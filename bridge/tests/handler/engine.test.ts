@@ -2970,12 +2970,12 @@ describe("instruct (extraction)", () => {
   // pass rather than the instruct one. Arm-time extraction has its own describe.
 
   function extract(items: ExtractedItem[]) {
-    return { runExtractionFn: async () => items };
+    return { runExtractionFn: async () => ({ items, amend: [] }) };
   }
 
   it("instructing an unarmed terminal is a safe no-op", async () => {
     let spawned = 0;
-    const { engine, sent, saved } = makeEngine({ runExtractionFn: async () => { spawned++; return []; } });
+    const { engine, sent, saved } = makeEngine({ runExtractionFn: async () => { spawned++; return { items: [], amend: [] }; } });
     expect(() => engine.instruct({ terminalId: "t-unknown", text: "do the thing" })).not.toThrow();
     await settle();
     expect(spawned).toBe(0);
@@ -2985,7 +2985,7 @@ describe("instruct (extraction)", () => {
 
   it("whitespace-only text is dropped before the spawn", async () => {
     let spawned = 0;
-    const { engine, sent } = makeEngine({ runExtractionFn: async () => { spawned++; return []; } });
+    const { engine, sent } = makeEngine({ runExtractionFn: async () => { spawned++; return { items: [], amend: [] }; } });
     engine.arm({ terminalId: "t1", notifyOnly: false });
     engine.instruct({ terminalId: "t1", text: "   \n  " });
     await settle();
@@ -2997,7 +2997,7 @@ describe("instruct (extraction)", () => {
     let spawned = 0;
     const { engine, sent } = makeEngine({
       tool: () => "kimi",
-      runExtractionFn: async () => { spawned++; return []; },
+      runExtractionFn: async () => { spawned++; return { items: [], amend: [] }; },
     });
     engine.arm({ terminalId: "t1", notifyOnly: false });
     engine.instruct({ terminalId: "t1", text: "update the docs" });
@@ -3010,17 +3010,21 @@ describe("instruct (extraction)", () => {
   });
 
   it("extraction runs on the session judge and its model", async () => {
-    const calls: { tool: string; model?: string; text: string; cwd: string }[] = [];
+    const calls: {
+      tool: string; model?: string; text: string; cwd: string; backlog?: unknown[];
+    }[] = [];
     const { engine } = makeEngine({
-      runExtractionFn: async (o: { tool: string; model?: string; text: string; cwd: string }) => {
+      runExtractionFn: async (o: {
+        tool: string; model?: string; text: string; cwd: string; backlog?: unknown[];
+      }) => {
         calls.push(o);
-        return [{ ref: "a", text: "x" }];
+        return { items: [{ ref: "a", text: "x" }], amend: [] };
       },
     });
     engine.arm({ terminalId: "t1", notifyOnly: false, judgeTool: "codex", judgeModel: "m" });
     engine.instruct({ terminalId: "t1", text: "  do x  " });
     await settle();
-    expect(calls).toEqual([{ tool: "codex", model: "m", text: "do x", cwd: "/proj" }]);
+    expect(calls).toEqual([{ tool: "codex", model: "m", text: "do x", cwd: "/proj", backlog: [] }]);
   });
 
   it("two extracted items both land queued with distinct ids", async () => {
@@ -3148,7 +3152,7 @@ describe("instruct (extraction)", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     const { engine, sent, saved } = makeEngine({
-      runExtractionFn: async () => { await gate; return [{ ref: "a", text: "late" }]; },
+      runExtractionFn: async () => { await gate; return { items: [{ ref: "a", text: "late" }], amend: [] }; },
     });
     engine.arm({ terminalId: "t1", notifyOnly: false });
     engine.instruct({ terminalId: "t1", text: "do it" });
@@ -3166,7 +3170,7 @@ describe("instruct (extraction)", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     const { engine, sent } = makeEngine({
-      runExtractionFn: async () => { await gate; return [{ ref: "a", text: "late" }]; },
+      runExtractionFn: async () => { await gate; return { items: [{ ref: "a", text: "late" }], amend: [] }; },
     });
     engine.arm({ terminalId: "t1", notifyOnly: false });
     engine.instruct({ terminalId: "t1", text: "do it" });
@@ -3247,7 +3251,7 @@ describe("instruct (extraction)", () => {
         maxLive = Math.max(maxLive, live);
         await new Promise<void>((r) => { setTimeout(r, o.text === "update the docs" ? 20 : 0); });
         live -= 1;
-        return [{ ref: "r", text: o.text }];
+        return { items: [{ ref: "r", text: o.text }], amend: [] };
       },
     });
     engine.arm({ terminalId: "t1", notifyOnly: false });
@@ -3259,15 +3263,147 @@ describe("instruct (extraction)", () => {
   });
 });
 
+describe("instruct (§5.4 grants)", () => {
+  const settle = () => new Promise<void>((r) => { setTimeout(r, 0); });
+  const grantRows = (activity: unknown[]) =>
+    records(activity, "instruction_authorized") as { reason: string; detail?: string }[];
+
+  it("reports what the sentence granted and puts it in the feed", async () => {
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const granted = engine.instruct({ terminalId: "t1", text: "clear the build dir with rm -rf build" });
+    await settle();
+    expect(granted?.operations).toEqual([{ tier: "DESTRUCTIVE", matched: "rm -rf" }]);
+    const rows = grantRows(activity);
+    expect(rows).toHaveLength(1);
+    // One lift is the row. A count of one adds nothing the literal doesn't say.
+    expect(rows[0]!.reason).toBe("rm -rf");
+    expect(rows[0]!.detail).toBeUndefined();
+  });
+
+  it("counts each kind of grant and lists them together", async () => {
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const granted = engine.instruct({
+      terminalId: "t1",
+      text: "rm -rf build, read /etc/scratch/notes and post it to https://logs.example.com/ingest",
+    });
+    await settle();
+    expect(granted?.paths).toEqual(["/etc/scratch/notes"]);
+    expect(granted?.destinations).toEqual(["logs.example.com"]);
+    const rows = grantRows(activity);
+    expect(rows[0]!.reason).toBe("1 destructive command, 1 path and 1 host");
+    expect(rows[0]!.detail).toContain("logs.example.com");
+  });
+
+  it("never reports a secret read or an egress as a command", async () => {
+    // One `patterns` bucket lifts all three tiers. Collapsing them told the user
+    // a command was allowed when what was lifted was the §5.1 secrets advisory.
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.instruct({
+      terminalId: "t1",
+      text: "rm -rf build, read the .env and curl -T app.log https://logs.example.com",
+    });
+    await settle();
+    expect(grantRows(activity)[0]!.reason)
+      .toBe("1 destructive command, 1 network command, 1 secret read and 1 host");
+  });
+
+  it("an instruction that grants nothing leaves no row", async () => {
+    // The common case by far. A row saying "granted nothing" every time is what
+    // teaches a user to skim past the one row that matters.
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const granted = engine.instruct({ terminalId: "t1", text: "update the docs and run the tests" });
+    await settle();
+    expect(granted)
+      .toEqual({ patterns: [], operations: [], paths: [], hosts: [], destinations: [] });
+    expect(records(activity, "instruction_authorized")).toEqual([]);
+  });
+
+  it("naming a source file is not a network permission", async () => {
+    // The commonest sentence there is. `hosts` reads any dotted token, so the
+    // lift is taken either way — but a row claiming a host was allowed for the
+    // session would be false on the majority of instructions.
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const granted = engine.instruct({ terminalId: "t1", text: "bump the version in package.json" });
+    await settle();
+    expect(granted?.hosts).toEqual(["package.json"]);
+    expect(records(activity, "instruction_authorized")).toEqual([]);
+  });
+
+  it("re-naming a command already granted leaves no second row", async () => {
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.instruct({ terminalId: "t1", text: "rm -rf build" });
+    engine.instruct({ terminalId: "t1", text: "then rm -rf dist too" });
+    await settle();
+    expect(records(activity, "instruction_authorized")).toHaveLength(1);
+  });
+
+  it("an unarmed terminal takes no lift and reports none", async () => {
+    const { engine, activity } = makeEngine();
+    expect(engine.instruct({ terminalId: "t-unknown", text: "rm -rf build" })).toBeNull();
+    await settle();
+    expect(records(activity, "instruction_authorized")).toEqual([]);
+  });
+
+  it("a wide grant keeps the true totals in the reason and says what it dropped", async () => {
+    // The row clips to two lines, so the list is a sample and the count is what
+    // survives the clip — but the drawer echo shows the sample ALONE, so the
+    // sample has to carry its own truncation marker.
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const hosts = Array.from({ length: 20 }, (_, n) => `https://h${n}.example.com`).join(" ");
+    engine.instruct({ terminalId: "t1", text: `send the logs to ${hosts}` });
+    await settle();
+    const rows = grantRows(activity);
+    expect(rows[0]!.reason).toBe("20 hosts");
+    expect(rows[0]!.detail!.split(" · ")).toHaveLength(8);
+    expect(rows[0]!.detail).toEndWith(" +12 more");
+  });
+
+  it("the first literal rides however long it is", async () => {
+    // A row whose count says "2 hosts" over an empty list reads as a bug in the
+    // row, so the character budget may never take everything.
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const long = `${"a".repeat(240)}.example.com`;
+    engine.instruct({ terminalId: "t1", text: `send it to https://${long} and https://b.example.com` });
+    await settle();
+    const rows = grantRows(activity);
+    expect(rows[0]!.reason).toBe("2 hosts");
+    expect(rows[0]!.detail).toBe(`${long} +1 more`);
+  });
+
+  it("the character budget can stop the sample short of the entry cap", async () => {
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const hosts = Array.from({ length: 8 }, (_, n) => `https://h${n}.${"x".repeat(50)}.example.com`);
+    engine.instruct({ terminalId: "t1", text: `send the logs to ${hosts.join(" ")}` });
+    await settle();
+    const rows = grantRows(activity);
+    expect(rows[0]!.reason).toBe("8 hosts");
+    const shown = rows[0]!.detail!.split(" · ");
+    expect(shown.length).toBeLessThan(8);
+    expect(rows[0]!.detail).toEndWith(` +${8 - shown.length} more`);
+  });
+});
+
 describe("arm-time extraction (§3.2)", () => {
   const settle = () => new Promise<void>((r) => { setTimeout(r, 0); });
 
   it("a goal on a fresh arm becomes backlog items behind the handoff", async () => {
     const { engine, sent } = makeEngine({
-      runExtractionFn: async () => [
-        { ref: "tests", text: "get the tests passing" },
-        { ref: "pr", text: "open a PR", dependsOn: ["tests"] },
-      ],
+      runExtractionFn: async () => ({
+        items: [
+          { ref: "tests", text: "get the tests passing" },
+          { ref: "pr", text: "open a PR", dependsOn: ["tests"] },
+        ],
+        amend: [],
+      }),
     });
     engine.arm({ terminalId: "t1", goal: "get the tests passing then open a PR", notifyOnly: false });
     // Arming is one tap: the spawn resolves behind it, never in front of it.
@@ -3281,7 +3417,10 @@ describe("arm-time extraction (§3.2)", () => {
   it("extracts the trimmed goal and nothing else", async () => {
     const calls: { text: string; transcriptPath?: string }[] = [];
     const { engine } = makeEngine({
-      runExtractionFn: async (o: { text: string }) => { calls.push(o); return [{ ref: "a", text: "x" }]; },
+      runExtractionFn: async (o: { text: string }) => {
+        calls.push(o);
+        return { items: [{ ref: "a", text: "x" }], amend: [] };
+      },
     });
     engine.arm({ terminalId: "t1", goal: "  ship it  ", notifyOnly: false });
     await settle();
@@ -3293,7 +3432,7 @@ describe("arm-time extraction (§3.2)", () => {
     let spawned = 0;
     const { engine, sent } = makeEngine({
       tool: () => "kimi",
-      runExtractionFn: async () => { spawned += 1; return []; },
+      runExtractionFn: async () => { spawned += 1; return { items: [], amend: [] }; },
     });
     engine.arm({ terminalId: "t1", goal: "ship it", notifyOnly: false });
     await settle();
@@ -3334,7 +3473,9 @@ describe("arm-time extraction (§3.2)", () => {
   });
 
   it("a goal stated after a one-tap arm still extracts", async () => {
-    const { engine, sent } = makeEngine({ runExtractionFn: async () => [{ ref: "a", text: "ship it" }] });
+    const { engine, sent } = makeEngine({
+      runExtractionFn: async () => ({ items: [{ ref: "a", text: "ship it" }], amend: [] }),
+    });
     engine.arm({ terminalId: "t1", notifyOnly: false });
     await settle();
     engine.arm({ terminalId: "t1", goal: "ship it", notifyOnly: false });
@@ -3345,7 +3486,7 @@ describe("arm-time extraction (§3.2)", () => {
   it("re-arming with the same goal does not extract a second time", async () => {
     let spawned = 0;
     const { engine, sent } = makeEngine({
-      runExtractionFn: async () => { spawned += 1; return [{ ref: "a", text: "ship it" }]; },
+      runExtractionFn: async () => { spawned += 1; return { items: [{ ref: "a", text: "ship it" }], amend: [] }; },
     });
     engine.arm({ terminalId: "t1", goal: "ship it", notifyOnly: false });
     await settle();
@@ -3360,7 +3501,7 @@ describe("arm-time extraction (§3.2)", () => {
     // of the whole sentence on every edit.
     let spawned = 0;
     const { engine, sent } = makeEngine({
-      runExtractionFn: async () => { spawned += 1; return [{ ref: "a", text: "ship it" }]; },
+      runExtractionFn: async () => { spawned += 1; return { items: [{ ref: "a", text: "ship it" }], amend: [] }; },
     });
     engine.arm({ terminalId: "t1", goal: "ship it", notifyOnly: false });
     await settle();
@@ -3376,13 +3517,364 @@ describe("arm-time extraction (§3.2)", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     const { engine, sent } = makeEngine({
-      runExtractionFn: async (o: { text: string }) => { await gate; return [{ ref: "a", text: o.text }]; },
+      runExtractionFn: async (o: { text: string }) => {
+        await gate;
+        return { items: [{ ref: "a", text: o.text }], amend: [] };
+      },
     });
     engine.arm({ terminalId: "t1", goal: "first", notifyOnly: false });
     engine.arm({ terminalId: "t1", goal: "second", notifyOnly: false });
     release();
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["first"]);
+  });
+});
+
+describe("an instruction can take an earlier one back (BD-0)", () => {
+  const settle = () => new Promise<void>((r) => { setTimeout(r, 0); });
+
+  function seed(text: string, extra: Partial<InstructionItem> = {}): InstructionItem {
+    return { id: `i-${text.replace(/\W+/g, "")}`, text, status: "queued", createdAt: 0, ...extra };
+  }
+  const COMMIT = seed("commit the fix");
+  const TESTS = seed("run the tests");
+
+  function amending(amend: unknown[], items: unknown[] = []) {
+    return { runExtractionFn: async () => ({ items, amend }) };
+  }
+
+  // The failure this whole path exists for: without it the countermand lands as a
+  // second queued item, nextActionable still returns the commit, and the corrective
+  // item can never close because no transcript can evidence a change of mind.
+  it("drops the item the user took back instead of queueing a line about it", async () => {
+    const { engine, sent, activity, saved } = makeEngine(
+      amending([{ id: COMMIT.id, action: "drop" }]),
+    );
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.instruct({ terminalId: "t1", text: "actually skip the commit" });
+    await settle();
+    expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["run the tests"]);
+    expect((saved.at(-1) as HandlerSessionRecord).backlog).toHaveLength(1);
+    expect(records(activity, "instruction_amended")).toHaveLength(1);
+    expect((records(activity, "instruction_amended")[0] as { reason: string }).reason)
+      .toBe('removed "commit the fix"');
+  });
+
+  // Removal, never a status. A change of mind is not evidence of work, so a
+  // dropped item may not reach the wrap-up summary as something Handler resolved.
+  it("removes rather than closes, so nothing is banked as skipped or done", async () => {
+    const { engine, sent, activity } = makeEngine(amending([{ id: COMMIT.id, action: "drop" }]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.instruct({ terminalId: "t1", text: "actually skip the commit" });
+    await settle();
+    expect(statusOf(sent).backlog.some((i) => i.id === COMMIT.id)).toBe(false);
+    expect(records(activity, "item_skipped")).toHaveLength(0);
+    expect(records(activity, "item_done")).toHaveLength(0);
+    expect(records(activity, "item_failed")).toHaveLength(0);
+  });
+
+  // The extractor can now name live ids and is still an LLM. One it invents is
+  // discarded the way a dangling ref is, and takes nothing else down with it.
+  it("discards an id that names nothing and applies the rest", async () => {
+    const { engine, sent, activity } = makeEngine(amending([
+      { id: "i-nothing", action: "drop" },
+      { id: TESTS.id, action: "drop" },
+    ]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.instruct({ terminalId: "t1", text: "forget the tests" });
+    await settle();
+    expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["commit the fix"]);
+    expect((records(activity, "instruction_amended")[0] as { reason: string }).reason)
+      .toBe('removed "run the tests"');
+  });
+
+  // §2.2's one-way door, asked from the other side: an item the harness closed on
+  // evidence cannot be reopened by a sentence, or the walk-back that re-completes
+  // one item per pass forever is back through a new entrance.
+  it("leaves a closed item exactly where the evidence gate put it", async () => {
+    const done = seed("open a PR", { status: "done", evidence: "PR #12 opened" });
+    const { engine, sent, activity } = makeEngine(amending([
+      { id: done.id, action: "revise", text: "open two PRs" },
+    ]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [done] });
+    engine.instruct({ terminalId: "t1", text: "make that two PRs" });
+    await settle();
+    const item = statusOf(sent).backlog[0]!;
+    expect(item.text).toBe("open a PR");
+    expect(item.status).toBe("done");
+    expect(records(activity, "instruction_amended")).toHaveLength(0);
+  });
+
+  it("rewords an item in place, keeping its id and its place in the list", async () => {
+    const { engine, sent } = makeEngine(amending([
+      { id: TESTS.id, action: "revise", text: "run the full test suite" },
+    ]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.instruct({ terminalId: "t1", text: "make that the full suite" });
+    await settle();
+    const backlog = statusOf(sent).backlog;
+    expect(backlog.map((i) => i.text)).toEqual(["commit the fix", "run the full test suite"]);
+    expect(backlog[1]!.id).toBe(TESTS.id);
+    expect(backlog[1]!.createdAt).toBe(0);
+  });
+
+  it("clears a condition on an empty string and leaves it alone when absent", async () => {
+    const gated = seed("deploy", { condition: "the build is green" });
+    const { engine, sent, activity } = makeEngine(
+      amending([{ id: gated.id, action: "revise", condition: "" }]),
+    );
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [gated] });
+    engine.instruct({ terminalId: "t1", text: "just deploy, never mind the build" });
+    await settle();
+    expect(statusOf(sent).backlog[0]!.condition).toBeUndefined();
+    // The row names what moved: nothing about the item's wording changed.
+    expect(records(activity, "instruction_amended")[0])
+      .toMatchObject({ reason: 'changed the condition on "deploy"', detail: "→ no condition" });
+
+    const other = makeEngine(amending([{ id: gated.id, action: "revise", text: "deploy to staging" }]));
+    other.engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [gated] });
+    other.engine.instruct({ terminalId: "t1", text: "make it staging" });
+    await settle();
+    expect(statusOf(other.sent).backlog[0]!.condition).toBe("the build is green");
+  });
+
+  // A dependency naming a removed item is unresolvable, and nextActionable reads
+  // an unresolvable id as unsatisfied — which strands the dependent in the same
+  // undrivable, non-terminal state the countermand itself used to create.
+  it("takes the removed item out of every dependency that named it", async () => {
+    const dependent = seed("push", { dependsOn: [COMMIT.id] });
+    const { engine, sent } = makeEngine(amending([{ id: COMMIT.id, action: "drop" }]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, dependent] });
+    engine.instruct({ terminalId: "t1", text: "actually skip the commit" });
+    await settle();
+    const backlog = statusOf(sent).backlog;
+    expect(backlog.map((i) => i.id)).toEqual([dependent.id]);
+    expect(backlog[0]!.dependsOn).toBeUndefined();
+    expect(backlog[0]!.status).toBe("queued");
+  });
+
+  it("revives a dependent the removed item was blocking", async () => {
+    const blocker = seed("migrate", { status: "blocked" });
+    const dependent = seed("push", {
+      dependsOn: [blocker.id], status: "blocked", outcome: "waiting on the migration",
+    });
+    const { engine, sent } = makeEngine(amending([{ id: blocker.id, action: "drop" }]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [blocker, dependent] });
+    engine.instruct({ terminalId: "t1", text: "drop the migration, we are not doing it" });
+    await settle();
+    const revived = statusOf(sent).backlog[0]!;
+    expect(revived.status).toBe("queued");
+    expect(revived.outcome).toBeUndefined();
+  });
+
+  // `items` stays append-only: the id-collision reasoning ExtractedItemSchema rests
+  // on holds only while the extractor never names a final id on that side.
+  it("appends new items beside the amendment, with fresh ids at the end", async () => {
+    const { engine, sent } = makeEngine(amending(
+      [{ id: COMMIT.id, action: "drop" }],
+      [{ ref: "a", text: "run the linter" }],
+    ));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.instruct({ terminalId: "t1", text: "skip the commit, lint it instead" });
+    await settle();
+    const backlog = statusOf(sent).backlog;
+    expect(backlog.map((i) => i.text)).toEqual(["run the tests", "run the linter"]);
+    expect(backlog[1]!.id).not.toBe(COMMIT.id);
+    expect(backlog[1]!.status).toBe("queued");
+  });
+
+  // The fallback is the expected path on a rate-limited account, and Wave 3 rests
+  // on it: an armed session reliably has a backlog because of this.
+  it("still lands the raw sentence as one item when extraction fails", async () => {
+    const { engine, sent } = makeEngine({ runExtractionFn: async () => null });
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    engine.instruct({ terminalId: "t1", text: "also update the changelog" });
+    await settle();
+    expect(statusOf(sent).backlog.map((i) => i.text))
+      .toEqual(["commit the fix", "also update the changelog"]);
+  });
+
+  // The opposite of the fallback, and the reason it cannot be unconditional: the
+  // extractor read the sentence as a countermand, so landing it as work is the
+  // uncloseable item again.
+  it("reports an amendment that matched nothing rather than queueing the sentence", async () => {
+    const { engine, sent, activity } = makeEngine(amending([{ id: "i-gone", action: "drop" }]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    engine.instruct({ terminalId: "t1", text: "actually skip the deploy" });
+    await settle();
+    expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["commit the fix"]);
+    expect(records(activity, "instruction_amended")).toHaveLength(0);
+    // Quoted, because this row is the only trace the sentence leaves and a user
+    // reading the feed later cannot otherwise tell which of theirs it was.
+    expect(records(activity, "instruction_dropped")[0])
+      .toMatchObject({ reason: "nothing it named is still open in the backlog",
+        detail: "actually skip the deploy" });
+  });
+
+  it("shows the extractor the backlog as it stands", async () => {
+    const seen: InstructionItem[][] = [];
+    const { engine } = makeEngine({
+      runExtractionFn: async (o: { backlog?: InstructionItem[] }) => {
+        seen.push(o.backlog ?? []);
+        return { items: [], amend: [{ id: COMMIT.id, action: "drop" }] };
+      },
+    });
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.instruct({ terminalId: "t1", text: "actually skip the commit" });
+    await settle();
+    expect(seen[0]!.map((i) => i.id)).toEqual([COMMIT.id, TESTS.id]);
+  });
+
+  // The backlog ids are minted against the list as it stands after the await, and
+  // an amendment computed against a session that has since been replaced would be
+  // applied to a list it was never written about.
+  it("applies nothing to a session disarmed while the extraction ran", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const { engine, sent } = makeEngine({
+      runExtractionFn: async () => {
+        await gate;
+        return { items: [], amend: [{ id: COMMIT.id, action: "drop" }] };
+      },
+    });
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    engine.instruct({ terminalId: "t1", text: "actually skip the commit" });
+    await settle();
+    engine.disarm("t1");
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    release();
+    await settle();
+    expect(statusOf(sent).backlog.map((i) => i.id)).toEqual([COMMIT.id]);
+  });
+
+  // The §5.4 lift reads the raw sentence, and a sentence that takes something
+  // back is the one shape it must NOT read as a request: granting there would post
+  // a row telling the user they had permitted the very command they cancelled.
+  it("a countermanding sentence lifts nothing", async () => {
+    const { engine, activity } = makeEngine(amending([{ id: COMMIT.id, action: "drop" }]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    engine.instruct({ terminalId: "t1", text: "forget the commit, just rm -rf build" });
+    await settle();
+    expect(records(activity, "instruction_authorized")).toHaveLength(0);
+  });
+
+  it("puts the totals in the row and the items under it once more than one moved", async () => {
+    const { engine, activity } = makeEngine(amending([
+      { id: COMMIT.id, action: "drop" },
+      { id: TESTS.id, action: "revise", text: "run the full test suite" },
+    ]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.instruct({ terminalId: "t1", text: "skip the commit and make that the full suite" });
+    await settle();
+    const row = records(activity, "instruction_amended")[0] as { reason: string; detail: string };
+    // Grouped by verb, not collapsed into a count: a removal has no other record
+    // once the line is off the list, so the row has to say which of the two it was.
+    expect(row.reason).toBe("1 item removed and 1 item reworded");
+    expect(row.detail).toBe('"commit the fix" · "run the tests"');
+  });
+
+  // The replacement wording is the extractor's, not the user's, and the drawer is
+  // the only other place carrying it — which is no use to the reader this feed is
+  // for, who was away while it happened.
+  it("shows what a reworded item says now", async () => {
+    const { engine, activity } = makeEngine(amending([
+      { id: TESTS.id, action: "revise", text: "run the full test suite" },
+    ]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [TESTS] });
+    engine.instruct({ terminalId: "t1", text: "make that the full suite" });
+    await settle();
+    const row = records(activity, "instruction_amended")[0] as { reason: string; detail?: string };
+    expect(row.reason).toBe('reworded "run the tests"');
+    expect(row.detail).toBe('→ "run the full test suite"');
+  });
+
+  // Read off the amendment's SHAPE, a revise carrying the text the item already
+  // has counts as a change: it prints a row asserting something moved that did
+  // not, and suppresses the honest report of a sentence that landed nowhere.
+  it("ignores a revise that revises nothing", async () => {
+    const { engine, sent, activity } = makeEngine(amending([
+      { id: TESTS.id, action: "revise", text: TESTS.text },
+      { id: COMMIT.id, action: "revise", condition: "" },
+    ]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.instruct({ terminalId: "t1", text: "also update the changelog" });
+    await settle();
+    expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["commit the fix", "run the tests"]);
+    expect(records(activity, "instruction_amended")).toHaveLength(0);
+    expect(records(activity, "instruction_dropped")).toHaveLength(1);
+  });
+
+  // Everything past the extractor's cap is offered to it as "not changeable", and
+  // the ids end in a dense integer — so one naming a hidden item was extrapolated,
+  // not read, and applies to a line the user was never shown as being at risk.
+  it("refuses an id the extractor was never shown", async () => {
+    const many = Array.from({ length: 31 }, (_, n) => seed(`chore ${n}`));
+    const hidden = many[30]!;
+    const { engine, sent, activity } = makeEngine(
+      amending([{ id: hidden.id, action: "drop" }]),
+    );
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: many });
+    engine.instruct({ terminalId: "t1", text: "drop the last chore" });
+    await settle();
+    expect(statusOf(sent).backlog).toHaveLength(31);
+    expect(records(activity, "instruction_amended")).toHaveLength(0);
+  });
+
+  // The revive is for a block the removed item was CAUSING. One a surviving
+  // dependency still causes is not lifted, so the judge's reason still describes
+  // the state the item is in and the row that renders it keeps its subtitle.
+  it("keeps the reason for a block a surviving dependency still holds", async () => {
+    const gone = seed("migrate", { status: "blocked" });
+    const holding = seed("audit", { status: "blocked" });
+    const dependent = seed("push", {
+      dependsOn: [gone.id, holding.id], status: "blocked", outcome: "waiting on the migration",
+    });
+    const { engine, sent } = makeEngine(amending([{ id: gone.id, action: "drop" }]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [gone, holding, dependent] });
+    engine.instruct({ terminalId: "t1", text: "forget the migration" });
+    await settle();
+    const still = statusOf(sent).backlog.find((i) => i.id === dependent.id)!;
+    expect(still.status).toBe("blocked");
+    expect(still.outcome).toBe("waiting on the migration");
+  });
+
+  // allTerminal refuses an empty backlog, so a session emptied this way can never
+  // wrap up: it watches forever with nothing to drive, and the sentence that
+  // emptied it reads as having worked.
+  it("asks the user rather than sitting armed on an emptied list", async () => {
+    const { engine, activity, sent } = makeEngine(amending([
+      { id: COMMIT.id, action: "drop" },
+      { id: TESTS.id, action: "drop" },
+    ]));
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.instruct({ terminalId: "t1", text: "actually, forget all of that" });
+    await settle();
+    expect(statusOf(sent).backlog).toHaveLength(0);
+    expect((records(activity, "escalate")[0] as { reason: string }).reason)
+      .toBe("that took the last item off the backlog");
+  });
+
+  it("says nothing at all when the amendment resolves after a re-arm", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const { engine, activity } = makeEngine({
+      runExtractionFn: async () => {
+        await gate;
+        return { items: [], amend: [{ id: COMMIT.id, action: "drop" }] };
+      },
+    });
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    engine.instruct({ terminalId: "t1", text: "actually skip the commit" });
+    await settle();
+    engine.disarm("t1");
+    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    release();
+    await settle();
+    // "nothing it named is still on the list" would be a row about a session the
+    // sentence was never about — appendItems warns and says nothing for the same
+    // case, and the two halves of one await must not disagree.
+    expect(records(activity, "instruction_dropped")).toHaveLength(0);
+    expect(records(activity, "instruction_amended")).toHaveLength(0);
   });
 });
 
@@ -3507,7 +3999,7 @@ describe("snapshot-before-act (§5.2)", () => {
       ...handling(RESET), takeSnapshotsFn: snapshotter(calls),
     });
     engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
-    engine.instruct({ terminalId: "t1", text: "hard reset the branch to drop that commit" });
+    engine.instruct({ terminalId: "t1", text: "hard reset the branch to last night's state" });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(records(activity, "floor_warning")).toHaveLength(0);
     expect(calls).toEqual([RESET]);

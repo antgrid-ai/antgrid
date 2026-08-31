@@ -10,6 +10,7 @@ import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/handler/handler_blocked_action_card.dart';
 import 'package:antgrid/widgets/handler/handler_decision_card.dart';
+import 'package:antgrid/widgets/handler/handler_layout.dart';
 import 'package:antgrid/widgets/handler/handler_screen.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -349,6 +350,182 @@ void main() {
     expect(find.textContaining('Done: run the tests'), findsOneWidget);
     expect(find.textContaining('Skipped: open a PR'), findsOneWidget);
     expect(find.text('Goal edited'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  // The pass where Handler decided nothing needed doing — by a wide margin the
+  // most frequent row in the feed, and for a long time the only kind with no arm
+  // in any of the three switches, so it printed its own protocol word.
+  testWidgets('a continue row says what Handler saw, not what the wire called '
+      'it', (tester) async {
+    await pumpHandlerScreen(
+      tester,
+      stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+        activity: const [
+          HandlerActivityRecord(
+            recordId: 'r1',
+            at: 1,
+            terminalId: 't1',
+            decision: 'continue',
+            reason: 'the agent is still installing dependencies',
+          ),
+        ],
+      ),
+    );
+    // The same word the header pill uses for the same state, on the same screen.
+    expect(
+      find.text('Watching: the agent is still installing dependencies'),
+      findsOneWidget,
+    );
+    expect(find.text('continue'), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  // The §5.4 lift an instruction takes is the half of it the user cannot read
+  // off their own sentence, so the row has to be legible without opening
+  // anything: the scope and the totals in the title, the literals below it.
+  testWidgets('a grant row names its scope and lists what it allowed', (
+    tester,
+  ) async {
+    await pumpHandlerScreen(
+      tester,
+      stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+        activity: const [
+          HandlerActivityRecord(
+            recordId: 'r1',
+            at: 1,
+            terminalId: 't1',
+            decision: 'instruction_authorized',
+            reason: '1 destructive command and 1 host',
+            detail: 'rm -rf · logs.example.com',
+          ),
+        ],
+      ),
+    );
+    expect(
+      find.text('Allowed for this session: 1 destructive command and 1 host'),
+      findsOneWidget,
+    );
+    expect(find.text('rm -rf · logs.example.com'), findsOneWidget);
+    expect(find.text('instruction_authorized'), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  // The list the user did not touch, changing anyway. They said something, the
+  // extractor matched it to a line they had already written, and the drawer may
+  // not even have been open — so the row names the surface and quotes the item.
+  testWidgets('an amended row quotes the line that moved', (
+    tester,
+  ) async {
+    await pumpHandlerScreen(
+      tester,
+      stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+        activity: const [
+          HandlerActivityRecord(
+            recordId: 'r1',
+            at: 1,
+            terminalId: 't1',
+            decision: 'instruction_amended',
+            reason: '2 items changed',
+            detail: '"commit the fix" · "run the tests"',
+          ),
+        ],
+      ),
+    );
+    expect(find.text('Backlog updated: 2 items changed'), findsOneWidget);
+    expect(find.text('"commit the fix" · "run the tests"'), findsOneWidget);
+    expect(find.text('instruction_amended'), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  // Hand-mirrored from the bridge's ActivityRecord.decision (handler/config.ts)
+  // and HandlerActivityMessage (protocol.ts). Nothing catches drift between the
+  // three, and a kind that reaches the app with no arm is dressed exactly like
+  // the unknown-kind fallback below — which is why the guard here is the rail
+  // glyph, the one thing only an explicit arm can produce.
+  const decisions = <String>[
+    'continue',
+    'handle',
+    'escalate',
+    'armed',
+    'goal_edited',
+    'item_done',
+    'item_blocked',
+    'item_skipped',
+    'item_failed',
+    'instruction_dropped',
+    'instruction_authorized',
+    'instruction_amended',
+    'floor_warning',
+    'evidence_rejected',
+    'wrapped_up',
+    'parked',
+    'resumed',
+  ];
+
+  Future<void> pumpOneRow(WidgetTester tester, String decision) =>
+      pumpHandlerScreen(
+        tester,
+        stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+          activity: [
+            HandlerActivityRecord(
+              recordId: 'r1',
+              at: 1,
+              terminalId: 't1',
+              decision: decision,
+              reason: 'what the pass was about',
+              detail: 'what came with it',
+            ),
+          ],
+        ),
+      );
+
+  testWidgets('every decision the bridge sends has an arm of its own', (
+    tester,
+  ) async {
+    for (final decision in decisions) {
+      await pumpOneRow(tester, decision);
+      expect(find.text(decision), findsNothing, reason: decision);
+      // A kind with no arm falls through to a legible row — the bare reason as
+      // its title and an empty rail — so a text assertion alone cannot see it.
+      // The glyph can: only an explicit arm produces one. The session card above
+      // the feed reserves the same slot and leaves it empty, so a lit rail on
+      // this screen is the activity row's and nothing else's.
+      expect(
+        tester
+            .widgetList<HandlerRail>(find.byType(HandlerRail))
+            .where((r) => r.icon != null),
+        hasLength(1),
+        reason: decision,
+      );
+      expect(
+        find.text('what the pass was about'),
+        findsNothing,
+        reason: decision,
+      );
+    }
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('a kind this build has no arm for still renders a row', (
+    tester,
+  ) async {
+    // A bridge ahead of the app. The row says what it can — the reason as the
+    // title, whatever came with it below — and never the protocol word, which
+    // is a name the user has never seen and cannot act on.
+    await pumpOneRow(tester, 'some_future_kind');
+    expect(find.text('some_future_kind'), findsNothing);
+    expect(find.text('what the pass was about'), findsOneWidget);
+    expect(find.text('what came with it'), findsOneWidget);
+    expect(find.byType(AbListRow), findsWidgets);
+    // And the rail stays dark, which is what makes the sweep above a guard
+    // rather than an assertion every row passes.
+    expect(
+      tester
+          .widgetList<HandlerRail>(find.byType(HandlerRail))
+          .where((r) => r.icon != null),
+      isEmpty,
+    );
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -1100,17 +1277,22 @@ void main() {
       // to SHOW it — a rejection the user cannot read is one they cannot judge —
       // and offer the one control that retires it.
       final t = await pumpLiveHandlerScreen(tester);
-      t.emit('handler:status', armedStatusJson(escalations: [
-        {
-          'escalationId': 'b1',
-          'question': 'Handler did not send its reply',
-          'reasoning': 'slash command /code-review is not in this catalog',
-          'draftReply': '/code-review --fix',
-          'urgency': 'normal',
-          'at': 1,
-          'kind': 'guard_blocked',
-        },
-      ]));
+      t.emit(
+        'handler:status',
+        armedStatusJson(
+          escalations: [
+            {
+              'escalationId': 'b1',
+              'question': 'Handler did not send its reply',
+              'reasoning': 'slash command /code-review is not in this catalog',
+              'draftReply': '/code-review --fix',
+              'urgency': 'normal',
+              'at': 1,
+              'kind': 'guard_blocked',
+            },
+          ],
+        ),
+      );
       await pumpDelivery(tester);
 
       expect(find.byType(HandlerBlockedActionCard), findsOneWidget);

@@ -315,10 +315,12 @@ export function allTerminal(backlog: InstructionItem[]): boolean {
   return backlog.length > 0 && backlog.every((i) => TERMINAL.has(i.status));
 }
 
-// Every field rendered here is extraction output, ids included, so any of them can
-// carry a newline that would forge an extra list line — and a forged line hands the
-// evaluator an id the user-authored vocabulary §2.1 rests on never contained.
-function oneLine(s: string): string {
+// Every field rendered into a prompt is extraction output, ids included, so any of
+// them can carry a newline that would forge an extra list line — and a forged line
+// hands the evaluator an id the user-authored vocabulary §2.1 rests on never
+// contained. Exported so the extraction prompt, which renders the same fields for
+// the same reason, shares this rule rather than keeping a second copy of it.
+export function oneLine(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 

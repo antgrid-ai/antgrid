@@ -28,6 +28,7 @@ import 'projects.dart';
 import 'provider_retry.dart';
 import 'providers.dart';
 import 'recent_agents.dart';
+import 'session_opening_prompt.dart';
 import 'sessions.dart';
 import 'ui_attention_providers.dart';
 
@@ -355,6 +356,13 @@ Future<void> startNewSession(
         initialPrompt: prompt.isEmpty ? null : prompt,
         raiseRefusal: true,
       );
+      // Nothing else keeps this sentence: the bridge takes it as one-shot argv
+      // and the draft is cleared below. Arming Handler happens later, on
+      // another surface, and this is what lets that arm carry the user's own
+      // words as the session goal instead of none.
+      ref
+          .read(sessionOpeningPromptsProvider.notifier)
+          .remember(created.id, prompt);
 
       // A start survives the user walking away from the canvas, so only steal
       // the focus of someone still standing on it — otherwise the session they

@@ -4,7 +4,7 @@ import { createMessage, type AbMessage } from "../protocol";
 import { classifyDestructive, describeWarning, type FloorWarning } from "./destructive-floor";
 import {
   authorizeInstruction, createAuthorization, partitionWarnings,
-  type InstructionAuthorization,
+  type GrantSummary, type InstructionAuthorization, type LiftedTier,
 } from "./authorization";
 import {
   clearSessionTrash, describeSnapshot, planSnapshots, releaseSnapshots, takeSnapshots, undoSnapshot,
@@ -14,7 +14,10 @@ import { loadSnapshots, pruneSnapshots, saveSnapshots, type StoredSnapshot } fro
 import { RunawayGuard } from "./runaway-guard";
 import { assembleContext } from "./context";
 import { runDecision as defaultRunDecision, runExtraction as defaultRunExtraction } from "./judge";
-import { MAX_ITEM_CHARS, type ExtractedItem } from "./extract";
+import {
+  MAX_ITEM_CHARS, amendableItems,
+  type Amendment, type ExtractedItem, type ExtractionResult,
+} from "./extract";
 import {
   loadHandlerConfig, appendActivity,
   type HandlerConfig, type ActivityRecord,
@@ -144,6 +147,13 @@ const MAX_REMEMBERED_REJECTIONS = 3;
 // back into the prompt each time — before the harness concludes it cannot be met.
 const MAX_ANCHOR_REFUSALS = 3;
 
+// How many literals ride along in the detail of a feed row whose reason is a
+// count, and how much of the line they may spend. The reason carries the true
+// totals, so the list never has to stand in for the count — it is the sample that
+// makes the totals concrete, and a feed row is read at a glance either way.
+const MAX_ROW_SAMPLE_ENTRIES = 8;
+const MAX_ROW_SAMPLE_CHARS = 200;
+
 // The item outcomes the activity feed carries a kind for. A skip is as
 // consequential as a completion (§4.3), so they stay distinguishable without
 // parsing the reason text.
@@ -205,6 +215,150 @@ function snapshotWire(st: StoredSnapshot) {
     state: st.undoneAt !== undefined ? "undone" as const : st.failure ? "failed" as const : "available" as const,
     ...(st.failure ? { detail: st.failure } : {}),
   };
+}
+
+type Noun = readonly [one: string, many: string];
+
+function countPhrase(n: number, [one, many]: Noun): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+// What a lift is counted in. Three nouns rather than one, because the tiers are
+// three unlike permissions and the count is the half that survives a clip: a
+// sentence that lifted the §5.1 secret-access advisory for the rest of the
+// session must not be reported as having allowed a command.
+const GRANT_NOUNS: Record<LiftedTier, Noun> = {
+  DESTRUCTIVE: ["destructive command", "destructive commands"],
+  EGRESS: ["network command", "network commands"],
+  SECRETS: ["secret read", "secret reads"],
+};
+const GRANT_TIERS: LiftedTier[] = ["DESTRUCTIVE", "EGRESS", "SECRETS"];
+
+/**
+ * What one instruction's §5.4 lift added, as the two halves of a feed row: the
+ * totals, and a sample of the literals themselves.
+ *
+ * Null when it added nothing. Most instructions grant nothing at all, and a row
+ * saying so every time is exactly the noise that teaches a user to skim past the
+ * one row that matters.
+ *
+ * A single lift is the reason and carries no detail: "1 destructive command"
+ * over `rm -rf` spends the row's loudest slot on a count the line below it
+ * already implies, and buries the one thing the user came to check — the inverse
+ * of how the `floor_warning` row about that same command reads.
+ */
+function describeGrant(g: GrantSummary): { reason: string; detail?: string } | null {
+  const groups: { noun: Noun; entries: string[] }[] = [];
+  for (const tier of GRANT_TIERS) {
+    const matched = g.operations.filter((o) => o.tier === tier).map((o) => o.matched);
+    if (matched.length > 0) groups.push({ noun: GRANT_NOUNS[tier], entries: matched });
+  }
+  if (g.paths.length > 0) groups.push({ noun: ["path", "paths"], entries: g.paths });
+  // `destinations`, never `hosts`: the harvest reads any dotted token as a host so
+  // that granting and checking agree with each other, and repeating that superset
+  // back would call every source file the user named a network permission.
+  if (g.destinations.length > 0) {
+    groups.push({ noun: ["host", "hosts"], entries: g.destinations });
+  }
+  const entries = groups.flatMap((x) => x.entries);
+  if (entries.length === 0) return null;
+  if (entries.length === 1) return { reason: entries[0]! };
+  return {
+    reason: joinPhrases(groups.map((x) => countPhrase(x.entries.length, x.noun))),
+    detail: rowSample(entries),
+  };
+}
+
+function joinPhrases(parts: string[]): string {
+  return parts.length <= 1
+    ? parts.join("")
+    : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+/** The capped list under a feed row whose title is a count.
+ *
+ *  The first entry always rides, however long: a row whose list is empty while
+ *  its count says "2 commands" reads as a bug in the row. And a sample that
+ *  stopped short says so where it stopped — the grant row's drawer echo shows
+ *  this half with no title over it. */
+function rowSample(entries: string[]): string {
+  const shown: string[] = [];
+  let budget = MAX_ROW_SAMPLE_CHARS;
+  for (const e of entries.slice(0, MAX_ROW_SAMPLE_ENTRIES)) {
+    if (shown.length > 0 && e.length > budget) break;
+    shown.push(e);
+    budget -= e.length + 3;
+  }
+  const more = entries.length > shown.length ? ` +${entries.length - shown.length} more` : "";
+  return `${shown.join(" · ")}${more}`;
+}
+
+// The item text quoted back in an amendment row. Long enough to recognise a line
+// the user wrote, short enough that two of them still read at a glance.
+const MAX_AMENDMENT_QUOTE_CHARS = 60;
+
+// What a change to the list is counted in. Three nouns rather than one, for the
+// reason GRANT_NOUNS has three: a removal and a reword are unlike changes, and
+// "2 items changed" over two quotes leaves the user unable to tell which of those
+// lines are gone — which, once a line is off the backlog, this row is the only
+// place left to ask.
+type AmendmentKind = "removed" | "reworded" | "recondition";
+const AMENDMENT_NOUNS: Record<AmendmentKind, Noun> = {
+  removed: ["item removed", "items removed"],
+  reworded: ["item reworded", "items reworded"],
+  recondition: ["condition changed", "conditions changed"],
+};
+const AMENDMENT_KINDS: AmendmentKind[] = ["removed", "reworded", "recondition"];
+
+interface AmendmentChange {
+  /** What the row counts this as beside the others. An item whose wording AND
+   *  condition both moved counts once, as a reword: counting it twice would read
+   *  as two items on a row whose whole job is saying how many lines moved. */
+  kind: AmendmentKind;
+  /** How the row names it when it is the only change. */
+  verb: string;
+  /** The item as the user last saw it. */
+  text: string;
+  /** What it says now, where the change left something to show. */
+  now?: string;
+}
+
+/**
+ * What one instruction changed about the list the user was already keeping, as
+ * the two halves of a feed row.
+ *
+ * The item is quoted as the user last saw it — the question this row answers is
+ * which of their lines moved, and the old wording is the only version they can
+ * recognise. What it says NOW rides in the detail for a single change, because
+ * the replacement text is the extractor's rather than the user's and the drawer
+ * is the only other surface carrying it — which is no help to the reader this
+ * feed is for, who was away and is reading it afterwards.
+ */
+function describeAmendments(changes: AmendmentChange[]): { reason: string; detail?: string } {
+  const first = changes[0];
+  if (changes.length === 1 && first) {
+    return {
+      reason: `${first.verb} "${clipQuote(first.text)}"`,
+      // The arrow is composed here rather than by the app: this kind carries two
+      // detail shapes, and only the bridge knows which one it just sent.
+      ...(first.now ? { detail: `→ ${first.now}` } : {}),
+    };
+  }
+  const parts = AMENDMENT_KINDS.flatMap((kind) => {
+    const n = changes.filter((c) => c.kind === kind).length;
+    return n > 0 ? [countPhrase(n, AMENDMENT_NOUNS[kind])] : [];
+  });
+  return {
+    reason: joinPhrases(parts),
+    detail: rowSample(changes.map((c) => `"${clipQuote(c.text)}"`)),
+  };
+}
+
+function clipQuote(text: string): string {
+  const one = oneLine(text);
+  return one.length > MAX_AMENDMENT_QUOTE_CHARS
+    ? `${one.slice(0, MAX_AMENDMENT_QUOTE_CHARS)}...`
+    : one;
 }
 
 function wakeClock(at: number): string {
@@ -791,20 +945,30 @@ export class HandlerEngine {
    * This is also the ONE feed point for §5.4 authorization. The arm-time goal is
    * deliberately not one: it is a statement of what the session is for, and a lift
    * has to be traceable to a sentence the user wrote to authorize an action.
+   *
+   * Returns what the sentence granted, or null where it reached no session and no
+   * lift was taken. The grant is the half of an instruction the user cannot infer
+   * from their own words — "clear out the build dir" reads as a chore and is also
+   * a session-long permission — so it is recorded here rather than left implicit.
    */
-  instruct(p: { terminalId: string; text: string }): void {
+  instruct(p: { terminalId: string; text: string }): GrantSummary | null {
     const s = this.sessions.get(p.terminalId);
     if (!s) {
       log.warn("handler instruct ignored: no armed session for %s", p.terminalId);
-      return;
+      return null;
     }
     const text = p.text.trim();
-    if (!text) return;
+    if (!text) return null;
     // Taken from the raw payload and BEFORE the extraction spawn: extraction output is
     // judge-authored, so deriving a lift from it would let a compromised agent widen
     // its own permissions through the extractor.
-    authorizeInstruction(s.auth, text, this.deps.projectPath(p.terminalId));
+    const granted = authorizeInstruction(s.auth, text, this.deps.projectPath(p.terminalId));
+    const described = describeGrant(granted);
+    if (described) {
+      this.record(p.terminalId, "instruction_authorized", described.reason, described.detail);
+    }
     this.queueExtraction(p.terminalId, text);
+    return granted;
   }
 
   // `onlyIfEmpty` is for the arm-time pass (§3.2): the goal is extracted once,
@@ -832,11 +996,18 @@ export class HandlerEngine {
     // a whole pasted instruction into every decide prompt from here on.
     const raw: ExtractedItem[] = [{ ref: "raw", text: text.slice(0, MAX_ITEM_CHARS) }];
 
-    let items: ExtractedItem[] | null = null;
+    let result: ExtractionResult | null = null;
     if (judgeCapable(tool)) {
       const runExtractionFn = this.deps.runExtractionFn ?? defaultRunExtraction;
       try {
-        items = await runExtractionFn({ tool, model: s.judgeModel, text, cwd: this.deps.projectPath(terminalId) });
+        result = await runExtractionFn({
+          tool, model: s.judgeModel, text,
+          // Shown to the extractor so one sentence can take an earlier one back,
+          // and never the list anything is APPLIED to: what comes back is
+          // resolved against the backlog as it stands after this await.
+          backlog: s.backlog,
+          cwd: this.deps.projectPath(terminalId),
+        });
       } catch (err) {
         // A session parked on a provider limit lands here: the extraction spawn
         // shares that limited account. The instruction survives as one raw item,
@@ -848,10 +1019,199 @@ export class HandlerEngine {
     // append is the whole point of the call, so a failed disk write would
     // otherwise be invisible.
     try {
-      this.appendItems(terminalId, s, items?.length ? items : raw);
+      const named = result?.amend ?? [];
+      const amended = this.applyAmendments(terminalId, s, named);
+      // The session this sentence was about has been replaced. appendItems warns
+      // and says nothing to the user for the same case, and a feed row here would
+      // be written against whichever session now holds this terminal id.
+      if (amended === null) return;
+      const items = result?.items ?? [];
+      if (items.length > 0) {
+        this.appendItems(terminalId, s, items);
+        return;
+      }
+      if (amended > 0) {
+        this.escalateIfEmptied(terminalId, s);
+        return;
+      }
+      // The extractor read the sentence as taking something back, and nothing it
+      // named is still open. Landing it as an item instead is the exact deadlock
+      // amendments exist to end — "actually skip the commit" is a line no
+      // transcript can ever satisfy — so the sentence is reported as untracked
+      // rather than tracked as work. It is quoted, because a user reading the feed
+      // hours later has no other way to tell which of their sentences this was.
+      if (named.length > 0) {
+        this.record(terminalId, "instruction_dropped",
+          "nothing it named is still open in the backlog", clipQuote(text));
+        return;
+      }
+      this.appendItems(terminalId, s, raw);
     } catch (err) {
       log.error("handler instruct append failed for %s: %s", terminalId, err);
     }
+  }
+
+  /**
+   * The half of an instruction that changes what is already tracked (§3.2).
+   *
+   * Applied here and never by the judge: a terminal transition needs a verbatim
+   * quote from the transcript, which a change of mind can never produce, so
+   * routing "actually skip the commit" through the judge earns an
+   * `evidence_rejected` and leaves the item actionable. That gate is untouched by
+   * this method — `drop` REMOVES the item rather than closing it, and there is no
+   * path here to a status at all, so nothing the user says can add to what the
+   * session will later report as done, skipped or failed.
+   *
+   * Every id is resolved against the items the extractor was actually SHOWN
+   * (`amendableItems`), as they stand NOW, and one naming anything else is
+   * discarded in silence — the discipline the dangling-ref filter takes, for the
+   * same reason: the extractor is an LLM that can now name live ids, and its
+   * output is untrusted input.
+   *
+   * Returns how many items actually moved, or null when the session under this
+   * terminal id is no longer the one the sentence was about — which is not the
+   * same answer as "nothing matched", and the caller reports the two differently.
+   */
+  private applyAmendments(terminalId: string, s: ArmedSession, amendments: Amendment[]): number | null {
+    if (amendments.length === 0) return 0;
+    // The same re-check appendItems makes, for the same reason: the extraction
+    // await yielded the event loop, and amending a session the user has since
+    // disarmed would re-persist it as armed.
+    if (this.sessions.get(terminalId) !== s) {
+      log.warn("handler dropped %d amendment(s) for %s: session no longer armed",
+        amendments.length, terminalId);
+      return null;
+    }
+
+    // §2.2's terminal states are a one-way door in both directions — an item the
+    // harness closed cannot be reopened from the user's words, or the walk-back
+    // that re-completes one item per pass forever is back with a new entrance —
+    // and everything past the extractor's own cap was offered to it as "not
+    // changeable". amendableItems is both bounds in one place.
+    const byId = new Map(amendableItems(s.backlog).map((i) => [i.id, i]));
+    const dropped = new Set<string>();
+    const revised = new Map<string, { text?: string; condition?: string }>();
+    const changes: AmendmentChange[] = [];
+    for (const a of amendments) {
+      const item = byId.get(a.id);
+      if (!item) continue;
+      if (a.action === "drop") {
+        dropped.add(a.id);
+        changes.push({ kind: "removed", verb: "removed", text: item.text });
+        continue;
+      }
+      // Compared against the item rather than read off the amendment's shape: a
+      // revise carrying the text the item already has, or `"condition":""` for an
+      // item that never had one, is an extractor answering with no change at all
+      // — and counting it would print a row asserting a change that did not
+      // happen AND suppress the fallback that would have tracked the sentence.
+      const text = a.text !== undefined && a.text !== item.text ? a.text : undefined;
+      const wanted = a.condition === "" ? undefined : a.condition;
+      const condition = a.condition !== undefined && wanted !== item.condition ? a.condition : undefined;
+      if (text === undefined && condition === undefined) continue;
+      revised.set(a.id, { text, condition });
+      const nowCondition = condition === undefined
+        ? undefined
+        : condition === "" ? "no condition" : `only if ${clipQuote(condition)}`;
+      changes.push({
+        kind: text !== undefined ? "reworded" : "recondition",
+        verb: text !== undefined
+          ? (condition !== undefined ? "reworded and changed the condition on" : "reworded")
+          : "changed the condition on",
+        text: item.text,
+        now: [
+          ...(text !== undefined ? [`"${clipQuote(text)}"`] : []),
+          ...(nowCondition ? [nowCondition] : []),
+        ].join(" · "),
+      });
+    }
+    if (changes.length === 0) return 0;
+
+    // The dropped items that were themselves BLOCKING something. propagateBlocked
+    // derives a block from a dependency that is blocked or failed, so only such a
+    // dependency can have been the reason for a dependent's — a block the judge
+    // wrote about an item whose dependency was merely queued is not this
+    // instruction's to lift, and its outcome is not this instruction's to erase.
+    const wasBlocking = new Set(
+      [...dropped].filter((id) => byId.get(id)?.status === "blocked"),
+    );
+    const revived = new Set<string>();
+    const next: InstructionItem[] = [];
+    for (const i of s.backlog) {
+      if (dropped.has(i.id)) continue;
+      const item: InstructionItem = { ...i };
+      const deps = (i.dependsOn ?? []).filter((d) => !dropped.has(d));
+      // A removed item's id survives in every dependsOn that named it, and
+      // nextActionable reads an id it cannot resolve as UNSATISFIED — so the
+      // dependent would sit queued, undrivable and non-terminal forever, which is
+      // the deadlock this whole path exists to end.
+      if (deps.length > 0) item.dependsOn = deps; else delete item.dependsOn;
+      const rev = revised.get(i.id);
+      if (rev) {
+        if (rev.text !== undefined) item.text = rev.text;
+        // Empty clears, absent leaves alone — see AmendmentSchema.
+        if (rev.condition !== undefined) {
+          if (rev.condition === "") delete item.condition; else item.condition = rev.condition;
+        }
+      }
+      // propagateBlocked only ever moves an item TOWARD blocked, so a dependent
+      // blocked by the item just removed has nothing left to lift it. Reset, and
+      // let the sweep below re-derive it from the dependencies that remain.
+      if (item.status === "blocked" && (i.dependsOn ?? []).some((d) => wasBlocking.has(d))) {
+        item.status = "queued";
+        revived.add(item.id);
+      }
+      next.push(item);
+    }
+    // Replaced, not mutated: an earlier emitStatus handed the old array out by
+    // reference, and absorbTransitions keeps the same discipline.
+    s.backlog = propagateBlocked(next);
+    // The judge's justification goes only where the revive actually held. An item
+    // the sweep put straight back to `blocked` on a dependency that SURVIVED is
+    // still in the state that reason describes, and the row renders `outcome` as
+    // its subtitle — clearing it there leaves the row saying blocked with nothing
+    // under it, and nothing regenerates one until some later transition does.
+    for (const item of s.backlog) {
+      if (!revived.has(item.id) || item.status === "blocked") continue;
+      delete item.outcome;
+      delete item.evidence;
+    }
+    // The list the last verdict was reached against is not the list any more, so
+    // the staleness guard must not skip the pass that reads the new one.
+    s.lastJudgedContextHash = undefined;
+
+    const described = describeAmendments(changes);
+    // The user did not tap Delete, and the drawer may not even be open: without
+    // this row an item they wrote stops existing with nothing anywhere saying so,
+    // and the feed is what they read to reconstruct the hours they were away.
+    this.record(terminalId, "instruction_amended", described.reason, described.detail);
+    this.persist(terminalId, s, true);
+    this.emitStatus();
+    return changes.length;
+  }
+
+  /**
+   * The one end state an amendment can leave behind that nothing else resolves:
+   * an armed session watching an empty list.
+   *
+   * `allTerminal` refuses to call an empty backlog terminal — §4.3 asks for the
+   * user rather than a wrap-up that reports having accomplished nothing — so the
+   * session can never wrap up, keeps spending a judge pass on every terminal
+   * event, and has nothing to drive. Reachable before this only by arming with no
+   * goal, which the user chose and can see; "forget all of that" against a short
+   * list reaches it in one ordinary sentence that reads as having worked.
+   */
+  private escalateIfEmptied(terminalId: string, s: ArmedSession): void {
+    if (s.backlog.length > 0) return;
+    this.escalate(terminalId, s, {
+      decision: "escalate", confidence: 0,
+      reason: "that took the last item off the backlog",
+      notify: {
+        title: "Handler",
+        body: "Nothing left to work through — add an instruction or disarm Handler",
+        draftReply: "", urgency: "normal",
+      },
+    });
   }
 
   // The one path items reach the backlog by. Everything the extractor is not
@@ -1875,7 +2235,10 @@ export class HandlerEngine {
   // can never be told less than the user was.
   private noteFloorWarnings(terminalId: string, s: ArmedSession, warnings: FloorWarning[]): void {
     for (const w of warnings) {
-      this.record(terminalId, "floor_warning", describeWarning(w), w.pattern);
+      // No detail: `describeWarning` already carries the readable half, and the
+      // other one is a regex source — the row a user is meant to act on is the
+      // last place to print the floor's own spelling of itself.
+      this.record(terminalId, "floor_warning", describeWarning(w));
       this.rememberWarning(s, describeWarning(w));
     }
   }

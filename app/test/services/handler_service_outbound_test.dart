@@ -35,6 +35,41 @@ const _item = HandlerInstructionItem(
   createdAt: 7,
 );
 
+/// What the extractor made of an instruction — the append that answers it.
+const _extracted = HandlerInstructionItem(
+  id: 'i2',
+  text: 'rerun the tests',
+  status: 'queued',
+  createdAt: 8,
+);
+
+Map<String, dynamic> _session(
+  String terminalId,
+  List<HandlerInstructionItem> backlog,
+) => {
+  'terminalId': terminalId,
+  'notifyOnly': false,
+  'state': 'watching',
+  'pendingEscalations': 0,
+  'armedAt': 1,
+  // Required by HandlerSessionState.fromWire: a snapshot without it parses to
+  // null, and the session is silently absent from the state under test.
+  'goal': 'ship the fix',
+  'backlog': [for (final i in backlog) i.toWire()],
+};
+
+/// One `handler:status`, carrying t1 plus whatever else is armed. The engine
+/// serialises every armed session on every frame, so [others] is how a test
+/// reaches the case that matters: a frame t1 had no part in raising.
+void _status(
+  FakeAgentTransport t,
+  List<HandlerInstructionItem> backlog, {
+  List<Map<String, dynamic>> others = const [],
+}) => t.emit('handler:status', {
+  'projectId': 'p',
+  'sessions': [_session('t1', backlog), ...others],
+});
+
 void main() {
   test('a 1-tap arm sends armed:true and no payload keys', () async {
     // Spec §4.1: arming must not require a form, so an arm with no goal and no
@@ -143,23 +178,253 @@ void main() {
     await session.close();
   });
 
-  test('instruct does not touch local state', () async {
+  test('instruct records the sentence and appends no item', () async {
     // The bridge echoes the extracted backlog on handler:status; a local
-    // append would race that snapshot.
+    // append would race that snapshot. The sentence itself is held instead —
+    // it is the only thing there is to show for the seconds extraction takes,
+    // and it claims nothing about the items it becomes.
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = HandlerService.fromSession(session);
-    final before = svc.currentState;
-    var emissions = 0;
-    final sub = svc.stateStream.listen((_) => emissions++);
+
+    expect(
+      svc.instruct('t1', 'and rerun the tests'),
+      HandlerInstructResult.sent,
+    );
+
+    expect(svc.currentState.pendingInstructionsFor('t1'), [
+      'and rerun the tests',
+    ]);
+    expect(svc.currentState.sessions, isEmpty);
+
+    // The bridge appends and absorbs no duplicate, so the same sentence is
+    // refused for as long as it is outstanding — and named as a duplicate, not
+    // as an empty send, because the two are owed different answers on screen.
+    expect(
+      svc.instruct('t1', 'and rerun the tests'),
+      HandlerInstructResult.duplicate,
+    );
+    expect(t.sent.where((m) => m['type'] == 'handler:instruct'), hasLength(1));
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a grown backlog retires the instruction that grew it', () async {
+    // An instruct is unacknowledged and extraction rewrites its text, so the
+    // items themselves can never be matched to the sentence that asked for
+    // them. The backlog's own length is what can: extraction appends, so a list
+    // that is no longer the length it was has been rewritten since the send.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
 
     svc.instruct('t1', 'and rerun the tests');
+    _status(t, [_item]);
     await Future<void>.delayed(Duration.zero);
 
-    expect(emissions, 0);
-    expect(identical(svc.currentState, before), isTrue);
+    expect(svc.currentState.pendingInstructionsFor('t1'), isEmpty);
+    expect(
+      svc.instruct('t1', 'and rerun the tests'),
+      HandlerInstructResult.sent,
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('another terminal\'s status frame retires nothing', () async {
+    // emitStatus serialises EVERY armed session on every handler event, twice,
+    // so a second armed terminal's ordinary supervision raises a frame within
+    // milliseconds of the send. Retiring on the frame alone took the row away
+    // mid-extraction, lifted the debounce, and unlocked the drawer inside the
+    // one window its edit lock exists to cover.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+
+    _status(t, [_item]);
+    await Future<void>.delayed(Duration.zero);
+    svc.instruct('t1', 'and rerun the tests');
+
+    _status(t, [_item], others: [_session('t2', const [])]);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.pendingInstructionsFor('t1'), [
+      'and rerun the tests',
+    ]);
+    expect(
+      svc.instruct('t1', 'and rerun the tests'),
+      HandlerInstructResult.duplicate,
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a disarmed terminal retires what it can no longer append', () async {
+    // Nothing is left to grow the backlog, and a sentence outliving its session
+    // reads as work Handler is holding — and holds the drawer's edit lock with
+    // it, indefinitely.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+
+    _status(t, [_item]);
+    await Future<void>.delayed(Duration.zero);
+    svc.instruct('t1', 'and rerun the tests');
+
+    t.emit('handler:status', {'projectId': 'p', 'sessions': <dynamic>[]});
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.pendingInstructionsFor('t1'), isEmpty);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a dropped instruction retires on its activity record', () async {
+    // A backlog at the bridge's cap appends nothing and emits no status at all,
+    // so this record is the whole outcome. Left unretired it holds the edit
+    // lock forever — and under a full backlog, deleting an item is the only
+    // thing that would free room.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    _status(t, [_item]);
+    await Future<void>.delayed(Duration.zero);
+    svc.instruct('t1', 'and rerun the tests');
+
+    t.emit('handler:activity', {
+      'projectId': 'p',
+      'recordId': 'r1',
+      'at': 9,
+      'terminalId': 't1',
+      'decision': 'instruction_dropped',
+      'reason': 'backlog is full (100 items)',
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.pendingInstructionsFor('t1'), isEmpty);
 
     await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('an amended instruction retires on its activity record', () async {
+    // A sentence that only rewords something already tracked leaves the item
+    // count exactly where it was, which is the only thing the status snapshot
+    // is compared on — so this record is the whole outcome, the same way a
+    // dropped one is.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    _status(t, [_item]);
+    await Future<void>.delayed(Duration.zero);
+    svc.instruct('t1', 'make that the full suite');
+
+    t.emit('handler:activity', {
+      'projectId': 'p',
+      'recordId': 'r1',
+      'at': 9,
+      'terminalId': 't1',
+      'decision': 'instruction_amended',
+      'reason': 'reworded "run the tests"',
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.pendingInstructionsFor('t1'), isEmpty);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('an amendment answers only its own sentence', () async {
+    // An amendment records a row AND emits a status frame carrying a backlog its
+    // own drop has already shortened. Read as the NEXT sentence's evidence too,
+    // that frame retired a second instruction whose extraction had not started —
+    // taking its row away, lifting the debounce, and lifting the drawer's edit
+    // lock inside exactly the window it exists to cover.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    _status(t, [_item, _extracted]);
+    await Future<void>.delayed(Duration.zero);
+    svc.instruct('t1', 'actually skip the commit');
+    svc.instruct('t1', 'and update the changelog');
+
+    t.emit('handler:activity', {
+      'projectId': 'p',
+      'recordId': 'r1',
+      'at': 9,
+      'terminalId': 't1',
+      'decision': 'instruction_amended',
+      'reason': 'removed "open PR"',
+    });
+    // The snapshot that same call emits, one item shorter.
+    _status(t, [_item]);
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.pendingInstructionsFor('t1'), [
+      'and update the changelog',
+    ]);
+
+    // Its own append is what answers it.
+    _status(t, [_item, _extracted]);
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.pendingInstructionsFor('t1'), isEmpty);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('updateBacklog is refused while an instruction is outstanding', () async {
+    // Every edit is a wholesale replace and extraction appends behind it, so a
+    // list built while one is in flight deletes the items the user just asked
+    // for. The floor is here rather than on the drawer: this is the only way an
+    // edit reaches the wire.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+
+    _status(t, [_item]);
+    await Future<void>.delayed(Duration.zero);
+    svc.instruct('t1', 'and rerun the tests');
+    t.clearSent();
+
+    // Reported, not just silent: a surface holding text the user typed has to
+    // be able to keep it rather than close over a send that never happened.
+    expect(
+      svc.updateBacklog(
+        terminalId: 't1',
+        backlog: const [],
+        notifyOnly: false,
+      ),
+      isFalse,
+    );
+    expect(t.sent.any((m) => m['type'] == 'handler:configure'), isFalse);
+
+    _status(t, [_item, _extracted]);
+    await Future<void>.delayed(Duration.zero);
+    expect(
+      svc.updateBacklog(
+        terminalId: 't1',
+        backlog: const [],
+        notifyOnly: false,
+      ),
+      isTrue,
+    );
+
+    expect(t.sent.any((m) => m['type'] == 'handler:configure'), isTrue);
+
     await svc.dispose();
     await session.close();
   });
