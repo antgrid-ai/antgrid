@@ -33,6 +33,7 @@ export function createDriver(ctx: DriverCtx): StructuredDriver {
     cwd: ctx.projectPath,
     spawn: ({ canUseTool, abort, resume }) =>
       spawnClaude({ cwd: ctx.projectPath, canUseTool, resume,
+        approvalPolicy: ctx.approvalPolicy,
         onStderr: pushStderr, abortController: abort,
         ...(pluginDir ? { extraArgs: { "plugin-dir": pluginDir } } : {}),
         extraEnv: chatAug.env }),
