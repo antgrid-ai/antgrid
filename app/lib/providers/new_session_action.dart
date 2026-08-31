@@ -119,6 +119,9 @@ Future<void> startNewSession(
       ? selection.branch
       : null;
   final isolated = ref.read(newSessionIsolatedProvider);
+  final selectedAgent = ref.read(newSessionAgentProvider);
+  final selectedMode = ref.read(newSessionModeProvider);
+  final approvalPolicy = ref.read(newSessionApprovalPolicyProvider);
   final start = ref.read(newSessionStartProgressProvider.notifier);
   bool intentIsCurrent() {
     final currentTarget = ref.read(selectedTargetProjectProvider);
@@ -129,6 +132,9 @@ Future<void> startNewSession(
         : null;
     return currentTarget?.id == target.id &&
         ref.read(newSessionIsolatedProvider) == isolated &&
+        ref.read(newSessionAgentProvider) == selectedAgent &&
+        ref.read(newSessionModeProvider) == selectedMode &&
+        ref.read(newSessionApprovalPolicyProvider) == approvalPolicy &&
         currentBranch == explicitBranch &&
         !ref.read(newSessionStartCancelRequestedProvider);
   }
@@ -270,7 +276,7 @@ Future<void> startNewSession(
 
     // 3. Create + start the session, then mark it active.
     final svc = ref.read(sessionsServiceProvider);
-    final agent = ref.read(newSessionAgentProvider);
+    final agent = selectedAgent;
     final customCmd = ref.read(newSessionCustomCmdProvider).trim();
     final cliArgs = ref.read(newSessionCliArgsProvider).trim();
     final tool = newSessionAgentToolKey(agent); // null when custom
@@ -286,7 +292,7 @@ Future<void> startNewSession(
       descriptor: tool == null ? null : ref.read(agentCatalogProvider)[tool],
     );
     final mode = (tool != null && chatCapable == true)
-        ? ref.read(newSessionModeProvider)
+        ? selectedMode
         : 'terminal';
 
     // An agent rejection (`ok:false`) comes back as a null result, but a
@@ -303,6 +309,7 @@ Future<void> startNewSession(
         command: command,
         args: cliArgs.isEmpty ? null : cliArgs,
         mode: mode,
+        approvalPolicy: approvalPolicy,
         isolation: isolated ? 'worktree' : 'shared',
         baseBranch: isolated ? explicitBranch : null,
       );

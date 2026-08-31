@@ -45,6 +45,7 @@ import 'handler/handler_pa_bar.dart';
 import 'remote_access_control.dart';
 import 'remote_host_chip.dart';
 import 'session_agent_mark.dart';
+import 'session_approval_badge.dart';
 import 'session_mode_control.dart';
 import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
@@ -98,6 +99,8 @@ class AgentPanel extends ConsumerWidget {
               ),
               const SizedBox(width: AbTokens.space6),
               const SessionAgentMark(),
+              const SizedBox(width: AbTokens.space6),
+              const ActiveSessionApprovalBadge(),
               // space12, not space8: the work-status badge overhangs the mark
               // by 2px (see AgentWorkStatusBadge's Positioned offset in
               // SessionAgentMark) and needs the wider gap to actually clear
@@ -197,6 +200,8 @@ class AgentBar extends ConsumerWidget {
           const SizedBox(width: AbTokens.space6),
         ],
         const SessionAgentMark(),
+        const SizedBox(width: AbTokens.space6),
+        const ActiveSessionApprovalBadge(),
         // space12, not space8 — see the matching comment in AgentPanel's
         // mobile header above.
         const SizedBox(width: AbTokens.space12),

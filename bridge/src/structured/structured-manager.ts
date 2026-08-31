@@ -1,6 +1,7 @@
 import { createMessage, type AbMessage } from "../protocol";
 import { isChatCapableTool } from "./chat-capable";
 import type { CapCommand } from "./chat-session";
+import type { ApprovalPolicy } from "../agents/types";
 
 // Structural type the manager needs from a driver (CodexDriver satisfies it).
 export interface StructuredDriver {
@@ -51,6 +52,7 @@ export type DriverFactory = (
   tool: string,
   sendMessage: (m: AbMessage) => void,
   resumeId?: string,
+  approvalPolicy?: ApprovalPolicy,
 ) => StructuredDriver;
 
 export interface StructuredAgentManagerOpts {
@@ -107,8 +109,8 @@ export class StructuredAgentManager {
     this.onUserPrompt = opts.onUserPrompt;
   }
 
-  async startChat(opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string }): Promise<void> {
-    const { sessionId, tool, resumeId, config, initialPrompt } = opts;
+  async startChat(opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string; approvalPolicy?: ApprovalPolicy }): Promise<void> {
+    const { sessionId, tool, resumeId, config, initialPrompt, approvalPolicy = "default" } = opts;
     if (!isChatCapableTool(tool)) {
       throw new Error(`tool "${tool}" does not support chat mode`);
     }
@@ -131,7 +133,7 @@ export class StructuredAgentManager {
       // exited and released the ~/.codex sqlite lock (else initialize wedges).
       const pendingStop = this.stopping.get(sessionId);
       if (pendingStop) await pendingStop;
-      const driver = this.factory(sessionId, tool, this.send, resumeId);
+      const driver = this.factory(sessionId, tool, this.send, resumeId, approvalPolicy);
       let agentId: string;
       try {
         agentId = await driver.start(resumeId);

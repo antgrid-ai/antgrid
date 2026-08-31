@@ -30,6 +30,7 @@ import '../agent_work_status_dot.dart';
 import '../session_delete_flow.dart';
 import '../session_deleting_badge.dart';
 import '../session_isolation_badge.dart';
+import '../session_approval_badge.dart';
 import '../session_shared_workspace_badge.dart';
 
 /// One row in the Recent tab: agent mark (status-badged) · session name ·
@@ -325,6 +326,7 @@ class _DesktopLayout extends StatelessWidget {
                 // long name ellipsizes around them rather than pushing them off
                 // the row.
                 SessionIsolationBadge(session: row.session, setup: setup),
+                SessionApprovalBadge(session: row.session),
                 SessionSharedWorkspaceBadge(session: row.session),
                 SessionDeletingBadge(deleting: deleting),
                 const SizedBox(width: AbTokens.space12),
@@ -439,6 +441,7 @@ class _MobileLayout extends StatelessWidget {
               const SizedBox(width: AbTokens.space12),
               Expanded(child: _SessionName(name: row.session.name)),
               SessionIsolationBadge(session: row.session, setup: setup),
+              SessionApprovalBadge(session: row.session),
               SessionSharedWorkspaceBadge(session: row.session),
               SessionDeletingBadge(deleting: deleting),
               const SizedBox(width: AbTokens.space8),

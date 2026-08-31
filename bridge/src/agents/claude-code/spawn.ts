@@ -2,6 +2,7 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKMessage, SDKUserMessage, CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { stripInheritedCertOverrides } from "../../terminal-session";
 import { resolveAgent } from "../../known-agents";
+import type { ApprovalPolicy } from "../types";
 
 // The slice of the SDK Query object the driver needs (injectable for tests —
 // same rationale as CodexEndpoint). The SDK does not export Query cleanly.
@@ -50,6 +51,7 @@ export interface SpawnClaudeOpts {
   abortController: AbortController;
   extraArgs?: Record<string, string | null>;
   extraEnv?: Record<string, string>;
+  approvalPolicy?: ApprovalPolicy;
 }
 
 export interface SpawnedClaude {
@@ -122,7 +124,8 @@ export function spawnClaude(opts: SpawnClaudeOpts): SpawnedClaude {
     options: {
       pathToClaudeCodeExecutable: resolveClaudeBinary(opts.binPath),
       cwd: opts.cwd,
-      permissionMode: "default",
+      permissionMode: opts.approvalPolicy === "bypass" ? "bypassPermissions" : "default",
+      ...(opts.approvalPolicy === "bypass" ? { allowDangerouslySkipPermissions: true } : {}),
       canUseTool: opts.canUseTool,
       env: { ...buildClaudeEnv(), ...(opts.extraEnv ?? {}) },
       abortController: opts.abortController,

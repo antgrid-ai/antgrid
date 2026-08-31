@@ -39,6 +39,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
   "claude-code": {
     bin: "claude",
     label: "Claude Code",
+    approvalPolicies: { bypass: { terminalArgs: ["--dangerously-skip-permissions"], chat: true, risk: "bypasses-approvals" } },
     hookName: "claude",
     hookDir: "~/.claude/hooks",
     notificationSource: "plugin",
@@ -117,6 +118,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
   codex: {
     bin: "codex",
     label: "Codex",
+    approvalPolicies: { bypass: { terminalArgs: ["--dangerously-bypass-approvals-and-sandbox"], chat: true, risk: "bypasses-approvals-and-sandbox" } },
     hookName: "codex",
     hookDir: "~/.codex/hooks",
     notificationSource: "plugin",
@@ -173,6 +175,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
   opencode: {
     bin: "opencode",
     label: "opencode",
+    approvalPolicies: {},
     // No `bridge hook` events: opencode's plugin runs inside its own runtime and
     // POSTs to the loopback API itself, under this name.
     hookName: "opencode",
@@ -233,6 +236,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
   "cursor-agent": {
     bin: "cursor-agent",
     label: "Cursor",
+    approvalPolicies: { bypass: { terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
     hookName: "cursor",
     hookDir: null,
     notificationSource: "plugin",
@@ -253,6 +257,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
   "github-copilot": {
     bin: "copilot",
     label: "Copilot",
+    approvalPolicies: { bypass: { terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
     hookName: "github-copilot",
     hookDir: null,
     notificationSource: "osc",
@@ -311,6 +316,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
   antigravity: {
     bin: "agy",
     label: "Antigravity",
+    approvalPolicies: { bypass: { terminalArgs: ["--dangerously-skip-permissions"], risk: "bypasses-approvals" } },
     hookName: "antigravity",
     hookDir: null,
     notificationSource: "plugin",
@@ -336,6 +342,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
   kilo: {
     bin: "kilo",
     label: "Kilo",
+    approvalPolicies: { bypass: { terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
     hookName: null,
     hookDir: null,
     notificationSource: "osc",
@@ -368,6 +375,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
   kimi: {
     bin: "kimi",
     label: "Kimi",
+    approvalPolicies: { bypass: { terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
     hookName: null,
     hookDir: null,
     notificationSource: "osc",
@@ -381,6 +389,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
   "mistral-vibe": {
     bin: "vibe",
     label: "Mistral Vibe",
+    approvalPolicies: {},
     hookName: null,
     hookDir: null,
     notificationSource: "osc",

@@ -165,6 +165,7 @@ class SessionEntry {
   final String? forkedFromSessionId;
   final String? args;
   final String mode;
+  final String approvalPolicy;
 
   /// False when this session's agent-native conversation can no longer be
   /// resumed, so a mode switch would silently start a fresh one. Deliberately
@@ -210,6 +211,7 @@ class SessionEntry {
     this.forkedFromSessionId,
     this.args,
     this.mode = 'terminal',
+    this.approvalPolicy = 'default',
     this.agentSessionResumable = true,
     this.workStatus,
     this.agentSessionId,
@@ -238,6 +240,7 @@ class SessionEntry {
     if (forkedFromSessionId != null) 'forkedFromSessionId': forkedFromSessionId,
     if (args != null) 'args': args,
     'mode': mode,
+    'approvalPolicy': approvalPolicy,
     'agentSessionResumable': agentSessionResumable,
     if (workStatus != null) 'workStatus': workStatus!.name,
     if (agentSessionId != null) 'agentSessionId': agentSessionId,
@@ -270,6 +273,7 @@ class SessionEntry {
     forkedFromSessionId: j['forkedFromSessionId'] as String?,
     args: j['args'] as String?,
     mode: j['mode'] as String? ?? 'terminal',
+    approvalPolicy: j['approvalPolicy'] as String? ?? 'default',
     // Optimistic on absence, matching the bridge schema's default: a stale
     // `true` only lets the mode control show for a conversation that turns out
     // to be gone, while a wrong `false` would hide it outright.
@@ -305,6 +309,7 @@ class SessionEntry {
     bool? running,
     bool? deleting,
     SessionSetup? setup,
+
     /// Drop the provisioning state instead of carrying it over. Never pass this
     /// together with [setup] — the two are contradictory answers to the same
     /// field.
@@ -323,6 +328,7 @@ class SessionEntry {
     forkedFromSessionId: forkedFromSessionId,
     args: args,
     mode: mode,
+    approvalPolicy: approvalPolicy,
     agentSessionResumable: agentSessionResumable,
     workStatus: workStatus,
     agentSessionId: agentSessionId,
@@ -352,6 +358,7 @@ class SessionEntry {
           other.forkedFromSessionId == forkedFromSessionId &&
           other.args == args &&
           other.mode == mode &&
+          other.approvalPolicy == approvalPolicy &&
           other.agentSessionResumable == agentSessionResumable &&
           other.workStatus == workStatus &&
           other.agentSessionId == agentSessionId &&
@@ -379,6 +386,7 @@ class SessionEntry {
     forkedFromSessionId,
     args,
     mode,
+    approvalPolicy,
     agentSessionResumable,
     workStatus,
     agentSessionId,

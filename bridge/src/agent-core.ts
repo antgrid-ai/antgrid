@@ -1225,6 +1225,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               command: msg.command,
               args: msg.args,
               mode: msg.mode,
+              approvalPolicy: msg.approvalPolicy ?? "default",
               isolation: msg.isolation ?? "shared",
               baseBranch: msg.baseBranch,
             });
@@ -2576,7 +2577,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         maybeGenerateTitle(tool, { terminalId: sessionId, prompt: text })
           .catch((err) => log.error("Title generation failed: %s", err));
       },
-      driverFactory: (sessionId, tool, send) => {
+      driverFactory: (sessionId, tool, send, _resumeId, approvalPolicy = "default") => {
         // Chat mode is gated on isChatCapableTool, which IS "the spec has a
         // driver" — so an unreachable tool here means the two disagreed.
         const driver = agentSpec(tool)?.driver;
@@ -2592,6 +2593,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           send,
           projectPath: sessionRuntime.checkout.path,
           projectId: project.id,
+          approvalPolicy,
           chatAugment: () => buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir),
           onAgentSession: (agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
           onLifecycle: (evt) => {

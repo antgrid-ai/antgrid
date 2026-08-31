@@ -908,7 +908,14 @@ describe("SessionManager start/stop", () => {
     });
     const s = sm.create("c", { tool: "codex", mode: "chat" });
     sm.start(s.id);
-    expect(calls).toEqual([{ sessionId: s.id, tool: "codex", resumeId: undefined }]);
+    expect(calls).toEqual([{
+      sessionId: s.id,
+      tool: "codex",
+      resumeId: undefined,
+      config: undefined,
+      initialPrompt: undefined,
+      approvalPolicy: "default",
+    }]);
     expect(term.spawns.length).toBe(0); // no PTY spawned
     expect(sm.get(s.id)?.running).toBe(true); // chat running reflected without a PTY
     sm.flushNow();

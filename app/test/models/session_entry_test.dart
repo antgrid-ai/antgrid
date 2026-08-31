@@ -12,6 +12,21 @@ void main() {
       'running': false,
     });
     expect(e.mode, 'terminal');
+    expect(e.approvalPolicy, 'default');
+  });
+
+  test('parses and round-trips bypass approval policy', () {
+    final e = SessionEntry.fromJson({
+      'id': 'a',
+      'name': 'n',
+      'createdAt': 1,
+      'lastUsedAt': 1,
+      'archived': false,
+      'running': true,
+      'approvalPolicy': 'bypass',
+    });
+    expect(e.approvalPolicy, 'bypass');
+    expect(e.toJson()['approvalPolicy'], 'bypass');
   });
 
   test('parses and round-trips chat mode', () {
