@@ -117,11 +117,21 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     // reading.
     _syncTail(running && !expanded && !queued ? terminalId : null, runKey);
 
+    // The agent is ALREADY working in a tree this run has not finished
+    // building: `startAgent: immediate`, or a start the user released by hand.
+    // A different claim from the queued wait — the commands it is about to run
+    // can fail for a reason that is not its fault — so it gets the warning tone
+    // and the one action left that means anything. Derived from the live run
+    // plus the session's own `running` rather than from a mode flag: both
+    // routes reach the identical situation, and only this surface reports it.
+    final agentLive = running && (ref.watch(activeSessionProvider)?.running ?? false);
+
     final colors = context.antgrid;
     final tone = switch (phase) {
       SessionSetupPhase.failed ||
       SessionSetupPhase.interrupted => colors.warning,
-      SessionSetupPhase.running => colors.textSecondary,
+      SessionSetupPhase.running =>
+        agentLive ? colors.warning : colors.textSecondary,
       _ => colors.textMuted,
     };
     final tail = _runKey == runKey ? _tail : null;
@@ -130,9 +140,16 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
       mainAxisSize: MainAxisSize.min,
       children: [
         AbInlineBanner(
-          text: _headline(setup, phase),
+          text: _headline(setup, phase, agentLive),
           color: tone,
-          trailing: _buildActions(sessionId, runKey, phase, expanded, queued),
+          trailing: _buildActions(
+            sessionId,
+            runKey,
+            phase,
+            expanded,
+            queued,
+            agentLive,
+          ),
         ),
         if (running)
           AbProgressRule(
@@ -148,7 +165,11 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     );
   }
 
-  String _headline(SessionSetup setup, SessionSetupPhase phase) {
+  String _headline(
+    SessionSetup setup,
+    SessionSetupPhase phase,
+    bool agentLive,
+  ) {
     final step = setup.stepCount > 0
         ? '${setup.stepIndex + 1} of ${setup.stepCount}'
         : null;
@@ -159,6 +180,13 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     ].join(' · ');
     final message = setup.message;
     return switch (phase) {
+      // "Preparing" is a promise the agent is waiting on. Once it is not, the
+      // headline has to name what the user is actually looking at: a session
+      // they can type into, over a workspace that is still being built.
+      SessionSetupPhase.running when agentLive =>
+        where.isEmpty
+            ? 'Workspace still installing…'
+            : 'Workspace still installing — $where',
       SessionSetupPhase.running =>
         where.isEmpty ? 'Preparing workspace…' : 'Preparing workspace — $where',
       SessionSetupPhase.done => 'Workspace ready',
@@ -179,8 +207,16 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     SessionSetupPhase phase,
     bool expanded,
     bool queued,
+    bool agentLive,
   ) {
     final action = switch (phase) {
+      // Releasing an agent that is already up is meaningless, so the live case
+      // gets the one verb still worth offering: end the install holding the
+      // tree the agent is working in.
+      SessionSetupPhase.running when agentLive => (
+        label: 'Cancel setup',
+        verb: SessionSetupAction.cancel,
+      ),
       // Named for what it does rather than for the `skip` verb underneath: it
       // releases the queued agent start and leaves the run going — the "the
       // deps are already cached" case, which is the common one. Nothing about
