@@ -23,6 +23,10 @@ class PreviewWithSourceToggle extends StatefulWidget {
   final String? searchQuery;
   final WidgetBuilder previewBuilder;
 
+  /// Preview-only header actions, placed left of the source toggle. Dropped in
+  /// source mode, where they have no preview to act on.
+  final List<Widget> extraActions;
+
   const PreviewWithSourceToggle({
     super.key,
     required this.content,
@@ -32,6 +36,7 @@ class PreviewWithSourceToggle extends StatefulWidget {
     this.fileWasModified = false,
     this.searchLine,
     this.searchQuery,
+    this.extraActions = const [],
   });
 
   @override
@@ -76,6 +81,7 @@ class _PreviewWithSourceToggleState extends State<PreviewWithSourceToggle> {
           size: widget.content.size,
           onClose: widget.onClose,
           trailing: [
+            ...widget.extraActions,
             AbIconButton(
               icon: AbIcons.code,
               onTap: () => setState(() => _showSource = true),
