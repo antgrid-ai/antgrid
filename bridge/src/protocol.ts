@@ -1252,6 +1252,10 @@ const SessionEntrySchema = z.object({
     stepIndex: z.number().int().nonnegative(),
     stepCount: z.number().int().nonnegative(),
     stepName: z.string().optional(),
+    // Every step's name, in plan order — the ledger's only source. Optional so
+    // an older bridge still parses, and absent for a state recovered from disk,
+    // which knows how many steps ran but not what they were called.
+    stepNames: z.array(z.string()).optional(),
     // The setup transcript's terminal, replayable via terminal:snapshot:request.
     terminalId: z.string().optional(),
     exitCode: z.number().int().optional(),

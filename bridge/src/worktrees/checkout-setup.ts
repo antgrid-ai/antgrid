@@ -146,6 +146,8 @@ interface ActiveRun {
   stepCount: number;
   stepIndex: number;
   stepName?: string;
+  /** Fixed for the life of the run — the plan is built once and never re-read. */
+  stepNames: string[];
   planPath: string;
   resultPath: string;
   timeoutMs: number;
@@ -269,6 +271,7 @@ export class CheckoutSetupRunner {
       stepIndex: run.stepIndex,
       stepCount: run.stepCount,
       stepName: run.stepName,
+      stepNames: run.stepNames,
       terminalId,
     });
     return true;
@@ -318,6 +321,7 @@ export class CheckoutSetupRunner {
       stepCount: plan.steps.length,
       stepIndex: 0,
       stepName: plan.steps[0]?.name,
+      stepNames: plan.steps.map((s) => s.name),
       planPath,
       resultPath,
       timeoutMs: clampTimeout(setup.timeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS),
@@ -375,6 +379,7 @@ export class CheckoutSetupRunner {
       stepIndex: 0,
       stepCount: run.stepCount,
       stepName: run.stepName,
+      stepNames: run.stepNames,
       terminalId,
     });
   }
@@ -455,6 +460,7 @@ export class CheckoutSetupRunner {
       stepIndex,
       stepCount: run.stepCount,
       stepName,
+      stepNames: run.stepNames,
       terminalId: run.terminalId,
     };
 

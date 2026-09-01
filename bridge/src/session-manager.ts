@@ -162,14 +162,25 @@ export interface SessionManagerOpts {
    *  checkout is removed: on Windows a live `bun install` holding the worktree
    *  as its cwd makes `git worktree remove` fail. */
   cancelCheckoutSetup?: (checkoutId: string) => Promise<void>;
-  /** Whether this checkout has a `worktree.setup` block AT ALL, answered from
-   *  its own antgrid.yaml. Read once per managed checkout on load, and only to
-   *  keep "died mid-run" apart from "never had a run": every checkout cut before
+  /** What this checkout's own antgrid.yaml asks of a provisioning run.
+   *
+   *  `declares` is whether there is a `worktree.setup` block AT ALL. It keeps
+   *  "died mid-run" apart from "never had a run": every checkout cut before
    *  this feature shipped carries no marker either, and reporting those as
    *  `interrupted` puts a "Setup didn't finish" banner on every isolated session
-   *  the user already had. Unanswerable (an unreadable config) reads as true, so
-   *  the doubt surfaces rather than hides. */
-  checkoutDeclaresSetup?: (checkout: CheckoutRecord) => boolean;
+   *  the user already had. It also gates the `services:` deferral.
+   *
+   *  `startAgent` is whether the agent waits for the run (see the config
+   *  schema). Deliberately a SEPARATE axis from the deferral: `services:` stay
+   *  held either way, because `bun run dev` against an empty `node_modules`
+   *  fails with nobody watching, unlike an agent.
+   *
+   *  Unanswerable (an unreadable config) fails closed on BOTH: the doubt gets
+   *  the banner, and it does not get to say the agent may skip the wait. */
+  checkoutSetupPolicy?: (checkout: CheckoutRecord) => {
+    declares: boolean;
+    startAgent: "afterSetup" | "immediate";
+  };
   /** Re-push the checkout's workspace state AFTER the session is announced.
    *  `prepareCheckoutRuntime` emits it too, but nothing replays a push frame
    *  and at that point no app knows the checkout exists — so its subscriber
@@ -432,6 +443,10 @@ interface SetupRuntime {
   stepIndex: number;
   stepCount: number;
   stepName?: string;
+  /** Every step's name, in plan order, for the app's ledger. Retained like
+   *  `terminalId` rather than overwritten: a recovered state has none and a
+   *  report that omits them must not blank a ledger already on screen. */
+  stepNames?: string[];
   terminalId?: string;
   exitCode?: number;
   message?: string;
@@ -931,8 +946,8 @@ export class SessionManager {
       // strands the dev server, and stamping the `done` such a run reports
       // banners "Workspace ready" on a project that never opted in, on this
       // launch and (through recoverSetupStates) on every launch after it.
-      const declaresSetup = !!this.opts.runCheckoutSetup
-        && this.opts.checkoutDeclaresSetup?.(checkout) !== false;
+      const policy = this.opts.checkoutSetupPolicy?.(checkout);
+      const declaresSetup = !!this.opts.runCheckoutSetup && policy?.declares !== false;
       await this.opts.prepareCheckoutRuntime?.(checkout, { deferServices: declaresSetup });
       runtimePrepared = true;
       const checkoutSpec = await this.opts.resolveAgentSpec?.(checkout.id) ?? this.agentSpec;
@@ -948,7 +963,9 @@ export class SessionManager {
       // Seeded before the commit so the entry the create reply carries already
       // says `running` — the app must never see an isolated session that looks
       // provisioned for the frame before the first progress lands.
-      const setup = declaresSetup ? this.beginSetup(entry.id, true) : undefined;
+      const setup = declaresSetup
+        ? this.beginSetup(entry.id, true, undefined, policy?.startAgent)
+        : undefined;
       this.entries.set(entry.id, entry);
       await this.flushNowOrThrow();
       this.notifyObservers();
@@ -1589,6 +1606,7 @@ export class SessionManager {
     sessionId: string,
     holdsServices: boolean,
     pendingStart?: { initialPrompt?: string },
+    startAgent: "afterSetup" | "immediate" = "afterSetup",
   ): SetupRuntime {
     const setup: SetupRuntime = {
       runId: this.nextSetupRunId++,
@@ -1599,7 +1617,15 @@ export class SessionManager {
       pendingStart,
       // Survives across reruns so a second one can still re-arm the start.
       lastQueuedPrompt: pendingStart?.initialPrompt ?? this.setups.get(sessionId)?.lastQueuedPrompt,
-      gateReleased: false,
+      // Born open under `immediate`, which is the whole of that policy: an open
+      // gate is one `setupGate` declines to report, so `start()` falls straight
+      // through to the spawn with no branch of its own. Everything downstream
+      // still works because it is the same state a Skip produces — the run
+      // keeps reporting. It releases nothing by itself, though: a caller that
+      // ALSO queues a start (only `rerunSetup` does) owes it a
+      // `firePendingStart`, since an open gate is exactly what stops the
+      // settle from firing one.
+      gateReleased: startAgent === "immediate",
       holdsServices,
     };
     this.setups.set(sessionId, setup);
@@ -1624,6 +1650,7 @@ export class SessionManager {
     setup.stepName = progress.stepName;
     setup.exitCode = progress.exitCode;
     setup.message = progress.message;
+    if (progress.stepNames !== undefined) setup.stepNames = progress.stepNames;
     // Kept when a later report omits it: the transcript stays reachable after
     // the run ends, which is the point of the expandable log.
     if (progress.terminalId !== undefined) setup.terminalId = progress.terminalId;
@@ -1797,8 +1824,19 @@ export class SessionManager {
     const requeue = previous?.lastQueuedPrompt !== undefined && !this.isRunning(entry)
       ? { initialPrompt: previous.lastQueuedPrompt }
       : undefined;
-    const setup = this.beginSetup(entry.id, false, requeue);
+    // Re-read rather than remembered from create: a rerun is exactly when the
+    // config has changed since, and the answer this run owes is the one on the
+    // checkout's branch NOW.
+    const setup = this.beginSetup(
+      entry.id, false, requeue, this.opts.checkoutSetupPolicy?.(checkout)?.startAgent,
+    );
     this.notifyObservers();
+    // A gate born open holds nothing back, so a start queued behind it has
+    // nobody to fire it: `firePendingStart` runs only when a run SETTLES, which
+    // under `immediate` is the entire wait that policy exists to remove. Create
+    // never meets this — it queues no start of its own — and a rerun does,
+    // because it re-arms the prompt the previous run spent.
+    if (setup.gateReleased && setup.pendingStart) this.firePendingStart(entry.id);
     run(checkout, entry.id, (progress) => this.onSetupProgress(entry.id, setup.runId, progress));
   }
 
@@ -1864,7 +1902,9 @@ export class SessionManager {
       // `interrupted`, with a "Run setup" button `rerunSetup` can only answer
       // with WORKTREE_MISSING.
       if (!record) continue;
-      if (!record.setupState && this.opts.checkoutDeclaresSetup?.(record) === false) continue;
+      // `declares` only: a recovered state has no runner to wait for, so this
+      // path has no gate to seed and `startAgent` says nothing about it.
+      if (!record.setupState && this.opts.checkoutSetupPolicy?.(record)?.declares === false) continue;
       // `done` is deliberately NOT re-seeded. A finished run offers no action,
       // and `startedAt` can only fall back to the session's creation time — so
       // a recovered success re-announces "Workspace ready" for every isolated
@@ -2531,6 +2571,7 @@ export class SessionManager {
       stepIndex: setup.stepIndex,
       stepCount: setup.stepCount,
       stepName: setup.stepName,
+      stepNames: setup.stepNames,
       terminalId: setup.terminalId,
       exitCode: setup.exitCode,
       message: setup.message,
