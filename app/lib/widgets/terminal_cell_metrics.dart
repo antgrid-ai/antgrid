@@ -16,11 +16,13 @@ const double kGhosttyLineHeight = 1.35;
 /// one frame LATE, and on every remount (a session switch re-keys the wrapper)
 /// that first frame has no metrics at all. Laying the grid out at a
 /// locally-derived width for that one frame and then correcting it is a real
-/// grid resize under the guest, and `ghostty_vte_flutter` does not reflow: an
-/// Ink-style TUI leaks stale fragments across it.
+/// grid resize under the guest, and an Ink-style TUI leaks stale fragments
+/// across it. The engine's own reflow does not save this: it re-wraps SOFT
+/// wrapped rows only, and a TUI that wraps its own output writes the break
+/// itself — see `terminal_reflow_contract_test.dart`, which pins both halves.
 ///
 /// HAND-MIRRORED against the pinned fork (`ghostty_vte_flutter`, ref
-/// `c262d5f2002d26b2116b2c5c943a46a63f994133`):
+/// `6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee`):
 /// `_GhosttyTerminalViewState._measureMetrics` and
 /// `_snapLogicalExtentToPhysical` in `lib/src/terminal_view.dart`. The package
 /// defaults the wrapper does not override are folded in — `cellWidthScale = 1`,

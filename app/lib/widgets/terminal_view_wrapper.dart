@@ -235,6 +235,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   int? _lastSentCols;
   int? _lastSentRows;
 
+  /// The `TerminalTab.sizeEpoch` [_lastSentCols]/[_lastSentRows] were booked
+  /// against, so a bump can retire them.
+  int? _observedSizeEpoch;
+
   /// Size the driver's grid is actually rendered at, reported by
   /// `_TerminalGridFreeze`. The PTY's authoritative `cols`/`rows` are derived
   /// from this (not the live viewport) so the size sent to the PTY lands in
@@ -334,6 +338,38 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       if (!mounted) return;
       ref.read(focusAgentInputProvider.notifier).set(_publishedFocusInput);
     });
+  }
+
+  @override
+  void didUpdateWidget(TerminalViewWrapper oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The booking below is per-PTY, but this State is not: only
+    // `terminal_screen` keys the wrapper by terminalId — the pinned pane
+    // (`terminal_list_view`), `terminal_detail_view` and the setup banner all
+    // mount it unkeyed, so swapping which terminal they show reuses this State.
+    // Carried over, `_lastSent*` gate the new PTY against the old one's grid,
+    // and two tabs sitting at the same epoch (the common case — both 0, or both
+    // bumped in lockstep by a reattach) make the bump no edge at all. That is
+    // the exact stranding `sizeEpoch` exists to prevent, reached through the
+    // widget tree instead of the wire.
+    if (oldWidget.tab.terminalId == widget.tab.terminalId) return;
+    _lastSentCols = null;
+    _lastSentRows = null;
+    _observedSizeEpoch = null;
+    // A pointer-down authorizes taking width ownership of the terminal the
+    // user pressed, not of whichever one lands in this slot next.
+    _claimRequestedByUser = false;
+    // Both halves of the claim gate, because the swap fires no focus event to
+    // re-arm the other one: `_claimed` is cleared only on a focus GAIN, and
+    // these slots swap while the wrapper keeps focus. On a touch device that is
+    // terminal — `_requestUserClaim` returns immediately without a physical
+    // keyboard, so `autoClaiming` is the only claim path there, and a `true`
+    // carried over from the previous terminal leaves the phone letterboxed at
+    // another device's grid with no gesture that takes it back.
+    _claimed = false;
+    // `_renderSize` is deliberately kept: it describes the PANEL's settled
+    // grid, which this swap does not move, and `_TerminalGridFreeze` survives
+    // the slot too — so it would never be re-reported if it were cleared.
   }
 
   late final ProviderContainer _container;
@@ -869,6 +905,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                         constraints,
                         amDriver,
                         tab.driverClientId,
+                        sizeEpoch: tab.sizeEpoch,
                         charWidth: cell.charWidth,
                         lineHeightPx: cell.linePixels,
                       );
@@ -876,10 +913,13 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       // Driver → fill the viewport. Pin the grid to the last
                       // settled width via `_TerminalGridFreeze` so transient
                       // resizes (e.g. dragging the agent/workspace divider)
-                      // don't spam Ghostty grid resizes —
-                      // `ghostty_vte_flutter` doesn't reflow soft-wrapped lines, and
-                      // Ink-style TUI redraws (Claude Code) leak stale fragments
-                      // when the grid changes underneath them.
+                      // don't spam Ghostty grid resizes — Ink-style TUI
+                      // redraws (Claude Code) leak stale fragments when the
+                      // grid changes underneath them. The engine DOES reflow
+                      // its own soft-wrapped rows, but that reaches none of
+                      // this: such a TUI wraps its output itself, so every row
+                      // it wrote is a hard break reflow cannot re-join
+                      // (`terminal_reflow_contract_test.dart`).
                       if (amDriver) {
                         return _TerminalGridFreeze(
                           onSettled: _onRenderSizeSettled,
@@ -1036,9 +1076,20 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     BoxConstraints constraints,
     bool amDriver,
     String? observedDriverClientId, {
+    required int sizeEpoch,
     required double charWidth,
     required double lineHeightPx,
   }) {
+    // A bump means the PTY no longer holds what we booked — it respawned, or a
+    // send the service accepted never reached the wire (`TerminalTab.sizeEpoch`
+    // names every case). Reopening the `changed` gate is the only thing that
+    // recovers it: the panel is not moving, so every later build computes the
+    // same grid and would return below forever.
+    //
+    // Read here, retired only where the booking it belongs to is written — a
+    // build that computes a grid is not a build that sends one, and consuming
+    // the edge during layout spends it on the early returns too.
+    final epochStale = _observedSizeEpoch != sizeEpoch;
     // Subtract the view's symmetric padding from BOTH axes so the native grid
     // matches what GhosttyTerminalView._syncGrid actually renders
     // (floor((dim - padding) / cellMetric)). `_hPad` (= padding.horizontal,
@@ -1076,23 +1127,40 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     final autoClaiming = !_hasPhysicalKeyboard && _locallyActive && !_claimed;
     final userClaiming = _claimRequestedByUser && !_claimed;
     final claiming = autoClaiming || userClaiming;
-    final changed = nativeCols != _lastSentCols || nativeRows != _lastSentRows;
+    final changed =
+        epochStale ||
+        nativeCols != _lastSentCols ||
+        nativeRows != _lastSentRows;
     if (!claiming && !(amDriver && changed)) return;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      if (claiming) {
-        _claimed = true;
-        _claimRequestedByUser = false;
-      }
-      _lastSentCols = nativeCols;
-      _lastSentRows = nativeRows;
-      widget.terminalService.sendResize(
+      // Book the size and consume the claim only if the service actually took
+      // the request. A terminal can mount before the per-install client id
+      // resolves, and `sendResize` drops those; recording them anyway leaves
+      // `changed` false against a size the PTY never received, so the agent
+      // keeps wrapping at the old width until the panel happens to move again.
+      // A rejected attempt leaves `changed` true, and this view watches
+      // `clientIdProvider` itself (`_buildTerminal`), so the id landing rebuilds
+      // it — which is what retries the send.
+      //
+      // Queued is not delivered: `sendResize` can still discard the frame it
+      // armed, and those paths answer with a `sizeEpoch` bump rather than a
+      // return value, because they resolve long after this callback is gone.
+      final sent = widget.terminalService.sendResize(
         terminalId,
         nativeCols,
         nativeRows,
         baseDriverClientId: observedDriverClientId,
       );
+      if (!sent) return;
+      if (claiming) {
+        _claimed = true;
+        _claimRequestedByUser = false;
+      }
+      _observedSizeEpoch = sizeEpoch;
+      _lastSentCols = nativeCols;
+      _lastSentRows = nativeRows;
     });
   }
 
@@ -1185,11 +1253,29 @@ class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
   Size? _pinnedSize;
   Timer? _settleTimer;
 
+  /// The size [_settleTimer] is currently counting down towards, so a rebuild
+  /// that observes the same size does not restart it.
+  Size? _settlingTo;
+
   @override
   void dispose() {
-    _settleTimer?.cancel();
+    _cancelSettle();
     super.dispose();
   }
+
+  /// Whether two observed sizes are the same to the only precision that
+  /// matters here — the integer cell grid the pin protects.
+  ///
+  /// Not `Size ==`: that is exact double equality, and a width arriving as
+  /// 599.9999999999999 on one layout pass and 600.0 on the next (a fractional
+  /// flex split, a divider still animating toward its endpoint) would read as
+  /// movement. The guards below would then re-arm on every rebuild and restore
+  /// the never-settles behaviour they exist to remove, with nothing visible to
+  /// say why.
+  static bool _sameSize(Size? a, Size b) =>
+      a != null &&
+      (a.width - b.width).abs() < 0.5 &&
+      (a.height - b.height).abs() < 0.5;
 
   /// Notify the parent of the rendered size without mutating state during
   /// layout (the immediate pin happens inside `build`): defer to post-frame.
@@ -1201,13 +1287,36 @@ class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
     });
   }
 
+  /// Arms the settle countdown for [size], measuring quiet from the last time
+  /// the size actually MOVED — never from the last rebuild.
+  ///
+  /// `LayoutBuilder` re-runs its builder whenever the parent rebuilds, not only
+  /// when constraints change, so re-arming unconditionally makes any wrapper
+  /// rebuild faster than [_settleDelay] (a streaming agent, a selection drag, a
+  /// session-list tick) cancel the timer forever. The grid then stays pinned to
+  /// whatever it held when the panel last changed size — the content clipped at
+  /// the stale column with dead space beside it, for as long as the rebuilds
+  /// keep coming.
   void _scheduleSettle(Size size) {
+    if (_sameSize(_settlingTo, size)) return;
+    _settlingTo = size;
     _settleTimer?.cancel();
     _settleTimer = Timer(_settleDelay, () {
+      // Cleared before the mount check so `_settlingTo` never outlives the
+      // timer it names — every other guard here reads it as "a countdown is
+      // running".
+      _settlingTo = null;
+      _settleTimer = null;
       if (!mounted) return;
       setState(() => _pinnedSize = size);
       _notifySettled(size);
     });
+  }
+
+  void _cancelSettle() {
+    _settleTimer?.cancel();
+    _settleTimer = null;
+    _settlingTo = null;
   }
 
   @override
@@ -1221,8 +1330,13 @@ class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
           _pinnedSize = live;
           _notifySettled(live);
         }
-        if (_pinnedSize != live) {
+        if (!_sameSize(_pinnedSize, live)) {
           _scheduleSettle(live);
+        } else {
+          // Back at the pinned size before the countdown expired (a drag that
+          // returned, a transient constraint). Dropping the timer keeps it from
+          // pinning a size the panel no longer has.
+          _cancelSettle();
         }
         final inner = _pinnedSize!;
         return ClipRect(
