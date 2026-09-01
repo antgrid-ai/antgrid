@@ -143,6 +143,64 @@ void main() {
     });
   });
 
+  group('handlerShieldTooltip', () {
+    // The explainer's copy matrix has its own group above. This is the surface
+    // that answers every time, and the two must agree about precedence.
+    test('an armed session offers only the way out', () {
+      expect(
+        handlerShieldTooltip(armed: true, observable: false, judgeCapable: false),
+        'Disarm Handler',
+      );
+    });
+
+    test('an escalate-only agent is named before the arm, not after', () {
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: true,
+          judgeCapable: false,
+        ),
+        escalateOnlyNotice,
+      );
+    });
+
+    test('unwatchable outranks escalate-only', () {
+      // Both true of the same agent says one thing: it reports nothing. What
+      // its judge could have done never comes up.
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: false,
+          judgeCapable: false,
+          agentLabel: 'Claude Code',
+        ),
+        unwatchableNotice('Claude Code'),
+      );
+    });
+
+    test('a fully covered agent gets the plain label', () {
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: true,
+          judgeCapable: true,
+        ),
+        'Arm Handler',
+      );
+    });
+
+    test('an undescribed agent claims neither fault', () {
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: null,
+          judgeCapable: null,
+        ),
+        'Arm Handler',
+      );
+    });
+  });
+
   group('shieldShowsLabel', () {
     test('labels only before the first arm and never while armed', () {
       expect(shieldShowsLabel(armedOnce: false, sessionArmed: false), isTrue);
