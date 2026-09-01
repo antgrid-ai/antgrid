@@ -7,6 +7,7 @@ import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_chip.dart';
+import '../../design/widgets/ab_confirm_dialog.dart';
 import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_list_row.dart';
@@ -106,6 +107,37 @@ class HandlerScreen extends ConsumerWidget {
       // `reply` answers a disposed service with `false` — an answer the user typed,
       // silently dropped, under a card that still reads as answered.
       focusedServiceOrNull(container, (s) => s.handlerService)?.reply(e, text);
+    }
+
+    // Confirmed for one action out of four. Undoing a hard reset, a recursive
+    // delete or a clean touches this machine only; undoing a force push writes
+    // to a shared remote, and the row it is offered on is a scrolling list row
+    // whose whole body is the tap target (§5.2 buys prevention back as one tap).
+    // The dialog is the only thing standing between a thumb landing where the
+    // scroll stopped and a ref overwritten for everyone on it.
+    //
+    // Re-resolved after the dialog for the same reason `answer` re-resolves
+    // after its sheet: the focused project's session can be rebuilt while the
+    // dialog is open, and the build-time instance is disposed by then.
+    Future<void> undo(HandlerSnapshot s) async {
+      if (s.action == 'force_push') {
+        final ok = await AbConfirmDialog.show(
+          context: context,
+          title: 'Undo this force push?',
+          // No promise of recovery: the bridge pins the current remote tip
+          // before overwriting it, but only when the ref still exists there —
+          // a ref already gone from the remote is restored with a bare
+          // `--force` and nothing pinned (snapshot.ts).
+          body:
+              'This force-pushes the remote back to where it was before the '
+              "agent's push. Whatever is on it now is overwritten.\n\n"
+              '${s.summary}',
+          confirmLabel: 'Undo force push',
+          destructive: true,
+        );
+        if (!ok) return;
+      }
+      focusedServiceOrNull(container, (x) => x.handlerService)?.undo(s);
     }
 
     Widget meta(String terminalId, int at) => _RowMeta(
@@ -253,10 +285,7 @@ class HandlerScreen extends ConsumerWidget {
                 snapshot: s,
                 meta: meta(s.terminalId, s.at),
                 pending: state.pendingUndo.contains(s.snapshotId),
-                onUndo: () => focusedServiceOrNull(
-                  container,
-                  (x) => x.handlerService,
-                )?.undo(s),
+                onUndo: () => unawaited(undo(s)),
                 p: p,
               );
             },
