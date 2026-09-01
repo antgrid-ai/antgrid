@@ -1,4 +1,5 @@
-import 'ab_message.dart' show GitFileStatusEntry;
+import 'ab_message.dart'
+    show GitFileStatusEntry, GitLogEntry, GitCommitFileEntry;
 import 'git_sync_state.dart';
 
 enum FileNodeType { file, directory }
@@ -139,12 +140,83 @@ class FilesPaneState {
   }
 }
 
+/// The History tab's commit list plus whatever per-commit file lists the user
+/// has expanded. A `Set`, not a single "open commit" — the History tab lets
+/// more than one commit's file list stay expanded at once (unlike an
+/// accordion), and [collapseAll] (an empty [expandedShas]) is the explicit
+/// action that folds all of them back up.
+class GitHistoryState {
+  final List<GitLogEntry> commits;
+
+  /// True only while fetching the NEXT page (scroll-triggered); the first
+  /// page's own fetch is [initialLoad], since the list is empty either way and
+  /// the two need different placeholders (a full-pane spinner vs. a trailing
+  /// row).
+  final bool loadingMore;
+  final bool initialLoad;
+  final bool hasMore;
+  final String? error;
+
+  /// Commits whose file list is expanded and showing.
+  final Set<String> expandedShas;
+
+  /// Per-commit file lists, once fetched — absent means "never requested",
+  /// distinct from an empty list (a commit with a message but no diff, e.g. an
+  /// empty merge commit).
+  final Map<String, List<GitCommitFileEntry>> filesBySha;
+  final Set<String> filesLoadingShas;
+  final Map<String, String> filesErrorBySha;
+
+  const GitHistoryState({
+    this.commits = const [],
+    this.loadingMore = false,
+    this.initialLoad = true,
+    this.hasMore = true,
+    this.error,
+    this.expandedShas = const {},
+    this.filesBySha = const {},
+    this.filesLoadingShas = const {},
+    this.filesErrorBySha = const {},
+  });
+
+  static const empty = GitHistoryState();
+
+  GitHistoryState copyWith({
+    List<GitLogEntry>? commits,
+    bool? loadingMore,
+    bool? initialLoad,
+    bool? hasMore,
+    String? error,
+    bool clearError = false,
+    Set<String>? expandedShas,
+    Map<String, List<GitCommitFileEntry>>? filesBySha,
+    Set<String>? filesLoadingShas,
+    Map<String, String>? filesErrorBySha,
+  }) {
+    return GitHistoryState(
+      commits: commits ?? this.commits,
+      loadingMore: loadingMore ?? this.loadingMore,
+      initialLoad: initialLoad ?? this.initialLoad,
+      hasMore: hasMore ?? this.hasMore,
+      error: clearError ? null : (error ?? this.error),
+      expandedShas: expandedShas ?? this.expandedShas,
+      filesBySha: filesBySha ?? this.filesBySha,
+      filesLoadingShas: filesLoadingShas ?? this.filesLoadingShas,
+      filesErrorBySha: filesErrorBySha ?? this.filesErrorBySha,
+    );
+  }
+}
+
 /// Per-tab right-pane state for the Git tab.
 ///
 /// Mutated only by Git-tab actions (requestDiff, clearDiff, gitViewFile,
 /// gitClearViewing). Reading these fields from the Files tab is a leak.
 ///
-/// [diffPath]/[diffContent]/[diffLoading] back the DiffViewer.
+/// [diffPath]/[diffContent]/[diffLoading] back the DiffViewer — for a working
+/// -tree diff when [diffCommitSha] is null, or for that commit's diff of
+/// [diffPath] when it is set. One shared slot rather than a second copy under
+/// [GitHistoryState]: only one diff is ever open regardless of which tab it
+/// was opened from, and the viewer itself renders the same either way.
 /// [viewingPath]/[viewingFile]/[viewingLoading] back the "View File from diff"
 /// mode that renders a FileContentViewer inside the Git pane.
 class GitPaneState {
@@ -153,9 +225,19 @@ class GitPaneState {
   final int? diffAdditions;
   final int? diffDeletions;
   final bool diffLoading;
+
+  /// Set when [diffPath] names a file WITHIN this commit rather than the
+  /// working tree — the History tab's file list opens a diff the same way the
+  /// Changes tab does, just scoped to a commit instead of HEAD.
+  final String? diffCommitSha;
+
   final String? viewingPath;
   final FileContent? viewingFile;
   final bool viewingLoading;
+
+  /// The History tab's own state — commit list, pagination, and expanded
+  /// per-commit file lists. See [GitHistoryState].
+  final GitHistoryState history;
 
   /// Folders the user has collapsed in the changed-files tree.
   ///
@@ -188,6 +270,7 @@ class GitPaneState {
     this.diffAdditions,
     this.diffDeletions,
     this.diffLoading = false,
+    this.diffCommitSha,
     this.viewingPath,
     this.viewingFile,
     this.viewingLoading = false,
@@ -195,6 +278,7 @@ class GitPaneState {
     this.sync = GitSyncState.empty,
     this.syncing,
     this.lastSyncFailure,
+    this.history = GitHistoryState.empty,
   });
 
   static const empty = GitPaneState();
@@ -205,6 +289,8 @@ class GitPaneState {
     int? diffAdditions,
     int? diffDeletions,
     bool? diffLoading,
+    String? diffCommitSha,
+    bool clearDiffCommitSha = false,
     bool clearDiff = false,
     String? viewingPath,
     FileContent? viewingFile,
@@ -216,6 +302,7 @@ class GitPaneState {
     bool clearSyncing = false,
     GitSyncFailure? lastSyncFailure,
     bool clearSyncFailure = false,
+    GitHistoryState? history,
   }) {
     return GitPaneState(
       diffPath: clearDiff ? null : (diffPath ?? this.diffPath),
@@ -223,6 +310,9 @@ class GitPaneState {
       diffAdditions: clearDiff ? null : (diffAdditions ?? this.diffAdditions),
       diffDeletions: clearDiff ? null : (diffDeletions ?? this.diffDeletions),
       diffLoading: clearDiff ? false : (diffLoading ?? this.diffLoading),
+      diffCommitSha: (clearDiff || clearDiffCommitSha)
+          ? null
+          : (diffCommitSha ?? this.diffCommitSha),
       viewingPath: clearViewing ? null : (viewingPath ?? this.viewingPath),
       viewingFile: clearViewing ? null : (viewingFile ?? this.viewingFile),
       viewingLoading: clearViewing
@@ -236,6 +326,7 @@ class GitPaneState {
       lastSyncFailure: clearSyncFailure
           ? null
           : (lastSyncFailure ?? this.lastSyncFailure),
+      history: history ?? this.history,
     );
   }
 }

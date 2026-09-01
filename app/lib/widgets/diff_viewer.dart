@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show SelectedContent;
 
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
@@ -11,6 +12,7 @@ import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
 import 'code_syntax.dart';
 import 'git_status_color.dart';
+import 'send_to_agent_comment.dart';
 
 /// Parsed representation of a single diff hunk.
 class _DiffHunk {
@@ -151,6 +153,15 @@ class DiffViewer extends StatefulWidget {
   final VoidCallback onViewFile;
   final VoidCallback onClose;
 
+  /// Delivers a composed "Send to Agent" message (comment + source label +
+  /// selected code, already put together by [showSendToAgentComment]) to the
+  /// focused session. Kept as a plain callback rather than reading Riverpod
+  /// here directly — this widget stays a dumb, provider-free presentation
+  /// component (matching [onViewFile]/[onClose]) and the one call site
+  /// (`git_panel.dart`) supplies the routing.
+  final Future<void> Function(BuildContext context, String message)
+  onSendToAgent;
+
   const DiffViewer({
     super.key,
     required this.path,
@@ -160,6 +171,7 @@ class DiffViewer extends StatefulWidget {
     required this.deletions,
     required this.onViewFile,
     required this.onClose,
+    required this.onSendToAgent,
   });
 
   @override
@@ -214,6 +226,13 @@ class _DiffViewerState extends State<DiffViewer> {
 
   final ScrollController _horizontal = ScrollController();
   final ScrollController _vertical = ScrollController();
+
+  /// The last non-empty selection, tracked from [SelectionArea.onSelectionChanged]
+  /// — `SelectableRegionState` exposes no public getter for the live content,
+  /// only the anchors/button-items the toolbar itself needs, so this is the
+  /// only way [_buildContextMenu]'s "Send to Agent" button can read what was
+  /// actually selected.
+  SelectedContent? _lastSelection;
 
   late List<_DiffRow> _rows;
   late List<_DiffHunk> _hunks;
@@ -390,51 +409,63 @@ class _DiffViewerState extends State<DiffViewer> {
         //
         // Vertical stays visible and horizontal fades with use, which is how
         // re_editor builds the file viewer's pair.
-        return RawScrollbar(
-          controller: _vertical,
-          notificationPredicate: (n) => n.depth == 1,
-          scrollbarOrientation: ScrollbarOrientation.right,
-          thickness: _scrollbarThickness,
-          radius: _scrollbarRadius,
-          crossAxisMargin: _scrollbarMargin,
-          thumbVisibility: true,
+        //
+        // SelectionArea makes every line's code text (never the gutter/marker
+        // columns — see [_buildGutter]/[_buildMarker]) selectable and
+        // copyable, the same as a real editor. [_buildContextMenu] is what
+        // turns that into "Send to Agent": Flutter anchors the toolbar it
+        // returns to the selection itself (the platform's own copy/paste
+        // popup mechanism), so the action appears wherever the user actually
+        // selected rather than at a fixed button elsewhere in the panel.
+        return SelectionArea(
+          contextMenuBuilder: _buildContextMenu,
+          onSelectionChanged: (content) => _lastSelection = content,
           child: RawScrollbar(
-            controller: _horizontal,
-            notificationPredicate: (n) => n.depth == 0,
-            scrollbarOrientation: ScrollbarOrientation.bottom,
+            controller: _vertical,
+            notificationPredicate: (n) => n.depth == 1,
+            scrollbarOrientation: ScrollbarOrientation.right,
             thickness: _scrollbarThickness,
             radius: _scrollbarRadius,
             crossAxisMargin: _scrollbarMargin,
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
+            thumbVisibility: true,
+            child: RawScrollbar(
               controller: _horizontal,
-              child: SizedBox(
-                width: math.max(constraints.maxWidth, contentWidth),
-                child: ListView.builder(
-                  controller: _vertical,
-                  itemCount: _rows.length,
-                  itemExtent: _rowHeight,
-                  // The listener rides on each ROW, not on the list: a pointer
-                  // signal goes to the FIRST registrant in hit-test order,
-                  // which runs innermost-first, so only a node below the
-                  // vertical Scrollable can take an event away from it. See
-                  // [_onPointerSignal].
-                  itemBuilder: (context, index) => Listener(
-                    // Opaque, or the row only claims the pixels its text and
-                    // gutter actually paint: the gap between them, and every
-                    // column past the end of a short line, hit-tests through
-                    // to the vertical list, which is exactly where a sideways
-                    // scroll starts creeping up and down again.
-                    behavior: HitTestBehavior.opaque,
-                    onPointerSignal: _onPointerSignal,
-                    child: switch (_rows[index]) {
-                      _HunkHeaderRow(:final text) => _buildHunkHeader(
-                        context,
-                        text,
-                      ),
-                      _HunkGapRow() => _buildHunkGap(context),
-                      _CodeRow(:final line) => _buildLine(context, line),
-                    },
+              notificationPredicate: (n) => n.depth == 0,
+              scrollbarOrientation: ScrollbarOrientation.bottom,
+              thickness: _scrollbarThickness,
+              radius: _scrollbarRadius,
+              crossAxisMargin: _scrollbarMargin,
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                controller: _horizontal,
+                child: SizedBox(
+                  width: math.max(constraints.maxWidth, contentWidth),
+                  child: ListView.builder(
+                    controller: _vertical,
+                    itemCount: _rows.length,
+                    itemExtent: _rowHeight,
+                    // The listener rides on each ROW, not on the list: a pointer
+                    // signal goes to the FIRST registrant in hit-test order,
+                    // which runs innermost-first, so only a node below the
+                    // vertical Scrollable can take an event away from it. See
+                    // [_onPointerSignal].
+                    itemBuilder: (context, index) => Listener(
+                      // Opaque, or the row only claims the pixels its text and
+                      // gutter actually paint: the gap between them, and every
+                      // column past the end of a short line, hit-tests through
+                      // to the vertical list, which is exactly where a sideways
+                      // scroll starts creeping up and down again.
+                      behavior: HitTestBehavior.opaque,
+                      onPointerSignal: _onPointerSignal,
+                      child: switch (_rows[index]) {
+                        _HunkHeaderRow(:final text) => _buildHunkHeader(
+                          context,
+                          text,
+                        ),
+                        _HunkGapRow() => _buildHunkGap(context),
+                        _CodeRow(:final line) => _buildLine(context, line),
+                      },
+                    ),
                   ),
                 ),
               ),
@@ -615,38 +646,86 @@ class _DiffViewerState extends State<DiffViewer> {
     );
   }
 
+  // Excluded from the SelectionArea (see [_buildBody]): a +/- marker is
+  // layout, not content, and copying it in front of every line would corrupt
+  // the code it's pasted back into.
   Widget _buildMarker(_DiffLineType type, Color color) {
     return SizedBox(
       width: _markerWidth,
-      child: Text(
-        switch (type) {
-          _DiffLineType.addition => '+',
-          _DiffLineType.deletion => '-',
-          _DiffLineType.context => '',
-        },
-        maxLines: 1,
-        style: AbTokens.monoStyle(
-          fontSize: AbTokens.fontXs,
-          height: kCodeFontHeight,
-          color: color,
+      child: SelectionContainer.disabled(
+        child: Text(
+          switch (type) {
+            _DiffLineType.addition => '+',
+            _DiffLineType.deletion => '-',
+            _DiffLineType.context => '',
+          },
+          maxLines: 1,
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXs,
+            height: kCodeFontHeight,
+            color: color,
+          ),
         ),
       ),
     );
   }
 
+  // Excluded from the SelectionArea for the same reason as the marker: a line
+  // number is a reference for reading the diff, not text anyone selecting the
+  // code beside it wants in their clipboard.
   Widget _buildGutter(int? lineNum, Color color) {
     return SizedBox(
       width: _gutterWidth,
-      child: Text(
-        lineNum?.toString() ?? '',
-        textAlign: TextAlign.right,
-        maxLines: 1,
-        style: AbTokens.monoStyle(
-          fontSize: AbTokens.fontXs,
-          height: kCodeFontHeight,
-          color: color,
+      child: SelectionContainer.disabled(
+        child: Text(
+          lineNum?.toString() ?? '',
+          textAlign: TextAlign.right,
+          maxLines: 1,
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXs,
+            height: kCodeFontHeight,
+            color: color,
+          ),
         ),
       ),
     );
+  }
+
+  /// Adds "Send to Agent" to the platform's own selection toolbar rather than
+  /// floating a separate button: [selectableRegionState.contextMenuAnchors]
+  /// is the same anchor Copy/Select All render from, so the action shows up
+  /// exactly where the user made the selection instead of a fixed spot
+  /// elsewhere in the panel — and disappears with the rest of the toolbar
+  /// once they tap elsewhere, the same as any other selection action.
+  Widget _buildContextMenu(
+    BuildContext context,
+    SelectableRegionState selectableRegionState,
+  ) {
+    final buttonItems = <ContextMenuButtonItem>[
+      ...selectableRegionState.contextMenuButtonItems,
+      ContextMenuButtonItem(
+        label: 'Send to Agent',
+        onPressed: () {
+          final text = _lastSelection?.plainText;
+          selectableRegionState.hideToolbar();
+          if (text == null || text.trim().isEmpty) return;
+          _sendSelectionToAgent(text);
+        },
+      ),
+    ];
+    return AdaptiveTextSelectionToolbar.buttonItems(
+      anchors: selectableRegionState.contextMenuAnchors,
+      buttonItems: buttonItems,
+    );
+  }
+
+  Future<void> _sendSelectionToAgent(String selectedText) async {
+    final message = await showSendToAgentComment(
+      context: context,
+      selectedText: selectedText,
+      sourceLabel: '[from diff: ${widget.path}]',
+    );
+    if (message == null || !mounted) return;
+    await widget.onSendToAgent(context, message);
   }
 }

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -10,14 +11,17 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_diff_stat.dart';
+import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_inline_banner.dart';
+import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_separator.dart';
-import '../models/ab_message.dart' show GitFileStatusEntry;
+import '../models/ab_message.dart'
+    show GitFileStatusEntry, GitCommitFileEntry, GitLogEntry;
 import '../models/git_sync_state.dart';
 import '../models/file_tree_models.dart';
 import '../navigation/back_intent.dart';
@@ -26,12 +30,23 @@ import '../providers/providers.dart';
 import '../providers/visible_surface.dart';
 import '../services/file_service.dart';
 import '../util/detached.dart';
+import '../util/relative_time.dart';
 import '../widgets/workspace_tab_bar.dart';
 import '../widgets/diff_viewer.dart';
 import '../widgets/file_viewer_router.dart';
 import '../widgets/file_tree_view.dart';
 import '../widgets/git_commit_sheet.dart';
+import '../widgets/git_status_color.dart';
 import '../widgets/git_sync_failure_handoff.dart';
+import '../widgets/send_capture_to_agent.dart';
+
+/// Anchors the Changes header's title row (diff totals + conflict chip) for
+/// tests — it carries no text of its own (the header sits directly under the
+/// panel's own "Git" workspace tab, which already says what this is), so a
+/// test can no longer find it by a "Changes" label without also risking a
+/// match against a file row's own diff-stat badge.
+@visibleForTesting
+const gitChangesHeaderTitleKey = Key('gitChangesHeaderTitle');
 
 /// Standalone git-changes panel extracted from FileExplorerScreen.
 ///
@@ -68,6 +83,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     // be recomputed when this tab goes on or off screen.
     final onScreen =
         ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.git;
+    _maybeLoadHistory(fileService);
 
     // Loading/error keep the same header (no back affordance) so the panel
     // chrome doesn't jump when data arrives; the data case owns its own header
@@ -99,6 +115,28 @@ class _GitPanelState extends ConsumerState<GitPanel> {
         data: (state) => _GitPanelBody(state: state, fileService: fileService),
       ),
     );
+  }
+
+  /// History has no consumer besides this panel — unlike the file tree or
+  /// sync state, both shown elsewhere too — so it is fetched lazily here
+  /// rather than eagerly for every `FileService` construction, which would
+  /// cost every project session a `git:log` round trip whether or not its Git
+  /// tab is ever opened.
+  ///
+  /// [FileService.claimHistoryLoad] (not a local flag) is what makes this
+  /// safe to call on every build: build() itself must stay free of the
+  /// [FileService.loadHistory] send (and the reply-timeout timer it arms), so
+  /// the actual call is deferred to a post-frame callback — and a widget can
+  /// legitimately build more than once before that callback runs and the
+  /// resulting `loadingMore` state change comes back around. The claim is
+  /// what keeps that window from firing the send twice.
+  void _maybeLoadHistory(FileService? fileService) {
+    if (fileService == null) return;
+    if (!fileService.claimHistoryLoad()) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      fileService.loadHistory();
+    });
   }
 
   /// Steps out ONE level: the file opened from a diff, then the diff itself.
@@ -420,19 +458,35 @@ class _GitChangesHeader extends StatelessWidget {
                 children: [
                   Row(children: _title(context, stacked: true)),
                   const SizedBox(height: AbTokens.space4),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: _actions(context),
-                  ),
+                  // Column.stretch already hands this a bounded, tight width
+                  // (no wrapping Row/Expanded needed) — see _actionsCluster.
+                  _actionsCluster(context),
                 ],
               )
             : Row(
                 children: [
                   ..._title(context, stacked: false),
-                  ..._actions(context),
+                  Expanded(child: _actionsCluster(context)),
                 ],
               ),
       ),
+    );
+  }
+
+  /// The action buttons, scrollable rather than overflowing when the row
+  /// can't hold them all — a touch tablet's docked context pane and a
+  /// desktop window at its minimum width both land under the width these
+  /// need. `reverse: true` is the trick ([ListView.reverse] does the same for
+  /// a short chat log): content smaller than the box still anchors to the
+  /// END, so Commit sits flush against the panel's right edge exactly as it
+  /// did when this was a fixed-width row, and only overflows into a scroll
+  /// — starting scrolled to Commit's end, never to Refresh's — once the
+  /// buttons genuinely don't fit.
+  Widget _actionsCluster(BuildContext context) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      reverse: true,
+      child: Row(mainAxisSize: MainAxisSize.min, children: _actions(context)),
     );
   }
 
@@ -448,53 +502,69 @@ class _GitChangesHeader extends StatelessWidget {
       ),
       const SizedBox(width: AbTokens.space8),
     ],
-    // Expanded, not a Spacer: sharing the line with the actions, the title is
-    // the one thing here that can give room up (the tab it sits under already
-    // says Git); on its own row it is what pushes nothing to the right.
-    Expanded(
-      child: Row(
-        children: [
-          Flexible(
-            child: Text(
-              'Changes',
-              overflow: TextOverflow.ellipsis,
-              style: AbTokens.sansStyle(color: context.antgrid.textMuted),
-            ),
-          ),
-          // The diff stat is what yields, and only where it has to: on the
-          // narrow header a merge is the one thing that fills the row (back
-          // button + totals + conflict chip, none of them shrinkable), and of
-          // the two counts it is the chip that has to survive — it is what
-          // explains the dead Commit button beside it. The totals are still on
-          // the workspace menu, and a merge's conflicts contribute 0 to them
-          // anyway.
-          if ((counts.additions > 0 || counts.deletions > 0) &&
-              !(stacked && counts.conflictPaths.isNotEmpty)) ...[
-            const SizedBox(width: AbTokens.space8),
-            AbDiffStat(
-              additions: counts.additions,
-              deletions: counts.deletions,
-              fontSize: AbTokens.fontXs,
-            ),
-          ],
-          if (counts.conflictPaths.isNotEmpty) ...[
-            const SizedBox(width: AbTokens.space8),
-            // Beside the header's own totals, not down in the list: a conflict
-            // is why Commit beside it is dead, and a user who cannot see one
-            // without scrolling the tree reads that button as broken.
-            AbChip.system(
-              label: counts.conflictPaths.length == 1
-                  ? '1 conflict'
-                  : '${counts.conflictPaths.length} conflicts',
-              color: context.antgrid.gitConflict,
-            ),
-          ],
-        ],
-      ),
-    ),
+    // Expanded, not a Spacer: sharing the line with the actions, this is the
+    // one thing here that can give room up; on its own row it is what pushes
+    // nothing to the right.
+    Expanded(child: _titleStats(context, stacked)),
   ];
 
+  /// The diff stat is what yields, and only where it has to: on the narrow
+  /// header a merge is the one thing that fills the row (back button +
+  /// totals + conflict chip, none of them shrinkable), and of the two counts
+  /// it is the chip that has to survive — it is what explains the dead
+  /// Commit button beside it. The totals are still on the workspace menu, and
+  /// a merge's conflicts contribute 0 to them anyway.
+  Widget _titleStats(BuildContext context, bool stacked) {
+    final showStat =
+        (counts.additions > 0 || counts.deletions > 0) &&
+        !(stacked && counts.conflictPaths.isNotEmpty);
+    final showConflictChip = counts.conflictPaths.isNotEmpty;
+    return Row(
+      key: gitChangesHeaderTitleKey,
+      children: [
+        if (showStat)
+          AbDiffStat(
+            additions: counts.additions,
+            deletions: counts.deletions,
+            fontSize: AbTokens.fontXs,
+          ),
+        if (showConflictChip) ...[
+          if (showStat) const SizedBox(width: AbTokens.space8),
+          // Beside the header's own totals, not down in the list: a conflict
+          // is why Commit beside it is dead, and a user who cannot see one
+          // without scrolling the tree reads that button as broken.
+          AbChip.system(
+            label: counts.conflictPaths.length == 1
+                ? '1 conflict'
+                : '${counts.conflictPaths.length} conflicts',
+            color: context.antgrid.gitConflict,
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// Re-pulls everything the panel shows: the file tree (which, server-side,
+  /// forces a fresh git-status read alongside it — see the bridge's
+  /// `file:tree:snapshot:request` handler), the ahead/behind sync counts, and
+  /// the commit log. One button for all three: from here they read as one
+  /// picture of the repository, not three independently-stale ones.
+  void _refresh() {
+    fileService.requestFullTree();
+    fileService.refreshSyncState();
+    fileService.loadHistory();
+  }
+
   List<Widget> _actions(BuildContext context) => [
+    SizedBox(
+      width: AbTokens.rowHeightSm,
+      child: AbIconButton(
+        icon: AbIcons.refresh,
+        tooltip: 'Refresh',
+        onTap: _refresh,
+      ),
+    ),
+    const SizedBox(width: AbTokens.space6),
     // Its own control, not a third cell in the group below: that group is the
     // two actions that WRITE to the tree, and a view toggle sharing their
     // border would read as one of them. It is also gated separately — a tree
@@ -607,6 +677,59 @@ class _CollapseToggle extends StatelessWidget {
         icon: allCollapsed ? AbIcons.expandAll : AbIcons.collapseAll,
         onTap: onTap,
         tooltip: allCollapsed ? 'Expand All Folders' : 'Collapse All Folders',
+      ),
+    );
+  }
+}
+
+/// The small inline header the History section carries at the bottom of the
+/// left column (see [_GitPanelBody._buildFileList]) — a label plus a fold
+/// toggle for expanded commits. No back affordance: unlike the top-level
+/// [_GitChangesHeader], this never stands alone as the whole panel's chrome,
+/// so there is never a "back to history" to offer. No write actions either —
+/// nothing here mutates the working tree.
+///
+/// No bulk "expand all" the way [_CollapseToggle] offers one for folders:
+/// expanding a commit fetches its file list, so expanding every loaded
+/// commit at once would fire one request per row for a list the user hasn't
+/// scrolled to yet.
+class _GitHistorySectionHeader extends StatelessWidget {
+  const _GitHistorySectionHeader({
+    required this.fileService,
+    required this.history,
+  });
+
+  final FileService fileService;
+  final GitHistoryState history;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space12,
+        vertical: AbTokens.space4,
+      ),
+      child: AbCompactTapTargets(
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                'History',
+                overflow: TextOverflow.ellipsis,
+                style: AbTokens.sansStyle(color: context.antgrid.textMuted),
+              ),
+            ),
+            if (history.expandedShas.isNotEmpty)
+              SizedBox(
+                width: AbTokens.rowHeightSm,
+                child: AbIconButton(
+                  icon: AbIcons.collapseAll,
+                  tooltip: 'Collapse All',
+                  onTap: fileService.collapseAllHistory,
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -834,14 +957,14 @@ class _SyncFailureStrip extends ConsumerWidget {
   }
 }
 
-class _GitPanelBody extends StatelessWidget {
+class _GitPanelBody extends ConsumerWidget {
   const _GitPanelBody({required this.state, required this.fileService});
 
   final FileTreeState state;
   final FileService fileService;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final showSideBySide = constraints.maxWidth >= kCompactBreakpoint;
@@ -865,6 +988,7 @@ class _GitPanelBody extends StatelessWidget {
               : null,
           body: _buildContent(
             context,
+            ref,
             showSideBySide: showSideBySide,
             isViewing: isViewing,
           ),
@@ -874,29 +998,62 @@ class _GitPanelBody extends StatelessWidget {
   }
 
   Widget _buildContent(
-    BuildContext context, {
+    BuildContext context,
+    WidgetRef ref, {
     required bool showSideBySide,
     required bool isViewing,
   }) {
+    final list = _buildLeftColumn(context);
+
     if (showSideBySide) {
       return Row(
         children: [
           SizedBox(
             width: 280,
-            child: _buildFileList(context),
+            child: list,
           ), // 280px non-ladder: side-by-side file list width
           const AbSeparator.vertical(weight: AbSeparatorWeight.strong),
-          Expanded(child: _buildContentArea(context)),
+          Expanded(child: _buildContentArea(context, ref)),
         ],
       );
     }
 
     // Compact: show viewer when a diff or "view file" is active.
     if (isViewing) {
-      return _buildContentArea(context);
+      return _buildContentArea(context, ref);
     }
 
-    return _buildFileList(context);
+    return list;
+  }
+
+  /// The panel's left column: the Changes tree on top, the commit History
+  /// underneath it, in one fixed 3:2 split rather than a tab switching
+  /// between them — both stay on screen and each scrolls independently,
+  /// so seeing what changed and seeing how it got there never cost a tap
+  /// to switch between.
+  Widget _buildLeftColumn(BuildContext context) {
+    return Column(
+      children: [
+        Expanded(flex: 3, child: _buildFileList(context)),
+        const AbSeparator.horizontal(),
+        Expanded(
+          flex: 2,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _GitHistorySectionHeader(
+                fileService: fileService,
+                history: state.git.history,
+              ),
+              const AbSeparator.horizontal(),
+              Expanded(
+                child: _HistoryList(git: state.git, fileService: fileService),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
   // The same widget the Files tab renders, in its [changesOnly] mode: decorated,
@@ -1007,21 +1164,37 @@ class _GitPanelBody extends StatelessWidget {
     if (confirmed) fileService.discard([path], includeStaged: true);
   }
 
-  Widget _buildContentArea(BuildContext context) {
+  Widget _buildContentArea(BuildContext context, WidgetRef ref) {
     final git = state.git;
     if (git.diffPath != null) {
       if (git.diffLoading) {
         return const AbLoading();
       }
       if (git.diffContent != null) {
+        // A commit-scoped diff's status letter comes from that commit's own
+        // file list, never `state.gitFileStatuses` — the working tree's
+        // status for the same path (or none at all) describes a different
+        // change.
+        final commitSha = git.diffCommitSha;
+        final gitStatus = commitSha == null
+            ? state.gitFileStatuses[git.diffPath!]
+            : git.history.filesBySha[commitSha]
+                  ?.where((f) => f.path == git.diffPath)
+                  .firstOrNull
+                  ?.status;
         return DiffViewer(
           path: git.diffPath!,
-          gitStatus: state.gitFileStatuses[git.diffPath!],
+          gitStatus: gitStatus,
           diff: git.diffContent!,
           additions: git.diffAdditions ?? 0,
           deletions: git.diffDeletions ?? 0,
           onViewFile: () => fileService.gitViewFile(git.diffPath!),
           onClose: () => fileService.clearDiff(),
+          onSendToAgent: (context, message) => sendCaptureToAgent(
+            context: context,
+            container: ref.container,
+            text: message,
+          ),
         );
       }
       return Center(
@@ -1049,6 +1222,389 @@ class _GitPanelBody extends StatelessWidget {
         'Select a file to view',
         style: TextStyle(color: context.antgrid.textMuted),
       ),
+    );
+  }
+}
+
+/// The History section's scrollable commit list, in its own [Expanded] slot
+/// under [_GitHistorySectionHeader]. Each commit can expand in place to a
+/// file list (more than one at once — see [GitHistoryState]); the list itself
+/// paginates via [FileService.loadMoreHistory] as the user scrolls near its
+/// end, the same "ask for more before you hit the wall" margin a fling can
+/// cover in one frame.
+class _HistoryList extends StatefulWidget {
+  const _HistoryList({required this.git, required this.fileService});
+
+  final GitPaneState git;
+  final FileService fileService;
+
+  @override
+  State<_HistoryList> createState() => _HistoryListState();
+}
+
+class _HistoryListState extends State<_HistoryList> {
+  final _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    if (position.pixels >= position.maxScrollExtent - 400) {
+      widget.fileService.loadMoreHistory();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final history = widget.git.history;
+    if (history.initialLoad && history.commits.isEmpty) {
+      return const AbLoading(message: 'loading history...');
+    }
+    if (history.error != null && history.commits.isEmpty) {
+      return AbEmptyState.error(
+        title: 'Could not load history',
+        subtitle: history.error,
+        action: AbButton(
+          label: 'Retry',
+          compact: true,
+          onTap: widget.fileService.loadHistory,
+        ),
+      );
+    }
+    if (history.commits.isEmpty) {
+      return const AbEmptyState(
+        title: 'No commits yet',
+        icon: AbIcons.gitCommit,
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: () async {
+        widget.fileService.loadHistory();
+        await Future.delayed(const Duration(milliseconds: 500));
+      },
+      child: ListView.builder(
+        controller: _scrollController,
+        itemCount: history.commits.length + 1,
+        itemBuilder: (context, index) {
+          if (index == history.commits.length) {
+            return _HistoryFooter(
+              history: history,
+              fileService: widget.fileService,
+            );
+          }
+          final commit = history.commits[index];
+          final expanded = history.expandedShas.contains(commit.sha);
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _CommitHeaderRow(
+                commit: commit,
+                expanded: expanded,
+                onTap: () =>
+                    widget.fileService.toggleCommitExpanded(commit.sha),
+              ),
+              if (expanded)
+                _CommitFilesSection(
+                  sha: commit.sha,
+                  files: history.filesBySha[commit.sha],
+                  loading: history.filesLoadingShas.contains(commit.sha),
+                  error: history.filesErrorBySha[commit.sha],
+                  openPath: widget.git.diffCommitSha == commit.sha
+                      ? widget.git.diffPath
+                      : null,
+                  fileService: widget.fileService,
+                ),
+              const AbSeparator.horizontal(),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// The trailing row of the history list: a spinner while the next page loads,
+/// a retry affordance if it failed, "No more commits" once [hasMore] is
+/// false, or nothing while there's more to scroll to but nothing is loading
+/// yet.
+class _HistoryFooter extends StatelessWidget {
+  const _HistoryFooter({required this.history, required this.fileService});
+
+  final GitHistoryState history;
+  final FileService fileService;
+
+  @override
+  Widget build(BuildContext context) {
+    if (history.loadingMore) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: AbTokens.space16),
+        child: Center(child: AbLoadingDot()),
+      );
+    }
+    if (history.error != null) {
+      return Padding(
+        padding: const EdgeInsets.all(AbTokens.space12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              history.error!,
+              textAlign: TextAlign.center,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: context.antgrid.error,
+              ),
+            ),
+            const SizedBox(height: AbTokens.space8),
+            AbButton(
+              label: 'Retry',
+              compact: true,
+              onTap: fileService.loadMoreHistory,
+            ),
+          ],
+        ),
+      );
+    }
+    if (!history.hasMore) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: AbTokens.space16),
+        child: Center(
+          child: Text(
+            'No more commits',
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              color: context.antgrid.textMuted,
+            ),
+          ),
+        ),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+}
+
+/// One commit's row: an expand chevron, its subject, and the author/date/sha
+/// meta line. Tapping anywhere on the row toggles the file list beneath it.
+class _CommitHeaderRow extends StatelessWidget {
+  const _CommitHeaderRow({
+    required this.commit,
+    required this.expanded,
+    required this.onTap,
+  });
+
+  final GitLogEntry commit;
+  final bool expanded;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final when = DateTime.tryParse(commit.authorDate);
+    return AbListRow(
+      onTap: onTap,
+      hoverable: true,
+      density: AbRowDensity.md,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      titleMaxLines: 2,
+      leading: Padding(
+        padding: const EdgeInsets.only(top: 2),
+        child: AbIcon(
+          expanded ? AbIcons.chevronDown : AbIcons.chevronRight,
+          size: 12,
+          color: p.textMuted,
+        ),
+      ),
+      // A commit subject clips at 2 lines; the tooltip is the only way to
+      // read the rest of a longer one, matching VS Code's history hover.
+      title: AbTooltip(message: commit.subject, child: Text(commit.subject)),
+      subtitle: Row(
+        children: [
+          Flexible(
+            child: Text(commit.authorName, overflow: TextOverflow.ellipsis),
+          ),
+          const SizedBox(width: AbTokens.space6),
+          if (when != null)
+            AbTooltip(
+              message: absoluteTime(when),
+              child: Text(relativeTime(when)),
+            ),
+          const Spacer(),
+          Text(
+            commit.shortSha,
+            style: AbTokens.monoStyle(
+              fontSize: AbTokens.fontXxs,
+              color: p.textMuted,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One expanded commit's file list — loading, an error with retry, an empty
+/// result (a commit with no diff, e.g. an empty merge), or the files
+/// themselves. Indented under the commit row it belongs to.
+class _CommitFilesSection extends StatelessWidget {
+  const _CommitFilesSection({
+    required this.sha,
+    required this.files,
+    required this.loading,
+    required this.error,
+    required this.openPath,
+    required this.fileService,
+  });
+
+  final String sha;
+  final List<GitCommitFileEntry>? files;
+  final bool loading;
+  final String? error;
+  final String? openPath;
+  final FileService fileService;
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: AbTokens.space12),
+        child: Center(child: AbLoadingDot()),
+      );
+    }
+    if (error != null) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AbTokens.space16,
+          vertical: AbTokens.space8,
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                error!,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXs,
+                  color: context.antgrid.error,
+                ),
+              ),
+            ),
+            AbButton(
+              label: 'Retry',
+              compact: true,
+              onTap: () => fileService.retryCommitFiles(sha),
+            ),
+          ],
+        ),
+      );
+    }
+    final entries = files ?? const <GitCommitFileEntry>[];
+    if (entries.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AbTokens.space16,
+          vertical: AbTokens.space8,
+        ),
+        child: Text(
+          'No file changes',
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: context.antgrid.textMuted,
+          ),
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final file in entries)
+          _CommitFileRow(
+            sha: sha,
+            file: file,
+            selected: file.path == openPath,
+            onTap: () => fileService.requestCommitDiff(sha, file.path),
+          ),
+      ],
+    );
+  }
+}
+
+/// One file within an expanded commit — status letter, path, and a diff stat.
+/// Tapping it opens that file's diff for this specific commit.
+class _CommitFileRow extends StatelessWidget {
+  const _CommitFileRow({
+    required this.sha,
+    required this.file,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String sha;
+  final GitCommitFileEntry file;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return AbListRow(
+      onTap: onTap,
+      hoverable: true,
+      selected: selected,
+      selectionStyle: AbRowSelection.surface,
+      density: AbRowDensity.sm,
+      // Indented under the commit's own leading chevron so the file list
+      // reads as nested content, matching the depth-indent the Changes tab's
+      // folder tree uses for the same reason.
+      horizontalPadding: AbTokens.space12 + AbTokens.space16,
+      leading: SizedBox(
+        width: 14,
+        child: Text(
+          file.status,
+          textAlign: TextAlign.center,
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXs,
+            fontWeight: FontWeight.w600,
+            color: gitStatusColor(context, file.status),
+          ),
+        ),
+      ),
+      // A long path clips to the row's width with no way to read the rest of
+      // it — the hover tooltip is what VS Code's own changed-files list shows
+      // in exactly this spot.
+      title: AbTooltip(
+        message: file.path,
+        child: Text(
+          file.path,
+          style: AbTokens.monoStyle(
+            color: selected ? p.accent : p.textPrimary,
+          ),
+        ),
+      ),
+      subtitle: file.oldPath != null
+          ? AbTooltip(
+              message: file.oldPath!,
+              child: Text(file.oldPath!),
+            )
+          : null,
+      trailing: (file.additions > 0 || file.deletions > 0)
+          ? AbDiffStat(
+              additions: file.additions,
+              deletions: file.deletions,
+              fontSize: AbTokens.fontXxs,
+            )
+          : null,
     );
   }
 }

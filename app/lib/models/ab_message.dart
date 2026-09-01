@@ -601,6 +601,104 @@ class GitUnstageResultMessage {
   });
 }
 
+/// One row of `git:log-result` — a commit as the History tab lists it.
+class GitLogEntry {
+  final String sha;
+  final String shortSha;
+  final String subject;
+  final String authorName;
+  final String authorEmail;
+  final String authorDate;
+
+  const GitLogEntry({
+    required this.sha,
+    required this.shortSha,
+    required this.subject,
+    required this.authorName,
+    required this.authorEmail,
+    required this.authorDate,
+  });
+}
+
+class GitLogResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final List<GitLogEntry> commits;
+  final int skip;
+  final bool hasMore;
+  final String? error;
+
+  const GitLogResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.commits,
+    required this.skip,
+    required this.hasMore,
+    this.error,
+  });
+}
+
+/// One file changed within a single commit — `git:commit-files-result`'s
+/// per-path entry. No `staged` field (unlike [GitFileStatusEntry]): a commit
+/// has no index/worktree split, only what it changed.
+class GitCommitFileEntry {
+  final String path;
+  final String status;
+  final String? oldPath;
+  final int additions;
+  final int deletions;
+
+  const GitCommitFileEntry({
+    required this.path,
+    required this.status,
+    this.oldPath,
+    required this.additions,
+    required this.deletions,
+  });
+}
+
+class GitCommitFilesResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final String sha;
+  final List<GitCommitFileEntry> files;
+  final String? error;
+
+  const GitCommitFilesResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.sha,
+    required this.files,
+    this.error,
+  });
+}
+
+class GitCommitDiffContentMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final String sha;
+  final String path;
+  final String? diff;
+  final int additions;
+  final int deletions;
+
+  const GitCommitDiffContentMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.sha,
+    required this.path,
+    this.diff,
+    required this.additions,
+    required this.deletions,
+  });
+}
+
 class GitSyncResultMessage {
   final String id;
   final int timestamp;
@@ -1378,6 +1476,104 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         success: unstageSuccess,
         files: unstageFiles,
         error: json['error'] as String?,
+      );
+
+    case 'git:log-result':
+      final projectId = json['projectId'];
+      final skip = json['skip'];
+      final hasMore = json['hasMore'];
+      if (projectId is! String || skip is! int || hasMore is! bool) {
+        return null;
+      }
+      final commitsJson = json['commits'];
+      final commits = <GitLogEntry>[];
+      if (commitsJson is List) {
+        for (final c in commitsJson) {
+          if (c is! Map) continue;
+          final sha = c['sha'];
+          final shortSha = c['shortSha'];
+          final subject = c['subject'];
+          final authorName = c['authorName'];
+          final authorEmail = c['authorEmail'];
+          final authorDate = c['authorDate'];
+          if (sha is! String ||
+              shortSha is! String ||
+              subject is! String ||
+              authorName is! String ||
+              authorEmail is! String ||
+              authorDate is! String) {
+            continue;
+          }
+          commits.add(
+            GitLogEntry(
+              sha: sha,
+              shortSha: shortSha,
+              subject: subject,
+              authorName: authorName,
+              authorEmail: authorEmail,
+              authorDate: authorDate,
+            ),
+          );
+        }
+      }
+      return GitLogResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        commits: commits,
+        skip: skip,
+        hasMore: hasMore,
+        error: json['error'] as String?,
+      );
+
+    case 'git:commit-files-result':
+      final projectId = json['projectId'];
+      final sha = json['sha'];
+      if (projectId is! String || sha is! String) return null;
+      final filesJson = json['files'];
+      final files = <GitCommitFileEntry>[];
+      if (filesJson is List) {
+        for (final f in filesJson) {
+          if (f is! Map) continue;
+          final path = f['path'];
+          final status = f['status'];
+          if (path is! String || status is! String) continue;
+          files.add(
+            GitCommitFileEntry(
+              path: path,
+              status: status,
+              oldPath: f['oldPath'] as String?,
+              additions: f['additions'] as int? ?? 0,
+              deletions: f['deletions'] as int? ?? 0,
+            ),
+          );
+        }
+      }
+      return GitCommitFilesResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        sha: sha,
+        files: files,
+        error: json['error'] as String?,
+      );
+
+    case 'git:commit-diff-content':
+      final projectId = json['projectId'];
+      final sha = json['sha'];
+      final path = json['path'];
+      if (projectId is! String || sha is! String || path is! String) {
+        return null;
+      }
+      return GitCommitDiffContentMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        sha: sha,
+        path: path,
+        diff: json['diff'] as String?,
+        additions: json['additions'] as int? ?? 0,
+        deletions: json['deletions'] as int? ?? 0,
       );
 
     case 'git:sync-result':

@@ -351,6 +351,26 @@ class DemoTransport extends BufferedAgentTransport {
       case 'git:list-branches':
         return <Map<String, Object?>>[kDemoGitBranches];
 
+      // No fixture curates a commit log, and fabricating SHAs/dates that
+      // nothing else in the demo can act on risks looking broken rather than
+      // read-only — an empty page (renders as "No commits yet") is the
+      // honest answer, consistent with every other git verb here refusing to
+      // mutate anything real. Answered explicitly rather than falling into
+      // the fire-and-forget default: unlike a mutation, the History tab is
+      // WAITING on this reply and would otherwise sit on its spinner for the
+      // full gitActionTimeout.
+      case 'git:log':
+        return <Map<String, Object?>>[
+          <String, Object?>{
+            'type': 'git:log-result',
+            'projectId': kDemoProjectId,
+            'checkoutId': 'main',
+            'commits': const <Object?>[],
+            'skip': message['skip'] as int? ?? 0,
+            'hasMore': false,
+          },
+        ];
+
       case 'git:checkout':
         return <Map<String, Object?>>[
           <String, Object?>{

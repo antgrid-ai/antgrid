@@ -56,7 +56,8 @@ import { StructuredAgentManager } from "./structured/structured-manager";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
 import { getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
-import { gitPull, gitPush, readSyncState, EMPTY_SYNC_STATE, type GitSyncState } from "./git-sync";
+import { getGitLog, getCommitFiles, getCommitFileDiff } from "./git-log";
+import { gitPull, gitPush, readSyncState, fetchRemote, EMPTY_SYNC_STATE, type GitSyncState } from "./git-sync";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 
 /** Hand the event loop one full turn. `setImmediate` fires in libuv's check
@@ -96,6 +97,10 @@ interface CheckoutRuntime {
    * 10s on the backstop poll alone. */
   cachedGitSync: GitSyncState;
   gitBranchInterval: ReturnType<typeof setInterval> | null;
+  /** Periodic background `git fetch` — see [fetchRemote]. Its own timer, on a
+   * much longer period than [gitBranchInterval]: that one is a cheap LOCAL
+   * read, this one reaches the network. */
+  gitAutofetchInterval: ReturnType<typeof setInterval> | null;
   gitRefreshTimer: ReturnType<typeof setTimeout> | null;
   /** Fire-and-forget `git status` reads still running against this checkout —
    * see [trackGitRefresh] for why teardown has to wait them out. */
@@ -648,6 +653,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       cachedGitFiles: [],
       cachedGitSync: EMPTY_SYNC_STATE,
       gitBranchInterval: null,
+      gitAutofetchInterval: null,
       gitRefreshTimer: null,
       pendingGitRefreshes: new Set(),
       gitStatusSeq: 0,
@@ -1059,6 +1065,24 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "git:list-branches": {
         handleGitListBranches(runtime, msg.projectId).catch((err) =>
           log.error("git:list-branches handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:log": {
+        handleGitLog(runtime, msg.projectId, msg.skip, msg.limit).catch((err) =>
+          log.error("git:log handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:commit-files": {
+        handleGitCommitFiles(runtime, msg.projectId, msg.sha).catch((err) =>
+          log.error("git:commit-files handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:commit-diff": {
+        handleGitCommitDiff(runtime, msg.projectId, msg.sha, msg.path).catch((err) =>
+          log.error("git:commit-diff handler failed: %s", err)
         );
         break;
       }
@@ -1525,6 +1549,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       runtime.tunnelManager?.stop();
       if (runtime.gitBranchInterval) clearInterval(runtime.gitBranchInterval);
       runtime.gitBranchInterval = null;
+      if (runtime.gitAutofetchInterval) clearInterval(runtime.gitAutofetchInterval);
+      runtime.gitAutofetchInterval = null;
       if (runtime.gitRefreshTimer) clearTimeout(runtime.gitRefreshTimer);
       runtime.gitRefreshTimer = null;
       runtime.started = false;
@@ -1869,6 +1895,34 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }));
   }
 
+  /** One background-fetch pass — see [fetchRemote]. Pushes `git:sync-state`
+   *  only when the counts it produces actually moved. */
+  function runGitAutofetchTick(runtime: CheckoutRuntime): void {
+    const prevSync = JSON.stringify(runtime.cachedGitSync);
+    trackGitRefresh(
+      runtime,
+      fetchRemote(runtime.checkout.path)
+        .then((fetched) => {
+          if (!fetched || runtime.disposed) return;
+          return refreshGitStatus(runtime).then(() => {
+            if (JSON.stringify(runtime.cachedGitSync) !== prevSync) sendGitSyncState(runtime);
+          });
+        })
+        .catch(() => {}),
+    );
+  }
+
+  /** Starts this checkout's background-fetch backstop — the periodic
+   *  counterpart to [readSyncState]'s "as fresh as the last fetch" contract,
+   *  matching every SCM client with a sync indicator (VS Code defaults to 3
+   *  minutes; kept the same here). Ticks once immediately: without that, a
+   *  checkout that just connected would wait up to the full period before it
+   *  could show a commit someone else pushed while this bridge was offline. */
+  function startGitAutofetch(runtime: CheckoutRuntime): void {
+    runGitAutofetchTick(runtime);
+    runtime.gitAutofetchInterval = setInterval(() => runGitAutofetchTick(runtime), 180_000);
+  }
+
   async function handleGitListBranches(runtime: CheckoutRuntime, projectId: string) {
     try {
       const catalog = await listLocalBranches(runtime.checkout.path);
@@ -1881,6 +1935,67 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }));
     } catch {
       // ignore
+    }
+  }
+
+  async function handleGitLog(runtime: CheckoutRuntime, projectId: string, skip: number, limit: number) {
+    try {
+      const { commits, hasMore } = await getGitLog(runtime.checkout.path, skip, limit);
+      sendFromRuntime(runtime, createMessage("git:log-result", {
+        projectId,
+        commits,
+        skip,
+        hasMore,
+      }));
+    } catch (err: any) {
+      sendFromRuntime(runtime, createMessage("git:log-result", {
+        projectId,
+        commits: [],
+        skip,
+        hasMore: false,
+        error: err?.message || String(err),
+      }));
+    }
+  }
+
+  async function handleGitCommitFiles(runtime: CheckoutRuntime, projectId: string, sha: string) {
+    try {
+      const files = await getCommitFiles(runtime.checkout.path, sha);
+      sendFromRuntime(runtime, createMessage("git:commit-files-result", {
+        projectId,
+        sha,
+        files,
+      }));
+    } catch (err: any) {
+      sendFromRuntime(runtime, createMessage("git:commit-files-result", {
+        projectId,
+        sha,
+        files: [],
+        error: err?.message || String(err),
+      }));
+    }
+  }
+
+  async function handleGitCommitDiff(runtime: CheckoutRuntime, projectId: string, sha: string, path: string) {
+    try {
+      const { diff, additions, deletions } = await getCommitFileDiff(runtime.checkout.path, sha, path);
+      sendFromRuntime(runtime, createMessage("git:commit-diff-content", {
+        projectId,
+        sha,
+        path,
+        diff,
+        additions,
+        deletions,
+      }));
+    } catch {
+      sendFromRuntime(runtime, createMessage("git:commit-diff-content", {
+        projectId,
+        sha,
+        path,
+        diff: null,
+        additions: 0,
+        deletions: 0,
+      }));
     }
   }
 
@@ -1898,6 +2013,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       sendStatus(runtime);
       await refreshGitStatus(runtime);
       sendGitStatus(runtime);
+      // A branch switch changes ahead/behind outright (new branch, new — or no
+      // — upstream); without this the sync control shows the PREVIOUS branch's
+      // counts until the next 10s poll tick.
+      sendGitSyncState(runtime);
     } catch (err: any) {
       sendFromRuntime(runtime, createMessage("git:checkout-result", {
         projectId,
@@ -1919,6 +2038,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (result.success) {
       await refreshGitStatus(runtime);
       sendGitStatus(runtime);
+      // A commit moves `ahead` immediately; without this push the sync
+      // control's count (and the enabled Push button) waits on the next 10s
+      // poll tick instead of appearing the moment the commit lands.
+      sendGitSyncState(runtime);
       sendStatus(runtime);
     }
   }
@@ -2433,6 +2556,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           .catch(() => {}),
       );
     }, 10_000);
+
+    startGitAutofetch(runtime);
   }
 
   /** Spawn the checkout's `services` block. Manual-start slots stay listed in
@@ -2509,6 +2634,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     runtime.tunnelManager?.stop();
     if (runtime.gitBranchInterval) clearInterval(runtime.gitBranchInterval);
     runtime.gitBranchInterval = null;
+    if (runtime.gitAutofetchInterval) clearInterval(runtime.gitAutofetchInterval);
+    runtime.gitAutofetchInterval = null;
     if (runtime.gitRefreshTimer) clearTimeout(runtime.gitRefreshTimer);
     runtime.gitRefreshTimer = null;
     return watcherClosed;
@@ -3079,6 +3206,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         .then(() => {
           sendStatus();
           sendGitStatus();
+          // Sent once here so the bus CACHES it for replay — see the matching
+          // comment on the checkout-runtime path above.
+          sendGitSyncState(mainRuntime);
         })
         .catch(() => {}),
     );
@@ -3087,6 +3217,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     mainRuntime.gitBranchInterval = setInterval(() => {
       const prevBranch = mainRuntime.cachedGitBranch;
       const prevFiles = JSON.stringify(mainRuntime.cachedGitFiles);
+      const prevSync = JSON.stringify(mainRuntime.cachedGitSync);
       trackGitRefresh(
         mainRuntime,
         Promise.all([refreshGitBranch(mainRuntime), refreshGitStatus(mainRuntime)])
@@ -3095,10 +3226,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             if (JSON.stringify(mainRuntime.cachedGitFiles) !== prevFiles) {
               sendGitStatus(mainRuntime);
             }
+            // The backstop that catches a commit, fetch or push made OUTSIDE
+            // the app — those touch only `.git/`, which the watcher ignores.
+            if (JSON.stringify(mainRuntime.cachedGitSync) !== prevSync) {
+              sendGitSyncState(mainRuntime);
+            }
           })
           .catch(() => {}),
       );
     }, 10_000);
+
+    startGitAutofetch(mainRuntime);
 
     const fw = new FileWatcher(
       project,

@@ -358,6 +358,78 @@ const GitUnstageResultMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+const GitLogEntrySchema = z.object({
+  sha: z.string(),
+  shortSha: z.string(),
+  subject: z.string(),
+  authorName: z.string(),
+  authorEmail: z.string(),
+  authorDate: z.string(),
+});
+
+const GitLogRequestMessage = BaseMessage.extend({
+  type: z.literal("git:log"),
+  projectId: z.string(),
+  skip: z.number().int().nonnegative().default(0),
+  limit: z.number().int().positive().default(50),
+  ...CheckoutScoped,
+});
+
+const GitLogResultMessage = BaseMessage.extend({
+  type: z.literal("git:log-result"),
+  projectId: z.string(),
+  commits: z.array(GitLogEntrySchema),
+  skip: z.number().int().nonnegative(),
+  /** Whether a further page exists past `skip + commits.length` — what the
+   *  History tab's scroll-triggered fetch checks before asking for more. */
+  hasMore: z.boolean(),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitCommitFileEntrySchema = z.object({
+  path: z.string(),
+  status: z.enum(["M", "A", "D", "R"]),
+  oldPath: z.string().optional(),
+  additions: z.number().int(),
+  deletions: z.number().int(),
+});
+
+const GitCommitFilesRequestMessage = BaseMessage.extend({
+  type: z.literal("git:commit-files"),
+  projectId: z.string(),
+  sha: z.string(),
+  ...CheckoutScoped,
+});
+
+const GitCommitFilesResultMessage = BaseMessage.extend({
+  type: z.literal("git:commit-files-result"),
+  projectId: z.string(),
+  sha: z.string(),
+  files: z.array(GitCommitFileEntrySchema),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitCommitDiffRequestMessage = BaseMessage.extend({
+  type: z.literal("git:commit-diff"),
+  projectId: z.string(),
+  sha: z.string(),
+  path: z.string(),
+  ...CheckoutScoped,
+});
+
+const GitCommitDiffContentMessage = BaseMessage.extend({
+  type: z.literal("git:commit-diff-content"),
+  projectId: z.string(),
+  sha: z.string(),
+  path: z.string(),
+  diff: z.string().nullable(),
+  additions: z.number().int(),
+  deletions: z.number().int(),
+  ...CheckoutScoped,
+});
+
 /** Why a push/pull did not happen. Mirrors [GitSyncFailureKind] in git-sync.ts
  *  and `GitSyncFailureKind` in the Dart model BY HAND; a receiver that meets an
  *  unrecognized value must read it as "unknown" rather than reject the frame,
@@ -1987,6 +2059,12 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   GitStageResultMessage,
   GitUnstageMessage,
   GitUnstageResultMessage,
+  GitLogRequestMessage,
+  GitLogResultMessage,
+  GitCommitFilesRequestMessage,
+  GitCommitFilesResultMessage,
+  GitCommitDiffRequestMessage,
+  GitCommitDiffContentMessage,
   GitSyncMessage,
   GitSyncResultMessage,
   GitSyncStatusMessage,
@@ -2118,6 +2196,14 @@ export type GitStage = z.infer<typeof GitStageMessage>;
 export type GitStageResult = z.infer<typeof GitStageResultMessage>;
 export type GitUnstage = z.infer<typeof GitUnstageMessage>;
 export type GitUnstageResult = z.infer<typeof GitUnstageResultMessage>;
+export type GitLogEntryWire = z.infer<typeof GitLogEntrySchema>;
+export type GitLogRequest = z.infer<typeof GitLogRequestMessage>;
+export type GitLogResult = z.infer<typeof GitLogResultMessage>;
+export type GitCommitFileEntryWire = z.infer<typeof GitCommitFileEntrySchema>;
+export type GitCommitFilesRequest = z.infer<typeof GitCommitFilesRequestMessage>;
+export type GitCommitFilesResult = z.infer<typeof GitCommitFilesResultMessage>;
+export type GitCommitDiffRequest = z.infer<typeof GitCommitDiffRequestMessage>;
+export type GitCommitDiffContent = z.infer<typeof GitCommitDiffContentMessage>;
 export type GitSync = z.infer<typeof GitSyncMessage>;
 export type GitSyncResult = z.infer<typeof GitSyncResultMessage>;
 export type GitSyncStatus = z.infer<typeof GitSyncStatusMessage>;
@@ -2219,6 +2305,8 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "git:status", "git:diff", "git:diff-content", "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
   "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
+  "git:log", "git:log-result", "git:commit-files", "git:commit-files-result",
+  "git:commit-diff", "git:commit-diff-content",
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "command:run", "command:output", "command:done",
   "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
@@ -2295,6 +2383,8 @@ const KNOWN_TYPES = new Set<string>([
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
   "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
+  "git:log", "git:log-result", "git:commit-files", "git:commit-files-result",
+  "git:commit-diff", "git:commit-diff-content",
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "file:search", "file:search-cancel", "file:search-result", "file:search-done",
   "file:upload-start", "file:upload-ready", "file:upload-chunk",

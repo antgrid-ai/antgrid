@@ -192,6 +192,33 @@ export async function readSyncState(cwd: string): Promise<GitSyncState> {
   return { ...base, ahead, behind, hasUpstream: true };
 }
 
+// Runs unattended on a timer, not behind a user's tap — a slow or dark remote
+// must give up quietly rather than hold the checkout runtime the way a
+// pressed Push/Pull is allowed to.
+const AUTOFETCH_TIMEOUT_MS = 20_000;
+
+/**
+ * Background, read-only `git fetch` for the tracked branch alone — updates
+ * `refs/remotes` so the next [readSyncState] sees a commit someone else
+ * pushed, without the user having to press Pull first. This is the periodic
+ * counterpart to [readSyncState]'s "as fresh as the last fetch" contract: it
+ * IS what keeps that fetch recent. Best-effort and silent on any failure (no
+ * remote, no upstream, offline, auth) — there is no user action to report a
+ * failure back to, only the counts this refreshes for.
+ */
+export async function fetchRemote(cwd: string): Promise<boolean> {
+  const branch = await currentBranch(cwd);
+  if (!branch) return false;
+  const target = await resolvePushTarget(cwd, branch);
+  if (!target?.tracked) return false;
+  const res = await runGitRemote(
+    cwd,
+    ["fetch", target.remote, target.remoteBranch],
+    AUTOFETCH_TIMEOUT_MS,
+  );
+  return res.exitCode === 0;
+}
+
 function fail(
   op: "push" | "pull",
   branch: string | null,

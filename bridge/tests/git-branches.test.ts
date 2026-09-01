@@ -180,7 +180,7 @@ describe("git-branches helper", () => {
     }
   });
 
-  it("throws CHECKOUT_FAILED on conflicting dirty working tree", async () => {
+  it("throws DIRTY_WORKTREE, naming the file, on conflicting uncommitted changes", async () => {
     await run(dir, ["init"]);
     await run(dir, ["config", "user.email", "test@antgrid.local"]);
     await run(dir, ["config", "user.name", "Test"]);
@@ -204,7 +204,9 @@ describe("git-branches helper", () => {
       expect(true).toBe(false);
     } catch (err: any) {
       expect(err).toBeInstanceOf(GitHelperError);
-      expect(err.code).toBe("CHECKOUT_FAILED");
+      expect(err.code).toBe("DIRTY_WORKTREE");
+      expect(err.message).toContain("file.txt");
+      expect(err.message).toContain("dev");
     }
 
     // Verify uncommitted content remains intact

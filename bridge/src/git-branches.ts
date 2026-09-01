@@ -7,12 +7,54 @@ export interface GitBranchCatalog {
 
 export class GitHelperError extends Error {
   constructor(
-    public readonly code: "NOT_GIT_REPOSITORY" | "UNKNOWN_BRANCH" | "CHECKOUT_FAILED",
+    public readonly code:
+      | "NOT_GIT_REPOSITORY"
+      | "UNKNOWN_BRANCH"
+      | "CHECKOUT_FAILED"
+      | "DIRTY_WORKTREE",
     message: string,
   ) {
     super(message);
     this.name = "GitHelperError";
   }
+}
+
+/** Longest file list a dirty-worktree refusal spells out before summarizing —
+ * same shape as `unresolvedConflictError` in `git.ts`. */
+const NAMED_DIRTY_FILES_IN_ERROR = 3;
+
+/** Whether `stderr` is git's refusal to move HEAD over changes it would have
+ * to overwrite — a tracked edit or an untracked file in the way — as opposed
+ * to any other reason `git switch` can fail (a hook, a submodule, detached
+ * HEAD oddities). Both of git's own wordings ("...by checkout" for a plain
+ * switch, "...by merge" when the switch itself performs a merge) share this
+ * clause, so matching on it covers both without depending on which one fired. */
+function isDirtyWorktreeRefusal(stderr: string): boolean {
+  return stderr.includes("would be overwritten by");
+}
+
+/** The path list `git switch` prints directly under either "would be
+ * overwritten" header, one per line, each indented with a single tab —
+ * git's own format, not ours to construct. */
+function parseOverwrittenFiles(stderr: string): string[] {
+  return stderr
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("\t"))
+    .map((line) => line.slice(1));
+}
+
+/** User-facing refusal for `DIRTY_WORKTREE`, naming what is actually in the
+ * way — the raw git hint block ("Please commit your changes or stash them...")
+ * reads as a terminal message, not app copy, and says nothing about WHICH
+ * files. */
+function dirtyWorktreeError(branch: string, files: string[]): string {
+  if (files.length === 0) {
+    return `Switching to "${branch}" would overwrite uncommitted changes. Commit, stash, or discard them first.`;
+  }
+  const named = files.slice(0, NAMED_DIRTY_FILES_IN_ERROR).join(", ");
+  const rest = files.length - NAMED_DIRTY_FILES_IN_ERROR;
+  const list = rest > 0 ? `${named} and ${rest} more` : named;
+  return `Switching to "${branch}" would overwrite uncommitted changes in: ${list}. Commit, stash, or discard them first.`;
 }
 
 export async function listLocalBranches(projectPath: string): Promise<GitBranchCatalog> {
@@ -132,6 +174,12 @@ export async function checkoutLocalBranch(
   const exitCode = await proc.exited;
 
   if (exitCode !== 0) {
+    if (known && isDirtyWorktreeRefusal(stderr)) {
+      throw new GitHelperError(
+        "DIRTY_WORKTREE",
+        dirtyWorktreeError(branch, parseOverwrittenFiles(stderr)),
+      );
+    }
     throw new GitHelperError(
       known ? "CHECKOUT_FAILED" : "UNKNOWN_BRANCH",
       stderr || `git switch ${branch} failed with exit code ${exitCode}`,

@@ -53,6 +53,18 @@ class FileService {
   final Duration gitActionTimeout;
   ReplyLatch? _diffLatch;
 
+  /// Bounds a `git:log` page fetch the same way [_diffLatch] bounds
+  /// `git:diff` — one slot, superseded on the next fetch (a scroll-triggered
+  /// load is guarded against firing while one is already in flight, so there
+  /// is never more than one page request to bound at a time).
+  ReplyLatch? _historyLatch;
+
+  /// Bounds `git:commit-files`, keyed by sha rather than a single slot like
+  /// [_historyLatch]: the History tab lets more than one commit's file list
+  /// stay expanded and loading at once (see [GitHistoryState]), so a dropped
+  /// send for one commit must not settle another's in-flight fetch.
+  final Map<String, ReplyLatch> _commitFilesLatches = {};
+
   /// Wall-clock bound for push/pull. Longer than [gitActionTimeout] because
   /// these reach the network — and load-bearing beyond the usual dropped-send
   /// case: a bridge predating `git:sync` DROPS the verb silently, and there is
@@ -89,6 +101,12 @@ class FileService {
     // also re-fires on every reconnect, which is what keeps the indicator from
     // sitting on counts from before a drop.
     session.hydrateCheckout(checkoutId, _syncHydratorKey, _hydrateSyncState);
+    // History is deliberately NOT hydrated here the way the tree and sync
+    // state are: it has no consumer besides the Git panel (every FileService
+    // exists whether or not that panel is ever opened), so eager-on-construct
+    // hydration would cost every project session a `git:log` round trip for a
+    // view most never visit. `GitPanel` triggers the first load itself once
+    // it is actually built with an empty history — see its `_maybeLoadHistory`.
     // A hydrator covers re-ESTABLISHMENT; this covers the other window the
     // agent suppresses in, which re-establishes nothing. While the app is
     // backgrounded the agent DROPS every `tree:update` and keeps bumping its
@@ -195,6 +213,18 @@ class FileService {
     }
     if (parsed is GitSyncStateMessage) {
       _setState(_state.copyWith(git: _state.git.copyWith(sync: parsed.state)));
+      return;
+    }
+    if (parsed is GitLogResultMessage) {
+      _handleGitLogResult(parsed);
+      return;
+    }
+    if (parsed is GitCommitFilesResultMessage) {
+      _handleCommitFilesResult(parsed);
+      return;
+    }
+    if (parsed is GitCommitDiffContentMessage) {
+      _handleGitCommitDiffContent(parsed);
       return;
     }
   }
@@ -329,7 +359,104 @@ class FileService {
 
   void _handleGitDiffContent(GitDiffContentMessage msg) {
     onFragmentSuccess?.call(FragHint('git:diff-content', msg.path));
-    if (msg.path != _state.git.diffPath) return;
+    // Also guards on diffCommitSha being unset: a working-tree diff reply
+    // landing after the user has already switched to a commit's diff for the
+    // SAME path must not overwrite it.
+    if (msg.path != _state.git.diffPath || _state.git.diffCommitSha != null) {
+      return;
+    }
+    _diffLatch?.settle();
+    _diffLatch = null;
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          diffContent: msg.diff,
+          diffAdditions: msg.additions,
+          diffDeletions: msg.deletions,
+          diffLoading: false,
+        ),
+      ),
+    );
+  }
+
+  void _handleGitLogResult(GitLogResultMessage msg) {
+    _historyLatch?.settle();
+    _historyLatch = null;
+    if (msg.error != null) {
+      _setState(
+        _state.copyWith(
+          git: _state.git.copyWith(
+            history: _state.git.history.copyWith(
+              loadingMore: false,
+              initialLoad: false,
+              error: msg.error,
+            ),
+          ),
+        ),
+      );
+      return;
+    }
+    // A page fetched with `skip: 0` REPLACES the list (a fresh open of the
+    // History tab, or a refresh); any other skip is assumed to continue the
+    // list this service itself has been paginating — callers never fetch an
+    // arbitrary skip, so there is nothing else it could be appending to.
+    final commits = msg.skip == 0
+        ? msg.commits
+        : [..._state.git.history.commits, ...msg.commits];
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          history: _state.git.history.copyWith(
+            commits: commits,
+            loadingMore: false,
+            initialLoad: false,
+            hasMore: msg.hasMore,
+            clearError: true,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _handleCommitFilesResult(GitCommitFilesResultMessage msg) {
+    _commitFilesLatches.remove(msg.sha)?.settle();
+    final loading = Set<String>.from(_state.git.history.filesLoadingShas)
+      ..remove(msg.sha);
+    if (msg.error != null) {
+      final errors = Map<String, String>.from(_state.git.history.filesErrorBySha)
+        ..[msg.sha] = msg.error!;
+      _setState(
+        _state.copyWith(
+          git: _state.git.copyWith(
+            history: _state.git.history.copyWith(
+              filesLoadingShas: loading,
+              filesErrorBySha: errors,
+            ),
+          ),
+        ),
+      );
+      return;
+    }
+    final files = Map<String, List<GitCommitFileEntry>>.from(
+      _state.git.history.filesBySha,
+    )..[msg.sha] = msg.files;
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          history: _state.git.history.copyWith(
+            filesBySha: files,
+            filesLoadingShas: loading,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _handleGitCommitDiffContent(GitCommitDiffContentMessage msg) {
+    onFragmentSuccess?.call(FragHint('git:commit-diff-content', msg.path));
+    if (msg.path != _state.git.diffPath || msg.sha != _state.git.diffCommitSha) {
+      return;
+    }
     _diffLatch?.settle();
     _diffLatch = null;
     _setState(
@@ -351,6 +478,7 @@ class FileService {
       case 'file:content':
         _failFileContent(hint.key);
       case 'git:diff-content':
+      case 'git:commit-diff-content':
         _failDiff(hint.key);
     }
   }
@@ -772,6 +900,9 @@ class FileService {
           diffPath: path,
           diffLoading: true,
           clearViewing: true,
+          // A prior commit diff for the same path must not linger: the reply
+          // handler keys on diffCommitSha being unset to accept this one.
+          clearDiffCommitSha: true,
         ),
       ),
     );
@@ -790,6 +921,223 @@ class FileService {
         _,
       ) {
         if (_disposed || _diffLatch != latch || _state.git.diffPath != path) {
+          return;
+        }
+        _diffLatch = null;
+        _setState(
+          _state.copyWith(git: _state.git.copyWith(diffLoading: false)),
+        );
+      }),
+    );
+  }
+
+  /// Commits fetched per `git:log` page — the History tab's scroll-triggered
+  /// [loadMoreHistory] asks for another page of this size once the list is
+  /// within reach of its end.
+  static const historyPageSize = 50;
+
+  bool _historyRequested = false;
+
+  /// Claims the FIRST-ever history load for this service's lifetime,
+  /// returning true only on that one call. `GitPanel` calls this on every
+  /// build once its data is ready — cheaply and safely, since it is a plain
+  /// bool flip, not a state notification — and defers the actual
+  /// [loadHistory] send to outside build() only when it wins the claim. That
+  /// split is what makes the trigger immune to a build() that fires more than
+  /// once before the resulting `loadingMore` state change is reflected back:
+  /// without it, each such build would kick off its own `git:log` send and
+  /// its own 15s reply timeout, and only the LAST would ever be tracked (or
+  /// answered), leaving the earlier ones as orphaned pending timers.
+  bool claimHistoryLoad() {
+    if (_historyRequested) return false;
+    _historyRequested = true;
+    return true;
+  }
+
+  /// History tab: fetch the first page of commits, replacing whatever was
+  /// loaded before. Called once when the tab is first shown.
+  void loadHistory() {
+    _historyLatch?.settle();
+    final latch = _historyLatch = ReplyLatch();
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          history: GitHistoryState.empty.copyWith(
+            loadingMore: true,
+            initialLoad: true,
+          ),
+        ),
+      ),
+    );
+    _requestLogPage(skip: 0, latch: latch);
+  }
+
+  /// History tab: fetch the next page, appending to what is already loaded.
+  /// No-op while a page is already loading or none remain — the scroll
+  /// listener that drives this has no other way to avoid firing repeatedly
+  /// near the bottom of the list.
+  void loadMoreHistory() {
+    final history = _state.git.history;
+    if (history.loadingMore || !history.hasMore) return;
+    _historyLatch?.settle();
+    final latch = _historyLatch = ReplyLatch();
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(history: history.copyWith(loadingMore: true)),
+      ),
+    );
+    _requestLogPage(skip: history.commits.length, latch: latch);
+  }
+
+  void _requestLogPage({required int skip, required ReplyLatch latch}) {
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:log', {
+        'projectId': projectId,
+        'skip': skip,
+        'limit': historyPageSize,
+      }),
+    );
+    unawaited(
+      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+        _,
+      ) {
+        if (_disposed || _historyLatch != latch) return;
+        _historyLatch = null;
+        _setState(
+          _state.copyWith(
+            git: _state.git.copyWith(
+              history: _state.git.history.copyWith(
+                loadingMore: false,
+                initialLoad: false,
+                error: 'Loading history timed out — no response from the agent',
+              ),
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
+  /// History tab: expand a commit's file list, fetching it on first expand —
+  /// [GitHistoryState.filesBySha] is a cache the toggle never re-fetches once
+  /// populated — or collapse it back up. More than one commit can stay
+  /// expanded at once; see [collapseAllHistory] for the bulk fold.
+  void toggleCommitExpanded(String sha) {
+    final history = _state.git.history;
+    final expanded = Set<String>.from(history.expandedShas);
+    final expanding = !expanded.remove(sha);
+    if (expanding) expanded.add(sha);
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(history: history.copyWith(expandedShas: expanded)),
+      ),
+    );
+    if (expanding &&
+        !history.filesBySha.containsKey(sha) &&
+        !history.filesLoadingShas.contains(sha)) {
+      _requestCommitFiles(sha);
+    }
+  }
+
+  /// History tab: re-fetch a commit's file list after [_requestCommitFiles]
+  /// failed — the commit is already expanded (that's why an error row is on
+  /// screen), so retrying is a plain re-fetch rather than another toggle.
+  void retryCommitFiles(String sha) => _requestCommitFiles(sha);
+
+  void _requestCommitFiles(String sha) {
+    final history = _state.git.history;
+    final loading = Set<String>.from(history.filesLoadingShas)..add(sha);
+    final errors = Map<String, String>.from(history.filesErrorBySha)
+      ..remove(sha);
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          history: history.copyWith(
+            filesLoadingShas: loading,
+            filesErrorBySha: errors,
+          ),
+        ),
+      ),
+    );
+    _commitFilesLatches.remove(sha)?.settle();
+    final latch = ReplyLatch();
+    _commitFilesLatches[sha] = latch;
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:commit-files', {'projectId': projectId, 'sha': sha}),
+    );
+    unawaited(
+      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+        _,
+      ) {
+        if (_disposed || _commitFilesLatches[sha] != latch) return;
+        _commitFilesLatches.remove(sha);
+        final stillLoading = Set<String>.from(
+          _state.git.history.filesLoadingShas,
+        )..remove(sha);
+        final withError = Map<String, String>.from(
+          _state.git.history.filesErrorBySha,
+        )..[sha] = 'Loading files timed out — no response from the agent';
+        _setState(
+          _state.copyWith(
+            git: _state.git.copyWith(
+              history: _state.git.history.copyWith(
+                filesLoadingShas: stillLoading,
+                filesErrorBySha: withError,
+              ),
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
+  /// History tab: fold every expanded commit's file list shut without
+  /// dropping the cached files — the same "Collapse All" the Changes tab's
+  /// folder toggle offers, applied to expanded commits instead of folders.
+  void collapseAllHistory() {
+    final history = _state.git.history;
+    if (history.expandedShas.isEmpty) return;
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(history: history.copyWith(expandedShas: const {})),
+      ),
+    );
+  }
+
+  /// History tab: open one file's diff within [sha] — the same viewer
+  /// [requestDiff] opens for the working tree, distinguished on screen by
+  /// [GitPaneState.diffCommitSha].
+  void requestCommitDiff(String sha, String path) {
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          diffPath: path,
+          diffCommitSha: sha,
+          diffLoading: true,
+          clearViewing: true,
+        ),
+      ),
+    );
+    _diffLatch?.settle();
+    final latch = _diffLatch = ReplyLatch();
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:commit-diff', {
+        'projectId': projectId,
+        'sha': sha,
+        'path': path,
+      }),
+    );
+    unawaited(
+      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+        _,
+      ) {
+        if (_disposed ||
+            _diffLatch != latch ||
+            _state.git.diffPath != path ||
+            _state.git.diffCommitSha != sha) {
           return;
         }
         _diffLatch = null;
@@ -860,6 +1208,12 @@ class FileService {
     _diffLatch = null;
     _syncLatch?.settle();
     _syncLatch = null;
+    _historyLatch?.settle();
+    _historyLatch = null;
+    for (final latch in _commitFilesLatches.values) {
+      latch.settle();
+    }
+    _commitFilesLatches.clear();
     for (final pending in _pendingResolves.values) {
       pending.fail(StateError('FileService disposed'));
     }

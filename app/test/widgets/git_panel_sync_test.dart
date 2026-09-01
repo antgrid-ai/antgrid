@@ -77,6 +77,25 @@ void main() {
         ),
       ),
     );
+    // The panel eagerly claims (and, one post-frame callback later, sends)
+    // its first `git:log` the moment its FileService is ready — see
+    // GitPanel._maybeLoadHistory. Answering it is what keeps that send's
+    // 15s reply-timeout timer from outliving the test; waiting for it to
+    // actually appear in `sent` (rather than a fixed pump count) is what
+    // keeps this robust against exactly how many frames that takes.
+    for (
+      var i = 0;
+      i < 5 && transport.sent.every((m) => m['type'] != 'git:log');
+      i++
+    ) {
+      await tester.pump();
+    }
+    transport.emit('git:log-result', {
+      'projectId': 'p',
+      'commits': const <Object?>[],
+      'skip': 0,
+      'hasMore': false,
+    });
     transport.emit('git:status', {'projectId': 'p', 'files': const []});
     if (sync != null) transport.emit('git:sync-state', sync);
     await tester.pump();

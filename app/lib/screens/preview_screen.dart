@@ -26,7 +26,6 @@ import '../providers/demo_mode.dart';
 import '../services/preview_service.dart';
 import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
-import '../providers/recent_ports.dart';
 import '../providers/visible_surface.dart';
 import '../util/detached.dart';
 import '../util/external_url.dart';
@@ -35,8 +34,6 @@ import '../widgets/preview_tab_bar.dart';
 import '../util/ab_log.dart';
 import '../widgets/new_session/environment_menu.dart'
     show PanelHint, PanelRow, PanelSectionHeader;
-import '../widgets/port_entry.dart';
-import '../widgets/port_list_widget.dart';
 import '../util/image_thumbnail.dart';
 import '../widgets/preview_draw_overlay.dart';
 import '../widgets/send_capture_to_agent.dart';
@@ -46,10 +43,10 @@ import '../design/widgets/ab_loading.dart';
 import 'preview_element_picker_script.dart';
 import 'preview_screenshot_script.dart';
 
-/// The browser preview screen. Shows detected ports, a URL bar at the top of
-/// the panel with refresh/external-browser/element-picker actions, a popup
-/// tab switcher ([PreviewTabsButton]) over the open ports, and one embedded
-/// webview per open port.
+/// The browser preview screen. A URL bar at the top of the panel with
+/// refresh/external-browser/element-picker actions, a popup tab switcher
+/// ([PreviewTabsButton]) over the open ports, and one embedded webview per
+/// open port.
 class PreviewScreen extends ConsumerStatefulWidget {
   const PreviewScreen({super.key});
 
@@ -183,8 +180,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         }
         final id = ref.read(previewStateProvider).value?.activeTabId;
         final tabState = id != null ? _tabStates[id] : null;
-        if (tabState == null) return;
-        final display = _toDisplayUrl(tabState, tabState.currentUrl);
+        // No active tab — nothing to restore to, so discard the edit outright
+        // rather than leaving whatever was typed on screen.
+        final display = tabState == null
+            ? ''
+            : _toDisplayUrl(tabState, tabState.currentUrl);
         if (_addrController.text != display) {
           _addrController.text = display;
         }
@@ -396,10 +396,6 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         return;
       }
       final (port, scheme, path) = target;
-      final projectId = ref.read(selectedRegistrationIdProvider);
-      if (projectId != null) {
-        ref.read(recentPortsProvider(projectId).notifier).add(port, scheme);
-      }
       unawaited(_openPort(port, scheme, path: path));
       _addrFocus.unfocus();
       return;
@@ -570,18 +566,25 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     if (_drawActiveForPort != null && !openPorts.contains(_drawActiveForPort)) {
       _drawActiveForPort = null;
     }
+    // No active tab (none open, or the last one just closed) — the address
+    // bar has no live URL to show, so it must not keep displaying whatever
+    // was last typed/loaded. Skipped while composing a new tab: that flow
+    // already owns the field (see [_startComposingNewTab]).
+    if (state.activeTabId == null && !_composingNewTab) {
+      _syncAddrField('');
+    }
 
     // The address bar (and the rest of the toolbar chrome) is always on
     // screen from here on — like a real browser, not just once a tab is
     // open — so it's the one place to type a port whether that opens the
     // first tab, a later one, or navigates the active one.
-    return _buildPreviewView(state, openPorts);
+    return _buildPreviewView(state);
   }
 
   /// Content below the toolbar: the open tabs' webviews, a loading spinner
-  /// while the first tab's proxy binds, the detected-port list to reopen
-  /// one, or the truly-empty message when nothing's ever been detected.
-  Widget _buildBody(PreviewState state, Set<int> openPorts) {
+  /// while the first tab's proxy binds, or the empty-state recent-ports
+  /// quick-pick once nothing's open.
+  Widget _buildBody(PreviewState state) {
     if (state.tabs.isNotEmpty) {
       final active = state.activeTab ?? state.tabs.first;
       // Tab open but proxy not ready yet.
@@ -638,33 +641,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       );
     }
 
-    // No tabs open — offer the recent-ports quick-pick as a fallback path
-    // when nothing has ever been detected either. Source the project id from
-    // the focus provider (not previewServiceProvider) so this build path
-    // stays cheap and doesn't construct the session/service.
-    if (state.ports.isEmpty) {
-      final projectId = ref.watch(selectedRegistrationIdProvider);
-      return _framed(
-        PreviewEmptyState(
-          action: projectId == null
-              ? null
-              : RecentPortsRow(
-                  projectId: projectId,
-                  onSelected: (port, scheme) =>
-                      unawaited(_openPort(port, scheme)),
-                ),
-        ),
-      );
-    }
-
-    // Ports known but every tab was closed -- show the port list to reopen.
-    return _framed(
-      PortListWidget(
-        ports: state.ports,
-        openPorts: openPorts,
-        onPortSelected: (port, scheme) => unawaited(_openPort(port, scheme)),
-      ),
-    );
+    // No tabs open — just the plain empty state. Detected ports
+    // (`state.ports`) are shown only through the open-tabs UI now: bridge-side
+    // detection is a text heuristic over agent/process output and can list a
+    // port nothing is actually serving, so it's not worth surfacing as a
+    // standalone "closed tabs" reopen list either.
+    return _framed(const PreviewEmptyState());
   }
 
   /// Insets [child] into a rounded, subtly-bordered browser-window frame —
@@ -1070,7 +1052,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// one, and navigating the active tab are all just "type in the top bar
   /// and press Enter" (see [_handleAddressSubmit]) instead of three
   /// different surfaces (a centered form, a dialog, a field).
-  Widget _buildPreviewView(PreviewState state, Set<int> openPorts) {
+  Widget _buildPreviewView(PreviewState state) {
     // [previewStateProvider] keeps its last value while it re-runs, so this
     // view can render one frame past a session that was invalidated (host
     // restart, LRU evict) — long enough for a raw façade read to throw during
@@ -1191,7 +1173,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                     ),
                 ],
         ),
-        Expanded(child: _buildBody(state, openPorts)),
+        Expanded(child: _buildBody(state)),
       ],
     );
   }

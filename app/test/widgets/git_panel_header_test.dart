@@ -92,6 +92,25 @@ void main() {
         ),
       ),
     );
+    // The panel eagerly claims (and, one post-frame callback later, sends)
+    // its first `git:log` the moment its FileService is ready — see
+    // GitPanel._maybeLoadHistory. Answering it is what keeps that send's
+    // 15s reply-timeout timer from outliving the test; waiting for it to
+    // actually appear in `sent` (rather than a fixed pump count) is what
+    // keeps this robust against exactly how many frames that takes.
+    for (
+      var i = 0;
+      i < 5 && transport.sent.every((m) => m['type'] != 'git:log');
+      i++
+    ) {
+      await tester.pump();
+    }
+    transport.emit('git:log-result', {
+      'projectId': 'p',
+      'commits': const <Object?>[],
+      'skip': 0,
+      'hasMore': false,
+    });
     if (tree != null) {
       transport.emit('tree:full', {'projectId': 'p', 'root': tree});
     }
@@ -255,10 +274,10 @@ void main() {
       },
     ]);
 
-    // Scoped to the header: a.dart's own row carries the same -4 badge.
-    final header = find
-        .ancestor(of: find.text('Changes'), matching: find.byType(Row))
-        .first;
+    // Scoped to the header's own title row: a.dart's own row carries the
+    // same -4 badge, and the sub-tab strip above the header repeats the word
+    // "Changes" too — neither must be mistaken for the header's totals.
+    final header = find.byKey(gitChangesHeaderTitleKey);
     expect(
       find.descendant(of: header, matching: find.text('+2,010')),
       findsOneWidget,
@@ -276,9 +295,7 @@ void main() {
       {'path': 'a.dart', 'status': 'R', 'staged': true, 'oldPath': 'z.dart'},
     ]);
 
-    final header = find
-        .ancestor(of: find.text('Changes'), matching: find.byType(Row))
-        .first;
+    final header = find.byKey(gitChangesHeaderTitleKey);
     expect(
       find.descendant(of: header, matching: find.textContaining('+')),
       findsNothing,
@@ -297,19 +314,16 @@ void main() {
       {'path': 'a.dart', 'status': 'M', 'staged': true},
     ], width: 300);
 
-    final title = tester.getRect(find.text('Changes'));
+    final titleRow = tester.getRect(find.byKey(gitChangesHeaderTitleKey));
     final commit = tester.getRect(find.byType(AbButton).last);
     expect(
       commit.top,
-      greaterThanOrEqualTo(title.bottom),
+      greaterThanOrEqualTo(titleRow.bottom),
       reason: 'the actions belong on their own row, below the title',
     );
 
-    // The title row spans the header (its text sits in an Expanded), so its
+    // The title row spans the header (it sits in an Expanded), so its
     // trailing edge is where a right-aligned action has to end.
-    final titleRow = tester.getRect(
-      find.ancestor(of: find.text('Changes'), matching: find.byType(Row)).first,
-    );
     expect(commit.right, closeTo(titleRow.right, 8));
   });
 
@@ -318,9 +332,9 @@ void main() {
       {'path': 'a.dart', 'status': 'M', 'staged': true},
     ]);
 
-    final title = tester.getRect(find.text('Changes'));
+    final titleRow = tester.getRect(find.byKey(gitChangesHeaderTitleKey));
     final commit = tester.getRect(find.byType(AbButton).last);
-    expect(commit.top, lessThan(title.bottom));
+    expect(commit.top, lessThan(titleRow.bottom));
   });
 
   // The state the panel used to render as an anonymous red dot on one row: git

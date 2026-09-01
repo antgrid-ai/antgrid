@@ -7,6 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/design/widgets/ab_cross_fade.dart';
 import 'package:antgrid/design/ab_theme.dart';
+import 'package:antgrid/launcher/host_control_client.dart'
+    show HostControlException;
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
@@ -946,6 +948,64 @@ void main() {
       await tester.pump(const Duration(seconds: 8));
       await tester.pump(const Duration(milliseconds: 300));
     });
+  });
+
+  group('git checkout refusals', () {
+    // A dirty-worktree checkout refusal (uncommitted changes the switch would
+    // overwrite) reaches the composer as the same HostControlException the
+    // ACTIVE_SESSIONS case rethrows for the dialog above — with no safe retry
+    // to offer, so it must land as clear, specific text (naming the files, as
+    // the bridge's own message does) rather than the raw exception dump the
+    // generic catch-all prints.
+    testWidgets(
+      'DIRTY_WORKTREE shows the bridge message, not a raw exception dump',
+      (tester) async {
+        await tester.pumpWidget(
+          _host(
+            overrides: [
+              ..._baseOverrides(target: _project),
+              newSessionBranchSelectionProvider.overrideWith(
+                () => ValueController(
+                  const NewSessionBranchSelection(
+                    targetId: 'p-my-repo',
+                    branch: 'dev',
+                  ),
+                ),
+              ),
+            ],
+            submit: (ref, {allowActiveSessions = false}) async {
+              throw HostControlException(
+                'DIRTY_WORKTREE',
+                'Switching to "dev" would overwrite uncommitted changes in: '
+                    'a.txt. Commit, stash, or discard them first.',
+              );
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.byKey(const Key('new-session-prompt-field')),
+          'start session',
+        );
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(
+          find.text(
+            'Switching to "dev" would overwrite uncommitted changes in: '
+            'a.txt. Commit, stash, or discard them first.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.textContaining('HostControlException'), findsNothing);
+        expect(find.textContaining('Failed to start session'), findsNothing);
+
+        await tester.pump(const Duration(seconds: 8));
+        await tester.pump(const Duration(milliseconds: 300));
+      },
+    );
   });
 
   group('create-time isolation refusals', () {

@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show RpcException;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -19,6 +21,7 @@ import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_snack_bar.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../design/widgets/ab_tooltip.dart';
+import '../../launcher/host_control_client.dart' show HostControlException;
 
 // The send key moved to the design system (shared with the transcript
 // composer); re-exported so existing importers keep resolving it from here.
@@ -377,6 +380,28 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
             e.message,
             'Could not start the session.',
           ),
+          duration: const Duration(seconds: 8),
+        );
+      }
+    } on HostControlException catch (e) {
+      // A local branch checkout's refusal (e.g. DIRTY_WORKTREE — uncommitted
+      // changes the switch would overwrite) is already user-facing text from
+      // the bridge, naming the files in the way; showing `e.toString()`
+      // instead would print the exception's type and code as if they were
+      // part of the sentence.
+      if (mounted && !_endedByCancel) {
+        showAbSnackBar(
+          context,
+          sessionRefusalCopy(e.code, e.message, 'Could not switch branch.'),
+          duration: const Duration(seconds: 8),
+        );
+      }
+    } on RpcException catch (e) {
+      // Same refusal, over the remote control plane.
+      if (mounted && !_endedByCancel) {
+        showAbSnackBar(
+          context,
+          sessionRefusalCopy(e.code, e.message, 'Could not switch branch.'),
           duration: const Duration(seconds: 8),
         );
       }
