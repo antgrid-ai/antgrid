@@ -408,4 +408,55 @@ void main() {
 
     await session.close();
   });
+
+  // The PTY's geometry is invalidated by exactly the two events the seq cutoff
+  // is: a re-drive and a same-id respawn. The driver re-sends `terminal:resize`
+  // only when its computed grid differs from the last size it believes the PTY
+  // received, so neither event has any other way to reach it — the panel is
+  // not moving, so the wrapper keeps computing the same grid and the gate stays
+  // shut for as long as the terminal is on screen.
+  test('a re-drive retires the geometry the driver booked', () async {
+    if (_skipWithoutNative()) return;
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    await seedTabA(t);
+    final before = session.terminalService.currentState.tabs['a']!.sizeEpoch;
+
+    t.redriveHydrators();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(
+      session.terminalService.currentState.tabs['a']!.sizeEpoch,
+      greaterThan(before),
+      reason: 'a resize sent while the stream was away vanished unreported',
+    );
+
+    await session.close();
+  });
+
+  test('a same-id respawn retires the geometry the driver booked', () async {
+    if (_skipWithoutNative()) return;
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    await seedTabA(t);
+    final before = session.terminalService.currentState.tabs['a']!.sizeEpoch;
+
+    // A fresh PTY on a known id. Its geometry is the bridge's, not whatever
+    // the driver had sent the process that just died — `lastDriverGeometry` if
+    // any terminal has resized in that bridge process, 80x24 (used here) if
+    // none has.
+    t.emit('terminal:started', {
+      'terminalId': 'a',
+      'shell': 'bash',
+      'cols': 80,
+      'rows': 24,
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    final tab = session.terminalService.currentState.tabs['a']!;
+    expect(tab.cols, 80);
+    expect(tab.sizeEpoch, greaterThan(before));
+
+    await session.close();
+  });
 }

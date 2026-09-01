@@ -201,4 +201,119 @@ void main() {
     await svc.dispose();
     await session.close();
   });
+
+  // The two paths where `sendResize` returns true and the frame it armed is
+  // then thrown away. The caller books the size on that `true`, so its gate is
+  // shut against a geometry the PTY never received; only a `sizeEpoch` bump
+  // reopens it, and nothing else in the system can detect the disagreement.
+  test('a queued resize discarded by another driver bumps sizeEpoch', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = TerminalService.fromSession(session);
+    svc.setClientId('desktop');
+
+    t.emit('agent:status', {
+      'projectId': 'p',
+      'terminals': [
+        {
+          'id': 't1',
+          'terminalId': 't1',
+          'name': 'Terminal 1',
+          'running': true,
+          'cols': 120,
+          'rows': 30,
+          'driverClientId': 'desktop',
+        },
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+    final before = svc.currentState.tabs['t1']!.sizeEpoch;
+
+    // Nothing queued: the frame is authoritative news, not a cancellation, and
+    // the caller has no booking to retire.
+    t.emit('terminal:size', {
+      'terminalId': 't1',
+      'cols': 90,
+      'rows': 30,
+      'driverClientId': 'mobile',
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.tabs['t1']!.sizeEpoch, before);
+
+    expect(
+      svc.sendResize('t1', 121, 30, baseDriverClientId: 'desktop'),
+      isTrue,
+    );
+    t.emit('terminal:size', {
+      'terminalId': 't1',
+      'cols': 50,
+      'rows': 40,
+      'driverClientId': 'mobile',
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+
+    expect(t.sent.where((m) => m['type'] == 'terminal:resize'), isEmpty);
+    expect(
+      svc.currentState.tabs['t1']!.sizeEpoch,
+      before + 1,
+      reason: 'the queued frame was destroyed, so the booking must be retired',
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a resize the debounce itself discards bumps sizeEpoch', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = TerminalService.fromSession(session);
+    svc.setClientId('mobile');
+
+    t.emit('agent:status', {
+      'projectId': 'p',
+      'terminals': [
+        {
+          'id': 't1',
+          'terminalId': 't1',
+          'name': 'Terminal 1',
+          'running': true,
+          'cols': 120,
+          'rows': 30,
+          'driverClientId': 'desktop',
+        },
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+    final before = svc.currentState.tabs['t1']!.sizeEpoch;
+
+    expect(svc.sendResize('t1', 50, 40, baseDriverClientId: 'desktop'), isTrue);
+    // A THIRD device takes the terminal, announced on the status tier rather
+    // than as a `terminal:size` — so the cancellation above never runs and the
+    // armed timer survives to reject itself against the new driver.
+    t.emit('agent:status', {
+      'projectId': 'p',
+      'terminals': [
+        {
+          'id': 't1',
+          'terminalId': 't1',
+          'name': 'Terminal 1',
+          'running': true,
+          'cols': 120,
+          'rows': 30,
+          'driverClientId': 'tablet',
+        },
+      ],
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+
+    expect(t.sent.where((m) => m['type'] == 'terminal:resize'), isEmpty);
+    expect(
+      svc.currentState.tabs['t1']!.sizeEpoch,
+      before + 1,
+      reason: 'the debounce dropped the frame long after sendResize answered',
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
 }
