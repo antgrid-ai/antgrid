@@ -445,18 +445,17 @@ class HandlerHeaderControl extends ConsumerWidget {
           notifyOnly: state.defaultNotifyOnly,
           agentObservable: coverage.observable,
           agentLabel: coverage.agentLabel,
+          judgeCapable: coverage.judgeCapable,
         ),
       );
     }
 
-    // Arming is one tap, so this tooltip is the only place the pre-arm
-    // coverage answer can reach the user — an agent that reports nothing
-    // arms just as silently as one that is merely quiet.
-    final shieldTooltip = session != null
-        ? 'Disarm Handler'
-        : coverage.observable == false
-        ? unwatchableNotice(coverage.agentLabel)
-        : 'Arm Handler';
+    final shieldTooltip = handlerShieldTooltip(
+      armed: session != null,
+      observable: coverage.observable,
+      judgeCapable: coverage.judgeCapable,
+      agentLabel: coverage.agentLabel,
+    );
 
     return Row(
       mainAxisSize: MainAxisSize.min,

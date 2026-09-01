@@ -13,7 +13,8 @@ const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
 
 // Re-exported because the engine flattens the same way for its push bodies, where
 // a stray newline renders as a broken multi-line notification. It is DEFINED in
-// backlog.ts, which is import-free: the prompt renderers there and this module
+// backlog.ts because that module sits below every consumer of the rule and can
+// be reached from any of them: the prompt renderers there and this module
 // enforce one flattening rule, and a second copy is a second place to keep it.
 export { oneLine };
 

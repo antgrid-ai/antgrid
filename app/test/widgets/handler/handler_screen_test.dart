@@ -50,14 +50,17 @@ Map<String, dynamic> snapshotJson({
   String snapshotId = 's1',
   String state = 'available',
   String? detail,
+  String action = 'force_push',
+  String trigger = 'git push --force origin feat/x',
+  String summary = 'pre-push SHA abc1234 recorded',
 }) => {
   'projectId': 'p',
   'snapshotId': snapshotId,
   'terminalId': 't1',
   'at': 1,
-  'action': 'force_push',
-  'trigger': 'git push --force origin feat/x',
-  'summary': 'pre-push SHA abc1234 recorded',
+  'action': action,
+  'trigger': trigger,
+  'summary': summary,
   'state': state,
   'detail': ?detail,
 };
@@ -71,14 +74,17 @@ List<Map<String, dynamic>> choicesJson() => [
 ];
 
 /// The one-shot `handler:escalation` push.
-Map<String, dynamic> escalationJson({List<Map<String, dynamic>>? choices}) => {
+Map<String, dynamic> escalationJson({
+  List<Map<String, dynamic>>? choices,
+  String urgency = 'high',
+}) => {
   'projectId': 'p',
   'escalationId': 'e1',
   'terminalId': 't1',
   'question': 'bun or vitest?',
   'reasoning': 'Affects CI wiring.',
   'draftReply': 'use bun',
-  'urgency': 'high',
+  'urgency': urgency,
   'choices': ?choices,
 };
 
@@ -575,7 +581,45 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('a snapshot advert becomes a one-tap undo on the wire', (
+  testWidgets('an urgent escalation is marked on a plain row', (tester) async {
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit('handler:status', armedStatusJson());
+    await pumpDelivery(tester);
+    t.emit('handler:escalation', escalationJson());
+    await pumpDelivery(tester);
+
+    expect(find.text('bun or vitest?'), findsOneWidget);
+    expect(find.text('URGENT'), findsOneWidget);
+  });
+
+  testWidgets('and on a decision card, from the same meta column', (
+    tester,
+  ) async {
+    // The payoff of hanging the marker off the shared trailing widget: three
+    // unrelated row shapes render an escalation, and none of them can be the
+    // one that forgot.
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit('handler:status', armedStatusJson());
+    await pumpDelivery(tester);
+    t.emit('handler:escalation', escalationJson(choices: choicesJson()));
+    await pumpDelivery(tester);
+
+    expect(find.byType(HandlerDecisionCard), findsOneWidget);
+    expect(find.text('URGENT'), findsOneWidget);
+  });
+
+  testWidgets('a normal escalation is not marked', (tester) async {
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit('handler:status', armedStatusJson());
+    await pumpDelivery(tester);
+    t.emit('handler:escalation', escalationJson(urgency: 'normal'));
+    await pumpDelivery(tester);
+
+    expect(find.text('bun or vitest?'), findsOneWidget);
+    expect(find.text('URGENT'), findsNothing);
+  });
+
+  testWidgets('a force push undo asks before it writes to the remote', (
     tester,
   ) async {
     final t = await pumpLiveHandlerScreen(tester);
@@ -586,12 +630,62 @@ void main() {
     expect(find.text('git push --force origin feat/x'), findsOneWidget);
 
     await tester.tap(find.text('Undo'));
-    await tester.pump();
+    await tester.pumpAndSettle();
+
+    // Nothing on the wire yet — the tap opened a question, not a push.
+    expect(t.sent.where((m) => m['type'] == 'handler:undo'), isEmpty);
+    // The dialog names the entry, so the ref being overwritten is on screen
+    // rather than left to the row behind it.
+    expect(find.text('pre-push SHA abc1234 recorded'), findsWidgets);
+
+    await tester.tap(find.text('Undo force push'));
+    await tester.pumpAndSettle();
 
     final sent = t.sent.where((m) => m['type'] == 'handler:undo').toList();
     expect(sent, hasLength(1));
     expect(sent.single['projectId'], 'p');
     expect(sent.single['snapshotId'], 's1');
+  });
+
+  testWidgets('cancelling the force push confirm sends nothing', (
+    tester,
+  ) async {
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit('handler:snapshot', snapshotJson());
+    await pumpDelivery(tester);
+
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(t.sent.where((m) => m['type'] == 'handler:undo'), isEmpty);
+    // And the offer survives the refusal: a cancelled undo is not a spent one.
+    expect(find.text('Undo'), findsOneWidget);
+  });
+
+  testWidgets('an undo that stays on this machine is still one tap', (
+    tester,
+  ) async {
+    // The confirm is bought by the blast radius, not by the word "undo". A
+    // hard reset restores this checkout and nobody else's, so §5.2's one-tap
+    // prevention stands where it was always right.
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit(
+      'handler:snapshot',
+      snapshotJson(
+        action: 'reset_hard',
+        trigger: 'git reset --hard HEAD~1',
+        summary: 'stashed 3 files',
+      ),
+    );
+    await pumpDelivery(tester);
+
+    expect(find.text('Hard reset'), findsOneWidget);
+    await tester.tap(find.text('Undo'));
+    await tester.pump();
+
+    expect(t.sent.where((m) => m['type'] == 'handler:undo'), hasLength(1));
   });
 
   testWidgets('a spent undo offers no tap, and a re-advert replaces its row', (
@@ -625,7 +719,10 @@ void main() {
 
     expect(find.text('remote rejected the push'), findsOneWidget);
     await tester.tap(find.text('Retry undo'));
-    await tester.pump();
+    await tester.pumpAndSettle();
+    // A retry is the same push as the first attempt, so it asks the same way.
+    await tester.tap(find.text('Undo force push'));
+    await tester.pumpAndSettle();
     expect(t.sent.where((m) => m['type'] == 'handler:undo'), hasLength(1));
   });
 

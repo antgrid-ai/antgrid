@@ -99,10 +99,14 @@ class HandlerAwayAttentionSinceNotifier extends Notifier<DateTime?> {
 /// thunk (an absent per-session tool means the project default). ONE provider
 /// so the header shield, the away hint, and the explainer can never answer the
 /// coverage question differently for the same session.
+/// [judgeCapable] is null under exactly the same condition [observable] is —
+/// both are read off one descriptor, so an agent the catalog has never
+/// described answers neither question rather than half of one.
 typedef FocusedSessionCoverage = ({
   String? agent,
   String? agentLabel,
   bool? observable,
+  bool? judgeCapable,
 });
 
 final focusedSessionCoverageProvider =
@@ -120,6 +124,13 @@ final focusedSessionCoverageProvider =
           agent,
           chat: entry?.mode == 'chat',
         ),
+        // The bridge's own second question, asked the same way: an armed
+        // session resolves its judge as `storedJudge ?? the session's own tool`
+        // (observabilityFor, bridge/src/handler/engine.ts). Nothing writes a
+        // stored judge today, so the fallback IS the answer and the catalog
+        // already holds it — this predicts, it does not approximate. Whatever
+        // lands a judge picker owns keeping that true.
+        judgeCapable: catalog[agent]?.judgeCapable,
       );
     });
 

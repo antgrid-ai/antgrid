@@ -262,7 +262,7 @@ class HandlerService {
     // it too. This is what lets the "needs you" rows survive an app restart
     // or reconnect instead of leaving a badge that points at nothing.
     final escalations = [for (final s in sessions.values) ...s.escalations]
-      ..sort((a, b) => a.at.compareTo(b.at));
+      ..sort(compareEscalations);
     // An id the bridge no longer replays has been retired there, so nothing is
     // left to suppress and the set cannot grow with the session's history.
     _answeredEscalations.retainWhere(
@@ -335,7 +335,14 @@ class HandlerService {
           choices: msg.choices,
         );
         _emit(
-          _state.copyWith(escalations: [..._state.escalations, escalation]),
+          _state.copyWith(
+            // Sorted on the way in, not appended: a status frame re-sorts
+            // within milliseconds, but the push is what raises the toast, and
+            // between the two the row the user came to answer would be sitting
+            // at the bottom of the list.
+            escalations: [..._state.escalations, escalation]
+              ..sort(compareEscalations),
+          ),
         );
         // Read back out of the state rather than forwarded: the floors in
         // [_withChoiceFloors] may have withdrawn the card on the way in, and a
