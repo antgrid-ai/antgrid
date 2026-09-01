@@ -33,13 +33,19 @@ describe("alias table", () => {
     }
   });
 
-  // The four snapshot-preparable operations, in the prose a user actually types.
+  // The floor operations in the prose a user actually types: the four snapshot.ts
+  // can prepare a snapshot for, and the outward ones nothing can.
   const cases: [string, string][] = [
     ["hard reset the branch to origin/main", "git reset --hard HEAD~2"],
     ["git reset the working tree hard", "git reset --hard HEAD~2"],
     ["force push branch", "git push --force origin feat/x"],
     ["recursively delete the stale fixtures directory", "rm -rf tests/fixtures/stale"],
     ["git clean the workspace", "git clean -fdx"],
+    ["squash merge the PRs into development", "gh pr merge 67 --squash --delete-branch"],
+    ["merge PR #67 once checks pass", "gh pr merge 67"],
+    ["close the stale PRs", "gh pr close 12"],
+    ["force delete the branch", "git branch -D antgrid/foo"],
+    ["publish to npm", "npm publish"],
   ];
   for (const [phrase, command] of cases) {
     it(`"${phrase}" authorizes ${command}`, () => {
@@ -75,12 +81,47 @@ describe("alias table", () => {
     ["the delete button should force remove the row from the cache", "rm -rf build"],
     ["recursively delete stale entries from the in-memory LRU", "rm -rf build"],
     ["clean up the ignored files section of the docs", "git clean -fd"],
+    ["merge the two config objects into one", "gh pr merge 12"],
+    ["add a merge conflict resolver to the editor", "gh pr merge 12"],
+    ["close the dialog when the user taps outside", "gh pr close 12"],
+    // "delete the branch" is the prose for `git branch -d`, which the floor does not
+    // flag at all — only the forced spelling is liftable, and only when named as such.
+    ["delete the branch after merging", "git branch -D topic"],
+    ["delete the branch coverage report from the docs", "git branch -D topic"],
+    ["publish an event on the bus", "npm publish"],
+    // GitHub numbers issues and pull requests in one series, so a bare `#N` is not
+    // a PR anchor: "closes #42" is the standard idiom for an ISSUE and is the single
+    // most common line in a backlog.
+    ["closes #42 once the fix lands", "gh pr close 12"],
+    ["fixes #7 and #8", "gh pr merge 12"],
+    // Carries the verb AND the anchor, and asks for the opposite of a merge — the
+    // PR is not ready to land.
+    ["fix the merge conflicts on PR #12", "gh pr merge 12"],
+    ["resolve merge conflicts in the pull request", "gh pr merge 12"],
   ];
   for (const [phrase, command] of proseCorpus) {
     it(`"${phrase}" grants no lift`, () => {
       expect(stillWarns(armed(phrase), command)).toHaveLength(1);
     });
   }
+
+  // A lift is keyed by the floor pattern SOURCE, so two operations sharing one
+  // pattern share every authorization granted for either. These are the pairs a
+  // single alternation used to collapse.
+  it("a lift never crosses to another operation", () => {
+    const crossings: [string, string, string][] = [
+      ["merge PR #67 once checks pass", "gh pr merge 67", "gh pr close 12"],
+      ["close the stale PRs", "gh pr close 12", "gh pr merge 67"],
+      // No prose alias for these two, so the lift comes from the literal the user
+      // pasted — the pattern source is the key either way.
+      ["run `gh release delete v1.2.0 --yes`", "gh release delete v1.2.0", "gh repo delete owner/name"],
+    ];
+    for (const [phrase, granted, other] of crossings) {
+      const auth = armed(phrase);
+      expect(stillWarns(auth, granted)).toEqual([]);
+      expect(stillWarns(auth, other)).toHaveLength(1);
+    }
+  });
 });
 
 describe("provenance", () => {
@@ -95,6 +136,14 @@ describe("provenance", () => {
     expect(isAuthorized(auth, floor.hard[0]!, "mkfs.ext4 /dev/sdb", PROJECT)).toBe(false);
     // Nothing about the hard command leaks into the session's grants either.
     expect(auth.patterns.size).toBe(0);
+  });
+
+  it("an instruction that forbids the operation still grants it", () => {
+    // The alias matches on the verb, so a conditional refusal reads as a mention.
+    // Leaving the advisory standing is the safe direction: the user still sees the
+    // row, where a lift would silence the one operation they said not to take.
+    expect(stillWarns(armed("if any check fails do NOT merge it"), "gh pr merge 67"))
+      .toHaveLength(1);
   });
 });
 

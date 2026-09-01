@@ -27,10 +27,18 @@ describe("splitSlashCommand", () => {
 });
 
 describe("replyShape", () => {
-  it("written is the trimmed action value, internal spacing intact", () => {
-    // The whole line is what reaches the agent and what the runaway guard hashes,
-    // so the split must not normalize what it will type.
-    expect(replyShape(slash("  /review  a.ts   b.ts ")).written).toBe("/review  a.ts   b.ts");
+  it("written is the action value flattened to one line", () => {
+    // The whole line is submitted with a trailing CR, so a break anywhere inside it
+    // would submit half a command and leave the rest as the next one.
+    const shape = replyShape(slash("  /review  a.ts   b.ts "));
+    expect(shape.written).toBe("/review a.ts b.ts");
+    expect(shape.args).toBe("a.ts b.ts");
+  });
+  it("a line break in the argument tail is flattened, never refused", () => {
+    const shape = replyShape(slash("/review a.ts\nb.ts"));
+    expect(shape.written).toBe("/review a.ts b.ts");
+    expect(shape.args).toBe("a.ts b.ts");
+    expect(checkReplyShape(shape, undefined)).toBeNull();
   });
   it("a reply is flattened to the one line injectReply will submit", () => {
     expect(replyShape(handle({ reply: "line one\n\nline two" })).reply).toBe("line one line two");
@@ -77,14 +85,31 @@ describe("checkReplyShape", () => {
     expect(checkReplyShape(shape, undefined)?.reason).toContain("reply too long");
   });
 
+  it("an over-length action value names the action field", () => {
+    const r = checkReplyShape(replyShape(slash(`/review ${"x".repeat(MAX_REPLY_CHARS)}`)), undefined);
+    expect(r?.retryable).toBe(true);
+    expect(r?.reason).toContain("action.value too long");
+  });
+
   it("a control char that is not whitespace is retryable", () => {
     expect(checkReplyShape(replyShape(handle({ reply: "pick two\x1b[B" })), undefined))
       .toEqual({ reason: "reply contains control characters", retryable: true });
   });
 
+  it("a control char surviving the flatten is refused, and the reason names the action field", () => {
+    // The pair with the reply case above is what proves the flatten collapsed only
+    // whitespace: an escape sequence is still a keystroke and still fails the guard.
+    expect(checkReplyShape(replyShape(slash("/review \x1b[B")), undefined))
+      .toEqual({ reason: "action.value contains control characters", retryable: true });
+  });
+
   it("a path-shaped verb is rejected even when it carries arguments", () => {
-    expect(checkReplyShape(replyShape(slash("/etc/hosts --force")), undefined))
-      .toEqual({ reason: "slash command value is not a simple verb", retryable: true });
+    const r = checkReplyShape(replyShape(slash("/etc/hosts --force")), undefined);
+    expect(r?.retryable).toBe(true);
+    expect(r?.reason).toContain("not a simple verb");
+    // The reason is fed back to the judge verbatim, so it has to say where the prose
+    // it crammed into `value` belongs instead.
+    expect(r?.reason).toContain("`reason`");
   });
 
   it("a backslash in the verb is rejected too", () => {

@@ -29,14 +29,17 @@ export interface SessionAdapter {
 }
 
 export function createPtyAdapter(deps: {
-  write: (terminalId: string, data: string) => void;
+  submit: (terminalId: string, line: string) => void;
   getRecentOutput: (terminalId: string) => string;
   getTranscriptPath: (terminalId: string) => string | undefined;
 }): SessionAdapter {
   return {
-    // The trailing CR submits the line; the engine has already floor/cap-checked
-    // the text (which is why control chars in `text` itself are rejected there).
-    injectReply: (id, text) => deps.write(id, `${text}\r`),
+    // The seam hands over the line and the terminal layer submits it as a
+    // separate write: a CR sharing a read with 64+ characters of text is
+    // absorbed into it and inserted as literal text (see pty-submit.ts). The
+    // engine has already floor/cap-checked the text, which is why control chars
+    // in `text` itself are rejected there.
+    injectReply: (id, text) => deps.submit(id, text),
     recentOutput: (id) => deps.getRecentOutput(id),
     outputKind: () => "pty",
     transcriptPath: (id) => deps.getTranscriptPath(id),

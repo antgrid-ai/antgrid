@@ -2,7 +2,10 @@
 
 // Supervisor + agent with no human between them is a closed loop. Cap consecutive
 // auto-replies and detect a repeated reply (same point exchanged again). Reset on
-// a human reply (engine calls reset when the user answers an escalation).
+// a human reply (engine calls reset when the user answers an escalation) — an
+// ANSWER, meaning a submitted line or the app-routed resolve that arrives as a
+// bare CR, never a bare keystroke or a mouse report, since `reset` drops
+// recentHashes along with the cap.
 
 interface GuardState { consecutive: number; recentHashes: string[]; }
 

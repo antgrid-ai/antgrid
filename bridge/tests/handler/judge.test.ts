@@ -24,9 +24,14 @@ function fakeSpawn(outputs: string[]) {
 describe("runDecision", () => {
   it("parses a valid decision on first attempt", async () => {
     const { spawn, calls } = fakeSpawn([GOOD]);
-    const d = await runDecision({ tool: "claude-code", goal: GOAL, backlogText: BACKLOG_TEXT, context: "C", cwd: ".", spawn });
+    let timedOut = 0;
+    const d = await runDecision({
+      tool: "claude-code", goal: GOAL, backlogText: BACKLOG_TEXT, context: "C", cwd: ".", spawn,
+      onTimeout: () => { timedOut += 1; },
+    });
     expect(d?.decision).toBe("continue");
     expect(calls.length).toBe(1);
+    expect(timedOut).toBe(0);
   });
   it("puts the goal and the backlog in front of the judge", async () => {
     const { spawn, calls } = fakeSpawn([GOOD]);
@@ -69,12 +74,45 @@ describe("runDecision", () => {
         kill() { close(); resolveExit(1); },
       };
     }) as unknown as typeof Bun.spawn;
+    let timedOut = 0;
     const d = await runDecision({
       tool: "claude-code", goal: GOAL, backlogText: "", context: "C",
-      cwd: ".", timeoutMs: 50, spawn,
+      cwd: ".", timeoutMs: 50, spawn, onTimeout: () => { timedOut += 1; },
     });
     expect(d).toBeNull();
     expect(calls.length).toBe(1); // no retry leg after a timeout
+    // The null above is the same value a failed spawn returns, so this hook is the
+    // only thing that can tell the caller which leg spent the whole budget.
+    expect(timedOut).toBe(1);
+  });
+
+  // The retry inherits whatever the first attempt left of the budget, so a hung
+  // one spends the rest of it — and returns the same null a failed spawn does.
+  // Leaving the hook silent there is what makes the budget unmeasurable from the
+  // one leg that would tell you it is too small.
+  it("reports the timeout when the RETRY is the leg that hangs", async () => {
+    const calls: string[][] = [];
+    const spawn = ((cmd: string[]) => {
+      calls.push(cmd);
+      if (calls.length === 1) {
+        return { stdout: new Response("garbage").body, exited: Promise.resolve(0), kill() {} };
+      }
+      let close!: () => void;
+      let resolveExit!: (code: number) => void;
+      return {
+        stdout: new ReadableStream({ start(c) { close = () => c.close(); } }),
+        exited: new Promise<number>((r) => { resolveExit = r; }),
+        kill() { close(); resolveExit(1); },
+      };
+    }) as unknown as typeof Bun.spawn;
+    let timedOut = 0;
+    const d = await runDecision({
+      tool: "claude-code", goal: GOAL, backlogText: "", context: "C",
+      cwd: ".", timeoutMs: 80, spawn, onTimeout: () => { timedOut += 1; },
+    });
+    expect(calls.length).toBe(2);
+    expect(d).toBeNull();
+    expect(timedOut).toBe(1);
   });
 
   // The shape rules live in the caller's gate, so a judge that breaks one has

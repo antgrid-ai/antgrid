@@ -7,9 +7,11 @@
 // corrected it to the driver's authoritative width — two engine resizes where
 // the authoritative width never moved, plus a runtimeType swap at the same tree
 // position that disposed the whole `GhosttyTerminalView` state. Neither is
-// cosmetic: `ghostty_vte_flutter` does not reflow, so an Ink-style TUI leaks
-// stale fragments across a grid change, which is what "returning to a terminal
-// shows blank regions" looked like from the user's side.
+// cosmetic: the engine reflows only the rows IT soft-wrapped, and an Ink-style
+// TUI writes its own breaks, so such a TUI leaks stale fragments across a grid
+// change (`terminal_reflow_contract_test.dart` pins both halves) — which is what
+// "returning to a terminal shows blank regions" looked like from the user's
+// side.
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/terminal_models.dart';

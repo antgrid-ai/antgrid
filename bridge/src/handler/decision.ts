@@ -85,6 +85,7 @@ export function buildDecidePrompt(opts: {
       ? `You are a supervisor standing in for the user while the coding agent \`${supervisedName(opts.agentTool)}\` works.`
       : "You are a supervisor standing in for the user while a coding agent works.",
     "Decide whether to let the agent continue, answer it on the user's behalf, or escalate to the user.",
+    "`handle` types text at the agent, and it covers two moves: TELL the agent what to do next, or ASK it a question when what you are missing is something it can answer from the work in front of it. A question is a `handle` whose `reply` is the question — there is no separate decision value for one.",
     "",
     "SESSION GOAL (the user's own words):",
     opts.goal || "(none stated)",
@@ -100,13 +101,28 @@ export function buildDecidePrompt(opts: {
     "- If an item names a slash command, `done` additionally requires a quote showing THAT command being invoked. A quote about some other, similar step does not close it, however real the quote is.",
     "- Report `done` only on evidence the work actually happened (test output, exit codes, a diff), never on intent or belief. `outcome` is your one-line summary for the user and never substitutes for evidence.",
     "- An item the agent has already satisfied on its own is `done` with that evidence — do not drive it again.",
+    // The judge reasons over a capped excerpt while the agent holds the live
+    // session, so its edge is judgement about WHAT, never a recipe for HOW: a
+    // procedure composed from that excerpt is a guess the agent then follows
+    // verbatim. The same bound covers `notify.draftReply`, which the app offers
+    // the user as a one-tap chip.
+    "",
+    "ALTITUDE — you decide WHAT should happen next and why; the agent decides HOW.",
+    "- RECENT CONTEXT below is a bounded excerpt of the session, not the whole of it. The agent has the live session, the working tree and write access; assume it knows the file layout, the commands and this project's conventions better than you do.",
+    "- Name the outcome you want and what would make it wrong. Do not write the agent's commands, file edits or commit messages for it.",
+    "- Keep it to one or two sentences. Length reads as certainty you do not have, and each extra clause is another detail you did not verify. This binds `notify.draftReply` too: the user is offered it as a one-tap chip and it reaches the agent verbatim if they take it.",
     "",
     "RULES:",
     "- Escalating always trumps making progress: if the next step on an item needs the user, escalate instead of transitioning it.",
     "- If you cannot answer with high confidence, escalate. A wrong auto-reply is the expensive failure.",
+    // Ordered against the confidence rule above, never merely beside it: missing
+    // information is exactly that rule's trigger, so an unordered "ask the agent"
+    // would divert to the agent what only the user can settle.
+    "- Missing information is not automatically the user's problem, and the split is by who can answer: ask the AGENT for facts about the work — what it found, what it tried, what it chose and why. Escalate what only the USER can settle: intent, authorization, preference, anything that changes the goal.",
+    "- A question costs a turn. It spends one of the bounded run of consecutive auto-replies the harness allows before it escalates on its own, so ask only when the answer would change what you do next; if you would say the same thing either way, say it.",
     "- Safety limits are enforced after your decision; never attempt to bypass them.",
     `- \`reply\` is free text typed at the agent and submitted as ONE line, under ${MAX_REPLY_CHARS} characters. Write one line: a line break would submit early, so any you write are collapsed to spaces before sending.`,
-    "- `action` with `kind: \"slash_command\"` types a command at the agent instead. `value` is `\"/verb\"` or `\"/verb <args>\"` — the verb is a single token with no spaces and no further `/`.",
+    "- `action` with `kind: \"slash_command\"` types a command at the agent instead. `value` is `\"/verb\"` or `\"/verb <args>\"` — the verb is a single token with no spaces and no further `/`. The whole value is ONE line of command, verb and arguments only, whitespace inside it collapsed to spaces before sending; it carries no prose. Put what you need to explain in `reason`, which the user reads, and if the agent itself must be told something first, send that as `reply` this pass and the command on the next.",
     "- Set either `reply` or `action`, never both. A decision carrying both is refused and reaches the agent as nothing.",
     // The point of turning the floor advisory is that the Assistant sees
     // which of its own proposals were dangerous. Stating that these are its past

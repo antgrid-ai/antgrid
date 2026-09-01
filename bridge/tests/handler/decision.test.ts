@@ -41,6 +41,16 @@ describe("decision schema", () => {
     expect(r.success).toBe(false);
   });
 
+  // Asking the agent is a `handle` carrying a question, never its own decision
+  // value: a fourth one would reach the engine's decision switch as an unhandled
+  // branch, and the prompt says so precisely so this stays true.
+  it("rejects an ask decision rather than treating it as a fourth move", () => {
+    const r = HandlerDecisionSchema.safeParse({
+      decision: "ask", confidence: 0.5, reason: "needs a fact",
+    });
+    expect(r.success).toBe(false);
+  });
+
   it("rejects a transition with no id", () => {
     const r = HandlerDecisionSchema.safeParse({
       decision: "continue", confidence: 0.9, reason: "ok",
@@ -193,12 +203,58 @@ describe("buildDecidePrompt", () => {
     expect(p).toContain("/verb <args>");
   });
 
+  // The value is typed as a command line, so prose inside it either fails the
+  // verb check outright or is submitted at the agent as arguments; `reason` is
+  // the field the user actually reads.
+  it("keeps the slash-command value free of prose and points prose at reason", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" });
+    expect(p).toContain("verb and arguments only");
+    expect(p).toContain("Put what you need to explain in `reason`");
+  });
+
+  // The catalog branch is the one place a command may not be typed as text, so
+  // the no-prose rule above must not read as permission to inline it in `reply`.
+  it("keeps the catalog's invoke-through-action rule intact", () => {
+    const p = buildDecidePrompt({
+      goal: GOAL, backlogText: "", context: "C",
+      commands: [{ id: "cmd:code-review", name: "code-review" }],
+    });
+    expect(p).toContain("never by typing it in `reply`");
+  });
+
   it("states that reply and action are mutually exclusive", () => {
     expect(buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" })).toContain("never both");
   });
 
   it("states that the reply is submitted as ONE line", () => {
     expect(buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" })).toContain("ONE line");
+  });
+
+  // The enum is fixed at three: a reader who takes "ask the agent" literally
+  // widens it, and every switch on `decision.decision` silently loses a branch.
+  it("offers a question as a `handle`, never as a fourth decision", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" });
+    expect(p).toContain("ASK it a question");
+    expect(p).toContain("no separate decision value");
+  });
+
+  // Missing information is the confidence rule's own trigger, so an ask move
+  // read before it diverts to the agent the escalations the user must settle.
+  it("orders the ask move behind the escalate-when-unsure rule", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" });
+    expect(p).toContain("ask the AGENT for facts about the work");
+    expect(p.indexOf("only the USER can settle"))
+      .toBeGreaterThan(p.indexOf("A wrong auto-reply is the expensive failure"));
+  });
+
+  // The same prompt writes the injected reply and the one-tap chip, so a bound
+  // stated for only one of them leaves the other unbounded.
+  it("bounds the reply's altitude and length on both surfaces", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" });
+    expect(p).toContain("ALTITUDE");
+    expect(p).toContain("the agent decides HOW");
+    expect(p).toContain("one or two sentences");
+    expect(p).toContain("notify.draftReply");
   });
 
   // The judge reads a transcript the agent itself wrote, where `claude` appears

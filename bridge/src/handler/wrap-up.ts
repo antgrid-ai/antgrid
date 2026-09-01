@@ -47,6 +47,10 @@ export const MAX_WRAPUP_TEXT_CHARS = 120;
 // One activity row's detail, on the same terms as every other sampled row.
 export const MAX_WRAPUP_DETAIL_CHARS = 200;
 export const MAX_BLOCKED_REASONS = 3;
+// Tighter than the record's three: the push is read on a lock screen, where the
+// OS truncates the tail, and the card behind it carries the full set.
+export const MAX_PUSH_BLOCKED_REASONS = 2;
+export const PUSH_BLOCKED_REASON_CHARS = 80;
 
 export interface WrapUpOutcome {
   status: SummaryStatus;
@@ -123,14 +127,22 @@ export function wrapUpGroupLine(o: WrapUpOutcome, cap: number): string {
   return `${groupLabel(o.status)}: ${shown.join(", ")}${more > 0 ? ` +${more} more` : ""}`;
 }
 
-function blockedClause(total: number): string {
-  return `${total} action(s) Handler could not take`;
+/**
+ * Names what a guard refused rather than counting it: a bare count reads the same
+ * whether the guard stopped something trivial or the one thing the session existed
+ * to do. The push is the only channel that reaches a phone whose app was not
+ * running when the `handler:activity` rows went out — `handler:status` replays
+ * sessions, snapshots and wrap-ups, never the feed — so it has to say it here.
+ */
+function blockedClause(rec: WrapUpRecord, cap: number, chars: number): string {
+  const shown = rec.blockedReasons.slice(0, cap).map((r) => clip(r, chars));
+  if (shown.length === 0) return `${rec.blockedTotal} action(s) Handler could not take`;
+  const more = rec.blockedTotal - shown.length;
+  return `Could not: ${shown.join("; ")}${more > 0 ? ` +${more} more` : ""}`;
 }
 
 function clauses(rec: WrapUpRecord, cap: number): string[] {
-  const parts = rec.outcomes.map((o) => wrapUpGroupLine(o, cap));
-  if (rec.blockedTotal > 0) parts.push(blockedClause(rec.blockedTotal));
-  return parts;
+  return rec.outcomes.map((o) => wrapUpGroupLine(o, cap));
 }
 
 /**
@@ -141,7 +153,13 @@ function clauses(rec: WrapUpRecord, cap: number): string[] {
  */
 export function wrapUpPushBody(rec: WrapUpRecord, { openUndos }: { openUndos: number }): string {
   const parts = clauses(rec, MAX_PUSH_ITEMS_PER_GROUP);
+  // Ahead of the blocked clause: the OS truncates the tail, and of the two only
+  // this one expires — the reports keep on the wrap-up card, while the offer to
+  // undo is gone once the user stops looking for it.
   if (openUndos > 0) parts.push(`${openUndos} flagged action(s) can still be undone`);
+  if (rec.blockedTotal > 0) {
+    parts.push(blockedClause(rec, MAX_PUSH_BLOCKED_REASONS, PUSH_BLOCKED_REASON_CHARS));
+  }
   return [`Handler: done — ${rec.goal || "session complete"}`, ...parts].join(". ");
 }
 
@@ -152,5 +170,7 @@ export function wrapUpPushBody(rec: WrapUpRecord, { openUndos }: { openUndos: nu
  * is frozen for good.
  */
 export function wrapUpDetail(rec: WrapUpRecord): string {
-  return clip(clauses(rec, MAX_PUSH_ITEMS_PER_GROUP).join(". "), MAX_WRAPUP_DETAIL_CHARS);
+  const parts = clauses(rec, MAX_PUSH_ITEMS_PER_GROUP);
+  if (rec.blockedTotal > 0) parts.push(blockedClause(rec, MAX_BLOCKED_REASONS, MAX_WRAPUP_TEXT_CHARS));
+  return clip(parts.join(". "), MAX_WRAPUP_DETAIL_CHARS);
 }

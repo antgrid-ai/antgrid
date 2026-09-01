@@ -100,9 +100,27 @@ describe("wrap-up rendering", () => {
   it("names the blocked reports without pointing at the activity feed", () => {
     const blocked = build([item("a", "done")], { blockedReports: [{ reasoning: "refused" }] });
     const body = wrapUpPushBody(blocked, { openUndos: 0 });
-    expect(body).toContain("1 action(s) Handler could not take");
-    expect(body).not.toContain("see the activity feed");
-    expect(wrapUpDetail(blocked)).not.toContain("see the activity feed");
+    // A count reads the same whether the guard stopped something trivial or the
+    // one thing the session existed to do.
+    expect(body).toContain("Could not: refused");
+    expect(body).not.toContain("activity feed");
+    expect(wrapUpDetail(blocked)).not.toContain("activity feed");
+  });
+
+  it("caps the push at two named reports and says how many more", () => {
+    const blocked = build([item("a", "done")], {
+      blockedReports: [{ reasoning: "one" }, { reasoning: "two" }, { reasoning: "three" }],
+    });
+    const body = wrapUpPushBody(blocked, { openUndos: 0 });
+    expect(body).toContain("Could not: one; two +1 more");
+  });
+
+  it("offers the undo ahead of the reports, because only the undo expires", () => {
+    // OS surfaces truncate the tail. The reports keep on the wrap-up card; the
+    // offer to undo is gone once the user stops looking for it, so it goes first.
+    const blocked = build([item("a", "done")], { blockedReports: [{ reasoning: "refused" }] });
+    const body = wrapUpPushBody(blocked, { openUndos: 2 });
+    expect(body.indexOf("can still be undone")).toBeLessThan(body.indexOf("Could not:"));
   });
 
   it("keeps the goal and the undo count out of the activity row's detail", () => {
