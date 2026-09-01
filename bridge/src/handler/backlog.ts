@@ -318,10 +318,25 @@ export function allTerminal(backlog: InstructionItem[]): boolean {
 // Every field rendered into a prompt is extraction output, ids included, so any of
 // them can carry a newline that would forge an extra list line — and a forged line
 // hands the evaluator an id the user-authored vocabulary §2.1 rests on never
-// contained. Exported so the extraction prompt, which renders the same fields for
-// the same reason, shares this rule rather than keeping a second copy of it.
+// contained. The ONE copy of that rule, here because this module imports nothing:
+// the extraction prompt renders the same fields for the same reason, and
+// reply-shape re-exports it for the engine's push bodies.
 export function oneLine(s: string): string {
   return s.replace(/\s+/g, " ").trim();
+}
+
+/** Truncate to `max` UTF-16 code units without splitting an astral pair — the
+ *  other half of the same rule, and here for the same reason.
+ *
+ *  `slice` cuts code units, so a cap landing between a surrogate pair strands a
+ *  half that reaches the extractor's prompt and the app's activity feed alike as
+ *  a replacement glyph. Every field clipped this way is user- or judge-authored,
+ *  where an emoji at the cap is ordinary rather than exotic. */
+export function clip(s: string, max: number, ellipsis = "…"): string {
+  if (s.length <= max) return s;
+  const last = s.charCodeAt(max - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? max - 1 : max;
+  return `${s.slice(0, end)}${ellipsis}`;
 }
 
 export function renderBacklog(backlog: InstructionItem[]): string {

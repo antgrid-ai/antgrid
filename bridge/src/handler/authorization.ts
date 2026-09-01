@@ -179,11 +179,11 @@ function normalizeHost(h: string): string {
   return h.split("@").pop()!.replace(/:\d+$/, "").replace(/\.$/, "").toLowerCase();
 }
 
+// Built ON destinationsIn rather than beside it, so "the subset" below stays a
+// fact about the code and not a claim two lists have to keep agreeing on.
 function hostsIn(text: string): Set<string> {
-  const out = new Set<string>();
-  for (const m of text.matchAll(URL_AUTHORITY)) out.add(normalizeHost(m[1]!));
+  const out = destinationsIn(text);
   for (const m of text.matchAll(BARE_HOST)) out.add(normalizeHost(m[1]!));
-  for (const m of text.matchAll(IPV4)) out.add(m[0]!);
   return out;
 }
 

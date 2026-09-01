@@ -73,6 +73,10 @@ class HandlerBacklogDrawer extends ConsumerWidget {
     final state = ref.watch(handlerStateProvider).value;
     final session = state?.sessions[terminalId];
     final backlog = session?.backlog ?? const <HandlerInstructionItem>[];
+    // Indexed once per rebuild rather than searched per link: every waits-on
+    // line resolves against this same list, so a backlog near the bridge's cap
+    // otherwise walks it again for each one.
+    final byId = {for (final i in backlog) i.id: i};
     // Keyed by terminal, so a rebuild for a different terminalId cannot draw
     // one session's outstanding instruction under another's backlog.
     final pending =
@@ -144,7 +148,7 @@ class HandlerBacklogDrawer extends ConsumerWidget {
                           item: backlog[index],
                           canMoveUp: index > 0,
                           canMoveDown: index < backlog.length - 1,
-                          labelFor: (id) => _dependencyLabel(backlog, id),
+                          labelFor: (id) => _dependencyLabel(byId, id),
                           lockReason: editLock,
                         ),
                 ),
@@ -658,13 +662,13 @@ Widget? _itemSubtitle(HandlerInstructionItem item) {
 /// along because whether this item can move is a fact about the item it waits
 /// on, and the row is the only place holding both.
 ({String text, bool resolved, String? status}) _dependencyLabel(
-  List<HandlerInstructionItem> backlog,
+  Map<String, HandlerInstructionItem> byId,
   String id,
 ) {
-  for (final i in backlog) {
-    if (i.id == id) return (text: i.text, resolved: true, status: i.status);
-  }
-  return (text: id, resolved: false, status: null);
+  final item = byId[id];
+  return item == null
+      ? (text: id, resolved: false, status: null)
+      : (text: item.text, resolved: true, status: item.status);
 }
 
 /// How much of the user's own sentence the lock reason quotes back. It has to
