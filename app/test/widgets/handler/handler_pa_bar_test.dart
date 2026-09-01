@@ -30,7 +30,6 @@ HandlerSessionState _armed({
   int? parkedUntil,
 }) => HandlerSessionState(
   terminalId: 't1',
-  notifyOnly: false,
   runState: runState,
   pendingEscalations: pendingEscalations ?? escalations.length,
   armedAt: 1,
@@ -242,8 +241,8 @@ void main() {
   });
 
   test('a skipped item never advances the ordinal', () {
-    // §4.3: skipped and failed close an item without achieving it, so counting
-    // them would inflate the progress the bar promises.
+    // Skipped and failed close an item without achieving it, so counting them
+    // would inflate the progress the bar promises.
     final label = handlerPaStatusLabel(
       _armed(
         backlog: [

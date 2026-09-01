@@ -87,7 +87,7 @@ test("handler:dismiss reaches the engine, and a malformed one resyncs without di
   // one that carries a report across it.
   const rec: HandlerSessionRecord = {
     version: 2, terminalId: "t1", armed: false, suspended: true,
-    goal: "migrate auth", backlog: [], notifyOnly: true, armedAt: 1,
+    goal: "migrate auth", backlog: [], armedAt: 1,
     escalations: [{
       escalationId: "b1", question: "Handler did not send its reply",
       reasoning: "reply contains control characters", draftReply: "yes[B",
@@ -108,7 +108,7 @@ test("handler:dismiss reaches the engine, and a malformed one resyncs without di
   await waitFor(() => sent.some((m) => m.type === "agent:status"));
 
   bus.dispatchInbound(createMessage("handler:configure", {
-    projectId: core.projectId, terminalId: "t1", armed: true, notifyOnly: true,
+    projectId: core.projectId, terminalId: "t1", armed: true,
   }), "control", "loopback");
   expect(await waitFor(() => statuses(sent).some((s) => s.sessions.length === 1))).toBe(true);
   // A report survives the suspend→re-arm gap intact: it names nothing in the
@@ -128,7 +128,7 @@ test("handler:dismiss reaches the engine, and a malformed one resyncs without di
     escalationId: 7,
   } as never, "control", "loopback");
   bus.dispatchInbound(createMessage("handler:configure", {
-    projectId: core.projectId, terminalId: "t2", armed: true, notifyOnly: true,
+    projectId: core.projectId, terminalId: "t2", armed: true,
   }), "control", "loopback");
   expect(await waitFor(() => statuses(sent).some((s) => s.sessions.length === 2))).toBe(true);
   const armed = statuses(sent).at(-1)!.sessions;

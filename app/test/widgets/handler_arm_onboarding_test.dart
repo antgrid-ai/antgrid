@@ -313,7 +313,6 @@ void main() {
         'sessions': [
           {
             'terminalId': 't1',
-            'notifyOnly': false,
             'state': 'watching',
             'pendingEscalations': 0,
             'armedAt': 1,
@@ -338,7 +337,6 @@ void main() {
         context: context,
         container: container,
         terminalId: 't1',
-        notifyOnly: false,
         agentObservable: true,
       );
 
@@ -362,7 +360,6 @@ void main() {
         context: context,
         container: container,
         terminalId: 't1',
-        notifyOnly: false,
         agentObservable: true,
       );
 
@@ -387,7 +384,6 @@ void main() {
         context: context,
         container: container,
         terminalId: 't1',
-        notifyOnly: false,
         agentObservable: true,
       );
       await confirmArmed(tester, transport);
@@ -400,7 +396,6 @@ void main() {
         context: context,
         container: container,
         terminalId: 't1',
-        notifyOnly: false,
         agentObservable: true,
       );
       expect(armFrame(transport).containsKey('goal'), isFalse);
@@ -423,7 +418,6 @@ void main() {
           context: context,
           container: container,
           terminalId: 't1',
-          notifyOnly: false,
           agentObservable: true,
         ),
       );
@@ -454,7 +448,6 @@ void main() {
           context: context,
           container: container,
           terminalId: 't1',
-          notifyOnly: false,
           agentObservable: true,
         ),
       );

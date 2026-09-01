@@ -3,10 +3,10 @@
 // The live instruction stack. Collapsing the old Auditor role means the same
 // evaluator call that says "run the tests" later says "tests ran", and that
 // self-certification is only safe while the item vocabulary stays user-authored
-// and finite. `applyTransitions` is where that bound is enforced (spec §2.1):
-// the prompt restates it, but the prompt is the component being constrained.
+// and finite. `applyTransitions` is where that bound is enforced: the prompt
+// restates it, but the prompt is the component being constrained.
 //
-// The §2.1 bound is unchanged by the citation gate below: `done` is still minted
+// That bound is unchanged by the citation gate below: `done` is still minted
 // only by a transition naming a user-authored id, and nothing here can create
 // one. What the gate narrows is WHEN — "carries an evidence field" means "cited
 // something that is actually in the record the judge was shown", not merely "the
@@ -85,9 +85,9 @@ export interface TransitionResult {
 
 const TERMINAL: ReadonlySet<ItemStatus> = new Set<ItemStatus>(["done", "skipped", "failed"]);
 
-/** §2.2's one-way door, asked about a single item. Exported so nothing outside
- *  re-lists the three statuses: a copy that drifts would let a caller act on an
- *  item this module considers closed. */
+/** The one-way door the three terminal statuses form, asked about a single item.
+ *  Exported so nothing outside re-lists the three statuses: a copy that drifts
+ *  would let a caller act on an item this module considers closed. */
 export function isTerminalStatus(status: ItemStatus): boolean {
   return TERMINAL.has(status);
 }
@@ -146,7 +146,7 @@ function checkCitation(
   // `done` only. A skip or a failure says the work did NOT happen, so demanding a
   // quote of the command being run would ask for the very record that does not
   // exist — and would make "correctly did not happen" unsayable again, which is
-  // the §2.2 deadlock this whole vocabulary was widened to remove.
+  // the deadlock this whole vocabulary was widened to remove.
   if (t.status === "done" && !ctx.anchorWaived?.has(item.id)) {
     const tokens = anchorTokens(item, ctx);
     if (tokens.length > 0 && !tokens.some((tok) => quote.includes(tok))) {
@@ -219,7 +219,7 @@ export function applyTransitions(
     // Transitions arrive as JSON parsed from evaluator output, so the TS type is
     // a claim rather than a check. An unlisted status stored verbatim would never
     // match TERMINAL again, so the item could not be driven or wrapped up — the
-    // deadlock §2.2 exists to remove.
+    // deadlock the terminal-status vocabulary exists to remove.
     const parsed = ItemTransitionSchema.safeParse(raw);
     if (!parsed.success) {
       rejected.push({ transition: { ...raw }, reason: "malformed transition", code: "malformed" });
@@ -235,12 +235,12 @@ export function applyTransitions(
       rejected.push({ transition: t, reason: "unknown item id", code: "unknown_id" });
       continue;
     }
-    // §2.2's terminal states are one-way. An evaluator able to walk an item back
+    // The terminal states are one-way. An evaluator able to walk an item back
     // out of `done` could re-complete it once per pass forever, resetting the
-    // runaway guard every round — §2.1's mint-progress attack reached without
+    // runaway guard every round — the mint-progress attack reached without
     // minting an id. Revival off `blocked` (non-terminal) stays open; reviving a
-    // skipped item is a user tap in the backlog drawer (§4.3) — the wrap-up
-    // summary is a push notification with no tap target — not an evaluator move.
+    // skipped item is a user tap in the backlog drawer — the wrap-up summary is
+    // a push notification with no tap target — not an evaluator move.
     if (TERMINAL.has(item.status)) {
       rejected.push({ transition: t, reason: `${item.status} is terminal`, code: "already_terminal" });
       continue;
@@ -266,7 +266,7 @@ export function applyTransitions(
   return { backlog: next, applied, rejected, progressed };
 }
 
-// Blocking is derived, never judged (§3.3): an item is blocked because a thing it
+// Blocking is derived, never judged: an item is blocked because a thing it
 // depends on is, not because a model said so.
 export function propagateBlocked(backlog: InstructionItem[]): InstructionItem[] {
   const next = backlog.map(cloneItem);
@@ -297,10 +297,10 @@ export function propagateBlocked(backlog: InstructionItem[]): InstructionItem[] 
 export function nextActionable(backlog: InstructionItem[]): InstructionItem | undefined {
   const byId = new Map(backlog.map((i) => [i.id, i]));
   // `skipped` satisfies a dependency the way `done` does: it means the
-  // precondition will not happen and did not fail (§3.3 propagates only
-  // `blocked`/`failed`), so waiting on it would leave the dependent queued,
+  // precondition will not happen and did not fail (propagateBlocked propagates
+  // only `blocked`/`failed`), so waiting on it would leave the dependent queued,
   // undrivable and non-terminal forever — mootness stranding work the user still
-  // wants (§4.3). A dangling id is the opposite case: it reads as unsatisfied
+  // wants. A dangling id is the opposite case: it reads as unsatisfied
   // rather than absent, because a precondition that was stated and then lost
   // cannot be checked, and surfacing unfinished work beats driving it blind.
   return backlog.find((i) => i.status === "queued" && (i.dependsOn ?? []).every((id) => {
@@ -310,19 +310,20 @@ export function nextActionable(backlog: InstructionItem[]): InstructionItem | un
 }
 
 // Empty is deliberately NOT terminal: wrapping up an empty backlog ends a session
-// that accomplished nothing, which §4.3 requires escalating instead.
+// that accomplished nothing, so an emptied list escalates to the user instead
+// (escalateIfEmptied in engine.ts).
 export function allTerminal(backlog: InstructionItem[]): boolean {
   return backlog.length > 0 && backlog.every((i) => TERMINAL.has(i.status));
 }
 
 // Every field rendered into a prompt is extraction output, ids included, so any of
 // them can carry a newline that would forge an extra list line — and a forged line
-// hands the evaluator an id the user-authored vocabulary §2.1 rests on never
-// contained. The ONE copy of that rule, and it lives here because this module
-// sits BELOW every consumer of it: its only imports are zod and ./evidence,
-// which imports nothing at all, so extract/reply-shape/engine can all reach it
-// with no cycle. The extraction prompt renders the same fields for the same
-// reason, and reply-shape re-exports it for the engine's push bodies.
+// hands the evaluator an id the user-authored vocabulary never contained. The
+// ONE copy of that rule, and it lives here because this module sits BELOW every
+// consumer of it: its only imports are zod and ./evidence, which imports nothing
+// at all, so extract/reply-shape/engine can all reach it with no cycle. The
+// extraction prompt renders the same fields for the same reason, and reply-shape
+// re-exports it for the engine's push bodies.
 export function oneLine(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
@@ -339,6 +340,21 @@ export function clip(s: string, max: number, ellipsis = "…"): string {
   const last = s.charCodeAt(max - 1);
   const end = last >= 0xd800 && last <= 0xdbff ? max - 1 : max;
   return `${s.slice(0, end)}${ellipsis}`;
+}
+
+// Renders judge text for a HUMAN to read in an escalation, never for injection. The
+// control characters that force some of these escalations are exactly what must stay
+// visible here, so they are escaped rather than stripped.
+//
+// Beside `clip` rather than in the engine because the wrap-up composer needs it
+// too, and this module sits below every consumer of it (see `oneLine`'s note) —
+// reaching up for it is the cycle those consumers cannot have.
+export function previewForUser(s: string, max = 300): string {
+  const escaped = s.replace(
+    /[\x00-\x1f\x7f]/g,
+    (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
+  );
+  return clip(escaped, max);
 }
 
 export function renderBacklog(backlog: InstructionItem[]): string {

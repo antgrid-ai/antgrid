@@ -162,7 +162,7 @@ const _terminalItemStatuses = {'done', 'skipped', 'failed'};
 ///
 /// Only `done` counts towards the numerator, never the other terminal states: a
 /// skipped or failed item ends without being achieved, and folding it into
-/// progress is the summary inflation spec §4.3 guards against. `left` is
+/// progress is the summary inflation this guards against. `left` is
 /// everything still open — queued, active and blocked alike — because from the
 /// outside they are all work that has not happened yet.
 String handlerProgressLabel(HandlerSessionState session) {

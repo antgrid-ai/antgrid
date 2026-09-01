@@ -3,18 +3,18 @@
 // The act path can cause the agent to run commands with NO human in the loop and
 // WITHOUT passing the phone+allowlist gate that guards normal terminal:input.
 //
-// Advisory by default (spec §5.1): a match yields a WARNING that is recorded and
-// fed back to the Assistant, not a veto. A regex that silently overrode a proposal
-// the Assistant made blind taught it nothing about which of its own proposals were
+// Advisory by default: a match yields a WARNING that is recorded and fed back to
+// the Assistant, not a veto. A regex that silently overrode a proposal the
+// Assistant made blind taught it nothing about which of its own proposals were
 // dangerous; a warning is strictly better input. The property that buys back is
-// reversibility (§5.2), not prevention — except for the residual HARD tier below,
-// which nothing undoes and which therefore still blocks.
+// reversibility (snapshot.ts), not prevention — except for the residual HARD
+// tier below, which nothing undoes and which therefore still blocks.
 
 export type FloorTier = "HARD" | "DESTRUCTIVE" | "EGRESS" | "SECRETS" | "ABS_PATH";
 
 export interface FloorWarning {
   tier: FloorTier;
-  /** Regex source — the stable key an authorization pattern lift is granted against (§5.4). */
+  /** Regex source — the stable key an authorization pattern lift is granted against. */
   pattern: string;
   /** The text that tripped it, bounded: this reaches a prompt and an activity row. */
   matched: string;
@@ -23,13 +23,13 @@ export interface FloorWarning {
 // Two lists rather than one list the caller filters: a caller that forgets to
 // filter for HARD fails OPEN, and this is the one tier where that is unrecoverable.
 export interface FloorResult {
-  /** §5.3 — unrecoverable, still escalates. Never liftable by authorization. */
+  /** Unrecoverable, still escalates. Never liftable by authorization. */
   hard: FloorWarning[];
-  /** §5.1 — recorded unsuppressibly and fed to the next decide prompt. */
+  /** Recorded unsuppressibly and fed to the next decide prompt. */
   warnings: FloorWarning[];
 }
 
-// Five unrecoverable shapes (§5.3). No snapshot undoes these and none has a
+// Five unrecoverable shapes. No snapshot undoes these and none has a
 // legitimate use inside a coding-agent session, so keeping them hard costs no
 // false positives. `dd`/`>` are device-scoped here — a dd between two files is
 // destructive but recoverable, so it stays advisory below.
@@ -69,7 +69,7 @@ const DESTRUCTIVE: RegExp[] = [
   /\bgit\s+push\s+(?:[^\n]*\s)?\+\S/i,
   // Both force spellings, and the flag may sit behind -d/-x/a pathspec. Keep in
   // lockstep with planSnapshots' own force detection: a clean this misses is a
-  // clean the §5.2 snapshot pass is never asked to protect.
+  // clean the snapshot pass is never asked to protect.
   /\bgit\s+clean\s+[^\n]*(?:--force\b|-[a-zA-Z]*f)/i,
   /\bdd\s+[^\n]*\b(?:if|of)=/i,
   /\b(drop|truncate)\s+(table|database)\b/i,
@@ -115,7 +115,7 @@ const EGRESS: RegExp[] = [
 ];
 
 // A warning nobody should act on is noise that trains the Assistant to discount
-// warnings generally (§5.1), so the four patterns that matched a *mention* rather
+// warnings generally, so the four patterns that matched a *mention* rather
 // than an *access* are gated behind a read verb or a redirect. `ls ~/.ssh` and
 // "fix auth credentials test" are the corpus cases this exists for.
 const READ_ACCESS = String.raw`(?:\b(?:cat|bat|head|tail|less|more|nl|strings|xxd|od|hexdump|base64|openssl|curl|wget|scp|rsync|cp|mv|tar|zip|source)\b|<)`;
@@ -140,7 +140,7 @@ const SECRETS: RegExp[] = [
 
 // A path claim needs an INTERIOR separator. A slash command is "/"-shaped too, and
 // reading `/code-review` as an out-of-project path teaches the Assistant that its own
-// commands are dangerous — in the one channel (§5.1) that exists to teach it which of
+// commands are dangerous — in the one channel that exists to teach it which of
 // its proposals actually are. reply-shape's VERB rule forbids a "/" inside a verb, so
 // an interior separator is precisely the shape a slash command can never have.
 //
@@ -161,7 +161,7 @@ const SECRETS: RegExp[] = [
 const ABS_PATH = /(?:^|[\s'"=])(\/+[^\s'"/]+\/[^\s'"]*|[A-Za-z]:\\[^\s'"]+)/g;
 
 // One synthetic key for every outside-project path, because this tier is lifted
-// literally (§5.4) — the path is the claim, the pattern never is.
+// literally — the path is the claim, the pattern never is.
 export const ABS_PATH_RULE = "absolute path outside project";
 
 const MAX_MATCHED_CHARS = 120;

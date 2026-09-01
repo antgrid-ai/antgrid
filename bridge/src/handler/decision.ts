@@ -64,9 +64,9 @@ function promptLine(s: string): string {
 
 // The transition rules below restate what applyTransitions enforces. That is
 // belt-and-braces, not the guard — a prompt cannot bind the component it is
-// addressed to (spec §2.1). It earns its place by making well-formed output the
-// likely one: an evaluator that answers in prose gets its progress dropped, and
-// the item then sits open with nothing explaining why. The refused-transitions
+// addressed to. It earns its place by making well-formed output the likely one:
+// an evaluator that answers in prose gets its progress dropped, and the item
+// then sits open with nothing explaining why. The refused-transitions
 // section is the same bargain one pass later: the harness has already dropped
 // those moves, and stating why is what stops the next pass re-citing identically.
 export function buildDecidePrompt(opts: {
@@ -124,7 +124,7 @@ export function buildDecidePrompt(opts: {
     `- \`reply\` is free text typed at the agent and submitted as ONE line, under ${MAX_REPLY_CHARS} characters. Write one line: a line break would submit early, so any you write are collapsed to spaces before sending.`,
     "- `action` with `kind: \"slash_command\"` types a command at the agent instead. `value` is `\"/verb\"` or `\"/verb <args>\"` — the verb is a single token with no spaces and no further `/`. The whole value is ONE line of command, verb and arguments only, whitespace inside it collapsed to spaces before sending; it carries no prose. Put what you need to explain in `reason`, which the user reads, and if the agent itself must be told something first, send that as `reply` this pass and the command on the next.",
     "- Set either `reply` or `action`, never both. A decision carrying both is refused and reaches the agent as nothing.",
-    // The point of turning the floor advisory (§5.1) is that the Assistant sees
+    // The point of turning the floor advisory is that the Assistant sees
     // which of its own proposals were dangerous. Stating that these are its past
     // replies, not the agent's commands, is what makes them actionable.
     ...(opts.floorWarnings?.length

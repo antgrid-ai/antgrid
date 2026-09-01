@@ -18,7 +18,7 @@ function record(over: Partial<HandlerSessionRecord> = {}): HandlerSessionRecord 
   return {
     version: 2, terminalId: "t1", armed: true,
     goal: "migrate the auth module", backlog: [item("i1")],
-    notifyOnly: false, armedAt: 123, escalations: [],
+    armedAt: 123, escalations: [],
     ...over,
   } as HandlerSessionRecord;
 }
@@ -158,7 +158,7 @@ describe("session record rejection", () => {
   it("refuses a version-1 record instead of salvaging it", () => {
     const abDir = tmpAbDir();
     writeRaw(abDir, "t1", JSON.stringify({
-      version: 1, terminalId: "t1", armed: true, notifyOnly: false, armedAt: 1,
+      version: 1, terminalId: "t1", armed: true, armedAt: 1,
       brief: { taskSummary: "x", willHandle: [], wakeFor: [], thenItems: [] },
       doneWhenMet: false, ledger: [], escalations: [],
     }));

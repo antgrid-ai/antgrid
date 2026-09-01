@@ -108,7 +108,6 @@ Future<void> armWithFirstRunExplainer({
   required BuildContext context,
   required ProviderContainer container,
   required String terminalId,
-  required bool notifyOnly,
   required bool? agentObservable,
   String? agentLabel,
   bool? judgeCapable,
@@ -127,7 +126,7 @@ Future<void> armWithFirstRunExplainer({
   focusedServiceOrNull(
     container,
     (s) => s.handlerService,
-  )?.arm(terminalId: terminalId, goal: goal, notifyOnly: notifyOnly);
+  )?.arm(terminalId: terminalId, goal: goal);
   latchHandlerArmedOnConfirmation(container, terminalId);
 }
 

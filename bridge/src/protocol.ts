@@ -779,9 +779,10 @@ const BacklogWire = z.array(InstructionItemWire).refine(
 
 // Payload-only schema for the parseMessageFast hot path, which matches
 // KNOWN_TYPES and checks NOTHING else; agent-core re-parses the whole payload
-// with this before arming. `notifyOnly` is why it re-parses everything rather
-// than the one field it acts on — arriving absent it would read as falsy and
-// silently run an auto-injecting session the user asked to be notify-only.
+// with this before arming. It re-parses the payload wholesale rather than the
+// fields it acts on one by one because BacklogWire's duplicate-id refine has to
+// run over the list before it is stored — a shadowed item is unreachable by any
+// transition, leaving a session that can never wrap up.
 //
 // Arming deliberately carries no required payload: one tap arms with whatever
 // the session already holds. Any rule making `armed: true` demand a filled-in
@@ -802,7 +803,6 @@ export const HandlerConfigureWire = z.object({
   // bridge's copy behind a non-blocking arm, so a sender that always shipped a
   // full backlog would overwrite items it never saw.
   backlog: BacklogWire.optional(),
-  notifyOnly: z.boolean(),
   // Per-SESSION judge choice, persisted in the terminal's handler-session
   // record by arm(). Empty string = clear back to default (the session's own
   // tool / CLI default model); absent = leave the stored choice untouched.
@@ -837,7 +837,7 @@ const HandlerInstructMessage = BaseMessage.extend({
   projectId: z.string(),
 }).extend(HandlerInstructWire.shape);
 
-// One tap-to-answer option on a quick-choice escalation (§4.6). `text` is sent as
+// One tap-to-answer option on a quick-choice escalation. `text` is sent as
 // the USER's own reply through the ordinary reply transport, so it must be
 // something a session can actually receive: whitespace alone is dropped by every
 // consumer, which turns the chip into a button that silently does nothing.
@@ -879,14 +879,14 @@ const OpenEscalationWire = z.object({
   // question) that must be resolved in the chat UI — injected text can't
   // answer it, and auto-approval is deliberately impossible (see engine).
   //
-  // "guard_blocked" = a REPORT that a harness guard (reply shape, the §5.3 hard
+  // "guard_blocked" = a REPORT that a harness guard (reply shape, the HARD
   // floor, the runaway guard) refused an action Handler wanted to take. A typed
   // line does not answer it — the action was never taken — so only
   // `handler:dismiss` retires one, and the bridge never mints `choices` for it:
   // this row exists BECAUSE a guard refused this exact text, and a one-tap that
   // re-sent it would be the thinnest human in the loop there is.
   kind: z.enum(["reply", "resolve_in_session", "guard_blocked"]).optional(),
-  // §4.6 quick choices, optional exactly the way `kind` is: absent means "free-text
+  // Quick choices, optional exactly the way `kind` is: absent means "free-text
   // reply", so an app that predates this renders its reply sheet unchanged. Two is
   // the floor because one chip is a card with no alternative, and the free-text
   // escape hatch is app-authored — never an entry here — so no bridge can ship a
@@ -900,7 +900,7 @@ const OpenEscalationWire = z.object({
   at: z.number(),
 });
 
-// One §5.2 snapshot, as the app sees it. Shared by the one-shot advert and the
+// One snapshot, as the app sees it. Shared by the one-shot advert and the
 // per-project replay on `handler:status`, the same way OpenEscalationWire is
 // shared — an app that reconnected (or restarted) after the advert must still be
 // able to offer the undo.
@@ -931,12 +931,48 @@ const HandlerSnapshotMessage = BaseMessage.extend({
   projectId: z.string(),
 }).extend(HandlerSnapshotWire.shape);
 
+// One wrap-up report, as the app sees it — the summary the notification spends
+// once, kept. Replayed on `handler:status` for a sharper version of the reason
+// the snapshots are: the wrap-up is what DISARMS the session, so by the time the
+// report is worth reading its session is gone from `sessions` and nothing else on
+// this frame names it. The activity row that carries the same prose cannot stand
+// in — `handler:activity` is not replayed, and its jsonl is never read back.
+//
+// What this shape freezes, deliberately: MAX_STORED_WRAPUPS (5) records, each up
+// to 4 outcome groups x 8 sampled items x 120 chars, plus 3 blocked reasons and a
+// goal at the same 120 — ~22K characters per status frame at the worst. That is
+// why the item text is clipped at 120 rather than previewForUser's 300 default:
+// handler:status is a REPLAY_TYPE, held by reference in the bus cache, emitted
+// twice per handler event, and encrypted across the relay to a phone.
+//
+// The open-undo count is NOT here. It outlives the report — an undo taken
+// afterwards spends the entry, a re-arm retires the offers outright — so the app
+// derives it live from `snapshots` on this same frame. `blockedTotal` and
+// `blockedReasons` are frozen for the opposite reason: the session that could
+// re-derive them no longer exists.
+export const HandlerWrapUpWire = z.object({
+  wrapUpId: z.string(),
+  // The supervised slot the session ran in.
+  terminalId: z.string(),
+  at: z.number(),
+  goal: z.string(),
+  outcomes: z.array(z.object({
+    status: z.enum(["done", "failed", "blocked", "skipped"]),
+    // The TRUE count `items` is sampled from, which is what makes "+N more"
+    // recoverable without a second number that could disagree with it.
+    total: z.number().int().nonnegative(),
+    items: z.array(z.string()),
+  })),
+  blockedTotal: z.number().int().nonnegative(),
+  blockedReasons: z.array(z.string()),
+});
+
 // One-tap undo of a snapshot the bridge advertised. Payload-only schema for the
 // same reason as HandlerConfigureWire: parseMessageFast admits it on the
 // discriminator alone, so agent-core re-parses with this before anything runs.
 //
 // No terminalId: the id names the entry, and the entry carries its own session
-// and project path. Undo is deliberately NOT gated on authorization (§5.4) —
+// and project path. Undo is deliberately NOT gated on authorization —
 // anyone who can drive this project can already drive its terminal, and a second
 // authorization concept would only make the safety net harder to reach than the
 // action it reverses.
@@ -970,7 +1006,6 @@ const HandlerDismissMessage = BaseMessage.extend({
 
 const HandlerSessionSnapshot = z.object({
   terminalId: z.string(),
-  notifyOnly: z.boolean(),
   state: z.enum(["watching", "handling", "needs_you", "parked"]),
   pendingEscalations: z.number().int().nonnegative(),
   armedAt: z.number(),
@@ -998,8 +1033,6 @@ const HandlerStatusMessage = BaseMessage.extend({
   // project agent tool) — chat slots resolve from their own SessionEntry.tool
   // app-side. Judge overrides themselves are per-session (see snapshot).
   defaultTool: z.string().optional(),
-  // Project default seeding a newly armed session's notify-only (config v2).
-  defaultNotifyOnly: z.boolean(),
   sessions: z.array(HandlerSessionSnapshot),
   // Every snapshot this project still knows about, replayed for the same reason
   // escalations are: an app that restarted between the advert and the tap would
@@ -1007,6 +1040,12 @@ const HandlerStatusMessage = BaseMessage.extend({
   // sessions array holds only ARMED sessions, and a wrapped-up one is exactly
   // when the offer matters most.
   snapshots: z.array(HandlerSnapshotWire),
+  // Every wrap-up report this project still holds, appended LAST and optional
+  // the way a session snapshot appends `observability`: an older app still
+  // parses the frame and every key it already reads keeps its position. Absent
+  // and [] mean the same thing — unlike `observability`, presence here is not a
+  // capability signal, so a bridge with nothing to report simply omits it.
+  wrapUps: z.array(HandlerWrapUpWire).optional(),
 });
 
 const HandlerEscalationMessage = BaseMessage.extend({
@@ -1023,8 +1062,8 @@ const HandlerActivityMessage = BaseMessage.extend({
   terminalId: z.string(),
   // Kept in lockstep with ActivityRecord.decision (handler/config.ts) and the
   // app's handler_state.dart. One kind per item outcome rather than a single
-  // "item_resolved": a skip is as consequential as a completion (spec §4.3), so
-  // the feed distinguishes them without parsing the reason text.
+  // "item_resolved": a skip is as consequential as a completion, so the feed
+  // distinguishes them without parsing the reason text.
   decision: z.enum([
     "continue", "handle", "escalate",
     "armed", "goal_edited",
