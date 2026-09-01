@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -17,6 +18,7 @@ import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
+import '../models/workspace_view.dart';
 import '../providers/account_agents.dart';
 import '../providers/agent_coordinates.dart';
 import '../providers/agent_transport.dart';
@@ -29,6 +31,7 @@ import '../providers/providers.dart';
 import '../providers/recent_agents.dart';
 import '../providers/session_mode.dart';
 import '../providers/sessions.dart';
+import '../providers/visible_surface.dart';
 import '../screens/terminal_screen.dart';
 import '../util/ab_log.dart';
 import '../util/device_id.dart';
@@ -390,15 +393,64 @@ class HandlerHeaderControl extends ConsumerWidget {
     }
     // Surface escalations on OTHER sessions even when the focused session is
     // armed — an unanswered question must never hide behind this session's
-    // WATCHING/HANDLING pill. When the focused session itself needs the user its
-    // own count already shows; when it's unarmed, otherPending is the full
+    // WATCHING/HANDLING pill. When it's unarmed, otherPending is the full
     // project-wide count (session-null case).
+    //
+    // Yields to the focused session when that session is itself waiting: this
+    // pill is one label and cannot name two sessions, and the tab it opens
+    // renders only the focused one, so a merged count would send the user
+    // somewhere that cannot account for it. What the siblings get instead is a
+    // count on their own drawer rows (`SessionHandlerBadge`) — the surface
+    // that survives whatever is in focus.
     final otherPending =
         state.pendingEscalations - (session?.pendingEscalations ?? 0);
     if (session?.runState != HandlerRunState.needsYou && otherPending > 0) {
       pillLabel = 'NEEDS YOU $otherPending';
       pillColor = p.accent;
       pillNavigates = true;
+    }
+
+    // The Handler tab shows the FOCUSED session only, so a pill counting
+    // another session has to move focus there or it reveals an empty tab — the
+    // one navigation this pill exists to make.
+    //
+    // The target comes from the SAME branch that wrote the label. A pill
+    // carrying the focused session's own count must never move focus at all;
+    // `state.escalations` is banded by urgency across the whole project, so its
+    // head belongs to whichever session escalated most urgently — take it and a
+    // tap on "your session needs you" switches the user's entire workspace to
+    // someone else's.
+    //
+    // A focus change cannot reveal the tab by calling: moving focus arms
+    // WorkspaceShell's per-session UI restore, which re-applies the TARGET
+    // session's own saved workspace tab from a post-frame callback, and any tab
+    // selected before that lands is silently undone by it. So the destination
+    // is handed over as pending state instead — the same handover a deep link
+    // naming a view uses, drained by the shell after the restore.
+    void openHandler() {
+      final waiting = session?.runState == HandlerRunState.needsYou
+          ? null
+          : state.escalations
+                .firstWhereOrNull((e) => e.terminalId != activeId)
+                ?.terminalId;
+      if (waiting == null) {
+        ref.read(revealHandlerTabProvider)?.call();
+        return;
+      }
+      ref.read(activeSessionIdProvider.notifier).set(waiting);
+      // Read back rather than assumed: `ActiveSessionId.set` REFUSES a session
+      // the bridge is already deleting, and such a session keeps its replayed
+      // escalations for the seconds before its row goes. Focus then stays put,
+      // and the handover below would stamp the session still in focus with a
+      // destination picked for a different one.
+      if (ref.read(activeSessionIdProvider) != waiting) {
+        ref.read(revealHandlerTabProvider)?.call();
+        return;
+      }
+      ref.read(pendingWorkspaceViewProvider.notifier).set((
+        target: ref.read(selectedTargetProvider),
+        value: WorkspaceView.handler,
+      ));
     }
 
     // A NEEDS YOU pill is a call to action, so it navigates to the Handler
@@ -411,7 +463,7 @@ class HandlerHeaderControl extends ConsumerWidget {
             cursor: SystemMouseCursors.click,
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: () => ref.read(revealHandlerTabProvider)?.call(),
+              onTap: openHandler,
               child: AbChip.system(label: pillLabel, color: pillColor),
             ),
           )
