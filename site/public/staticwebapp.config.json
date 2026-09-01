@@ -12,6 +12,7 @@
     { "route": "/og/*", "headers": { "Cache-Control": "public, max-age=86400" } }
   ],
   "mimeTypes": {
+    ".txt": "text/plain",
     ".webmanifest": "application/manifest+json",
     ".svg": "image/svg+xml"
   }

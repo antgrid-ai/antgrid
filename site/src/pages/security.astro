@@ -1,0 +1,397 @@
+---
+import { Icon } from "astro-icon/components";
+import Base from "../layouts/Base.astro";
+import Chip from "../components/ui/Chip.astro";
+import Eyebrow from "../components/ui/Eyebrow.astro";
+import Readout from "../components/ui/Readout.astro";
+import { links } from "../config";
+
+// Written for someone deciding whether to run this on a work machine, so it
+// leads with mechanism and puts the source links above the fold: the page is
+// only worth anything to a reader who does not take its word for it. Two rules
+// hold the whole file together — every claim here is one the public repository
+// proves, and no strong claim ships without the limit that bounds it in the
+// same block. A sentence that cannot be traced to source does not go on this
+// page, and a gap is never written as if it were a feature.
+//
+// Colour discipline (see Readout.astro and Eyebrow.astro): amber means a human
+// is needed, so the gaps below deliberately do NOT use it — they are facts, not
+// alerts. Signal stays on the outbound source links, which are the one thing on
+// the page a reader is meant to act on.
+
+const relayHolds = [
+  { it: "Your account id", why: "taken from the verified token — it is the routing key" },
+  { it: "Device ids", why: "one per machine, one per app slot" },
+  { it: "The device name in the hello frame", why: "on a machine this defaults to its OS hostname" },
+  { it: "Each device's Ed25519 public key", why: "and its connection epoch" },
+  { it: "The licence credential id presented", why: "kept so a revocation can find the socket" },
+  { it: "Your IP address", why: "in memory only, for per-IP connection caps and rate limits" },
+  { it: "The Host header of the upgrade", why: "rebuilt into the signature body so a hello cannot be replayed elsewhere" },
+  { it: "The hello timestamp and nonce", why: "for replay rejection and equal-epoch arbitration" },
+  { it: "Connect time and last-seen time", why: "per open connection" },
+  { it: "Who is sending to whom", why: "the destination in each frame's cleartext route header" },
+  { it: "Which channel a frame is on", why: "control or preview — it keys the rate-limit bucket" },
+  { it: "The size and timing of every frame", why: "and its kind byte, forwarded without interpretation" },
+  { it: "Which of your devices are online", why: "and it tells your other live connections" },
+  { it: "Push routing", why: "the destination token and provider transit the relay" },
+  { it: "Device ids in operational logs", why: "a ping timeout names the device it dropped" },
+];
+
+const relayNeverHolds = [
+  { it: "Message payloads", why: "sealed on the sending device" },
+  { it: "The stream envelope inside them", why: "including stream ids" },
+  { it: "Project names and project ids", why: "" },
+  { it: "File paths and file contents", why: "" },
+  { it: "Terminal output", why: "" },
+  { it: "Your prompts and the agent's replies", why: "" },
+  { it: "The text of a push notification", why: "it forwards a sealed blob and a placeholder" },
+];
+
+const gaps = [
+  {
+    title: "No second factor.",
+    body: "Sign-in is single factor: an emailed magic link, GitHub, Google, or email and password. There is no TOTP, no passkey and no hardware-key support. The primary path is the magic link, which has no password to steal, and a password set on an unverified address is dropped as soon as someone proves that address another way.",
+  },
+  {
+    title: "No audit, no penetration test, no certification.",
+    body: "What exists is a published protocol specification, cross-language test vectors that both implementations must pass, and a security policy. None of those is an external review, and we are not going to describe them as one. We hold no SOC 2 report and no ISO certification, and this page makes no compliance claim of any kind.",
+  },
+  {
+    title: "Telemetry is on by default.",
+    body: "It is opt-out, in app settings. Events carry no account id, no device id and no content — an event name, your platform, the app version, and a random install-scoped id that goes only to our own backend and never to the analytics host. Switching it off stops new events and discards anything still queued; crash reporting follows the same toggle and picks the change up at the next launch.",
+  },
+  {
+    title: "Crash reports are scrubbed on the device, not on receipt.",
+    body: "File paths are redacted throughout a report before it is sent, and raw source lines and local variables are dropped rather than redacted. That is a scrubber, and a scrubber is a best effort against a stack trace it has not seen before.",
+  },
+  {
+    title: "Denial of service is out of scope.",
+    body: "There is per-IP and per-channel rate limiting, but it protects the relay, not your availability. A rate-limited frame is dropped unrecoverably and only the sender is told. Do not read it as an uptime guarantee.",
+  },
+  {
+    title: "A machine that is already compromised is out of scope.",
+    body: "Physical access, a malicious local user, and an attacker who already has your shell are all outside what the bridge defends against. That user already has everything your agent has.",
+  },
+];
+
+const sources = [
+  { label: "Repository", href: links.repo, note: "the whole product, source-available" },
+  { label: "SECURITY.md", href: links.securityPolicyFile, note: "scope, reporting, what to expect" },
+  { label: "packages/antgrid_relay_client", href: links.relayClient, note: "the client-side encryption, Apache-2.0" },
+  { label: "packages/antgrid-wire", href: links.wirePackage, note: "the wire protocol, Apache-2.0" },
+  { label: "docs/protocol/e2e-handshake.md", href: links.handshakeSpec, note: "the handshake, specified to the byte" },
+  { label: "e2e-handshake-vectors.json", href: links.handshakeVectors, note: "the vectors both implementations must pass" },
+];
+---
+<Base
+  title="Security — antgrid"
+  description="The architecture behind antgrid's encryption, exactly what the relay can and cannot see, and an honest list of what does not exist yet."
+  path="/security"
+>
+  <main>
+    <section class="border-b border-edge-inner bg-well">
+      <div class="mx-auto max-w-shell px-6 py-16">
+        <Eyebrow class="mb-5">Security</Eyebrow>
+        <h1 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">What runs where, and who can reach it.</h1>
+        <p class="mb-4 max-w-2xl text-lede text-muted">
+          antgrid runs your coding agents on your own machines and carries your traffic to your phone through a relay that holds no key to it. This page is the architecture, not a set of assurances — every claim below is one you can check in the public repository, and every claim that has a limit is printed next to it.
+        </p>
+        <p class="mb-8 max-w-2xl text-note text-muted2">
+          If you are evaluating this for a work machine, the three sections that matter are <span class="text-ink2">what the relay sees</span>, <span class="text-ink2">what has to be true before a phone can drive a machine</span>, and <span class="text-ink2">what doesn't exist yet</span>. Nothing here is a compliance statement.
+        </p>
+        <div class="flex flex-wrap gap-x-6 gap-y-2.5">
+          {sources.slice(0, 3).map((s) => (
+            <a href={s.href} class="group inline-flex items-center gap-1.5 font-mono text-meta text-signal2 hover:text-signal">
+              <Icon name="tabler:arrow-up-right" class="shrink-0" width="13" height="13" />
+              {s.label}
+            </a>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section id="wire" class="reveal mx-auto max-w-shell px-6 py-20">
+      <Eyebrow class="mb-5">The wire</Eyebrow>
+      <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">The relay forwards bytes it holds no key for.</h2>
+      <p class="mb-4 max-w-2xl text-lede text-muted">
+        Traffic between your devices and your machines is end-to-end encrypted. Keys are made on the two devices, and the relay is never given one.
+      </p>
+
+      <div class="grid items-start gap-8 md:grid-cols-2">
+        <Readout source="app ⇄ machine · handshake" state="sealed" label="mutual auth">
+          <ol class="flex flex-col gap-2.5 p-4 md:p-5">
+            <li class="font-mono text-row text-ink2">
+              <span class="text-faint">1 </span>Both sides generate an ephemeral X25519 keypair, fresh for this connection, and exchange the public halves.
+            </li>
+            <li class="font-mono text-row text-ink2">
+              <span class="text-faint">2 </span>Both sign a canonical transcript with their long-term Ed25519 identity key. The transcript binds both device identities, both ephemeral public keys, a 32-byte fresh nonce, the machine binding and the protocol version.
+            </li>
+            <li class="font-mono text-row text-ink2">
+              <span class="text-faint">3 </span>Each side verifies the other's signature against the key it already holds for that device. A key exchange someone tampered with in transit produces no signature that verifies.
+            </li>
+            <li class="font-mono text-row text-ink2">
+              <span class="text-faint">4 </span>Both sides check an HMAC key-confirmation tag, compared in constant time. No application data is sent or accepted before that passes.
+            </li>
+            <li class="font-mono text-row text-ink2">
+              <span class="text-faint">5 </span>Transport is AES-256-GCM, with a separate key for each direction.
+            </li>
+          </ol>
+        </Readout>
+
+        <div>
+          <p class="mb-4 max-w-xl text-note leading-relaxed text-muted">
+            Because the session keys are ephemeral, a long-term signing key stolen later does not decrypt sessions that already happened. Session keys live in memory for the life of one connection, are never written to disk, and every teardown path overwrites their buffers.
+          </p>
+          <div class="mb-5 border-l-2 border-edge-emph pl-4">
+            <p class="mb-1.5 font-mono text-marker uppercase tracking-[0.14em] text-faint">Limit</p>
+            <p class="max-w-xl text-note leading-relaxed text-muted2">
+              That overwrite is best effort. Both implementations run in garbage-collected runtimes, so residual key material in a process dump is expected and is not treated as a vulnerability.
+            </p>
+          </div>
+          <div class="mb-5 border-l-2 border-edge-emph pl-4">
+            <p class="mb-1.5 font-mono text-marker uppercase tracking-[0.14em] text-faint">Scope</p>
+            <p class="max-w-xl text-note leading-relaxed text-muted2">
+              This covers app-to-machine traffic that crosses the network. The desktop app driving the machine it is running on does not use this channel at all: it talks to its own bridge over a loopback socket on 127.0.0.1, authenticated by a per-process token compared in constant time. That traffic never leaves the machine. The file carrying that token is written owner-only on POSIX, as are the machine's device inventory, its phone list, its remote-access switch and its session records.
+            </p>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <Chip>ephemeral X25519 per connection</Chip>
+            <Chip>Ed25519 transcript signatures</Chip>
+            <Chip>AES-256-GCM, one key per direction</Chip>
+            <Chip>constant-time key confirmation</Chip>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="relay" class="reveal border-y border-edge-inner bg-well">
+      <div class="mx-auto max-w-shell px-6 py-20">
+        <Eyebrow class="mb-5">The relay</Eyebrow>
+        <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">What the relay does see.</h2>
+        <p class="mb-8 max-w-2xl text-lede text-muted">
+          Zero-knowledge is a claim about content, and only about content. Everything the relay needs in cleartext to admit a socket and route a frame, it has. Here is that list in full, beside the list of what it never holds.
+        </p>
+
+        <div class="grid items-start gap-3.5 md:grid-cols-2">
+          <Readout source="in cleartext at the relay" state="readable" label="metadata">
+            <ul class="flex flex-col gap-2 p-4 md:p-5">
+              {relayHolds.map((r) => (
+                <li class="border-b border-edge-inner pb-2 last:border-0 last:pb-0">
+                  <span class="font-mono text-row text-ink2">{r.it}</span>
+                  <span class="ml-1.5 font-mono text-marker text-muted2">{r.why}</span>
+                </li>
+              ))}
+            </ul>
+          </Readout>
+
+          <Readout source="never at the relay" state="sealed" label="ciphertext" tone="well">
+            <ul class="flex flex-col gap-2 p-4 md:p-5">
+              {relayNeverHolds.map((r) => (
+                <li class="border-b border-edge-inner pb-2 last:border-0 last:pb-0">
+                  <span class="font-mono text-row text-ink2">{r.it}</span>
+                  {r.why && <span class="ml-1.5 font-mono text-marker text-muted2">{r.why}</span>}
+                </li>
+              ))}
+            </ul>
+            <Fragment slot="foot">
+              <span class="flex items-start gap-2">
+                <Icon name="tabler:database-off" class="mt-0.5 shrink-0 text-faint" width="13" height="13" />
+                <span>no database, no file, no queue anywhere in the relay — an entry exists only while a socket is open</span>
+              </span>
+            </Fragment>
+          </Readout>
+        </div>
+
+        <div class="mt-9 grid gap-x-10 gap-y-6 md:grid-cols-2">
+          <div>
+            <h3 class="mb-2 text-kicker font-medium text-ink">Routing</h3>
+            <p class="max-w-xl text-note leading-relaxed text-muted">
+              The relay routes only between devices that belong to the same account, and that check runs fresh on every frame. It is the only routing authorization there is. A blocked route and an offline device get the identical answer, so the relay cannot be used to discover which of your machines are up, and presence is announced only to other live connections on your own account.
+            </p>
+          </div>
+          <div>
+            <h3 class="mb-2 text-kicker font-medium text-ink">Admission</h3>
+            <p class="max-w-xl text-note leading-relaxed text-muted">
+              Every connection is admitted by a single signed hello frame, verified in a fixed order: schema, clock window, Ed25519 signature over a body that binds the relay hostname, replay cache, licence, then connection arbitration. Nothing is queued for a device that is not connected — a frame addressed to one is refused and dropped.
+            </p>
+          </div>
+          <div>
+            <h3 class="mb-2 text-kicker font-medium text-ink">Push notifications</h3>
+            <p class="max-w-xl text-note leading-relaxed text-muted">
+              The notification body is sealed to your phone's own key on the machine — ephemeral X25519, HKDF, AES-256-GCM — before it ever reaches the relay, and the relay hands Apple or Google a generic placeholder that your phone replaces once it decrypts. Apple and Google see delivery metadata and an opaque blob. The destination push token and provider do transit the relay, which is why they are in the list above.
+            </p>
+          </div>
+          <div>
+            <h3 class="mb-2 text-kicker font-medium text-ink">What we are still trusted with</h3>
+            <p class="max-w-xl text-note leading-relaxed text-muted">
+              This design takes the relay out of the trust boundary. It does not take our account service out of it. A relay operator who tampers with the key exchange cannot produce a signature your device accepts — but your phone learns a machine's Ed25519 identity key from your account's device inventory, served by app.antgrid.ai, so a compromised account service could hand a device that has not yet cached the real key one of its choosing. The relay is not trusted with identity. The account service is.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="remote-access" class="reveal mx-auto max-w-shell px-6 py-20">
+      <Eyebrow class="mb-5">Remote access</Eyebrow>
+      <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Three things have to be true before a phone can drive a machine.</h2>
+      <p class="mb-8 max-w-2xl text-lede text-muted">
+        They are independent and they are checked together. Any one of them false and the command does not run.
+      </p>
+
+      <div class="mb-8 grid gap-3.5 md:grid-cols-3">
+        <div class="rounded-lg border border-edge bg-panel p-5">
+          <p class="mb-2 font-mono text-marker text-faint">01</p>
+          <p class="mb-2 text-note font-medium text-ink">The device is on your signed-in account.</p>
+          <p class="text-note leading-relaxed text-muted2">
+            A device is admitted from your account's own inventory — there is no pairing code or QR ceremony to intercept — and its Ed25519 identity must verify against the handshake transcript before anything proceeds.
+          </p>
+        </div>
+        <div class="rounded-lg border border-edge bg-panel p-5">
+          <p class="mb-2 font-mono text-marker text-faint">02</p>
+          <p class="mb-2 text-note font-medium text-ink">That machine's remote-access switch is on.</p>
+          <p class="text-note leading-relaxed text-muted2">
+            Off on a fresh install. One boolean for the whole machine, read live at every check, so turning it off takes effect immediately without restarting anything.
+          </p>
+        </div>
+        <div class="rounded-lg border border-edge bg-panel p-5">
+          <p class="mb-2 font-mono text-marker text-faint">03</p>
+          <p class="mb-2 text-note font-medium text-ink">The project is one that machine already knows.</p>
+          <p class="text-note leading-relaxed text-muted2">
+            A shape check plus a lookup in that machine's own catalog of projects bounds which project a remote device is allowed to name.
+          </p>
+        </div>
+      </div>
+
+      <p class="mb-6 max-w-2xl text-note leading-relaxed text-muted">
+        With the switch off, a remote device sees nothing: every inbound verb is dropped at a single chokepoint, the preview and HTTP tunnel is gated separately because it bypasses that path, and outbound streaming stops at the send.
+      </p>
+
+      <div class="grid gap-x-10 gap-y-5 md:grid-cols-3">
+        <div class="border-l-2 border-edge-emph pl-4">
+          <p class="mb-1.5 font-mono text-marker uppercase tracking-[0.14em] text-faint">Not per-project permissions</p>
+          <p class="text-note leading-relaxed text-muted2">
+            The switch is machine-wide. The project catalog is a bound on what a remote device may name, not a grant you issue per project.
+          </p>
+        </div>
+        <div class="border-l-2 border-edge-emph pl-4">
+          <p class="mb-1.5 font-mono text-marker uppercase tracking-[0.14em] text-faint">A known device is identity, not permission</p>
+          <p class="text-note leading-relaxed text-muted2">
+            The machine's phone list holds labels, push routing and last-seen. Removing a phone from it revokes nothing. Revocation is deleting the device on your account — which closes its live relay sockets immediately — or turning the machine's switch off.
+          </p>
+        </div>
+        <div class="border-l-2 border-edge-emph pl-4">
+          <p class="mb-1.5 font-mono text-marker uppercase tracking-[0.14em] text-faint">The desktop is exempt by design</p>
+          <p class="text-note leading-relaxed text-muted2">
+            The app driving its own machine goes over the loopback socket and never depends on the relay, so it keeps working with the switch off.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="agent-traffic" class="reveal border-y border-edge-inner bg-well">
+      <div class="mx-auto max-w-shell px-6 py-20">
+        <Eyebrow class="mb-5">Your agents</Eyebrow>
+        <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Your agents talk to their providers, not to us.</h2>
+        <p class="mb-4 max-w-2xl text-lede text-muted">
+          Coding agents run on your machine as ordinary local processes, launched from your own environment, and reach their model providers directly under your own logins. antgrid operates no model endpoint and holds no model-provider credentials — there is no provider API key anywhere in the bridge, the relay or the web service.
+        </p>
+        <p class="mb-8 max-w-2xl text-note leading-relaxed text-muted">
+          That is not the same sentence as "your code never leaves your machine", and we are not going to write that one. Your agent sends your code to its provider; that is what it is for. The claim is that antgrid adds no hop of its own and no key of its own.
+        </p>
+
+        <div class="grid items-start gap-3.5 md:grid-cols-2">
+          <div class="rounded-lg border border-edge bg-panel p-5">
+            <h3 class="mb-2 text-kicker font-medium text-ink">Handler runs your agent again</h3>
+            <p class="mb-3 text-note leading-relaxed text-muted">
+              When you arm Handler on a session, it runs the agent you already picked for that session headlessly, with read-only tools over that working tree. So working-tree content and transcript excerpts reach the vendor you already chose, on your own account, without a fresh action from you for each call.
+            </p>
+            <p class="text-note leading-relaxed text-muted2">
+              It never borrows a different vendor's agent to supervise a session, and those runs are kept out of your own session history.
+            </p>
+          </div>
+          <div class="rounded-lg border border-edge bg-panel p-5">
+            <h3 class="mb-2 text-kicker font-medium text-ink">antgrid does not sandbox your agent</h3>
+            <p class="mb-3 text-note leading-relaxed text-muted">
+              An agent runs with your environment and your permissions, and an agent you have configured to skip approvals will skip them. Handler's destructive-path floor is an advisory floor, not a sandbox.
+            </p>
+            <p class="text-note leading-relaxed text-muted2">
+              In an isolated session, the branch's own setup steps run as shell lines — the same trust class as the commands you run yourself. Escapes out of the checkout path are refused, but the commands themselves are branch content.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="gaps" class="reveal mx-auto max-w-shell px-6 py-20">
+      <Eyebrow class="mb-5">Honest inventory</Eyebrow>
+      <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">What doesn't exist yet.</h2>
+      <p class="mb-8 max-w-2xl text-lede text-muted">
+        Every item here is something a reasonable reviewer will ask for and we do not have. None of it is written as a feature.
+      </p>
+      <div class="grid gap-x-10 gap-y-6 md:grid-cols-2">
+        {gaps.map((g) => (
+          <div class="border-t border-edge-inner pt-4">
+            <p class="mb-1.5 text-note font-medium text-ink">{g.title}</p>
+            <p class="max-w-xl text-note leading-relaxed text-muted">{g.body}</p>
+          </div>
+        ))}
+      </div>
+      <p class="mt-8 max-w-2xl text-note text-muted2">
+        What we collect, and for how long, is set out on the <a href={links.privacy} class="text-signal2 hover:text-signal">privacy page</a>.
+      </p>
+    </section>
+
+    <section id="verify" class="reveal border-y border-edge-inner bg-well">
+      <div class="mx-auto max-w-shell px-6 py-20">
+        <Eyebrow class="mb-5">Verify it</Eyebrow>
+        <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Check the crypto claims yourself.</h2>
+        <p class="mb-4 max-w-2xl text-lede text-muted">
+          The handshake is specified in public down to the byte layout of the signed transcript, with cross-language test vectors that both the TypeScript and the Dart implementation must pass. The wire protocol and the client-side encryption are Apache-2.0 and carry their own licence files, so you can read, reimplement and publish work built on them without asking us.
+        </p>
+        <p class="mb-8 max-w-2xl text-note leading-relaxed text-muted2">
+          The rest of antgrid is source-available under the Elastic License 2.0. That is not OSI-approved open source and we do not call it that.
+        </p>
+        <ul class="grid gap-x-10 gap-y-3 md:grid-cols-2">
+          {sources.map((s) => (
+            <li class="border-t border-edge-inner pt-3">
+              <a href={s.href} class="inline-flex items-center gap-1.5 font-mono text-row text-signal2 hover:text-signal">
+                <Icon name="tabler:arrow-up-right" class="shrink-0" width="13" height="13" />
+                {s.label}
+              </a>
+              <p class="mt-1 text-meta text-muted2">{s.note}</p>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+
+    <section id="report" class="reveal mx-auto max-w-shell px-6 py-20">
+      <Eyebrow class="mb-5">Disclosure</Eyebrow>
+      <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Reporting a vulnerability.</h2>
+      <p class="mb-4 max-w-2xl text-lede text-muted">
+        If you can read traffic the relay is not supposed to read, or run something on a machine without its owner's account and consent, we want to hear about it before anyone else does. Please don't open a public issue, discussion or pull request for it.
+      </p>
+      <div class="mb-6 grid gap-3.5 md:grid-cols-2">
+        <div class="rounded-lg border border-edge bg-panel p-5">
+          <p class="mb-2 font-mono text-marker uppercase tracking-[0.14em] text-faint">Email</p>
+          <a href={links.securityEmail} class="font-mono text-row text-signal2 hover:text-signal">contact@radhaai.com</a>
+          <p class="mt-2 text-note leading-relaxed text-muted2">Put "Security" in the subject line.</p>
+        </div>
+        <div class="rounded-lg border border-edge bg-panel p-5">
+          <p class="mb-2 font-mono text-marker uppercase tracking-[0.14em] text-faint">GitHub private advisory</p>
+          <a href={links.securityAdvisory} class="inline-flex items-center gap-1.5 font-mono text-row text-signal2 hover:text-signal">
+            <Icon name="tabler:arrow-up-right" class="shrink-0" width="13" height="13" />
+            Report a vulnerability
+          </a>
+          <p class="mt-2 text-note leading-relaxed text-muted2">Preferred, and it keeps the thread on the repository.</p>
+        </div>
+      </div>
+      <p class="mb-4 max-w-2xl text-note leading-relaxed text-muted">
+        We acknowledge reports within three business days, tell you what we found, keep you updated while we fix it, and credit you in the release notes if you want it. We ask for a reasonable window before public disclosure. Please test against your own account and your own machines.
+      </p>
+      <p class="max-w-2xl text-note text-muted2">
+        What is in scope and what is not is listed in <a href={links.securityPolicyFile} class="text-signal2 hover:text-signal">SECURITY.md</a>. Machine-readable contact details are at <a href="/.well-known/security.txt" class="text-signal2 hover:text-signal">/.well-known/security.txt</a>.
+      </p>
+    </section>
+  </main>
+</Base>

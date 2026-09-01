@@ -1,5 +1,11 @@
 export const SITE_URL = import.meta.env.PUBLIC_SITE_URL ?? "https://antgrid.ai";
 export const APP_URL = import.meta.env.PUBLIC_APP_URL ?? "https://app.antgrid.ai";
+// The web service's API origin. Same deployment as APP_URL today, but declared
+// separately because it is overridden for a different reason: pointing a preview
+// build's waitlist POST at a local web server must not also move sign-in and
+// checkout off production. The site is a static build on another origin, so
+// anything under here is a cross-origin request the web service must allow.
+export const WEB_URL = import.meta.env.PUBLIC_WEB_URL ?? "https://app.antgrid.ai";
 
 // Public releases repo. `releases/latest/download/<asset>` redirects to the
 // newest stable release's asset of that exact filename, so these URLs never
@@ -21,6 +27,19 @@ export const links = {
   downloadWindows: "https://get.microsoft.com/installer/download/9N0P7ZRL4D9W?referrer=appbadge&cid=site",
   downloadLinux: `${RELEASES_URL}/releases/latest/download/antgrid-linux.AppImage`,
   support: "/support",
+  security: "/security",
+  // Verification surfaces for /security. `HEAD` rather than a branch name:
+  // GitHub resolves it to whatever the repo's default branch is, so renaming
+  // that branch never turns these into 404s under a page whose whole argument
+  // is that the reader can go and check.
+  repo: RELEASES_URL,
+  securityPolicyFile: `${RELEASES_URL}/blob/HEAD/SECURITY.md`,
+  securityAdvisory: `${RELEASES_URL}/security/advisories/new`,
+  handshakeSpec: `${RELEASES_URL}/blob/HEAD/docs/protocol/e2e-handshake.md`,
+  handshakeVectors: `${RELEASES_URL}/blob/HEAD/evals/fixtures/e2e-handshake-vectors.json`,
+  relayClient: `${RELEASES_URL}/tree/HEAD/packages/antgrid_relay_client`,
+  wirePackage: `${RELEASES_URL}/tree/HEAD/packages/antgrid-wire`,
+  securityEmail: "mailto:contact@radhaai.com?subject=Security",
   // Enterprise leads go straight to a human. Pointing them at /support put a
   // budget holder on the troubleshooting page; the subject line sorts them out
   // of general support mail on arrival.
@@ -33,5 +52,8 @@ export const links = {
   terms: "/terms",
   refunds: "/refunds",
   company: "https://radhaai.com",
+  // Interest capture for founding pricing. Posted to by the inline script in
+  // WaitlistCta.astro — never rendered as an href, since a GET on it does nothing.
+  waitlist: `${WEB_URL}/api/waitlist`,
   checkout: (planId: string) => `${APP_URL}/checkout?planId=${planId}`,
 };
