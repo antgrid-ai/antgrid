@@ -70,17 +70,19 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
           type, where the default wrap strands a two-word tail ("stuck since 2am.",
           "machine.") on its own line at some widths and not others. A hard <br />
           fixes the one width you tested and makes narrow viewports worse. */}
-      <span class="mb-3 block max-w-2xl text-kicker text-muted">
-        <span class="inline-block">Agents on your laptop, your workstation, a cloud box.</span>{" "}
+      <span class="mb-3 block max-w-4xl text-kicker text-muted">
+        <span class="inline-block">Claude Code on your laptop, Codex on your workstation, another on a cloud box.</span>{" "}
         <span class="inline-block">One's been stuck since 2am.</span>
       </span>
-      {/* The headline claims the overview, so the tension has to sit in the kicker
-          above it — on its own "One screen." is a watching claim, and the product
-          acts. The stuck agent is what the lede's proof loop then answers. */}
+      {/* The kicker carries scope — every agent, every machine — so the headline
+          is free to carry the wedge, and the ProofCard below is its evidence. It
+          used to claim the overview ("One screen."), which is a watching claim
+          for a product that acts, and left the argument the card was making
+          unstated in anything larger than body copy. Fleet.astro still owns the
+          overview claim; it is the section that proves it. */}
       <span class="block font-display text-display font-semibold text-ink">
-        <span class="inline-block">Every agent.</span>{" "}
-        <span class="inline-block">Every machine.</span>{" "}
-        <span class="inline-block">One screen.</span>
+        <span class="inline-block">Your agent says it's done.</span>{" "}
+        <span class="inline-block">Make it prove it.</span>
       </span>
     </h1>
 
@@ -88,20 +90,26 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
         rather than pinned to the shell's edges — pushed apart, the buttons read
         as stranded rather than as a deliberate second column. */}
     <div class="grid gap-x-12 gap-y-7 md:grid-cols-[minmax(0,35rem)_minmax(0,21rem)]">
-      {/* Carries the proof loop, because the headline no longer does — it claims
-          the overview instead. Does not re-open on "your agents run on your own
-          machines": the kicker and headline directly above have just said that,
-          and the paragraph runs long on a phone as it is. */}
+      {/* Carries the mechanism behind the headline's claim — the headline asserts
+          the gate, this says how it closes. Names "your agents" rather than
+          opening on "They": the nearest noun above is now the singular "your
+          agent" in the headline, so the pronoun read as a reference to it. */}
       <p class="text-lede text-muted">
-        They run on your own machines — your repos, your branches, your existing subscriptions. Hand antgrid the sequence in plain text: it reads every result, refuses a "done" that arrives with no test output, exit code or diff, and moves to the next phase.
+        Your agents run on your own machines — your repos, your branches, your existing subscriptions. Hand antgrid the sequence in plain text: it reads every result, refuses a "done" that arrives with no test output, exit code or diff, and moves to the next phase.
       </p>
       <div>
         <div class="flex flex-wrap items-center gap-3">
           <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
           <Button href={links.getStarted} variant="outline">Setup guide</Button>
         </div>
-        <p class="mt-4.5 text-meta leading-relaxed text-muted2">
-          No VPN or port forwarding · End-to-end encrypted · Desktop out now, iOS &amp; Android coming to the App Store &amp; Play.
+        {/* Two lines because there are two jobs here: the guarantees are a
+            dot-separated list of properties, availability is a sentence. Run
+            together they made a four-clause line that wrapped to three in this
+            21rem column and split "iOS &" from "Android" across rows. */}
+        <p class="mt-4.5 text-meta leading-relaxed text-muted2">No VPN or port forwarding · End-to-end encrypted</p>
+        <p class="mt-1.5 text-meta leading-relaxed text-muted2">
+          <span class="inline-block">Desktop out now on Windows, macOS &amp; Linux.</span>{" "}
+          <span class="inline-block">iOS &amp; Android in private beta — <a href={links.mobileInvite} class="text-signal2 hover:text-signal">request an invite</a>.</span>
         </p>
       </div>
     </div>
