@@ -175,6 +175,20 @@ final sessionStartQueuedProvider = Provider.autoDispose.family<bool, String>((
 /// `initialPrompt`, and it replaces the queued one the user actually typed.
 bool sessionStartQueued(SessionSetup? setup) => setup?.pendingStart ?? false;
 
+/// What to tell the user when a setup verb is refused.
+///
+/// Shared by the banner and the provisioning pane: both offer `skip` under the
+/// same label, and a refusal that read differently depending on which control
+/// the user happened to press would describe the same bridge answer twice.
+///
+/// `skip` is worded for what it does — release the queued agent — rather than
+/// for its wire name: the run it is named after keeps going either way.
+String sessionSetupFailureCopy(SessionSetupAction verb) => switch (verb) {
+  SessionSetupAction.skip => "Couldn't start the agent",
+  SessionSetupAction.cancel => "Couldn't stop setup",
+  SessionSetupAction.rerun => "Couldn't start setup",
+};
+
 /// Sends `session:setup` for [sessionId] in [entryId] and reports what came
 /// back.
 ///

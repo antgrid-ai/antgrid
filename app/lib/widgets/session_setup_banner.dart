@@ -95,7 +95,15 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
       return const SizedBox.shrink();
     }
 
-    final expanded = ui.expandedSessionId == sessionId;
+    // The pane below is already this same transcript, full height, while a
+    // start is queued behind the run (`_ProvisioningSessionState`), so the
+    // strip's own two copies of it stand down — derived off the same wire field
+    // rather than the banner and the pane having to know about each other.
+    // Folded into `expanded` so the log, the tail and the disclosure can never
+    // disagree about it; a rerun re-queues a start, and the expansion set is
+    // per session and outlives the run that was expanded.
+    final queued = sessionStartQueued(setup);
+    final expanded = ui.expandedSessionId == sessionId && !queued;
     if (phase == SessionSetupPhase.done && !expanded) {
       ref
           .read(sessionSetupBannerUiProvider.notifier)
@@ -107,7 +115,7 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     // While the log is open the tail is on screen in full; sampling it twice
     // would only pay the formatter again for a line the user is already
     // reading.
-    _syncTail(running && !expanded ? terminalId : null, runKey);
+    _syncTail(running && !expanded && !queued ? terminalId : null, runKey);
 
     final colors = context.antgrid;
     final tone = switch (phase) {
@@ -124,7 +132,7 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
         AbInlineBanner(
           text: _headline(setup, phase),
           color: tone,
-          trailing: _buildActions(sessionId, runKey, phase, expanded),
+          trailing: _buildActions(sessionId, runKey, phase, expanded, queued),
         ),
         if (running)
           AbProgressRule(
@@ -170,12 +178,15 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     String runKey,
     SessionSetupPhase phase,
     bool expanded,
+    bool queued,
   ) {
     final action = switch (phase) {
-      // Skip releases the queued agent start and leaves the run going — the
-      // "the deps are already cached" case, which is the common one.
+      // Named for what it does rather than for the `skip` verb underneath: it
+      // releases the queued agent start and leaves the run going — the "the
+      // deps are already cached" case, which is the common one. Nothing about
+      // the run itself is skipped, which is what the old label claimed.
       SessionSetupPhase.running => (
-        label: 'Skip',
+        label: 'Start agent now',
         verb: SessionSetupAction.skip,
       ),
       SessionSetupPhase.failed => (
@@ -206,13 +217,17 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
           ),
         ],
         const SizedBox(width: AbTokens.space4),
-        AbIconButton(
-          icon: expanded ? AbIcons.chevronDown : AbIcons.chevronRight,
-          tooltip: expanded ? 'Hide setup log' : 'View setup log',
-          onTap: () => ref
-              .read(sessionSetupBannerUiProvider.notifier)
-              .toggleExpanded(sessionId, runKey),
-        ),
+        // No disclosure while the pane below is already the transcript: the
+        // chevron would mount a SECOND view of the same terminal directly above
+        // the first.
+        if (!queued)
+          AbIconButton(
+            icon: expanded ? AbIcons.chevronDown : AbIcons.chevronRight,
+            tooltip: expanded ? 'Hide setup log' : 'View setup log',
+            onTap: () => ref
+                .read(sessionSetupBannerUiProvider.notifier)
+                .toggleExpanded(sessionId, runKey),
+          ),
         // A run still going has nothing to dismiss to — the banner is the only
         // account of why the agent has not started yet.
         if (phase != SessionSetupPhase.running)
@@ -308,7 +323,10 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
           // has logged it either way, and a refusal narrated over a DIFFERENT
           // session's banner reads as that session having failed.
           if (container.read(activeSessionIdProvider) != sessionId) return;
-          showAbSnackBar(context, '${_failureCopy(verb)} — ${result.error}');
+          showAbSnackBar(
+            context,
+            '${sessionSetupFailureCopy(verb)} — ${result.error}',
+          );
         } finally {
           container
               .read(sessionSetupBannerUiProvider.notifier)
@@ -317,12 +335,6 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
       },
     );
   }
-
-  String _failureCopy(SessionSetupAction verb) => switch (verb) {
-    SessionSetupAction.skip => "Couldn't skip setup",
-    SessionSetupAction.cancel => "Couldn't stop setup",
-    SessionSetupAction.rerun => "Couldn't start setup",
-  };
 
   /// Starts, retargets or stops the tail sampler. Called from `build`, which
   /// only ever schedules a timer here — the sample itself lands on a later

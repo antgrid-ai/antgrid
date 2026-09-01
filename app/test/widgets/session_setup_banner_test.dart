@@ -138,16 +138,18 @@ void main() {
       await unmount(tester);
     });
 
-    // Skip is the common case ("the deps are cached") and it is the only thing
-    // on screen that explains why the agent has not started, so it must be
-    // reachable for the whole run.
-    testWidgets('offers Skip and the log, and refuses to be dismissed', (
+    // Releasing the agent is the common case ("the deps are cached") and it is
+    // the only thing on screen that explains why the agent has not started, so
+    // it must be reachable for the whole run. The disclosure is NOT: while a
+    // start is queued the terminal pane below is already this transcript, and
+    // the chevron would stack a second copy of it on the first.
+    testWidgets('offers the release and refuses to be dismissed', (
       tester,
     ) async {
       await pumpBanner(tester, _setup('running', pendingStart: true));
 
-      expect(find.text('Skip'), findsOneWidget);
-      expect(find.byTooltip('View setup log'), findsOneWidget);
+      expect(find.text('Start agent now'), findsOneWidget);
+      expect(find.byTooltip('View setup log'), findsNothing);
       expect(find.byTooltip('Dismiss'), findsNothing);
       await unmount(tester);
     });
@@ -184,6 +186,9 @@ void main() {
       );
       expect(find.byType(AbProgressRule), findsOneWidget);
       expect(find.byTooltip('Dismiss'), findsNothing);
+      // And the disclosure is back: the agent owns the pane now, so the strip
+      // is once more the only way to reach the run still holding the tree.
+      expect(find.byTooltip('View setup log'), findsOneWidget);
       await unmount(tester);
     });
   });
@@ -323,13 +328,13 @@ void main() {
       return transport;
     }
 
-    testWidgets('Skip sends session:setup for this session', (tester) async {
+    testWidgets('the release sends session:setup for this session', (tester) async {
       final transport = await pumpWired(
         tester,
         _setup('running', pendingStart: true),
       );
 
-      await tester.tap(find.text('Skip'));
+      await tester.tap(find.text('Start agent now'));
       await tester.pump();
       await tester.pump();
 
