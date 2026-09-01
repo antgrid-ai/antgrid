@@ -7,6 +7,8 @@ import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/providers/sessions.dart';
+import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/handler_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
@@ -146,6 +148,9 @@ Future<FakeAgentTransport> pumpLiveHandlerScreen(WidgetTester tester) async {
       projectSessionProvider.overrideWith((ref, id) async => projectSession),
       handlerServiceProvider.overrideWithValue(service),
       handlerStateProvider.overrideWith((ref) => service.stateStream),
+      // The screen narrows to the focused session, so without this every row
+      // the transport delivers for 't1' is filtered off the screen.
+      activeSessionIdProvider.overrideWith(() => ValueController('t1')),
     ],
   );
   addTearDown(container.dispose);
@@ -167,6 +172,7 @@ Future<void> pumpHandlerScreen(WidgetTester tester, HandlerState state) async {
     ProviderScope(
       overrides: [
         handlerStateProvider.overrideWith((ref) => Stream.value(state)),
+        activeSessionIdProvider.overrideWith(() => ValueController('t1')),
       ],
       child: const MaterialApp(home: Scaffold(body: HandlerScreen())),
     ),
@@ -233,6 +239,7 @@ void main() {
               ),
             ),
           ),
+          activeSessionIdProvider.overrideWith(() => ValueController('t1')),
         ],
         child: const MaterialApp(home: Scaffold(body: HandlerScreen())),
       ),
@@ -1236,19 +1243,18 @@ void main() {
       tester,
       stateWith(
         sessions: {
-          for (final id in ['t1', 't2'])
-            id: HandlerSessionState(
-              terminalId: id,
-              // The longest run-state word. It and the Armed chip are the
-              // status row's two fixed ends, so this is the widest that row is
-              // ever asked to be.
-              runState: HandlerRunState.needsYou,
-              pendingEscalations: 1,
-              armedAt: 1,
-              goal: 'ship it',
-              backlog: const [],
-              escalations: const [],
-            ),
+          't1': HandlerSessionState(
+            terminalId: 't1',
+            // The longest run-state word. It and the Armed chip are the status
+            // row's two fixed ends, so this is the widest that row is ever
+            // asked to be.
+            runState: HandlerRunState.needsYou,
+            pendingEscalations: 1,
+            armedAt: 1,
+            goal: 'ship it',
+            backlog: const [],
+            escalations: const [],
+          ),
         },
       ),
     );
@@ -1459,6 +1465,7 @@ void main() {
         ProviderScope(
           overrides: [
             handlerStateProvider.overrideWith((ref) => states.stream),
+            activeSessionIdProvider.overrideWith(() => ValueController('t1')),
           ],
           child: const MaterialApp(home: Scaffold(body: HandlerScreen())),
         ),
@@ -1498,14 +1505,9 @@ void main() {
     testWidgets('says nothing about undo when nothing is undoable', (
       tester,
     ) async {
-      // Including offers that belong to ANOTHER session: the count is scoped
-      // to the terminal the report names.
       await pumpHandlerScreen(
         tester,
-        const HandlerState.initial().copyWith(
-          wrapUps: [wrapUp(terminalId: 't2')],
-          snapshots: [snapshot('s1')],
-        ),
+        const HandlerState.initial().copyWith(wrapUps: [wrapUp()]),
       );
       expect(find.textContaining('can still be undone'), findsNothing);
       debugDefaultTargetPlatformOverride = null;
@@ -1519,7 +1521,7 @@ void main() {
           snapshots: [snapshot('s1')],
         ),
       );
-      final sessions = tester.getTopLeft(find.text('SESSIONS')).dy;
+      final sessions = tester.getTopLeft(find.text('SESSION')).dy;
       final wrapUps = tester.getTopLeft(find.text('WRAP-UP')).dy;
       final undo = tester.getTopLeft(find.text('UNDO')).dy;
       expect(sessions, lessThan(wrapUps));
@@ -1552,6 +1554,121 @@ void main() {
         find.text('Done: wire the codec. Failed: flush the cache'),
         findsOneWidget,
       );
+      debugDefaultTargetPlatformOverride = null;
+    });
+  });
+
+  group('the tab follows focus', () {
+    HandlerActivityRecord rec(String terminalId, String reason) =>
+        HandlerActivityRecord(
+          recordId: 'r-$terminalId',
+          at: 1,
+          terminalId: terminalId,
+          decision: 'handle',
+          reason: reason,
+        );
+
+    testWidgets('shows one session at a time, and swaps on a focus change', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      final container = ProviderContainer(
+        overrides: [
+          activeSessionIdProvider.overrideWith(() => ValueController('t1')),
+          handlerStateProvider.overrideWith(
+            (ref) => Stream.value(
+              stateWith(
+                sessions: {
+                  't1': sessionState('t1'),
+                  't2': sessionState('t2'),
+                },
+              ).copyWith(
+                activity: [
+                  rec('t1', 'answered the lint prompt'),
+                  rec('t2', 'answered the migration prompt'),
+                ],
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: Scaffold(body: HandlerScreen())),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.textContaining('answered the lint prompt'), findsOneWidget);
+      expect(find.textContaining('answered the migration prompt'), findsNothing);
+
+      container.read(activeSessionIdProvider.notifier).set('t2');
+      await tester.pump();
+
+      expect(find.textContaining('answered the lint prompt'), findsNothing);
+      expect(
+        find.textContaining('answered the migration prompt'),
+        findsOneWidget,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('an escalation with no session behind it yet still renders', (
+      tester,
+    ) async {
+      // The two arrive on separate streams, so a pushed escalation can land
+      // before the status frame that adds its session. Answering that with the
+      // arm copy hides a question the app has already raised a toast for.
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      await pumpHandlerScreen(
+        tester,
+        const HandlerState.initial().copyWith(
+          escalations: [
+            HandlerEscalation(
+              escalationId: 'e1',
+              terminalId: 't1',
+              question: 'may I force push?',
+              reasoning: 'r',
+              draftReply: 'd',
+              urgency: 'normal',
+              at: 1,
+            ),
+          ],
+        ),
+      );
+      expect(find.textContaining('Handler is off'), findsNothing);
+      expect(find.text('may I force push?'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('with nothing focused it offers the arm copy, not every '
+        'session at once', (tester) async {
+      // Never the project's whole state: falling back to it mid-switch would
+      // put two sessions' rows on a tab that says it shows one.
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            activeSessionIdProvider.overrideWith(
+              () => ValueController<String?>(null),
+            ),
+            handlerStateProvider.overrideWith(
+              (ref) => Stream.value(
+                stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+                  activity: [rec('t1', 'answered the lint prompt')],
+                ),
+              ),
+            ),
+          ],
+          child: const MaterialApp(home: Scaffold(body: HandlerScreen())),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.textContaining('Handler is off'), findsOneWidget);
+      expect(find.textContaining('answered the lint prompt'), findsNothing);
       debugDefaultTargetPlatformOverride = null;
     });
   });

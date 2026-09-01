@@ -38,30 +38,35 @@ class HandlerScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(handlerStateProvider).value;
-    return _body(context, ref, state);
+    return _body(context, ref, ref.watch(focusedSessionHandlerStateProvider));
   }
 
-  Widget _body(BuildContext context, WidgetRef ref, HandlerState? state) {
+  Widget _body(BuildContext context, WidgetRef ref, HandlerState state) {
     final p = context.antgrid;
 
     // Undo offers and wrap-up reports keep this screen alive after the last
     // disarm: a wrapped-up session is exactly when the force push it made at
     // 3am — and the account of what it did — get read.
-    if (state == null ||
-        (!state.anyArmed &&
-            state.snapshots.isEmpty &&
-            state.wrapUps.isEmpty)) {
+    //
+    // Escalations are in the test for a different reason: they arrive on their
+    // own stream, so a pushed one can land before the status frame that adds
+    // its session, and `anyArmed` alone would answer an unanswered question
+    // with the arm CTA.
+    if (!state.anyArmed &&
+        state.escalations.isEmpty &&
+        state.snapshots.isEmpty &&
+        state.wrapUps.isEmpty) {
       return const Padding(
         padding: EdgeInsets.all(AbTokens.space24),
         child: Center(
           child: AbEmptyState(
             icon: AbIcons.shield,
-            title: 'Handler is off',
+            title: 'Handler is off for this session',
             subtitle:
                 'Arm it with the shield at the end of the top bar. It then '
-                'watches that session, answers what it can, and escalates the '
-                'rest to you here.',
+                'watches this session, answers what it can, and escalates the '
+                'rest to you here. This tab answers for one session — '
+                'another that needs you is counted on its own agent header.',
           ),
         ),
       );
@@ -70,26 +75,15 @@ class HandlerScreen extends ConsumerWidget {
     final service = serviceWhenReady(ref, handlerServiceProvider);
     final container = ref.container;
 
-    final entries = {
-      for (final s in ref.watch(activeSessionsProvider)) s.id: s,
-    };
-    String nameOf(String terminalId) => entries[terminalId]?.name ?? terminalId;
+    // Watched for its subscription, not its value: `resolvedDefaultTool` below
+    // reads the SessionsService's current state directly, so without this the
+    // judge label on the session card would keep whatever it resolved to on
+    // first build.
+    ref.watch(activeSessionsProvider);
     // No catalog prediction here on purpose: every row on this screen is an
     // ARMED session, and the bridge's own per-session observability describes
     // its live mode and judge pick. The pre-arm guess belongs where nothing is
     // armed yet (the header's shield tooltip).
-
-    // Show which session a row belongs to only when the screen is actually
-    // mixing rows from more than one terminal — a single-session handler
-    // repeating the same label on every row is noise.
-    final distinctTerminals = <String>{
-      ...state.sessions.keys,
-      ...state.escalations.map((e) => e.terminalId),
-      ...state.activity.map((a) => a.terminalId),
-      ...state.snapshots.map((s) => s.terminalId),
-      ...state.wrapUps.map((w) => w.terminalId),
-    };
-    final showSessionLabels = distinctTerminals.length > 1;
 
     Future<void> answer(HandlerEscalation e) async {
       if (service == null) return;
@@ -152,18 +146,14 @@ class HandlerScreen extends ConsumerWidget {
     // decision card, plain row) and this is the only piece all three share, so
     // it is the only place the marker cannot be added to two of them and
     // forgotten on the third.
-    Widget meta(String terminalId, int at, {bool urgent = false}) => _RowMeta(
-      sessionName: showSessionLabels ? nameOf(terminalId) : null,
-      at: at,
-      p: p,
-      urgent: urgent,
-    );
+    Widget meta(int at, {bool urgent = false}) =>
+        _RowMeta(at: at, p: p, urgent: urgent);
 
     // The urgency test itself, once, for that same reason: spelled out at each
     // of the three call sites it is three chances to omit, and a fourth row
     // shape starts life without it.
     Widget escalationMeta(HandlerEscalation e) =>
-        meta(e.terminalId, e.at, urgent: e.urgency == 'high');
+        meta(e.at, urgent: e.urgency == 'high');
 
     return CustomScrollView(
       slivers: [
@@ -254,18 +244,17 @@ class HandlerScreen extends ConsumerWidget {
           ),
         ],
         if (state.sessions.isNotEmpty) ...[
-          // Never conditional on the session count. Section headers here are
-          // PINNED, so the band left standing over a headerless section is the
-          // previous one — drop this and a lone session card scrolls up under
-          // "NEEDS YOU", reading as an unanswered escalation.
-          _section('Sessions', state.sessions.length, p.textMuted, p),
+          // Section headers here are PINNED, so the band left standing over a
+          // headerless section is the previous one — drop this and the session
+          // card scrolls up under "NEEDS YOU", reading as an unanswered
+          // escalation.
+          _section('Session', null, p.textMuted, p),
           SliverList.list(
             children: [
               for (final s in state.sessions.values)
                 _SessionCard(
                   session: s,
-                  sessionName: showSessionLabels ? nameOf(s.terminalId) : null,
-                  // The sessionNames watch above already subscribes this build
+                  // The session-list watch above already subscribes this build
                   // to session-list changes, so the resolver read stays
                   // reactive. The bare state.defaultTool is NOT a second
                   // resolution rule — it only fires while the service is still
@@ -302,7 +291,7 @@ class HandlerScreen extends ConsumerWidget {
               final w = state.wrapUps[state.wrapUps.length - 1 - i];
               return _WrapUpCard(
                 wrapUp: w,
-                meta: meta(w.terminalId, w.at),
+                meta: meta(w.at),
                 // Derived, never read off the record: an undo taken after the
                 // wrap-up spends its entry and a re-arm retires the offers
                 // outright, so a count frozen at compose time is a lie on the
@@ -327,7 +316,7 @@ class HandlerScreen extends ConsumerWidget {
               final s = state.snapshots[state.snapshots.length - 1 - i];
               return _SnapshotRow(
                 snapshot: s,
-                meta: meta(s.terminalId, s.at),
+                meta: meta(s.at),
                 pending: state.pendingUndo.contains(s.snapshotId),
                 onUndo: () =>
                     detached('HandlerScreen', 'undo snapshot', () => undo(s)),
@@ -360,7 +349,7 @@ class HandlerScreen extends ConsumerWidget {
               final a = state.activity[i];
               return _ActivityRow(
                 record: a,
-                meta: meta(a.terminalId, a.at),
+                meta: meta(a.at),
                 p: p,
               );
             },
@@ -382,15 +371,9 @@ class HandlerScreen extends ConsumerWidget {
       );
 }
 
-/// Right-aligned session/time metadata shown on escalation and activity rows.
+/// Right-aligned time metadata shown on escalation and activity rows.
 class _RowMeta extends StatelessWidget {
-  const _RowMeta({
-    required this.sessionName,
-    required this.at,
-    required this.p,
-    this.urgent = false,
-  });
-  final String? sessionName;
+  const _RowMeta({required this.at, required this.p, this.urgent = false});
   final int at;
   final AbColors p;
 
@@ -408,11 +391,10 @@ class _RowMeta extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        // Above the session name, so the eye reaches it on the way down to the
-        // timestamp rather than after it. System-assigned data, so the mono
-        // uppercase chip, matching ESCALATE ONLY on the session card.
+        // Above the timestamp, so the eye reaches it on the way down rather
+        // than after it. System-assigned data, so the mono uppercase chip,
+        // matching ESCALATE ONLY on the session card.
         if (urgent) AbChip.system(label: 'URGENT', color: p.warning),
-        if (sessionName != null) Text(sessionName!, style: style),
         Text(_fmtTime(at), style: style),
       ],
     );
@@ -460,19 +442,17 @@ String? handlerParkNote(HandlerSessionState session, {DateTime? now}) {
 /// this panel.
 ///
 /// Only the status line's own two ends are fixed — the run-state word and the
-/// Armed chip. Everything else that could grow (the judge name, the session
-/// name) either shrinks or sits on a line below, so a narrow context panel or
-/// a scaled text size cannot overflow the row.
+/// Armed chip. Everything else that could grow (the judge name) either shrinks
+/// or sits on a line below, so a narrow context panel or a scaled text size
+/// cannot overflow the row.
 class _SessionCard extends StatelessWidget {
   const _SessionCard({
     required this.session,
-    required this.sessionName,
     required this.judgeLabel,
     required this.onDisarm,
     required this.onOpenBacklog,
   });
   final HandlerSessionState session;
-  final String? sessionName;
 
   /// Resolved judge CLI, rendered read-only on the status line (override, else
   /// the session's default). This never mutates it.
@@ -636,17 +616,6 @@ class _SessionCard extends StatelessWidget {
                     ],
                   ),
                 ],
-                // Its own full-width line, not a slot on the status row: names
-                // only render when several sessions are on screen, which is
-                // exactly when they share a prefix and a truncated one
-                // identifies nothing.
-                if (sessionName != null)
-                  Text(
-                    sessionName!,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: mutedMono,
-                  ),
                 const SizedBox(height: AbTokens.space2),
                 Text(
                   // A 1-tap arm legitimately has no goal until extraction

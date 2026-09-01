@@ -34,10 +34,17 @@ final visibleWorkspaceViewProvider =
 /// `pendingActiveSessionIdProvider` — the shell drains it on mount and on
 /// change, and clears it on consumption.
 ///
+/// Also the only safe way to reveal a view in the same turn as a SESSION
+/// switch, which is why the agent bar's NEEDS YOU pill writes here rather than
+/// calling `revealHandlerTab`: a focus change arms the shell's per-session UI
+/// restore, and that restore re-applies the target session's own saved tab
+/// after any tab the caller selected first. The drain runs after it.
+///
 /// Null is a written value, not just an absence: a location naming no view
 /// writes null so a view left pending by an earlier one is dropped rather than
 /// applied to this destination. The [PendingNav] stamp covers the other half —
-/// a project switch that never goes through the nav layer at all.
+/// a project switch that never goes through the nav layer at all, and it is
+/// what lets a second writer be added safely.
 final pendingWorkspaceViewProvider =
     NotifierProvider<
       ValueController<PendingNav<WorkspaceView>?>,
@@ -66,6 +73,12 @@ final pendingFilePathProvider =
 /// Counts the workspace views advertise on their tab: unstaged git files, and
 /// escalations the handler is waiting on.
 ///
+/// Both are scoped to what their tab actually shows — the focused checkout for
+/// git, the focused session for the handler. A handler badge counting the whole
+/// project would send the user to a tab narrowed past the escalation it
+/// promised; the agent bar's NEEDS YOU pill is what carries the project-wide
+/// count, and it moves focus to the session it counted on the way in.
+///
 /// A provider rather than a WorkspaceShell method because the agent bar's
 /// workspace menu lists the same views from outside that State, and a menu that
 /// disagreed with the tab strip about how many files changed would be worse than
@@ -80,8 +93,11 @@ final workspaceBadgesProvider = Provider<Map<WorkspaceView, int>>((ref) {
   final gitCount = ref.watch(
     fileTreeStateProvider.select((s) => s.value?.gitFileStatuses.length ?? 0),
   );
+  // Off the narrowed state rather than a second `sessions[activeId]` lookup of
+  // its own: the tab and its badge must never be able to answer differently
+  // about what the tab holds, and one narrowing rule is what guarantees it.
   final pending = ref.watch(
-    handlerStateProvider.select((s) => s.value?.pendingEscalations ?? 0),
+    focusedSessionHandlerStateProvider.select((s) => s.pendingEscalations),
   );
   return {
     if (gitCount > 0) WorkspaceView.git: gitCount,

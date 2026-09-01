@@ -823,6 +823,51 @@ class HandlerState {
   List<String> pendingInstructionsFor(String terminalId) =>
       pendingInstructions[terminalId] ?? const [];
 
+  /// This project's state narrowed to the one terminal the Handler tab shows.
+  ///
+  /// Only the tab narrows. The service and the bridge engine stay project-wide
+  /// — one HandlerService per project, one engine keyed by terminalId — because
+  /// escalations, undo offers and wrap-ups all have to keep arriving for
+  /// sessions nobody is looking at, and the agent bar's NEEDS YOU pill reads
+  /// the unnarrowed state to say so.
+  ///
+  /// [defaultTool] rides through unfiltered: it is the project's judge
+  /// fallback, and the session card resolves its judge label against it.
+  ///
+  /// A null [terminalId] narrows to nothing rather than to everything: an
+  /// unresolved focus names no session, and answering it with the project's
+  /// whole state would undo the narrowing at exactly that moment.
+  ///
+  /// Built through [copyWith] rather than the constructor so a field added to
+  /// this class later is CARRIED, not silently reset to its default on the one
+  /// surface that reads a narrowed state. Whether it then needs narrowing of
+  /// its own is a question a reader gets to see; a blank section is not.
+  HandlerState forTerminal(String? terminalId) {
+    if (terminalId == null) {
+      return HandlerState.initial().copyWith(defaultTool: defaultTool);
+    }
+    final session = sessions[terminalId];
+    final mine = snapshots.where((s) => s.terminalId == terminalId).toList();
+    final mineIds = {for (final s in mine) s.snapshotId};
+    final instructions = pendingInstructions[terminalId];
+    return copyWith(
+      sessions: session == null ? const {} : {terminalId: session},
+      escalations: escalations
+          .where((e) => e.terminalId == terminalId)
+          .toList(),
+      activity: activity.where((a) => a.terminalId == terminalId).toList(),
+      snapshots: mine,
+      wrapUps: wrapUps.where((w) => w.terminalId == terminalId).toList(),
+      // Filtered against the narrowed offers, not carried whole: a pending id
+      // naming a snapshot this state no longer holds marks a row that is not
+      // on screen.
+      pendingUndo: pendingUndo.where(mineIds.contains).toSet(),
+      pendingInstructions: instructions == null
+          ? const {}
+          : {terminalId: instructions},
+    );
+  }
+
   HandlerState copyWith({
     String? defaultTool,
     Map<String, HandlerSessionState>? sessions,
