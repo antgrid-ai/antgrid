@@ -318,9 +318,11 @@ export function allTerminal(backlog: InstructionItem[]): boolean {
 // Every field rendered into a prompt is extraction output, ids included, so any of
 // them can carry a newline that would forge an extra list line — and a forged line
 // hands the evaluator an id the user-authored vocabulary §2.1 rests on never
-// contained. The ONE copy of that rule, here because this module imports nothing:
-// the extraction prompt renders the same fields for the same reason, and
-// reply-shape re-exports it for the engine's push bodies.
+// contained. The ONE copy of that rule, and it lives here because this module
+// sits BELOW every consumer of it: its only imports are zod and ./evidence,
+// which imports nothing at all, so extract/reply-shape/engine can all reach it
+// with no cycle. The extraction prompt renders the same fields for the same
+// reason, and reply-shape re-exports it for the engine's push bodies.
 export function oneLine(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }

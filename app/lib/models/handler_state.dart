@@ -403,12 +403,17 @@ class HandlerEscalationChoice {
 
 /// Urgent first, then oldest-first within each band.
 ///
-/// `high` is not a shade of judge opinion. The engine mints it itself, with no
-/// judge call at all, for a blocking prompt — a permission request or a
-/// question the agent is stopped on right now (see `escalate` in
-/// bridge/src/handler/engine.ts). Those are the rows that unblock a session for
-/// one tap, and a flat oldest-first order filed them under every stale question
-/// already on the list.
+/// The band exists for the rows that unblock a session for one tap: the engine
+/// mints `high` itself, with no judge call at all, for a blocking prompt — a
+/// permission request or a question the agent is stopped on right now — and a
+/// flat oldest-first order filed those under every stale question already on
+/// the list.
+///
+/// It is NOT only that. `escalate` passes the judge's own `notify.urgency`
+/// through (bridge/src/handler/engine.ts), and the decide prompt offers the
+/// model both words, so a judge-authored `high` sorts into the same band and
+/// wears the same marker. Nothing on the wire tells the two apart today;
+/// anything that needs to must reach for `kind`, not `urgency`.
 ///
 /// Age still decides WITHIN a band and never across it: a `normal` that has
 /// waited an hour is not the thing holding the agent up. An urgency a newer
@@ -685,8 +690,17 @@ class HandlerState {
   int get pendingEscalations =>
       sessions.values.fold(0, (n, s) => n + s.pendingEscalations);
 
-  String? get latestEscalationId =>
-      escalations.isEmpty ? null : escalations.last.escalationId;
+  // Folded on `at` rather than read off the tail: [escalations] is banded by
+  // [compareEscalations], so `.last` is the newest NORMAL one and an urgent row
+  // — the only kind anything asking for "the latest" would want to land on —
+  // can never be it.
+  String? get latestEscalationId {
+    HandlerEscalation? newest;
+    for (final e in escalations) {
+      if (newest == null || e.at >= newest.at) newest = e;
+    }
+    return newest?.escalationId;
+  }
 
   /// What [terminalId] has in flight, oldest first — empty for a terminal with
   /// nothing outstanding, so no caller needs a null branch to ask.

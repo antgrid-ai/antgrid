@@ -19,6 +19,7 @@ import '../../design/widgets/ab_tooltip.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
+import '../../util/detached.dart';
 import '../../util/relative_time.dart';
 import 'handler_backlog_drawer.dart';
 import 'handler_blocked_action_card.dart';
@@ -152,6 +153,12 @@ class HandlerScreen extends ConsumerWidget {
       urgent: urgent,
     );
 
+    // The urgency test itself, once, for that same reason: spelled out at each
+    // of the three call sites it is three chances to omit, and a fourth row
+    // shape starts life without it.
+    Widget escalationMeta(HandlerEscalation e) =>
+        meta(e.terminalId, e.at, urgent: e.urgency == 'high');
+
     return CustomScrollView(
       slivers: [
         // Actionable first. The old order opened with the session headers, so
@@ -168,11 +175,7 @@ class HandlerScreen extends ConsumerWidget {
                 if (e.kind == 'guard_blocked')
                   HandlerBlockedActionCard(
                     escalation: e,
-                    trailing: meta(
-                      e.terminalId,
-                      e.at,
-                      urgent: e.urgency == 'high',
-                    ),
+                    trailing: escalationMeta(e),
                     // Re-resolved through the container for the same reason
                     // `answer` re-resolves after its sheet: the build-time
                     // instance can be disposed by the time a tap lands.
@@ -187,11 +190,7 @@ class HandlerScreen extends ConsumerWidget {
                 else if (e.choices != null)
                   HandlerDecisionCard(
                     escalation: e,
-                    trailing: meta(
-                      e.terminalId,
-                      e.at,
-                      urgent: e.urgency == 'high',
-                    ),
+                    trailing: escalationMeta(e),
                     // The id, not the choice: the service resolves it against
                     // the escalation's own offered set, so the text on the wire
                     // is always the one the bridge authored.
@@ -242,11 +241,7 @@ class HandlerScreen extends ConsumerWidget {
                         ),
                       ],
                     ),
-                    trailing: meta(
-                      e.terminalId,
-                      e.at,
-                      urgent: e.urgency == 'high',
-                    ),
+                    trailing: escalationMeta(e),
                     onTap: () => answer(e),
                   ),
             ],
@@ -303,7 +298,8 @@ class HandlerScreen extends ConsumerWidget {
                 snapshot: s,
                 meta: meta(s.terminalId, s.at),
                 pending: state.pendingUndo.contains(s.snapshotId),
-                onUndo: () => unawaited(undo(s)),
+                onUndo: () =>
+                    detached('HandlerScreen', 'undo snapshot', () => undo(s)),
                 p: p,
               );
             },
