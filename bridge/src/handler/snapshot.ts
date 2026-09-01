@@ -354,6 +354,35 @@ export const SNAPSHOT_PATTERNS: ReadonlyMap<string, SnapshotAction> = new Map(
   ),
 );
 
+/**
+ * Floor patterns for which no §5.2 action exists BY CONSTRUCTION.
+ *
+ * A separate set rather than more rows in the map above, because it answers a
+ * different question: these move state that is not in the project at all — a
+ * remote's default branch, a deleted ref, a published version — so there is
+ * nothing local a snapshot could hold. That is not the same as the patterns which
+ * merely have no plan yet, and the engine says so out loud instead of passing over
+ * them in the silence that reads like a fully protected action.
+ *
+ * Derived by running the floor over one canonical command per row, the same way
+ * the map above is, so a floor edit cannot leave a stale key here.
+ */
+export const NO_SNAPSHOT_PATTERNS: ReadonlySet<string> = new Set(
+  ([
+    "gh pr merge 1",
+    "gh pr close 1",
+    "gh release delete v1",
+    "gh repo delete owner/name",
+    "git branch -D topic",
+    "git tag -d v1",
+    "npm publish",
+  ] as const).flatMap((command) =>
+    classifyDestructive(command, "").warnings
+      .filter((w) => w.tier === "DESTRUCTIVE")
+      .map((w) => w.pattern),
+  ),
+);
+
 // ---------------------------------------------------------------------------
 // Trash dir
 // ---------------------------------------------------------------------------

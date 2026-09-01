@@ -65,6 +65,23 @@ const DESTRUCTIVE: RegExp[] = [
   /\b(drop|truncate)\s+(table|database)\b/i,
   /\bchmod\s+-R\b/i,
   /\bchown\s+-R\b/i,
+  // Outward moves: a merged pull request, a published version, a deleted ref. No §5.2
+  // snapshot reaches any of them — the state that moved lives on a remote or in a
+  // registry — so what these buy is the audit row and a lift that has to be asked for,
+  // never an undo.
+  //
+  // Advisory rather than HARD even though nothing undoes them: merging the pull request
+  // is routinely the backlog's whole point, and a HARD entry is liftable by nothing, so
+  // promoting these would block the very operation the user authorized.
+  //
+  // The branch pattern alone carries no `i` flag: `-d` and `-D` are different commands.
+  // The lowercase one refuses to drop an unmerged branch and so destroys nothing, and
+  // case-folding it would flag the safe spelling — the warning nobody should act on.
+  /\bgh\s+pr\s+(?:merge|close)\b/i,
+  /\bgh\s+(?:release|repo)\s+delete\b/i,
+  /\bgit\s+branch\s+(?=[^\n]*(?:-[a-zA-Z]*[dD]\b|--delete\b))[^\n]*(?:-[a-zA-Z]*D\b|--force\b|-[a-zA-Z]*f\b)/,
+  /\bgit\s+tag\s+[^\n]*(?:-d\b|--delete\b)/i,
+  /\bnpm\s+publish\b/i,
 ];
 
 // Data exfiltration / reverse shells. Downloads (curl URL / wget URL with no

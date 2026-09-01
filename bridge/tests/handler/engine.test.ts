@@ -359,6 +359,74 @@ describe("escalation accounting", () => {
     expect(pending().state).toBe("watching");
   });
 
+  // Alt+enter builds a multi-line prompt rather than sending one, so the agent is
+  // still blocked on whatever it asked. Escalations never supersede, so a row
+  // cleared by an unsubmitted line is unrecoverable: nothing re-raises it, because
+  // escalation needs a new event and a blocked agent emits none.
+  it("alt+enter builds a multi-line prompt and clears no escalation", async () => {
+    const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+    engine.onUserReply("t1", "more context\x1b\r");
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+    expect(statusOf(sent).state).toBe("needs_you");
+    engine.onUserReply("t1", "\r");
+    expect(statusOf(sent).pendingEscalations).toBe(0);
+    expect(statusOf(sent).state).toBe("watching");
+  });
+
+  // The exact shape _sanitizePaste emits: every newline normalized to CR and the
+  // trailing one stripped, so "git status" copied off a web page does not auto-run.
+  it("a pasted multi-line blob clears no escalation until the user presses enter", async () => {
+    const { engine, sent, saved } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    const writes = saved.length;
+    const statuses = sent.filter((m) => m.type === "handler:status").length;
+    engine.onUserReply("t1", "line one\rline two");
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+    expect(statusOf(sent).state).toBe("needs_you");
+    // A frame that submitted nothing must also cost nothing: no disk write, no
+    // encrypted status broadcast.
+    expect(saved.length).toBe(writes);
+    expect(sent.filter((m) => m.type === "handler:status").length).toBe(statuses);
+    engine.onUserReply("t1", "\r");
+    expect(statusOf(sent).pendingEscalations).toBe(0);
+    expect(statusOf(sent).state).toBe("watching");
+  });
+
+  // Once the agent enables mouse tracking, a pointer sweep is one terminal:input
+  // frame per pointer event — so a reset there hands an armed session an unbounded
+  // auto-reply budget for the price of moving the mouse. One typed character is the
+  // same defect, and the common one.
+  it("neither a mouse report nor a bare keystroke reclaims the runaway budget", () => {
+    const guard = new RunawayGuard(2);
+    const { engine } = makeEngine({ guard });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    guard.recordAutoReply("t1", "a");
+    guard.recordAutoReply("t1", "b");
+    engine.onUserReply("t1", "\x1b[<35;10;5M");
+    engine.onUserReply("t1", "k");
+    expect(guard.check("t1", "c")).toContain("runaway cap");
+    engine.onUserReply("t1", "go on\r");
+    expect(guard.check("t1", "c")).toBeNull();
+  });
+
+  // Why the rule is the submitting CR and not typed content: an answer given from
+  // the app arrives as the bare sentinel, which carries none — gating on content
+  // would leave the supervisor capped forever after the user answered.
+  it("an app-routed resolve reclaims the runaway budget", async () => {
+    const guard = new RunawayGuard(2);
+    const { engine } = makeEngine({ guard });
+    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "perm-1" });
+    guard.recordAutoReply("c1", "a");
+    guard.recordAutoReply("c1", "b");
+    engine.onUserReply("c1", "\r", { resolvedPromptId: "perm-1" });
+    expect(guard.check("c1", "c")).toBeNull();
+  });
+
   // The other half of that contract. An option-based prompt is answered by the
   // chat resolve RPC alone, so a typed line retires nothing for it — clearing the
   // row would blank the pill on a session that is still blocked, and nothing
@@ -642,11 +710,27 @@ describe("handleEvent decision loop", () => {
   });
 
   it("judge unavailable parks instead of escalating on the first failure", async () => {
-    const { engine, sent } = makeEngine({ runDecisionFn: async () => null });
+    const { engine, sent, activity } = makeEngine({ runDecisionFn: async () => null });
     engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
     expect(statusOf(sent).state).toBe("parked");
+    expect((records(activity, "parked")[0] as { reason: string }).reason).toBe("judge unavailable");
+  });
+
+  // A failed spawn, an unparseable answer and a judge that burned the whole budget
+  // are one undifferentiated null upstream; the park row is the only durable record
+  // of any of them, so the one leg that CAN be named is named there.
+  it("a judge timeout parks with its own class", async () => {
+    const { engine, sent, activity } = makeEngine({
+      runDecisionFn: async (o: { onTimeout?: () => void }) => { o.onTimeout?.(); return null; },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    expect(statusOf(sent).state).toBe("parked");
+    const parked = records(activity, "parked") as Array<{ reason: string }>;
+    expect(parked).toHaveLength(1);
+    expect(parked[0].reason).toBe("judge timeout");
   });
 
   it("does not inject when the session is disarmed while the judge is still deciding", async () => {
@@ -1406,7 +1490,21 @@ describe("chat blocking prompts and slash guard", () => {
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(injected).toHaveLength(0);
       const esc = sent.find((m) => m.type === "handler:escalation") as never as { reasoning: string };
-      expect(esc.reasoning).toBe("slash command value is not a simple verb");
+      expect(esc.reasoning).toContain("not a simple verb");
+    });
+
+    // The value is submitted as one line with a trailing CR, so a break inside it
+    // would submit half a command — and refusing it instead spends a retry on a
+    // rule the judge cannot see it broke.
+    it("a line break in the argument tail injects one flattened line", async () => {
+      const { engine, sent, injected } = makeEngine({
+        runDecisionFn: async () =>
+          decide({ decision: "handle", action: { kind: "slash_command", value: "/code-review --fix\nsrc/a.ts" } }),
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(injected).toEqual([["t1", "/code-review --fix src/a.ts"]]);
+      expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
     });
 
     it("the floor sees an absolute path in the argument tail", async () => {
@@ -1969,6 +2067,15 @@ describe("quick-choice escalations (§4.6)", () => {
     expect(choicesOf(sent)).toBeUndefined();
   });
 
+  // A one-tap on an action nothing can undo is the thinnest human in the loop there
+  // is, so the merge falls back to the sheet the user has to read.
+  it("a draft naming an irreversible merge is not offered as a one-tap", async () => {
+    const { engine, sent } = makeEngine(escalatingWith("gh pr merge 67 --squash --delete-branch"));
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    expect(choicesOf(sent)).toBeUndefined();
+  });
+
   // quickChoicesFor passes no pathCheckText at all, so ABS_PATH's own reading is the
   // only thing between a slash command in the draft and the loss of both chips. A
   // misreading here spends a real affordance, not merely a warning row.
@@ -2126,6 +2233,40 @@ describe("quick-choice escalations (§4.6)", () => {
     expect(esc.draftReply).toBe(CONTROL_REPLY);
     // ...but it must never become a one-tap: EscalationChoiceWire bans control chars,
     // so the card falls back to the editable sheet a human has to read.
+    expect(choicesOf(sent)).toBeUndefined();
+  });
+
+  // The card and the feed answer different questions. The card asks the user
+  // something, so it keeps the judge's prose; the row is the only durable record of
+  // WHICH field a guard refused, and prose about neither field cannot say it.
+  it("a blocked action is recorded as the command that was refused, not the judge's note to the user", async () => {
+    const { engine, sent, activity } = makeEngine({
+      runDecisionFn: async () => decide({
+        decision: "handle",
+        action: { kind: "slash_command", value: "/etc/hosts --force" },
+        notify: { title: "", body: "", draftReply: "Ask the user about the hosts file", urgency: "normal" },
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const esc = sent.find((m) => m.type === "handler:escalation") as never as { draftReply: string };
+    expect(esc.draftReply).toBe("Ask the user about the hosts file");
+    expect((records(activity, "escalate")[0] as { detail?: string }).detail).toBe("/etc/hosts --force");
+  });
+
+  it("an action-only rejection prefills the sheet with the command Handler wanted to send", async () => {
+    const { engine, sent } = makeEngine({
+      runDecisionFn: async () => decide({
+        decision: "handle",
+        action: { kind: "slash_command", value: "/etc/hosts --force" },
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const esc = sent.find((m) => m.type === "handler:escalation") as never as { draftReply: string };
+    expect(esc.draftReply).toBe("/etc/hosts --force");
+    // A guard_blocked card never offers a one-tap, so the prefill cannot become a
+    // re-send of the text a guard just refused.
     expect(choicesOf(sent)).toBeUndefined();
   });
 });
@@ -2331,7 +2472,10 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     // Holding the wrap-up open would leave a finished session armed until somebody
     // tapped Dismiss — so the push carries the report out instead.
     expect(records(activity, "wrapped_up")).toHaveLength(1);
-    expect(pushes.at(-1)).toContain("1 action(s) Handler could not take");
+    expect(pushes.at(-1)).toContain("Could not: reply contains control characters");
+    // A pointer is what the push cannot afford: it outlives the disarm and reaches
+    // a phone whose app was never running to receive the rows it points at.
+    expect(pushes.at(-1)).not.toContain("activity feed");
 
     const parked = makeEngine({ loadSessionFn: () => blockedRecord() });
     parked.engine.arm({ terminalId: "t1", notifyOnly: false });
@@ -2339,6 +2483,34 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     parked.timers.at(-1)!.fn();
     // The nudge answers nothing a report asked, so a report must not strand it.
     expect(parked.injected).toEqual([["t1", "continue"]]);
+  });
+
+  // One OS notification carries the wrap-up summary, the undo offer and this note,
+  // and every surface truncates — so past the cap the count is what stays honest.
+  it("the wrap-up push names the first reports and counts the rest", async () => {
+    const reasons = [
+      "reply contains control characters",
+      "hard floor: mkfs.ext4 /dev/sdb",
+      "runaway cap reached",
+    ];
+    const { engine, pushes } = makeEngine({
+      loadSessionFn: () => blockedRecord({
+        backlog: [item("a")],
+        escalations: reasons.map((reasoning, i) => ({
+          escalationId: `b${i}`, question: "Handler did not send its reply",
+          reasoning, draftReply: `d${i}`, urgency: "normal" as const, at: i + 1,
+          kind: "guard_blocked" as const,
+        })),
+      }),
+      runDecisionFn: async () => decide({ transitions: [{ id: "a", status: "done", evidence: "ran to completion" }] }),
+    });
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const push = pushes.at(-1)!;
+    expect(push).toContain(reasons[0]);
+    expect(push).toContain(reasons[1]);
+    expect(push).not.toContain(reasons[2]);
+    expect(push).toContain("+1 more");
   });
 
   it("a guard_blocked row survives a suspend and a re-arm", () => {
@@ -3959,6 +4131,7 @@ describe("instruction-scoped authorization (§5.4)", () => {
 
 describe("snapshot-before-act (§5.2)", () => {
   const RESET = "git reset --hard HEAD~1";
+  const MERGE = "gh pr merge 67 --squash --delete-branch";
   const handling = (reply: string) => ({ runDecisionFn: async () => decide({ decision: "handle", reply }) });
 
   function entryFor(id: string, trigger: string): SnapshotEntry {
@@ -4081,6 +4254,60 @@ describe("snapshot-before-act (§5.2)", () => {
     expect(snapshots()).toHaveLength(0);
     const rows = records(activity, "floor_warning") as Array<{ reason: string }>;
     expect(rows.some((r) => r.reason.includes("not protected"))).toBe(true);
+  });
+
+  // Every other DESTRUCTIVE hit resolves to either an undo offer or an explicit
+  // "was not protected" row. One that no §5.2 action can ever cover would resolve
+  // to neither, leaving the user to infer the missing undo from an absent card.
+  it("an irreversible outward action injects, snapshots nothing, and says no undo exists", async () => {
+    const calls: string[] = [];
+    const { engine, sent, injected, activity, snapshots } = makeEngine({
+      ...handling(MERGE), takeSnapshotsFn: snapshotter(calls),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    expect(injected).toEqual([["t1", MERGE]]);
+    // The pass runs — the floor flagged it — and plans nothing, which is the right
+    // answer: no local copy undoes a merged pull request.
+    expect(calls).toEqual([MERGE]);
+    expect(snapshots()).toHaveLength(0);
+    expect(snapshotFrames(sent)).toHaveLength(0);
+    const rows = records(activity, "floor_warning") as Array<{ reason: string }>;
+    expect(rows.some((r) => r.reason.includes("no undo exists"))).toBe(true);
+  });
+
+  // §5.4 buys silence on the advisory. It cannot buy silence on the missing undo:
+  // the user authorized the merge, never the loss of a way back from it.
+  it("an authorized merge carries no warning but still says no undo exists", async () => {
+    const { engine, sent, activity } = makeEngine({
+      ...handling(MERGE), takeSnapshotsFn: snapshotter([]),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.instruct({ terminalId: "t1", text: "squash merge the PRs into development" });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    const rows = records(activity, "floor_warning") as Array<{ reason: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reason).toContain("no undo exists");
+    expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+  });
+
+  // The row is for the user, not the judge. Feeding it back would restate the risk
+  // the lift removed on every pass, which is the prompt's cue to escalate instead —
+  // turning the authorization the user granted into a nag about the same merge.
+  it("an authorized merge is not fed back to the judge as a safety warning", async () => {
+    const seen: (string[] | undefined)[] = [];
+    const { engine } = makeEngine({
+      runDecisionFn: async (opts: { floorWarnings?: string[] }) => {
+        seen.push(opts.floorWarnings ? [...opts.floorWarnings] : undefined);
+        return decide({ decision: "handle", reply: MERGE });
+      },
+      takeSnapshotsFn: snapshotter([]),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.instruct({ terminalId: "t1", text: "squash merge the PRs into development" });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    expect(seen[1]).toEqual([]);
   });
 
   it("the backstop stays quiet when the outcome merely says nothing was at risk", async () => {

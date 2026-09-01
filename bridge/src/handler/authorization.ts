@@ -82,8 +82,13 @@ interface Alias {
 // The floor's patterns are COMMAND-shaped and an instruction is natural language, so
 // scanning "force push branch" with the floor regexes matches nothing — a lift derived
 // from that scan alone would be dead code that still passes its own tests. This table
-// closes the gap for the four operations §5.2 can actually prepare a snapshot for,
-// which are also the ones a user routinely names in prose.
+// closes the gap for the floor operations a user routinely names in prose.
+//
+// That deliberately reaches past the operations §5.2 can prepare a snapshot for, to the
+// outward ones (a merge, a publish, a force branch delete) that nothing can. Without a
+// row here their advisory recurs every pass and buildDecidePrompt feeds it back as a
+// reason to escalate, so the merge the backlog exists to land never lands. A lift there
+// buys silence on the advisory and nothing else — never an undo, because none exists.
 //
 // It stays narrow and demands specific phrasing, because the two failure directions are
 // not symmetric: a MISSING lift costs one advisory row in the activity feed, while a
@@ -104,6 +109,12 @@ const REPO_ANCHOR = String.raw`\b(?:git|repo|repository|branch|commit|HEAD|origi
 // No "cache" — "force remove the row from the cache" is in-memory prose, and the
 // filesystem sense always spells itself "cache dir"/"cache directory" anyway.
 const FS_ANCHOR = String.raw`\b(?:dirs?|directory|directories|folders?|files?|node_modules|build|dist|out|target|coverage|vendor|artifacts?)\b`;
+// The `#\d+` arm carries no leading `\b`: a word boundary before `#` can never match
+// after whitespace, so `\b#\d+` silently matches no PR number anyone actually writes.
+const PR_ANCHOR = String.raw`(?:\bPRs?\b|\bpull\s+requests?\b|#\d+\b)`;
+// Its own anchor rather than REPO_ANCHOR, which also accepts git/repo/commit — "delete
+// the old git config files" would otherwise grant a force branch delete.
+const BRANCH_ANCHOR = String.raw`\bbranch(?:es)?\b`;
 
 /** An anchored phrase, in either order — prose puts the anchor on either side. */
 function anchored(phrase: string, anchor: string, gap = 40): RegExp[] {
@@ -148,6 +159,42 @@ const ALIASES: Alias[] = [
     ],
     command: "git clean -fd",
   },
+  {
+    phrases: [
+      ...anchored(String.raw`\b(?:squash[\s-]?|rebase[\s-]?)?merg(?:e|es|ed|ing)\b`, PR_ANCHOR),
+      /\bgh\s+pr\s+merge\b/i,
+    ],
+    command: "gh pr merge 1",
+  },
+  {
+    phrases: [
+      ...anchored(String.raw`\bclos(?:e|es|ed|ing)\b`, PR_ANCHOR),
+      /\bgh\s+pr\s+close\b/i,
+    ],
+    command: "gh pr close 1",
+  },
+  {
+    // FORCE phrasing only. Plain "delete the branch after merging" is the prose for
+    // `git branch -d`, which the floor does not flag at all, so lifting the forced
+    // spelling from it would be exactly the spurious grant this table cannot afford.
+    // The literal arm is case-sensitive for the same reason the floor pattern is.
+    phrases: [
+      ...anchored(String.raw`\bforce[\s-]?delet(?:e|es|ed|ing)\b`, BRANCH_ANCHOR),
+      /\bgit\s+branch\s+-D\b/,
+    ],
+    command: "git branch -D topic",
+  },
+  {
+    phrases: [
+      /\bnpm\s+publish\b/i,
+      /\bpublish(?:es|ed|ing)?\b[^\n]{0,24}\b(?:to\s+)?npm\b/i,
+    ],
+    command: "npm publish",
+  },
+  // No prose alias for `gh release delete`, `gh repo delete` or `git tag -d`: the
+  // English for each is arguable ("delete the release notes", "drop the old tags"),
+  // and a user who types the literal command in the PA bar is already lifted by the
+  // floor-scan half of authorizeInstruction.
 ];
 
 // ABS_PATH is excluded rather than incidentally absent: an alias grants an operation,
@@ -274,8 +321,8 @@ export function authorizeInstruction(
   const operations: LiftedOperation[] = [];
   const seen = new Set<string>();
   const note = (tier: LiftedTier, matched: string) => {
-    if (seen.has(`${tier} ${matched}`)) return;
-    seen.add(`${tier} ${matched}`);
+    if (seen.has(JSON.stringify([tier, matched]))) return;
+    seen.add(JSON.stringify([tier, matched]));
     operations.push({ tier, matched });
   };
   for (const w of floor.warnings) {

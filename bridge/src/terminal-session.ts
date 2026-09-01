@@ -10,6 +10,7 @@ import { createMessage, type AbMessage } from "./protocol";
 import { findOnPath } from "./tool-detector";
 import { TerminalNotificationScanner, type NotificationEvent } from "./notification-scanner";
 import { VtCapabilityResponder } from "./vt-capability-responder";
+import { padBareVerb, PtySubmitQueue } from "./pty-submit";
 import {
   createKillOnCloseJob,
   snapshotDescendants,
@@ -928,12 +929,32 @@ export class TerminalSession {
     }
   }
 
+  /** Serializes this session's writes. Built once: a per-write queue would
+   *  order nothing. The writer reads `this.pty` at call time because the pty is
+   *  assigned at spawn, long after this field. */
+  private submitQueue = new PtySubmitQueue({
+    write: (data) => {
+      try {
+        this.pty?.write(data);
+      } catch {
+        // PTY may have already exited
+      }
+    },
+  });
+
   write(data: string): void {
-    try {
-      this.pty?.write(data);
-    } catch {
-      // PTY may have already exited
-    }
+    this.submitQueue.write(data);
+  }
+
+  /**
+   * Send `line` as a prompt. The caller hands over the line WITHOUT its CR and
+   * the queue writes the CR as a separate read — see `pty-submit.ts` for why a
+   * CR sharing a read with the line it submits is inserted as literal text.
+   */
+  submit(line: string): void {
+    // Only an agent TUI has a slash-command suggestion list to trip; a shell
+    // must receive exactly what was typed.
+    this.submitQueue.submit(this.type === "agent" ? padBareVerb(line) : line);
   }
 
   /**

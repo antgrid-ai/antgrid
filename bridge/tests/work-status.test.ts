@@ -102,7 +102,7 @@ test("a turn-end notification closes the hook-opened turn (terminal-mode session
 
 test("closeTurn ends a hook-based session's turn on a bare Esc, with no stop hook required", () => {
   // Terminal-mode sessions have no cancel RPC — project-core's onInterrupt
-  // (agent-core's isInterruptKeystroke) calls closeTurn directly the instant
+  // (keystrokes.ts' isInterruptKeystroke) calls closeTurn directly the instant
   // the user presses Esc, rather than waiting on a Stop hook most CLIs never
   // fire for a manual interrupt.
   const working = turnStart(fold([sessions(1)]), "r0");

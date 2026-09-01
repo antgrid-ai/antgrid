@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { hasTypedContent, isInterruptKeystroke, isSubmitKeystroke } from "../src/agent-core";
+import { hasTypedContent, isInterruptKeystroke, isSubmitKeystroke, submittedLine } from "../src/keystrokes";
 
 // Gates the work-status turn inference for agents with no pre-turn hook. A false
 // positive opens a turn nothing will close, so the negatives matter more than the
@@ -65,5 +65,30 @@ test("any longer ESC-prefixed sequence is content, not an interrupt", () => {
 test("ordinary keys and an empty payload are not an interrupt", () => {
   for (const data of ["a", "\r", "\t", "\x03", ""]) {
     expect(isInterruptKeystroke(data)).toBe(false);
+  }
+});
+
+// Splits the one shape a guest tokenizer absorbs the CR into. Everything else is
+// written through untouched, so the negatives are what keep an ordinary keystroke
+// off the deferred-CR path. See pty-submit.ts for what the split buys.
+
+test("a content-carrying submit is split from its CR", () => {
+  expect(submittedLine("run the tests\r")).toBe("run the tests");
+  // The case the split exists for: past the guest's 64-character threshold the
+  // CR stops arriving as a key event of its own.
+  const long = "x".repeat(200);
+  expect(submittedLine(`${long}\r`)).toBe(long);
+  expect(submittedLine("\x1b[A\r")).toBe("\x1b[A");
+});
+
+test("only the submitting CR is separated", () => {
+  // An interior CR belongs to the body — separating it would submit the first
+  // line and fire the rest at whatever the agent draws next.
+  expect(submittedLine("line one\rline two\r")).toBe("line one\rline two");
+});
+
+test("anything that is not a content-carrying submit is written through", () => {
+  for (const data of ["\r", "\x1b\r", "abc", "\x1b", ""]) {
+    expect(submittedLine(data)).toBeNull();
   }
 });

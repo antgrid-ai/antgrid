@@ -8,7 +8,8 @@ import {
 } from "./authorization";
 import {
   clearSessionTrash, describeSnapshot, planSnapshots, releaseSnapshots, takeSnapshots, undoSnapshot,
-  SNAPSHOT_PATTERNS, type SnapshotEntry, type SnapshotOutcome, type UndoResult,
+  NO_SNAPSHOT_PATTERNS, SNAPSHOT_PATTERNS,
+  type SnapshotEntry, type SnapshotOutcome, type UndoResult,
 } from "./snapshot";
 import { loadSnapshots, pruneSnapshots, saveSnapshots, type StoredSnapshot } from "./snapshot-store";
 import { RunawayGuard } from "./runaway-guard";
@@ -41,6 +42,7 @@ import {
   LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS, TRANSIENT_CEILING, transientBackoffMs,
   defaultSchedule, TimerRegistry, type LifecycleDeps,
 } from "./lifecycle";
+import { isSubmitKeystroke } from "../keystrokes";
 import { logger } from "../logger";
 
 const log = logger.child({ component: "handler-engine" });
@@ -117,6 +119,13 @@ const MAX_BACKLOG_ITEMS = 100;
 // every report is preserved verbatim in the activity feed either way: the row is
 // only the reminder that one is there.
 const MAX_BLOCKED_REPORTS = 5;
+
+// How much of those reports the wrap-up push may name. The note shares one OS
+// notification with `wrapUpSummary` and `undoNote`, and OS surfaces truncate;
+// standing reports are bounded by MAX_BLOCKED_REPORTS, so the cap plus a `+N more`
+// tail is what keeps the whole push readable when all five stand.
+const MAX_BLOCKED_NOTE_REASONS = 2;
+const BLOCKED_NOTE_REASON_CHARS = 80;
 
 // What a `guard_blocked` row asks, and — through push/compose.ts — the body of
 // its notification. Engine-authored rather than taken from `notify.body`: a judge
@@ -1328,13 +1337,31 @@ export class HandlerEngine {
    * row, see the clearing rule below.
    */
   onUserReply(terminalId: string, data: string, opts?: { resolvedPromptId?: string }): void {
+    // Called per terminal:input — every keystroke, and once the agent enables mouse
+    // tracking a report per pointer event — so nothing below may run until the frame
+    // is known to be a human ANSWER. `guard.reset` drops the consecutive cap AND the
+    // circular-reply hashes, so resetting on a pointer move would hand an armed
+    // session an unbounded auto-reply budget for the price of moving the mouse; the
+    // rest of the body costs one disk write plus one encrypted status broadcast per
+    // byte.
+    //
+    // The test is the SUBMIT rule, not "contains a newline": alt+enter (`\x1b\r`)
+    // and a pasted multi-line blob both carry a CR that submits nothing — the app
+    // strips a paste's trailing CR on purpose, so "git status" copied off a web
+    // page does not auto-run (see _sanitizePaste in terminal_view_wrapper.dart) —
+    // and the agent stays blocked on whatever it asked. Escalations never
+    // supersede, so a row cleared by an unsubmitted line drops the session to
+    // "watching" and nothing re-raises it: escalation needs a NEW event, and a
+    // blocked agent emits none. The bare `"\r"` agent-core.ts sends for an
+    // app-routed prompt/resolve IS a submit, which is why the rule is the
+    // submitting CR and not typed content — an answer given from the app carries
+    // none of the latter.
+    if (!isSubmitKeystroke(data)) return;
+    // Above the session lookup, so a terminal with no live session still has its
+    // guard state reclaimed.
     this.guard.reset(terminalId);
     const s = this.sessions.get(terminalId);
     if (!s) return;
-    // Called per terminal:input (every keystroke), so the submitted-line test
-    // comes first: typing into an armed terminal must not cost one disk write +
-    // one encrypted status broadcast per character.
-    if (!/[\r\n]/.test(data)) return;
     // A submitted line ordinarily reaches the transcript and moves the hash by
     // itself; cleared anyway because the two are written by different processes
     // and the guard must never be the reason a human's own instruction goes
@@ -1634,6 +1661,10 @@ export class HandlerEngine {
     // gate below must grade the evidence against what the judge actually read, not
     // against whatever the terminal has scrolled to since.
     let judgedContext = "";
+    // The park row is the only durable record of a judge that could not answer, and
+    // "timed out" versus "never ran" is the one distinction that would let the
+    // budget in judge.ts be set from data rather than guessed at.
+    let judgeTimedOut = false;
     try {
       const tool = this.deps.tool(evt.terminalId);
       catalog = this.deps.adapter.commandCatalog(evt.terminalId);
@@ -1685,6 +1716,7 @@ export class HandlerEngine {
         agentTool: tool,
         commands: catalog,
         retryIfShape,
+        onTimeout: () => { judgeTimedOut = true; },
       });
     } catch {
       if (this.sessions.get(evt.terminalId) === s) this.onJudgeUnavailable(evt, s);
@@ -1696,7 +1728,7 @@ export class HandlerEngine {
     // stopped mid-judge — supervise-safely boundary.
     if (this.sessions.get(evt.terminalId) !== s) return;
 
-    if (!decision) return this.onJudgeUnavailable(evt, s);
+    if (!decision) return this.onJudgeUnavailable(evt, s, judgeTimedOut ? "judge timeout" : undefined);
 
     // A judge that answered proves the provider is serving us again.
     s.transientFailures = 0;
@@ -1939,8 +1971,8 @@ export class HandlerEngine {
   // A judge that could not run says nothing about the agent, so the pause it was
   // asked about is stashed and re-judged after the backoff. Nudging "continue"
   // here would let the agent proceed with no supervision at all.
-  private onJudgeUnavailable(evt: HandlerEvent, s: ArmedSession): void {
-    this.registerTransientFailure({ ...evt, errorClass: evt.errorClass ?? "judge unavailable" }, s, evt);
+  private onJudgeUnavailable(evt: HandlerEvent, s: ArmedSession, errorClass = "judge unavailable"): void {
+    this.registerTransientFailure({ ...evt, errorClass: evt.errorClass ?? errorClass }, s, evt);
   }
 
   private enterPark(terminalId: string, s: ArmedSession, p: {
@@ -2160,10 +2192,19 @@ export class HandlerEngine {
   // The disarm takes the rows off the app with it — the app rebuilds its
   // escalation list from the status snapshot, and a wrapped-up session is no
   // longer in one — so this push is the last chance to say a guard refused
-  // something. The reports themselves survive in the activity feed.
+  // something. It says WHAT was refused rather than pointing at a surface: the note
+  // rides an OS push, the one channel that reaches a phone whose app was not
+  // running when the handler:activity rows went out, and `handler:status` replays
+  // sessions and snapshots but never activity — so a pointer can land on an empty
+  // feed. `reasoning`, not `question`: a report's question is the constant
+  // BLOCKED_QUESTION, and the forced reason is the half that names the refusal.
   private blockedNote(s: ArmedSession): string {
-    const reports = s.escalations.length - pendingQuestions(s);
-    return reports > 0 ? `. ${reports} action(s) Handler could not take — see the activity feed` : "";
+    const reports = s.escalations.filter((e) => e.kind === "guard_blocked");
+    if (reports.length === 0) return "";
+    const shown = reports.slice(0, MAX_BLOCKED_NOTE_REASONS)
+      .map((e) => previewForUser(oneLine(e.reasoning), BLOCKED_NOTE_REASON_CHARS));
+    const more = reports.length > shown.length ? ` +${reports.length - shown.length} more` : "";
+    return `. Could not: ${shown.join("; ")}${more}`;
   }
 
   // Last non-empty output lines (PTY scrollback or rendered chat snapshot),
@@ -2182,20 +2223,37 @@ export class HandlerEngine {
     promptId?: string,
   ): void {
     const reason = forcedReason ?? decision.reason;
+    const blocked = kind === "guard_blocked";
+    // A guard_blocked row is a report about text a guard refused, and `written` is the
+    // only artifact that says which field the judge filled — `notify.draftReply`
+    // describes the pause to the user and can be prose about neither field. Recomputed
+    // rather than threaded down because it is a pure function of the decision, and
+    // escalate is reached from call sites that hold no shape.
+    const refused = blocked ? replyShape(decision).written : "";
     // Carries the text a harness guard rejected, so the reply sheet can show what
     // Handler wanted to send and let the user edit it down. Safe to pass raw: the wire
     // leaves `draftReply` unconstrained while `EscalationChoiceWire.text` bans control
     // chars and caps length, so `quickChoicesFor` withholds the one-tap chip on exactly
-    // the drafts a guard would have refused.
-    const draftReply = firstFilled(decision.notify?.draftReply, decision.reply) ?? "";
-    const blocked = kind === "guard_blocked";
+    // the drafts a guard would have refused. A blocked action fills neither of the
+    // first two fields, and an empty draft leaves the reply sheet with nothing to
+    // edit; the refused text as the last fallback is safe for the same reason —
+    // `quickChoicesFor` withholds every chip on a `guard_blocked` card, so it can
+    // never become a one-tap re-send.
+    const draftReply = firstFilled(decision.notify?.draftReply, decision.reply, refused) ?? "";
+    // The activity row is read, never injected, so the control chars that forced some
+    // of these escalations are escaped into view rather than written raw into the feed.
+    // A blocked row reports the refused text rather than the user-facing draft: the
+    // draft is prose about the pause, so a feed built from it cannot say which field
+    // the judge filled or what the guard actually turned down.
+    const rowText = blocked ? refused : draftReply;
+    const detail = rowText === "" ? undefined : previewForUser(rowText);
     // Nothing retires a report but the user, so an identical repeat would cost
     // them a second Dismiss for a situation the standing row already describes in
     // the same words. The feed still gets its row: that Handler was refused AGAIN
     // is the fact worth keeping, and the feed is where it is durable.
     if (blocked && s.escalations.some((e) => e.kind === "guard_blocked"
       && e.reasoning === reason && e.draftReply === draftReply)) {
-      this.record(terminalId, "escalate", reason, draftReply === "" ? undefined : previewForUser(draftReply));
+      this.record(terminalId, "escalate", reason, detail);
       // The three lines the normal path ends with, minus the push and the row.
       // Every guard_blocked call site is a `return this.escalate(...)` out of the
       // handle branch, which set "handling" before the judge call and resets it
@@ -2236,9 +2294,7 @@ export class HandlerEngine {
     }
     s.escalations.push(esc);
     s.state = "needs_you";
-    // The activity row is read, never injected, so the control chars that forced some
-    // of these escalations are escaped into view rather than written raw into the feed.
-    this.record(terminalId, "escalate", reason, draftReply === "" ? undefined : previewForUser(draftReply));
+    this.record(terminalId, "escalate", reason, detail);
     this.persist(terminalId, s, true);
     this.emitStatus();
   }
@@ -2297,7 +2353,8 @@ export class HandlerEngine {
    * `flagged` is the floor's own verdict, and it is the backstop for the two
    * parsers disagreeing: a §5.2 shape the floor recognized but the planner
    * produced no plan for would otherwise pass in complete silence, which reads to
-   * the user exactly like an action that was fully snapshotted.
+   * the user exactly like an action that was fully snapshotted. A flagged shape no
+   * §5.2 action can EVER cover reports that fact rather than passing in silence.
    */
   private recordSnapshots(
     terminalId: string, s: ArmedSession, outcomes: SnapshotOutcome[], flagged: FloorWarning[],
@@ -2315,7 +2372,11 @@ export class HandlerEngine {
     const covered = new Set(outcomes.map((o) => o.action));
     for (const w of flagged) {
       const action = SNAPSHOT_PATTERNS.get(w.pattern);
-      if (!action || covered.has(action)) continue;
+      if (!action) {
+        if (NO_SNAPSHOT_PATTERNS.has(w.pattern)) this.recordIrreversible(terminalId, w);
+        continue;
+      }
+      if (covered.has(action)) continue;
       this.recordUnprotected(terminalId, s, w.matched, `${action}: the flagged command could not be parsed into a snapshot plan`);
     }
   }
@@ -2324,6 +2385,26 @@ export class HandlerEngine {
     const line = `flagged action was not protected: ${trigger}`;
     this.record(terminalId, "floor_warning", line, detail);
     this.rememberWarning(s, line);
+  }
+
+  /**
+   * The row for a flagged shape §5.2 can never cover, because the state it moves
+   * lives outside the project — a remote's default branch, a registry. Fires even
+   * when §5.4 authorization suppressed the advisory: the user authorized the
+   * operation and never the loss of its undo, the same rule `recordSnapshots`
+   * states for a snapshot that could not be taken.
+   *
+   * The one unprotected-style row that is NOT fed to the next decide prompt, so it
+   * takes no `ArmedSession` and calls no `rememberWarning`: the warning already
+   * reaches the judge on the unauthorized path, and restating it for a merge the
+   * user authorized would turn the lift they granted into a nudge to escalate the
+   * same merge every pass.
+   */
+  private recordIrreversible(terminalId: string, w: FloorWarning): void {
+    this.record(
+      terminalId, "floor_warning", `no undo exists for this action: ${w.matched}`,
+      "it changes state outside the project, so no snapshot could be prepared",
+    );
   }
 
   private storeSnapshot(st: StoredSnapshot): void {
