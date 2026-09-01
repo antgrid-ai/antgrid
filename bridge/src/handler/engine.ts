@@ -1044,6 +1044,9 @@ export class HandlerEngine {
       if (named.length > 0) {
         this.record(terminalId, "instruction_dropped",
           "nothing it named is still open in the backlog", clipQuote(text));
+        // Unchanged snapshot, sent anyway — see appendItems' cap return for why
+        // every instruction record owes one.
+        this.emitStatus();
         return;
       }
       this.appendItems(terminalId, s, raw);
@@ -1240,9 +1243,18 @@ export class HandlerEngine {
       this.record(terminalId, "instruction_dropped",
         `backlog is full (${MAX_BACKLOG_ITEMS} items)`, `${dropped} item(s) not tracked`);
     }
-    // Nothing appended means nothing to persist and no snapshot worth
-    // broadcasting; the record above is the whole outcome.
-    if (kept.length === 0) return;
+    // Nothing appended, so nothing to persist — but the frame still goes out.
+    // The app credits its NEXT status frame to every instruction record it
+    // retires a "sending" row off (_withOldestPendingRetired,
+    // app/lib/services/handler_service.dart), because the two outcomes that ride
+    // WITH a frame carry a backlog the retired sentence itself moved. A record
+    // with no frame behind it hands that credit to the next sentence's own
+    // append instead, and the row it should have retired stands forever. An
+    // unchanged snapshot answers for nothing and costs one re-baseline.
+    if (kept.length === 0) {
+      this.emitStatus();
+      return;
+    }
 
     // Minted against the backlog AS IT STANDS NOW, never before the spawn: the
     // backlog may have moved while extraction ran, and a duplicate id leaves the

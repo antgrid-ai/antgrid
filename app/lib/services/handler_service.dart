@@ -38,12 +38,14 @@ class HandlerService {
   // a status frame, and every survivor is re-baselined against the same one).
   final Map<String, ({int backlog, int armedAt})> _instructBaselines = {};
 
-  // Terminals whose next status frame is already spent. An amendment is the one
-  // bridge outcome that BOTH records an activity row and emits a snapshot, and
-  // the snapshot carries a backlog its own drop has already shortened — so read
-  // as a survivor's evidence it would retire a second sentence whose extraction
-  // has not started. Marked when the row retires off it, and spent by
-  // [_retirePending] re-baselining that terminal instead of retiring off it.
+  // Terminals whose next status frame is already spent. Every bridge outcome
+  // that records an instruction row emits a snapshot straight after it, and for
+  // the two that also moved the backlog — an amendment, and a cap hit that still
+  // had room for part of the batch — that snapshot carries a change the retired
+  // sentence itself made. Read as a survivor's evidence it would retire a second
+  // sentence whose extraction has not started. Marked when the row retires off
+  // its activity record, and spent by [_retirePending] re-baselining that
+  // terminal instead of retiring off it.
   final Set<String> _creditedStatus = {};
 
   // Terminals whose arm seeded a goal the bridge will extract behind the
@@ -214,15 +216,19 @@ class HandlerService {
   /// arrive outside a status snapshot. The baseline is left where it is: the
   /// session it was taken against has not moved.
   ///
-  /// A survivor is always credited the next status frame, whether or not the
-  /// bridge actually emits one. Two of these records ride WITH a snapshot whose
-  /// backlog this same sentence already moved — an amendment, and a cap hit that
-  /// still had room for some of the batch — and [_retirePending] would read
-  /// either as the NEXT sentence having landed, taking its "sending" row away
-  /// while its extraction is still running and lifting the edit lock inside the
-  /// window it exists to cover. Crediting a frame the bridge never sends costs
-  /// one re-baseline instead: the survivor keeps waiting for a change of its
-  /// own, which is what it was doing anyway.
+  /// A survivor is always credited the next status frame. The blanket rule rests
+  /// on a bridge invariant: every path that records an instruction row emits a
+  /// snapshot immediately after it, so the record and its frame arrive as a
+  /// pair. Two of those records ride with a snapshot whose backlog this same
+  /// sentence already moved — an amendment, and a cap hit that still had room
+  /// for some of the batch — and [_retirePending] would read either as the NEXT
+  /// sentence having landed, taking its "sending" row away while its extraction
+  /// is still running and lifting the edit lock inside the window it exists to
+  /// cover. The rest emit an unchanged snapshot, which spends the credit for
+  /// nothing. Break that invariant on the bridge (a `record` with no
+  /// `emitStatus` behind it, see `extractAndAppend` and `appendItems` in
+  /// bridge/src/handler/engine.ts) and the credit lands on the survivor's own
+  /// append instead, stranding its row for good.
   Map<String, List<String>> _withOldestPendingRetired(String terminalId) {
     final outstanding = _state.pendingInstructionsFor(terminalId);
     if (outstanding.isEmpty) return _state.pendingInstructions;
@@ -434,12 +440,25 @@ class HandlerService {
             : prev?.model,
       );
     }
-    // The exact condition the bridge queues an arm-time extraction on: a goal
-    // with words in it, and no backlog carried alongside it (an app-supplied
-    // list is already the user's own, and extracting the goal beside it would
-    // double every item). `updateBacklog` sends a backlog and no goal, so an
-    // edit never sets this.
-    if (goal != null && goal.trim().isNotEmpty && backlog == null) {
+    // Mirrors the condition the bridge queues an arm-time extraction on: a goal
+    // with words in it, no backlog carried alongside it (an app-supplied list is
+    // already the user's own, and extracting the goal beside it would double
+    // every item), and — for a session that is ALREADY armed — a goal that
+    // actually moved. Restating the same goal is a no-op there (`goalChanged` in
+    // bridge/src/handler/engine.ts), and a mark nothing will satisfy waits for
+    // the user's first sentence and swallows the frame that sentence's own
+    // append raised. `updateBacklog` sends a backlog and no goal, so an edit
+    // never sets this.
+    //
+    // A prediction, not a fact: the bridge also extracts a goal REHYDRATED off
+    // its own disk record, which arrives on a one-tap arm carrying no goal at
+    // all and cannot be mirrored from here. That append still answers for a
+    // sentence that did not cause it.
+    final armedGoal = _state.sessions[terminalId]?.goal.trim();
+    if (goal != null &&
+        goal.trim().isNotEmpty &&
+        backlog == null &&
+        armedGoal != goal.trim()) {
       _armGoalExtractions.add(terminalId);
     }
     session.send(
