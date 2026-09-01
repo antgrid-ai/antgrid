@@ -46,6 +46,13 @@ class HandlerService {
   // [_retirePending] re-baselining that terminal instead of retiring off it.
   final Set<String> _creditedStatus = {};
 
+  // Terminals whose arm seeded a goal the bridge will extract behind the
+  // handoff (§3.2). That pass runs on the SAME per-terminal chain instructions
+  // queue on, and ahead of them — so its append moves backlogTotal exactly the
+  // way a sentence's does, with nothing on the wire saying which of the two
+  // moved it. Held so [_retirePending] can spend that one frame on the goal.
+  final Set<String> _armGoalExtractions = {};
+
   // Judge picks, keyed by terminalId. `sessions` in [HandlerState] only holds
   // currently-armed sessions, so a disarmed terminal's judge pick would
   // otherwise vanish and the next arm would silently reset to Default — the
@@ -156,10 +163,17 @@ class HandlerService {
   /// against what was just observed, so the next sentence in the queue waits
   /// for a change of its own rather than inheriting this one's.
   ///
-  /// The cap path appends nothing and emits no status at all, so it is not
-  /// reachable from here — [_onHeavyJson] retires that one off its own activity
-  /// record. An amendment does emit one, and [_creditedStatus] is how that frame
-  /// re-baselines the survivors instead of answering for them too.
+  /// A backlog already AT the cap appends nothing and emits no status at all,
+  /// so it is not reachable from here — [_onHeavyJson] retires that one off its
+  /// own activity record. The two outcomes that record a row AND emit a frame —
+  /// an amendment, and a cap hit that still had room for part of the batch —
+  /// are why [_creditedStatus] exists: that frame re-baselines the survivors
+  /// instead of answering for them too.
+  ///
+  /// [_armGoalExtractions] covers the one append that is nobody's sentence: a
+  /// goal seeded at arm time is extracted on this same chain and lands FIRST,
+  /// so a preset tapped while it was still running was retired by the goal's
+  /// own items — with the preset's extraction not yet started.
   Map<String, List<String>> _retirePending(
     Map<String, HandlerSessionState> sessions,
   ) {
@@ -169,12 +183,17 @@ class HandlerService {
       final session = sessions[terminalId];
       final baseline = _instructBaselines[terminalId];
       final credited = _creditedStatus.remove(terminalId);
-      final answered =
+      final moved =
           session == null ||
-          (!credited &&
-              (baseline == null ||
-                  session.backlogTotal != baseline.backlog ||
-                  session.armedAt != baseline.armedAt));
+          baseline == null ||
+          session.backlogTotal != baseline.backlog ||
+          session.armedAt != baseline.armedAt;
+      // Spent only on a frame that actually moved: an unchanged one retires
+      // nothing, so letting it consume the goal pass would hand the goal's real
+      // append to the sentence behind it after all.
+      final goalPass =
+          moved && session != null && _armGoalExtractions.remove(terminalId);
+      final answered = session == null || (!credited && !goalPass && moved);
       final kept = session == null
           ? const <String>[]
           : (answered ? entry.value.sublist(1) : entry.value);
@@ -266,6 +285,16 @@ class HandlerService {
     // Read before the state moves: [_retirePending] compares the snapshot
     // against the session each sentence was sent against.
     final pendingInstructions = _retirePending(sessions);
+    // After it, never before: the frame carrying the goal's own items is the one
+    // [_retirePending] needs the mark for. The bridge extracts a goal only into
+    // an EMPTY backlog, so a session that now has items has either run that pass
+    // or skipped it for good — and a terminal that is gone runs nothing. Left
+    // standing, the mark would wait for the user's first sentence and swallow
+    // the frame that sentence's own append raised.
+    _armGoalExtractions.removeWhere((t) {
+      final s = sessions[t];
+      return s == null || s.backlogTotal > 0;
+    });
     final next = _state.copyWith(
       sessions: sessions,
       defaultNotifyOnly: msg.defaultNotifyOnly,
@@ -404,6 +433,14 @@ class HandlerService {
             ? (judgeModel.trim().isEmpty ? null : judgeModel.trim())
             : prev?.model,
       );
+    }
+    // The exact condition the bridge queues an arm-time extraction on: a goal
+    // with words in it, and no backlog carried alongside it (an app-supplied
+    // list is already the user's own, and extracting the goal beside it would
+    // double every item). `updateBacklog` sends a backlog and no goal, so an
+    // edit never sets this.
+    if (goal != null && goal.trim().isNotEmpty && backlog == null) {
+      _armGoalExtractions.add(terminalId);
     }
     session.send(
       createAbMessage('handler:configure', {

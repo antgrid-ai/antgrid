@@ -386,6 +386,91 @@ void main() {
     await session.close();
   });
 
+  test("the arm-time goal answers for its own append", () async {
+    // The goal is extracted on the SAME per-terminal chain instructions queue
+    // on, and lands ahead of them — so its items moved the backlog count that
+    // was the only evidence a sentence had, and retired a preset whose own
+    // extraction had not started. One client, no second device: arm from the
+    // new-session prompt, tap a chip before the goal comes back.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+
+    svc.arm(terminalId: 't1', goal: 'ship the fix', notifyOnly: false);
+    _status(t, const []);
+    await Future<void>.delayed(Duration.zero);
+
+    svc.instruct('t1', 'and rerun the tests');
+
+    // The goal's extraction, which was queued first.
+    _status(t, [_item]);
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.pendingInstructionsFor('t1'), [
+      'and rerun the tests',
+    ]);
+    expect(
+      svc.instruct('t1', 'and rerun the tests'),
+      HandlerInstructResult.duplicate,
+    );
+
+    // Its own append is what answers it.
+    _status(t, [_item, _extracted]);
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.pendingInstructionsFor('t1'), isEmpty);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a goal pass that never appends swallows nothing', () async {
+    // The bridge extracts a goal only into an empty backlog, so a rehydrated
+    // one skips that pass for good. Left marked, the terminal would wait for the
+    // user's first sentence and take the frame that sentence's own append
+    // raised — stranding the row and holding the edit lock with it.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+
+    svc.arm(terminalId: 't1', goal: 'ship the fix', notifyOnly: false);
+    _status(t, [_item]);
+    await Future<void>.delayed(Duration.zero);
+
+    svc.instruct('t1', 'and rerun the tests');
+    _status(t, [_item, _extracted]);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.pendingInstructionsFor('t1'), isEmpty);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('an edit claims no frame — only a seeded goal does', () async {
+    // updateBacklog arms with a backlog and no goal, which is exactly the case
+    // the bridge never extracts. Marking it too would cost the next sentence a
+    // frame it was owed.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+
+    _status(t, const []);
+    await Future<void>.delayed(Duration.zero);
+    svc.updateBacklog(
+      terminalId: 't1',
+      backlog: const [_item],
+      notifyOnly: false,
+    );
+
+    svc.instruct('t1', 'and rerun the tests');
+    _status(t, [_item, _extracted]);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.pendingInstructionsFor('t1'), isEmpty);
+
+    await svc.dispose();
+    await session.close();
+  });
+
   test('updateBacklog is refused while an instruction is outstanding', () async {
     // Every edit is a wholesale replace and extraction appends behind it, so a
     // list built while one is in flight deletes the items the user just asked
