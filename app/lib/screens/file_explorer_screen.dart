@@ -316,6 +316,7 @@ class _FileExplorerBody extends ConsumerWidget {
         onRefreshContent: () =>
             fileService.requestFileContent(files.selectedFilePath!),
         onClose: () => fileService.clearViewingFile(),
+        onOpenFile: (path) => fileService.selectFile(path),
       );
     }
 
