@@ -34,7 +34,7 @@ final handlerBacklogOpenerProvider =
 ///
 /// The ordinal counts completions only, never the other closed states: a
 /// skipped or failed item ends without being achieved, and folding it into
-/// progress is the summary inflation spec §4.3 guards against.
+/// progress is the summary inflation this guards against.
 ///
 /// With nothing active it defers to [handlerProgressLabel] rather than phrasing
 /// the aggregate itself — this bar and the Handler tab are both on screen on
@@ -179,8 +179,8 @@ bool _hasLiveDeadline(HandlerSessionState session, DateTime now) {
   return DateTime.fromMillisecondsSinceEpoch(until).isAfter(now);
 }
 
-/// Pinned status line for the focused terminal (spec §4.2): what Handler is
-/// doing, and what typing will do to it.
+/// Pinned status line for the focused terminal: what Handler is doing, and
+/// what typing will do to it.
 ///
 /// Deliberately ONE row and no input of its own. The composer (or the PTY) sits
 /// directly above this, so a second field with its own send button read as a

@@ -118,7 +118,8 @@ class HandlerScreen extends ConsumerWidget {
     // Confirmed for one action out of four. Undoing a hard reset, a recursive
     // delete or a clean touches this machine only; undoing a force push writes
     // to a shared remote, and the row it is offered on is a scrolling list row
-    // whose whole body is the tap target (§5.2 buys prevention back as one tap).
+    // whose whole body is the tap target, because the snapshot buys prevention
+    // back as one tap.
     // The dialog is the only thing standing between a thumb landing where the
     // scroll stopped and a ref overwritten for everyone on it.
     //
@@ -806,8 +807,9 @@ String _snapshotActionLabel(String action) {
 /// and clipping that would hide the only thing the row says about it.
 const _undoColumnWidth = 68.0;
 
-/// One reversible flagged action. The whole row is the tap target: §5.2 buys
-/// prevention back as one tap, so nothing here opens a sheet or a form.
+/// One reversible flagged action. The whole row is the tap target: the
+/// snapshot buys prevention back as one tap, so nothing here opens a sheet or
+/// a form.
 class _SnapshotRow extends StatelessWidget {
   const _SnapshotRow({
     required this.snapshot,
@@ -935,8 +937,8 @@ class _WrapUpCard extends StatelessWidget {
   };
 
   /// The failures and blocks are what the user has to act on, so they are the
-  /// two the eye can find without reading — §2.2's whole reason for putting the
-  /// non-`done` outcomes at the centre of the summary.
+  /// two the eye can find without reading — which is the whole reason the
+  /// summary puts the non-`done` outcomes at its centre.
   Color _outcomeColor(String status) => switch (status) {
     'failed' => p.error,
     'blocked' => p.warning,
@@ -1024,9 +1026,9 @@ String _itemDecisionLabel(String decision) {
   ),
   'handle' => ('Auto-answered: ${r.reason}', null),
   'escalate' => ('Escalated: ${r.reason}', null),
-  // Skipped and failed read exactly like done, deliberately: §4.3 requires
-  // a skip to be as visible as a completion, or "3 items skipped as moot"
-  // becomes the summary an assistant that simply gave up would also write.
+  // Skipped and failed read exactly like done, deliberately: a skip has to be
+  // as visible as a completion, or "3 items skipped as moot" becomes the
+  // summary an assistant that simply gave up would also write.
   'item_done' ||
   'item_blocked' ||
   'item_skipped' ||
@@ -1048,9 +1050,9 @@ String _itemDecisionLabel(String decision) {
   // moved is the whole question, and it is the one thing the backlog itself can
   // no longer answer once the line is gone.
   'instruction_amended' => ('Backlog updated: ${r.reason}', null),
-  // Advisory floor hit (spec §5.1). The action went through — this row is
-  // the audit trail prevention was traded for, so it is never conditional
-  // on what Handler decided afterwards.
+  // Advisory floor hit. The action went through — this row is the audit trail
+  // prevention was traded for, so it is never conditional on what Handler
+  // decided afterwards.
   'floor_warning' => ('Flagged: ${r.reason}', p.warning),
   // A completion the harness refused to bank. The status snapshot that
   // follows is identical to the one before it, so this row is the only trace

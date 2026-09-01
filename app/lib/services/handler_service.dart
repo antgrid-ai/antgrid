@@ -49,7 +49,7 @@ class HandlerService {
   final Set<String> _creditedStatus = {};
 
   // Terminals whose arm seeded a goal the bridge will extract behind the
-  // handoff (§3.2). That pass runs on the SAME per-terminal chain instructions
+  // handoff. That pass runs on the SAME per-terminal chain instructions
   // queue on, and ahead of them — so its append moves backlogTotal exactly the
   // way a sentence's does, with nothing on the wire saying which of the two
   // moved it. Held so [_retirePending] can spend that one frame on the goal.
@@ -420,11 +420,11 @@ class HandlerService {
     }
   }
 
-  /// Arm [terminalId]. Spec §4.1: arming takes one tap and requires no payload,
-  /// so [goal] and [backlog] are both optional and an omitted one leaves the
-  /// bridge's stored value untouched — absent is not empty. Pass `backlog: []`
-  /// to clear it explicitly. The bridge's backlog is authoritative once
-  /// extraction appends to it, so never round-trip a stale copy back.
+  /// Arm [terminalId]. Arming takes one tap and requires no payload, so [goal]
+  /// and [backlog] are both optional and an omitted one leaves the bridge's
+  /// stored value untouched — absent is not empty. Pass `backlog: []` to clear
+  /// it explicitly. The bridge's backlog is authoritative once extraction
+  /// appends to it, so never round-trip a stale copy back.
   ///
   /// [judgeTool]/[judgeModel] are this session's judge choice; `''` clears back
   /// to default and a name sets it. Pass null (the default) to leave the
@@ -592,9 +592,9 @@ class HandlerService {
     return HandlerInstructResult.sent;
   }
 
-  /// Undo [snapshot] — the one tap spec §5.2 trades prevention for. The bridge
-  /// owns the result: it re-states the entry as `undone` or as `failed` with a
-  /// reason, so nothing is assumed here beyond marking the id in flight.
+  /// Undo [snapshot] — the one tap the snapshot traded prevention for. The
+  /// bridge owns the result: it re-states the entry as `undone` or as `failed`
+  /// with a reason, so nothing is assumed here beyond marking the id in flight.
   ///
   /// A spent or unrecognised entry sends nothing rather than firing a message
   /// the bridge would discard — the row that renders it offers no tap either,
@@ -816,23 +816,24 @@ class HandlerService {
     );
   }
 
-  /// Answer [escalation] by tapping one of its own quick choices (spec §4.6).
+  /// Answer [escalation] by tapping one of its own quick choices.
   /// [choiceId] is resolved against the offered set and the choice's `text` is
   /// what goes on the wire, so a caller holding only an id — an OS notification
   /// action — can never put text of its own into the session, and an id that no
   /// longer matches sends nothing rather than something else.
   ///
   /// Routes through [reply] and deliberately NOT through [instruct]: a tap
-  /// grants no §5.4 authorization lift. `handler:instruct` is the sole feed
-  /// point for instruction-scoped authorization and §5.4 derives that only from
-  /// the user's own instruction text — chip text is Assistant output (the judge
-  /// composed the draft `[Approve]` sends), so minting a lift from it is the
-  /// laundering path §5.4 exists to close. It would also stack an extraction
-  /// item no terminal status can resolve, leaving the session unable to wrap
-  /// up. The costs are asymmetric: under-lifting costs one advisory
-  /// `floor_warning` row per repeat, since the floor records rather than
-  /// blocks, while over-lifting costs a session-wide grant nobody read. The
-  /// real lift stays one control away, in the user's own words, via the PA bar.
+  /// grants no authorization lift. `handler:instruct` is the sole feed point
+  /// for instruction-scoped authorization, and it derives that only from the
+  /// user's own instruction text — chip text is Assistant output (the judge
+  /// composed the draft `[Approve]` sends), so minting a lift from it would
+  /// launder the judge's own words into a grant the user never gave. It would
+  /// also stack an extraction item no terminal status can resolve, leaving the
+  /// session unable to wrap up. The costs are asymmetric: under-lifting costs
+  /// one advisory `floor_warning` row per repeat, since the floor records
+  /// rather than blocks, while over-lifting costs a session-wide grant nobody
+  /// read. The real lift stays one control away, in the user's own words, via
+  /// the PA bar.
   ///
   /// Returns whether the answer reached the wire, so a card can only show a
   /// send as in-flight when one actually is.

@@ -1,11 +1,11 @@
 // bridge/src/handler/extract.ts
 
-// One user sentence → the items Handler will track (spec §3). This pass reads the
-// user's own words and the list already kept from them, and nothing else — no
-// transcript, no working tree — which is what keeps it extraction rather than the
-// decomposition §3.1 leaves to the agent. The list is there so one sentence can
-// take an earlier one back; every id it names is checked against the live backlog
-// by the engine afterwards, never trusted from here.
+// One user sentence → the items Handler will track. This pass reads the user's
+// own words and the list already kept from them, and nothing else — no
+// transcript, no working tree — which is what keeps it extraction rather than
+// the decomposition this pass leaves to the agent. The list is there so one
+// sentence can take an earlier one back; every id it names is checked against
+// the live backlog by the engine afterwards, never trusted from here.
 
 import { z } from "zod";
 import { clip, isTerminalStatus, oneLine, type InstructionItem } from "./backlog";

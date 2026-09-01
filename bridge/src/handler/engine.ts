@@ -153,8 +153,8 @@ const MAX_ROW_SAMPLE_ENTRIES = 8;
 const MAX_ROW_SAMPLE_CHARS = 200;
 
 // The item outcomes the activity feed carries a kind for. A skip is as
-// consequential as a completion (§4.3), so they stay distinguishable without
-// parsing the reason text.
+// consequential as a completion, so they stay distinguishable without parsing
+// the reason text.
 const ITEM_DECISION: Partial<Record<ItemStatus, ActivityRecord["decision"]>> = {
   done: "item_done",
   blocked: "item_blocked",
@@ -219,7 +219,7 @@ function countPhrase(n: number, [one, many]: Noun): string {
 
 // What a lift is counted in. Three nouns rather than one, because the tiers are
 // three unlike permissions and the count is the half that survives a clip: a
-// sentence that lifted the §5.1 secret-access advisory for the rest of the
+// sentence that lifted the secret-access advisory for the rest of the
 // session must not be reported as having allowed a command.
 const GRANT_NOUNS: Record<LiftedTier, Noun> = {
   DESTRUCTIVE: ["destructive command", "destructive commands"],
@@ -229,8 +229,8 @@ const GRANT_NOUNS: Record<LiftedTier, Noun> = {
 const GRANT_TIERS: LiftedTier[] = ["DESTRUCTIVE", "EGRESS", "SECRETS"];
 
 /**
- * What one instruction's §5.4 lift added, as the two halves of a feed row: the
- * totals, and a sample of the literals themselves.
+ * What one instruction's authorization lift added, as the two halves of a feed
+ * row: the totals, and a sample of the literals themselves.
  *
  * Null when it added nothing. Most instructions grant nothing at all, and a row
  * saying so every time is exactly the noise that teaches a user to skim past the
@@ -367,22 +367,22 @@ function wakeClock(at: number): string {
 const REJECT_CHOICE_TEXT = "Do not proceed. Wait for my instructions.";
 
 /**
- * The §4.6 quick-choice card for an escalation the engine has already built.
+ * The quick-choice card for an escalation the engine has already built.
  *
  * Minted here rather than asked of the judge: the judge could propose a richer set,
- * but its labels are Assistant output reaching a one-tap control, and §5.4 is
- * emphatic that nothing about authorization may derive from Assistant output. The
+ * but its labels are Assistant output reaching a one-tap control, and nothing
+ * about authorization may derive from Assistant output (authorization.ts). The
  * one thing the judge does contribute is the draft it already composed, which the
  * [Approve] choice sends VERBATIM — so the app must render `text`, not only `label`.
  *
- * A tap carries NO §5.4 authorization lift. It answers through the ordinary reply
+ * A tap carries NO authorization lift. It answers through the ordinary reply
  * transport (terminal:input / agent:prompt), never through handler:instruct:
- * - `instruct` is the single feed point for §5.4 and it also queues an extraction,
- *   so a tap would mint a backlog item no terminal status can ever resolve and the
- *   session could never wrap up.
- * - A lift minted by tapping a label the judge wrote is the laundering path §5.4
- *   closes: a compromised agent composes an escalation whose [Approve] chip
- *   silences every later advisory row.
+ * - `instruct` is the single feed point for authorization and it also queues an
+ *   extraction, so a tap would mint a backlog item no terminal status can ever
+ *   resolve and the session could never wrap up.
+ * - A lift minted by tapping a label the judge wrote is the laundering path that
+ *   instruction-scoped authorization closes: a compromised agent composes an
+ *   escalation whose [Approve] chip silences every later advisory row.
  * The costs are not symmetric — under-lifting costs one advisory activity row per
  * repeat (post-Phase-5 the advisory floor records rather than escalates), while
  * over-lifting costs a session-wide grant the user never read. The real lift stays
@@ -402,7 +402,7 @@ export function quickChoicesFor(p: {
   if (p.kind === "resolve_in_session") return undefined;
   // A report exists BECAUSE a guard refused this exact text, so a one-tap that
   // re-sent it would be the thinnest human in the loop there is. The reply sheet
-  // costs the same send and makes the user read what was refused first. The §5.3
+  // costs the same send and makes the user read what was refused first. The HARD
   // case already falls out through `floorRule`; this covers the shape and runaway
   // rejections, which set no rule.
   if (p.kind === "guard_blocked") return undefined;
@@ -415,7 +415,7 @@ export function quickChoicesFor(p: {
   // withholds. The app enforces the mirror of this for the order the bridge cannot
   // see (a prompt arriving AFTER a card was already minted).
   if (p.open?.some((e) => e.kind === "resolve_in_session")) return undefined;
-  // floorRule is set only by the §5.3 HARD floor, which nothing lifts. Those keep
+  // floorRule is set only by the HARD floor, which nothing lifts. Those keep
   // costing a human who reads the text behind the reply sheet's floor banner.
   if (p.floorRule !== undefined) return undefined;
   const draft = p.draftReply.trim();
@@ -469,8 +469,8 @@ export interface HandlerEngineDeps {
   sendPush?: (message: string, terminalId: string) => void;
   runDecisionFn?: typeof defaultRunDecision;
   runExtractionFn?: typeof defaultRunExtraction;
-  // §5.2 snapshot/undo, injectable: the real ones shell out to git and copy trees,
-  // so a test that could not replace them would need a repo on disk.
+  // Snapshot/undo (snapshot.ts), injectable: the real ones shell out to git and
+  // copy trees, so a test that could not replace them would need a repo on disk.
   takeSnapshotsFn?: typeof takeSnapshots;
   undoSnapshotFn?: typeof undoSnapshot;
   clearTrashFn?: (sessionId: string) => Promise<void>;
@@ -504,7 +504,7 @@ interface ArmedSession {
   selfResuming?: boolean;
   // Consecutive terminal transient failures. A judged decision clears it.
   transientFailures: number;
-  // Advisory floor hits on replies this session already injected (§5.1), fed back
+  // Advisory floor hits on replies this session already injected, fed back
   // into the next decide prompt. Deliberately not persisted: the activity log is
   // the durable audit trail, and this copy exists only to shape the next call.
   floorWarnings: string[];
@@ -525,12 +525,13 @@ interface ArmedSession {
   // ITEM — not per attempt — is what keeps the feed a record of what happened to
   // the backlog rather than a transcript of the judge's retries.
   evidenceRejected: Set<string>;
-  // What the user's own instructions authorized for this session (§5.4). Not
+  // What the user's own instructions authorized for this session. Not
   // persisted, unlike the backlog those instructions also produced: rebuilding it
   // after a restart could only come from the stored item text, which extraction
-  // wrote — laundering judge output into an authorization is exactly what §5.4
-  // exists to prevent. A restart therefore costs one advisory row per operation
-  // the user has to name again, which is the cheap side of that trade.
+  // wrote — laundering judge output into an authorization is exactly what
+  // instruction-scoped authorization exists to prevent. A restart therefore costs
+  // one advisory row per operation the user has to name again, which is the cheap
+  // side of that trade.
   auth: InstructionAuthorization;
   // Consecutive limit parks that ended with the limit still in force. Not
   // persisted, unlike transientFailures: it bounds one in-process park→nudge
@@ -904,7 +905,7 @@ export class HandlerEngine {
     if (resumed?.parkKind && resumed.parkedUntil !== undefined) {
       this.rehydratePark(p.terminalId, s, resumed.parkKind, resumed.parkedUntil, resumed.parkAwaitingJudge);
     }
-    // §3.2: the user types one sentence and the session arms immediately, with
+    // The user types one sentence and the session arms immediately, with
     // extraction resolving behind the handoff. Skipped once a backlog exists — a
     // rehydrated or app-supplied one is already the user's list, and extracting
     // the goal alongside it would double every item.
@@ -940,16 +941,17 @@ export class HandlerEngine {
   }
 
   /**
-   * Stack more instructions onto a live session (§3.2). Returns without waiting
+   * Stack more instructions onto a live session. Returns without waiting
    * on the extraction spawn: arming and stacking are one tap, and a supervisor
    * that made the user watch a 20s CLI run before their sentence appeared would
    * be a worse product than one that fills the list a moment later.
    *
    * Instructing never arms — `handler:configure` is the only thing that does.
    *
-   * This is also the ONE feed point for §5.4 authorization. The arm-time goal is
-   * deliberately not one: it is a statement of what the session is for, and a lift
-   * has to be traceable to a sentence the user wrote to authorize an action.
+   * This is also the ONE feed point for instruction-scoped authorization. The
+   * arm-time goal is deliberately not one: it is a statement of what the session
+   * is for, and a lift has to be traceable to a sentence the user wrote to
+   * authorize an action.
    *
    * Returns what the sentence granted, or null where it reached no session and no
    * lift was taken. The grant is the half of an instruction the user cannot infer
@@ -976,7 +978,7 @@ export class HandlerEngine {
     return granted;
   }
 
-  // `onlyIfEmpty` is for the arm-time pass (§3.2): the goal is extracted once,
+  // `onlyIfEmpty` is for the arm-time pass: the goal is extracted once,
   // and the check has to happen at DEQUEUE time, or a goal edited twice while the
   // first spawn was still running would append the sentence in both forms.
   private queueExtraction(terminalId: string, text: string, opts: { onlyIfEmpty?: boolean } = {}): void {
@@ -1060,7 +1062,7 @@ export class HandlerEngine {
   }
 
   /**
-   * The half of an instruction that changes what is already tracked (§3.2).
+   * The half of an instruction that changes what is already tracked.
    *
    * Applied here and never by the judge: a terminal transition needs a verbatim
    * quote from the transcript, which a change of mind can never produce, so
@@ -1091,7 +1093,7 @@ export class HandlerEngine {
       return null;
     }
 
-    // §2.2's terminal states are a one-way door in both directions — an item the
+    // The terminal states are a one-way door in both directions — an item the
     // harness closed cannot be reopened from the user's words, or the walk-back
     // that re-completes one item per pass forever is back with a new entrance —
     // and everything past the extractor's own cap was offered to it as "not
@@ -1202,9 +1204,9 @@ export class HandlerEngine {
    * The one end state an amendment can leave behind that nothing else resolves:
    * an armed session watching an empty list.
    *
-   * `allTerminal` refuses to call an empty backlog terminal — §4.3 asks for the
-   * user rather than a wrap-up that reports having accomplished nothing — so the
-   * session can never wrap up, keeps spending a judge pass on every terminal
+   * `allTerminal` refuses to call an empty backlog terminal — the user is asked
+   * rather than handed a wrap-up reporting that nothing was accomplished — so
+   * the session can never wrap up, keeps spending a judge pass on every terminal
    * event, and has nothing to drive. Reachable before this only by arming with no
    * goal, which the user chose and can see; "forget all of that" against a short
    * list reaches it in one ordinary sentence that reads as having worked.
@@ -1703,7 +1705,7 @@ export class HandlerEngine {
         // path exists to end.
         const shape = replyShape(decision);
         const rejection = checkReplyShape(shape, catalog);
-        // forcedReason only: floorRule is the §5.3 hard floor's alone, and setting it
+        // forcedReason only: floorRule is the HARD floor's alone, and setting it
         // here would suppress the escalation card's one-tap choices.
         //
         // `guard_blocked`, like the two rejections below it: this row reports an
@@ -1723,19 +1725,19 @@ export class HandlerEngine {
         // verb, while an absolute path in the args is a real one the floor has to see.
         const pathText = `${shape.reply}\n${shape.args}`;
 
-        // The floor's ONE call site (spec §5). It inspects the text Handler is
+        // The floor's ONE call site. It inspects the text Handler is
         // about to inject, never the commands the agent goes on to run.
         const projectPath = this.deps.projectPath(evt.terminalId);
         const floor = classifyDestructive(probe, projectPath, pathText);
-        // Checked before the partition, and never against it: §5.3 is liftable by
-        // nothing, so no instruction can reach this branch.
+        // Checked before the partition, and never against it: the HARD tier is
+        // liftable by nothing, so no instruction can reach this branch.
         if (floor.hard.length > 0) {
           const reason = describeWarning(floor.hard[0]!);
           return this.escalate(evt.terminalId, s, decision, `floor: ${reason}`, reason, "guard_blocked");
         }
-        // §5.4: what the user's own instructions already authorized drops out of the
+        // What the user's own instructions already authorized drops out of the
         // warning stream. It stays a separate list rather than being filtered away
-        // because an authorized action is still snapshotted (§5.2) — the snapshot pass
+        // because an authorized action is still snapshotted — the snapshot pass
         // reads `authorized` here, alongside `warn`.
         const { warn, authorized } = partitionWarnings(s.auth, floor.warnings, probe, projectPath);
 
@@ -1748,9 +1750,9 @@ export class HandlerEngine {
           log.info("handler floor: %d warning(s) authorized by instruction for %s",
             authorized.length, evt.terminalId);
         }
-        // §5.2, and the reason the floor can afford to be advisory: prepare the undo
+        // The reason the floor can afford to be advisory: prepare the undo
         // BEFORE the agent is told to do the thing. Authorized warnings count here —
-        // §5.4 drops the warning, never the safety net ("I asked for it" is not the
+        // a lift drops the warning, never the safety net ("I asked for it" is not the
         // same as "I wanted that exact result").
         const snapshots = warn.length + authorized.length > 0
           ? await this.prepareSnapshots(evt.terminalId, shape.written)
@@ -1777,7 +1779,7 @@ export class HandlerEngine {
         this.guard.recordAutoReply(evt.terminalId, probe);
         // Both recorded after the inject and before the handle row, so the feed reads
         // as "what was saved, what was flagged, then what was sent". Auditability is
-        // what prevention was traded for (§5.1), so nothing here is conditional on the
+        // what prevention was traded for, so nothing here is conditional on the
         // Assistant's own view of the risk.
         this.recordSnapshots(evt.terminalId, s, snapshots, [...warn, ...authorized]);
         this.noteFloorWarnings(evt.terminalId, s, warn);
@@ -2036,7 +2038,7 @@ export class HandlerEngine {
         s.evidenceRejections = s.evidenceRejections.slice(-MAX_REMEMBERED_REJECTIONS);
       }
     }
-    // Blocking is derived, never judged (§3.3): an item is blocked because
+    // Blocking is derived, never judged: an item is blocked because
     // something it depends on is, which is why it carries no evidence and why the
     // evaluator is not asked for it. Without this call `dependsOn` would be
     // decorative — extracted, rendered, and never acted on.
@@ -2074,7 +2076,7 @@ export class HandlerEngine {
     if (result.applied.length > 0 || derived.length > 0) this.persist(terminalId, s, true);
   }
 
-  // Auto-disarm once every item has reached a terminal state (§2.2). A `blocked`
+  // Auto-disarm once every item has reached a terminal state. A `blocked`
   // item is deliberately not one: it is revivable, and the evaluator can still
   // resolve it as `skipped` or `failed` on evidence — which is the deadlock fix,
   // since "correctly did not happen" is now sayable and an unreachable item no
@@ -2122,7 +2124,7 @@ export class HandlerEngine {
 
   // The wrap-up push is the last thing the user reads about this session, and the
   // session is disarmed by the time they read it — so it is also the last place
-  // the undo can be made discoverable before it is needed (§5.5). Counted here and
+  // the undo can be made discoverable before it is needed. Counted here and
   // stored nowhere: an undo taken afterwards, or a re-arm retiring the offers,
   // makes a frozen count a lie on a card whose whole job is to be read later.
   private openUndoCount(terminalId: string): number {
@@ -2217,7 +2219,7 @@ export class HandlerEngine {
   }
 
   /**
-   * Take the §5.2 snapshots the about-to-be-injected text calls for. Records and
+   * Take the snapshots the about-to-be-injected text calls for. Records and
    * advertises nothing: the inject that would justify an undo offer has not
    * happened yet, and a promise about a reply that was never sent is worse than
    * no promise at all.
@@ -2248,7 +2250,7 @@ export class HandlerEngine {
    * the user authorized the operation, never the loss of its undo.
    *
    * `flagged` is the floor's own verdict, and it is the backstop for the two
-   * parsers disagreeing: a §5.2 shape the floor recognized but the planner
+   * parsers disagreeing: a preparable shape the floor recognized but the planner
    * produced no plan for would otherwise pass in complete silence, which reads to
    * the user exactly like an action that was fully snapshotted.
    */
@@ -2344,11 +2346,12 @@ export class HandlerEngine {
   }
 
   /**
-   * Perform the undo an advertised snapshot promised (§5.2).
+   * Perform the undo an advertised snapshot promised.
    *
-   * Deliberately NOT gated on §5.4 authorization: anyone who can drive this
-   * project can already drive its terminal, so a second authorization concept
-   * would only make the safety net harder to reach than the action it reverses.
+   * Deliberately NOT gated on instruction-scoped authorization: anyone who can
+   * drive this project can already drive its terminal, so a second authorization
+   * concept would only make the safety net harder to reach than the action it
+   * reverses.
    *
    * Idempotent in every direction the app can get wrong — an id this project no
    * longer has resyncs the sender, an already-undone entry just re-states itself,

@@ -25,9 +25,9 @@ import {
 
 export type SummaryStatus = keyof ReturnType<typeof summarize>;
 
-// §2.2 puts the non-`done` outcomes at the centre of the summary — an item nobody
-// could reach is the one thing the user has to act on — so `done` leads and the
-// rest follow in descending order of how much they demand.
+// The non-`done` outcomes are what the summary is for — an item nobody could
+// reach is the one thing the user has to act on — so `done` leads and the rest
+// follow in descending order of how much they demand.
 const SUMMARY_GROUPS: [SummaryStatus, string][] = [
   ["done", "Done"],
   ["failed", "Failed"],
@@ -136,7 +136,7 @@ function clauses(rec: WrapUpRecord, cap: number): string[] {
 /**
  * The wrap-up notification. Last thing the user reads about this session, and
  * the session is disarmed by the time they read it — so it is also the last
- * place the undo can be made discoverable before it is needed (§5.5), which is
+ * place the undo can be made discoverable before it is needed, which is
  * why `openUndos` is passed in live rather than read off the record.
  */
 export function wrapUpPushBody(rec: WrapUpRecord, { openUndos }: { openUndos: number }): string {

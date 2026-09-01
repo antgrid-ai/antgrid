@@ -11,8 +11,8 @@ export interface ActivityRecord {
   // feed can show why a session went quiet.
   //
   // One kind per item outcome rather than a single "item_resolved": a skip is as
-  // consequential as a completion (spec §4.3), so the feed must distinguish them
-  // without parsing the reason text. Kept in lockstep with the same enum in
+  // consequential as a completion, so the feed must distinguish them without
+  // parsing the reason text. Kept in lockstep with the same enum in
   // protocol.ts and the app's handler_state.dart — a value missing from either
   // renders as an unknown row at runtime, never as a build error.
   decision: "continue" | "handle" | "escalate" | "armed" | "goal_edited"

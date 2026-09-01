@@ -837,7 +837,7 @@ const HandlerInstructMessage = BaseMessage.extend({
   projectId: z.string(),
 }).extend(HandlerInstructWire.shape);
 
-// One tap-to-answer option on a quick-choice escalation (§4.6). `text` is sent as
+// One tap-to-answer option on a quick-choice escalation. `text` is sent as
 // the USER's own reply through the ordinary reply transport, so it must be
 // something a session can actually receive: whitespace alone is dropped by every
 // consumer, which turns the chip into a button that silently does nothing.
@@ -879,14 +879,14 @@ const OpenEscalationWire = z.object({
   // question) that must be resolved in the chat UI — injected text can't
   // answer it, and auto-approval is deliberately impossible (see engine).
   //
-  // "guard_blocked" = a REPORT that a harness guard (reply shape, the §5.3 hard
+  // "guard_blocked" = a REPORT that a harness guard (reply shape, the HARD
   // floor, the runaway guard) refused an action Handler wanted to take. A typed
   // line does not answer it — the action was never taken — so only
   // `handler:dismiss` retires one, and the bridge never mints `choices` for it:
   // this row exists BECAUSE a guard refused this exact text, and a one-tap that
   // re-sent it would be the thinnest human in the loop there is.
   kind: z.enum(["reply", "resolve_in_session", "guard_blocked"]).optional(),
-  // §4.6 quick choices, optional exactly the way `kind` is: absent means "free-text
+  // Quick choices, optional exactly the way `kind` is: absent means "free-text
   // reply", so an app that predates this renders its reply sheet unchanged. Two is
   // the floor because one chip is a card with no alternative, and the free-text
   // escape hatch is app-authored — never an entry here — so no bridge can ship a
@@ -900,7 +900,7 @@ const OpenEscalationWire = z.object({
   at: z.number(),
 });
 
-// One §5.2 snapshot, as the app sees it. Shared by the one-shot advert and the
+// One snapshot, as the app sees it. Shared by the one-shot advert and the
 // per-project replay on `handler:status`, the same way OpenEscalationWire is
 // shared — an app that reconnected (or restarted) after the advert must still be
 // able to offer the undo.
@@ -972,7 +972,7 @@ export const HandlerWrapUpWire = z.object({
 // discriminator alone, so agent-core re-parses with this before anything runs.
 //
 // No terminalId: the id names the entry, and the entry carries its own session
-// and project path. Undo is deliberately NOT gated on authorization (§5.4) —
+// and project path. Undo is deliberately NOT gated on authorization —
 // anyone who can drive this project can already drive its terminal, and a second
 // authorization concept would only make the safety net harder to reach than the
 // action it reverses.
@@ -1062,8 +1062,8 @@ const HandlerActivityMessage = BaseMessage.extend({
   terminalId: z.string(),
   // Kept in lockstep with ActivityRecord.decision (handler/config.ts) and the
   // app's handler_state.dart. One kind per item outcome rather than a single
-  // "item_resolved": a skip is as consequential as a completion (spec §4.3), so
-  // the feed distinguishes them without parsing the reason text.
+  // "item_resolved": a skip is as consequential as a completion, so the feed
+  // distinguishes them without parsing the reason text.
   decision: z.enum([
     "continue", "handle", "escalate",
     "armed", "goal_edited",

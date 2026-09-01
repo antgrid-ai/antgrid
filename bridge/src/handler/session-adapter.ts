@@ -1,9 +1,9 @@
 import type { CapCommand } from "../structured/chat-session";
 
-// Transport seam (spec §Session adapter seam): everything above this interface —
-// goal + backlog, judge, floors, runaway guard — is transport-agnostic. The PTY
-// adapter writes to a live terminal; the structured (chat) adapter lives in
-// structured-adapter.ts and rides the driver's prompt path.
+// Transport seam: everything above this interface — goal + backlog, judge,
+// floors, runaway guard — is transport-agnostic. The PTY adapter writes to a
+// live terminal; the structured (chat) adapter lives in structured-adapter.ts
+// and rides the driver's prompt path.
 
 /** A catalog hit the engine already resolved: the chat transport routes on
  *  `id` and sends `args` as its text, while a PTY ignores it — the verb is

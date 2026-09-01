@@ -122,13 +122,13 @@ export async function runDecision(opts: {
 }
 
 // Deliberately no transcriptPath and no context parameter: extraction reads the
-// user's instruction and the list it is already keeping for them, and nothing else
-// (spec §3.1) — no transcript, no working tree — so there is no context tier to
+// user's instruction and the list it is already keeping for them, and nothing
+// else — no transcript, no working tree — so there is no context tier to
 // assemble. `backlog` is what lets one sentence take back an earlier one; it is
 // rendered under the extractor's own bound (renderAmendable), never whole. The
 // budget is well under decide's 45s because this prompt carries no transcript
-// excerpt and the arm it feeds is non-blocking (§3.2) — a slower one only widens
-// the window in which the backlog is still empty.
+// excerpt and the arm it feeds is non-blocking — a slower one only widens the
+// window in which the backlog is still empty.
 export async function runExtraction(opts: {
   tool: string; model?: string; text: string; cwd: string;
   backlog?: InstructionItem[];

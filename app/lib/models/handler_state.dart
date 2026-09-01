@@ -75,7 +75,7 @@ class HandlerInstructionItem {
   final String text;
 
   /// Ids this item waits on, extracted from the user's own ordering words. The
-  /// bridge derives `blocked` from them; the app never authors one (spec §3.3).
+  /// bridge derives `blocked` from them; the app never authors one.
   final List<String>? dependsOn;
   final String? condition;
 
@@ -207,7 +207,7 @@ class HandlerSessionState {
 
   /// Only `done` counts, never the other terminal states: `skipped` and
   /// `failed` close an item without achieving it, and reporting them as
-  /// progress is the summary-inflation failure mode spec §4.3 guards against.
+  /// progress is the summary-inflation failure mode this guards against.
   int get backlogDone => backlog.where((i) => i.status == 'done').length;
 
   HandlerSessionState copyWith({
@@ -289,8 +289,8 @@ class HandlerSessionState {
   }
 }
 
-/// One 1-tap answer offered on a decision card (spec §4.6). Mirrors the
-/// bridge's `EscalationChoiceWire` (`bridge/src/protocol.ts`) and
+/// One 1-tap answer offered on a decision card. Mirrors the bridge's
+/// `EscalationChoiceWire` (`bridge/src/protocol.ts`) and
 /// `EscalationChoiceSchema` (`bridge/src/handler/session-store.ts`) — three
 /// hand-written copies of one shape, so the bounds below move with them.
 class HandlerEscalationChoice {
@@ -523,7 +523,7 @@ class HandlerEscalation {
 }
 
 /// One snapshot the bridge took before injecting a flagged reply, and the undo
-/// it offers (spec §5.2). Mirrors `HandlerSnapshotWire` (`bridge/src/protocol.ts`).
+/// it offers. Mirrors `HandlerSnapshotWire` (`bridge/src/protocol.ts`).
 ///
 /// Project-scoped rather than nested under a session: the offer outlives the
 /// session that took it, and a wrapped-up session is when it matters most.
@@ -646,7 +646,7 @@ class HandlerWrapUpOutcome {
   }
 }
 
-/// The morning-after report of one finished session (spec §2.2). Mirrors
+/// The morning-after report of one finished session. Mirrors
 /// `HandlerWrapUpWire` (`bridge/src/protocol.ts`), which is hand-mirrored in
 /// turn from `WrapUpRecord` (`bridge/src/handler/wrap-up.ts`) — nothing checks
 /// the wire→Dart hop, so a field renamed there fails here as a card that draws

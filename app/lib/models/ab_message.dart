@@ -261,7 +261,7 @@ class HandlerStatusMessage {
   final String? defaultTool;
   final List<Map<String, dynamic>> sessions;
 
-  /// Every §5.2 snapshot the project still knows about, replayed like the
+  /// Every snapshot the project still knows about, replayed like the
   /// escalations so an app that restarted between the advert and the tap can
   /// still reach the undo. Project-level, not per session: the offer matters
   /// most once the session that took it has wrapped up.
