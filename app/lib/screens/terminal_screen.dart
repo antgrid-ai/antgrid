@@ -19,6 +19,7 @@ import '../providers/sessions.dart';
 import '../services/sessions_service.dart' show SessionOperationException;
 import '../util/ab_log.dart';
 import '../util/detached.dart';
+import '../widgets/session_setup_progress.dart';
 import '../widgets/session_start_refusal.dart';
 import '../widgets/terminal_view_wrapper.dart';
 
@@ -359,6 +360,9 @@ class _ProvisioningSessionStateState
       color: colors.bgDeepest,
       child: Column(
         children: [
+          // Above the transcript, not below it: the ledger is orientation the
+          // user reads once, and the log is the thing that keeps moving.
+          if (setup != null) SetupStepLedger(setup: setup),
           Expanded(
             child: tab == null || terminalService == null
                 // Not a dead end: the run has yet to report the PTY it spawned,

@@ -33,6 +33,12 @@ SessionSetup _setup({required bool pendingStart}) => SessionSetup(
   stepIndex: 1,
   stepCount: 4,
   stepName: 'Install dependencies',
+  stepNames: const [
+    'Copy env files',
+    'Install dependencies',
+    'Generate client',
+    'Build assets',
+  ],
   terminalId: 'worktree-1:setup',
   pendingStart: pendingStart,
   startedAt: 1700,
@@ -119,6 +125,17 @@ void main() {
     // The bridge has accepted `cancel` since the verb shipped and no surface
     // offered it; this pane is the one that does.
     expect(find.text('Cancel setup'), findsOneWidget);
+  });
+
+  // The pane is what the user stares at for the whole run, so it is where the
+  // ledger belongs: "2 of 4" says how far along the run is and nothing about
+  // what is left, which on a real block is the question being asked.
+  testWidgets('the pane says what is still to come', (tester) async {
+    await pumpPane(tester, _setup(pendingStart: true));
+
+    expect(find.text('Copy env files'), findsOneWidget);
+    expect(find.text('Generate client'), findsOneWidget);
+    expect(find.text('Build assets'), findsOneWidget);
   });
 
   // The gate is the ONLY thing this branch keys on. A session stopped for any

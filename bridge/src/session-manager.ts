@@ -443,6 +443,10 @@ interface SetupRuntime {
   stepIndex: number;
   stepCount: number;
   stepName?: string;
+  /** Every step's name, in plan order, for the app's ledger. Retained like
+   *  `terminalId` rather than overwritten: a recovered state has none and a
+   *  report that omits them must not blank a ledger already on screen. */
+  stepNames?: string[];
   terminalId?: string;
   exitCode?: number;
   message?: string;
@@ -1643,6 +1647,7 @@ export class SessionManager {
     setup.stepName = progress.stepName;
     setup.exitCode = progress.exitCode;
     setup.message = progress.message;
+    if (progress.stepNames !== undefined) setup.stepNames = progress.stepNames;
     // Kept when a later report omits it: the transcript stays reachable after
     // the run ends, which is the point of the expandable log.
     if (progress.terminalId !== undefined) setup.terminalId = progress.terminalId;
@@ -2557,6 +2562,7 @@ export class SessionManager {
       stepIndex: setup.stepIndex,
       stepCount: setup.stepCount,
       stepName: setup.stepName,
+      stepNames: setup.stepNames,
       terminalId: setup.terminalId,
       exitCode: setup.exitCode,
       message: setup.message,

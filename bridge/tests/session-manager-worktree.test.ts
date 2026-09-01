@@ -532,6 +532,31 @@ describe("isolated session worktree.setup", () => {
     });
   });
 
+  it("keeps the step ledger a later report leaves out", async () => {
+    await withDir(async (dir) => {
+      const { sm, runs } = harness(dir);
+      const created = await sm.create("Isolated", { isolation: "worktree" });
+      const report = runs[0]!.report;
+
+      report({
+        state: "running", stepIndex: 0, stepCount: 2, stepName: "Copy env files",
+        stepNames: ["Copy env files", "Install dependencies"], terminalId: "t",
+      });
+      expect(sm.get(created.id)?.setup?.stepNames).toEqual([
+        "Copy env files", "Install dependencies",
+      ]);
+
+      // A report that omits the ledger must not blank one already on screen —
+      // same retention `terminalId` gets, and for the same reason: the app has
+      // no second source for either.
+      report({ state: "running", stepIndex: 1, stepCount: 2, stepName: "Install dependencies" });
+      expect(sm.get(created.id)?.setup?.stepNames).toEqual([
+        "Copy env files", "Install dependencies",
+      ]);
+      expect(sm.get(created.id)?.setup?.terminalId).toBe("t");
+    });
+  });
+
   it("an immediate policy launches the agent alongside the run", async () => {
     await withDir(async (dir) => {
       const { sm, terminal, runs, deferred } = harness(dir, { startAgent: "immediate" });

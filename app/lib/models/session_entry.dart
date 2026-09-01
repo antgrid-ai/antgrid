@@ -20,6 +20,13 @@ class SessionSetup {
   final int stepCount;
   final String? stepName;
 
+  /// Every step's name, in plan order — the ledger's only source, since
+  /// [stepName] names the current one alone. Empty for a state recovered from
+  /// disk, which knows how many steps ran but not what they were called, and
+  /// for a bridge that predates the field; a ledger with no names renders
+  /// nothing rather than a column of blanks.
+  final List<String> stepNames;
+
   /// The setup transcript's terminal. The only handle on that log, and the name
   /// every list filters by: the setup PTY is typed neither `agent` nor
   /// `service`, and the ad-hoc terminal list selects by EXCLUDING those two —
@@ -44,6 +51,7 @@ class SessionSetup {
     required this.stepCount,
     required this.startedAt,
     this.stepName,
+    this.stepNames = const [],
     this.terminalId,
     this.exitCode,
     this.message,
@@ -56,6 +64,7 @@ class SessionSetup {
     'stepIndex': stepIndex,
     'stepCount': stepCount,
     if (stepName != null) 'stepName': stepName,
+    if (stepNames.isNotEmpty) 'stepNames': stepNames,
     if (terminalId != null) 'terminalId': terminalId,
     if (exitCode != null) 'exitCode': exitCode,
     if (message != null) 'message': message,
@@ -74,6 +83,9 @@ class SessionSetup {
     stepIndex: (j['stepIndex'] as num?)?.toInt() ?? 0,
     stepCount: (j['stepCount'] as num?)?.toInt() ?? 0,
     stepName: j['stepName'] as String?,
+    stepNames:
+        (j['stepNames'] as List?)?.whereType<String>().toList(growable: false) ??
+        const [],
     terminalId: j['terminalId'] as String?,
     exitCode: (j['exitCode'] as num?)?.toInt(),
     message: j['message'] as String?,
@@ -87,6 +99,7 @@ class SessionSetup {
     int? stepIndex,
     int? stepCount,
     String? stepName,
+    List<String>? stepNames,
     String? terminalId,
     int? exitCode,
     String? message,
@@ -98,6 +111,7 @@ class SessionSetup {
     stepIndex: stepIndex ?? this.stepIndex,
     stepCount: stepCount ?? this.stepCount,
     stepName: stepName ?? this.stepName,
+    stepNames: stepNames ?? this.stepNames,
     terminalId: terminalId ?? this.terminalId,
     exitCode: exitCode ?? this.exitCode,
     message: message ?? this.message,
@@ -114,6 +128,7 @@ class SessionSetup {
           other.stepIndex == stepIndex &&
           other.stepCount == stepCount &&
           other.stepName == stepName &&
+          _sameNames(other.stepNames, stepNames) &&
           other.terminalId == terminalId &&
           other.exitCode == exitCode &&
           other.message == message &&
@@ -127,6 +142,7 @@ class SessionSetup {
     stepIndex,
     stepCount,
     stepName,
+    Object.hashAll(stepNames),
     terminalId,
     exitCode,
     message,
@@ -134,6 +150,19 @@ class SessionSetup {
     startedAt,
     finishedAt,
   );
+}
+
+/// A plan's step names are fixed for the life of a run, so equality is a
+/// pairwise walk rather than a set comparison — and it has to be one at all,
+/// since two structurally equal lists are different objects and would make
+/// every re-parse of an unchanged entry look like a change.
+bool _sameNames(List<String> a, List<String> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
 }
 
 class SessionEntry {

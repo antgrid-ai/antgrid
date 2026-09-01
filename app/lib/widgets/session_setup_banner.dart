@@ -20,6 +20,7 @@ import '../providers/providers.dart';
 import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
 import '../util/detached.dart';
+import 'session_setup_progress.dart';
 import 'terminal_view_wrapper.dart';
 
 /// How often the collapsed strip re-reads the setup terminal's tail.
@@ -151,17 +152,43 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
             agentLive,
           ),
         ),
-        if (running)
-          AbProgressRule(
-            // 0-based index: the fraction is the work already behind the
-            // current step, which is the only part that is actually done.
-            fraction: setup.stepCount > 0
-                ? setup.stepIndex / setup.stepCount
-                : null,
-          ),
+        if (running) _buildProgress(setup),
         if (tail != null) _buildTail(context, tail),
         if (expanded) _buildLog(context, terminalId),
       ],
+    );
+  }
+
+  /// The measure and the clock, on their own line rather than in the banner's
+  /// trailing row: the headline already names a step and would be squeezed off
+  /// a phone by anything else competing for that width.
+  ///
+  /// The elapsed reading is what separates a slow step from a hung one — a
+  /// four-minute `bun install` prints nothing for most of its run, and the
+  /// rule alone does not move either.
+  Widget _buildProgress(SessionSetup setup) {
+    final colors = context.antgrid;
+    return Container(
+      color: colors.bgElevated,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space12,
+        vertical: AbTokens.space2,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: AbProgressRule(
+              // 0-based index: the fraction is the work already behind the
+              // current step, which is the only part that is actually done.
+              fraction: setup.stepCount > 0
+                  ? setup.stepIndex / setup.stepCount
+                  : null,
+            ),
+          ),
+          const SizedBox(width: AbTokens.space8),
+          SetupElapsed(startedAt: setup.startedAt, color: colors.textMuted),
+        ],
+      ),
     );
   }
 
