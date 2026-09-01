@@ -208,7 +208,7 @@ void main() {
     expect(state.anyArmed, isTrue);
   });
 
-  group('quick choices (§4.6)', () {
+  group('quick choices', () {
     const approve = {
       'choiceId': 'approve',
       'label': 'Approve',

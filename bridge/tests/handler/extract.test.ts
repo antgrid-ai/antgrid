@@ -38,7 +38,7 @@ function fakeSpawn(outputs: string[]) {
   return { spawn, calls };
 }
 
-describe("§3.3 no ordering word, no dependency", () => {
+describe("no ordering word, no dependency", () => {
   // The plan's named fixture. A spurious dependency here silently blocks work the
   // user wanted done; a missing one only means Handler does not wait.
   it('extracts "update the docs and run the tests" as two independent items', () => {
@@ -84,7 +84,7 @@ describe("§3.3 no ordering word, no dependency", () => {
   });
 });
 
-describe("§3.1 the instruction text is the whole input", () => {
+describe("the instruction text is the whole input", () => {
   it("puts the user's text in the prompt verbatim", () => {
     expect(buildExtractPrompt("get the tests passing then open a PR"))
       .toContain("get the tests passing then open a PR");
@@ -286,8 +286,8 @@ describe("runExtraction", () => {
     expect(calls[0]!.join(" ")).toContain("update the docs and run the tests");
   });
 
-  // §3.1: the input is the user's words and nothing else. A transcript path here
-  // would reintroduce the context tier Phase 2 deleted.
+  // The input is the user's words and nothing else. A transcript path here would
+  // reintroduce the context tier Phase 2 deleted.
   it("never passes a transcript path", async () => {
     const { spawn, calls } = fakeSpawn([GOOD]);
     await runExtraction({ tool: "claude-code", text: "run the tests", cwd: ".", spawn });

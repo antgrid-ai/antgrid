@@ -30,7 +30,7 @@ function corpus(...quotes: string[]): { evidenceCorpus: string } {
   return { evidenceCorpus: `agent output:\n${quotes.join("\n")}\n` };
 }
 
-describe("§2.1 the assistant moves items, it never mints them", () => {
+describe("the assistant moves items, it never mints them", () => {
   it("rejects a transition naming an id that is not in the backlog", () => {
     const backlog = [item("a", "queued")];
     const before = structuredClone(backlog);
@@ -69,7 +69,7 @@ describe("§2.1 the assistant moves items, it never mints them", () => {
   });
 });
 
-describe("§2.1 terminal transitions require evidence", () => {
+describe("terminal transitions require evidence", () => {
   for (const status of ["done", "skipped", "failed"] as const) {
     it(`rejects a ${status} transition with no evidence field`, () => {
       const r = applyTransitions([item("a", "active")], [{ id: "a", status }], NOW, corpus("do a ran fine"));
@@ -99,8 +99,8 @@ describe("§2.1 terminal transitions require evidence", () => {
     expect(r.backlog[0]!.evidence).toBe("dependency still red");
   });
 
-  // Only the three terminal states are evidence-gated (§2.2); an item being picked
-  // up or parked is not a claim about the world.
+  // Only the three terminal states are evidence-gated; an item being picked up or
+  // parked is not a claim about the world.
   it("allows non-terminal transitions without evidence", () => {
     const r = applyTransitions([item("a", "queued"), item("b", "active"), item("c", "blocked")], [
       { id: "a", status: "active" },
@@ -124,7 +124,7 @@ describe("§2.1 terminal transitions require evidence", () => {
 // paraphrasing, inventing, or quoting a real sentence about a different subject.
 // These pin what the two stacked rules — grounding, then the command anchor —
 // can and cannot answer.
-describe("§2.1 terminal evidence must be a citation, not a string", () => {
+describe("terminal evidence must be a citation, not a string", () => {
   it("applies a terminal transition whose evidence really is in the corpus", () => {
     const r = applyTransitions([item("a", "active")], [
       { id: "a", status: "done", evidence: "14 tests passed in 0.4s" },
@@ -228,7 +228,7 @@ describe("§2.1 terminal evidence must be a citation, not a string", () => {
 // in the context, about the coding agent's own internal review step. The anchor
 // is what catches that shape, and grounding is what stops the anchor being
 // cleared by typing the command name into the evidence field.
-describe("§2.1 a command-shaped item needs evidence of THAT command", () => {
+describe("a command-shaped item needs evidence of THAT command", () => {
   const ITEM = "run /code-review --fix";
   const OTHER = "running my own review of the changes; review complete, no findings";
 
@@ -255,7 +255,7 @@ describe("§2.1 a command-shaped item needs evidence of THAT command", () => {
 
   // A skip or a failure says the work did NOT happen, so demanding a quote of the
   // invocation would ask for the one record that cannot exist — and make
-  // "correctly did not happen" unsayable again, the §2.2 deadlock the wider
+  // "correctly did not happen" unsayable again, the deadlock the wider
   // vocabulary was added to remove.
   for (const status of ["skipped", "failed"] as const) {
     it(`lets ${status} through on a grounded quote that names no command`, () => {
@@ -293,7 +293,7 @@ describe("§2.1 a command-shaped item needs evidence of THAT command", () => {
 // a quote no honest sentence will ever contain — and the item is then unclosable
 // for the life of the session. Two answers narrow that: the session's catalog,
 // where there is one, and the caller's waiver where there is not.
-describe("§2.1 the command anchor only fires on a command", () => {
+describe("the command anchor only fires on a command", () => {
   const ROUTE = "Fix the /login redirect so it lands on the dashboard";
   const LANDED = "LoginRedirect.tsx updated; login now redirects to /dashboard";
 
@@ -357,7 +357,7 @@ describe("§2.1 the command anchor only fires on a command", () => {
   });
 });
 
-describe("§2.2 only done counts as progress", () => {
+describe("only done counts as progress", () => {
   it("sets progressed when an item reaches done, straight from queued", () => {
     const r = applyTransitions([item("a", "queued")], [
       { id: "a", status: "done", evidence: "all green, 0 failures" },
@@ -418,9 +418,9 @@ describe("§2.2 only done counts as progress", () => {
     expect(r.progressed).toBe(false);
   });
 
-  // A finite backlog must yield finite progress. `done` is terminal in §2.2, so an
+  // A finite backlog must yield finite progress. `done` is terminal, so an
   // evaluator that can walk an item back out of it can reset the guard once per
-  // pass forever — §2.1's mint-progress attack, reached without minting an id.
+  // pass forever — the mint-progress attack, reached without minting an id.
   it("bounds the number of progress signals by the number of items", () => {
     let backlog = [item("a", "queued")];
     let progressions = 0;
@@ -440,7 +440,7 @@ describe("§2.2 only done counts as progress", () => {
   });
 });
 
-describe("§2.2 done, skipped and failed are one-way", () => {
+describe("done, skipped and failed are one-way", () => {
   for (const from of ["done", "skipped", "failed"] as const) {
     it(`rejects a transition out of ${from}`, () => {
       const backlog = [item("a", from, { evidence: "the original justification" })];
@@ -453,9 +453,9 @@ describe("§2.2 done, skipped and failed are one-way", () => {
     });
   }
 
-  // The revival §2.2 does sanction: `blocked` is not terminal, so new evidence
-  // puts the item back in play. Reviving a skipped one is a user tap on the
-  // summary (§4.3), which does not come through this function.
+  // The one revival the vocabulary sanctions: `blocked` is not terminal, so new
+  // evidence puts the item back in play. Reviving a skipped one is a user tap
+  // on the summary, which does not come through this function.
   it("allows revival out of blocked", () => {
     const r = applyTransitions([item("a", "blocked", { evidence: "dep was red" })], [
       { id: "a", status: "queued" },
@@ -481,8 +481,8 @@ describe("§2.2 done, skipped and failed are one-way", () => {
 // The transition type is a claim about evaluator output, not a check on it: these
 // values arrive as parsed JSON, so an unlisted status or a non-string evidence
 // reaches the function as easily as a well-formed tuple.
-describe("§2.1 malformed transitions are rejected, not applied", () => {
-  it("rejects a status outside the §2.2 vocabulary", () => {
+describe("malformed transitions are rejected, not applied", () => {
+  it("rejects a status outside the item-status vocabulary", () => {
     const r = applyTransitions(
       [item("a", "active")],
       [{ id: "a", status: "completed" } as unknown as ItemTransition],
@@ -533,7 +533,7 @@ describe("applyTransitions is pure", () => {
     expect(propagateBlocked(backlog)[0]!.dependsOn).not.toBe(backlog[0]!.dependsOn);
   });
 
-  // Rejections exist so the engine can log a §2.1 mint attempt; a record that
+  // Rejections exist so the engine can log a mint attempt; a record that
   // aliases the caller's object can be rewritten to name a legitimate id after
   // the fact, which is exactly what an audit trail must not allow.
   it("snapshots a rejected transition instead of aliasing it", () => {
@@ -569,7 +569,7 @@ describe("applyTransitions is pure", () => {
   });
 });
 
-describe("§3.3 blocking is derived, never judged", () => {
+describe("blocking is derived, never judged", () => {
   it("blocks a queued item whose dependency is blocked", () => {
     const r = propagateBlocked([item("tests", "blocked"), item("pr", "queued", { dependsOn: ["tests"] })]);
     expect(r.find((i) => i.id === "pr")!.status).toBe("blocked");
@@ -581,7 +581,7 @@ describe("§3.3 blocking is derived, never judged", () => {
   });
 
   // Listed dependents-first on purpose: extraction does not order a backlog, and
-  // the drawer lets the user reorder it (§4.4), so a single forward pass would
+  // the drawer lets the user reorder it, so a single forward pass would
   // leave the far end of the chain queued. This is what the fixpoint sweep buys.
   it("propagates transitively down a chain listed against its own order", () => {
     const r = propagateBlocked([
@@ -597,8 +597,8 @@ describe("§3.3 blocking is derived, never judged", () => {
     expect(r.find((i) => i.id === "pr")!.status).toBe("queued");
   });
 
-  // A skipped dependency is "no longer applicable", not a failure — §3.3 derives
-  // blocking from `blocked`/`failed` only, and treating mootness as breakage
+  // A skipped dependency is "no longer applicable", not a failure — blocking is
+  // derived from `blocked`/`failed` only, and treating mootness as breakage
   // would strand the work the user still wants.
   it("does not block on a skipped dependency", () => {
     const r = propagateBlocked([item("unit", "skipped"), item("pr", "queued", { dependsOn: ["unit"] })]);
@@ -717,7 +717,7 @@ describe("nextActionable", () => {
   });
 });
 
-describe("§2.2 allTerminal is the wrap-up predicate", () => {
+describe("allTerminal is the wrap-up predicate", () => {
   for (const status of ["queued", "active", "blocked"] as const) {
     it(`is false while any item is ${status}`, () => {
       expect(allTerminal([
@@ -735,7 +735,7 @@ describe("§2.2 allTerminal is the wrap-up predicate", () => {
     ])).toBe(true);
   });
 
-  // §4.3: a session with nothing left is the session evaporating, not self-healing.
+  // A session with nothing left is the session evaporating, not self-healing.
   it("is false for an empty backlog", () => {
     expect(allTerminal([])).toBe(false);
   });
@@ -769,7 +769,7 @@ describe("renderBacklog", () => {
     expect(text.split("\n")).toHaveLength(1);
   });
 
-  // The id is extraction output too, and it is the field §2.1's whole invariant
+  // The id is extraction output too, and it is the field the no-minting invariant
   // is keyed on — a forged line here mints the vocabulary entry directly.
   it("renders one line per item when an id carries newlines", () => {
     const text = renderBacklog([
@@ -809,8 +809,8 @@ describe("summarize", () => {
     expect(s).toEqual({ done: 2, blocked: 1, skipped: 1, failed: 1 });
   });
 
-  // §4.3's "escalate instead of skipping when the skip would empty the session" is
-  // composed from these two: terminal, but nothing accomplished.
+  // The "escalate instead of skipping when the skip would empty the session" rule
+  // is composed from these two: terminal, but nothing accomplished.
   it("reports zero done for a fully-skipped backlog that is otherwise terminal", () => {
     const backlog = [
       item("a", "skipped", { evidence: "branch already merged" }),

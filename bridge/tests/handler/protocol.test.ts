@@ -139,7 +139,8 @@ describe("handler wire", () => {
     const send = (choices: unknown) => parseMessage(JSON.stringify({
       ...createMessage("handler:escalation", base), choices,
     }));
-    // Absent = free-text reply, exactly as `kind` is absent — the pre-§4.6 shape.
+    // Absent = free-text reply, exactly as `kind` is absent — the shape that
+    // predates quick choices.
     expect(parseMessage(JSON.stringify(createMessage("handler:escalation", base)))).toBeTruthy();
     expect(send([choice(), other])).toBeTruthy();
     // One chip is a card with no alternative; four is past what a lock-screen
@@ -448,7 +449,7 @@ describe("handler:instruct", () => {
   }
 });
 
-describe("handler:snapshot / handler:undo (§5.2)", () => {
+describe("handler:snapshot / handler:undo", () => {
   const snapshot = {
     snapshotId: "s1", terminalId: "t1", at: 5, action: "reset_hard" as const,
     trigger: "git reset --hard HEAD~1", summary: "saved HEAD abc1234", state: "available" as const,

@@ -385,9 +385,10 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  // The §5.4 lift an instruction takes is the half of it the user cannot read
-  // off their own sentence, so the row has to be legible without opening
-  // anything: the scope and the totals in the title, the literals below it.
+  // The authorization lift an instruction takes is the half of it the user
+  // cannot read off their own sentence, so the row has to be legible without
+  // opening anything: the scope and the totals in the title, the literals
+  // below it.
   testWidgets('a grant row names its scope and lists what it allowed', (
     tester,
   ) async {
@@ -666,8 +667,8 @@ void main() {
     tester,
   ) async {
     // The confirm is bought by the blast radius, not by the word "undo". A
-    // hard reset restores this checkout and nobody else's, so §5.2's one-tap
-    // prevention stands where it was always right.
+    // hard reset restores this checkout and nobody else's, so the one-tap undo
+    // stands where it was always right.
     final t = await pumpLiveHandlerScreen(tester);
     t.emit(
       'handler:snapshot',

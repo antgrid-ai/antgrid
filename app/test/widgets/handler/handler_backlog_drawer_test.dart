@@ -123,10 +123,10 @@ void _emitDisarmed(ProjectSession session) {
 FakeAgentTransport _transportOf(ProjectSession session) =>
     session.transport as FakeAgentTransport;
 
-/// One `handler:activity` row. The §5.4 grant the bridge records for an
-/// instruction arrives on this wire, before any status snapshot: the lift is
-/// taken from the raw sentence, and the extraction that follows it is a headless
-/// CLI run away.
+/// One `handler:activity` row. The authorization grant the bridge records for
+/// an instruction arrives on this wire, before any status snapshot: the lift
+/// is taken from the raw sentence, and the extraction that follows it is a
+/// headless CLI run away.
 void _emitGrant(
   ProjectSession session, {
   String recordId = 'g1',
@@ -489,8 +489,8 @@ void main() {
     final session = await _armedSession([_tests, _commit, _pr]);
     await _pumpDrawer(tester, session);
 
-    // Spec §3.3: a dependency may be dropped, never written. Nothing renders an
-    // add affordance, and every menu entry is a drop/move/requeue.
+    // A dependency may be dropped, never written. Nothing renders an add
+    // affordance, and every menu entry is a drop/move/requeue.
     expect(
       tester
           .widgetList<AbIcon>(find.byType(AbIcon))
@@ -903,7 +903,7 @@ void main() {
     testWidgets('a parked session keeps the chips and input live', (
       tester,
     ) async {
-      // Spec §4.4: stacking while parked is the point — the bridge queues it.
+      // Stacking while parked is the point — the bridge queues it.
       final session = await _armedSession([_tests], state: 'parked');
       await _pumpDrawer(tester, session);
 
@@ -936,14 +936,14 @@ void main() {
       expect(find.text(handlerDisclaimerText), findsNothing);
     });
 
-    testWidgets('the drawer carries the disclaimer, worded as §5.5 has it', (
-      tester,
-    ) async {
+    testWidgets('the drawer carries the disclaimer verbatim', (tester) async {
       final session = await _armedSession([_tests]);
       await _pumpDrawer(tester, session);
 
-      // Spelled out rather than compared against the constant: the wording is
-      // the spec's, so a rewrite of it has to fail here.
+      // Spelled out rather than compared against the constant: asserting
+      // `handlerDisclaimerText` against itself would pass through any reword,
+      // so this duplicated literal is the only thing that fails when the
+      // wording changes.
       expect(
         find.text(
           "Handler acts on your behalf while you're away and can make mistakes. "

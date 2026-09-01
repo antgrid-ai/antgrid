@@ -88,7 +88,8 @@ test("handler:undo reaches the engine, and a malformed one resyncs without disar
     version: 1,
     entries: [{
       // An earlier session's offer: arming t1 below retires t1's own leftovers,
-      // and an offer outliving the session that took it is the point of §5.2.
+      // and an offer outliving the session that took it is the point of the
+      // snapshot store.
       terminalId: "t0",
       action: "reset_hard",
       entry: {

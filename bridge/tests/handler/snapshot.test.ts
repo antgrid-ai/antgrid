@@ -68,7 +68,7 @@ const take = (f: Fixture, text: string, extra: Partial<Parameters<typeof takeSna
 // ---------------------------------------------------------------------------
 
 describe("planSnapshots", () => {
-  test("recognizes the four §5.2 rows", () => {
+  test("recognizes the four snapshot actions", () => {
     expect(planSnapshots("git reset --hard HEAD~1")).toEqual([
       { action: "reset_hard", trigger: "git reset --hard HEAD~1", targetRef: "HEAD~1" },
     ]);
@@ -802,7 +802,7 @@ describe("module surface", () => {
     }
   });
 
-  test("SNAPSHOT_PATTERNS maps a live floor pattern for each §5.2 action", () => {
+  test("SNAPSHOT_PATTERNS maps a live floor pattern for each snapshot action", () => {
     expect([...new Set(SNAPSHOT_PATTERNS.values())].sort())
       .toEqual(["force_push", "git_clean", "reset_hard", "rm_rf"]);
     for (const [pattern, action] of SNAPSHOT_PATTERNS) {

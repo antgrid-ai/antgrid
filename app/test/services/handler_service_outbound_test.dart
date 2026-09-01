@@ -71,9 +71,9 @@ void _status(
 
 void main() {
   test('a 1-tap arm sends armed:true and no payload keys', () async {
-    // Spec §4.1: arming must not require a form, so an arm with no goal and no
-    // backlog has to be a complete message. Sending either key as an empty
-    // value would clear whatever the bridge already holds for the session.
+    // Arming must not require a form, so an arm with no goal and no backlog
+    // has to be a complete message. Sending either key as an empty value would
+    // clear whatever the bridge already holds for the session.
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = HandlerService.fromSession(session);
@@ -618,7 +618,7 @@ void main() {
     await session.close();
   });
 
-  group('quick-choice answers (§4.6)', () {
+  group('quick-choice answers', () {
     const choices = [
       {'choiceId': 'approve', 'label': 'Approve', 'text': 'ship it'},
       {'choiceId': 'reject', 'label': 'Reject', 'text': 'Do not proceed.'},
@@ -659,9 +659,9 @@ void main() {
       await session.close();
     });
 
-    test('a tap grants no §5.4 authorization lift', () async {
+    test('a tap grants no authorization lift', () async {
       // handler:instruct is the sole feed point for instruction-scoped
-      // authorization, and §5.4 derives that only from the user's own words.
+      // authorization, and that lift derives only from the user's own words.
       // Chip text is Assistant output, so routing a tap there would let the
       // judge's own draft authorize itself for the rest of the session — and
       // would stack an extraction item no terminal status can ever resolve.
@@ -740,7 +740,7 @@ void main() {
       expect(t.sent.any((m) => m['type'] == 'terminal:input'), isFalse);
       expect(svc.currentState.escalations, isNotEmpty);
 
-      // The row is still answerable in the user's own words — spec §4.6's
+      // The row is still answerable in the user's own words, and the
       // [Custom Reply] escape hatch is what keeps an unanticipated situation
       // from dead-ending at 3am.
       svc.reply(plainRow, 'actually, rebase first');

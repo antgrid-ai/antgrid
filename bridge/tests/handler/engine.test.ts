@@ -62,7 +62,7 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
   const pushes: string[] = [];
   const timers: FakeTimer[] = [];
   const clock = { t: 1000 };
-  // The §5.2 store, in memory: the real one writes JSON next to the session
+  // The snapshot store, in memory: the real one writes JSON next to the session
   // records, and every test in this file arms at least one session.
   let stored: StoredSnapshot[] = [];
   // The wrap-up store, in memory on the same terms. One case below deliberately
@@ -86,14 +86,15 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
     },
     sendAb: (m: AbMessage) => sent.push(m),
     sendPush: (m: string) => pushes.push(m),
-    // Arming with a goal extracts it (§3.2), so every engine in this file would
+    // Arming with a goal extracts it, so every engine in this file would
     // otherwise reach the real CLI spawn. Null is the fail-closed answer, which
     // lands the goal as one raw item — exactly what a judge-less arm produces.
     runExtractionFn: async () => null,
     // Snapshots default to "recognized the action, nothing was at risk" for the
     // same reason: the real ones shell out to git and copy trees, so only the
-    // §5.2 suite below wires a live one. Returning a bare [] would be dishonest —
-    // an outcome-less §5.2 shape means NOT PROTECTED, and the engine says so.
+    // snapshot suite below wires a live one. Returning a bare [] would be
+    // dishonest — an outcome-less snapshot plan means NOT PROTECTED, and the
+    // engine says so.
     takeSnapshotsFn: async ({ text }: { text: string }): Promise<SnapshotOutcome[]> =>
       planSnapshots(text).map((p) => ({ status: "nothing", action: p.action, trigger: p.trigger, detail: "stub" })),
     clearTrashFn: async (id: string) => { trashed.push(id); },
@@ -297,8 +298,8 @@ describe("suspend vs disarm across a restart", () => {
     expect(saved().armed).toBe(false);
     expect(saved().suspended).toBe(true);
 
-    // Re-arm carries no goal and no backlog — the one-tap shield never does
-    // (§4.1), which is why anything it fails to rehydrate is simply gone.
+    // Re-arm carries no goal and no backlog — the one-tap shield never does, which
+    // is why anything it fails to rehydrate is simply gone.
     engine.arm({ terminalId: "t1" });
     const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
       sessions: Array<{ goal: string; backlog: unknown[]; pendingEscalations: number; state: string }>;
@@ -593,7 +594,7 @@ describe("handleEvent decision loop", () => {
     expect(activity.some((a) => (a as { decision: string }).decision === "handle")).toBe(true);
   });
 
-  // §5.3: only the residual hard floor still blocks. Everything else is advisory.
+  // Only the residual hard floor still blocks. Everything else is advisory.
   it("a HARD floor hit escalates with floorRule and injects nothing", async () => {
     const { engine, sent, injected } = makeEngine({
       runDecisionFn: async () => decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" }),
@@ -605,7 +606,7 @@ describe("handleEvent decision loop", () => {
     expect(esc.floorRule).toBeTruthy();
   });
 
-  // The core §5.1 trade: the action goes through, and the record is what was
+  // The core advisory trade: the action goes through, and the record is what was
   // bought with the prevention that was given up.
   it("an advisory floor hit injects anyway and records the warning", async () => {
     const { engine, sent, injected, activity } = makeEngine({
@@ -1525,7 +1526,7 @@ describe("chat blocking prompts and slash guard", () => {
       expect(rows.map((r) => r.reason)).toEqual([
         "absolute path outside project: /etc/passwd",
       ]);
-      // Advisory, per §5.1: the warning is the outcome, not a block.
+      // Advisory: the warning is the outcome, not a block.
       expect(injected).toEqual([["t1", "/review /etc/passwd"]]);
     });
 
@@ -1770,9 +1771,8 @@ describe("chat blocking prompts and slash guard", () => {
 
   // The mirror of the test above: /proj is the MAIN checkout, so for a session
   // running in a worktree it is outside, and the ABS_PATH tier is what says so.
-  // Advisory, per §5.1 — the warning and its snapshot are the assertion, not a
-  // block, and reading the project path instead of the session's would leave
-  // both silent.
+  // Advisory — the warning and its snapshot are the assertion, not a block, and
+  // reading the project path instead of the session's would leave both silent.
   it("warns on a main-checkout path for an isolated session as outside its project", async () => {
     const injected: Array<[string, string]> = [];
     const { engine, activity } = makeEngine({
@@ -2014,7 +2014,7 @@ test("opencode decide context reads the db but hands the judge no path", async (
   }
 });
 
-describe("quick-choice escalations (§4.6)", () => {
+describe("quick-choice escalations", () => {
   const DRAFT = "Yes, reuse the existing migration table.";
 
   interface Choice { choiceId: string; label: string; text: string }
@@ -2082,8 +2082,8 @@ describe("quick-choice escalations (§4.6)", () => {
     expect(choicesOf(sent)!.map((c) => c.choiceId)).toEqual(["approve", "reject"]);
   });
 
-  // §5.3 is liftable by nothing, so those keep costing a human who reads the text
-  // behind the reply sheet's floor banner.
+  // The hard floor is liftable by nothing, so those keep costing a human who reads
+  // the text behind the reply sheet's floor banner.
   it("a HARD floor escalation carries no choices", async () => {
     const { engine, sent } = makeEngine({
       runDecisionFn: async () => decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" }),
@@ -2180,7 +2180,7 @@ describe("quick-choice escalations (§4.6)", () => {
     expect(quickChoicesFor({ draftReply: "y".repeat(400), projectPath: "/proj" })).toHaveLength(2);
   });
 
-  // §5.4: a tap answers through the ordinary reply transport and mints nothing.
+  // A tap answers through the ordinary reply transport and mints nothing.
   // Contrast with "an instruction naming the operation lifts it for the session" —
   // the same sentence through handler:instruct DOES lift, which is the whole point:
   // authorization comes from the instruction backlog, never from a label the judge
@@ -2310,7 +2310,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     await floor.engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     const [floored] = escalations(floor.sent);
     expect(floored!.kind).toBe("guard_blocked");
-    // The §5.3 rule still rides the row: the card names which floor refused it.
+    // The hard-floor rule still rides the row: the card names which floor refused it.
     expect(floored!.floorRule).toBeTruthy();
 
     const runaway = makeEngine({
@@ -3050,11 +3050,11 @@ describe("lifecycle persistence", () => {
 });
 
 describe("instruct (extraction)", () => {
-  // instruct() is deliberately fire-and-forget (§3.2), so nothing returned by it
+  // instruct() is deliberately fire-and-forget, so nothing returned by it
   // can be awaited — the tests wait on the macrotask queue instead.
   const settle = () => new Promise<void>((r) => { setTimeout(r, 0); });
 
-  // These arms carry no goal on purpose: a goal is itself extracted (§3.2), and
+  // These arms carry no goal on purpose: a goal is itself extracted, and
   // a second batch in the backlog would make every assertion below read the arm
   // pass rather than the instruct one. Arm-time extraction has its own describe.
 
@@ -3358,7 +3358,7 @@ describe("instruct (extraction)", () => {
   });
 });
 
-describe("instruct (§5.4 grants)", () => {
+describe("instruct (authorization grants)", () => {
   const settle = () => new Promise<void>((r) => { setTimeout(r, 0); });
   const grantRows = (activity: unknown[]) =>
     records(activity, "instruction_authorized") as { reason: string; detail?: string }[];
@@ -3393,7 +3393,7 @@ describe("instruct (§5.4 grants)", () => {
 
   it("never reports a secret read or an egress as a command", async () => {
     // One `patterns` bucket lifts all three tiers. Collapsing them told the user
-    // a command was allowed when what was lifted was the §5.1 secrets advisory.
+    // a command was allowed when what was lifted was the SECRETS advisory.
     const { engine, activity } = makeEngine();
     engine.arm({ terminalId: "t1" });
     engine.instruct({
@@ -3487,7 +3487,7 @@ describe("instruct (§5.4 grants)", () => {
   });
 });
 
-describe("arm-time extraction (§3.2)", () => {
+describe("arm-time extraction", () => {
   const settle = () => new Promise<void>((r) => { setTimeout(r, 0); });
 
   it("a goal on a fresh arm becomes backlog items behind the handoff", async () => {
@@ -3683,9 +3683,10 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
       .toBe('removed "run the tests"');
   });
 
-  // §2.2's one-way door, asked from the other side: an item the harness closed on
-  // evidence cannot be reopened by a sentence, or the walk-back that re-completes
-  // one item per pass forever is back through a new entrance.
+  // The one-way door the terminal statuses form, asked from the other side: an item
+  // the harness closed on evidence cannot be reopened by a sentence, or the
+  // walk-back that re-completes one item per pass forever is back through a new
+  // entrance.
   it("leaves a closed item exactly where the evidence gate put it", async () => {
     const done = seed("open a PR", { status: "done", evidence: "PR #12 opened" });
     const { engine, sent, activity } = makeEngine(amending([
@@ -3847,9 +3848,10 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
     expect(statusOf(sent).backlog.map((i) => i.id)).toEqual([COMMIT.id]);
   });
 
-  // The §5.4 lift reads the raw sentence, and a sentence that takes something
-  // back is the one shape it must NOT read as a request: granting there would post
-  // a row telling the user they had permitted the very command they cancelled.
+  // An authorization lift reads the raw sentence, and a sentence that takes
+  // something back is the one shape it must NOT read as a request: granting there
+  // would post a row telling the user they had permitted the very command they
+  // cancelled.
   it("a countermanding sentence lifts nothing", async () => {
     const { engine, activity } = makeEngine(amending([{ id: COMMIT.id, action: "drop" }]));
     engine.arm({ terminalId: "t1", backlog: [COMMIT] });
@@ -3978,7 +3980,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
   });
 });
 
-describe("instruction-scoped authorization (§5.4)", () => {
+describe("instruction-scoped authorization", () => {
   const FORCE_PUSH = "git push --force origin feat/x";
   const handling = (reply: string) => ({ runDecisionFn: async () => decide({ decision: "handle", reply }) });
 
@@ -4046,7 +4048,7 @@ describe("instruction-scoped authorization (§5.4)", () => {
   });
 });
 
-describe("snapshot-before-act (§5.2)", () => {
+describe("snapshot-before-act", () => {
   const RESET = "git reset --hard HEAD~1";
   const handling = (reply: string) => ({ runDecisionFn: async () => decide({ decision: "handle", reply }) });
 
@@ -4075,7 +4077,7 @@ describe("snapshot-before-act (§5.2)", () => {
     }>;
   }
 
-  it("an advisory hit that maps to a §5.2 action is snapshotted before the inject", async () => {
+  it("an advisory hit that maps to a snapshot action is snapshotted before the inject", async () => {
     const calls: string[] = [];
     const { engine, sent, injected, activity, snapshots } = makeEngine({
       ...handling(RESET), takeSnapshotsFn: snapshotter(calls),
@@ -4090,9 +4092,9 @@ describe("snapshot-before-act (§5.2)", () => {
     expect(records(activity, "floor_warning")).toHaveLength(1);
   });
 
-  // §5.4 drops the warning, never the safety net — "I asked for it" is not the
-  // same as "I wanted that exact result". Getting this backwards removes undo
-  // from precisely the actions the user asked for.
+  // An authorization lift drops the warning, never the safety net — "I asked for
+  // it" is not the same as "I wanted that exact result". Getting this backwards
+  // removes undo from precisely the actions the user asked for.
   it("an authorized hit carries no warning and is still snapshotted", async () => {
     const calls: string[] = [];
     const { engine, activity, snapshots } = makeEngine({
@@ -4106,7 +4108,7 @@ describe("snapshot-before-act (§5.2)", () => {
     expect(snapshots()).toHaveLength(1);
   });
 
-  it("a flagged reply with no §5.2 mapping snapshots nothing", async () => {
+  it("a flagged reply with no snapshot-action mapping snapshots nothing", async () => {
     const calls: string[] = [];
     const { engine, sent, injected, activity, snapshots } = makeEngine({
       ...handling("cat /etc/shadow"), takeSnapshotsFn: snapshotter(calls),
@@ -4158,9 +4160,9 @@ describe("snapshot-before-act (§5.2)", () => {
   });
 
   // The floor decides what is flagged and the planner decides what is protected.
-  // A §5.2 shape only the floor recognizes must not pass in silence: silence
-  // reads to the user exactly like an action that was fully snapshotted.
-  it("a flagged §5.2 shape the snapshot pass produced no outcome for is reported unprotected", async () => {
+  // A snapshot-preparable shape only the floor recognizes must not pass in silence:
+  // silence reads to the user exactly like an action that was fully snapshotted.
+  it("a flagged snapshot-preparable shape the snapshot pass produced no outcome for is reported unprotected", async () => {
     const { engine, injected, activity, snapshots } = makeEngine({
       ...handling(RESET), takeSnapshotsFn: async () => [],
     });
@@ -4294,7 +4296,7 @@ describe("snapshot-before-act (§5.2)", () => {
   });
 });
 
-describe("undo (§5.2)", () => {
+describe("undo", () => {
   const stored = (id: string): StoredSnapshot => ({
     terminalId: "t1",
     action: "reset_hard",

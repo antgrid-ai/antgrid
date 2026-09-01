@@ -14,7 +14,7 @@ const warnsWith = (text: string, tier: FloorTier, project = PROJECT): boolean =>
 const isHard = (text: string): boolean => classifyDestructive(text, PROJECT).hard.length > 0;
 
 // ---------------------------------------------------------------------------
-// §5.3 residual hard floor — the only tier that still blocks.
+// Residual hard floor — the only tier that still blocks.
 // ---------------------------------------------------------------------------
 
 test("the five unrecoverable patterns are HARD", () => {
@@ -48,7 +48,7 @@ test("everything else is advisory, never hard", () => {
 });
 
 // ---------------------------------------------------------------------------
-// §5.1 advisory tiers — same patterns as the old gate, now warnings.
+// Advisory tiers — same patterns as the old gate, now warnings.
 // ---------------------------------------------------------------------------
 
 test("warns on destructive shell patterns", () => {
@@ -59,7 +59,7 @@ test("warns on destructive shell patterns", () => {
     "git push origin +main", "git push --mirror", "git push --force-with-lease",
     "git clean -fd", "DROP TABLE users;", "truncate table sessions",
     // Both force spellings, and the flag on either side of -d: a clean the floor
-    // misses is a clean the §5.2 snapshot pass is never asked to protect.
+    // misses is a clean the snapshot pass is never asked to protect.
     "git clean --force -d", "git clean -d --force", "git clean -xf -- vendor",
     "chmod -R 777 /etc", "chown -R me /srv",
   ]) {
@@ -88,7 +88,7 @@ test("does not warn on benign downloads / single-file ops", () => {
 });
 
 // ---------------------------------------------------------------------------
-// §5.1 SECRETS narrowing — the false-positive corpus is the point of the change.
+// SECRETS narrowing — the false-positive corpus is the point of the change.
 // A warning nobody should act on trains the Assistant to discount warnings.
 // ---------------------------------------------------------------------------
 
@@ -160,11 +160,11 @@ test("Windows out-of-project path is flagged, in-project is not", () => {
 
 // ---------------------------------------------------------------------------
 // The interior-separator rule, both sides of its trade. A slash command read as a
-// path corrupts the §5.1 channel that exists to teach the Assistant which of its own
-// proposals were dangerous, so a "/"-led token only counts as a path once it carries
-// a separator INSIDE it — the one shape reply-shape's VERB rule forbids a verb to have.
-// What that gives up is the bare top-level roots; the tiers that scan the full text
-// are what bound the loss.
+// path corrupts the advisory channel that exists to teach the Assistant which of
+// its own proposals were dangerous, so a "/"-led token only counts as a path once
+// it carries a separator INSIDE it — the one shape reply-shape's VERB rule forbids
+// a verb to have. What that gives up is the bare top-level roots; the tiers that
+// scan the full text are what bound the loss.
 // ---------------------------------------------------------------------------
 
 test("a slash command in prose is not read as a path", () => {
