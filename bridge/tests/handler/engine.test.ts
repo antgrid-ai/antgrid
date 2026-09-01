@@ -3209,9 +3209,14 @@ describe("instruct (extraction)", () => {
     expect(warnings).toContain("backlog cap");
   });
 
-  it("an instruction dropped entirely leaves a feed row and no phantom snapshot", async () => {
-    // The bridge log is not a surface the phone can read, and the status the app
-    // would get back is byte-identical to the one it already had.
+  it("an instruction dropped entirely leaves a feed row and the snapshot behind it", async () => {
+    // The bridge log is not a surface the phone can read, so the drop owes a feed
+    // row. The snapshot behind it is byte-identical to the one the app already
+    // had and is sent anyway: the app spends its next status frame on every
+    // instruction row it retires a "sending" row off, so a row with no frame
+    // behind it hands that credit to the NEXT sentence's own append and strands
+    // the row it should have retired (_withOldestPendingRetired,
+    // app/lib/services/handler_service.dart).
     const seeded = Array.from({ length: 100 }, (_, n) => item(`seed-${n}`));
     const { engine, sent, saved, activity } = makeEngine(extract([{ ref: "a", text: "one more" }]));
     engine.arm({ terminalId: "t1", backlog: seeded, notifyOnly: false });
@@ -3224,7 +3229,8 @@ describe("instruct (extraction)", () => {
     expect(records(activity, "instruction_dropped")).toHaveLength(1);
     expect(statusOf(sent).backlog).toHaveLength(100);
     expect(saved).toHaveLength(savedBefore);
-    expect(sent.slice(sentBefore).map((m) => m.type)).toEqual(["handler:activity"]);
+    expect(sent.slice(sentBefore).map((m) => m.type))
+      .toEqual(["handler:activity", "handler:status"]);
   });
 
   it("the raw fallback is held to the same per-item cap the extractor is", async () => {
@@ -3700,10 +3706,15 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
   it("reports an amendment that matched nothing rather than queueing the sentence", async () => {
     const { engine, sent, activity } = makeEngine(amending([{ id: "i-gone", action: "drop" }]));
     engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    const sentBefore = sent.length;
     engine.instruct({ terminalId: "t1", text: "actually skip the deploy" });
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["commit the fix"]);
     expect(records(activity, "instruction_amended")).toHaveLength(0);
+    // Every instruction row owes the app a status frame behind it, whether or
+    // not the backlog moved — see the cap drop in "instruct (extraction)".
+    expect(sent.slice(sentBefore).map((m) => m.type))
+      .toEqual(["handler:activity", "handler:status"]);
     // Quoted, because this row is the only trace the sentence leaves and a user
     // reading the feed later cannot otherwise tell which of theirs it was.
     expect(records(activity, "instruction_dropped")[0])
