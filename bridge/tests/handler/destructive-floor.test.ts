@@ -331,3 +331,68 @@ test("pathCheckText covers a reply plus an argument tail but not the verb", () =
   const abs = r.warnings.filter((w) => w.tier === "ABS_PATH");
   expect(abs.map((w) => w.matched)).toEqual(["/etc/hosts"]);
 });
+
+// ---------------------------------------------------------------------------
+// One operation per pattern, and each flag matched as a whole option token.
+// §5.4 keys an authorization lift on the pattern SOURCE, so anything these
+// guard is a lift crossing from the operation the user granted to one they
+// never saw.
+// ---------------------------------------------------------------------------
+
+const patternsFor = (text: string): string[] =>
+  classifyDestructive(text, PROJECT).warnings
+    .filter((w) => w.tier === "DESTRUCTIVE").map((w) => w.pattern);
+
+test("no two outward operations share a pattern source", () => {
+  // An alternation over two verbs would make these pairs equal, and one lift
+  // would then authorize both.
+  const pairs: [string, string][] = [
+    ["gh pr merge 1", "gh pr close 1"],
+    ["gh release delete v1", "gh repo delete owner/name"],
+  ];
+  for (const [a, b] of pairs) {
+    const [pa] = patternsFor(a);
+    const [pb] = patternsFor(b);
+    expect(pa).toBeDefined();
+    expect(pb).toBeDefined();
+    expect(pa).not.toBe(pb);
+  }
+});
+
+// `-[a-zA-Z]*f` without an option boundary reads the `-perf` of a branch NAME as
+// a force flag, so the SAFE spelling warns on every branch whose name has a
+// hyphen segment ending in f — the warning nobody should act on.
+test("a branch name is never read as a force or delete flag", () => {
+  for (const cmd of [
+    "git branch -d fix-perf", "git branch -d feature-of", "git branch --format='%(refname)'",
+    "git branch --list release-*",
+  ]) {
+    expect(warnsWith(cmd, "DESTRUCTIVE")).toBe(false);
+  }
+});
+
+// git accepts the flags as one grouped cluster, so the forced delete has more
+// spellings than `-D`.
+test("a grouped delete+force cluster is still the forced delete", () => {
+  for (const cmd of ["git branch -fd topic", "git branch -df topic", "git branch -Dr origin/topic"]) {
+    expect(warnsWith(cmd, "DESTRUCTIVE")).toBe(true);
+  }
+});
+
+// The flag has to reach the subcommand without crossing a quote or a command
+// separator, or a tag being CREATED with `-d` in its message reads as a delete.
+test("git tag delete does not match through a quote or a separator", () => {
+  expect(warnsWith('git tag -a v1 -m "fix -d flag"', "DESTRUCTIVE")).toBe(false);
+  expect(warnsWith("git tag -l; rm -d x", "DESTRUCTIVE")).toBe(false);
+  expect(warnsWith("git tag --delete v1", "DESTRUCTIVE")).toBe(true);
+});
+
+// A dry run packs, validates, and uploads nothing — flagging it is an advisory
+// nobody can act on, and (through NO_SNAPSHOT_PATTERNS) a "no undo exists" row
+// for an action that took none.
+test("publish covers every package manager but never a dry run", () => {
+  for (const pm of ["npm", "pnpm", "yarn", "bun"]) {
+    expect(warnsWith(`${pm} publish`, "DESTRUCTIVE")).toBe(true);
+    expect(warnsWith(`${pm} publish --dry-run`, "DESTRUCTIVE")).toBe(false);
+  }
+});

@@ -92,3 +92,32 @@ test("anything that is not a content-carrying submit is written through", () => 
     expect(submittedLine(data)).toBeNull();
   }
 });
+
+// A coding agent enables mouse reporting as it starts, so these arrive from a user
+// who has touched no key — and `typedSessions` outlives the frame that set it, so
+// one of them makes the NEXT bare Enter open a turn nothing will ever close.
+test("a mouse or focus report is not typed content", () => {
+  for (const seq of [
+    "\x1b[<0;12;5M", "\x1b[<0;12;5m", "\x1b[<35;80;24M", // SGR press / release / motion
+    "\x1b[M\x20\x30\x28",                                 // X10
+    "\x1b[32;80;24M",                                     // urxvt
+    "\x1b[I", "\x1b[O",                                   // focus in / out
+  ]) {
+    expect(hasTypedContent(seq)).toBe(false);
+  }
+});
+
+// Why the exclusion is a shape test and not "starts with ESC": dropping every
+// escape sequence loses arrow-key history recall, which IS a real prompt.
+test("the escape sequences a human produces still count", () => {
+  for (const seq of ["\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D", "\x1bOA", "\x1b[3~", "\x1b[1;5C"]) {
+    expect(hasTypedContent(seq)).toBe(true);
+  }
+});
+
+// A mouse report can never end in CR — X10 offsets its coordinates by 32, so no
+// byte in one is `\r` — which is why nothing above can reach the submit split.
+test("the submit split is untouched by pointer reports", () => {
+  expect(submittedLine("\x1b[<0;12;5M")).toBeNull();
+  expect(submittedLine("hello\r")).toBe("hello");
+});

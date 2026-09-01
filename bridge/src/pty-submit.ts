@@ -34,7 +34,10 @@ export const SUBMIT_CR_GAP_MS = 20;
  * The space is inert for the agent, which trims its own command line.
  */
 export function padBareVerb(line: string): string {
-  return /^\/\S+$/.test(line) ? `${line} ` : line;
+  // No slash or backslash after the leading one: a POSIX absolute path
+  // (`/etc/hosts`) and a Windows-style one are not slash verbs, and padding
+  // them would append a space to a line the user typed as a bare argument.
+  return /^\/[^\s/\\]+$/.test(line) ? `${line} ` : line;
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -72,9 +75,15 @@ export class PtySubmitQueue {
    *  {@link SUBMIT_CR_GAP_MS} for why the CR cannot share the line's read. */
   submit(line: string): void {
     this.chain(async () => {
+      const sleep = this.deps.sleep ?? defaultSleep;
       this.deps.write(line);
-      await (this.deps.sleep ?? defaultSleep)(SUBMIT_CR_GAP_MS);
+      await sleep(SUBMIT_CR_GAP_MS);
       this.deps.write("\r");
+      // The gap AFTER the CR matters as much as the one before it: the guest
+      // tokenizes a read as a whole in both directions, so whatever is written
+      // next — the user's own keystroke, a capability reply, a second submit —
+      // would otherwise share this read and rob the CR of its own key event.
+      await sleep(SUBMIT_CR_GAP_MS);
     });
   }
 

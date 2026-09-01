@@ -331,6 +331,15 @@ export function planSnapshots(text: string): SnapshotPlan[] {
   return plans;
 }
 
+/** The DESTRUCTIVE-tier pattern sources one canonical command trips. Shared by
+ *  both sets below so a floor edit that stops matching a canonical command
+ *  empties the same way in each — and never one silently. */
+function floorPatternsFor(command: string): string[] {
+  return classifyDestructive(command, "").warnings
+    .filter((w) => w.tier === "DESTRUCTIVE")
+    .map((w) => w.pattern);
+}
+
 /**
  * Floor pattern source → the §5.2 action that would protect what it flags.
  *
@@ -348,9 +357,7 @@ export const SNAPSHOT_PATTERNS: ReadonlyMap<string, SnapshotAction> = new Map(
     ["rm -rf build", "rm_rf"],
     ["git clean -fd", "git_clean"],
   ] as const).flatMap(([command, action]) =>
-    classifyDestructive(command, "").warnings
-      .filter((w) => w.tier === "DESTRUCTIVE")
-      .map((w) => [w.pattern, action] as [string, SnapshotAction]),
+    floorPatternsFor(command).map((p) => [p, action] as [string, SnapshotAction]),
   ),
 );
 
@@ -376,11 +383,7 @@ export const NO_SNAPSHOT_PATTERNS: ReadonlySet<string> = new Set(
     "git branch -D topic",
     "git tag -d v1",
     "npm publish",
-  ] as const).flatMap((command) =>
-    classifyDestructive(command, "").warnings
-      .filter((w) => w.tier === "DESTRUCTIVE")
-      .map((w) => w.pattern),
-  ),
+  ] as const).flatMap(floorPatternsFor),
 );
 
 // ---------------------------------------------------------------------------

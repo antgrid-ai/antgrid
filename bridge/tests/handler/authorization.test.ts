@@ -87,12 +87,39 @@ describe("alias table", () => {
     ["delete the branch after merging", "git branch -D topic"],
     ["delete the branch coverage report from the docs", "git branch -D topic"],
     ["publish an event on the bus", "npm publish"],
+    // GitHub numbers issues and pull requests in one series, so a bare `#N` is not
+    // a PR anchor: "closes #42" is the standard idiom for an ISSUE and is the single
+    // most common line in a backlog.
+    ["closes #42 once the fix lands", "gh pr close 12"],
+    ["fixes #7 and #8", "gh pr merge 12"],
+    // Carries the verb AND the anchor, and asks for the opposite of a merge — the
+    // PR is not ready to land.
+    ["fix the merge conflicts on PR #12", "gh pr merge 12"],
+    ["resolve merge conflicts in the pull request", "gh pr merge 12"],
   ];
   for (const [phrase, command] of proseCorpus) {
     it(`"${phrase}" grants no lift`, () => {
       expect(stillWarns(armed(phrase), command)).toHaveLength(1);
     });
   }
+
+  // A lift is keyed by the floor pattern SOURCE, so two operations sharing one
+  // pattern share every authorization granted for either. These are the pairs a
+  // single alternation used to collapse.
+  it("a lift never crosses to another operation", () => {
+    const crossings: [string, string, string][] = [
+      ["merge PR #67 once checks pass", "gh pr merge 67", "gh pr close 12"],
+      ["close the stale PRs", "gh pr close 12", "gh pr merge 67"],
+      // No prose alias for these two, so the lift comes from the literal the user
+      // pasted — the pattern source is the key either way.
+      ["run `gh release delete v1.2.0 --yes`", "gh release delete v1.2.0", "gh repo delete owner/name"],
+    ];
+    for (const [phrase, granted, other] of crossings) {
+      const auth = armed(phrase);
+      expect(stillWarns(auth, granted)).toEqual([]);
+      expect(stillWarns(auth, other)).toHaveLength(1);
+    }
+  });
 });
 
 describe("provenance", () => {

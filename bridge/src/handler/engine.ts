@@ -2155,8 +2155,12 @@ export class HandlerEngine {
     if (!allTerminal(s.backlog)) return false;
     this.record(terminalId, "wrapped_up", "every backlog item resolved", s.goal || NO_GOAL);
     this.deps.sendPush?.(
+      // `undoNote` before `blockedNote`: OS surfaces truncate the tail, and of the
+      // two the undo is the only one that expires — the reports stay readable in
+      // the activity feed, while the offer to undo is gone once the user stops
+      // looking for it (§5.5).
       `Handler: done — ${oneLine(s.goal) || "session complete"}${this.wrapUpSummary(s.backlog)}`
-      + `${this.blockedNote(s)}${this.undoNote(terminalId)}`,
+      + `${this.undoNote(terminalId)}${this.blockedNote(s)}`,
       terminalId,
     );
     this.disarm(terminalId);

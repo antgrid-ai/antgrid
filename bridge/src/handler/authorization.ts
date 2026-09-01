@@ -109,9 +109,11 @@ const REPO_ANCHOR = String.raw`\b(?:git|repo|repository|branch|commit|HEAD|origi
 // No "cache" — "force remove the row from the cache" is in-memory prose, and the
 // filesystem sense always spells itself "cache dir"/"cache directory" anyway.
 const FS_ANCHOR = String.raw`\b(?:dirs?|directory|directories|folders?|files?|node_modules|build|dist|out|target|coverage|vendor|artifacts?)\b`;
-// The `#\d+` arm carries no leading `\b`: a word boundary before `#` can never match
-// after whitespace, so `\b#\d+` silently matches no PR number anyone actually writes.
-const PR_ANCHOR = String.raw`(?:\bPRs?\b|\bpull\s+requests?\b|#\d+\b)`;
+// A bare `#\d+` is NOT an arm: GitHub numbers issues and pull requests in one series
+// and "closes #42" is the standard idiom for an ISSUE, so anchoring on the number alone
+// grants `gh pr close`/`gh pr merge` from the single most common line in a backlog.
+// `PR #42` still anchors — on the `PR`.
+const PR_ANCHOR = String.raw`(?:\bPRs?\b|\bpull\s+requests?\b)`;
 // Its own anchor rather than REPO_ANCHOR, which also accepts git/repo/commit — "delete
 // the old git config files" would otherwise grant a force branch delete.
 const BRANCH_ANCHOR = String.raw`\bbranch(?:es)?\b`;
@@ -161,7 +163,13 @@ const ALIASES: Alias[] = [
   },
   {
     phrases: [
-      ...anchored(String.raw`\b(?:squash[\s-]?|rebase[\s-]?)?merg(?:e|es|ed|ing)\b`, PR_ANCHOR),
+      // Not before `conflict`: "fix the merge conflicts on PR #12" is the most common
+      // sentence in a backlog carrying both the verb and the anchor, and it asks for the
+      // opposite of a merge — the PR is not ready to land.
+      ...anchored(
+        String.raw`\b(?:squash[\s-]?|rebase[\s-]?)?merg(?:e|es|ed|ing)\b(?!\s*conflicts?\b)`,
+        PR_ANCHOR,
+      ),
       /\bgh\s+pr\s+merge\b/i,
     ],
     command: "gh pr merge 1",
@@ -321,8 +329,11 @@ export function authorizeInstruction(
   const operations: LiftedOperation[] = [];
   const seen = new Set<string>();
   const note = (tier: LiftedTier, matched: string) => {
-    if (seen.has(JSON.stringify([tier, matched]))) return;
-    seen.add(JSON.stringify([tier, matched]));
+    // Injective without a separator byte either field could contain — the same rule
+    // destructive-floor.ts states for its own warning key.
+    const key = JSON.stringify([tier, matched]);
+    if (seen.has(key)) return;
+    seen.add(key);
     operations.push({ tier, matched });
   };
   for (const w of floor.warnings) {

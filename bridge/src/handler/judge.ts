@@ -88,13 +88,20 @@ async function runWithRetry<T>(opts: {
 
   // Budget spent by the first attempt is gone; the retry runs only within what
   // remains. If none is left, fail closed rather than start a full second timeout.
+  //
+  // Both legs below report the timeout for the same reason the first attempt
+  // does: the hook exists so a null reaches the caller NAMED rather than as an
+  // undifferentiated outage, and a first attempt that ate the whole budget or a
+  // retry that hung are timeouts however the individual spawns exited. A spawn
+  // that FAILED (`out2 === null`) is not one and keeps its silence.
   const remaining = opts.timeoutMs - (Date.now() - started);
-  if (remaining <= 0) return r1.value;
+  if (remaining <= 0) { opts.onTimeout?.(); return r1.value; }
   const retryPrompt = shapeError
     ? buildShapeRetryPrompt(prompt, shapeError)
     : buildRetryPrompt(prompt, r1.error ?? "invalid output");
   const out2 = await run(retryPrompt, remaining);
   if (out2 === null) return r1.value;
+  if (out2.timedOut) opts.onTimeout?.();
   // Exactly one retry: the second answer is final even if it breaks the same
   // rule, and the caller's own gate escalates it from there.
   return opts.parse(out2.stdout).value ?? r1.value;

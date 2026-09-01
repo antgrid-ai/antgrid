@@ -65,10 +65,10 @@ function projectDir(abDir: string, projectId: string): string {
  * `handler:activity` frame, so an error escaping this would cost the connected app
  * its live row as well as the audit line.
  */
-function rotateIfLarge(dir: string): void {
+function rotateIfLarge(dir: string, path: string): void {
   try {
-    if (statSync(join(dir, ACTIVITY_FILE)).size < ACTIVITY_LOG_MAX_BYTES) return;
-    renameSync(join(dir, ACTIVITY_FILE), join(dir, ACTIVITY_ROLLED_FILE));
+    if (statSync(path).size < ACTIVITY_LOG_MAX_BYTES) return;
+    renameSync(path, join(dir, ACTIVITY_ROLLED_FILE));
   } catch {
     // No log yet, or a rename Windows refused while something still holds the
     // rolled file — a skipped rotation, retried by the next record.
@@ -92,7 +92,8 @@ export function loadHandlerConfig(abDir: string, projectId: string): HandlerConf
 
 export function appendActivity(abDir: string, projectId: string, rec: ActivityRecord): void {
   const dir = projectDir(abDir, projectId);
+  const path = join(dir, ACTIVITY_FILE);
   mkdirSync(dir, { recursive: true });
-  rotateIfLarge(dir);
-  appendFileSync(join(dir, ACTIVITY_FILE), `${JSON.stringify(rec)}\n`, "utf8");
+  rotateIfLarge(dir, path);
+  appendFileSync(path, `${JSON.stringify(rec)}\n`, "utf8");
 }

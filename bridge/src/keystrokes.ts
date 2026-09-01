@@ -23,6 +23,19 @@ export function isSubmitKeystroke(data: string): boolean {
 }
 
 /**
+ * Reports the terminal EMITS rather than input a human gave it: mouse tracking
+ * (SGR `\x1b[<b;x;yM|m`, X10 `\x1b[M` + 3 bytes, urxvt `\x1b[b;x;yM`) and focus
+ * in/out (`\x1b[I`, `\x1b[O`).
+ *
+ * A coding agent turns mouse reporting on as it starts, so once the pointer is
+ * over the terminal these arrive continuously, one frame each, from a user who
+ * has touched no key.
+ */
+function isPointerOrFocusReport(data: string): boolean {
+  return /^\x1b\[(?:<\d+;\d+;\d+[Mm]|M[\s\S]{3}|\d+;\d+;\d+M|[IO])$/.test(data);
+}
+
+/**
  * Whether a `terminal:input` payload carried anything BESIDES the submitting CR.
  *
  * A PTY delivers one keystroke per frame, so the CR that submits a prompt almost
@@ -33,9 +46,14 @@ export function isSubmitKeystroke(data: string): boolean {
  * turn needs typed content since the last one (see `typedSessions`).
  *
  * Escape sequences count as content on purpose — arrow-key history recall then
- * enter IS a submit, and the alternative (dropping it) loses a real turn.
+ * enter IS a submit, and the alternative (dropping it) loses a real turn. The one
+ * exception is a sequence the TERMINAL wrote rather than the user: `typedSessions`
+ * outlives the frame that set it, so a single pointer move makes the next bare
+ * Enter — on a TUI menu, on an empty prompt — open a turn no stop hook will ever
+ * close, and the session holds a "working" dot for the rest of its life.
  */
 export function hasTypedContent(data: string): boolean {
+  if (isPointerOrFocusReport(data)) return false;
   return data.replace(/\r$/, "").length > 0;
 }
 

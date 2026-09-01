@@ -977,11 +977,13 @@ export class TerminalSession {
   private respondToCapabilityQueries(data: string): void {
     const replies = this.capabilityResponder.feed(data);
     if (replies === "") return;
-    try {
-      this.pty?.write(replies);
-    } catch {
-      // PTY may have already exited
-    }
+    // Through the queue like every other writer: a reply written raw would be the one
+    // thing that can land BETWEEN an injected line and its deferred CR, which is the
+    // interleave `pty-submit.ts` exists to make impossible. It costs these replies
+    // nothing in the case that matters — the queue is a synchronous pass-through while
+    // no submit is in flight, which is the whole startup burst these queries arrive in —
+    // and query protocols are FIFO, an order the queue preserves.
+    this.write(replies);
   }
 
   /** Resolves once this session's process tree is gone — see `killProcessTree`

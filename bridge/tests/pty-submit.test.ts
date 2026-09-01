@@ -108,3 +108,48 @@ describe("padBareVerb", () => {
     expect(padBareVerb("x".repeat(400))).toBe("x".repeat(400));
   });
 });
+
+describe("PtySubmitQueue: the gap after the CR", () => {
+  // The guest tokenizes a read as a whole in BOTH directions, so a write landing
+  // in the CR's read robs it of its own key event exactly as a CR sharing the
+  // line's read does — and the queue handing control back the instant the CR is
+  // written is what lets the next write do that.
+  it("holds a following write back until the CR's own read has closed", async () => {
+    const writes: string[] = [];
+    const g = gate();
+    const q = new PtySubmitQueue({ write: (d) => writes.push(d), sleep: g.sleep });
+    q.submit("hello");
+    await g.drain();
+    expect(writes).toEqual(["hello", "\r"]);
+    // Two gaps, not one: before the CR and after it.
+    expect(g.asked).toEqual([SUBMIT_CR_GAP_MS, SUBMIT_CR_GAP_MS]);
+  });
+
+  it("still returns to the synchronous fast path once the trailing gap closes", async () => {
+    const writes: string[] = [];
+    const g = gate();
+    const q = new PtySubmitQueue({ write: (d) => writes.push(d), sleep: g.sleep });
+    q.submit("hello");
+    await g.drain();
+    q.write("x");
+    // Asserted before any await: the keystroke path must not keep a scheduling
+    // hop it inherited from a finished submit.
+    expect(writes).toEqual(["hello", "\r", "x"]);
+  });
+});
+
+describe("padBareVerb: what is not a verb", () => {
+  // `\S+` accepts every non-space run, so a path the user typed as a bare line
+  // came back with a space appended to it.
+  it("leaves a bare path alone", () => {
+    expect(padBareVerb("/etc/hosts")).toBe("/etc/hosts");
+    expect(padBareVerb("/usr/local/bin/foo")).toBe("/usr/local/bin/foo");
+    expect(padBareVerb("/c/Users\Admin")).toBe("/c/Users\Admin");
+  });
+
+  it("still pads a verb that only looks like one segment", () => {
+    expect(padBareVerb("/clear")).toBe("/clear ");
+    expect(padBareVerb("/code-review")).toBe("/code-review ");
+    expect(padBareVerb("/plugin:skill")).toBe("/plugin:skill ");
+  });
+});

@@ -41,6 +41,16 @@ const HARD: RegExp[] = [
   /:\s*\(\s*\)\s*\{[^}]*\}\s*;\s*:/, // fork bomb
 ];
 
+// `git branch`'s delete and force flags, each as a WHOLE option token. The
+// `(?<![\w-])` is what keeps the short form off a branch NAME — without it
+// `-[a-zA-Z]*f` matches the `-perf` of `git branch -d fix-perf`, flagging the
+// safe spelling on every branch whose name has a hyphen segment ending in f —
+// and off a long option, so `--format` is not read as a force. Letters may follow
+// the flag letter because git accepts a grouped cluster: `-fd`, `-df` and `-Dr`
+// are all the forced delete that `-D` spells.
+const BRANCH_DELETE_FLAG = String.raw`(?:(?<![\w-])-[a-zA-Z]*[dD][a-zA-Z]*(?![\w=-])|--delete\b)`;
+const BRANCH_FORCE_FLAG = String.raw`(?:(?<![\w-])-[a-zA-Z]*[Df][a-zA-Z]*(?![\w=-])|--force\b)`;
+
 const DESTRUCTIVE: RegExp[] = [
   // Recursive or forced rm in any flag spelling. Denylists leak by design, so match the
   // long forms (--recursive/--force/--no-preserve-root) the short-flag-only patterns missed,
@@ -74,14 +84,25 @@ const DESTRUCTIVE: RegExp[] = [
   // is routinely the backlog's whole point, and a HARD entry is liftable by nothing, so
   // promoting these would block the very operation the user authorized.
   //
+  // One operation per pattern, never an alternation over two: §5.4 keys a lift on the
+  // pattern SOURCE, so a `(?:release|repo)` arm would let an authorized release delete
+  // silently authorize deleting the whole repository — and a `(?:merge|close)` one would
+  // let "close the stale PRs" grant every merge the judge proposes.
+  //
   // The branch pattern alone carries no `i` flag: `-d` and `-D` are different commands.
   // The lowercase one refuses to drop an unmerged branch and so destroys nothing, and
   // case-folding it would flag the safe spelling — the warning nobody should act on.
-  /\bgh\s+pr\s+(?:merge|close)\b/i,
-  /\bgh\s+(?:release|repo)\s+delete\b/i,
-  /\bgit\s+branch\s+(?=[^\n]*(?:-[a-zA-Z]*[dD]\b|--delete\b))[^\n]*(?:-[a-zA-Z]*D\b|--force\b|-[a-zA-Z]*f\b)/,
-  /\bgit\s+tag\s+[^\n]*(?:-d\b|--delete\b)/i,
-  /\bnpm\s+publish\b/i,
+  /\bgh\s+pr\s+merge\b/i,
+  /\bgh\s+pr\s+close\b/i,
+  /\bgh\s+release\s+delete\b/i,
+  /\bgh\s+repo\s+delete\b/i,
+  new RegExp(String.raw`\bgit\s+branch\s+(?=[^\n;&|]*${BRANCH_DELETE_FLAG})[^\n;&|]*${BRANCH_FORCE_FLAG}`),
+  // The flag has to reach the subcommand without crossing a quote or a command
+  // separator: `git tag -a v1 -m "fix -d flag"` names a tag it is creating.
+  /\bgit\s+tag\s+[^\n;&|'"]*(?:(?<![\w-])-[a-zA-Z]*d(?![\w=-])|--delete\b)/i,
+  // `--dry-run` packs and validates and uploads nothing, so flagging it would be an
+  // advisory nobody can act on and a "no undo exists" row for an action that took none.
+  /\b(?:npm|pnpm|yarn|bun)\s+publish\b(?![^\n]*--dry-run\b)/i,
 ];
 
 // Data exfiltration / reverse shells. Downloads (curl URL / wget URL with no
