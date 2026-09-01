@@ -3,18 +3,19 @@ import { createPtyAdapter, createDispatchAdapter } from "../../src/handler/sessi
 import type { SessionAdapter } from "../../src/handler/session-adapter";
 
 describe("createPtyAdapter", () => {
-  it("appends CR on inject and passes through reads", () => {
+  it("hands the bare line to the terminal layer and passes through reads", () => {
     const writes: Array<[string, string]> = [];
     const a = createPtyAdapter({
-      write: (id, data) => writes.push([id, data]),
+      submit: (id, line) => writes.push([id, line]),
       getRecentOutput: () => "scrollback",
       getTranscriptPath: (id) => (id === "t1" ? "/p.jsonl" : undefined),
     });
     a.injectReply("t1", "yes");
     // A terminal has no routing channel: the resolved command is ignored and the
-    // verb rides in `text`, still submitted by exactly one CR.
+    // verb rides in `text`. The submitting CR belongs to the terminal layer,
+    // which adds it as a separate write, so it never appears at this seam.
     a.injectReply("t1", "/compact", { id: "builtin:compact", args: "" });
-    expect(writes).toEqual([["t1", "yes\r"], ["t1", "/compact\r"]]);
+    expect(writes).toEqual([["t1", "yes"], ["t1", "/compact"]]);
     expect(a.recentOutput("t1")).toBe("scrollback");
     expect(a.transcriptPath("t1")).toBe("/p.jsonl");
     expect(a.transcriptPath("t2")).toBeUndefined();

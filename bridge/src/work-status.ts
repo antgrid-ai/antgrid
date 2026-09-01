@@ -493,8 +493,9 @@ export function userReply(
 
 /** The turn on [sessionId] is over — its turn-end frame, a chat cancel, or a
  *  hook-based session's Esc interrupt (see {@link isInterruptKeystroke} in
- *  agent-core.ts, the only other caller). Anything it was blocked on died
- *  with it. Pure; SAME object when there was nothing open to close, so a
+ *  keystrokes.ts, dispatched from agent-core.ts, the only other
+ *  caller). Anything it was blocked on died with it. Pure; SAME object
+ *  when there was nothing open to close, so a
  *  second Esc — or one after the real turn-end already landed — is a no-op. */
 export function closeTurn(prev: WorkStatusState, sessionId: string): WorkStatusState {
   const activeTurns = withoutTurn(prev.activeTurns, sessionId);

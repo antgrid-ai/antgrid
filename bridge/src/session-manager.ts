@@ -2154,9 +2154,12 @@ export class SessionManager {
     // Some registry agents have no verified launch-argv form for an opening
     // prompt. Their PTY still buffers input during startup, which gives every
     // registered terminal agent the same transcript-fork capability without
-    // inventing unsupported CLI flags.
+    // inventing unsupported CLI flags. The submit gap is best-effort on this
+    // path alone: the prompt is buffered before the TUI attaches, so both
+    // writes can still land in the agent's first read — never worse than the
+    // single write it replaces, but not a guarantee either.
     if (entry.conversationStart === "fork" && entry.forkTranscript && promptArgs.length === 0) {
-      this.tm.write(id, `${launchPrompt}\r`);
+      this.tm.submit(id, launchPrompt);
     }
     entry.lastUsedAt = Date.now();
     // Transcript forks have been handed to the spawned process. Native forks
