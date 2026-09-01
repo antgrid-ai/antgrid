@@ -779,9 +779,10 @@ const BacklogWire = z.array(InstructionItemWire).refine(
 
 // Payload-only schema for the parseMessageFast hot path, which matches
 // KNOWN_TYPES and checks NOTHING else; agent-core re-parses the whole payload
-// with this before arming. `notifyOnly` is why it re-parses everything rather
-// than the one field it acts on — arriving absent it would read as falsy and
-// silently run an auto-injecting session the user asked to be notify-only.
+// with this before arming. It re-parses the payload wholesale rather than the
+// fields it acts on one by one because BacklogWire's duplicate-id refine has to
+// run over the list before it is stored — a shadowed item is unreachable by any
+// transition, leaving a session that can never wrap up.
 //
 // Arming deliberately carries no required payload: one tap arms with whatever
 // the session already holds. Any rule making `armed: true` demand a filled-in
@@ -802,7 +803,6 @@ export const HandlerConfigureWire = z.object({
   // bridge's copy behind a non-blocking arm, so a sender that always shipped a
   // full backlog would overwrite items it never saw.
   backlog: BacklogWire.optional(),
-  notifyOnly: z.boolean(),
   // Per-SESSION judge choice, persisted in the terminal's handler-session
   // record by arm(). Empty string = clear back to default (the session's own
   // tool / CLI default model); absent = leave the stored choice untouched.
@@ -970,7 +970,6 @@ const HandlerDismissMessage = BaseMessage.extend({
 
 const HandlerSessionSnapshot = z.object({
   terminalId: z.string(),
-  notifyOnly: z.boolean(),
   state: z.enum(["watching", "handling", "needs_you", "parked"]),
   pendingEscalations: z.number().int().nonnegative(),
   armedAt: z.number(),
@@ -998,8 +997,6 @@ const HandlerStatusMessage = BaseMessage.extend({
   // project agent tool) — chat slots resolve from their own SessionEntry.tool
   // app-side. Judge overrides themselves are per-session (see snapshot).
   defaultTool: z.string().optional(),
-  // Project default seeding a newly armed session's notify-only (config v2).
-  defaultNotifyOnly: z.boolean(),
   sessions: z.array(HandlerSessionSnapshot),
   // Every snapshot this project still knows about, replayed for the same reason
   // escalations are: an app that restarted between the advert and the tap would

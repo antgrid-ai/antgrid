@@ -27,7 +27,7 @@ function item(id: string, over: Partial<InstructionItem> = {}): InstructionItem 
 function sessionRecord(over: Partial<HandlerSessionRecord> = {}): HandlerSessionRecord {
   return {
     version: 2, terminalId: "t1", armed: true, goal: GOAL, backlog: [],
-    notifyOnly: false, armedAt: 1, escalations: [], ...over,
+    armedAt: 1, escalations: [], ...over,
   };
 }
 
@@ -74,8 +74,6 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
     projectId: "proj", projectPath: () => "/proj", tool: () => "claude-code", abDir: "/tmp/unused",
     adapter: {
       injectReply: (id: string, t: string) => { injected.push([id, t]); },
-      // The counter stays LAST so outputSnippet's last-three-lines rule still sees
-      // it: a notify-only escalation asserts on "pty-tail" reaching the phone.
       recentOutput: () => `${EVIDENCE_TAIL}\npty-tail ${ptyReads++}`,
       transcriptPath: () => "/t.jsonl",
       outputKind: () => "pty",
@@ -96,7 +94,6 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
     clearTrashFn: async (id: string) => { trashed.push(id); },
     loadSnapshotsFn: () => stored,
     saveSnapshotsFn: (e: StoredSnapshot[]) => { stored = e; },
-    loadConfigFn: () => ({ version: 2, defaultNotifyOnly: false }),
     appendActivityFn: (r: unknown) => activity.push(r),
     loadSessionFn: () => null,
     saveSessionFn: (r: unknown) => saved.push(r),
@@ -145,7 +142,7 @@ async function capturingWarnings(fn: () => Promise<void>): Promise<string> {
 describe("arm/disarm", () => {
   it("arm persists the record, logs armed, and emits a session snapshot", () => {
     const { engine, sent, saved, activity } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect((saved[0] as { armed: boolean }).armed).toBe(true);
     expect((activity[0] as { decision: string }).decision).toBe("armed");
     const status = sent.find((m) => m.type === "handler:status") as never as {
@@ -159,7 +156,7 @@ describe("arm/disarm", () => {
     // Arming resolves before anything has stated what the session is for, so an
     // empty payload is a legitimate arm rather than a malformed one.
     const { engine, saved, activity } = makeEngine();
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     const rec = saved[0] as HandlerSessionRecord;
     expect(rec.goal).toBe("");
     expect(rec.backlog).toEqual([]);
@@ -167,14 +164,14 @@ describe("arm/disarm", () => {
   });
   it("re-arming an armed session logs goal_edited and leaves an absent backlog alone", () => {
     // Absent means "leave it alone", never "clear it": the bridge's copy holds
-    // the statuses this session has already banked, and a re-arm (or a
-    // notify-only toggle) carries no backlog.
+    // the statuses this session has already banked, and a re-arm (or a judge
+    // pick) carries no backlog.
     const { engine, saved, activity } = makeEngine();
     engine.arm({
-      terminalId: "t1", goal: GOAL, notifyOnly: false,
+      terminalId: "t1", goal: GOAL,
       backlog: [item("a", { status: "done", evidence: "ran" })],
     });
-    engine.arm({ terminalId: "t1", goal: "edited", notifyOnly: true });
+    engine.arm({ terminalId: "t1", goal: "edited" });
     expect((activity[1] as { decision: string }).decision).toBe("goal_edited");
     const rec = saved.at(-1) as HandlerSessionRecord;
     expect(rec.goal).toBe("edited");
@@ -182,22 +179,22 @@ describe("arm/disarm", () => {
   });
   it("an explicitly empty backlog clears the stored one", () => {
     const { engine, saved } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
-    engine.arm({ terminalId: "t1", backlog: [], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    engine.arm({ terminalId: "t1", backlog: [] });
     expect((saved.at(-1) as HandlerSessionRecord).backlog).toEqual([]);
   });
   it("a bridge-restart re-arm with no payload keeps the banked backlog", () => {
     const { engine, saved } = makeEngine({
       loadSessionFn: () => sessionRecord({ backlog: [item("a", { status: "done", evidence: "ran" })] }),
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     const rec = saved.at(-1) as HandlerSessionRecord;
     expect(rec.goal).toBe(GOAL);
     expect(rec.backlog.map((i) => i.status)).toEqual(["done"]);
   });
   it("disarm saves armed:false and removes the session from status", () => {
     const { engine, sent, saved } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     engine.disarm("t1");
     expect((saved.at(-1) as { armed: boolean }).armed).toBe(false);
     const status = sent.at(-1) as never as { sessions: unknown[] };
@@ -211,7 +208,7 @@ test("arm persists the judge choice on the session record and snapshot", () => {
   const saved: HandlerSessionRecord[] = [];
   const sent: AbMessage[] = [];
   const { engine } = makeEngine({ saveSessionFn: (r: HandlerSessionRecord) => saved.push(r), sendAb: (m: AbMessage) => sent.push(m) });
-  engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, judgeTool: "codex", judgeModel: "gpt-5.3-codex" });
+  engine.arm({ terminalId: "t1", goal: GOAL, judgeTool: "codex", judgeModel: "gpt-5.3-codex" });
   expect(saved.at(-1)?.judgeTool).toBe("codex");
   expect(saved.at(-1)?.judgeModel).toBe("gpt-5.3-codex");
   const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
@@ -224,8 +221,8 @@ test("arm persists the judge choice on the session record and snapshot", () => {
 test("arm ignores an unknown judge tool but applies the model", () => {
   const saved: HandlerSessionRecord[] = [];
   const { engine } = makeEngine({ saveSessionFn: (r: HandlerSessionRecord) => saved.push(r) });
-  engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, judgeTool: "codex" });
-  engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, judgeTool: "not-a-cli", judgeModel: "m2" });
+  engine.arm({ terminalId: "t1", goal: GOAL, judgeTool: "codex" });
+  engine.arm({ terminalId: "t1", goal: GOAL, judgeTool: "not-a-cli", judgeModel: "m2" });
   expect(saved.at(-1)?.judgeTool).toBe("codex"); // ignored, not cleared
   expect(saved.at(-1)?.judgeModel).toBe("m2");
 });
@@ -233,8 +230,8 @@ test("arm ignores an unknown judge tool but applies the model", () => {
 test("arm with empty strings clears back to defaults", () => {
   const saved: HandlerSessionRecord[] = [];
   const { engine } = makeEngine({ saveSessionFn: (r: HandlerSessionRecord) => saved.push(r) });
-  engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, judgeTool: "codex", judgeModel: "m" });
-  engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, judgeTool: "", judgeModel: "" });
+  engine.arm({ terminalId: "t1", goal: GOAL, judgeTool: "codex", judgeModel: "m" });
+  engine.arm({ terminalId: "t1", goal: GOAL, judgeTool: "", judgeModel: "" });
   expect(saved.at(-1)?.judgeTool).toBeUndefined();
   expect(saved.at(-1)?.judgeModel).toBeUndefined();
 });
@@ -245,11 +242,11 @@ test("decision runs on the session judge, falling back to the session's own tool
     tool: () => "claude-code",
     runDecisionFn: async (o: { tool: string; model?: string }) => { calls.push({ tool: o.tool, model: o.model }); return continueDecision; },
   });
-  engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, judgeTool: "codex", judgeModel: "m" });
+  engine.arm({ terminalId: "t1", goal: GOAL, judgeTool: "codex", judgeModel: "m" });
   await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
   expect(calls[0]).toEqual({ tool: "codex", model: "m" });
 
-  engine.arm({ terminalId: "t2", goal: GOAL, notifyOnly: false });
+  engine.arm({ terminalId: "t2", goal: GOAL });
   await engine.handleEvent({ terminalId: "t2", event: "turn_end" });
   expect(calls[1]).toEqual({ tool: "claude-code", model: undefined });
 });
@@ -260,7 +257,7 @@ test("bridge-restart re-arm keeps the persisted judge when the arm carries none"
     saveSessionFn: (r: HandlerSessionRecord) => saved.push(r),
     loadSessionFn: () => sessionRecord({ judgeTool: "codex", judgeModel: "m" }),
   });
-  engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+  engine.arm({ terminalId: "t1", goal: GOAL });
   expect(saved.at(-1)?.judgeTool).toBe("codex");
 });
 
@@ -284,7 +281,7 @@ describe("suspend vs disarm across a restart", () => {
     const { engine, sent, saved, activity } = restartable({
       runDecisionFn: async () => decide({ decision: "handle", reply: "go\x1b[B\r" }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i1")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i1")] });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(saved().escalations).toHaveLength(1);
 
@@ -294,7 +291,7 @@ describe("suspend vs disarm across a restart", () => {
 
     // Re-arm carries no goal and no backlog — the one-tap shield never does
     // (§4.1), which is why anything it fails to rehydrate is simply gone.
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
       sessions: Array<{ goal: string; backlog: unknown[]; pendingEscalations: number; state: string }>;
     };
@@ -311,12 +308,12 @@ describe("suspend vs disarm across a restart", () => {
 
   it("an explicit disarm is not suspended, and the next arm starts clean", () => {
     const { engine, sent, saved } = restartable();
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i1")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i1")] });
     engine.disarm("t1");
     expect(saved().armed).toBe(false);
     expect(saved().suspended).toBeUndefined();
 
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
       sessions: Array<{ goal: string; backlog: unknown[] }>;
     };
@@ -329,7 +326,7 @@ describe("suspend vs disarm across a restart", () => {
   // as stopped to anything else that reads it.
   it("a mode flip leaves the record armed rather than suspended", () => {
     const { engine, saved } = restartable();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     engine.onTerminalExit("t1", { keepArmed: true });
     expect(saved().armed).toBe(true);
     expect(saved().suspended).toBeUndefined();
@@ -344,7 +341,7 @@ describe("escalation accounting", () => {
 
   it("a submitted line clears ALL pending free-text escalations; bare keystrokes clear none", async () => {
     const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     const pending = () => (sent.at(-1) as never as {
@@ -366,7 +363,7 @@ describe("escalation accounting", () => {
   // none to send).
   it("a submitted line leaves a resolve_in_session escalation pending", async () => {
     const { engine, sent } = makeEngine();
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: rm -rf build" });
     engine.onUserReply("c1", "never mind, do something else\r");
     expect(statusOf(sent).pendingEscalations).toBe(1);
@@ -375,7 +372,7 @@ describe("escalation accounting", () => {
 
   it("a submitted line clears a free-text row raised beside a resolve_in_session one", async () => {
     const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls" });
     await engine.handleEvent({ terminalId: "c1", event: "awaiting_input" });
     expect(statusOf(sent).pendingEscalations).toBe(2);
@@ -391,7 +388,7 @@ describe("escalation accounting", () => {
   // blocked on, so it is the one caller that may retire such a row.
   it("a resolve clears a resolve_in_session escalation", async () => {
     const { engine, sent } = makeEngine();
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "perm-1" });
     engine.onUserReply("c1", "\r", { resolvedPromptId: "perm-1" });
     expect(statusOf(sent).pendingEscalations).toBe(0);
@@ -403,7 +400,7 @@ describe("escalation accounting", () => {
   // agent still blocked on the other one.
   it("a resolve leaves a second prompt's row pending", async () => {
     const { engine, sent } = makeEngine();
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "perm-1" });
     await engine.handleEvent({ terminalId: "c1", event: "question", detail: "which branch?", promptId: "q-1" });
     expect(statusOf(sent).pendingEscalations).toBe(2);
@@ -421,7 +418,7 @@ describe("escalation accounting", () => {
   // one state observed twice.
   it("two prompts raised in one tick each get their own row", async () => {
     const { engine, sent } = makeEngine();
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await Promise.all([
       engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "perm-1" }),
       engine.handleEvent({ terminalId: "c1", event: "question", detail: "which branch?", promptId: "q-1" }),
@@ -441,7 +438,7 @@ describe("escalation accounting", () => {
     const { engine, sent } = makeEngine({
       runDecisionFn: async () => { await gate; return decide({}); },
     });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     const judged = engine.handleEvent({ terminalId: "c1", event: "turn_end" });
     const first = engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "perm-1" });
     const second = engine.handleEvent({ terminalId: "c1", event: "question", detail: "which branch?", promptId: "q-1" });
@@ -454,7 +451,7 @@ describe("escalation accounting", () => {
   // unclearable must cost neither a disk write nor an encrypted broadcast.
   it("a submitted line into a session holding only resolve_in_session rows neither persists nor broadcasts", async () => {
     const { engine, sent, saved } = makeEngine();
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls" });
     const writes = saved.length;
     const statuses = sent.filter((m) => m.type === "handler:status").length;
@@ -468,7 +465,7 @@ describe("escalation accounting", () => {
   // wait whether or not the line could answer anything.
   it("a submitted line unparks even when a resolve_in_session row survives it", async () => {
     const { engine, sent, timers } = makeEngine();
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls" });
     await engine.handleEvent({ terminalId: "c1", event: "limit_hit" });
     expect(statusOf(sent).state).toBe("parked");
@@ -491,7 +488,7 @@ describe("escalation accounting", () => {
         }],
       }),
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     expect(statusOf(sent).state).toBe("needs_you");
     engine.onUserReply("t1", "carry on\r");
     expect(statusOf(sent).pendingEscalations).toBe(0);
@@ -501,7 +498,7 @@ describe("escalation accounting", () => {
   // Suspension follows the terminal's exit and a restart rebuilds every driver
   // empty, so the prompt a rehydrated row names is unresolvable and unretractable.
   // Carrying it across would wedge the slot: nothing clears it, and wrap-up, the
-  // notify-only gate and the park nudge all stand down while it is pending.
+  // ceiling escalations and the park nudge all stand down while it is pending.
   it("a rehydrated resolve_in_session row is dropped, and the free-text ones are kept", () => {
     const { engine, sent } = makeEngine({
       loadSessionFn: () => sessionRecord({
@@ -514,7 +511,7 @@ describe("escalation accounting", () => {
         ],
       }),
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     expect(statusOf(sent).pendingEscalations).toBe(1);
     expect(statusOf(sent).state).toBe("needs_you");
     engine.onUserReply("t1", "carry on\r");
@@ -531,7 +528,7 @@ describe("escalation accounting", () => {
         }],
       }),
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     expect(statusOf(sent).pendingEscalations).toBe(0);
     expect(statusOf(sent).state).toBe("watching");
   });
@@ -542,7 +539,7 @@ describe("escalation accounting", () => {
   it("a judged turn beside a pending prompt stays needs_you", async () => {
     let decision: HandlerDecision = decide({ decision: "continue" });
     const { engine, sent } = makeEngine({ runDecisionFn: async () => decision });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "perm-1" });
     await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
     expect(statusOf(sent).state).toBe("needs_you");
@@ -554,7 +551,7 @@ describe("escalation accounting", () => {
 
   it("status snapshots replay full escalation payloads (reconnect can rebuild rows)", async () => {
     const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     const esc = sent.find((m) => m.type === "handler:escalation") as never as { escalationId: string };
     const status = sent.at(-1) as never as {
@@ -578,20 +575,11 @@ describe("handleEvent decision loop", () => {
     expect(judged).toBe(0);
   });
 
-  it("notifyOnly escalates without spending a judge call", async () => {
-    let judged = 0;
-    const { engine, sent } = makeEngine({ runDecisionFn: async () => { judged++; return decide({}); } });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: true });
-    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
-    expect(judged).toBe(0);
-    expect(sent.some((m) => m.type === "handler:escalation")).toBe(true);
-  });
-
   it("handle injects the reply through the adapter and records activity", async () => {
     const { engine, injected, activity } = makeEngine({
       runDecisionFn: async () => decide({ decision: "handle", reply: "yes" }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toEqual([["t1", "yes"]]);
     expect(activity.some((a) => (a as { decision: string }).decision === "handle")).toBe(true);
@@ -602,7 +590,7 @@ describe("handleEvent decision loop", () => {
     const { engine, sent, injected } = makeEngine({
       runDecisionFn: async () => decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toHaveLength(0);
     const esc = sent.find((m) => m.type === "handler:escalation") as never as { floorRule?: string };
@@ -615,7 +603,7 @@ describe("handleEvent decision loop", () => {
     const { engine, sent, injected, activity } = makeEngine({
       runDecisionFn: async () => decide({ decision: "handle", reply: "rm -rf node_modules" }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toEqual([["t1", "rm -rf node_modules"]]);
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
@@ -634,7 +622,7 @@ describe("handleEvent decision loop", () => {
         return decide({ decision: "handle", reply: "rm -rf node_modules" });
       },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(seen[0]).toEqual([]);
@@ -643,7 +631,7 @@ describe("handleEvent decision loop", () => {
 
   it("judge unavailable parks instead of escalating on the first failure", async () => {
     const { engine, sent } = makeEngine({ runDecisionFn: async () => null });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
     expect(statusOf(sent).state).toBe("parked");
@@ -658,7 +646,7 @@ describe("handleEvent decision loop", () => {
         return decide({ decision: "handle", reply: "yes" });
       },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toHaveLength(0);
     const status = sent.at(-1) as never as { sessions: unknown[] };
@@ -672,7 +660,7 @@ describe("handleEvent decision loop", () => {
     const { engine } = makeEngine({
       runDecisionFn: async () => { judged++; await gate; return decide({}); },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     // Four events land back-to-back; by the time the chain drains each thunk,
     // only the last is still the terminal's newest — one judge call total.
     const all = [
@@ -684,25 +672,6 @@ describe("handleEvent decision loop", () => {
     release();
     await Promise.all(all);
     expect(judged).toBe(1);
-  });
-
-  it("notify-only re-escalates only after the pending question is answered", async () => {
-    const { engine, sent } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: true });
-    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
-    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
-    expect(sent.filter((m) => m.type === "handler:escalation")).toHaveLength(1);
-    engine.onUserReply("t1", "done\r");
-    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
-    expect(sent.filter((m) => m.type === "handler:escalation")).toHaveLength(2);
-  });
-
-  it("notify-only escalation body carries a PTY output snippet", async () => {
-    const { engine, sent } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: true });
-    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
-    const esc = sent.find((m) => m.type === "handler:escalation") as never as { question: string };
-    expect(esc.question).toContain("pty-tail"); // adapter.recentOutput in makeEngine
   });
 });
 
@@ -717,7 +686,7 @@ describe("backlog transitions", () => {
       }),
     });
     engine.arm({
-      terminalId: "t1", goal: GOAL, notifyOnly: false,
+      terminalId: "t1", goal: GOAL,
       backlog: [item("a"), item("b"), item("c")],
     });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -733,7 +702,7 @@ describe("backlog transitions", () => {
     const { engine, sent, activity } = makeEngine({
       runDecisionFn: async () => decide({ transitions: [{ id: "a", status: "active" }] }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(statusOf(sent).backlog[0].status).toBe("active");
     for (const kind of ["item_done", "item_blocked", "item_skipped", "item_failed"]) {
@@ -752,7 +721,7 @@ describe("backlog transitions", () => {
         ],
       }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
     const logged = await capturingWarnings(() =>
       engine.handleEvent({ terminalId: "t1", event: "turn_end" }));
     expect(records(activity, "item_done")).toHaveLength(0);
@@ -767,7 +736,7 @@ describe("backlog transitions", () => {
         transitions: [{ id: "a", status: "done", evidence: "ran to completion" }],
       }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")] });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     // Re-completing one item once per pass would reset the runaway guard every
@@ -782,7 +751,7 @@ describe("backlog transitions", () => {
     guard.recordProgress = (id: string) => { progressed.push(id); orig(id); };
     let transitions: ItemTransition[] = [{ id: "a", status: "skipped", evidence: "moot after the rewrite" }];
     const { engine } = makeEngine({ guard, runDecisionFn: async () => decide({ transitions }) });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")] });
 
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     // A resolution, but not progress: an agent free to skip its way through a
@@ -813,7 +782,7 @@ describe("backlog transitions", () => {
         adapter: { injectReply: () => {}, outputKind: () => "pty", commandCatalog: () => undefined, ...frozen },
         runDecisionFn: async () => { judged++; return decide({ decision: "escalate" }); },
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
       expect(judged).toBe(1);
@@ -835,7 +804,7 @@ describe("backlog transitions", () => {
         runDecisionFn: async () => { judged++; return decide({ transitions }); },
       });
       engine.arm({
-        terminalId: "t1", goal: GOAL, notifyOnly: false,
+        terminalId: "t1", goal: GOAL,
         backlog: [item("a"), item("b", { dependsOn: ["a"] })],
       });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -849,7 +818,7 @@ describe("backlog transitions", () => {
         adapter: { injectReply: () => {}, outputKind: () => "pty", commandCatalog: () => undefined, ...frozen },
         runDecisionFn: async () => { judged++; if (judged === 1) throw new Error("judge down"); return decide({}); },
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(judged).toBe(1);
       // The outage park re-runs THIS event on wake. Banking the hash before a
@@ -866,7 +835,7 @@ describe("backlog transitions", () => {
         adapter: { injectReply: () => {}, outputKind: () => "pty", commandCatalog: () => undefined, ...frozen },
         runDecisionFn: async () => { judged++; return decide({ decision: "escalate" }); },
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       engine.onUserReply("t1", "carry on\r");
       await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
@@ -879,9 +848,9 @@ describe("backlog transitions", () => {
         adapter: { injectReply: () => {}, outputKind: () => "pty", commandCatalog: () => undefined, ...frozen },
         runDecisionFn: async () => { judged++; return decide({ decision: "escalate" }); },
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
-      engine.arm({ terminalId: "t1", goal: "a different goal", backlog: [item("a")], notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: "a different goal", backlog: [item("a")] });
       await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
       expect(judged).toBe(2);
     });
@@ -894,7 +863,7 @@ describe("backlog transitions", () => {
       }),
     });
     engine.arm({
-      terminalId: "t1", goal: GOAL, notifyOnly: false,
+      terminalId: "t1", goal: GOAL,
       backlog: [item("a", { text: "fix the build" }), item("b", { dependsOn: ["a"] })],
     });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -911,7 +880,7 @@ describe("backlog transitions", () => {
     let transitions: ItemTransition[] = [{ id: "a", status: "failed", evidence: "compiler said no" }];
     const { engine, activity } = makeEngine({ runDecisionFn: async () => decide({ transitions }) });
     engine.arm({
-      terminalId: "t1", goal: GOAL, notifyOnly: false,
+      terminalId: "t1", goal: GOAL,
       backlog: [item("a"), item("b", { dependsOn: ["a"] })],
     });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -946,7 +915,7 @@ describe("evidence citations", () => {
       adapter: { ...PTY, recentOutput: () => tails[n++] ?? "" },
       runDecisionFn: async () => decide({ transitions }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     transitions = [{ id: "a", status: "done", evidence: "the migration landed cleanly" }];
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -959,7 +928,7 @@ describe("evidence citations", () => {
         transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
       }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     const rows = records(activity, "evidence_rejected") as Array<{ reason: string; detail?: string }>;
     expect(rows).toHaveLength(1);
@@ -976,7 +945,7 @@ describe("evidence citations", () => {
         transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
       }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
     const logged = await capturingWarnings(async () => {
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -998,7 +967,7 @@ describe("evidence citations", () => {
         transitions: [{ id: "a", status: "done", evidence: "I completed the whole backlog" }],
       }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(progressed).toEqual([]);
     expect(records(activity, "wrapped_up")).toHaveLength(0);
@@ -1015,7 +984,7 @@ describe("evidence citations", () => {
       },
     });
     engine.arm({
-      terminalId: "t1", goal: GOAL, notifyOnly: false,
+      terminalId: "t1", goal: GOAL,
       backlog: ["a", "b", "c", "d"].map((id) => item(id)),
     });
     for (const id of ["a", "b", "c", "d"]) {
@@ -1047,7 +1016,7 @@ describe("evidence citations", () => {
       }),
     });
     engine.arm({
-      terminalId: "t1", goal: GOAL, notifyOnly: false,
+      terminalId: "t1", goal: GOAL,
       backlog: [item("a", { text: "run /code-review --fix" })],
     });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -1068,7 +1037,7 @@ describe("evidence citations", () => {
       }),
     });
     engine.arm({
-      terminalId: "t1", goal: GOAL, notifyOnly: false,
+      terminalId: "t1", goal: GOAL,
       backlog: [item("a", { text: "run /code-review --fix" })],
     });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -1109,7 +1078,7 @@ pass ${n++}` },
           commandCatalog: () => [{ id: "cmd:code-review", name: "code-review" }],
         },
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, backlog: [item("a", { text: ROUTE })] });
+      engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a", { text: ROUTE })] });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(records(activity, "wrapped_up")).toHaveLength(1);
     });
@@ -1123,7 +1092,7 @@ pass ${n++}` },
       const orig = guard.recordProgress.bind(guard);
       guard.recordProgress = (id: string) => { progressed.push(id); orig(id); };
       const { engine, sent, activity } = routeEngine({ guard });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, backlog: [item("a", { text: ROUTE })] });
+      engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a", { text: ROUTE })] });
       for (let i = 0; i < 3; i++) await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(statusOf(sent).backlog[0].status).toBe("queued");
       expect(progressed).toEqual([]);
@@ -1142,7 +1111,7 @@ pass ${n++}` },
           transitions: [{ id: "a", status: "done", evidence: "the redirect works now" }],
         }),
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, backlog: [item("a", { text: ROUTE })] });
+      engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a", { text: ROUTE })] });
       for (let i = 0; i < 5; i++) await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(statusOf(sent).backlog[0].status).toBe("queued");
     });
@@ -1163,7 +1132,7 @@ pass ${n++}` },
         return decide({ transitions: [{ id: "a", status: "done", evidence }] });
       },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, backlog: [item("a"), item("b")] });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")] });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     evidence = "merged upstream";
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -1189,7 +1158,7 @@ describe("wrap-up", () => {
       }),
     });
     engine.arm({
-      terminalId: "t1", goal: GOAL, notifyOnly: false,
+      terminalId: "t1", goal: GOAL,
       backlog: [
         item("a", { text: "land the migration" }),
         item("b", { text: "backfill rows" }),
@@ -1217,7 +1186,7 @@ describe("wrap-up", () => {
       }),
     });
     engine.arm({
-      terminalId: "t1", goal: GOAL, notifyOnly: false,
+      terminalId: "t1", goal: GOAL,
       backlog: ["a", "b", "c", "d"].map((id) => item(id)),
     });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -1227,7 +1196,7 @@ describe("wrap-up", () => {
   it("never auto-disarms a session whose backlog is empty", async () => {
     // Wrapping up an empty backlog ends a session that accomplished nothing.
     const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({}) });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     const status = sent.at(-1) as never as { sessions: unknown[] };
     expect(status.sessions).toHaveLength(1);
@@ -1240,7 +1209,7 @@ describe("wrap-up", () => {
         transitions: [{ id: "a", status: "done", evidence: "ran to completion" }],
       }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(injected).toEqual([["t1", "yes, finish"]]); // reply not dropped
     expect(records(activity, "wrapped_up")).toHaveLength(1);
@@ -1253,7 +1222,7 @@ describe("wrap-up", () => {
         transitions: [{ id: "a", status: "done", evidence: "ran to completion" }],
       }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(records(activity, "wrapped_up")).toHaveLength(0);
     const status = sent.at(-1) as never as { sessions: Array<{ state: string }> };
@@ -1268,7 +1237,7 @@ describe("wrap-up", () => {
       decision: "escalate", transitions: [{ id: "a", status: "done", evidence: "ran to completion" }],
     });
     const { engine, sent, activity } = makeEngine({ runDecisionFn: async () => d });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     d = decide({});
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -1281,7 +1250,7 @@ describe("chat blocking prompts and slash guard", () => {
   it("permission_request force-escalates with kind resolve_in_session, no judge call", async () => {
     let judged = 0;
     const { engine, sent } = makeEngine({ runDecisionFn: async () => { judged++; return decide({}); } });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: rm -rf build" });
     expect(judged).toBe(0);
     const esc = sent.find((m) => m.type === "handler:escalation") as never as {
@@ -1299,17 +1268,17 @@ describe("chat blocking prompts and slash guard", () => {
     expect(status.sessions[0].escalations[0].kind).toBe("resolve_in_session");
   });
 
-  it("question force-escalates with kind resolve_in_session even in notify-only", async () => {
+  it("question force-escalates with kind resolve_in_session", async () => {
     const { engine, sent } = makeEngine();
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: true });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "question", detail: "Pick a migration strategy" });
     const esc = sent.find((m) => m.type === "handler:escalation") as never as { kind?: string };
     expect(esc.kind).toBe("resolve_in_session");
   });
 
   it("turn_end escalations carry no kind (free-text reply default)", async () => {
-    const { engine, sent } = makeEngine();
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: true });
+    const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
     const esc = sent.find((m) => m.type === "handler:escalation") as never as { kind?: string };
     expect(esc.kind).toBeUndefined();
@@ -1323,7 +1292,7 @@ describe("chat blocking prompts and slash guard", () => {
       runDecisionFn: async () =>
         decide({ decision: "handle", action: { kind: "slash_command", value: "/compact" } }),
     });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
     expect(injected).toEqual([["c1", "/compact"]]);
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
@@ -1339,7 +1308,7 @@ describe("chat blocking prompts and slash guard", () => {
         reply: "Good call on defect 3.\n\nDig deeper before you fix it.",
       }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(injected).toEqual([["t1", "Good call on defect 3. Dig deeper before you fix it."]]);
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
@@ -1354,7 +1323,7 @@ describe("chat blocking prompts and slash guard", () => {
         reply: "pick option two\x1b[B",
       }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(injected).toHaveLength(0);
     const esc = sent.find((m) => m.type === "handler:escalation") as never as { reasoning: string };
@@ -1377,7 +1346,7 @@ describe("chat blocking prompts and slash guard", () => {
       runDecisionFn: async () =>
         decide({ decision: "handle", action: { kind: "slash_command", value: "/etc/hosts" } }),
     });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
     expect(injected).toHaveLength(0);
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(true);
@@ -1391,7 +1360,7 @@ describe("chat blocking prompts and slash guard", () => {
         runDecisionFn: async () =>
           decide({ decision: "handle", action: { kind: "slash_command", value: "/code-review --fix" } }),
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(injected).toEqual([["t1", "/code-review --fix"]]);
       expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
@@ -1402,7 +1371,7 @@ describe("chat blocking prompts and slash guard", () => {
         runDecisionFn: async () =>
           decide({ decision: "handle", action: { kind: "slash_command", value: "/etc/hosts --force" } }),
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(injected).toHaveLength(0);
       const esc = sent.find((m) => m.type === "handler:escalation") as never as { reasoning: string };
@@ -1416,7 +1385,7 @@ describe("chat blocking prompts and slash guard", () => {
         runDecisionFn: async () =>
           decide({ decision: "handle", action: { kind: "slash_command", value: "/review /etc/passwd" } }),
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       const rows = records(activity, "floor_warning") as Array<{ reason: string }>;
       expect(rows.map((r) => r.reason)).toEqual([
@@ -1431,7 +1400,7 @@ describe("chat blocking prompts and slash guard", () => {
         runDecisionFn: async () =>
           decide({ decision: "handle", action: { kind: "slash_command", value: "/compact" } }),
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(records(activity, "floor_warning")).toHaveLength(0);
       expect(injected).toEqual([["t1", "/compact"]]);
@@ -1442,7 +1411,7 @@ describe("chat blocking prompts and slash guard", () => {
         runDecisionFn: async () =>
           decide({ decision: "handle", action: { kind: "slash_command", value: "/run mkfs.ext4 /dev/sdb" } }),
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(injected).toHaveLength(0);
       const esc = sent.find((m) => m.type === "handler:escalation") as never as { floorRule?: string };
@@ -1460,7 +1429,7 @@ describe("chat blocking prompts and slash guard", () => {
           action: { kind: "slash_command", value: "/compact" },
         }),
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(injected).toHaveLength(0);
       const esc = sent.find((m) => m.type === "handler:escalation") as never as
@@ -1477,7 +1446,7 @@ describe("chat blocking prompts and slash guard", () => {
           decision: "handle", reply: "carry on", action: { kind: "none", value: "" },
         }),
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(injected).toEqual([["t1", "carry on"]]);
       expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
@@ -1490,7 +1459,7 @@ describe("chat blocking prompts and slash guard", () => {
           action: { kind: "slash_command", value: "/compact" },
         }),
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(injected).toEqual([["t1", "/compact"]]);
     });
@@ -1499,7 +1468,7 @@ describe("chat blocking prompts and slash guard", () => {
       const { engine, sent, injected } = makeEngine({
         runDecisionFn: async () => decide({ decision: "handle", reply: "   " }),
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(injected).toHaveLength(0);
       const esc = sent.find((m) => m.type === "handler:escalation") as never as { reasoning: string };
@@ -1534,7 +1503,7 @@ describe("chat blocking prompts and slash guard", () => {
 
     it("a catalog hit routes on the driver's own command id with the tail as its text", async () => {
       const { engine, sent, injected, commands } = withCatalog(CATALOG, "/code-review --fix");
-      engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "c1", goal: GOAL });
       await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
       expect(injected).toEqual([["c1", "/code-review --fix"]]);
       expect(commands).toEqual([{ id: "cmd:code-review", args: "--fix" }]);
@@ -1543,7 +1512,7 @@ describe("chat blocking prompts and slash guard", () => {
 
     it("a verb outside a populated catalog escalates and injects nothing", async () => {
       const { engine, sent, injected } = withCatalog(CATALOG, "/invented --fix");
-      engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "c1", goal: GOAL });
       await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
       expect(injected).toHaveLength(0);
       const esc = sent.find((m) => m.type === "handler:escalation") as never as { reasoning: string };
@@ -1552,7 +1521,7 @@ describe("chat blocking prompts and slash guard", () => {
 
     it("membership is matched on the verb, never on the argument tail", async () => {
       const { engine, injected } = withCatalog(CATALOG, "/fix code-review");
-      engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "c1", goal: GOAL });
       await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
       expect(injected).toHaveLength(0);
     });
@@ -1561,7 +1530,7 @@ describe("chat blocking prompts and slash guard", () => {
       // The user's explicit choice for PTY: the agent rejects it visibly, which
       // lands in the next context, rather than the supervisor refusing in advance.
       const { engine, sent, injected, commands } = withCatalog(undefined, "/invented arg");
-      engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "c1", goal: GOAL });
       await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
       expect(injected).toEqual([["c1", "/invented arg"]]);
       expect(commands).toEqual([undefined]);
@@ -1584,7 +1553,7 @@ describe("chat blocking prompts and slash guard", () => {
           return decide({});
         },
       });
-      engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false, judgeTool: "codex" });
+      engine.arm({ terminalId: "c1", goal: GOAL, judgeTool: "codex" });
       await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
       expect(opts[0]!.tool).toBe("codex");
       expect(opts[0]!.agentTool).toBe("claude-code");
@@ -1601,7 +1570,7 @@ describe("chat blocking prompts and slash guard", () => {
       const { engine, sent, injected } = makeEngine({
         runDecisionFn: async () => { judged++; return decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" }); },
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(judged).toBe(1);
       expect(injected).toHaveLength(0);
@@ -1614,7 +1583,7 @@ describe("chat blocking prompts and slash guard", () => {
       const { engine, sent, injected } = makeEngine({
         runDecisionFn: async () => { judged++; return decide({ decision: "handle", reply: "same again" }); },
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(judged).toBe(2);
@@ -1628,7 +1597,7 @@ describe("chat blocking prompts and slash guard", () => {
       const { engine, activity, injected } = makeEngine({
         runDecisionFn: async () => { judged++; return decide({ decision: "handle", reply: "rm -rf node_modules" }); },
       });
-      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      engine.arm({ terminalId: "t1", goal: GOAL });
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(judged).toBe(1);
       expect(records(activity, "floor_warning")).toHaveLength(1);
@@ -1657,7 +1626,7 @@ describe("chat blocking prompts and slash guard", () => {
         return decide({ decision: "handle", reply: `edit ${ISO}/src/main.ts` });
       },
     });
-    engine.arm({ terminalId: "iso", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "iso", goal: GOAL });
     await engine.handleEvent({ terminalId: "iso", event: "turn_end" });
 
     expect(cwds).toEqual([ISO]);
@@ -1683,7 +1652,7 @@ describe("chat blocking prompts and slash guard", () => {
       },
       runDecisionFn: async () => decide({ decision: "handle", reply: "rm /proj/src/main.ts" }),
     });
-    engine.arm({ terminalId: "iso", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "iso", goal: GOAL });
     await engine.handleEvent({ terminalId: "iso", event: "turn_end" });
 
     const rows = records(activity, "floor_warning") as Array<{ reason: string }>;
@@ -1694,7 +1663,7 @@ describe("chat blocking prompts and slash guard", () => {
 
   it("onPromptRetracted clears pending escalations without a user answer", async () => {
     const { engine, sent } = makeEngine();
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: true });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "x" });
     engine.onPromptRetracted("c1");
     const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
@@ -1710,7 +1679,7 @@ describe("chat blocking prompts and slash guard", () => {
   // the session rested at "watching" over an agent still stopped on it.
   it("a retraction retires only the prompt it names", async () => {
     const { engine, sent } = makeEngine();
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "perm-1" });
     await engine.handleEvent({ terminalId: "c1", event: "question", detail: "which branch?", promptId: "q-1" });
     engine.onPromptRetracted("c1", "perm-1");
@@ -1726,7 +1695,7 @@ describe("chat blocking prompts and slash guard", () => {
   // record that Handler wanted something.
   it("a retraction leaves a free-text escalation alone", async () => {
     const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "awaiting_input" });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "perm-1" });
     engine.onPromptRetracted("c1", "perm-1");
@@ -1743,7 +1712,7 @@ describe("chat blocking prompts and slash guard", () => {
     const { engine, sent } = makeEngine({
       runDecisionFn: async () => { await gate; return decide({}); },
     });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     const judged = engine.handleEvent({ terminalId: "c1", event: "turn_end" });
     const first = engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "perm-1" });
     const second = engine.handleEvent({ terminalId: "c1", event: "question", detail: "which branch?", promptId: "q-1" });
@@ -1774,7 +1743,7 @@ describe("chat blocking prompts and slash guard", () => {
       },
       runDecisionFn: async () => decide({}),
     });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
 
     // A: turn_end. Wait (bounded — no real timers, so this can't hang) for its
     // dispatch to pass its own coalescing check and reach the gated
@@ -1808,8 +1777,8 @@ describe("chat blocking prompts and slash guard", () => {
   // turn end outright — the armed session stayed "watching" a dead agent, which is
   // precisely what counting stopReason "error" as a turn boundary exists to prevent.
   it("a retraction in the same tick does not swallow the turn_end that preceded it", async () => {
-    const { engine, sent } = makeEngine();
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: true });
+    const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
+    engine.arm({ terminalId: "c1", goal: GOAL });
 
     const turn = engine.handleEvent({ terminalId: "c1", event: "turn_end" });
     engine.onPromptRetracted("c1"); // the turn boundary's retraction, same stack
@@ -1827,7 +1796,7 @@ describe("chat blocking prompts and slash guard", () => {
     const { engine } = makeEngine({
       runDecisionFn: async () => { judged++; return decide({}); },
     });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
 
     const turn = engine.handleEvent({ terminalId: "c1", event: "turn_end" });
     engine.onPromptRetracted("c1");
@@ -1865,7 +1834,7 @@ test("decide context for codex resolves the rollout path for the judge", async (
         return decide({});
       },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(decideCalls[0].context).toContain("run the tests");
     expect(decideCalls[0].transcriptPath).toBe(rollout);
@@ -1902,7 +1871,7 @@ test("opencode decide context reads the db but hands the judge no path", async (
         return decide({});
       },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(decideCalls[0].context).toContain("ship it");
     expect(decideCalls[0].transcriptPath).toBeUndefined();
@@ -1930,7 +1899,7 @@ describe("quick-choice escalations (§4.6)", () => {
 
   it("an approvable draft becomes Approve + Reject, and Approve sends the draft verbatim", async () => {
     const { engine, sent } = makeEngine(escalatingWith(DRAFT));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     const choices = choicesOf(sent)!;
     expect(choices.map((c) => c.choiceId)).toEqual(["approve", "reject"]);
@@ -1945,7 +1914,7 @@ describe("quick-choice escalations (§4.6)", () => {
     // The app rebuilds its escalation list wholesale from handler:status, so a card
     // that only rode the push would flip back to a free-text row seconds later.
     const { engine, sent } = makeEngine(escalatingWith(DRAFT));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
       sessions: Array<{ escalations: Array<{ choices?: Choice[] }> }>;
@@ -1957,14 +1926,14 @@ describe("quick-choice escalations (§4.6)", () => {
     // Nothing to approve means nothing to offer: the app must not render an empty
     // card, and a lone chip is a card with no alternative.
     const { engine, sent } = makeEngine(escalatingWith(""));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(choicesOf(sent)).toBeUndefined();
   });
 
   it("a draft the floor recognizes is not offered as a one-tap", async () => {
     const { engine, sent } = makeEngine(escalatingWith("run rm -rf node_modules first"));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(choicesOf(sent)).toBeUndefined();
   });
@@ -1974,7 +1943,7 @@ describe("quick-choice escalations (§4.6)", () => {
   // misreading here spends a real affordance, not merely a warning row.
   it("a draft naming a slash command is still offered as a one-tap", async () => {
     const { engine, sent } = makeEngine(escalatingWith("Run /code-review before merging."));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(choicesOf(sent)!.map((c) => c.choiceId)).toEqual(["approve", "reject"]);
   });
@@ -1985,7 +1954,7 @@ describe("quick-choice escalations (§4.6)", () => {
     const { engine, sent } = makeEngine({
       runDecisionFn: async () => decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     const esc = sent.find((m) => m.type === "handler:escalation") as never as
       { floorRule?: string; choices?: Choice[] };
@@ -1998,7 +1967,7 @@ describe("quick-choice escalations (§4.6)", () => {
   // HandlerEvent never carried.
   it("permission_request and question escalations never carry choices", async () => {
     const { engine, sent } = makeEngine();
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls" });
     await engine.handleEvent({ terminalId: "c1", event: "question", detail: "Pick a strategy" });
     const escs = sent.filter((m) => m.type === "handler:escalation") as never as
@@ -2013,7 +1982,7 @@ describe("quick-choice escalations (§4.6)", () => {
   // free-text row costs the same send but makes the user open and read.
   it("no card is minted beside an unanswered option-based prompt", async () => {
     const { engine, sent } = makeEngine(escalatingWith(DRAFT));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "permission_request", detail: "Bash: ls" });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     const escs = sent.filter((m) => m.type === "handler:escalation") as never as
@@ -2088,7 +2057,7 @@ describe("quick-choice escalations (§4.6)", () => {
       notify: { title: "Handler", body: "Ship it?", draftReply: DRAFT, urgency: "normal" },
     });
     const { engine, sent, activity } = makeEngine({ runDecisionFn: async () => d });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(choicesOf(sent)).toHaveLength(2);
     // The app sends a tapped choice exactly as it sends a typed one.
@@ -2111,7 +2080,7 @@ describe("quick-choice escalations (§4.6)", () => {
         notify: { title: "", body: "", draftReply: "", urgency: "normal" },
       }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
 
     const esc = sent.find((m) => m.type === "handler:escalation") as never as
@@ -2188,7 +2157,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
         decision: "handle", action: { kind: "slash_command", value: "/invented --fix" },
       }),
     });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
     expect(injected).toHaveLength(0);
     const [esc] = escalations(sent);
@@ -2203,7 +2172,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     const floor = makeEngine({
       runDecisionFn: async () => decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" }),
     });
-    floor.engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    floor.engine.arm({ terminalId: "t1", goal: GOAL });
     await floor.engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     const [floored] = escalations(floor.sent);
     expect(floored!.kind).toBe("guard_blocked");
@@ -2213,7 +2182,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     const runaway = makeEngine({
       runDecisionFn: async () => decide({ decision: "handle", reply: "carry on" }),
     });
-    runaway.engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    runaway.engine.arm({ terminalId: "t1", goal: GOAL });
     await runaway.engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     await runaway.engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(runaway.injected).toEqual([["t1", "carry on"]]);
@@ -2228,7 +2197,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
   it("a submitted line clears the reply rows beside a guard_blocked row and leaves it standing", async () => {
     let d: HandlerDecision = decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" });
     const { engine, sent, saved } = makeEngine({ runDecisionFn: async () => d });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     d = decide({ decision: "escalate" });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -2247,7 +2216,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     // and no driver ever had anything to withdraw.
     let d: HandlerDecision = decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" });
     const { engine, sent } = makeEngine({ runDecisionFn: async () => d });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     d = decide({ decision: "escalate" });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -2260,7 +2229,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     const { engine, sent, saved } = makeEngine({
       runDecisionFn: async () => decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     const id = escalations(sent)[0]!.escalationId;
     engine.dismissEscalation("t1", id);
@@ -2271,7 +2240,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
 
   it("an unknown id, a reply row and a resolve_in_session row are all refused with a resync", async () => {
     const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "c1", goal: GOAL });
     await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
     await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "p1" });
     const [reply, prompt] = escalations(sent);
@@ -2290,19 +2259,14 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     expect(() => engine.dismissEscalation("t-unknown", "nope")).not.toThrow();
   });
 
+  // One unanswered QUESTION silences a ceiling; a report is not one — reading it
+  // as one would silence the session for the rest of its life.
   it("a standing guard_blocked row suppresses no further escalation", async () => {
-    // notify-only: one unanswered QUESTION is enough, but a report is not one —
-    // reading it as one would silence the session for the rest of its life.
-    const notify = makeEngine({ loadSessionFn: () => blockedRecord() });
-    notify.engine.arm({ terminalId: "t1", notifyOnly: true });
-    await notify.engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
-    expect(escalations(notify.sent)).toHaveLength(1);
-
     // The transient ceiling.
     const transient = makeEngine({
       loadSessionFn: () => blockedRecord(), runDecisionFn: async () => decide({}),
     });
-    transient.engine.arm({ terminalId: "t1", notifyOnly: false });
+    transient.engine.arm({ terminalId: "t1" });
     for (let i = 0; i < 3; i++) {
       await transient.engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
       const t = transient.timers.at(-1)!;
@@ -2312,7 +2276,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
 
     // The limit-park ceiling.
     const limit = makeEngine({ loadSessionFn: () => blockedRecord() });
-    limit.engine.arm({ terminalId: "t1", notifyOnly: false });
+    limit.engine.arm({ terminalId: "t1" });
     for (let i = 0; i < LIMIT_PARK_CEILING; i++) {
       await limit.engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
       const t = limit.timers.at(-1)!;
@@ -2326,7 +2290,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
       loadSessionFn: () => blockedRecord({ backlog: [item("a")] }),
       runDecisionFn: async () => decide({ transitions: [{ id: "a", status: "done", evidence: "ran to completion" }] }),
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     // Holding the wrap-up open would leave a finished session armed until somebody
     // tapped Dismiss — so the push carries the report out instead.
@@ -2334,7 +2298,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     expect(pushes.at(-1)).toContain("1 action(s) Handler could not take");
 
     const parked = makeEngine({ loadSessionFn: () => blockedRecord() });
-    parked.engine.arm({ terminalId: "t1", notifyOnly: false });
+    parked.engine.arm({ terminalId: "t1" });
     await parked.engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     parked.timers.at(-1)!.fn();
     // The nudge answers nothing a report asked, so a report must not strand it.
@@ -2357,7 +2321,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
         ],
       }),
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     // The prompt row names a driver a restart rebuilt empty; the report names
     // nothing that had to survive the runtime.
     expect(rowsOf(sent).map((e) => e.escalationId)).toEqual(["b0"]);
@@ -2368,7 +2332,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     const { engine, sent, activity } = makeEngine({
       runDecisionFn: async () => decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     // A second copy costs the user a second Dismiss for a situation the open row
@@ -2390,7 +2354,7 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
       // repeat the dedup above absorbs.
       runDecisionFn: async () => decide({ decision: "handle", reply: `do thing ${n++}\x1b[B` }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     for (let i = 0; i < 6; i++) await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     const raised = escalations(sent).map((e) => e.escalationId);
     expect(raised).toHaveLength(6);
@@ -2411,7 +2375,7 @@ async function drain(): Promise<void> {
 describe("lifecycle park / resume", () => {
   it("limit_hit parks until the detector's reset time with exactly one timer armed", async () => {
     const { engine, sent, activity, armed, clock } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({
       terminalId: "t1", event: "limit_hit", resetsAt: clock.t + 60_000, errorClass: "rate_limit",
     });
@@ -2426,7 +2390,7 @@ describe("lifecycle park / resume", () => {
 
   it("a limit_hit without a reset time falls back to 30 minutes", async () => {
     const { engine, sent, armed, clock } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     expect(statusOf(sent).parkedUntil).toBe(clock.t + LIMIT_FALLBACK_MS);
     expect(armed()[0].ms).toBe(LIMIT_FALLBACK_MS);
@@ -2434,7 +2398,7 @@ describe("lifecycle park / resume", () => {
 
   it("floors a reset time already in the past so the park cannot wake on arrival", async () => {
     const { engine, sent, injected, armed, clock, timers } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     // A stale limit snapshot: the window it describes closed a minute ago.
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit", resetsAt: clock.t - 60_000 });
     // The invariant is that a park cannot expire on arrival — without the floor
@@ -2449,7 +2413,7 @@ describe("lifecycle park / resume", () => {
 
   it("the park timer nudges exactly once and records resumed", async () => {
     const { engine, sent, injected, activity, timers } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     timers.at(-1)!.fn();
     expect(injected).toEqual([["t1", "continue"]]);
@@ -2460,7 +2424,7 @@ describe("lifecycle park / resume", () => {
 
   it("the first park of an episode pushes once; a re-park refreshes the deadline silently", async () => {
     const { engine, sent, activity, pushes, armed, clock } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit", resetsAt: clock.t + 60_000 });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit", resetsAt: clock.t + 90_000 });
     expect(statusOf(sent).parkedUntil).toBe(clock.t + 90_000);
@@ -2476,7 +2440,7 @@ describe("lifecycle park / resume", () => {
     const { engine, sent, injected, armed, clock } = makeEngine({
       runDecisionFn: async () => { judged++; return decide({}); },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({
       terminalId: "t1", event: "limit_hit", selfResuming: true, resetsAt: clock.t + 60_000,
     });
@@ -2490,7 +2454,7 @@ describe("lifecycle park / resume", () => {
 
   it("limit_cleared unparks and records resumed; on an unparked session it is dropped", async () => {
     const { engine, sent, activity, timers } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_cleared" });
     expect(records(activity, "resumed")).toHaveLength(0);
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
@@ -2504,7 +2468,7 @@ describe("lifecycle park / resume", () => {
   it("turn_end mid-park is dropped without a judge call", async () => {
     let judged = 0;
     const { engine, sent } = makeEngine({ runDecisionFn: async () => { judged++; return decide({}); } });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(judged).toBe(0);
@@ -2514,7 +2478,7 @@ describe("lifecycle park / resume", () => {
   it("a blocking prompt mid-park unparks, cancels the timer, and escalates with no judge call", async () => {
     let judged = 0;
     const { engine, sent, timers } = makeEngine({ runDecisionFn: async () => { judged++; return decide({}); } });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     await engine.handleEvent({ terminalId: "t1", event: "permission_request", detail: "Bash: rm -rf build" });
     expect(judged).toBe(0);
@@ -2526,7 +2490,7 @@ describe("lifecycle park / resume", () => {
 
   it("a submitted line unparks a session with zero pending escalations", async () => {
     const { engine, sent, timers } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     engine.onUserReply("t1", "k");
     expect(statusOf(sent).state).toBe("parked"); // a bare keystroke is not a resume
@@ -2538,7 +2502,7 @@ describe("lifecycle park / resume", () => {
 
   it("a prompt retraction unparks a session with zero pending escalations", async () => {
     const { engine, sent, timers } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     engine.onPromptRetracted("t1");
     expect(timers.at(-1)!.cancelled).toBe(true);
@@ -2547,13 +2511,13 @@ describe("lifecycle park / resume", () => {
 
   it("disarm and terminal exit cancel the park timer", async () => {
     const a = makeEngine();
-    a.engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    a.engine.arm({ terminalId: "t1", goal: GOAL });
     await a.engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     a.engine.disarm("t1");
     expect(a.timers.at(-1)!.cancelled).toBe(true);
 
     const b = makeEngine();
-    b.engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    b.engine.arm({ terminalId: "t1", goal: GOAL });
     await b.engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     b.engine.onTerminalExit("t1");
     expect(b.timers.at(-1)!.cancelled).toBe(true);
@@ -2566,7 +2530,7 @@ describe("lifecycle park / resume", () => {
     const { engine, sent, activity } = makeEngine({
       runDecisionFn: async () => { judged++; await gate; return decide({}); },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     const first = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     await drain(); // the first event is now inside the judge call
     // A later turn_end makes itself the newest event. A limit_hit riding the
@@ -2586,7 +2550,7 @@ describe("lifecycle park / resume", () => {
     const { engine, sent, injected, activity, timers } = makeEngine({
       runDecisionFn: async () => decide({ decision: "escalate" }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(statusOf(sent).state).toBe("needs_you");
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
@@ -2604,7 +2568,7 @@ describe("lifecycle park / resume", () => {
 
   it("a limit that outlasts repeated waits escalates instead of parking again", async () => {
     const { engine, sent, injected, activity, pushes, timers, armed } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     for (let i = 0; i < LIMIT_PARK_CEILING - 1; i++) {
       await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
       timers.at(-1)!.fn();
@@ -2628,7 +2592,7 @@ describe("lifecycle park / resume", () => {
 
   it("a judged turn between limit parks clears the limit ceiling", async () => {
     const { engine, sent, timers } = makeEngine({ runDecisionFn: async () => decide({}) });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     for (let i = 0; i < LIMIT_PARK_CEILING + 2; i++) {
       await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
       timers.at(-1)!.fn();
@@ -2637,21 +2601,9 @@ describe("lifecycle park / resume", () => {
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
   });
 
-  it("a notify-only park ends in a notification, never a nudge", async () => {
-    const { engine, sent, injected, timers } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: true });
-    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
-    expect(statusOf(sent).state).toBe("parked");
-    timers.at(-1)!.fn();
-    // "tell me, never act" — the wake must not type into the user's terminal.
-    expect(injected).toEqual([]);
-    expect(statusOf(sent).state).toBe("needs_you");
-    expect(sent.filter((m) => m.type === "handler:escalation")).toHaveLength(1);
-  });
-
   it("a cancel ends a selfResuming park, whose only wake path it also ended", async () => {
     const { engine, sent, activity, clock } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({
       terminalId: "t1", event: "limit_hit", selfResuming: true, resetsAt: clock.t + 60_000,
     });
@@ -2664,7 +2616,7 @@ describe("lifecycle park / resume", () => {
 
   it("a cancel is not an answer: pending escalations survive it", async () => {
     const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     engine.onTurnCancelled("t1");
     expect(statusOf(sent).state).toBe("needs_you");
@@ -2680,7 +2632,7 @@ describe("lifecycle park / resume", () => {
         if (r.decision === "resumed") throw new Error("ENOSPC");
       },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     expect(() => timers.at(-1)!.fn()).not.toThrow();
   });
@@ -2696,7 +2648,7 @@ describe("lifecycle park / resume", () => {
         return null;
       },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end", transcriptPath: "/orig.jsonl" });
     expect(calls).toHaveLength(1);
     // The provider coming back does not answer the pause nobody assessed.
@@ -2708,7 +2660,7 @@ describe("lifecycle park / resume", () => {
 
   it("limit_cleared with a question outstanding leaves the session needs_you", async () => {
     const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     await engine.handleEvent({ terminalId: "t1", event: "limit_cleared" });
@@ -2720,7 +2672,7 @@ describe("lifecycle park / resume", () => {
 describe("lifecycle transient ceiling", () => {
   it("backs off 30s then 2m and escalates on the third consecutive failure", async () => {
     const { engine, sent, timers, armed } = makeEngine({ runDecisionFn: async () => decide({}) });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
 
     await engine.handleEvent({ terminalId: "t1", event: "turn_failed", errorClass: "overloaded" });
     expect(statusOf(sent).parkKind).toBe("outage");
@@ -2741,7 +2693,7 @@ describe("lifecycle transient ceiling", () => {
 
   it("past the ceiling, further failures do not re-escalate until a human replies", async () => {
     const { engine, sent, pushes, timers } = makeEngine({ runDecisionFn: async () => decide({}) });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     for (let i = 0; i < 3; i++) {
       await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
       if (timers.at(-1)!.fired === false && !timers.at(-1)!.cancelled) timers.at(-1)!.fn();
@@ -2767,7 +2719,7 @@ describe("lifecycle transient ceiling", () => {
 
   it("a judged turn between failures resets the counter", async () => {
     const { engine, timers, armed } = makeEngine({ runDecisionFn: async () => decide({}) });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
     timers.at(-1)!.fn();
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
@@ -2777,7 +2729,7 @@ describe("lifecycle transient ceiling", () => {
 
   it("limit parks never contribute to the transient ceiling", async () => {
     const { engine, sent, timers, armed } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     timers.at(-1)!.fn();
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
@@ -2789,7 +2741,7 @@ describe("lifecycle transient ceiling", () => {
 
   it("turn_failed mid-park is dropped: no counter change, no overwritten limit park", async () => {
     const { engine, sent, activity, timers, armed, clock } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit", resetsAt: clock.t + 60_000 });
     await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
     expect(statusOf(sent).parkKind).toBe("limit");
@@ -2813,7 +2765,7 @@ describe("lifecycle transient ceiling", () => {
         return null;
       },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end", transcriptPath: "/orig.jsonl" });
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
     expect(statusOf(sent).parkKind).toBe("outage");
@@ -2830,7 +2782,7 @@ describe("lifecycle transient ceiling", () => {
     const { engine, sent } = makeEngine({
       runDecisionFn: async () => { throw new Error("judge spawn failed"); },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(statusOf(sent).state).toBe("parked");
     expect(statusOf(sent).parkKind).toBe("outage");
@@ -2845,7 +2797,7 @@ describe("lifecycle guard invariant", () => {
       guard: new RunawayGuard(1, 4),
       runDecisionFn: async () => decide({ decision: "handle", reply }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     timers.at(-1)!.fn();
@@ -2862,7 +2814,7 @@ describe("lifecycle guard invariant", () => {
       guard: new RunawayGuard(5, 4),
       runDecisionFn: async () => decide({ decision: "handle", reply }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     timers.at(-1)!.fn();
@@ -2889,7 +2841,7 @@ describe("lifecycle guard invariant", () => {
     const { engine, timers } = makeEngine({
       guard, runDecisionFn: async () => decide({ decision: "handle", reply: "go" }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     const beforePark = [...calls];
     expect(beforePark).toEqual(["recordAutoReply"]);
@@ -2905,7 +2857,7 @@ describe("lifecycle guard invariant", () => {
 describe("lifecycle persistence", () => {
   it("persists the park fields on the session record", async () => {
     const { engine, saved, clock } = makeEngine();
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit", resetsAt: clock.t + 60_000 });
     const rec = saved.at(-1) as { parkKind?: string; parkedUntil?: number; transientFailures?: number };
     expect(rec.parkKind).toBe("limit");
@@ -2917,7 +2869,7 @@ describe("lifecycle persistence", () => {
     const { engine, sent, armed, clock } = makeEngine({
       loadSessionFn: () => sessionRecord({ parkKind: "limit", parkedUntil: 1000 + 90_000, transientFailures: 2 }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect(statusOf(sent).state).toBe("parked");
     expect(statusOf(sent).parkedUntil).toBe(clock.t + 90_000);
     expect(armed()).toHaveLength(1);
@@ -2926,7 +2878,7 @@ describe("lifecycle persistence", () => {
 
   it("persists that a park still owes a judge a verdict", async () => {
     const { engine, saved } = makeEngine({ runDecisionFn: async () => null });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect((saved.at(-1) as { parkAwaitingJudge?: boolean }).parkAwaitingJudge).toBe(true);
   });
@@ -2937,7 +2889,7 @@ describe("lifecycle persistence", () => {
         parkKind: "outage", parkedUntil: 900, parkAwaitingJudge: true,
       }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     // The stashed event did not survive the restart, so "continue" here would
     // let the agent proceed from a pause no judge ever saw.
     expect(injected).toEqual([]);
@@ -2949,7 +2901,7 @@ describe("lifecycle persistence", () => {
     const { engine, sent, injected, activity, armed } = makeEngine({
       loadSessionFn: () => sessionRecord({ parkKind: "outage", parkedUntil: 900 }),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     // The wake lands in a runtime this process never armed — a restart may have
     // respawned the PTY empty — so "continue" would run as a shell command the
     // instant the user re-arms.
@@ -2986,7 +2938,7 @@ describe("instruct (extraction)", () => {
   it("whitespace-only text is dropped before the spawn", async () => {
     let spawned = 0;
     const { engine, sent } = makeEngine({ runExtractionFn: async () => { spawned++; return { items: [], amend: [] }; } });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "   \n  " });
     await settle();
     expect(spawned).toBe(0);
@@ -2999,7 +2951,7 @@ describe("instruct (extraction)", () => {
       tool: () => "kimi",
       runExtractionFn: async () => { spawned++; return { items: [], amend: [] }; },
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "update the docs" });
     await settle();
     expect(spawned).toBe(0);
@@ -3021,7 +2973,7 @@ describe("instruct (extraction)", () => {
         return { items: [{ ref: "a", text: "x" }], amend: [] };
       },
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false, judgeTool: "codex", judgeModel: "m" });
+    engine.arm({ terminalId: "t1", judgeTool: "codex", judgeModel: "m" });
     engine.instruct({ terminalId: "t1", text: "  do x  " });
     await settle();
     expect(calls).toEqual([{ tool: "codex", model: "m", text: "do x", cwd: "/proj", backlog: [] }]);
@@ -3032,7 +2984,7 @@ describe("instruct (extraction)", () => {
       { ref: "docs", text: "update the docs" },
       { ref: "tests", text: "run the tests" },
     ]));
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "update the docs and run the tests" });
     await settle();
     const backlog = statusOf(sent).backlog;
@@ -3047,7 +2999,7 @@ describe("instruct (extraction)", () => {
 
   it("extraction returning null falls back to the raw text as one item", async () => {
     const { engine, sent } = makeEngine({ runExtractionFn: async () => null });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "ship it" });
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["ship it"]);
@@ -3057,7 +3009,7 @@ describe("instruct (extraction)", () => {
     // An empty backlog is never terminal, so an instruct that appended nothing
     // would leave the user's sentence with no trace anywhere.
     const { engine, sent } = makeEngine(extract([]));
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "ship it" });
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["ship it"]);
@@ -3069,7 +3021,7 @@ describe("instruct (extraction)", () => {
     process.on("unhandledRejection", onUnhandled);
     try {
       const { engine, sent } = makeEngine({ runExtractionFn: async () => { throw new Error("spawn died"); } });
-      engine.arm({ terminalId: "t1", notifyOnly: false });
+      engine.arm({ terminalId: "t1" });
       await capturingWarnings(async () => {
         engine.instruct({ terminalId: "t1", text: "ship it" });
         await settle();
@@ -3090,7 +3042,7 @@ describe("instruct (extraction)", () => {
     const { engine, sent } = makeEngine(extract([
       { ref: "a", text: "one" }, { ref: "b", text: "two" }, { ref: "c", text: "three" },
     ]));
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: seeded, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: seeded });
     engine.instruct({ terminalId: "t1", text: "three more things" });
     await settle();
     const backlog = statusOf(sent).backlog;
@@ -3103,7 +3055,7 @@ describe("instruct (extraction)", () => {
       { ref: "docs", text: "update the docs" },
       { ref: "tests", text: "run the tests", dependsOn: ["docs"] },
     ]));
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "run the tests after you update the docs" });
     await settle();
     const [docs, tests] = statusOf(sent).backlog;
@@ -3115,7 +3067,7 @@ describe("instruct (extraction)", () => {
       { ref: "tests", text: "run the tests", dependsOn: ["docs"] },
       { ref: "docs", text: "update the docs" },
     ]));
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "run the tests once the docs are done" });
     await settle();
     const [tests, docs] = statusOf(sent).backlog;
@@ -3128,7 +3080,7 @@ describe("instruct (extraction)", () => {
     const { engine, sent } = makeEngine(extract([
       { ref: "tests", text: "run the tests", dependsOn: ["nothing-here", "tests"] },
     ]));
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "run the tests" });
     await settle();
     const backlog = statusOf(sent).backlog;
@@ -3140,7 +3092,7 @@ describe("instruct (extraction)", () => {
     const { engine, sent } = makeEngine(extract([
       { ref: "issue", text: "file an issue", condition: "the build is red" },
     ]));
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "if the build is red, file an issue" });
     await settle();
     expect(statusOf(sent).backlog[0]).toMatchObject({
@@ -3154,7 +3106,7 @@ describe("instruct (extraction)", () => {
     const { engine, sent, saved } = makeEngine({
       runExtractionFn: async () => { await gate; return { items: [{ ref: "a", text: "late" }], amend: [] }; },
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "do it" });
     engine.disarm("t1");
     const savedAfterDisarm = saved.length;
@@ -3172,9 +3124,9 @@ describe("instruct (extraction)", () => {
     const { engine, sent } = makeEngine({
       runExtractionFn: async () => { await gate; return { items: [{ ref: "a", text: "late" }], amend: [] }; },
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "do it" });
-    engine.arm({ terminalId: "t1", goal: "edited", notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: "edited" });
     release();
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["late"]);
@@ -3184,7 +3136,7 @@ describe("instruct (extraction)", () => {
     // The park path is untouched: the items sit queued and drain through the
     // existing resume, so there is no deferral queue here.
     const { engine, sent, clock } = makeEngine(extract([{ ref: "a", text: "next up" }]));
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit", resetsAt: clock.t + 60_000 });
     expect(statusOf(sent).state).toBe("parked");
     engine.instruct({ terminalId: "t1", text: "also do this" });
@@ -3198,7 +3150,7 @@ describe("instruct (extraction)", () => {
     const { engine, sent } = makeEngine(extract(
       Array.from({ length: 5 }, (_, n) => ({ ref: `r${n}`, text: `new ${n}` })),
     ));
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: seeded, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: seeded });
     const warnings = await capturingWarnings(async () => {
       engine.instruct({ terminalId: "t1", text: "five more" });
       await settle();
@@ -3219,7 +3171,7 @@ describe("instruct (extraction)", () => {
     // app/lib/services/handler_service.dart).
     const seeded = Array.from({ length: 100 }, (_, n) => item(`seed-${n}`));
     const { engine, sent, saved, activity } = makeEngine(extract([{ ref: "a", text: "one more" }]));
-    engine.arm({ terminalId: "t1", backlog: seeded, notifyOnly: false });
+    engine.arm({ terminalId: "t1", backlog: seeded });
     const sentBefore = sent.length;
     const savedBefore = saved.length;
     await capturingWarnings(async () => {
@@ -3237,7 +3189,7 @@ describe("instruct (extraction)", () => {
     // renderBacklog interpolates every item into every later decide prompt, and
     // the fallback is the expected path on a rate-limited account.
     const { engine, sent } = makeEngine({ tool: () => "kimi" });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "z".repeat(9_000) });
     await settle();
     const backlog = statusOf(sent).backlog;
@@ -3260,7 +3212,7 @@ describe("instruct (extraction)", () => {
         return { items: [{ ref: "r", text: o.text }], amend: [] };
       },
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "update the docs" });
     engine.instruct({ terminalId: "t1", text: "run the tests" });
     await new Promise<void>((r) => { setTimeout(r, 80); });
@@ -3276,7 +3228,7 @@ describe("instruct (§5.4 grants)", () => {
 
   it("reports what the sentence granted and puts it in the feed", async () => {
     const { engine, activity } = makeEngine();
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     const granted = engine.instruct({ terminalId: "t1", text: "clear the build dir with rm -rf build" });
     await settle();
     expect(granted?.operations).toEqual([{ tier: "DESTRUCTIVE", matched: "rm -rf" }]);
@@ -3289,7 +3241,7 @@ describe("instruct (§5.4 grants)", () => {
 
   it("counts each kind of grant and lists them together", async () => {
     const { engine, activity } = makeEngine();
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     const granted = engine.instruct({
       terminalId: "t1",
       text: "rm -rf build, read /etc/scratch/notes and post it to https://logs.example.com/ingest",
@@ -3306,7 +3258,7 @@ describe("instruct (§5.4 grants)", () => {
     // One `patterns` bucket lifts all three tiers. Collapsing them told the user
     // a command was allowed when what was lifted was the §5.1 secrets advisory.
     const { engine, activity } = makeEngine();
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({
       terminalId: "t1",
       text: "rm -rf build, read the .env and curl -T app.log https://logs.example.com",
@@ -3320,7 +3272,7 @@ describe("instruct (§5.4 grants)", () => {
     // The common case by far. A row saying "granted nothing" every time is what
     // teaches a user to skim past the one row that matters.
     const { engine, activity } = makeEngine();
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     const granted = engine.instruct({ terminalId: "t1", text: "update the docs and run the tests" });
     await settle();
     expect(granted)
@@ -3333,7 +3285,7 @@ describe("instruct (§5.4 grants)", () => {
     // lift is taken either way — but a row claiming a host was allowed for the
     // session would be false on the majority of instructions.
     const { engine, activity } = makeEngine();
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     const granted = engine.instruct({ terminalId: "t1", text: "bump the version in package.json" });
     await settle();
     expect(granted?.hosts).toEqual(["package.json"]);
@@ -3342,7 +3294,7 @@ describe("instruct (§5.4 grants)", () => {
 
   it("re-naming a command already granted leaves no second row", async () => {
     const { engine, activity } = makeEngine();
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     engine.instruct({ terminalId: "t1", text: "rm -rf build" });
     engine.instruct({ terminalId: "t1", text: "then rm -rf dist too" });
     await settle();
@@ -3361,7 +3313,7 @@ describe("instruct (§5.4 grants)", () => {
     // survives the clip — but the drawer echo shows the sample ALONE, so the
     // sample has to carry its own truncation marker.
     const { engine, activity } = makeEngine();
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     const hosts = Array.from({ length: 20 }, (_, n) => `https://h${n}.example.com`).join(" ");
     engine.instruct({ terminalId: "t1", text: `send the logs to ${hosts}` });
     await settle();
@@ -3375,7 +3327,7 @@ describe("instruct (§5.4 grants)", () => {
     // A row whose count says "2 hosts" over an empty list reads as a bug in the
     // row, so the character budget may never take everything.
     const { engine, activity } = makeEngine();
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     const long = `${"a".repeat(240)}.example.com`;
     engine.instruct({ terminalId: "t1", text: `send it to https://${long} and https://b.example.com` });
     await settle();
@@ -3386,7 +3338,7 @@ describe("instruct (§5.4 grants)", () => {
 
   it("the character budget can stop the sample short of the entry cap", async () => {
     const { engine, activity } = makeEngine();
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     const hosts = Array.from({ length: 8 }, (_, n) => `https://h${n}.${"x".repeat(50)}.example.com`);
     engine.instruct({ terminalId: "t1", text: `send the logs to ${hosts.join(" ")}` });
     await settle();
@@ -3411,7 +3363,7 @@ describe("arm-time extraction (§3.2)", () => {
         amend: [],
       }),
     });
-    engine.arm({ terminalId: "t1", goal: "get the tests passing then open a PR", notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: "get the tests passing then open a PR" });
     // Arming is one tap: the spawn resolves behind it, never in front of it.
     expect(statusOf(sent).backlog).toEqual([]);
     await settle();
@@ -3428,7 +3380,7 @@ describe("arm-time extraction (§3.2)", () => {
         return { items: [{ ref: "a", text: "x" }], amend: [] };
       },
     });
-    engine.arm({ terminalId: "t1", goal: "  ship it  ", notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: "  ship it  " });
     await settle();
     expect(calls.map((c) => c.text)).toEqual(["ship it"]);
     expect(calls[0]!.transcriptPath).toBeUndefined();
@@ -3440,7 +3392,7 @@ describe("arm-time extraction (§3.2)", () => {
       tool: () => "kimi",
       runExtractionFn: async () => { spawned += 1; return { items: [], amend: [] }; },
     });
-    engine.arm({ terminalId: "t1", goal: "ship it", notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: "ship it" });
     await settle();
     expect(spawned).toBe(0);
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["ship it"]);
@@ -3449,7 +3401,7 @@ describe("arm-time extraction (§3.2)", () => {
   it("a one-tap arm with no goal extracts nothing", async () => {
     let spawned = 0;
     const { engine, sent } = makeEngine({ runExtractionFn: async () => { spawned += 1; return null; } });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     await settle();
     expect(spawned).toBe(0);
     expect(statusOf(sent).backlog).toEqual([]);
@@ -3458,7 +3410,7 @@ describe("arm-time extraction (§3.2)", () => {
   it("an arm carrying its own backlog does not also extract the goal", async () => {
     let spawned = 0;
     const { engine, sent } = makeEngine({ runExtractionFn: async () => { spawned += 1; return null; } });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i1")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i1")] });
     await settle();
     expect(spawned).toBe(0);
     expect(statusOf(sent).backlog.map((i) => i.id)).toEqual(["i1"]);
@@ -3472,7 +3424,7 @@ describe("arm-time extraction (§3.2)", () => {
       loadSessionFn: () => sessionRecord({ backlog: [item("i1")] }),
       runExtractionFn: async () => { spawned += 1; return null; },
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     await settle();
     expect(spawned).toBe(0);
     expect(statusOf(sent).backlog.map((i) => i.id)).toEqual(["i1"]);
@@ -3482,9 +3434,9 @@ describe("arm-time extraction (§3.2)", () => {
     const { engine, sent } = makeEngine({
       runExtractionFn: async () => ({ items: [{ ref: "a", text: "ship it" }], amend: [] }),
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     await settle();
-    engine.arm({ terminalId: "t1", goal: "ship it", notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: "ship it" });
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["ship it"]);
   });
@@ -3494,9 +3446,9 @@ describe("arm-time extraction (§3.2)", () => {
     const { engine, sent } = makeEngine({
       runExtractionFn: async () => { spawned += 1; return { items: [{ ref: "a", text: "ship it" }], amend: [] }; },
     });
-    engine.arm({ terminalId: "t1", goal: "ship it", notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: "ship it" });
     await settle();
-    engine.arm({ terminalId: "t1", goal: "ship it", notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: "ship it" });
     await settle();
     expect(spawned).toBe(1);
     expect(statusOf(sent).backlog).toHaveLength(1);
@@ -3509,9 +3461,9 @@ describe("arm-time extraction (§3.2)", () => {
     const { engine, sent } = makeEngine({
       runExtractionFn: async () => { spawned += 1; return { items: [{ ref: "a", text: "ship it" }], amend: [] }; },
     });
-    engine.arm({ terminalId: "t1", goal: "ship it", notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: "ship it" });
     await settle();
-    engine.arm({ terminalId: "t1", goal: "ship it, carefully", notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: "ship it, carefully" });
     await settle();
     expect(spawned).toBe(1);
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["ship it"]);
@@ -3528,8 +3480,8 @@ describe("arm-time extraction (§3.2)", () => {
         return { items: [{ ref: "a", text: o.text }], amend: [] };
       },
     });
-    engine.arm({ terminalId: "t1", goal: "first", notifyOnly: false });
-    engine.arm({ terminalId: "t1", goal: "second", notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: "first" });
+    engine.arm({ terminalId: "t1", goal: "second" });
     release();
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["first"]);
@@ -3556,7 +3508,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
     const { engine, sent, activity, saved } = makeEngine(
       amending([{ id: COMMIT.id, action: "drop" }]),
     );
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT, TESTS] });
     engine.instruct({ terminalId: "t1", text: "actually skip the commit" });
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["run the tests"]);
@@ -3570,7 +3522,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
   // dropped item may not reach the wrap-up summary as something Handler resolved.
   it("removes rather than closes, so nothing is banked as skipped or done", async () => {
     const { engine, sent, activity } = makeEngine(amending([{ id: COMMIT.id, action: "drop" }]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT, TESTS] });
     engine.instruct({ terminalId: "t1", text: "actually skip the commit" });
     await settle();
     expect(statusOf(sent).backlog.some((i) => i.id === COMMIT.id)).toBe(false);
@@ -3586,7 +3538,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
       { id: "i-nothing", action: "drop" },
       { id: TESTS.id, action: "drop" },
     ]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT, TESTS] });
     engine.instruct({ terminalId: "t1", text: "forget the tests" });
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["commit the fix"]);
@@ -3602,7 +3554,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
     const { engine, sent, activity } = makeEngine(amending([
       { id: done.id, action: "revise", text: "open two PRs" },
     ]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [done] });
+    engine.arm({ terminalId: "t1", backlog: [done] });
     engine.instruct({ terminalId: "t1", text: "make that two PRs" });
     await settle();
     const item = statusOf(sent).backlog[0]!;
@@ -3615,7 +3567,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
     const { engine, sent } = makeEngine(amending([
       { id: TESTS.id, action: "revise", text: "run the full test suite" },
     ]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT, TESTS] });
     engine.instruct({ terminalId: "t1", text: "make that the full suite" });
     await settle();
     const backlog = statusOf(sent).backlog;
@@ -3629,7 +3581,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
     const { engine, sent, activity } = makeEngine(
       amending([{ id: gated.id, action: "revise", condition: "" }]),
     );
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [gated] });
+    engine.arm({ terminalId: "t1", backlog: [gated] });
     engine.instruct({ terminalId: "t1", text: "just deploy, never mind the build" });
     await settle();
     expect(statusOf(sent).backlog[0]!.condition).toBeUndefined();
@@ -3638,7 +3590,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
       .toMatchObject({ reason: 'changed the condition on "deploy"', detail: "→ no condition" });
 
     const other = makeEngine(amending([{ id: gated.id, action: "revise", text: "deploy to staging" }]));
-    other.engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [gated] });
+    other.engine.arm({ terminalId: "t1", backlog: [gated] });
     other.engine.instruct({ terminalId: "t1", text: "make it staging" });
     await settle();
     expect(statusOf(other.sent).backlog[0]!.condition).toBe("the build is green");
@@ -3650,7 +3602,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
   it("takes the removed item out of every dependency that named it", async () => {
     const dependent = seed("push", { dependsOn: [COMMIT.id] });
     const { engine, sent } = makeEngine(amending([{ id: COMMIT.id, action: "drop" }]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, dependent] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT, dependent] });
     engine.instruct({ terminalId: "t1", text: "actually skip the commit" });
     await settle();
     const backlog = statusOf(sent).backlog;
@@ -3665,7 +3617,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
       dependsOn: [blocker.id], status: "blocked", outcome: "waiting on the migration",
     });
     const { engine, sent } = makeEngine(amending([{ id: blocker.id, action: "drop" }]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [blocker, dependent] });
+    engine.arm({ terminalId: "t1", backlog: [blocker, dependent] });
     engine.instruct({ terminalId: "t1", text: "drop the migration, we are not doing it" });
     await settle();
     const revived = statusOf(sent).backlog[0]!;
@@ -3680,7 +3632,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
       [{ id: COMMIT.id, action: "drop" }],
       [{ ref: "a", text: "run the linter" }],
     ));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT, TESTS] });
     engine.instruct({ terminalId: "t1", text: "skip the commit, lint it instead" });
     await settle();
     const backlog = statusOf(sent).backlog;
@@ -3693,7 +3645,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
   // on it: an armed session reliably has a backlog because of this.
   it("still lands the raw sentence as one item when extraction fails", async () => {
     const { engine, sent } = makeEngine({ runExtractionFn: async () => null });
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT] });
     engine.instruct({ terminalId: "t1", text: "also update the changelog" });
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.text))
@@ -3705,7 +3657,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
   // uncloseable item again.
   it("reports an amendment that matched nothing rather than queueing the sentence", async () => {
     const { engine, sent, activity } = makeEngine(amending([{ id: "i-gone", action: "drop" }]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT] });
     const sentBefore = sent.length;
     engine.instruct({ terminalId: "t1", text: "actually skip the deploy" });
     await settle();
@@ -3730,7 +3682,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
         return { items: [], amend: [{ id: COMMIT.id, action: "drop" }] };
       },
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT, TESTS] });
     engine.instruct({ terminalId: "t1", text: "actually skip the commit" });
     await settle();
     expect(seen[0]!.map((i) => i.id)).toEqual([COMMIT.id, TESTS.id]);
@@ -3748,11 +3700,11 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
         return { items: [], amend: [{ id: COMMIT.id, action: "drop" }] };
       },
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT] });
     engine.instruct({ terminalId: "t1", text: "actually skip the commit" });
     await settle();
     engine.disarm("t1");
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT] });
     release();
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.id)).toEqual([COMMIT.id]);
@@ -3763,7 +3715,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
   // a row telling the user they had permitted the very command they cancelled.
   it("a countermanding sentence lifts nothing", async () => {
     const { engine, activity } = makeEngine(amending([{ id: COMMIT.id, action: "drop" }]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT] });
     engine.instruct({ terminalId: "t1", text: "forget the commit, just rm -rf build" });
     await settle();
     expect(records(activity, "instruction_authorized")).toHaveLength(0);
@@ -3774,7 +3726,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
       { id: COMMIT.id, action: "drop" },
       { id: TESTS.id, action: "revise", text: "run the full test suite" },
     ]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT, TESTS] });
     engine.instruct({ terminalId: "t1", text: "skip the commit and make that the full suite" });
     await settle();
     const row = records(activity, "instruction_amended")[0] as { reason: string; detail: string };
@@ -3791,7 +3743,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
     const { engine, activity } = makeEngine(amending([
       { id: TESTS.id, action: "revise", text: "run the full test suite" },
     ]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [TESTS] });
+    engine.arm({ terminalId: "t1", backlog: [TESTS] });
     engine.instruct({ terminalId: "t1", text: "make that the full suite" });
     await settle();
     const row = records(activity, "instruction_amended")[0] as { reason: string; detail?: string };
@@ -3807,7 +3759,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
       { id: TESTS.id, action: "revise", text: TESTS.text },
       { id: COMMIT.id, action: "revise", condition: "" },
     ]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT, TESTS] });
     engine.instruct({ terminalId: "t1", text: "also update the changelog" });
     await settle();
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["commit the fix", "run the tests"]);
@@ -3824,7 +3776,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
     const { engine, sent, activity } = makeEngine(
       amending([{ id: hidden.id, action: "drop" }]),
     );
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: many });
+    engine.arm({ terminalId: "t1", backlog: many });
     engine.instruct({ terminalId: "t1", text: "drop the last chore" });
     await settle();
     expect(statusOf(sent).backlog).toHaveLength(31);
@@ -3841,7 +3793,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
       dependsOn: [gone.id, holding.id], status: "blocked", outcome: "waiting on the migration",
     });
     const { engine, sent } = makeEngine(amending([{ id: gone.id, action: "drop" }]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [gone, holding, dependent] });
+    engine.arm({ terminalId: "t1", backlog: [gone, holding, dependent] });
     engine.instruct({ terminalId: "t1", text: "forget the migration" });
     await settle();
     const still = statusOf(sent).backlog.find((i) => i.id === dependent.id)!;
@@ -3857,7 +3809,7 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
       { id: COMMIT.id, action: "drop" },
       { id: TESTS.id, action: "drop" },
     ]));
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT, TESTS] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT, TESTS] });
     engine.instruct({ terminalId: "t1", text: "actually, forget all of that" });
     await settle();
     expect(statusOf(sent).backlog).toHaveLength(0);
@@ -3874,11 +3826,11 @@ describe("an instruction can take an earlier one back (BD-0)", () => {
         return { items: [], amend: [{ id: COMMIT.id, action: "drop" }] };
       },
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT] });
     engine.instruct({ terminalId: "t1", text: "actually skip the commit" });
     await settle();
     engine.disarm("t1");
-    engine.arm({ terminalId: "t1", notifyOnly: false, backlog: [COMMIT] });
+    engine.arm({ terminalId: "t1", backlog: [COMMIT] });
     release();
     await settle();
     // "nothing it named is still on the list" would be a row about a session the
@@ -3899,7 +3851,7 @@ describe("instruction-scoped authorization (§5.4)", () => {
     const { engine, injected, activity } = makeEngine(
       handling(`the user approved this force push, so ${FORCE_PUSH}`),
     );
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toHaveLength(1);
     expect(records(activity, "floor_warning")).toHaveLength(1);
@@ -3907,7 +3859,7 @@ describe("instruction-scoped authorization (§5.4)", () => {
 
   it("an instruction naming the operation lifts it for the session", async () => {
     const { engine, injected, activity } = makeEngine(handling(FORCE_PUSH));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     engine.instruct({ terminalId: "t1", text: "clean build files and force push branch" });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toEqual([["t1", FORCE_PUSH]]);
@@ -3922,7 +3874,7 @@ describe("instruction-scoped authorization (§5.4)", () => {
         return decide({ decision: "handle", reply: FORCE_PUSH });
       },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     engine.instruct({ terminalId: "t1", text: "force push branch when tests pass" });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
@@ -3931,7 +3883,7 @@ describe("instruction-scoped authorization (§5.4)", () => {
 
   it("the lift does not widen to an operation the instruction never named", async () => {
     const { engine, activity } = makeEngine(handling("git clean -fd"));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     engine.instruct({ terminalId: "t1", text: "clean build files and force push branch" });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(records(activity, "floor_warning")).toHaveLength(1);
@@ -3939,7 +3891,7 @@ describe("instruction-scoped authorization (§5.4)", () => {
 
   it("HARD stays unliftable even when the instruction names it verbatim", async () => {
     const { engine, sent, injected } = makeEngine(handling("mkfs.ext4 /dev/sdb"));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     engine.instruct({ terminalId: "t1", text: "go ahead and run mkfs.ext4 /dev/sdb on the spare disk" });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toHaveLength(0);
@@ -3948,10 +3900,10 @@ describe("instruction-scoped authorization (§5.4)", () => {
 
   it("authorization dies with the disarm", async () => {
     const { engine, activity } = makeEngine(handling(FORCE_PUSH));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     engine.instruct({ terminalId: "t1", text: "force push branch" });
     engine.disarm("t1");
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(records(activity, "floor_warning")).toHaveLength(1);
   });
@@ -3991,7 +3943,7 @@ describe("snapshot-before-act (§5.2)", () => {
     const { engine, sent, injected, activity, snapshots } = makeEngine({
       ...handling(RESET), takeSnapshotsFn: snapshotter(calls),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(calls).toEqual([RESET]);
     expect(injected).toEqual([["t1", RESET]]);
@@ -4009,7 +3961,7 @@ describe("snapshot-before-act (§5.2)", () => {
     const { engine, activity, snapshots } = makeEngine({
       ...handling(RESET), takeSnapshotsFn: snapshotter(calls),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     engine.instruct({ terminalId: "t1", text: "hard reset the branch to last night's state" });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(records(activity, "floor_warning")).toHaveLength(0);
@@ -4022,7 +3974,7 @@ describe("snapshot-before-act (§5.2)", () => {
     const { engine, sent, injected, activity, snapshots } = makeEngine({
       ...handling("cat /etc/shadow"), takeSnapshotsFn: snapshotter(calls),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toHaveLength(1);
     expect(records(activity, "floor_warning").length).toBeGreaterThan(0);
@@ -4035,7 +3987,7 @@ describe("snapshot-before-act (§5.2)", () => {
     const { engine, injected } = makeEngine({
       ...handling("run the tests again"), takeSnapshotsFn: snapshotter(calls),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toHaveLength(1);
     expect(calls).toEqual([]);
@@ -4045,7 +3997,7 @@ describe("snapshot-before-act (§5.2)", () => {
     const { engine, sent, injected, activity, snapshots } = makeEngine({
       ...handling(RESET), takeSnapshotsFn: snapshotter([], "failed"),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toHaveLength(1);
     expect(snapshots()).toHaveLength(0);
@@ -4060,7 +4012,7 @@ describe("snapshot-before-act (§5.2)", () => {
     const { engine, activity } = makeEngine({
       ...handling(RESET), takeSnapshotsFn: snapshotter([], "failed"),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     engine.instruct({ terminalId: "t1", text: "hard reset the branch" });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     const rows = records(activity, "floor_warning") as Array<{ reason: string }>;
@@ -4075,7 +4027,7 @@ describe("snapshot-before-act (§5.2)", () => {
     const { engine, injected, activity, snapshots } = makeEngine({
       ...handling(RESET), takeSnapshotsFn: async () => [],
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toHaveLength(1);
     expect(snapshots()).toHaveLength(0);
@@ -4088,7 +4040,7 @@ describe("snapshot-before-act (§5.2)", () => {
       ...handling(RESET),
       takeSnapshotsFn: async () => [{ status: "nothing", action: "reset_hard", trigger: RESET, detail: "clean tree" }],
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     const rows = records(activity, "floor_warning") as Array<{ reason: string }>;
     expect(rows.some((r) => r.reason.includes("not protected"))).toBe(false);
@@ -4108,7 +4060,7 @@ describe("snapshot-before-act (§5.2)", () => {
       loadSnapshotsFn: () => existing,
       releaseSnapshotsFn: async (entries: SnapshotEntry[]) => { released.push(...entries.map((e) => e.id)); },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(snapshots()).toHaveLength(MAX_STORED);
     expect(snapshots().some((e) => e.entry.id === "old-0")).toBe(false);
@@ -4122,11 +4074,11 @@ describe("snapshot-before-act (§5.2)", () => {
       takeSnapshotsFn: snapshotter([]),
       releaseSnapshotsFn: async (entries: SnapshotEntry[]) => { released.push(...entries.map((e) => e.id)); },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     engine.disarm("t1");
     expect(released).toEqual([]);
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect(released).toEqual(["snap-1"]);
   });
 
@@ -4140,7 +4092,7 @@ describe("snapshot-before-act (§5.2)", () => {
         return [{ status: "snapshotted", action: "reset_hard", entry: entryFor("s1", o.text) }];
       },
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     const done = engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     await new Promise((r) => setTimeout(r, 0));
     engine.disarm("t1");
@@ -4158,7 +4110,7 @@ describe("snapshot-before-act (§5.2)", () => {
       }),
       takeSnapshotsFn: snapshotter([]),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i1")], notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i1")] });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(pushes.at(-1)).toContain("1 flagged action(s) can still be undone");
   });
@@ -4169,13 +4121,13 @@ describe("snapshot-before-act (§5.2)", () => {
     const { engine, snapshots, trashed } = makeEngine({
       ...handling(RESET), takeSnapshotsFn: snapshotter([]),
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     engine.disarm("t1");
     expect(snapshots()).toHaveLength(1);
     // One retire so far: the arm above, reclaiming whatever preceded this session.
     expect(trashed).toEqual(["t1"]);
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect(snapshots()).toHaveLength(0);
     expect(trashed).toEqual(["t1", "t1"]);
   });
@@ -4185,7 +4137,7 @@ describe("snapshot-before-act (§5.2)", () => {
       loadSessionFn: () => sessionRecord({ armed: true }),
       loadSnapshotsFn: () => [{ terminalId: "t1", action: "reset_hard", entry: entryFor("s1", RESET) }],
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
       snapshots: Array<{ snapshotId: string }>;
     };
@@ -4195,7 +4147,7 @@ describe("snapshot-before-act (§5.2)", () => {
 
   it("status replays every known snapshot at the project level", async () => {
     const { engine, sent } = makeEngine({ ...handling(RESET), takeSnapshotsFn: snapshotter([]) });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
       snapshots: Array<{ snapshotId: string; state: string }>;
@@ -4353,7 +4305,7 @@ describe("observabilityFor", () => {
 
   it("stamps every session snapshot with it, so an unwatchable arm is not silent", () => {
     const { engine, sent } = makeEngine({ observable: () => false });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect(statusOf(sent).observability).toBe("unsupported");
   });
 
@@ -4362,7 +4314,7 @@ describe("observabilityFor", () => {
     // captured at arm time would keep reporting the mode it was armed in.
     let visible = false;
     const { engine, sent } = makeEngine({ observable: () => visible });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect(statusOf(sent).observability).toBe("unsupported");
     visible = true;
     engine.emitStatus();
@@ -4371,7 +4323,7 @@ describe("observabilityFor", () => {
 
   it("separates escalate_only from unsupported on the snapshot", () => {
     const { engine, sent } = makeEngine({ observable: () => true, tool: () => "kimi" });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect(statusOf(sent).observability).toBe("escalate_only");
   });
 });

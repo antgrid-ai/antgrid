@@ -65,7 +65,6 @@ function makeCore(dir: string, opts: CoreOpts = {}) {
       commandCatalog: () => undefined,
     },
     sendAb: (m: AbMessage) => sent.push(m),
-    loadConfigFn: () => ({ version: 2, defaultNotifyOnly: false }),
     appendActivityFn: () => {},
     loadSessionFn: () => null,
     saveSessionFn: (r: { armed: boolean }) => {
@@ -125,7 +124,7 @@ describe("session mode flip — teardown ordering", () => {
     const c = makeCore(dir);
     const s = c.sessions.create("t", { tool: "codex" });
     c.sessions.start(s.id);
-    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG, notifyOnly: false });
+    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG });
     expect(c.isArmed(s.id)).toBe(true);
 
     const flip = c.sessions.setMode(s.id, "chat");
@@ -146,7 +145,7 @@ describe("session mode flip — teardown ordering", () => {
     const c = makeCore(dir);
     const s = c.sessions.create("t", { tool: "codex" });
     c.sessions.start(s.id);
-    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG, notifyOnly: false });
+    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG });
 
     const flip = c.sessions.setMode(s.id, "chat");
     await tick();
@@ -172,7 +171,7 @@ describe("session mode flip — teardown ordering", () => {
     const c = makeCore(dir);
     const s = c.sessions.create("t", { tool: "codex" });
     c.sessions.start(s.id);
-    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG, notifyOnly: false });
+    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG });
     expect(c.isArmed(s.id)).toBe(true);
 
     c.exitPty(s.id); // the agent died on its own, no setMode in flight
@@ -203,7 +202,7 @@ describe("session mode flip — teardown ordering", () => {
     const c = makeCore(dir, { chatTeardown: () => gate.promise });
     const s = c.sessions.create("c", { tool: "codex", mode: "chat" });
     c.sessions.start(s.id);
-    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG, notifyOnly: false });
+    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG });
 
     const flip = c.sessions.setMode(s.id, "terminal");
     await tick();

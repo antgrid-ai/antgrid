@@ -63,7 +63,6 @@ const _extracted = HandlerInstructionItem(
 /// microtask flush inside the first [WidgetTester.pump].
 Future<ProjectSession> _armedSession(
   List<HandlerInstructionItem> backlog, {
-  bool notifyOnly = false,
   String state = 'watching',
   String goal = 'ship the fix',
 }) async {
@@ -79,7 +78,6 @@ Future<ProjectSession> _armedSession(
   _emitStatus(
     session,
     backlog,
-    notifyOnly: notifyOnly,
     state: state,
     goal: goal,
   );
@@ -93,7 +91,6 @@ Future<ProjectSession> _armedSession(
 void _emitStatus(
   ProjectSession session,
   List<HandlerInstructionItem> backlog, {
-  bool notifyOnly = false,
   String state = 'watching',
   String goal = 'ship the fix',
 }) {
@@ -102,7 +99,6 @@ void _emitStatus(
     'sessions': [
       {
         'terminalId': 't1',
-        'notifyOnly': notifyOnly,
         'state': state,
         'pendingEscalations': 0,
         'armedAt': 1,
@@ -478,17 +474,15 @@ void main() {
     }
   });
 
-  testWidgets('the edit carries the session\'s own notifyOnly', (tester) async {
-    final session = await _armedSession([_tests, _commit], notifyOnly: true);
+  testWidgets('the edit carries no goal', (tester) async {
+    final session = await _armedSession([_tests, _commit]);
     await _pumpDrawer(tester, session);
 
     await _openMenuFor(tester, 0);
     await _pick(tester, 'Delete');
 
-    final sent = _sentConfigure(session);
-    expect(sent['notifyOnly'], true);
     // A goal riding along would re-extract the backlog on the bridge.
-    expect(sent.containsKey('goal'), isFalse);
+    expect(_sentConfigure(session).containsKey('goal'), isFalse);
   });
 
   testWidgets('nothing in the drawer authors a dependency', (tester) async {
@@ -614,22 +608,24 @@ void main() {
     },
   );
 
-  // A notify-only session escalates every pause and injects nothing, so a
-  // backlog on one is a list the user works through themselves.
-  testWidgets('a notify-only empty list does not promise autonomous work', (
-    tester,
-  ) async {
-    final session = await _armedSession(const [], notifyOnly: true, goal: '');
+  // Whether an unfed Handler is doing anything at all is the question an empty
+  // list raises, and the subtitle is the whole of the answer — so it has to
+  // hold in the case with no goal above it to carry the claim instead.
+  testWidgets('an empty list still says what Handler answers', (tester) async {
+    final session = await _armedSession(const [], goal: '');
     await _pumpDrawer(tester, session);
 
     expect(
+      find.text("Add what you want done while you're away."),
+      findsOneWidget,
+    );
+    expect(
       find.text(
-        'Notify only on this session — every pause comes to you, and nothing '
-        'here is acted on while you are away.',
+        'Handler already answers what the agent pauses on. A backlog is the '
+        'work it takes on by itself.',
       ),
       findsOneWidget,
     );
-    expect(find.textContaining('takes on by itself'), findsNothing);
   });
 
   testWidgets('a terminal with no armed session says so, and asks nothing', (

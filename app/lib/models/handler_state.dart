@@ -151,7 +151,6 @@ class HandlerInstructionItem {
 /// `HandlerSessionSnapshot` (`bridge/src/protocol.ts`).
 class HandlerSessionState {
   final String terminalId;
-  final bool notifyOnly;
   final HandlerRunState runState;
   final int pendingEscalations;
   final int armedAt;
@@ -191,7 +190,6 @@ class HandlerSessionState {
 
   const HandlerSessionState({
     required this.terminalId,
-    required this.notifyOnly,
     required this.runState,
     required this.pendingEscalations,
     required this.armedAt,
@@ -218,7 +216,6 @@ class HandlerSessionState {
     List<HandlerEscalation>? escalations,
   }) => HandlerSessionState(
     terminalId: terminalId,
-    notifyOnly: notifyOnly,
     runState: runState ?? this.runState,
     pendingEscalations: pendingEscalations ?? this.pendingEscalations,
     armedAt: armedAt,
@@ -235,14 +232,12 @@ class HandlerSessionState {
   static HandlerSessionState? fromWire(dynamic json) {
     if (json is! Map) return null;
     final terminalId = json['terminalId'];
-    final notifyOnly = json['notifyOnly'];
     final state = json['state'];
     final pendingEscalations = json['pendingEscalations'];
     final armedAt = json['armedAt'];
     final goal = json['goal'];
     final backlogJson = json['backlog'];
     if (terminalId is! String ||
-        notifyOnly is! bool ||
         state is! String ||
         pendingEscalations is! num ||
         armedAt is! num ||
@@ -279,7 +274,6 @@ class HandlerSessionState {
     final parkedUntil = json['parkedUntil'];
     return HandlerSessionState(
       terminalId: terminalId,
-      notifyOnly: notifyOnly,
       runState: runState,
       pendingEscalations: pendingEscalations.toInt(),
       armedAt: armedAt.toInt(),
@@ -641,7 +635,6 @@ class HandlerState {
   /// What an absent per-session judge tool resolves to for PTY slots — the
   /// project's agent tool. Chat slots resolve from their own session entry.
   final String? defaultTool;
-  final bool defaultNotifyOnly;
   final Map<String, HandlerSessionState> sessions; // keyed by terminalId
   final List<HandlerEscalation> escalations;
   final List<HandlerActivityRecord> activity;
@@ -664,7 +657,6 @@ class HandlerState {
 
   const HandlerState({
     this.defaultTool,
-    this.defaultNotifyOnly = false,
     required this.sessions,
     required this.escalations,
     required this.activity,
@@ -675,7 +667,6 @@ class HandlerState {
 
   const HandlerState.initial()
     : defaultTool = null,
-      defaultNotifyOnly = false,
       sessions = const {},
       escalations = const [],
       activity = const [],
@@ -709,7 +700,6 @@ class HandlerState {
 
   HandlerState copyWith({
     String? defaultTool,
-    bool? defaultNotifyOnly,
     Map<String, HandlerSessionState>? sessions,
     List<HandlerEscalation>? escalations,
     List<HandlerActivityRecord>? activity,
@@ -719,7 +709,6 @@ class HandlerState {
   }) {
     return HandlerState(
       defaultTool: defaultTool ?? this.defaultTool,
-      defaultNotifyOnly: defaultNotifyOnly ?? this.defaultNotifyOnly,
       sessions: sessions ?? this.sessions,
       escalations: escalations ?? this.escalations,
       activity: activity ?? this.activity,

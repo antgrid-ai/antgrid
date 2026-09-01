@@ -18,10 +18,7 @@ import {
   MAX_ITEM_CHARS, amendableItems,
   type Amendment, type ExtractedItem, type ExtractionResult,
 } from "./extract";
-import {
-  loadHandlerConfig, appendActivity,
-  type HandlerConfig, type ActivityRecord,
-} from "./config";
+import { appendActivity, type ActivityRecord } from "./config";
 import {
   loadHandlerSession, saveHandlerSession, EscalationChoiceSchema,
   type EscalationChoice, type EscalationKind, type HandlerSessionRecord, type OpenEscalation,
@@ -30,7 +27,6 @@ import {
   allTerminal, applyTransitions, clip, isTerminalStatus, propagateBlocked, renderBacklog, summarize,
   type InstructionItem, type ItemStatus, type RejectionCode,
 } from "./backlog";
-import { stripAnsi } from "./context";
 import { checkReplyShape, findCommand, oneLine, replyShape } from "./reply-shape";
 import type { CapCommand } from "../structured/chat-session";
 import type { SessionAdapter } from "./session-adapter";
@@ -483,7 +479,6 @@ export interface HandlerEngineDeps {
   releaseSnapshotsFn?: (entries: SnapshotEntry[]) => Promise<void>;
   loadSnapshotsFn?: () => StoredSnapshot[];
   saveSnapshotsFn?: (entries: StoredSnapshot[]) => void;
-  loadConfigFn?: () => HandlerConfig;
   appendActivityFn?: (rec: ActivityRecord) => void;
   loadSessionFn?: (terminalId: string) => HandlerSessionRecord | null;
   saveSessionFn?: (rec: HandlerSessionRecord) => void;
@@ -497,7 +492,6 @@ interface ArmedSession {
   // The live instruction stack, and the only record of progress: an item's own
   // status is what it has reached, so nothing accumulates alongside it.
   backlog: InstructionItem[];
-  notifyOnly: boolean;
   armedAt: number;
   state: "watching" | "handling" | "needs_you" | "parked";
   // Full payloads, not a count: status snapshots replay these so the app can
@@ -613,7 +607,6 @@ function restingState(s: ArmedSession): "watching" | "needs_you" {
 export class HandlerEngine {
   private guard: RunawayGuard;
   private sessions = new Map<string, ArmedSession>();
-  private cachedConfig: HandlerConfig | null = null;
   private seq = 0;
   // Per-terminal work chain, covering everything that spawns an agent CLI.
   // handleEvent is fire-and-forget from agent-core (each /handler-event POST is
@@ -677,14 +670,6 @@ export class HandlerEngine {
       at, terminalId, verdict.reason, verdict.tier ?? "unknown",
     );
     return false;
-  }
-
-  private cfg(): HandlerConfig {
-    if (this.cachedConfig) return this.cachedConfig;
-    this.cachedConfig = this.deps.loadConfigFn
-      ? this.deps.loadConfigFn()
-      : loadHandlerConfig(this.deps.abDir, this.deps.projectId);
-    return this.cachedConfig;
   }
 
   // Judge choice application, shared by fresh-arm and edit-arm. Fields arrive
@@ -761,8 +746,8 @@ export class HandlerEngine {
   private persist(terminalId: string, s: ArmedSession, armed: boolean, suspended?: boolean): void {
     this.saveSession({
       version: 2, terminalId, armed, suspended, goal: s.goal, backlog: s.backlog,
-      notifyOnly: s.notifyOnly, armedAt: s.armedAt,
-      escalations: s.escalations, judgeTool: s.judgeTool, judgeModel: s.judgeModel,
+      armedAt: s.armedAt, escalations: s.escalations,
+      judgeTool: s.judgeTool, judgeModel: s.judgeModel,
       parkKind: s.parkKind, parkedUntil: s.parkedUntil, transientFailures: s.transientFailures,
       parkAwaitingJudge: s.parkAwaitingJudge,
     });
@@ -770,7 +755,7 @@ export class HandlerEngine {
 
   arm(p: {
     terminalId: string; goal?: string; backlog?: InstructionItem[];
-    notifyOnly: boolean; judgeTool?: string; judgeModel?: string;
+    judgeTool?: string; judgeModel?: string;
   }): void {
     // Entitlement first, ahead of every side effect below — the backlog clamp
     // records an activity row, and a refused arm must leave nothing behind.
@@ -814,8 +799,8 @@ export class HandlerEngine {
       // "handling" state with nothing left to reset it.
       //
       // Absent means "leave it alone", never "clear it" (an empty backlog is sent
-      // as []): a re-arm or a notify-only toggle carries no backlog, and the
-      // bridge's copy is the one holding the statuses this session has banked.
+      // as []): a re-arm or a goal edit carries no backlog, and the bridge's
+      // copy is the one holding the statuses this session has banked.
       const goalChanged = p.goal !== undefined && p.goal.trim() !== existing.goal.trim();
       if (p.goal !== undefined) existing.goal = p.goal;
       if (backlog !== undefined) existing.backlog = backlog;
@@ -823,13 +808,12 @@ export class HandlerEngine {
       // pass's verdict no longer covers the same question — the next event is
       // judged even if the agent has not moved.
       existing.lastJudgedContextHash = undefined;
-      existing.notifyOnly = p.notifyOnly;
       this.applyJudgeChoice(existing, p);
       this.persist(p.terminalId, existing, true);
       // Only when the goal actually moved: `handler:configure` is also the
-      // backlog-edit and notify-only path (see updateBacklog in the app), and a
+      // backlog-edit and judge-pick path (see updateBacklog in the app), and a
       // "Goal edited" row over an unchanged goal is a feed that misreports what
-      // happened on every reorder and every toggle.
+      // happened on every reorder and every judge change.
       if (goalChanged) this.record(p.terminalId, "goal_edited", existing.goal || NO_GOAL);
       this.emitStatus();
       // A goal landing on a session whose backlog is still empty is the user's
@@ -864,12 +848,11 @@ export class HandlerEngine {
     // is gone — suspension follows the terminal's exit, and a restart rebuilds every
     // driver with no pending prompts — so nothing is left to resolve or retract it.
     // Carrying one across would wedge the slot: no typed line clears it, wrap-up
-    // never fires, a notify-only session goes silent, and the park nudge stops.
+    // never fires, and the park nudge stops.
     const carried = (resumed?.escalations ?? []).filter((e) => e.kind !== "resolve_in_session");
     const s: ArmedSession = {
       goal: p.goal ?? resumed?.goal ?? "",
       backlog: backlog ?? resumed?.backlog ?? [],
-      notifyOnly: p.notifyOnly,
       armedAt: resumed?.armedAt ?? this.now(),
       state: carried.length > 0 ? "needs_you" : "watching",
       escalations: carried,
@@ -1595,23 +1578,6 @@ export class HandlerEngine {
       return;
     }
 
-    // Notify-only: escalate without spending a judge call. One unanswered
-    // question at a time — while the user hasn't responded, every further
-    // pause says the same thing ("agent is waiting"), so re-escalating each
-    // one would only pile up pushes and pending rows.
-    if (s.notifyOnly) {
-      if (pendingQuestions(s) > 0) return;
-      const body = await this.outputSnippet(evt.terminalId);
-      // The await yields the event loop: a concurrent disarm/exit may have
-      // dropped this session, and escalating would re-persist it as armed.
-      if (this.sessions.get(evt.terminalId) !== s) return;
-      this.escalate(evt.terminalId, s, {
-        decision: "escalate", confidence: 0, reason: "notify-only: escalating all events",
-        notify: { title: "Handler", body, draftReply: "", urgency: "normal" },
-      });
-      return;
-    }
-
     s.state = "handling";
     this.emitStatus();
 
@@ -1649,9 +1615,7 @@ export class HandlerEngine {
       // Nothing has happened since the last pass reached a verdict, so a second
       // judge call can only re-rule on evidence already ruled on — and a judge
       // that answers differently the second time is answering from noise. Skipped
-      // silently: this is the judged path's half of the notify-only rule that one
-      // unanswered escalation is enough, and a duplicate row would say the same
-      // thing the open one already says.
+      // silently: a duplicate row would say the same thing the open one already says.
       const hash = contextHash(ctx.text);
       if (hash === s.lastJudgedContextHash) {
         // assembleContext awaited the filesystem; a concurrent disarm may have
@@ -1999,21 +1963,6 @@ export class HandlerEngine {
     // so it is not one of those: leaving it in the count would strand every
     // parked session that happened to be holding one.
     if (pendingQuestions(s) > 0) return;
-    // Notify-only means "tell me, never act" — so the wake is a notification,
-    // not a nudge. Lifecycle events route ahead of the notify-only branch in
-    // handleEventInner (a park is a fact, not a verdict), which is what lets a
-    // notify-only session reach this timer at all; without this the wait would
-    // end by typing into a terminal the user opted out of auto-driving.
-    if (s.notifyOnly) {
-      this.escalate(terminalId, s, {
-        decision: "escalate", confidence: 0, reason: "notify-only: the wait is over",
-        notify: {
-          title: "Handler", body: "Agent is ready to resume — it is waiting on you",
-          draftReply: "", urgency: "normal",
-        },
-      });
-      return;
-    }
     // Straight to the adapter, never through the auto-reply path: the nudge is
     // the supervisor's own recovery action, so it must neither advance the
     // runaway counter nor enter the circular-exchange window — a second park
@@ -2164,16 +2113,6 @@ export class HandlerEngine {
   private blockedNote(s: ArmedSession): string {
     const reports = s.escalations.length - pendingQuestions(s);
     return reports > 0 ? `. ${reports} action(s) Handler could not take — see the activity feed` : "";
-  }
-
-  // Last non-empty output lines (PTY scrollback or rendered chat snapshot),
-  // ANSI-stripped and capped — gives a notify-only escalation enough context
-  // to act on from the lock screen.
-  private async outputSnippet(terminalId: string): Promise<string> {
-    const raw = stripAnsi(await this.deps.adapter.recentOutput(terminalId));
-    const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
-    const tail = lines.slice(-3).join(" · ");
-    return tail ? tail.slice(-200) : "Agent needs you";
   }
 
   private escalate(
@@ -2472,13 +2411,12 @@ export class HandlerEngine {
   }
 
   // Public: agent-core also emits on every app handshake so a fresh app sees
-  // defaultNotifyOnly/defaultTool before anything is armed. Judge choices are
-  // per-session now, carried on each session snapshot, and are never cleared
-  // by this emit — only arm() touches them.
+  // defaultTool before anything is armed. Judge choices are per-session now,
+  // carried on each session snapshot, and are never cleared by this emit — only
+  // arm() touches them.
   emitStatus(): void {
     const sessions = [...this.sessions.entries()].map(([terminalId, s]) => ({
       terminalId,
-      notifyOnly: s.notifyOnly,
       state: s.state,
       pendingEscalations: s.escalations.length,
       armedAt: s.armedAt,
@@ -2502,7 +2440,6 @@ export class HandlerEngine {
       // What an absent per-session judge resolves to for PTY slots — lets the
       // app label its picker "Default (claude-code)" instead of a bare Default.
       defaultTool: this.deps.tool(),
-      defaultNotifyOnly: this.cfg().defaultNotifyOnly,
       sessions,
       // Project-scoped, not per session: an undo offer outlives the session that
       // took it, and an app that restarted between the advert and the tap has no

@@ -100,7 +100,6 @@ export const HandlerSessionRecordSchema = z.object({
   // carrying one is better refused than rehydrated.
   goal: z.string(),
   backlog: BacklogSchema,
-  notifyOnly: z.boolean(),
   armedAt: z.number(),
   escalations: z.array(OpenEscalationSchema),
   // Per-session judge choice (absent = the session's own tool / CLI default

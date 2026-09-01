@@ -834,22 +834,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       case "handler:configure": {
         // parseMessageFast (the encrypted/local hot path) validates only the
-        // message type — every field below is still untrusted, so every field
-        // arming acts on has to be re-parsed, not just the ones the sender
-        // happened to fill in: a `notifyOnly` that arrives absent or non-bool
-        // reads as falsy and would arm an auto-injecting session the user asked
-        // to be notify-only.
+        // message type — every field below is still untrusted. Re-parsed as a
+        // whole rather than field by field because BacklogWire's duplicate-id
+        // refine has to run before arm() assigns the list wholesale: a shadowed
+        // item is unreachable by every transition, leaving a session that can
+        // never wrap up.
         const parsed = HandlerConfigureWire.safeParse(msg);
         if (parsed.success && parsed.data.armed) {
-          const { terminalId, goal, backlog, notifyOnly, judgeTool, judgeModel } = parsed.data;
-          handlerEngine.arm({ terminalId, goal, backlog, notifyOnly, judgeTool, judgeModel });
+          const { terminalId, goal, backlog, judgeTool, judgeModel } = parsed.data;
+          handlerEngine.arm({ terminalId, goal, backlog, judgeTool, judgeModel });
         } else if (parsed.success) {
           handlerEngine.disarm(parsed.data.terminalId);
         } else {
           // Reject WITHOUT disarming: a malformed arm/edit must not tear down
-          // the live armed session it failed to replace, and refusing to arm
-          // already closes the notifyOnly hole. Re-emit status so the sender's
-          // UI resyncs to the state that actually holds.
+          // the live armed session it failed to replace. Re-emit status so the
+          // sender's UI resyncs to the state that actually holds.
           logger.warn("handler:configure rejected: malformed payload");
           handlerEngine.emitStatus();
         }
@@ -2994,7 +2993,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb(buildAgentHello(config, VERSION));
     // Re-sync the config-error dot on every connect (see emitConfigState).
     emitConfigState();
-    // Seed the app's Handler defaults (judge overrides, notify-only) even when
+    // Seed the app's Handler defaults (judge overrides) even when
     // nothing is armed — arming is one tap and carries no payload, so it arms
     // with whatever this snapshot seeded.
     handlerEngine.emitStatus();

@@ -4,7 +4,6 @@ import 'package:flutter_test/flutter_test.dart';
 HandlerSessionState _session(String terminalId, {required int pending}) {
   return HandlerSessionState(
     terminalId: terminalId,
-    notifyOnly: false,
     runState: HandlerRunState.watching,
     pendingEscalations: pending,
     armedAt: 1,
@@ -90,7 +89,6 @@ void main() {
   test('HandlerSessionState counts only done items as progress', () {
     final s = HandlerSessionState.fromWire({
       'terminalId': 't1',
-      'notifyOnly': false,
       'state': 'watching',
       'pendingEscalations': 0,
       'armedAt': 1,
@@ -105,7 +103,6 @@ void main() {
   test('a malformed backlog item drops itself, not the session', () {
     final s = HandlerSessionState.fromWire({
       'terminalId': 't1',
-      'notifyOnly': false,
       'state': 'watching',
       'pendingEscalations': 0,
       'armedAt': 1,
@@ -129,7 +126,6 @@ void main() {
     // unmapped "parked" would make parked sessions vanish from the app.
     final s = HandlerSessionState.fromWire({
       'terminalId': 't1',
-      'notifyOnly': false,
       'state': 'parked',
       'pendingEscalations': 0,
       'armedAt': 1,
@@ -149,7 +145,6 @@ void main() {
   test('park fields are absent on an unparked session', () {
     final s = HandlerSessionState.fromWire({
       'terminalId': 't1',
-      'notifyOnly': false,
       'state': 'watching',
       'pendingEscalations': 0,
       'armedAt': 1,
@@ -164,7 +159,6 @@ void main() {
 
   Map<String, dynamic> wire(Object? observability) => {
     'terminalId': 't1',
-    'notifyOnly': false,
     'state': 'watching',
     'pendingEscalations': 0,
     'armedAt': 1,

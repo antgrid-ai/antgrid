@@ -7,22 +7,39 @@ import { setupTestEnv, type TestEnv } from "../helpers/harness";
 import { createMessage, type HandlerInstructionItem } from "../../bridge/src/protocol";
 import { firstProjectStream } from "../support/stream";
 
-// Each test owns its env: the backlog-lifecycle scenario needs agent-process env
-// vars (the scripted judge) that a shared beforeAll env can't carry.
+// Each test owns its env: both scenarios need agent-process env vars (their own
+// scripted judge) that a shared beforeAll env can't carry.
 let env: TestEnv | undefined;
 let streamId: string;
 afterEach(async () => { await env?.teardown(); env = undefined; });
 
-test("Notify-only: a handler-event triggers a handler:escalation at the app", async () => {
-  env = await setupTestEnv({ fixtureName: "basic" });
+test("A judged pause reaches the app as a handler:escalation", async () => {
+  // The agent runs as a spawned process, so in-process runDecisionFn injection is
+  // unreachable — swap the judge CLI for a scripted bun script via judge.ts's
+  // eval-only env override (ANTGRID_EVAL_TEST + ANTGRID_TEST_JUDGE_SCRIPT). It
+  // escalates whatever it is shown, so the assertion below is about the wiring
+  // (hook -> engine -> relay -> app) and not about which verdict a real judge picks.
+  const dir = mkdtempSync(join(tmpdir(), "antgrid-eval-judge-"));
+  const scriptPath = join(dir, "escalating-judge.ts");
+  const ESCALATING_JUDGE = `
+console.log(JSON.stringify({
+  decision: "escalate", confidence: 0.9, reason: "needs the user",
+  notify: { title: "Handler", body: "Agent is waiting on you", draftReply: "", urgency: "high" },
+}));
+`;
+  writeFileSync(scriptPath, ESCALATING_JUDGE);
+
+  env = await setupTestEnv({
+    fixtureName: "basic",
+    env: { ANTGRID_TEST_JUDGE_SCRIPT: scriptPath },
+  });
   // v3: handler:* are project verbs → the firstProject stream.
   streamId = await firstProjectStream(env.app, env.projectId, 10_000);
 
-  // Arm Handler in notify-only mode — every event escalates without spending a judge call.
-  // No backlog: arming carries no required payload, and notify-only never transitions items.
+  // No backlog: arming carries no required payload, and a pause is judged on its
+  // own, so nothing has to be queued for an escalation to be raised.
   env.app.sendOnStream(streamId, createMessage("handler:configure", {
-    projectId: env.projectId, terminalId: "agent-main", armed: true, notifyOnly: true,
-    goal: "watch for input",
+    projectId: env.projectId, terminalId: "agent-main", armed: true, goal: "watch for input",
   }));
   await env.app.waitForStreamAbType(streamId, "handler:status", 5_000);
 
@@ -30,16 +47,19 @@ test("Notify-only: a handler-event triggers a handler:escalation at the app", as
   // The agent's API port is discoverable from its ~/.antgrid/api.port file (written at startup).
   const portFile = `${env.abDir}/api.port`;
   const port = (await Bun.file(portFile).text()).trim();
-  // Synthetic terminalId is fine: notify-only escalates regardless of terminal validity.
+  // Synthetic terminalId is fine: an escalation only puts a frame on the wire, so
+  // nothing on this path writes to the terminal.
   await fetch(`http://127.0.0.1:${port}/handler-event`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ terminalId: "agent-main", event: "awaiting_input", agent: "claude" }),
   });
 
-  const esc = await env.app.waitForStreamAbType(streamId, "handler:escalation", 8_000);
+  // A judge spawn sits between the POST and this frame, so the wait matches the
+  // budget the lifecycle test gives its own judged steps.
+  const esc = await env.app.waitForStreamAbType(streamId, "handler:escalation", 15_000);
   expect((esc as any).projectId).toBe(env.projectId);
   expect((esc as any).terminalId).toBe("agent-main");
-}, 40_000);
+}, 60_000);
 
 test("Backlog lifecycle: arm -> auto-answer -> item done -> wrap-up", async () => {
   // The agent runs as a spawned process, so in-process runDecisionFn injection is
@@ -86,7 +106,7 @@ console.log(JSON.stringify(outputs[Math.min(n, outputs.length - 1)]));
   // One queued item is the whole wrap-up condition: the session auto-disarms once
   // every item is terminal, so a single `done` drives the end of the lifecycle.
   env.app.sendOnStream(streamId, createMessage("handler:configure", {
-    projectId: env.projectId, terminalId: "agent-main", armed: true, notifyOnly: false,
+    projectId: env.projectId, terminalId: "agent-main", armed: true,
     goal: "test task", backlog: BACKLOG,
   }));
   const armedStatus = await env.app.waitFor(

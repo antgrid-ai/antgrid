@@ -30,7 +30,6 @@ HandlerSessionState _armed({
   int? parkedUntil,
 }) => HandlerSessionState(
   terminalId: 't1',
-  notifyOnly: false,
   runState: runState,
   pendingEscalations: pendingEscalations ?? escalations.length,
   armedAt: 1,

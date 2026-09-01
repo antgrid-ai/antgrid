@@ -21,7 +21,6 @@ Map<String, dynamic> _sessionJson({
   required String terminalId,
   required int pendingEscalations,
   String state = 'watching',
-  bool notifyOnly = false,
   String goal = 'summary',
   List<Map<String, dynamic>> backlog = const [],
   List<Map<String, dynamic>> escalations = const [],
@@ -29,7 +28,6 @@ Map<String, dynamic> _sessionJson({
   String? judgeModel,
 }) => {
   'terminalId': terminalId,
-  'notifyOnly': notifyOnly,
   'state': state,
   'pendingEscalations': pendingEscalations,
   'armedAt': 0,
@@ -270,7 +268,6 @@ void main() {
 
       svc.arm(
         terminalId: 't1',
-        notifyOnly: false,
         judgeTool: 'opencode',
         judgeModel: 'm1',
       );
@@ -281,7 +278,7 @@ void main() {
       // Arming without touching the judge controls omits the override keys, so
       // the bridge leaves the session's stored judge record alone (no
       // clobber-to-default).
-      svc.arm(terminalId: 't1', notifyOnly: false);
+      svc.arm(terminalId: 't1');
       final plain = t.sent.lastWhere((m) => m['type'] == 'handler:configure');
       expect(plain.containsKey('judgeTool'), isFalse);
       expect(plain.containsKey('judgeModel'), isFalse);
@@ -420,7 +417,6 @@ void main() {
     // a touched arm would silently revert the choice.
     svc.arm(
       terminalId: 't1',
-      notifyOnly: false,
       judgeTool: 'opencode',
       judgeModel: '',
     );

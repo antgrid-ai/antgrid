@@ -4,7 +4,6 @@ import 'package:antgrid/models/ab_message.dart';
 void main() {
   const sessionWire = {
     'terminalId': 't1',
-    'notifyOnly': false,
     'state': 'watching',
     'pendingEscalations': 2,
     'armedAt': 1,

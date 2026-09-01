@@ -12,7 +12,7 @@ enum HandlerInstructResult { sent, empty, duplicate }
 
 /// Per-project mirror of the bridge Handler subsystem. Reduces `handler:*`
 /// inbound messages into a [HandlerState]; never persists (the bridge owns
-/// `handler-config.json` / `handler-activity.jsonl`).
+/// `handler-activity.jsonl`).
 class HandlerService {
   final ProjectSession session;
 
@@ -303,7 +303,6 @@ class HandlerService {
     });
     final next = _state.copyWith(
       sessions: sessions,
-      defaultNotifyOnly: msg.defaultNotifyOnly,
       escalations: escalations,
       defaultTool: msg.defaultTool,
       snapshots: snapshots,
@@ -427,7 +426,6 @@ class HandlerService {
     required String terminalId,
     String? goal,
     List<HandlerInstructionItem>? backlog,
-    required bool notifyOnly,
     String? judgeTool,
     String? judgeModel,
   }) {
@@ -475,7 +473,6 @@ class HandlerService {
         'armed': true,
         'goal': ?goal,
         'backlog': ?backlog?.map((i) => i.toWire()).toList(),
-        'notifyOnly': notifyOnly,
         'judgeTool': ?judgeTool,
         'judgeModel': ?judgeModel,
       }),
@@ -492,7 +489,6 @@ class HandlerService {
         'projectId': session.projectId,
         'terminalId': terminalId,
         'armed': false,
-        'notifyOnly': false,
       }),
     );
   }
@@ -507,10 +503,6 @@ class HandlerService {
   /// edit and never carry an edited copy across an async gap: extraction
   /// appends to the bridge's list behind the handoff, and a full replace built
   /// from a pre-extraction snapshot deletes whatever landed in between.
-  ///
-  /// [notifyOnly] must be the session's CURRENT value — the field is required
-  /// on the wire, so a guessed one silently flips the session between notifying
-  /// and acting.
   ///
   /// The goal is deliberately not a parameter: a changed goal arriving without
   /// a backlog re-extracts into the session, so the two edits stay separate
@@ -533,11 +525,10 @@ class HandlerService {
   bool updateBacklog({
     required String terminalId,
     required List<HandlerInstructionItem> backlog,
-    required bool notifyOnly,
   }) {
     if (_disposed) return false;
     if (_state.pendingInstructionsFor(terminalId).isNotEmpty) return false;
-    arm(terminalId: terminalId, backlog: backlog, notifyOnly: notifyOnly);
+    arm(terminalId: terminalId, backlog: backlog);
     return true;
   }
 

@@ -131,7 +131,6 @@ class HandlerBacklogDrawer extends ConsumerWidget {
                   ),
                   child: _NothingQueued(
                     armed: session != null,
-                    notifyOnly: session?.notifyOnly ?? false,
                     hasGoal: session?.goal.trim().isNotEmpty ?? false,
                   ),
                 )
@@ -203,18 +202,12 @@ String? _sessionName(WidgetRef ref, String terminalId) {
 class _NothingQueued extends StatelessWidget {
   const _NothingQueued({
     required this.armed,
-    required this.notifyOnly,
     required this.hasGoal,
   });
 
   /// False for a terminal Handler was never armed on — a state with no
   /// invitation to make, since nothing here would receive it.
   final bool armed;
-
-  /// A notify-only session escalates every pause and injects nothing, so this
-  /// list is one the user works through themselves. Saying otherwise is the
-  /// single biggest thing this surface can be wrong about.
-  final bool notifyOnly;
 
   /// Whether a goal is stated above this list.
   final bool hasGoal;
@@ -225,11 +218,9 @@ class _NothingQueued extends StatelessWidget {
           title: hasGoal
               ? 'Nothing queued beyond the goal above.'
               : "Add what you want done while you're away.",
-          subtitle: notifyOnly
-              ? 'Notify only on this session — every pause comes to you, and '
-                    'nothing here is acted on while you are away.'
-              : 'Handler already answers what the agent pauses on. A backlog '
-                    'is the work it takes on by itself.',
+          subtitle:
+              'Handler already answers what the agent pauses on. A backlog '
+              'is the work it takes on by itself.',
         )
       // The Handler tab's own direction, verbatim: one instruction worded one
       // way wherever the user meets it.
@@ -766,10 +757,6 @@ class _EditLockNotice extends StatelessWidget {
 /// only way any of them reaches the wire. What is owed here is the reason —
 /// [handlerEditLockReason], on every affordance and standing above the list.
 ///
-/// [HandlerSessionState.notifyOnly] rides along from that same snapshot: it is
-/// required on the wire, and a guessed value flips the session between
-/// notifying and acting without saying so.
-///
 /// Takes the container rather than a `WidgetRef` because a menu entry fires
 /// after its route pops, by which time a status update may have taken this row
 /// out of the tree.
@@ -799,7 +786,6 @@ _EditSend _sendEdit(
   return service.updateBacklog(
         terminalId: terminalId,
         backlog: next,
-        notifyOnly: session.notifyOnly,
       )
       ? _EditSend.sent
       : _EditSend.held;

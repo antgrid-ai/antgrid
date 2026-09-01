@@ -442,7 +442,6 @@ class HandlerHeaderControl extends ConsumerWidget {
           context: context,
           container: ref.container,
           terminalId: activeId,
-          notifyOnly: state.defaultNotifyOnly,
           agentObservable: coverage.observable,
           agentLabel: coverage.agentLabel,
           judgeCapable: coverage.judgeCapable,

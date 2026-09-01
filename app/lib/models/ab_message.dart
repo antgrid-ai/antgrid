@@ -259,7 +259,6 @@ class HandlerStatusMessage {
   /// What an absent per-session judge tool resolves to for PTY slots (the
   /// project's agent tool); chat slots resolve from their own session entry.
   final String? defaultTool;
-  final bool defaultNotifyOnly;
   final List<Map<String, dynamic>> sessions;
 
   /// Every §5.2 snapshot the project still knows about, replayed like the
@@ -273,7 +272,6 @@ class HandlerStatusMessage {
     required this.timestamp,
     required this.projectId,
     this.defaultTool,
-    required this.defaultNotifyOnly,
     required this.sessions,
     this.snapshots = const [],
   });
@@ -1432,7 +1430,6 @@ Object? parseAbMessage(Map<String, dynamic> json) {
           defaultTool: json['defaultTool'] is String
               ? json['defaultTool'] as String
               : null,
-          defaultNotifyOnly: json['defaultNotifyOnly'] == true,
           sessions: sessions,
           snapshots: snapshots,
         );

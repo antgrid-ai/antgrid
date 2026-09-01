@@ -22,7 +22,6 @@ HandlerSessionState _session(
   int? parkedUntil,
 }) => HandlerSessionState(
   terminalId: terminalId,
-  notifyOnly: false,
   runState: runState,
   pendingEscalations: pendingEscalations,
   armedAt: 1,

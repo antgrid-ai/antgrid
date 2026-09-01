@@ -26,7 +26,6 @@ HandlerSessionState sessionState(
   HandlerObservability? observability,
 }) => HandlerSessionState(
   terminalId: terminalId,
-  notifyOnly: false,
   runState: HandlerRunState.watching,
   pendingEscalations: 0,
   armedAt: 1,
@@ -98,7 +97,6 @@ Map<String, dynamic> armedStatusJson({
   'sessions': [
     {
       'terminalId': 't1',
-      'notifyOnly': false,
       'state': escalations.isEmpty ? 'watching' : 'needs_you',
       'pendingEscalations': escalations.length,
       'armedAt': 1,
@@ -214,7 +212,6 @@ void main() {
     );
     const session = HandlerSessionState(
       terminalId: 't1',
-      notifyOnly: false,
       runState: HandlerRunState.needsYou,
       pendingEscalations: 1,
       armedAt: 1,
@@ -293,7 +290,6 @@ void main() {
         sessions: {
           't1': HandlerSessionState(
             terminalId: 't1',
-            notifyOnly: false,
             runState: HandlerRunState.watching,
             pendingEscalations: 0,
             armedAt: 1,
@@ -1057,7 +1053,6 @@ void main() {
         sessions: {
           't1': HandlerSessionState(
             terminalId: 't1',
-            notifyOnly: false,
             runState: HandlerRunState.watching,
             pendingEscalations: 0,
             armedAt: 1,
@@ -1141,7 +1136,6 @@ void main() {
         sessions: {
           't1': HandlerSessionState(
             terminalId: 't1',
-            notifyOnly: false,
             runState: HandlerRunState.parked,
             pendingEscalations: 0,
             armedAt: 1,
@@ -1161,31 +1155,6 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  // A notify-only session never acts on the user's behalf. Nothing else on the
-  // screen distinguishes it from one that does.
-  testWidgets('a notify-only session says so', (tester) async {
-    await pumpHandlerScreen(
-      tester,
-      stateWith(
-        sessions: {
-          't1': HandlerSessionState(
-            terminalId: 't1',
-            notifyOnly: true,
-            runState: HandlerRunState.watching,
-            pendingEscalations: 0,
-            armedAt: 1,
-            goal: 'ship it',
-            backlog: const [],
-            escalations: const [],
-          ),
-        },
-      ),
-    );
-
-    expect(find.text('NOTIFY ONLY'), findsOneWidget);
-    debugDefaultTargetPlatformOverride = null;
-  });
-
   // `queued` is the status of every item on a fresh backlog, so printing it
   // fills the column with one repeated value and leaves the states that DID
   // change nothing to stand out against.
@@ -1196,7 +1165,6 @@ void main() {
         sessions: {
           't1': HandlerSessionState(
             terminalId: 't1',
-            notifyOnly: false,
             runState: HandlerRunState.watching,
             pendingEscalations: 0,
             armedAt: 1,
@@ -1268,9 +1236,9 @@ void main() {
           for (final id in ['t1', 't2'])
             id: HandlerSessionState(
               terminalId: id,
-              // Notify-only and needsYou together: the longest run-state word
-              // and the one extra marker, on the same line.
-              notifyOnly: true,
+              // The longest run-state word. It and the Armed chip are the
+              // status row's two fixed ends, so this is the widest that row is
+              // ever asked to be.
               runState: HandlerRunState.needsYou,
               pendingEscalations: 1,
               armedAt: 1,
@@ -1292,7 +1260,6 @@ void main() {
   test('a park note past its deadline promises a resume, not a time', () {
     final session = HandlerSessionState(
       terminalId: 't1',
-      notifyOnly: false,
       runState: HandlerRunState.parked,
       pendingEscalations: 0,
       armedAt: 1,

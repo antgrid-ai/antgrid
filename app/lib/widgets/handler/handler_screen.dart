@@ -430,8 +430,8 @@ String? handlerParkNote(HandlerSessionState session, {DateTime? now}) {
 ///
 /// Only the status line's own two ends are fixed — the run-state word and the
 /// Armed chip. Everything else that could grow (the judge name, the session
-/// name, the notify-only marker) either shrinks or sits on a line below, so a
-/// narrow context panel or a scaled text size cannot overflow the row.
+/// name) either shrinks or sits on a line below, so a narrow context panel or
+/// a scaled text size cannot overflow the row.
 class _SessionCard extends StatelessWidget {
   const _SessionCard({
     required this.session,
@@ -609,27 +609,12 @@ class _SessionCard extends StatelessWidget {
                 // only render when several sessions are on screen, which is
                 // exactly when they share a prefix and a truncated one
                 // identifies nothing.
-                if (sessionName != null || session.notifyOnly)
-                  Row(
-                    children: [
-                      if (sessionName != null)
-                        Flexible(
-                          child: Text(
-                            sessionName!,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: mutedMono,
-                          ),
-                        ),
-                      // A notify-only session never acts on the user's behalf,
-                      // which is the single biggest thing this card can be
-                      // wrong about by staying silent.
-                      if (session.notifyOnly) ...[
-                        if (sessionName != null)
-                          const SizedBox(width: AbTokens.space6),
-                        AbChip.system(label: 'NOTIFY ONLY', color: p.warning),
-                      ],
-                    ],
+                if (sessionName != null)
+                  Text(
+                    sessionName!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: mutedMono,
                   ),
                 const SizedBox(height: AbTokens.space2),
                 Text(

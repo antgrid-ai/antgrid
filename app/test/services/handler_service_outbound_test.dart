@@ -48,7 +48,6 @@ Map<String, dynamic> _session(
   List<HandlerInstructionItem> backlog,
 ) => {
   'terminalId': terminalId,
-  'notifyOnly': false,
   'state': 'watching',
   'pendingEscalations': 0,
   'armedAt': 1,
@@ -79,13 +78,12 @@ void main() {
     final session = await _newSession(t);
     final svc = HandlerService.fromSession(session);
 
-    svc.arm(terminalId: 't1', notifyOnly: true);
+    svc.arm(terminalId: 't1');
 
     final sent = t.sent.firstWhere((m) => m['type'] == 'handler:configure');
     expect(sent['projectId'], 'p');
     expect(sent['terminalId'], 't1');
     expect(sent['armed'], true);
-    expect(sent['notifyOnly'], true);
     expect(sent.containsKey('goal'), isFalse);
     expect(sent.containsKey('backlog'), isFalse);
 
@@ -102,7 +100,6 @@ void main() {
       terminalId: 't1',
       goal: 'ship the feature',
       backlog: const [_item],
-      notifyOnly: false,
     );
 
     final sent = t.sent.firstWhere((m) => m['type'] == 'handler:configure');
@@ -118,7 +115,7 @@ void main() {
     final session = await _newSession(t);
     final svc = HandlerService.fromSession(session);
 
-    svc.arm(terminalId: 't1', backlog: const [], notifyOnly: false);
+    svc.arm(terminalId: 't1', backlog: const []);
 
     final sent = t.sent.firstWhere((m) => m['type'] == 'handler:configure');
     expect(sent['backlog'], isEmpty);
@@ -396,7 +393,7 @@ void main() {
     final session = await _newSession(t);
     final svc = HandlerService.fromSession(session);
 
-    svc.arm(terminalId: 't1', goal: 'ship the fix', notifyOnly: false);
+    svc.arm(terminalId: 't1', goal: 'ship the fix');
     _status(t, const []);
     await Future<void>.delayed(Duration.zero);
 
@@ -431,7 +428,7 @@ void main() {
     final session = await _newSession(t);
     final svc = HandlerService.fromSession(session);
 
-    svc.arm(terminalId: 't1', goal: 'ship the fix', notifyOnly: false);
+    svc.arm(terminalId: 't1', goal: 'ship the fix');
     _status(t, [_item]);
     await Future<void>.delayed(Duration.zero);
 
@@ -458,7 +455,6 @@ void main() {
     svc.updateBacklog(
       terminalId: 't1',
       backlog: const [_item],
-      notifyOnly: false,
     );
 
     svc.instruct('t1', 'and rerun the tests');
@@ -491,7 +487,6 @@ void main() {
       svc.updateBacklog(
         terminalId: 't1',
         backlog: const [],
-        notifyOnly: false,
       ),
       isFalse,
     );
@@ -503,7 +498,6 @@ void main() {
       svc.updateBacklog(
         terminalId: 't1',
         backlog: const [],
-        notifyOnly: false,
       ),
       isTrue,
     );
@@ -531,7 +525,7 @@ void main() {
       ),
       _item,
     ];
-    svc.updateBacklog(terminalId: 't1', backlog: edited, notifyOnly: false);
+    svc.updateBacklog(terminalId: 't1', backlog: edited);
 
     final sent = t.sent.firstWhere((m) => m['type'] == 'handler:configure');
     expect(sent['projectId'], 'p');
@@ -546,23 +540,6 @@ void main() {
     await session.close();
   });
 
-  test('updateBacklog carries the notifyOnly it was given', () async {
-    // Required on the wire: the wrong value flips the session between
-    // notifying and acting without saying so.
-    final t = FakeAgentTransport();
-    final session = await _newSession(t);
-    final svc = HandlerService.fromSession(session);
-
-    svc.updateBacklog(terminalId: 't1', backlog: const [], notifyOnly: true);
-    expect(t.sent.last['notifyOnly'], true);
-
-    svc.updateBacklog(terminalId: 't1', backlog: const [], notifyOnly: false);
-    expect(t.sent.last['notifyOnly'], false);
-
-    await svc.dispose();
-    await session.close();
-  });
-
   test('updateBacklog after dispose is a no-op', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
@@ -572,7 +549,6 @@ void main() {
     svc.updateBacklog(
       terminalId: 't1',
       backlog: const [_item],
-      notifyOnly: false,
     );
 
     expect(t.sent.any((m) => m['type'] == 'handler:configure'), false);
@@ -786,7 +762,6 @@ void main() {
       'sessions': [
         {
           'terminalId': terminalId,
-          'notifyOnly': false,
           'state': escalations.isEmpty ? 'watching' : 'needs_you',
           'pendingEscalations': escalations.length,
           'armedAt': 1,
@@ -1023,7 +998,6 @@ void main() {
       'sessions': [
         {
           'terminalId': 't9',
-          'notifyOnly': false,
           'state': escalations.isEmpty ? 'watching' : 'needs_you',
           'pendingEscalations': escalations.length,
           'armedAt': 1,

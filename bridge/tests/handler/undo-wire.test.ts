@@ -106,7 +106,7 @@ test("handler:undo reaches the engine, and a malformed one resyncs without disar
   await waitFor(() => sent.some((m) => m.type === "agent:status"));
 
   bus.dispatchInbound(createMessage("handler:configure", {
-    projectId: core.projectId, terminalId: "t1", armed: true, notifyOnly: true,
+    projectId: core.projectId, terminalId: "t1", armed: true,
   }), "control", "loopback");
   expect(await waitFor(() => statuses(sent).some((s) => s.sessions.length === 1))).toBe(true);
   expect(statuses(sent).at(-1)!.snapshots.map((s) => s.snapshotId)).toEqual(["s1"]);
@@ -121,7 +121,7 @@ test("handler:undo reaches the engine, and a malformed one resyncs without disar
     snapshotId: 7,
   } as never, "control", "loopback");
   bus.dispatchInbound(createMessage("handler:configure", {
-    projectId: core.projectId, terminalId: "t2", armed: true, notifyOnly: true,
+    projectId: core.projectId, terminalId: "t2", armed: true,
   }), "control", "loopback");
   expect(await waitFor(() => statuses(sent).some((s) => s.sessions.length === 2))).toBe(true);
   expect(statuses(sent).at(-1)!.sessions.map((x) => x.terminalId).sort()).toEqual(["t1", "t2"]);
