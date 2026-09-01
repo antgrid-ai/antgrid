@@ -21,6 +21,14 @@ export const links = {
   downloadWindows: "https://get.microsoft.com/installer/download/9N0P7ZRL4D9W?referrer=appbadge&cid=site",
   downloadLinux: `${RELEASES_URL}/releases/latest/download/antgrid-linux.AppImage`,
   support: "/support",
+  // Enterprise leads go straight to a human. Pointing them at /support put a
+  // budget holder on the troubleshooting page; the subject line sorts them out
+  // of general support mail on arrival.
+  enterprise: "mailto:contact@radhaai.com?subject=Antgrid%20for%20teams",
+  // The mobile apps ship through TestFlight and Play internal testing today, so
+  // the hero has to route the ask somewhere. "Coming to the App Store" read as
+  // "you can't have it yet" while invites were in fact open — see get-started.
+  mobileInvite: "mailto:contact@radhaai.com?subject=Antgrid%20mobile%20invite",
   privacy: "/privacy",
   terms: "/terms",
   refunds: "/refunds",

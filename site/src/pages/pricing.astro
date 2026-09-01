@@ -32,9 +32,13 @@ import { links } from "../config";
         <div class="mb-1 flex items-baseline gap-2.5">
           <span class="font-mono text-lede font-medium text-ink">Enterprise</span>
         </div>
-        <div class="text-meta text-muted">Unlimited seats · SSO, audit log &amp; IP allowlist · invoiced annually</div>
+        {/* SSO, audit log and IP allowlist are named as roadmap, not as shipped:
+            the capability flags exist in web's plan model but nothing reads them
+            yet. Asking for the buyer's requirements is also the better opener —
+            it starts a conversation where a feature list ends one. */}
+        <div class="text-meta text-muted">Unlimited seats · invoiced annually · SSO, audit log and IP allowlist on the roadmap — tell us your requirements and your timeline.</div>
       </div>
-      <a href={links.support} class="font-mono text-meta text-signal2 hover:text-signal">Talk to us</a>
+      <a href={links.enterprise} class="font-mono text-meta text-signal2 hover:text-signal">Talk to sales</a>
     </div>
     <p class="mt-5.5 text-center text-meta text-faint">All plans include end-to-end encryption. The relay never sees your code.</p>
     <PricingFaq />
