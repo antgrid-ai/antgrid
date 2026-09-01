@@ -1,6 +1,6 @@
 // bridge/tests/handler/engine.test.ts
 import { describe, it, test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -14,6 +14,8 @@ import type { InstructionItem, ItemTransition } from "../../src/handler/backlog"
 import { MAX_ITEM_CHARS, type ExtractedItem } from "../../src/handler/extract";
 import type { HandlerSessionRecord } from "../../src/handler/session-store";
 import { MAX_STORED, type StoredSnapshot } from "../../src/handler/snapshot-store";
+import { MAX_STORED_WRAPUPS } from "../../src/handler/wrap-up-store";
+import type { WrapUpRecord } from "../../src/handler/wrap-up";
 import type { InjectCommand } from "../../src/handler/session-adapter";
 import type { CapCommand } from "../../src/structured/chat-session";
 import { planSnapshots, type SnapshotEntry, type SnapshotOutcome } from "../../src/handler/snapshot";
@@ -63,6 +65,9 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
   // The §5.2 store, in memory: the real one writes JSON next to the session
   // records, and every test in this file arms at least one session.
   let stored: StoredSnapshot[] = [];
+  // The wrap-up store, in memory on the same terms. One case below deliberately
+  // opts OUT of this pair, because production injects neither.
+  let storedWrapUps: WrapUpRecord[] = [];
   const trashed: string[] = [];
   // Every judged pause in production follows fresh agent output, so a CONSTANT
   // tail would make two distinct pauses indistinguishable to the staleness guard
@@ -94,6 +99,8 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
     clearTrashFn: async (id: string) => { trashed.push(id); },
     loadSnapshotsFn: () => stored,
     saveSnapshotsFn: (e: StoredSnapshot[]) => { stored = e; },
+    loadWrapUpsFn: () => storedWrapUps,
+    saveWrapUpsFn: (e: WrapUpRecord[]) => { storedWrapUps = e; },
     appendActivityFn: (r: unknown) => activity.push(r),
     loadSessionFn: () => null,
     saveSessionFn: (r: unknown) => saved.push(r),
@@ -111,6 +118,7 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
   return {
     engine, sent, injected, saved, activity, pushes, timers, armed, clock, trashed,
     snapshots: () => stored,
+    wrapUps: () => storedWrapUps,
   };
 }
 
@@ -1246,6 +1254,132 @@ describe("wrap-up", () => {
   });
 });
 
+// The record is the half of the summary that survives the session: the push is
+// spent when it is swiped, and the activity feed it used to point at is neither
+// replayed nor read back off disk.
+describe("the durable wrap-up record", () => {
+  const done = (id: string) => ({ id, status: "done" as const, evidence: "ran to completion" });
+
+  function blockedSession(over: Partial<HandlerSessionRecord> = {}): HandlerSessionRecord {
+    return sessionRecord({
+      escalations: [{
+        escalationId: "b0", question: "Handler did not send its reply",
+        reasoning: "reply contains control characters", draftReply: "no",
+        urgency: "normal", at: 1, kind: "guard_blocked",
+      }],
+      ...over,
+    });
+  }
+
+  function snap(id: string): StoredSnapshot {
+    return {
+      terminalId: "t1", action: "reset_hard",
+      entry: {
+        id, at: 5, sessionId: "t1", projectPath: "/proj", trigger: "git reset --hard",
+        kind: "git_stash", headSha: "abc1234567", backupRef: `refs/antgrid/handler-snapshot/${id}`,
+      },
+    };
+  }
+
+  function statusFrames(sent: AbMessage[]) {
+    return sent.filter((m) => m.type === "handler:status") as never as Array<{
+      sessions: unknown[]; wrapUps?: Array<{ wrapUpId: string; terminalId: string }>;
+    }>;
+  }
+
+  it("keeps the goal, the outcome groups and the blocked reports the session takes with it", async () => {
+    const { engine, wrapUps } = makeEngine({
+      loadSessionFn: () => blockedSession({ backlog: [item("a", { text: "land the migration" })] }),
+      runDecisionFn: async () => decide({ transitions: [done("a")] }),
+    });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(wrapUps()).toHaveLength(1);
+    const rec = wrapUps()[0]!;
+    expect(rec.terminalId).toBe("t1");
+    expect(rec.goal).toBe(GOAL);
+    expect(rec.outcomes).toEqual([{ status: "done", total: 1, items: ["land the migration"] }]);
+    // Frozen because they die here: the disarm below drops the session, and
+    // nothing can re-derive its reports afterwards.
+    expect(rec.blockedTotal).toBe(1);
+    expect(rec.blockedReasons).toEqual(["reply contains control characters"]);
+  });
+
+  // The ordering is the whole delivery: disarm ends in emitStatus, so a record
+  // saved after it waits for an unrelated frame that a project whose last session
+  // just ended may not send for hours.
+  it("rides the very status frame the disarm emits, with its session already gone", async () => {
+    const { engine, sent } = makeEngine({
+      runDecisionFn: async () => decide({ transitions: [done("a")] }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const last = statusFrames(sent).at(-1)!;
+    expect(last.sessions).toHaveLength(0);
+    expect(last.wrapUps?.map((w) => w.terminalId)).toEqual(["t1"]);
+  });
+
+  it("summarises in the activity row and leaves the undo count to the push alone", async () => {
+    // Resumed rather than freshly armed: a fresh arm retires the slot's undo
+    // offers, and the offer is what this case is about.
+    const { engine, activity, pushes } = makeEngine({
+      loadSessionFn: () => sessionRecord({ backlog: [item("a", { text: "land the migration" })] }),
+      loadSnapshotsFn: () => [snap("s1")],
+      runDecisionFn: async () => decide({ transitions: [done("a")] }),
+    });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const row = records(activity, "wrapped_up")[0] as { detail: string };
+    // The goal moved onto the record; the row that used to hold it now says what
+    // happened. The jsonl is append-only, so a count written here is frozen for
+    // good — which is why the live one rides the push and nothing else.
+    expect(row.detail).toBe("Done: land the migration");
+    expect(row.detail).not.toContain(GOAL);
+    expect(row.detail).not.toContain("can still be undone");
+    expect(pushes.at(-1)).toContain("1 flagged action(s) can still be undone");
+  });
+
+  // Nothing retires a wrap-up: a re-arm on the slot means a new session, and
+  // deleting the previous session's report is precisely the loss the record
+  // exists to prevent. The store's cap is the only thing that ages one out.
+  it("survives a fresh arm on the same slot, bounded only by the store's cap", async () => {
+    const older = Array.from({ length: MAX_STORED_WRAPUPS }, (_, i): WrapUpRecord => ({
+      wrapUpId: `old-${i}`, terminalId: "t1", at: i, goal: "earlier session",
+      outcomes: [], blockedTotal: 0, blockedReasons: [],
+    }));
+    const { engine, wrapUps } = makeEngine({
+      loadWrapUpsFn: () => older,
+      runDecisionFn: async () => decide({ transitions: [done("a")] }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    engine.arm({ terminalId: "t1", goal: "a second run", backlog: [item("b")] });
+    const ids = wrapUps().map((w) => w.wrapUpId);
+    expect(ids).toHaveLength(MAX_STORED_WRAPUPS);
+    expect(ids[0]).toBe("old-1"); // the oldest aged out, the newest survived the arm
+    expect(ids.at(-1)).not.toBe("old-4");
+  });
+
+  // agent-core builds the one production engine and injects no wrap-up store, so
+  // the internal fallback to the real loader is the only thing that persists
+  // anything on a real bridge. Every other test here injects the pair, which is
+  // exactly why this class of bug is invisible without a case that does not.
+  it("writes the store itself when nothing is injected", async () => {
+    const abDir = mkdtempSync(join(tmpdir(), "ab-engine-wrapup-"));
+    const { engine } = makeEngine({
+      abDir, loadWrapUpsFn: undefined, saveWrapUpsFn: undefined,
+      runDecisionFn: async () => decide({ transitions: [done("a")] }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const path = join(abDir, "agents", "proj", "handler-wrapups.json");
+    expect(existsSync(path)).toBe(true);
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { entries: WrapUpRecord[] };
+    expect(parsed.entries).toHaveLength(1);
+    expect(parsed.entries[0]!.goal).toBe(GOAL);
+  });
+});
+
 describe("chat blocking prompts and slash guard", () => {
   it("permission_request force-escalates with kind resolve_in_session, no judge call", async () => {
     let judged = 0;
@@ -2296,6 +2430,9 @@ describe("guard-rejection reports (kind: guard_blocked)", () => {
     // tapped Dismiss — so the push carries the report out instead.
     expect(records(activity, "wrapped_up")).toHaveLength(1);
     expect(pushes.at(-1)).toContain("1 action(s) Handler could not take");
+    // No pointer to the activity feed: it is neither replayed nor read back, so
+    // the reports ride the durable record instead.
+    expect(pushes.at(-1)).not.toContain("see the activity feed");
 
     const parked = makeEngine({ loadSessionFn: () => blockedRecord() });
     parked.engine.arm({ terminalId: "t1" });

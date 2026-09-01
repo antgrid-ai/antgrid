@@ -341,6 +341,21 @@ export function clip(s: string, max: number, ellipsis = "…"): string {
   return `${s.slice(0, end)}${ellipsis}`;
 }
 
+// Renders judge text for a HUMAN to read in an escalation, never for injection. The
+// control characters that force some of these escalations are exactly what must stay
+// visible here, so they are escaped rather than stripped.
+//
+// Beside `clip` rather than in the engine because the wrap-up composer needs it
+// too, and this module sits below every consumer of it (see `oneLine`'s note) —
+// reaching up for it is the cycle those consumers cannot have.
+export function previewForUser(s: string, max = 300): string {
+  const escaped = s.replace(
+    /[\x00-\x1f\x7f]/g,
+    (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
+  );
+  return clip(escaped, max);
+}
+
 export function renderBacklog(backlog: InstructionItem[]): string {
   if (backlog.length === 0) return "(no items)";
   return backlog.map((i) => {

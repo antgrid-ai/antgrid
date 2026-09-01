@@ -250,6 +250,44 @@ describe("handler wire", () => {
     expect(keys.at(-1)).toBe("observability");
   });
 
+  // The record the app reads hours later, when the session that produced it is
+  // gone from `sessions` and nothing else on the frame names it.
+  const wrapUp = {
+    wrapUpId: "w1", terminalId: "t1", at: 5, goal: "migrate auth",
+    outcomes: [{ status: "done" as const, total: 4, items: ["land it", "backfill"] }],
+    blockedTotal: 1, blockedReasons: ["reply contains control characters"],
+  };
+
+  test("status carries the wrap-up records, and survives their absence", () => {
+    const msg = createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [], wrapUps: [wrapUp],
+    });
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.wrapUps).toEqual([wrapUp]);
+    // The true total is what makes "+N more" derivable from a sampled list.
+    expect(parsed.wrapUps[0].outcomes[0].total).toBe(4);
+    // Absent is what a bridge predating the field sends, and what a project with
+    // nothing to report sends today — both must still deliver the frame.
+    const bare = parseMessage(JSON.stringify(createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [],
+    }))) as any;
+    expect(bare).toBeTruthy();
+    expect(bare.wrapUps).toBeUndefined();
+  });
+
+  test("wrapUps is appended last, so no existing key moved", () => {
+    const msg = createMessage("handler:status", {
+      snapshots: [], projectId: "p", defaultTool: "claude-code", sessions: [], wrapUps: [wrapUp],
+    });
+    expect(Object.keys(parseMessage(JSON.stringify(msg)) as any).at(-1)).toBe("wrapUps");
+  });
+
+  test("an outcome status outside the four item outcomes is rejected", () => {
+    expect(parseMessage(JSON.stringify(createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [],
+      wrapUps: [{ ...wrapUp, outcomes: [{ status: "queued", total: 1, items: [] }] }],
+    } as never)))).toBeNull();
+  });
   test("activity accepts the lifecycle kinds", () => {
     for (const decision of ["parked", "resumed"] as const) {
       const act = createMessage("handler:activity", {

@@ -931,6 +931,42 @@ const HandlerSnapshotMessage = BaseMessage.extend({
   projectId: z.string(),
 }).extend(HandlerSnapshotWire.shape);
 
+// One wrap-up report, as the app sees it — the summary the notification spends
+// once, kept. Replayed on `handler:status` for a sharper version of the reason
+// the snapshots are: the wrap-up is what DISARMS the session, so by the time the
+// report is worth reading its session is gone from `sessions` and nothing else on
+// this frame names it. The activity row that carries the same prose cannot stand
+// in — `handler:activity` is not replayed, and its jsonl is never read back.
+//
+// What this shape freezes, deliberately: MAX_STORED_WRAPUPS (5) records, each up
+// to 4 outcome groups x 8 sampled items x 120 chars, plus 3 blocked reasons and a
+// goal at the same 120 — ~22K characters per status frame at the worst. That is
+// why the item text is clipped at 120 rather than previewForUser's 300 default:
+// handler:status is a REPLAY_TYPE, held by reference in the bus cache, emitted
+// twice per handler event, and encrypted across the relay to a phone.
+//
+// The open-undo count is NOT here. It outlives the report — an undo taken
+// afterwards spends the entry, a re-arm retires the offers outright — so the app
+// derives it live from `snapshots` on this same frame. `blockedTotal` and
+// `blockedReasons` are frozen for the opposite reason: the session that could
+// re-derive them no longer exists.
+export const HandlerWrapUpWire = z.object({
+  wrapUpId: z.string(),
+  // The supervised slot the session ran in.
+  terminalId: z.string(),
+  at: z.number(),
+  goal: z.string(),
+  outcomes: z.array(z.object({
+    status: z.enum(["done", "failed", "blocked", "skipped"]),
+    // The TRUE count `items` is sampled from, which is what makes "+N more"
+    // recoverable without a second number that could disagree with it.
+    total: z.number().int().nonnegative(),
+    items: z.array(z.string()),
+  })),
+  blockedTotal: z.number().int().nonnegative(),
+  blockedReasons: z.array(z.string()),
+});
+
 // One-tap undo of a snapshot the bridge advertised. Payload-only schema for the
 // same reason as HandlerConfigureWire: parseMessageFast admits it on the
 // discriminator alone, so agent-core re-parses with this before anything runs.
@@ -1004,6 +1040,12 @@ const HandlerStatusMessage = BaseMessage.extend({
   // sessions array holds only ARMED sessions, and a wrapped-up one is exactly
   // when the offer matters most.
   snapshots: z.array(HandlerSnapshotWire),
+  // Every wrap-up report this project still holds, appended LAST and optional
+  // the way a session snapshot appends `observability`: an older app still
+  // parses the frame and every key it already reads keeps its position. Absent
+  // and [] mean the same thing — unlike `observability`, presence here is not a
+  // capability signal, so a bridge with nothing to report simply omits it.
+  wrapUps: z.array(HandlerWrapUpWire).optional(),
 });
 
 const HandlerEscalationMessage = BaseMessage.extend({

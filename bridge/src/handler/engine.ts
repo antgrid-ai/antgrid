@@ -11,6 +11,8 @@ import {
   SNAPSHOT_PATTERNS, type SnapshotEntry, type SnapshotOutcome, type UndoResult,
 } from "./snapshot";
 import { loadSnapshots, pruneSnapshots, saveSnapshots, type StoredSnapshot } from "./snapshot-store";
+import { buildWrapUp, wrapUpDetail, wrapUpPushBody, type WrapUpRecord } from "./wrap-up";
+import { loadWrapUps, pruneWrapUps, saveWrapUps } from "./wrap-up-store";
 import { RunawayGuard } from "./runaway-guard";
 import { assembleContext } from "./context";
 import { runDecision as defaultRunDecision, runExtraction as defaultRunExtraction } from "./judge";
@@ -24,7 +26,7 @@ import {
   type EscalationChoice, type EscalationKind, type HandlerSessionRecord, type OpenEscalation,
 } from "./session-store";
 import {
-  allTerminal, applyTransitions, clip, isTerminalStatus, propagateBlocked, renderBacklog, summarize,
+  allTerminal, applyTransitions, clip, isTerminalStatus, previewForUser, propagateBlocked, renderBacklog,
   type InstructionItem, type ItemStatus, type RejectionCode,
 } from "./backlog";
 import { checkReplyShape, findCommand, oneLine, replyShape } from "./reply-shape";
@@ -160,14 +162,6 @@ const ITEM_DECISION: Partial<Record<ItemStatus, ActivityRecord["decision"]>> = {
   failed: "item_failed",
 };
 
-type SummaryStatus = keyof ReturnType<typeof summarize>;
-const SUMMARY_GROUPS: [SummaryStatus, string][] = [
-  ["done", "Done"],
-  ["failed", "Failed"],
-  ["blocked", "Blocked"],
-  ["skipped", "Skipped"],
-];
-
 // Identity of the evidence a decide pass reasoned over (see lastJudgedContextHash).
 // Deliberately NOT RunawayGuard's 32-bit djb2: a collision there false-escalates,
 // which is the safe direction, but a collision HERE skips a real pause and no
@@ -186,17 +180,6 @@ function firstFilled(...values: (string | undefined)[]): string | undefined {
   return values.find((v) => v !== undefined && v.trim() !== "");
 }
 
-// Renders judge text for a HUMAN to read in an escalation, never for injection. The
-// control characters that force some of these escalations are exactly what must stay
-// visible here, so they are escaped rather than stripped.
-function previewForUser(s: string, max = 300): string {
-  const escaped = s.replace(
-    /[\x00-\x1f\x7f]/g,
-    (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
-  );
-  return clip(escaped, max);
-}
-
 // A stored snapshot as the app sees it. `state` is derived rather than stored:
 // "undone" is the only spent state, and a failed attempt leaves the entry
 // retryable, so the two can never disagree with what an undo would actually do.
@@ -210,6 +193,21 @@ function snapshotWire(st: StoredSnapshot) {
     summary: describeSnapshot(st.entry),
     state: st.undoneAt !== undefined ? "undone" as const : st.failure ? "failed" as const : "available" as const,
     ...(st.failure ? { detail: st.failure } : {}),
+  };
+}
+
+// A stored wrap-up as the app sees it. Named field by field rather than spread:
+// the record is a disk format, so publishing a field it gains has to be a
+// decision rather than a side effect of storing it.
+function wrapUpWire(rec: WrapUpRecord) {
+  return {
+    wrapUpId: rec.wrapUpId,
+    terminalId: rec.terminalId,
+    at: rec.at,
+    goal: rec.goal,
+    outcomes: rec.outcomes.map((o) => ({ status: o.status, total: o.total, items: [...o.items] })),
+    blockedTotal: rec.blockedTotal,
+    blockedReasons: [...rec.blockedReasons],
   };
 }
 
@@ -479,6 +477,8 @@ export interface HandlerEngineDeps {
   releaseSnapshotsFn?: (entries: SnapshotEntry[]) => Promise<void>;
   loadSnapshotsFn?: () => StoredSnapshot[];
   saveSnapshotsFn?: (entries: StoredSnapshot[]) => void;
+  loadWrapUpsFn?: () => WrapUpRecord[];
+  saveWrapUpsFn?: (entries: WrapUpRecord[]) => void;
   appendActivityFn?: (rec: ActivityRecord) => void;
   loadSessionFn?: (terminalId: string) => HandlerSessionRecord | null;
   saveSessionFn?: (rec: HandlerSessionRecord) => void;
@@ -635,6 +635,9 @@ export class HandlerEngine {
   // emitStatus reads the whole list on every status broadcast; every mutation
   // writes through and prunes on the same terms as the file, so the two agree.
   private storedSnapshots: StoredSnapshot[] | null = null;
+  // The same read-through cache for the wrap-up store, for the same reason: every
+  // status broadcast renders the whole list.
+  private storedWrapUps: WrapUpRecord[] | null = null;
   // Undos in flight, by snapshot id. Two taps on one row must not run two undos:
   // the second would be acting on a tree the first already moved.
   private undoing = new Set<string>();
@@ -726,6 +729,24 @@ export class HandlerEngine {
     (this.deps.saveSnapshotsFn ?? ((e: StoredSnapshot[]) =>
       saveSnapshots(this.deps.abDir, this.deps.projectId, e)))(kept);
     if (dropped.length) this.release(dropped);
+  }
+
+  private wrapUps(): WrapUpRecord[] {
+    this.storedWrapUps ??= this.deps.loadWrapUpsFn
+      ? this.deps.loadWrapUpsFn()
+      : loadWrapUps(this.deps.abDir, this.deps.projectId);
+    return this.storedWrapUps;
+  }
+
+  // Prunes before caching on the same terms as saveSnapshots — the cache and the
+  // file have to advertise the same set — but nothing is reclaimed on the way out:
+  // a wrap-up pins no stash, backup ref or trash copy, so ageing one out costs
+  // only the reading of it.
+  private saveWrapUps(entries: WrapUpRecord[]): void {
+    const kept = pruneWrapUps(entries);
+    this.storedWrapUps = kept;
+    (this.deps.saveWrapUpsFn ?? ((e: WrapUpRecord[]) =>
+      saveWrapUps(this.deps.abDir, this.deps.projectId, e)))(kept);
   }
 
   // Fire-and-forget: the entries are already unreachable through the store, so
@@ -2067,52 +2088,45 @@ export class HandlerEngine {
     // and silently bury the unanswered escalation. A `guard_blocked` report is
     // not such a question — nothing is waiting on it — and holding the wrap-up
     // open for one would leave a finished session armed until somebody tapped
-    // Dismiss; the push below is what carries the reports out instead.
+    // Dismiss; the record and the push below carry the reports out instead.
     if (pendingQuestions(s) > 0) return false;
     if (!allTerminal(s.backlog)) return false;
-    this.record(terminalId, "wrapped_up", "every backlog item resolved", s.goal || NO_GOAL);
-    this.deps.sendPush?.(
-      `Handler: done — ${oneLine(s.goal) || "session complete"}${this.wrapUpSummary(s.backlog)}`
-      + `${this.blockedNote(s)}${this.undoNote(terminalId)}`,
+    // Reports, not questions — pendingQuestions above is their complement. They
+    // are frozen into the record because they die here: `disarm` drops the session
+    // and takes `s.escalations` with it, and nothing can re-derive them afterwards.
+    const rec = buildWrapUp({
+      wrapUpId: this.id("wrap"),
       terminalId,
-    );
+      at: this.now(),
+      goal: s.goal,
+      backlog: s.backlog,
+      blockedReports: s.escalations.filter((e) => e.kind === "guard_blocked"),
+    });
+    this.record(terminalId, "wrapped_up", "every backlog item resolved", wrapUpDetail(rec));
+    // Persisted BEFORE the disarm: `disarm` ends in emitStatus, and that emit is
+    // what carries this record to the app. A save landing after it waits for an
+    // unrelated status frame, which on a project whose last session just ended may
+    // not come for hours. Caught rather than thrown for the mirror-image reason —
+    // the row above is already written, so a full disk must not leave a finished
+    // session armed forever. The report is the nice-to-have; the disarm is the
+    // contract.
+    try {
+      this.saveWrapUps([...this.wrapUps(), rec]);
+    } catch (err) {
+      log.warn("handler wrap-up persist failed for %s: %s", terminalId, err);
+    }
+    this.deps.sendPush?.(wrapUpPushBody(rec, { openUndos: this.openUndoCount(terminalId) }), terminalId);
     this.disarm(terminalId);
     return true;
   }
 
-  // The morning-after summary. §2.2 puts the non-`done` outcomes at the centre of
-  // it — an item nobody could reach is the one thing the user has to act on — and
-  // a bare count reads the same whether the work was moot or the assistant gave
-  // up, so each group names its items. Capped so a long backlog can't blow past
-  // OS notification limits.
-  private wrapUpSummary(backlog: InstructionItem[]): string {
-    const counts = summarize(backlog);
-    const parts: string[] = [];
-    for (const [status, label] of SUMMARY_GROUPS) {
-      const total = counts[status];
-      if (total === 0) continue;
-      const shown = backlog.filter((i) => i.status === status).slice(0, 3).map((i) => oneLine(i.text));
-      const more = total > shown.length ? ` +${total - shown.length} more` : "";
-      parts.push(`${label}: ${shown.join(", ")}${more}`);
-    }
-    return parts.length > 0 ? `. ${parts.join(". ")}` : "";
-  }
-
   // The wrap-up push is the last thing the user reads about this session, and the
   // session is disarmed by the time they read it — so it is also the last place
-  // the undo can be made discoverable before it is needed (§5.5).
-  private undoNote(terminalId: string): string {
-    const open = this.snapshots().filter((e) => e.terminalId === terminalId && e.undoneAt === undefined);
-    return open.length > 0 ? `. ${open.length} flagged action(s) can still be undone` : "";
-  }
-
-  // The disarm takes the rows off the app with it — the app rebuilds its
-  // escalation list from the status snapshot, and a wrapped-up session is no
-  // longer in one — so this push is the last chance to say a guard refused
-  // something. The reports themselves survive in the activity feed.
-  private blockedNote(s: ArmedSession): string {
-    const reports = s.escalations.length - pendingQuestions(s);
-    return reports > 0 ? `. ${reports} action(s) Handler could not take — see the activity feed` : "";
+  // the undo can be made discoverable before it is needed (§5.5). Counted here and
+  // stored nowhere: an undo taken afterwards, or a re-arm retiring the offers,
+  // makes a frozen count a lie on a card whose whole job is to be read later.
+  private openUndoCount(terminalId: string): number {
+    return this.snapshots().filter((e) => e.terminalId === terminalId && e.undoneAt === undefined).length;
   }
 
   private escalate(
@@ -2435,6 +2449,7 @@ export class HandlerEngine {
       // and its judge pick both change under a live arm.
       observability: this.observabilityFor(terminalId),
     }));
+    const wrapUps = this.wrapUps();
     this.deps.sendAb(createMessage("handler:status", {
       projectId: this.deps.projectId,
       // What an absent per-session judge resolves to for PTY slots — lets the
@@ -2445,6 +2460,9 @@ export class HandlerEngine {
       // took it, and an app that restarted between the advert and the tap has no
       // other way back to it.
       snapshots: this.snapshots().map(snapshotWire),
+      // Optional and appended LAST (see HandlerWrapUpWire): absent and [] mean the
+      // same thing, so a project that has never wrapped up sends neither.
+      ...(wrapUps.length ? { wrapUps: wrapUps.map(wrapUpWire) } : {}),
     }));
   }
 }
