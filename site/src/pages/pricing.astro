@@ -19,13 +19,13 @@ import { links } from "../config";
     {BETA_FREE && (
       <div class="mb-6 flex items-start justify-center gap-2.5 rounded-lg border border-signaldeep2 bg-signaldeep/30 px-4 py-3 text-note text-ink2">
         <Icon name="tabler:sparkles" class="mt-0.5 shrink-0 text-signal" width="15" height="15" />
-        <span>antgrid is <span class="font-medium text-ink">free while in beta</span> — everything below is included. Paid plans activate when the beta ends; prices shown are launch prices.</span>
+        <span>antgrid is <span class="font-medium text-ink">free while in beta</span> — everything below is included. Paid plans activate when the beta ends; prices shown are founding prices.</span>
       </div>
     )}
     <div class={`grid gap-3.5 ${BETA_FREE ? "md:grid-cols-2" : "md:grid-cols-3"}`}>
       <PlanCard plan={free} />
-      {!BETA_FREE && <PlanCard plan={trial} />}
-      <PlanCard plan={proYearly} />
+      {!BETA_FREE && <PlanCard plan={trial} waitlistSource="pricing" />}
+      <PlanCard plan={proYearly} waitlistSource="pricing" />
     </div>
     <div class="mt-3.5 flex flex-wrap items-center justify-between gap-4 rounded-lg border border-edge bg-panel px-5 py-4.5">
       <div class="min-w-0">

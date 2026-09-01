@@ -1,25 +1,19 @@
 import { Layout, PageHead } from "./layout.js";
-import {
-  BETA,
-  displayPriceCents,
-  formatUsd,
-  FREE_WORKER_LIMIT,
-  TRIAL_DAYS,
-  type BillingEnv,
-} from "../billing/plans.js";
+import { asset } from "./asset.js";
+import { FREE_WORKER_LIMIT } from "../billing/plans.js";
 import type { PlanRow } from "../models/plan.js";
 
 export type PricingPageProps = {
   user: { email?: string | null };
   plans: PlanRow[];
-  env: BillingEnv;
 };
 
-/** Why a plan can't be bought, in the CTA itself. "Coming soon" reads as
- *  half-built to someone who arrived from a site that told them the beta is
- *  free; naming the beta makes the disabled button an explanation. Keep the
- *  beta wording identical to PlanCard.astro's on the marketing site. */
-const UNAVAILABLE_CTA_LABEL = BETA ? "Available after beta" : "Coming soon";
+/** The public waitlist endpoint (web/src/routes/waitlist.ts), which the
+ *  marketing site posts to as well — same origin as this page, so a relative
+ *  action reaches it. `source` is the bounded slug its schema expects, naming
+ *  the surface that captured the signup. */
+const WAITLIST_ACTION = "/api/waitlist";
+const WAITLIST_SOURCE = "pricing";
 
 /** Sales address for the contract-only plan. */
 const ENTERPRISE_MAILTO = "mailto:contact@radhaai.com";
@@ -111,31 +105,60 @@ function FeatureList({
   );
 }
 
-function UnavailableCta({ footer }: { footer: string }) {
+/** The founding-price capture, in the slot a plan's buy button will take back.
+ *
+ *  One per page: entries/waitlist.ts binds by id, and a second copy would
+ *  collide on every one of them. */
+function WaitlistCta({ email }: { email?: string | null }) {
   return (
     <div class="mt-auto pt-6">
-      <button type="button" class="btn btn-disabled w-full" disabled>
-        {UNAVAILABLE_CTA_LABEL}
-      </button>
-      <p class="text-xs text-faint text-center mt-3 min-h-10">
-        {footer}
+      <form
+        id="waitlist-form"
+        method="post"
+        action={WAITLIST_ACTION}
+        data-waitlist-source={WAITLIST_SOURCE}
+        class="space-y-2"
+      >
+        <label class="sr-only" for="waitlist-email">
+          Email
+        </label>
+        {/* Prefilled with the signed-in address: /pricing is behind the session
+            gate, so asking for an address the page already knows reads as a
+            form that wasn't paying attention. Still editable — a personal
+            address is a fair answer to "tell me when this launches". */}
+        <input
+          type="email"
+          id="waitlist-email"
+          name="email"
+          required
+          autocomplete="email"
+          value={email ?? ""}
+          placeholder="you@example.com"
+          class="input input-bordered font-mono w-full"
+        />
+        <button type="submit" id="waitlist-submit" class="btn btn-primary w-full">
+          Join the waitlist
+        </button>
+      </form>
+      {/* Idle note, error and confirmation all land here, on the `min-h-10` the
+          plan footers already reserve — so none of the three resizes the card. */}
+      <p id="waitlist-status" class="text-xs text-center mt-3 min-h-10 text-faint" role="status">
+        Founding pricing at launch.
       </p>
     </div>
   );
 }
 
 export function PricingPage(props: PricingPageProps) {
-  const yearlyPrice = displayPriceCents("pro_yearly", props.env);
-  const trialPlan = props.plans.find((p) => p.slug === "trial");
   const yearlyPlan = props.plans.find((p) => p.slug === "pro_yearly");
   const enterprisePlan = props.plans.find((p) => p.slug === "enterprise");
 
   return (
     <Layout title="Pricing" user={props.user} section="pricing">
-      {/* Headline and lede match PricingHeader.astro on the marketing site,
-          same as the beta CTA wording below — this is the same three plans for
-          the same reader, and "Simple, honest pricing" said nothing that the
-          site's line does not say better. Keep them in lockstep. */}
+      {/* Headline and lede match PricingHeader.astro on the marketing site —
+          this is the same three plans for the same reader, and "Simple, honest
+          pricing" said nothing that the site's line does not say better. Keep
+          them in lockstep. */}
       <div class="text-center mb-10">
         <h1 class="font-display text-3xl font-semibold tracking-[-0.026em]">
           Priced per person. Bring your own machines.
@@ -148,59 +171,16 @@ export function PricingPage(props: PricingPageProps) {
         </p>
       </div>
 
-      {trialPlan && (
-        <FreeTrialBanner yearlyPrice={yearlyPrice} trialWorkers={trialPlan.workerLimit} />
-      )}
-
       <div class="grid gap-6 md:grid-cols-2 mt-6">
         {/* The free plan row is excluded from listActivePlans, so its worker
             count comes from the same constant that seeds it. */}
         <FreeCard workers={FREE_WORKER_LIMIT} />
-        {yearlyPlan && <ProYearlyCard plan={yearlyPlan} price={yearlyPrice} />}
+        {yearlyPlan && <ProYearlyCard plan={yearlyPlan} email={props.user.email} />}
       </div>
 
       {enterprisePlan && <EnterpriseCard plan={enterprisePlan} />}
+      <script src={asset("waitlist")} defer />
     </Layout>
-  );
-}
-
-function trialFirstChargeDate(): string {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + TRIAL_DAYS);
-  return d.toISOString().slice(0, 10);
-}
-
-function FreeTrialBanner({
-  yearlyPrice,
-  trialWorkers,
-}: {
-  yearlyPrice: number;
-  trialWorkers: number;
-}) {
-  const firstCharge = trialFirstChargeDate();
-  return (
-    <div class="rounded-lg border border-edge opacity-60 bg-panel p-5 md:p-6 flex flex-col md:flex-row md:items-center gap-5">
-      <div class="flex-1 min-w-0">
-        <div class="flex flex-wrap items-center gap-2 mb-2">
-          <span class="badge badge-success text-xs font-bold px-2">FREE TRIAL</span>
-          <span class="text-xs text-muted2">{TRIAL_DAYS}-day trial</span>
-        </div>
-        <h2 class="text-lg font-semibold">
-          {TRIAL_DAYS}-day free trial, then {formatUsd(yearlyPrice)} per seat / year
-        </h2>
-        <p class="text-sm text-muted mt-1.5 max-w-2xl">
-          Add your card to start. Run agents on up to{" "}
-          <strong class="text-ink2">{machines(trialWorkers)}</strong> during the
-          trial, on one seat — invite your team once it converts. Your card won't be charged
-          until <strong class="text-ink2">{firstCharge}</strong> — cancel anytime
-          before then to avoid the {formatUsd(yearlyPrice)} per seat / year charge.
-          Subscription renews automatically unless canceled.
-        </p>
-      </div>
-      <button type="button" class="btn btn-disabled shrink-0" disabled>
-        {UNAVAILABLE_CTA_LABEL}
-      </button>
-    </div>
   );
 }
 
@@ -230,16 +210,20 @@ function FreeCard({ workers }: { workers: number }) {
   );
 }
 
-function ProYearlyCard({ plan, price }: { plan: PlanRow; price: number }) {
+function ProYearlyCard({ plan, email }: { plan: PlanRow; email?: string | null }) {
   return (
-    <div class="card bg-panel h-full border border-edge opacity-60">
+    <div class="card bg-panel h-full border border-edge">
       <div class="card-body flex flex-col h-full">
         <h2 class="font-display text-xl font-semibold tracking-[-0.02em]">{plan.label}</h2>
 
+        {/* No figure in this slot. Every account already holds the promotional
+            Pro grant (ensureDefaultSubscription), so "free" is the true state
+            today — and a number printed before the price is set is one launch
+            would have to honour. */}
         <div class="mt-3 font-mono min-h-19">
-          <span class="text-4xl font-bold">{formatUsd(price)}</span>
-          <span class="text-sm text-muted2 ml-1">/ seat / year</span>
-          <p class="text-xs text-muted2 mt-1.5">Billed yearly, per seat.</p>
+          <span class="text-4xl font-bold">Free</span>
+          <span class="text-sm text-muted2 ml-1">while in beta</span>
+          <p class="text-xs text-muted2 mt-1.5">No card and no charge while the beta runs.</p>
         </div>
 
         <FeatureList
@@ -248,9 +232,7 @@ function ProYearlyCard({ plan, price }: { plan: PlanRow; price: number }) {
           maxSeats={plan.maxSeats}
         />
 
-        <UnavailableCta
-          footer={`${formatUsd(price)} per seat / year · Renews automatically · Cancel anytime`}
-        />
+        <WaitlistCta email={email} />
       </div>
     </div>
   );
@@ -290,13 +272,16 @@ function EnterpriseCard({ plan }: { plan: PlanRow }) {
 // web/src/models/subscription.ts). So the real, working pricing/checkout UI
 // below — current-plan detection, the active-plan banner, and the actual
 // /checkout links — is kept here as comments instead of deleted, and the
-// static always-"Coming soon" cards above are shown instead.
+// static beta cards above are shown instead. Those cards name no price at
+// all: the Pro card takes waitlist signups for the launch price instead.
 //
 // TO RESTORE ONCE PAYMENT INTEGRATION SHIPS:
 //   1. Delete the static replacement above this marker: PricingPageProps,
-//      UNAVAILABLE_CTA_LABEL, FREE_FEATURES, UnavailableCta, PricingPage,
-//      FreeTrialBanner, FreeCard, ProYearlyCard (everything from `export type
+//      WAITLIST_ACTION, WAITLIST_SOURCE, FREE_FEATURES, WaitlistCta,
+//      PricingPage, FreeCard, ProYearlyCard (everything from `export type
 //      PricingPageProps` down to just above this marker). Re-add a Free card.
+//      Also drop the `waitlist` entry from vite.config.ts and ui/asset.ts, and
+//      delete ui/entries/waitlist.ts, which nothing else loads.
 //   2. Select everything below this marker and strip the leading "// " from
 //      each line (most editors: select + "toggle line comment").
 //   3. In web/src/routes/ui.tsx's `/pricing` handler, do the matching restore

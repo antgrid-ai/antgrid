@@ -14,6 +14,9 @@ const DOWNLOADS = {
   linux: "https://github.com/antgrid-ai/antgrid/releases/latest/download/antgrid-linux.AppImage",
 };
 
+// The web service, which is a different origin from this static build.
+const WAITLIST_ORIGIN = "https://app.antgrid.ai";
+
 test("desktop downloads point at the published release artifacts", async ({ page }) => {
   await page.goto("/#download");
   const band = page.locator("#download");
@@ -59,14 +62,22 @@ test("the paid path stays closed: no checkout links anywhere", async ({ page }) 
   }
 });
 
-test("charging plans render a disabled button, never a live CTA", async ({ page }) => {
+test("charging plans capture interest, never a live checkout CTA", async ({ page }) => {
   await page.goto("/pricing");
 
-  // Any card carrying `comingSoon` (pricing.ts) must swap its checkout link for a
-  // disabled button. Asserted by state, not by label — the label is BETA_FREE-gated.
+  // Any card carrying `comingSoon` (pricing.ts) must swap its checkout link for the
+  // founding-price capture. Asserted by state, not by label — copy is BETA_FREE-gated.
   const yearlyCard = page.locator("span.font-mono", { hasText: /^Pro$/ }).locator("..").locator("..");
-  await expect(yearlyCard.locator("button[disabled]")).toHaveCount(1);
+  const capture = yearlyCard.locator("form[data-waitlist]");
+  await expect(capture).toHaveCount(1);
+  // The address goes to the web service, cross-origin from this static site.
+  await expect(capture).toHaveAttribute("action", `${WAITLIST_ORIGIN}/api/waitlist`);
+  await expect(capture).toHaveAttribute("data-waitlist", "pricing");
   await expect(yearlyCard.locator("a[href]")).toHaveCount(0);
+  // The capture ships disabled so a scriptless reader is told to email instead; once
+  // the page's script has run nothing in the card may still be inert, or the dead
+  // paid CTA is back under a new name.
+  await expect(yearlyCard.locator("button[disabled]")).toHaveCount(0);
 
   // The free card is the one plan whose CTA stays live.
   const freeCard = page.locator("span.font-mono", { hasText: /^Free$/ }).locator("..").locator("..");
@@ -85,7 +96,7 @@ for (const path of ["/pricing", "/terms", "/refunds", "/support"]) {
 
 // Indexed pages. og-card is excluded on purpose: it is the screenshot source for
 // the social card, already noindex and filtered out of the sitemap.
-const INDEXED = ["/", "/pricing", "/get-started", "/support", "/privacy", "/terms", "/refunds"];
+const INDEXED = ["/", "/pricing", "/get-started", "/support", "/privacy", "/terms", "/refunds", "/security"];
 
 test("every indexed page ships a description search engines will show whole", async ({ page }) => {
   // 155 is where Google starts truncating. Social previews cut earlier — mobile

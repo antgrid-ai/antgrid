@@ -4,21 +4,23 @@
 // every seat gets its own copy of (the cap is counted per user in
 // checkCapAndUpsert, so a team never pools them) — the only place a machine count
 // is a paywall is Free. If YEARLY_OFFER_ACTIVE is turned off in web, set
-// OFFER_ACTIVE=false here so the struck price/discount disappear.
+// OFFER_ACTIVE=false here so the founding-price line disappears and the card
+// shows list. YEARLY_LIST_USD is a price we have not charged yet, so it is only
+// ever rendered forwards ("$99 at launch"), never struck through as a former one.
 //
 // Checkout is deliberately unwired this release: every card that would charge carries
-// `comingSoon`, which swaps the checkout link for a disabled button. Clearing it here
-// re-points the CTA at web's live `/checkout` (`web/src/routes/ui.tsx`), but the same
-// shutter is duplicated on web's own pricing page (`ComingSoonCta` in
-// web/src/ui/pricing.tsx) and on the app's WORKER_CAP Upgrade button
+// `comingSoon`, which swaps the checkout link for the founding-pricing capture
+// (`WaitlistCta.astro`). Clearing it here re-points the CTA at web's live `/checkout`
+// (`web/src/routes/ui.tsx`), but the same shutter is duplicated on web's own pricing
+// page (web/src/ui/pricing.tsx) and on the app's WORKER_CAP Upgrade button
 // (app/lib/screens/device_cap_dialog.dart) — flip all three together, or the funnel
 // sells a plan two of its three entry points still refuse.
 import { links } from "../config";
 
 // Single switch for the beta-free period: banners the pricing page, hides the
-// trial card, relabels paid CTAs to "Available after beta", and swaps the hero
-// pill and closing-CTA copy. Flip to false when plans activate — and update
-// support.md's beta note by hand, it is static markdown.
+// trial card, and swaps the hero pill, closing-CTA and paid-card copy. Flip to
+// false when plans activate — and update support.md's beta note by hand, it is
+// static markdown.
 export const BETA_FREE = true;
 
 export const TRIAL_DAYS = 7;
@@ -97,10 +99,10 @@ export const proYearly: PlanCardData = {
   priceUsd: seatPriceUsd,
   listUsd: OFFER_ACTIVE ? YEARLY_LIST_USD : undefined,
   unit: "/ seat / year",
-  // Under BETA_FREE the card's button is disabled ("Available after beta"), so the
+  // Under BETA_FREE the card's CTA is an interest capture, not a checkout, so the
   // copy must not promise a startable trial or a running subscription.
   note: BETA_FREE
-    ? "Free while the beta runs — this is the launch price"
+    ? "Free while the beta runs"
     : `${TRIAL_DAYS}-day free trial, then $${seatPriceUsd} per seat / year`,
   features: [
     "Handler AI assistant — stack instructions, evidence-gated \"done\", one-tap undo",
@@ -111,8 +113,10 @@ export const proYearly: PlanCardData = {
     "E2E zero-knowledge relay · priority support",
   ],
   cta: "Get Pro",
+  // No figure on this line while the CTA is a capture: the reader is agreeing to
+  // hear from us, not to a price, and the headline above already carries the number.
   ctaFooter: BETA_FREE
-    ? `$${seatPriceUsd} per seat / year when plans activate`
+    ? "Founding pricing at launch · no card, nothing charged during the beta"
     : `$${seatPriceUsd} per seat / year · renews automatically · cancel anytime`,
   recommended: true,
 };

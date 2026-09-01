@@ -1,0 +1,143 @@
+---
+import { links } from "../../config";
+
+interface Props {
+  /** Which surface the address came from — sent as `source` to the API. */
+  source: string;
+  /** Unique per instance: two captures can share a page (label/status ids). */
+  id: string;
+}
+const { source, id } = Astro.props;
+const inputId = `${id}-email`;
+const statusId = `${id}-status`;
+---
+{/* `action` is the real endpoint rather than a data-* attribute so the markup
+    states its own target, but the submit button ships DISABLED: without the
+    script a native cross-origin POST would land the reader on a raw JSON body,
+    and a disabled default button also blocks implicit submission from the
+    input. The script enables it — so scriptless readers get the noscript note
+    instead of a control that looks live and is not. */}
+<form
+  action={links.waitlist}
+  method="post"
+  novalidate
+  data-waitlist={source}
+  class="flex flex-col gap-2"
+>
+  <label class="sr-only" for={inputId}>Email address for founding-pricing news</label>
+  <div class="flex flex-col gap-2 sm:flex-row">
+    <input
+      type="email"
+      id={inputId}
+      name="email"
+      required
+      autocomplete="email"
+      spellcheck="false"
+      placeholder="you@company.com"
+      aria-describedby={statusId}
+      class="min-w-0 flex-1 rounded-md border border-edge bg-page px-3.5 py-3 text-note text-ink placeholder:text-faint"
+    />
+    <button
+      type="submit"
+      disabled
+      data-waitlist-submit
+      class="inline-flex shrink-0 items-center justify-center rounded-md bg-signalbtn px-5 py-3 text-note font-medium text-page transition-colors duration-200 hover:bg-signal disabled:cursor-not-allowed disabled:opacity-60 motion-reduce:transition-none"
+    >Join the list</button>
+  </div>
+  {/* Reserves its line so a status message does not shift the card under the
+      pointer that just clicked. */}
+  <p id={statusId} data-waitlist-status role="status" aria-live="polite" class="min-h-4 text-marker"></p>
+  <noscript>
+    {/* Amber, the site's one meaning for it: this path needs a human. */}
+    <p class="text-marker text-amber">Joining needs JavaScript. Turn it on, or email contact@radhaai.com with the subject “Founding pricing” and we will add you.</p>
+  </noscript>
+</form>
+
+<style>
+  /* Tone lives in CSS keyed off a data attribute rather than in class strings the
+     script swaps, so every colour stays a token the stylesheet can see. */
+  [data-waitlist-status] {
+    color: var(--color-muted2);
+  }
+  [data-waitlist-status][data-tone="ok"] {
+    color: var(--color-ok);
+  }
+  [data-waitlist-status][data-tone="error"] {
+    color: var(--color-amber);
+  }
+</style>
+
+<script>
+  // Astro bundles a component script once per page however many times the
+  // component renders, so this binds every capture on the page in one pass.
+  const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+  for (const form of document.querySelectorAll<HTMLFormElement>("form[data-waitlist]")) {
+    const input = form.querySelector<HTMLInputElement>('input[type="email"]');
+    const button = form.querySelector<HTMLButtonElement>("[data-waitlist-submit]");
+    const status = form.querySelector<HTMLParagraphElement>("[data-waitlist-status]");
+    if (!input || !button || !status) continue;
+
+    const idleLabel = button.textContent ?? "Join the list";
+    const verb = idleLabel.split(" ")[0];
+    button.disabled = false;
+
+    const say = (message: string, tone?: "ok" | "error") => {
+      status.textContent = message;
+      if (tone) status.dataset.tone = tone;
+      else delete status.dataset.tone;
+    };
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (form.dataset.state === "submitted" || form.dataset.state === "submitting") return;
+
+      const email = input.value.trim();
+      if (!EMAIL.test(email)) {
+        say("That does not look like an email address. Check it and try again.", "error");
+        input.focus();
+        return;
+      }
+
+      form.dataset.state = "submitting";
+      button.disabled = true;
+      button.textContent = `${verb}ing…`;
+      say("");
+
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ email, source: form.dataset.waitlist }),
+        });
+        // The API's `error` is a machine code ("BAD_REQUEST"), never reader-facing
+        // copy — the status is what the wording below is chosen from.
+        const body = await response.json().catch(() => null);
+
+        if (response.ok && body?.ok) {
+          form.dataset.state = "submitted";
+          input.readOnly = true;
+          button.textContent = `${verb}ed`;
+          say("You have joined the list. We will email you before founding pricing opens.", "ok");
+          return;
+        }
+
+        form.dataset.state = "error";
+        button.disabled = false;
+        button.textContent = idleLabel;
+        if (response.status === 429) {
+          say("Too many tries from here. Wait a minute, then try again.", "error");
+        } else if (response.status === 400) {
+          say("That address was not accepted. Check it and try again.", "error");
+        } else {
+          say("The list did not answer. Try again in a moment.", "error");
+        }
+      } catch {
+        form.dataset.state = "error";
+        button.disabled = false;
+        button.textContent = idleLabel;
+        say("We could not reach the list. Check your connection and try again.", "error");
+      }
+    });
+  }
+</script>

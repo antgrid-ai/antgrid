@@ -14,6 +14,7 @@ import { devBillingRoutes } from "./routes/dev-billing.js";
 import { oauthHandoffRoutes } from "./routes/oauth-handoff.js";
 import { oauthStartRoutes } from "./routes/oauth-start.js";
 import { eventsRoutes } from "./routes/events.js";
+import { waitlistRoutes } from "./routes/waitlist.js";
 import { uiRoutes } from "./routes/ui.js";
 import { setPublicOrigin } from "./ui/origin.js";
 import type { DB } from "./db/index.js";
@@ -110,6 +111,7 @@ export function buildApp(deps: AppDeps) {
   });
   app.route("/", health);
   app.route("/", eventsRoutes({ db: deps.db, clientIp }));
+  app.route("/", waitlistRoutes({ db: deps.db, clientIp }));
   app.route("/", deviceRoutes({ db: deps.db, auth: deps.auth, relay: deps.relay }));
   app.route("/", agentRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
   app.route("/", subscriptionRoutes({ db: deps.db, auth: deps.auth }));
