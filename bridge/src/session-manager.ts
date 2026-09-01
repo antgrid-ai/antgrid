@@ -1621,7 +1621,10 @@ export class SessionManager {
       // gate is one `setupGate` declines to report, so `start()` falls straight
       // through to the spawn with no branch of its own. Everything downstream
       // still works because it is the same state a Skip produces — the run
-      // keeps reporting, and `firePendingStart` finds nothing queued.
+      // keeps reporting. It releases nothing by itself, though: a caller that
+      // ALSO queues a start (only `rerunSetup` does) owes it a
+      // `firePendingStart`, since an open gate is exactly what stops the
+      // settle from firing one.
       gateReleased: startAgent === "immediate",
       holdsServices,
     };
@@ -1828,6 +1831,12 @@ export class SessionManager {
       entry.id, false, requeue, this.opts.checkoutSetupPolicy?.(checkout)?.startAgent,
     );
     this.notifyObservers();
+    // A gate born open holds nothing back, so a start queued behind it has
+    // nobody to fire it: `firePendingStart` runs only when a run SETTLES, which
+    // under `immediate` is the entire wait that policy exists to remove. Create
+    // never meets this — it queues no start of its own — and a rerun does,
+    // because it re-arms the prompt the previous run spent.
+    if (setup.gateReleased && setup.pendingStart) this.firePendingStart(entry.id);
     run(checkout, entry.id, (progress) => this.onSetupProgress(entry.id, setup.runId, progress));
   }
 

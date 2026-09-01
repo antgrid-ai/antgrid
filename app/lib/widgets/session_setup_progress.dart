@@ -8,6 +8,7 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
 import '../models/session_entry.dart';
 import '../providers/session_setup.dart';
+import 'transcript/format.dart';
 
 /// How much of the provisioning pane the ledger may take before it scrolls.
 /// A `worktree.setup` block is a list a human wrote, so it is short in
@@ -58,24 +59,16 @@ class _SetupElapsedState extends State<SetupElapsed> {
     final elapsed = DateTime.now().millisecondsSinceEpoch - startedAt;
     if (elapsed < 0) return const SizedBox.shrink();
     return Text(
-      formatSetupElapsed(Duration(milliseconds: elapsed)),
+      // The app's one elapsed format, shared with the agent transcript's own
+      // "Working for 2m 35s" directly below this strip — two live readouts of
+      // the same seconds must not disagree about how to spell them.
+      formatDuration(Duration(milliseconds: elapsed)),
       style: AbTokens.monoStyle(
         fontSize: AbTokens.fontXxs,
         color: widget.color,
       ),
     );
   }
-}
-
-/// `m:ss`, widening to `h:mm:ss` only once there is an hour to show — a
-/// leading `0:` on every reading spends a column on a digit that is almost
-/// always zero.
-String formatSetupElapsed(Duration d) {
-  final total = d.inSeconds;
-  final seconds = (total % 60).toString().padLeft(2, '0');
-  final minutes = total ~/ 60;
-  if (minutes < 60) return '$minutes:$seconds';
-  return '${minutes ~/ 60}:${(minutes % 60).toString().padLeft(2, '0')}:$seconds';
 }
 
 /// The run's steps, done through pending.

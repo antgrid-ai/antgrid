@@ -736,6 +736,26 @@ describe("isolated session worktree.setup", () => {
     });
   });
 
+  it("PROBE running+pendingStart simultaneously", async () => {
+    await withDir(async (dir) => {
+      await seedCheckout(dir);
+      const opts: { startAgent?: "afterSetup" | "immediate" } = { startAgent: "afterSetup" };
+      const { sm, terminal, runs } = harness(dir, opts);
+      const created = await sm.create("Isolated", { isolation: "worktree" });
+      await sm.start(created.id, "fix the flaky test");
+      runs[0]!.report({ state: "failed", stepIndex: 0, stepCount: 1, exitCode: 1 });
+      await waitForTerminal(terminal, created.id);
+      sm.stop(created.id);
+      opts.startAgent = "immediate";
+      await sm.applySetupAction(created.id, "rerun");
+      await sm.start(created.id);
+      await waitForTerminal(terminal, created.id);
+      const e = sm.get(created.id);
+      console.error("PROBE X running=", e?.running, "pendingStart=", e?.setup?.pendingStart,
+        "state=", e?.setup?.state);
+    });
+  });
+
   it("a rerun re-reads a policy that changed since create", async () => {
     await withDir(async (dir) => {
       await seedCheckout(dir);
@@ -749,14 +769,22 @@ describe("isolated session worktree.setup", () => {
       expect(sm.get(created.id)?.setup?.pendingStart).toBe(true);
 
       runs[0]!.report({ state: "failed", stepIndex: 0, stepCount: 1, exitCode: 1 });
-      // That failure fires the queued start (onFailure is `warn`), so stop the
-      // agent again — a rerun re-arms the prompt only for a session that is not
-      // already running, and this test is about the gate, not the prompt.
+      // The failure fires the queued start (`onFailure: warn`), and that is
+      // what banks the prompt in `lastQueuedPrompt` for the rerun to re-arm.
+      // AWAITED rather than assumed: the settle releases deferred services
+      // first, so a synchronous stop here would clear `pendingStart` before
+      // `firePendingStart` ever ran — and the rerun would then take the
+      // no-requeue path, which is not the one this test is about.
+      await waitForTerminal(terminal, created.id);
+      // A rerun re-arms the prompt only for a session that is not already
+      // running, which is the case that queues a start behind the new run.
       sm.stop(created.id);
       opts.startAgent = "immediate";
       await sm.applySetupAction(created.id, "rerun");
 
-      await sm.start(created.id, "fix the flaky test");
+      // No second `start()`: the rerun re-armed the prompt itself, and an
+      // `immediate` policy owes that start the agent straight away rather than
+      // at the end of the run it is not supposed to wait for.
       await waitForTerminal(terminal, created.id);
       expect(sm.get(created.id)?.setup?.pendingStart).toBe(false);
       expect(sm.get(created.id)?.setup?.state).toBe("running");

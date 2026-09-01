@@ -65,7 +65,15 @@ class TerminalScreen extends ConsumerWidget {
       if (sessionStartQueued(
         ref.watch(sessionSetupProvider(activeSession.id)),
       )) {
-        return _ProvisioningSessionState(sessionId: activeSession.id);
+        // Keyed by session, for the same reason `AgentTranscriptView` is
+        // (agent_panel.dart): without it Flutter reuses one State across a
+        // session switch, and the in-flight verb — plus the refusal snackbar
+        // it is waiting on — would land on whichever session is on screen by
+        // the time the reply arrives.
+        return _ProvisioningSessionState(
+          key: ValueKey(activeSession.id),
+          sessionId: activeSession.id,
+        );
       }
       return activeSession.mode == 'chat'
           ? _StoppedSessionEmptyState(
@@ -298,7 +306,7 @@ class _NoSessionEmptyState extends ConsumerWidget {
 /// `cancel` kills the run first. The bridge has accepted `cancel` since the
 /// verb shipped; this is the first surface to offer it.
 class _ProvisioningSessionState extends ConsumerStatefulWidget {
-  const _ProvisioningSessionState({required this.sessionId});
+  const _ProvisioningSessionState({super.key, required this.sessionId});
 
   final String sessionId;
 
@@ -324,7 +332,19 @@ class _ProvisioningSessionStateState
     final container = ref.container;
     final entryId = container.read(selectedRegistrationIdProvider);
     try {
-      if (entryId == null) return;
+      if (entryId == null) {
+        // A project mid-re-resolve has no registration to address, which is
+        // reachable across a run this long. Saying so is the whole contract
+        // below: a press that produces no wire traffic and no message is
+        // indistinguishable from a dropped tap.
+        if (mounted) {
+          showAbSnackBar(
+            context,
+            '${sessionSetupFailureCopy(verb)} — this project is reconnecting.',
+          );
+        }
+        return;
+      }
       final result = await runSessionSetupAction(
         container,
         entryId: entryId,
@@ -332,6 +352,11 @@ class _ProvisioningSessionStateState
         action: verb,
       );
       if (!mounted || result.ok) return;
+      // Only while this session is still the one on screen: a refusal narrated
+      // over a DIFFERENT session's pane reads as that session having failed.
+      // The key above makes this rare rather than impossible — the pane is
+      // rebuilt away on a switch, but a reply can still land first.
+      if (container.read(activeSessionIdProvider) != widget.sessionId) return;
       // Nothing else on screen changes when a setup verb is refused, so a log
       // line alone would make a refusal indistinguishable from a dropped press.
       showAbSnackBar(

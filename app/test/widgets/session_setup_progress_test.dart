@@ -91,15 +91,6 @@ void main() {
     });
   });
 
-  group('formatSetupElapsed', () {
-    test('drops the hour until there is one to show', () {
-      expect(formatSetupElapsed(const Duration(seconds: 7)), '0:07');
-      expect(formatSetupElapsed(const Duration(minutes: 4, seconds: 12)), '4:12');
-      expect(formatSetupElapsed(const Duration(minutes: 59, seconds: 59)), '59:59');
-      expect(formatSetupElapsed(const Duration(hours: 1, seconds: 5)), '1:00:05');
-    });
-  });
-
   group('SetupElapsed', () {
     testWidgets('says nothing about a clock it cannot trust', (tester) async {
       // `startedAt` is the BRIDGE's clock, and for a remote machine that is not

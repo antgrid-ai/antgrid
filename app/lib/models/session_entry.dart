@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 import 'agent_work_status.dart';
 
 /// Provisioning of an isolated session's own checkout (`worktree.setup` in the
@@ -128,7 +130,7 @@ class SessionSetup {
           other.stepIndex == stepIndex &&
           other.stepCount == stepCount &&
           other.stepName == stepName &&
-          _sameNames(other.stepNames, stepNames) &&
+          listEquals(other.stepNames, stepNames) &&
           other.terminalId == terminalId &&
           other.exitCode == exitCode &&
           other.message == message &&
@@ -150,19 +152,6 @@ class SessionSetup {
     startedAt,
     finishedAt,
   );
-}
-
-/// A plan's step names are fixed for the life of a run, so equality is a
-/// pairwise walk rather than a set comparison — and it has to be one at all,
-/// since two structurally equal lists are different objects and would make
-/// every re-parse of an unchanged entry look like a change.
-bool _sameNames(List<String> a, List<String> b) {
-  if (identical(a, b)) return true;
-  if (a.length != b.length) return false;
-  for (var i = 0; i < a.length; i++) {
-    if (a[i] != b[i]) return false;
-  }
-  return true;
 }
 
 class SessionEntry {

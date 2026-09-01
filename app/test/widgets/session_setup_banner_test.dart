@@ -50,13 +50,18 @@ SessionSetup _setup(
   startedAt: startedAt,
 );
 
-SessionEntry _entry(SessionSetup? setup, {bool running = false}) => SessionEntry(
+SessionEntry _entry(
+  SessionSetup? setup, {
+  bool running = false,
+  String mode = 'terminal',
+}) => SessionEntry(
   id: _sessionId,
   name: 'Fix auth bug',
   createdAt: 0,
   lastUsedAt: 0,
   archived: false,
   running: running,
+  mode: mode,
   checkoutId: 'worktree-1',
   checkoutKind: 'managed-worktree',
   setup: setup,
@@ -69,6 +74,7 @@ Future<void> pumpBanner(
   SessionSetup? setup, {
   List<Override> extraOverrides = const [],
   bool sessionRunning = false,
+  String mode = 'terminal',
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -79,7 +85,7 @@ Future<void> pumpBanner(
         freshSessionsStateProvider.overrideWithValue(
           SessionsState(
             projectId: _projectId,
-            sessions: [_entry(setup, running: sessionRunning)],
+            sessions: [_entry(setup, running: sessionRunning, mode: mode)],
           ),
         ),
         ...extraOverrides,
@@ -142,19 +148,37 @@ void main() {
       await unmount(tester);
     });
 
-    // Releasing the agent is the common case ("the deps are cached") and it is
-    // the only thing on screen that explains why the agent has not started, so
-    // it must be reachable for the whole run. The disclosure is NOT: while a
-    // start is queued the terminal pane below is already this transcript, and
-    // the chevron would stack a second copy of it on the first.
-    testWidgets('offers the release and refuses to be dismissed', (
+    // While a start is queued the terminal pane below IS this transcript and
+    // carries both verbs itself, so the banner stands down to a headline: a
+    // second `Start agent now` 100px away is not an alternative but a race,
+    // since only one of them can end the run. The dismiss is refused for the
+    // whole run either way — the banner is the only account of why the agent
+    // has not started.
+    testWidgets('stands down to the pane while a start is queued', (
       tester,
     ) async {
       await pumpBanner(tester, _setup('running', pendingStart: true));
 
-      expect(find.text('Start agent now'), findsOneWidget);
+      expect(find.text('Start agent now'), findsNothing);
       expect(find.byTooltip('View setup log'), findsNothing);
       expect(find.byTooltip('Dismiss'), findsNothing);
+      await unmount(tester);
+    });
+
+    // A chat session renders AgentTranscriptView in the pane's slot and mounts
+    // no provisioning pane at all, so standing down there would leave a
+    // four-minute install with no output anywhere on screen.
+    testWidgets('keeps the log and the release for a chat session', (
+      tester,
+    ) async {
+      await pumpBanner(
+        tester,
+        _setup('running', pendingStart: true),
+        mode: 'chat',
+      );
+
+      expect(find.byTooltip('View setup log'), findsOneWidget);
+      expect(find.text('Start agent now'), findsOneWidget);
       await unmount(tester);
     });
 
@@ -359,8 +383,9 @@ void main() {
     /// it actually lands: on the `session:setup` frame.
     Future<FakeAgentTransport> pumpWired(
       WidgetTester tester,
-      SessionSetup setup,
-    ) async {
+      SessionSetup setup, {
+      String mode = 'terminal',
+    }) async {
       final transport = FakeAgentTransport();
       final cache = await CachedSessionsStore.open();
       final session = ProjectSession(
@@ -375,6 +400,7 @@ void main() {
       await pumpBanner(
         tester,
         setup,
+        mode: mode,
         extraOverrides: [
           selectedRegistrationIdProvider.overrideWith((ref) => _projectId),
           projectSessionProvider(_projectId)
@@ -384,10 +410,15 @@ void main() {
       return transport;
     }
 
+    // Driven in chat mode, which is where the banner still owns the release:
+    // a terminal-mode session mounts the provisioning pane, and that pane's
+    // copy of this button is the one under test in
+    // `terminal_screen_provisioning_test.dart`.
     testWidgets('the release sends session:setup for this session', (tester) async {
       final transport = await pumpWired(
         tester,
         _setup('running', pendingStart: true),
+        mode: 'chat',
       );
 
       await tester.tap(find.text('Start agent now'));

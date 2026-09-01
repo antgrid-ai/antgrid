@@ -98,13 +98,26 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
 
     // The pane below is already this same transcript, full height, while a
     // start is queued behind the run (`_ProvisioningSessionState`), so the
-    // strip's own two copies of it stand down — derived off the same wire field
-    // rather than the banner and the pane having to know about each other.
+    // strip's own copies of it stand down — derived off the wire rather than
+    // the banner and the pane having to know about each other.
+    //
+    // ONLY in terminal mode. A chat session renders `AgentTranscriptView` in
+    // that slot (`agent_panel.dart`) and mounts no pane at all, so standing
+    // down there leaves a four-minute install with no output on screen
+    // anywhere — the run would be a headline and a rule and nothing else.
+    final session = ref.watch(activeSessionProvider);
+    final queued = sessionStartQueued(setup);
+    final paneOwnsTranscript = queued && session?.mode != 'chat';
     // Folded into `expanded` so the log, the tail and the disclosure can never
     // disagree about it; a rerun re-queues a start, and the expansion set is
-    // per session and outlives the run that was expanded.
-    final queued = sessionStartQueued(setup);
-    final expanded = ui.expandedSessionId == sessionId && !queued;
+    // per session and outlives the run that was expanded — which is also why
+    // the state itself is dropped rather than only masked.
+    final expanded = ui.expandedSessionId == sessionId && !paneOwnsTranscript;
+    if (paneOwnsTranscript) {
+      ref
+          .read(sessionSetupBannerUiProvider.notifier)
+          .collapseIfExpanded(sessionId);
+    }
     if (phase == SessionSetupPhase.done && !expanded) {
       ref
           .read(sessionSetupBannerUiProvider.notifier)
@@ -116,7 +129,10 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     // While the log is open the tail is on screen in full; sampling it twice
     // would only pay the formatter again for a line the user is already
     // reading.
-    _syncTail(running && !expanded && !queued ? terminalId : null, runKey);
+    _syncTail(
+      running && !expanded && !paneOwnsTranscript ? terminalId : null,
+      runKey,
+    );
 
     // The agent is ALREADY working in a tree this run has not finished
     // building: `startAgent: immediate`, or a start the user released by hand.
@@ -125,7 +141,7 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     // and the one action left that means anything. Derived from the live run
     // plus the session's own `running` rather than from a mode flag: both
     // routes reach the identical situation, and only this surface reports it.
-    final agentLive = running && (ref.watch(activeSessionProvider)?.running ?? false);
+    final agentLive = running && (session?.running ?? false);
 
     final colors = context.antgrid;
     final tone = switch (phase) {
@@ -148,7 +164,7 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
             runKey,
             phase,
             expanded,
-            queued,
+            paneOwnsTranscript,
             agentLive,
           ),
         ),
@@ -233,10 +249,14 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     String runKey,
     SessionSetupPhase phase,
     bool expanded,
-    bool queued,
+    bool paneOwnsTranscript,
     bool agentLive,
   ) {
-    final action = switch (phase) {
+    // The pane below offers both verbs already, and its copies are the ones
+    // sized for a decision — two `Start agent now` buttons 100px apart are not
+    // alternatives but a race, since only one of them can end the run and each
+    // tracks its own in-flight state.
+    final action = paneOwnsTranscript ? null : switch (phase) {
       // Releasing an agent that is already up is meaningless, so the live case
       // gets the one verb still worth offering: end the install holding the
       // tree the agent is working in.
@@ -283,7 +303,7 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
         // No disclosure while the pane below is already the transcript: the
         // chevron would mount a SECOND view of the same terminal directly above
         // the first.
-        if (!queued)
+        if (!paneOwnsTranscript)
           AbIconButton(
             icon: expanded ? AbIcons.chevronDown : AbIcons.chevronRight,
             tooltip: expanded ? 'Hide setup log' : 'View setup log',
