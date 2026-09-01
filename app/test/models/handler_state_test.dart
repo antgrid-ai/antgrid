@@ -336,4 +336,73 @@ void main() {
       expect(e.draftReply, isNotEmpty);
     });
   });
+
+  group('HandlerWrapUp.fromWire', () {
+    Map<String, dynamic> wire({
+      Object? outcomes,
+      Object? blockedTotal = 1,
+      Object? goal = 'ship the parser',
+    }) => {
+      'wrapUpId': 'w1',
+      'terminalId': 't1',
+      'at': 9,
+      'goal': goal,
+      'outcomes':
+          outcomes ??
+          [
+            {
+              'status': 'done',
+              'total': 5,
+              'items': ['item a', 'item b'],
+            },
+          ],
+      'blockedTotal': blockedTotal,
+      'blockedReasons': ['refused the force push'],
+    };
+
+    test('a full record round-trips and derives its +N more', () {
+      final w = HandlerWrapUp.fromWire(wire())!;
+      expect(w.wrapUpId, 'w1');
+      expect(w.terminalId, 't1');
+      expect(w.at, 9);
+      expect(w.goal, 'ship the parser');
+      expect(w.blockedTotal, 1);
+      expect(w.blockedReasons, ['refused the force push']);
+      final o = w.outcomes.single;
+      expect(o.status, 'done');
+      expect(o.total, 5);
+      expect(o.items, ['item a', 'item b']);
+      // The record stores the true total and never a second `more` field, so
+      // the suffix is arithmetic here rather than something that can disagree.
+      expect(o.more, 3);
+    });
+
+    test('a mistyped required field drops the whole record', () {
+      expect(HandlerWrapUp.fromWire({...wire(), 'wrapUpId': 7}), isNull);
+      expect(HandlerWrapUp.fromWire(wire(blockedTotal: 'two')), isNull);
+      expect(HandlerWrapUp.fromWire(wire(goal: null)), isNull);
+      expect(HandlerWrapUp.fromWire(wire(outcomes: 'done: a, b')), isNull);
+      expect(HandlerWrapUp.fromWire('wrapped up'), isNull);
+    });
+
+    test('an outcome this build has no status for costs one group, not the '
+        'report', () {
+      // A bridge ahead of the app. Losing the whole card would hide the
+      // blocked-report line too, which is the part nothing else can re-derive.
+      final w = HandlerWrapUp.fromWire(
+        wire(
+          outcomes: [
+            {'status': 'invented', 'total': 1, 'items': <String>[]},
+            {
+              'status': 'failed',
+              'total': 1,
+              'items': ['item c'],
+            },
+          ],
+        ),
+      )!;
+      expect(w.outcomes.single.status, 'failed');
+      expect(w.blockedTotal, 1);
+    });
+  });
 }

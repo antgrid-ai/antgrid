@@ -267,6 +267,12 @@ class HandlerStatusMessage {
   /// most once the session that took it has wrapped up.
   final List<Map<String, dynamic>> snapshots;
 
+  /// The morning-after wrap-up reports, replayed on the same terms as the
+  /// snapshots — the session they describe is disarmed by the time anyone reads
+  /// one, so the replay is the only path that survives an app restart between
+  /// the wrap-up and the read.
+  final List<Map<String, dynamic>> wrapUps;
+
   const HandlerStatusMessage({
     required this.id,
     required this.timestamp,
@@ -274,6 +280,7 @@ class HandlerStatusMessage {
     this.defaultTool,
     required this.sessions,
     this.snapshots = const [],
+    this.wrapUps = const [],
   });
 }
 
@@ -1423,6 +1430,15 @@ Object? parseAbMessage(Map<String, dynamic> json) {
             if (s is Map<String, dynamic>) snapshots.add(s);
           }
         }
+        // Same guard, same reason — and here absent and empty genuinely mean
+        // the same thing, so presence is never read as a capability signal.
+        final wrapUpsJson = json['wrapUps'];
+        final wrapUps = <Map<String, dynamic>>[];
+        if (wrapUpsJson is List) {
+          for (final w in wrapUpsJson) {
+            if (w is Map<String, dynamic>) wrapUps.add(w);
+          }
+        }
         return HandlerStatusMessage(
           id: id,
           timestamp: timestamp,
@@ -1432,6 +1448,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
               : null,
           sessions: sessions,
           snapshots: snapshots,
+          wrapUps: wrapUps,
         );
       }
 

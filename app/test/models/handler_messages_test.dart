@@ -28,6 +28,52 @@ void main() {
     expect(s.sessions.first['terminalId'], 't1');
   });
 
+  test('handler:status carries the wrap-up reports as raw maps', () {
+    final m =
+        parseAbMessage({
+              'type': 'handler:status',
+              'id': 'x',
+              'timestamp': 1,
+              'projectId': 'p',
+              'sessions': <Map<String, dynamic>>[],
+              'wrapUps': [
+                {
+                  'wrapUpId': 'w1',
+                  'terminalId': 't1',
+                  'at': 9,
+                  'goal': 'ship it',
+                  'outcomes': [
+                    {
+                      'status': 'done',
+                      'total': 2,
+                      'items': ['a'],
+                    },
+                  ],
+                  'blockedTotal': 0,
+                  'blockedReasons': <String>[],
+                },
+                'not a map',
+              ],
+            })
+            as HandlerStatusMessage?;
+    expect(m, isNotNull);
+    expect(m!.wrapUps, hasLength(1));
+    expect(m.wrapUps.single['wrapUpId'], 'w1');
+  });
+
+  test('a bridge with no wrapUps key still delivers its sessions', () {
+    final m = parseAbMessage({
+      'type': 'handler:status',
+      'id': 'x',
+      'timestamp': 1,
+      'projectId': 'p',
+      'sessions': [sessionWire],
+    });
+    expect(m, isA<HandlerStatusMessage>());
+    expect((m as HandlerStatusMessage).wrapUps, isEmpty);
+    expect(m.sessions, hasLength(1));
+  });
+
   test('handler:status with no defaultTool parses with defaultTool null', () {
     final m = parseAbMessage({
       'type': 'handler:status',

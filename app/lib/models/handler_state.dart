@@ -602,6 +602,124 @@ class HandlerSnapshot {
   }
 }
 
+/// One outcome group of a wrap-up — every item the session left in that state,
+/// sampled. Mirrors `HandlerWrapUpWire.outcomes` (`bridge/src/protocol.ts`).
+class HandlerWrapUpOutcome {
+  // 'done' | 'failed' | 'blocked' | 'skipped'
+  final String status;
+
+  /// The TRUE count [items] was sampled from. Kept rather than a second `more`
+  /// field for the reason the bridge keeps it that way: two numbers that must
+  /// agree are two numbers that can disagree.
+  final int total;
+  final List<String> items;
+
+  const HandlerWrapUpOutcome({
+    required this.status,
+    required this.total,
+    required this.items,
+  });
+
+  int get more => total - items.length;
+
+  static const _statuses = {'done', 'failed', 'blocked', 'skipped'};
+
+  static HandlerWrapUpOutcome? fromWire(dynamic json) {
+    if (json is! Map) return null;
+    final status = json['status'];
+    final total = json['total'];
+    final itemsJson = json['items'];
+    if (status is! String ||
+        !_statuses.contains(status) ||
+        total is! num ||
+        itemsJson is! List) {
+      return null;
+    }
+    return HandlerWrapUpOutcome(
+      status: status,
+      total: total.toInt(),
+      items: [
+        for (final i in itemsJson)
+          if (i is String) i,
+      ],
+    );
+  }
+}
+
+/// The morning-after report of one finished session (spec §2.2). Mirrors
+/// `HandlerWrapUpWire` (`bridge/src/protocol.ts`), which is hand-mirrored in
+/// turn from `WrapUpRecord` (`bridge/src/handler/wrap-up.ts`) — nothing checks
+/// the wire→Dart hop, so a field renamed there fails here as a card that draws
+/// nothing rather than as a parse error.
+///
+/// The count of undos still open is deliberately NOT a field: it outlives the
+/// record, so a frozen copy becomes a lie both when an undo is taken after the
+/// wrap-up and when a re-arm retires the offers outright. It is derived from
+/// [HandlerState.snapshots] at render time instead. The blocked-report count
+/// and reasons ARE frozen here, because they die with the session — the bridge
+/// drops its escalations on disarm and nothing can re-derive them.
+class HandlerWrapUp {
+  final String wrapUpId;
+
+  /// The supervised slot the session ran in.
+  final String terminalId;
+  final int at;
+  final String goal;
+  final List<HandlerWrapUpOutcome> outcomes;
+  final int blockedTotal;
+  final List<String> blockedReasons;
+
+  const HandlerWrapUp({
+    required this.wrapUpId,
+    required this.terminalId,
+    required this.at,
+    required this.goal,
+    required this.outcomes,
+    required this.blockedTotal,
+    required this.blockedReasons,
+  });
+
+  /// Null on any shape miss, and an outcome whose `status` this build does not
+  /// know is DROPPED rather than thrown: a bridge ahead of the app must cost
+  /// one group off a report, never the whole report.
+  static HandlerWrapUp? fromWire(dynamic json) {
+    if (json is! Map) return null;
+    final wrapUpId = json['wrapUpId'];
+    final terminalId = json['terminalId'];
+    final at = json['at'];
+    final goal = json['goal'];
+    final outcomesJson = json['outcomes'];
+    final blockedTotal = json['blockedTotal'];
+    final blockedReasonsJson = json['blockedReasons'];
+    if (wrapUpId is! String ||
+        terminalId is! String ||
+        at is! num ||
+        goal is! String ||
+        outcomesJson is! List ||
+        blockedTotal is! num ||
+        blockedReasonsJson is! List) {
+      return null;
+    }
+    final outcomes = <HandlerWrapUpOutcome>[];
+    for (final o in outcomesJson) {
+      final parsed = HandlerWrapUpOutcome.fromWire(o);
+      if (parsed != null) outcomes.add(parsed);
+    }
+    return HandlerWrapUp(
+      wrapUpId: wrapUpId,
+      terminalId: terminalId,
+      at: at.toInt(),
+      goal: goal,
+      outcomes: outcomes,
+      blockedTotal: blockedTotal.toInt(),
+      blockedReasons: [
+        for (final r in blockedReasonsJson)
+          if (r is String) r,
+      ],
+    );
+  }
+}
+
 class HandlerActivityRecord {
   final String recordId;
   final int at;
@@ -643,6 +761,11 @@ class HandlerState {
   /// survive the disarm of the session that took them.
   final List<HandlerSnapshot> snapshots;
 
+  /// Wrap-up reports for this project, oldest first. Project-scoped for the
+  /// same reason as [snapshots]: the session each one describes is disarmed by
+  /// the time it is read.
+  final List<HandlerWrapUp> wrapUps;
+
   /// Snapshot ids whose `handler:undo` is out and whose result has not come
   /// back yet. The bridge re-states the entry either way, so this only keeps a
   /// second tap from looking live during the round trip.
@@ -661,6 +784,7 @@ class HandlerState {
     required this.escalations,
     required this.activity,
     this.snapshots = const [],
+    this.wrapUps = const [],
     this.pendingUndo = const {},
     this.pendingInstructions = const {},
   });
@@ -671,6 +795,7 @@ class HandlerState {
       escalations = const [],
       activity = const [],
       snapshots = const [],
+      wrapUps = const [],
       pendingUndo = const {},
       pendingInstructions = const {};
 
@@ -704,6 +829,7 @@ class HandlerState {
     List<HandlerEscalation>? escalations,
     List<HandlerActivityRecord>? activity,
     List<HandlerSnapshot>? snapshots,
+    List<HandlerWrapUp>? wrapUps,
     Set<String>? pendingUndo,
     Map<String, List<String>>? pendingInstructions,
   }) {
@@ -713,6 +839,7 @@ class HandlerState {
       escalations: escalations ?? this.escalations,
       activity: activity ?? this.activity,
       snapshots: snapshots ?? this.snapshots,
+      wrapUps: wrapUps ?? this.wrapUps,
       pendingUndo: pendingUndo ?? this.pendingUndo,
       pendingInstructions: pendingInstructions ?? this.pendingInstructions,
     );

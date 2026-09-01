@@ -277,6 +277,15 @@ class HandlerService {
       if (s != null) snapshots.add(s);
     }
     snapshots.sort((a, b) => a.at.compareTo(b.at));
+    // Wholesale again, and this is the only delivery there is: no per-wrap-up
+    // advert exists, the status emit inside the bridge's own disarm carries the
+    // record, and a reconnect long after that disarm has nothing else to read.
+    final wrapUps = <HandlerWrapUp>[];
+    for (final raw in msg.wrapUps) {
+      final w = HandlerWrapUp.fromWire(raw);
+      if (w != null) wrapUps.add(w);
+    }
+    wrapUps.sort((a, b) => a.at.compareTo(b.at));
     // A status frame is authoritative about which entries EXIST and what the
     // bridge last decided about them, but it says nothing about an undo still
     // running: an in-flight one is still 'available' until its own
@@ -306,6 +315,7 @@ class HandlerService {
       escalations: escalations,
       defaultTool: msg.defaultTool,
       snapshots: snapshots,
+      wrapUps: wrapUps,
       pendingUndo: pendingUndo,
       pendingInstructions: pendingInstructions,
     );

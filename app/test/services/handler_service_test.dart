@@ -63,6 +63,22 @@ Map<String, dynamic> _snapshotJson({
   'state': state,
 };
 
+Map<String, dynamic> _wrapUpJson({String wrapUpId = 'w1', int at = 9}) => {
+  'wrapUpId': wrapUpId,
+  'terminalId': 't1',
+  'at': at,
+  'goal': 'ship the parser',
+  'outcomes': [
+    {
+      'status': 'done',
+      'total': 2,
+      'items': ['item a', 'item b'],
+    },
+  ],
+  'blockedTotal': 0,
+  'blockedReasons': <String>[],
+};
+
 Map<String, dynamic> _escalationJson(
   String escalationId, {
   String? kind,
@@ -826,9 +842,73 @@ void main() {
 
       expect(svc.currentState.sessions.keys, ['t1']);
       expect(svc.currentState.snapshots, isEmpty);
+      expect(svc.currentState.wrapUps, isEmpty);
 
       await svc.dispose();
       await session.close();
     },
   );
+
+  test('the wrap-up replay survives a status frame with nothing armed', () async {
+    // The morning-after case, and the only delivery there is: the bridge emits
+    // no per-wrap-up advert, so an app that restarted after the disarm sees the
+    // report on this frame or never.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': <Map<String, dynamic>>[],
+      'wrapUps': [_wrapUpJson(at: 9), _wrapUpJson(wrapUpId: 'w0', at: 2)],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.anyArmed, isFalse);
+    // Oldest first, like the offers beside them — the section renders reversed.
+    expect(
+      svc.currentState.wrapUps.map((w) => w.wrapUpId),
+      ['w0', 'w1'],
+    );
+    expect(svc.currentState.wrapUps.last.outcomes.single.total, 2);
+
+    // Wholesale replace, not append: the replay is the bridge's full current
+    // set, so an aged-out record leaves rather than accumulating a duplicate.
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': <Map<String, dynamic>>[],
+      'wrapUps': [_wrapUpJson(at: 9)],
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.wrapUps.map((w) => w.wrapUpId), ['w1']);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a malformed wrap-up drops itself, not the frame', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [_sessionJson(terminalId: 't1', pendingEscalations: 0)],
+      'wrapUps': [
+        {'wrapUpId': 'broken'},
+        _wrapUpJson(),
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.sessions.keys, ['t1']);
+    expect(svc.currentState.wrapUps.single.wrapUpId, 'w1');
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
 }
