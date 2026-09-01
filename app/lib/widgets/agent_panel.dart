@@ -445,6 +445,7 @@ class HandlerHeaderControl extends ConsumerWidget {
           notifyOnly: state.defaultNotifyOnly,
           agentObservable: coverage.observable,
           agentLabel: coverage.agentLabel,
+          judgeCapable: coverage.judgeCapable,
         ),
       );
     }

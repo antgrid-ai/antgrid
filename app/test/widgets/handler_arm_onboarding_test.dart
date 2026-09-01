@@ -84,6 +84,55 @@ void main() {
       );
     });
 
+    test('a watched session with no headless judge says so before arming', () {
+      // The bridge already knows this the moment the session arms and shows it
+      // as ESCALATE ONLY on the card — a chip you find by walking away and
+      // coming back to a session that woke you for everything.
+      final body = handlerArmExplainerBody(
+        agentObservable: true,
+        judgeCapable: false,
+      );
+      expect(body, startsWith(base));
+      expect(body, endsWith(escalateOnlyNotice));
+    });
+
+    test('a headless judge adds nothing', () {
+      expect(
+        handlerArmExplainerBody(agentObservable: true, judgeCapable: true),
+        base,
+      );
+    });
+
+    test('the judge caveat reads after the seeded goal', () {
+      final body = handlerArmExplainerBody(
+        agentObservable: true,
+        judgeCapable: false,
+        hasOpeningPrompt: true,
+      );
+      expect(body, contains('queues that as your backlog'));
+      expect(body, endsWith(escalateOnlyNotice));
+    });
+
+    test('an unwatchable agent does not stack a second caveat', () {
+      // It reports nothing Handler can act on, so what its judge could have
+      // done is moot — and a hedge under the stronger fact only dilutes it.
+      final body = handlerArmExplainerBody(
+        agentObservable: false,
+        agentLabel: 'Claude Code',
+        judgeCapable: false,
+      );
+      expect(body, isNot(contains(escalateOnlyNotice)));
+      expect(body, endsWith(unwatchableNotice('Claude Code')));
+    });
+
+    test('unknown coverage claims nothing about the judge either', () {
+      final body = handlerArmExplainerBody(
+        agentObservable: null,
+        judgeCapable: null,
+      );
+      expect(body, isNot(contains(escalateOnlyNotice)));
+    });
+
     test('the coverage warning still reads last', () {
       final body = handlerArmExplainerBody(
         agentObservable: false,

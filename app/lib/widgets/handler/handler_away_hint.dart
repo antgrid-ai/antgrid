@@ -60,6 +60,7 @@ class HandlerAwayHint extends ConsumerWidget {
                         notifyOnly: handlerState.defaultNotifyOnly,
                         agentObservable: coverage.observable,
                         agentLabel: coverage.agentLabel,
+                        judgeCapable: coverage.judgeCapable,
                       ),
                     );
                   },
