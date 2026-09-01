@@ -1,5 +1,6 @@
 // bridge/src/handler/reply-shape.ts
 import type { CapCommand } from "../structured/chat-session";
+import { oneLine } from "./backlog";
 import type { HandlerDecision } from "./decision";
 
 // Harness guards on the gate-bypassing inject channel (alongside the destructive
@@ -10,11 +11,11 @@ export const MAX_REPLY_CHARS = 4096;
 const VERB = /^\/[^\s/\\]+$/;
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
 
-// Exported because the engine flattens the same way for its push bodies, where a
-// stray newline renders as a broken multi-line notification.
-export function oneLine(s: string): string {
-  return s.replace(/\s+/g, " ").trim();
-}
+// Re-exported because the engine flattens the same way for its push bodies, where
+// a stray newline renders as a broken multi-line notification. It is DEFINED in
+// backlog.ts, which is import-free: the prompt renderers there and this module
+// enforce one flattening rule, and a second copy is a second place to keep it.
+export { oneLine };
 
 /** Split a slash_command value on its FIRST run of whitespace. The tail keeps its
  *  internal spacing: it is typed at the agent verbatim, and a control character

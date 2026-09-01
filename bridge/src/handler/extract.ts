@@ -8,7 +8,7 @@
 // by the engine afterwards, never trusted from here.
 
 import { z } from "zod";
-import { isTerminalStatus, oneLine, type InstructionItem } from "./backlog";
+import { clip, isTerminalStatus, oneLine, type InstructionItem } from "./backlog";
 import { extractJsonObject } from "./json-extract";
 
 // An item is one thing the user asked for, in their own words — a line, not a
@@ -111,13 +111,9 @@ export function renderAmendable(backlog: InstructionItem[]): string | null {
   const open = backlog.filter((i) => !isTerminalStatus(i.status));
   if (open.length === 0) return null;
   const shown = amendableItems(backlog);
-  const lines = shown.map((i) => {
-    const text = oneLine(i.text);
-    const clipped = text.length > MAX_AMENDABLE_LINE_CHARS
-      ? `${text.slice(0, MAX_AMENDABLE_LINE_CHARS)}...`
-      : text;
-    return `- id=${oneLine(i.id)} [${i.status}] ${clipped}`;
-  });
+  const lines = shown.map(
+    (i) => `- id=${oneLine(i.id)} [${i.status}] ${clip(oneLine(i.text), MAX_AMENDABLE_LINE_CHARS, "...")}`,
+  );
   const hidden = open.length - shown.length;
   // Said rather than left silent: an extractor that reads the list as complete
   // answers "there is no commit item" by inventing one.

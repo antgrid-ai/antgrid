@@ -27,7 +27,7 @@ import {
   type EscalationChoice, type EscalationKind, type HandlerSessionRecord, type OpenEscalation,
 } from "./session-store";
 import {
-  allTerminal, applyTransitions, isTerminalStatus, propagateBlocked, renderBacklog, summarize,
+  allTerminal, applyTransitions, clip, isTerminalStatus, propagateBlocked, renderBacklog, summarize,
   type InstructionItem, type ItemStatus, type RejectionCode,
 } from "./backlog";
 import { stripAnsi } from "./context";
@@ -198,7 +198,7 @@ function previewForUser(s: string, max = 300): string {
     /[\x00-\x1f\x7f]/g,
     (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
   );
-  return escaped.length > max ? `${escaped.slice(0, max)}…` : escaped;
+  return clip(escaped, max);
 }
 
 // A stored snapshot as the app sees it. `state` is derived rather than stored:
@@ -354,11 +354,12 @@ function describeAmendments(changes: AmendmentChange[]): { reason: string; detai
   };
 }
 
+// Flattened AND escaped: an amendment quotes the user's own backlog text back at
+// them in a feed row, so a control character smuggled into an item must not reach
+// the row raw. previewForUser is the one escaping rule; this only picks a tighter
+// cap, since several quotes share one row.
 function clipQuote(text: string): string {
-  const one = oneLine(text);
-  return one.length > MAX_AMENDMENT_QUOTE_CHARS
-    ? `${one.slice(0, MAX_AMENDMENT_QUOTE_CHARS)}...`
-    : one;
+  return previewForUser(oneLine(text), MAX_AMENDMENT_QUOTE_CHARS);
 }
 
 function wakeClock(at: number): string {

@@ -195,15 +195,16 @@ class HandlerService {
   /// arrive outside a status snapshot. The baseline is left where it is: the
   /// session it was taken against has not moved.
   ///
-  /// [spendsNextStatus] is whether the bridge emits a snapshot alongside this
-  /// record. It does for an amendment, and that snapshot's backlog is one item
-  /// shorter — which [_retirePending] would otherwise read as the NEXT sentence
-  /// having landed, taking its "sending" row away while its extraction is still
-  /// running and lifting the edit lock inside the window it exists to cover.
-  Map<String, List<String>> _withOldestPendingRetired(
-    String terminalId, {
-    required bool spendsNextStatus,
-  }) {
+  /// A survivor is always credited the next status frame, whether or not the
+  /// bridge actually emits one. Two of these records ride WITH a snapshot whose
+  /// backlog this same sentence already moved — an amendment, and a cap hit that
+  /// still had room for some of the batch — and [_retirePending] would read
+  /// either as the NEXT sentence having landed, taking its "sending" row away
+  /// while its extraction is still running and lifting the edit lock inside the
+  /// window it exists to cover. Crediting a frame the bridge never sends costs
+  /// one re-baseline instead: the survivor keeps waiting for a change of its
+  /// own, which is what it was doing anyway.
+  Map<String, List<String>> _withOldestPendingRetired(String terminalId) {
     final outstanding = _state.pendingInstructionsFor(terminalId);
     if (outstanding.isEmpty) return _state.pendingInstructions;
     final next = Map<String, List<String>>.from(_state.pendingInstructions);
@@ -213,7 +214,7 @@ class HandlerService {
       _creditedStatus.remove(terminalId);
     } else {
       next[terminalId] = outstanding.sublist(1);
-      if (spendsNextStatus) _creditedStatus.add(terminalId);
+      _creditedStatus.add(terminalId);
     }
     return next;
   }
@@ -332,20 +333,18 @@ class HandlerService {
       case 'handler:activity':
         final msg = parseAbMessage(json);
         if (msg is! HandlerActivityMessage) return;
-        // The two outcomes an instruction can reach that [_retirePending] cannot
-        // read off the item count: a backlog already at the bridge's cap appends
-        // nothing and emits nothing, and an amendment moves the count for a
-        // reason that is this sentence's own answer rather than the next one's.
-        // Left unretired, the "sending" row stands forever and the edit lock it
-        // raises holds Delete — which under a full backlog is the only thing that
-        // frees room — until an unrelated handler event, a re-arm or a reconnect.
-        final amended = msg.decision == 'instruction_amended';
+        // The outcomes an instruction can reach that [_retirePending] cannot read
+        // off the item count: a backlog at the bridge's cap appends nothing at
+        // all (and emits nothing) or appends only part of the batch, and an
+        // amendment moves the count for a reason that is this sentence's own
+        // answer rather than the next one's. Left unretired, the "sending" row
+        // stands forever and the edit lock it raises holds Delete — which under a
+        // full backlog is the only thing that frees room — until an unrelated
+        // handler event, a re-arm or a reconnect.
         final pendingInstructions =
-            amended || msg.decision == 'instruction_dropped'
-            ? _withOldestPendingRetired(
-                msg.terminalId,
-                spendsNextStatus: amended,
-              )
+            msg.decision == 'instruction_amended' ||
+                msg.decision == 'instruction_dropped'
+            ? _withOldestPendingRetired(msg.terminalId)
             : _state.pendingInstructions;
         final next = <HandlerActivityRecord>[
           HandlerActivityRecord(
