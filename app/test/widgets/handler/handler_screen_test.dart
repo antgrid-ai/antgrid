@@ -74,14 +74,17 @@ List<Map<String, dynamic>> choicesJson() => [
 ];
 
 /// The one-shot `handler:escalation` push.
-Map<String, dynamic> escalationJson({List<Map<String, dynamic>>? choices}) => {
+Map<String, dynamic> escalationJson({
+  List<Map<String, dynamic>>? choices,
+  String urgency = 'high',
+}) => {
   'projectId': 'p',
   'escalationId': 'e1',
   'terminalId': 't1',
   'question': 'bun or vitest?',
   'reasoning': 'Affects CI wiring.',
   'draftReply': 'use bun',
-  'urgency': 'high',
+  'urgency': urgency,
   'choices': ?choices,
 };
 
@@ -576,6 +579,44 @@ void main() {
     );
     expect(find.text('claude-code'), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('an urgent escalation is marked on a plain row', (tester) async {
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit('handler:status', armedStatusJson());
+    await pumpDelivery(tester);
+    t.emit('handler:escalation', escalationJson());
+    await pumpDelivery(tester);
+
+    expect(find.text('bun or vitest?'), findsOneWidget);
+    expect(find.text('URGENT'), findsOneWidget);
+  });
+
+  testWidgets('and on a decision card, from the same meta column', (
+    tester,
+  ) async {
+    // The payoff of hanging the marker off the shared trailing widget: three
+    // unrelated row shapes render an escalation, and none of them can be the
+    // one that forgot.
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit('handler:status', armedStatusJson());
+    await pumpDelivery(tester);
+    t.emit('handler:escalation', escalationJson(choices: choicesJson()));
+    await pumpDelivery(tester);
+
+    expect(find.byType(HandlerDecisionCard), findsOneWidget);
+    expect(find.text('URGENT'), findsOneWidget);
+  });
+
+  testWidgets('a normal escalation is not marked', (tester) async {
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit('handler:status', armedStatusJson());
+    await pumpDelivery(tester);
+    t.emit('handler:escalation', escalationJson(urgency: 'normal'));
+    await pumpDelivery(tester);
+
+    expect(find.text('bun or vitest?'), findsOneWidget);
+    expect(find.text('URGENT'), findsNothing);
   });
 
   testWidgets('a force push undo asks before it writes to the remote', (

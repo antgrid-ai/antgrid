@@ -140,10 +140,16 @@ class HandlerScreen extends ConsumerWidget {
       focusedServiceOrNull(container, (x) => x.handlerService)?.undo(s);
     }
 
-    Widget meta(String terminalId, int at) => _RowMeta(
+    // `urgent` rides the meta column rather than each row's own body: an
+    // escalation renders as one of three unrelated widgets (blocked card,
+    // decision card, plain row) and this is the only piece all three share, so
+    // it is the only place the marker cannot be added to two of them and
+    // forgotten on the third.
+    Widget meta(String terminalId, int at, {bool urgent = false}) => _RowMeta(
       sessionName: showSessionLabels ? nameOf(terminalId) : null,
       at: at,
       p: p,
+      urgent: urgent,
     );
 
     return CustomScrollView(
@@ -162,7 +168,11 @@ class HandlerScreen extends ConsumerWidget {
                 if (e.kind == 'guard_blocked')
                   HandlerBlockedActionCard(
                     escalation: e,
-                    trailing: meta(e.terminalId, e.at),
+                    trailing: meta(
+                      e.terminalId,
+                      e.at,
+                      urgent: e.urgency == 'high',
+                    ),
                     // Re-resolved through the container for the same reason
                     // `answer` re-resolves after its sheet: the build-time
                     // instance can be disposed by the time a tap lands.
@@ -177,7 +187,11 @@ class HandlerScreen extends ConsumerWidget {
                 else if (e.choices != null)
                   HandlerDecisionCard(
                     escalation: e,
-                    trailing: meta(e.terminalId, e.at),
+                    trailing: meta(
+                      e.terminalId,
+                      e.at,
+                      urgent: e.urgency == 'high',
+                    ),
                     // The id, not the choice: the service resolves it against
                     // the escalation's own offered set, so the text on the wire
                     // is always the one the bridge authored.
@@ -228,7 +242,11 @@ class HandlerScreen extends ConsumerWidget {
                         ),
                       ],
                     ),
-                    trailing: meta(e.terminalId, e.at),
+                    trailing: meta(
+                      e.terminalId,
+                      e.at,
+                      urgent: e.urgency == 'high',
+                    ),
                     onTap: () => answer(e),
                   ),
             ],
@@ -343,10 +361,15 @@ class _RowMeta extends StatelessWidget {
     required this.sessionName,
     required this.at,
     required this.p,
+    this.urgent = false,
   });
   final String? sessionName;
   final int at;
   final AbColors p;
+
+  /// Only escalations pass this. Snapshots and activity rows are history, and
+  /// nothing about them is waiting on the user.
+  final bool urgent;
 
   @override
   Widget build(BuildContext context) {
@@ -358,6 +381,10 @@ class _RowMeta extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
+        // Above the session name, so the eye reaches it on the way down to the
+        // timestamp rather than after it. System-assigned data, so the mono
+        // uppercase chip, matching ESCALATE ONLY on the session card.
+        if (urgent) AbChip.system(label: 'URGENT', color: p.warning),
         if (sessionName != null) Text(sessionName!, style: style),
         Text(_fmtTime(at), style: style),
       ],

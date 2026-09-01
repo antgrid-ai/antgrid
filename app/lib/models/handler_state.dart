@@ -401,6 +401,25 @@ class HandlerEscalationChoice {
   }
 }
 
+/// Urgent first, then oldest-first within each band.
+///
+/// `high` is not a shade of judge opinion. The engine mints it itself, with no
+/// judge call at all, for a blocking prompt — a permission request or a
+/// question the agent is stopped on right now (see `escalate` in
+/// bridge/src/handler/engine.ts). Those are the rows that unblock a session for
+/// one tap, and a flat oldest-first order filed them under every stale question
+/// already on the list.
+///
+/// Age still decides WITHIN a band and never across it: a `normal` that has
+/// waited an hour is not the thing holding the agent up. An urgency a newer
+/// bridge invents ranks as `normal` — the safe band, since it claims nothing.
+int compareEscalations(HandlerEscalation a, HandlerEscalation b) {
+  final byUrgency = _urgencyRank(a.urgency) - _urgencyRank(b.urgency);
+  return byUrgency != 0 ? byUrgency : a.at.compareTo(b.at);
+}
+
+int _urgencyRank(String urgency) => urgency == 'high' ? 0 : 1;
+
 class HandlerEscalation {
   final String escalationId;
   final String terminalId;

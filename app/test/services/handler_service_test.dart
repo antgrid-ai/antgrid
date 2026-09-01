@@ -69,13 +69,15 @@ Map<String, dynamic> _escalationJson(
   String escalationId, {
   String? kind,
   List<Map<String, dynamic>>? choices,
+  String urgency = 'normal',
+  int at = 1,
 }) => {
   'escalationId': escalationId,
   'question': 'q',
   'reasoning': 'r',
   'draftReply': 'd',
-  'urgency': 'normal',
-  'at': 1,
+  'urgency': urgency,
+  'at': at,
   'kind': ?kind,
   'choices': ?choices,
 };
@@ -90,6 +92,87 @@ const _choicesJson = [
 ];
 
 void main() {
+  test('a live urgent escalation outranks the ones already listed', () async {
+    // The push is what raises the toast, and the status frame that re-sorts
+    // arrives milliseconds later — but the user taps in between, and an
+    // appended row sat at the bottom of the very list the toast sent them to.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(
+          terminalId: 't1',
+          pendingEscalations: 2,
+          state: 'needs_you',
+          escalations: [
+            _escalationJson('waiting-1', at: 1),
+            _escalationJson('waiting-2', at: 2),
+          ],
+        ),
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    t.emit('handler:escalation', {
+      'projectId': 'p',
+      'escalationId': 'blocking',
+      'terminalId': 't1',
+      'question': 'q',
+      'reasoning': 'r',
+      'draftReply': 'd',
+      'urgency': 'high',
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.escalations.map((e) => e.escalationId), [
+      'blocking',
+      'waiting-1',
+      'waiting-2',
+    ]);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a replayed set comes back banded, not merely in age order', () async {
+    // Reconnect replays every unanswered escalation at once. Age order alone
+    // put the blocking one last on a list the user opened to unblock it.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(
+          terminalId: 't1',
+          pendingEscalations: 3,
+          state: 'needs_you',
+          escalations: [
+            _escalationJson('waiting', at: 1),
+            _escalationJson('blocking', at: 3, urgency: 'high'),
+            _escalationJson('waiting-later', at: 2),
+          ],
+        ),
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.escalations.map((e) => e.escalationId), [
+      'blocking',
+      'waiting',
+      'waiting-later',
+    ]);
+
+    await svc.dispose();
+    await session.close();
+  });
+
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {

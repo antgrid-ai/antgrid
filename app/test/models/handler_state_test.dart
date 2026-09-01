@@ -14,7 +14,59 @@ HandlerSessionState _session(String terminalId, {required int pending}) {
   );
 }
 
+HandlerEscalation _esc(String id, {required String urgency, required int at}) =>
+    HandlerEscalation(
+      escalationId: id,
+      terminalId: 't1',
+      question: 'q',
+      reasoning: 'r',
+      draftReply: 'd',
+      urgency: urgency,
+      at: at,
+    );
+
 void main() {
+  group('compareEscalations', () {
+    test('urgent first, and oldest first inside each band', () {
+      final ordered =
+          [
+            _esc('normal-old', urgency: 'normal', at: 1),
+            _esc('urgent-new', urgency: 'high', at: 9),
+            _esc('normal-new', urgency: 'normal', at: 7),
+            _esc('urgent-old', urgency: 'high', at: 5),
+          ]..sort(compareEscalations);
+      expect(ordered.map((e) => e.escalationId), [
+        'urgent-old',
+        'urgent-new',
+        'normal-old',
+        'normal-new',
+      ]);
+    });
+
+    test('age never crosses the band', () {
+      // The oldest row on the list still sorts under a `high` that arrived a
+      // moment ago: one has been waiting, the other is holding the agent up.
+      final ordered =
+          [
+            _esc('ancient', urgency: 'normal', at: 1),
+            _esc('fresh', urgency: 'high', at: 9999),
+          ]..sort(compareEscalations);
+      expect(ordered.first.escalationId, 'fresh');
+    });
+
+    test('an urgency a newer bridge invents ranks as normal', () {
+      // The unknown band is the safe one. Reading an unrecognised word as
+      // urgent would let a bridge outrank the one value the app knows means
+      // the agent is stopped.
+      final ordered =
+          [
+            _esc('invented', urgency: 'critical', at: 1),
+            _esc('known', urgency: 'high', at: 9),
+          ]..sort(compareEscalations);
+      expect(ordered.first.escalationId, 'known');
+    });
+  });
+
   const backlogWire = [
     {'id': 'i1', 'text': 'run the tests', 'status': 'done', 'createdAt': 1},
     {
