@@ -4,15 +4,19 @@
 // type with nothing on either saying who receives it.
 import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/handler_state.dart';
+import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
+import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/handler/handler_backlog_drawer.dart';
 import 'package:antgrid/widgets/handler/handler_pa_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../../helpers/prefs_test_mock.dart';
 
 /// [pendingEscalations] defaults to the length of [escalations] because the
 /// bridge derives it from that same list — a session carrying a count with no
@@ -60,14 +64,21 @@ List<HandlerEscalation> _replies(int n) => [
 
 /// The bar sends nothing of its own now, so this needs no project session — only
 /// the focused terminal and the handler snapshot the row reads.
+///
+/// The first-run store is here for the drawer the row opens, not for the bar:
+/// the drawer's disclaimer is retired by a persisted flag, and the provider
+/// holding it throws unless the store is injected.
 Future<void> _pump(
   WidgetTester tester, {
   required Map<String, HandlerSessionState> sessions,
   HandlerBacklogOpener? opener,
 }) async {
+  useInMemoryPrefs();
+  final firstRun = await FirstRunStore.open();
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
+        firstRunStoreProvider.overrideWithValue(firstRun),
         activeSessionIdProvider.overrideWith(() => ValueController('t1')),
         handlerStateProvider.overrideWith(
           (ref) => Stream.value(

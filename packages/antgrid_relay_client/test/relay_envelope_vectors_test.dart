@@ -45,6 +45,8 @@ void main() {
             expect(m!.deviceId, json['deviceId']);
             expect(m.epoch, json['epoch']);
             expect(m.serverTime, json['serverTime']);
+          case 'pong':
+            expect(parsed, isA<PongMessage>());
           case 'stream-opened':
             expect(
               (parsed as StreamOpenedMessage?)!.streamId,
@@ -100,6 +102,7 @@ void main() {
           'stream-close' => StreamCloseMessage(
             streamId: json['streamId'] as String,
           ).toJson(),
+          'ping' => const PingMessage().toJson(),
           _ => fail(
             'vector $name marked dartEmits but has no constructor '
             'case — add one when the Dart client learns to send it',

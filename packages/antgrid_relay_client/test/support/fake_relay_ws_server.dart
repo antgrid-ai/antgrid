@@ -15,13 +15,40 @@ import 'dart:io';
 /// already parsed out for convenience (RelayService always sends `hello` as
 /// its first — and, in these tests, only relevant — text frame).
 class FakeRelayConnection {
-  FakeRelayConnection(this.socket, this.hello);
+  FakeRelayConnection(this.socket, this.hello, this._messages) {
+    unawaited(_pump());
+  }
   final WebSocket socket;
   final Map<String, dynamic> hello;
+  final StreamIterator<dynamic> _messages;
+  final _incoming = StreamController<dynamic>.broadcast();
+  int receivedCount = 0;
 
   void sendJson(Map<String, dynamic> obj) => socket.add(jsonEncode(obj));
 
-  Future<void> close() => socket.close();
+  void sendText(String text) => socket.add(text);
+
+  void sendBinary(List<int> bytes) => socket.add(bytes);
+
+  Future<Map<String, dynamic>> nextJson() async {
+    final message = await _incoming.stream.first;
+    return jsonDecode(message as String) as Map<String, dynamic>;
+  }
+
+  Future<void> get done => socket.done;
+
+  Future<void> close() async {
+    await _messages.cancel();
+    await socket.close();
+    await _incoming.close();
+  }
+
+  Future<void> _pump() async {
+    while (await _messages.moveNext()) {
+      receivedCount++;
+      if (!_incoming.isClosed) _incoming.add(_messages.current);
+    }
+  }
 }
 
 class FakeRelayWsServer {
@@ -58,10 +85,12 @@ class FakeRelayWsServer {
     }
     final ws = await WebSocketTransformer.upgrade(req);
     // RelayService sends `hello` as the very first frame on every attempt.
-    final first = await ws.first as String;
+    final messages = StreamIterator<dynamic>(ws);
+    if (!await messages.moveNext()) return;
+    final first = messages.current as String;
     final hello = jsonDecode(first) as Map<String, dynamic>;
     if (!_connections.isClosed) {
-      _connections.add(FakeRelayConnection(ws, hello));
+      _connections.add(FakeRelayConnection(ws, hello, messages));
     }
   }
 

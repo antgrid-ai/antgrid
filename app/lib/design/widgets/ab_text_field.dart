@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show TextInputFormatter;
 
 import '../ab_icons.dart';
 import '../ab_tokens.dart';
@@ -7,7 +8,7 @@ import 'ab_control_box.dart';
 import 'ab_icon.dart';
 import 'ab_icon_button.dart';
 
-/// Single-line text input primitive for the Antgrid design system.
+/// Text input primitive for the Antgrid design system.
 ///
 /// Owns the visual chrome (1px [context.antgrid.borderDefault] outline,
 /// [AbTokens.borderRadius5], monospace text, accent cursor) and the
@@ -38,7 +39,10 @@ class AbTextField extends StatefulWidget {
     this.enableSuggestions = true,
     this.keyboardType,
     this.textInputAction,
+    this.inputFormatters,
     this.autofillHints,
+    this.minLines,
+    this.maxLines = 1,
     this.fillColor,
     this.height,
     this.contentPadding,
@@ -89,12 +93,26 @@ class AbTextField extends StatefulWidget {
   final TextInputType? keyboardType;
   final TextInputAction? textInputAction;
 
+  /// Forwarded verbatim to the inner [TextField]. A pass-through, not a
+  /// validation feature: the bound a value has to respect is known by the
+  /// caller that knows the wire, never by the box that draws it.
+  final List<TextInputFormatter>? inputFormatters;
+
   /// What the platform password manager should offer here (e.g.
   /// [AutofillHints.username]). Null — the default — opts the field OUT of
   /// autofill entirely, which is what every field but the sign-in form wants:
   /// Flutter only enrols a field the caller has named, and an unnamed one is
   /// never filled and never prompts a save.
   final Iterable<String>? autofillHints;
+
+  /// Line budget, forwarded to the inner [TextField]. The default of 1 is the
+  /// single-row control every other field here is; anything else makes the box
+  /// grow with its text, starting at [height] and expanding from there.
+  ///
+  /// [minLines] opens the box at that many lines, so a field meant to be
+  /// written into does not start as a slot the size of one word.
+  final int? minLines;
+  final int? maxLines;
 
   /// Background fill. Defaults to [context.antgrid.bgSurface].
   final Color? fillColor;
@@ -213,6 +231,10 @@ class _AbTextFieldState extends State<AbTextField> {
     final showClear =
         widget.showClearButton && enabled && _controller.text.isNotEmpty;
     final effHeight = widget.height ?? AbTokens.rowHeightSm;
+    // A wrapping field has no single row to centre against: its own text sets
+    // the box height, and the prefix and clear slots belong beside the FIRST
+    // line rather than halfway down the paragraph.
+    final wraps = widget.maxLines != 1;
 
     // Clear button, optionally centred in a square slot of [suffixSlotWidth]
     // (matches a same-width prefix slot for equal margins on all sides).
@@ -238,11 +260,22 @@ class _AbTextFieldState extends State<AbTextField> {
       behavior: HitTestBehavior.opaque,
       onTap: enabled ? _focusNode.requestFocus : null,
       child: AbControlBox(
-        height: effHeight,
+        height: wraps ? null : effHeight,
+        minHeight: wraps ? effHeight : null,
         focused: _focusNode.hasFocus,
         fillColor: widget.fillColor,
-        padding: widget.contentPadding,
+        padding:
+            widget.contentPadding ??
+            (wraps
+                ? const EdgeInsets.symmetric(
+                    horizontal: AbTokens.space8,
+                    vertical: AbTokens.space6,
+                  )
+                : null),
         child: Row(
+          crossAxisAlignment: wraps
+              ? CrossAxisAlignment.start
+              : CrossAxisAlignment.center,
           children: [
             if (widget.prefixIcon != null)
               SizedBox(
@@ -266,7 +299,10 @@ class _AbTextFieldState extends State<AbTextField> {
                 enableSuggestions: widget.enableSuggestions,
                 keyboardType: widget.keyboardType,
                 textInputAction: widget.textInputAction,
+                inputFormatters: widget.inputFormatters,
                 autofillHints: widget.autofillHints,
+                minLines: widget.minLines,
+                maxLines: widget.maxLines,
                 onChanged: widget.onChanged,
                 onSubmitted: widget.onSubmitted,
                 onTap: widget.onTap,

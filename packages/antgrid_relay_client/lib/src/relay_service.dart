@@ -32,6 +32,15 @@ class RelayConnectException implements Exception {
       '${message == null ? '' : ': $message'}';
 }
 
+enum RelayLogLevel { debug, info, warn, error }
+
+typedef RelayLogger =
+    void Function(
+      RelayLogLevel level,
+      String message, {
+      Map<String, Object?>? fields,
+    });
+
 /// One machine↔relay WebSocket for one phone identity. v3: authenticates with a
 /// single signed `hello` frame (proof-of-possession over `buildHelloSigBody`),
 /// the relay answers `welcome` (→ authenticated) or a typed `error`. There is
@@ -43,6 +52,7 @@ class RelayConnectException implements Exception {
 /// deciding when to try again.
 class RelayService {
   final CryptoService _crypto;
+  final RelayLogger? _logger;
 
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
@@ -52,6 +62,12 @@ class RelayService {
   Completer<void>? _connect;
   Timer? _connectTimeout;
   Duration _connectTimeoutDuration = const Duration(seconds: 15);
+  Duration _heartbeatInterval = const Duration(seconds: 25);
+  Timer? _heartbeatTimer;
+  DateTime? _socketOpenedAt;
+  DateTime? _lastInboundAt;
+  DateTime? _probeSentAt;
+  String? _relaySlotId;
 
   /// The bare machine `deviceUuid` this socket serves. The relay fans
   /// `peer-online`/`peer-offline` out account-wide (all of a user's machines —
@@ -95,7 +111,9 @@ class RelayService {
 
   AppState get currentState => _currentState;
 
-  RelayService({required CryptoService crypto}) : _crypto = crypto;
+  RelayService({required CryptoService crypto, RelayLogger? logger})
+    : _crypto = crypto,
+      _logger = logger;
 
   /// A dial outlives this object: `connect()` deliberately does not await
   /// `_doConnect`, so a socket that fails (or a `channel.ready` that rejects
@@ -139,8 +157,10 @@ class RelayService {
         message: 'connect() after dispose()',
       );
     }
+    _resetHeartbeat();
     _epoch = epoch;
     _machineDeviceId = machineDeviceId;
+    _relaySlotId = identity.deviceId;
     // A superseded in-flight attempt must not leave its caller hanging.
     _failConnect(
       RelayConnectException(
@@ -214,6 +234,12 @@ class RelayService {
       developer.log('connecting to relay $wsUrl', name: 'antgrid.relay');
       final channel = WebSocketChannel.connect(Uri.parse(wsUrl));
       _channel = channel;
+      _socketOpenedAt = DateTime.now().toUtc();
+      _log(
+        RelayLogLevel.info,
+        'relay socket connecting',
+        fields: {'machineSlot': _relaySlotId},
+      );
       // Deliberately NOT awaited: a relay killed without a close handshake
       // leaves `sink.close()` waiting for a FIN that never arrives, and this
       // dial would then open its socket, send nothing, and hang — the relay
@@ -235,9 +261,15 @@ class RelayService {
       );
 
       _subscription = channel.stream.listen(
-        _onMessage,
-        onDone: _onDisconnected,
-        onError: (Object error) => _onDisconnected(error),
+        (data) {
+          if (identical(_channel, channel)) _onMessage(data);
+        },
+        onDone: () {
+          if (identical(_channel, channel)) _onDisconnected();
+        },
+        onError: (Object error) {
+          if (identical(_channel, channel)) _onDisconnected(error);
+        },
       );
 
       final hello = await _buildHello(wsUrl, identity, licenseToken);
@@ -333,6 +365,16 @@ class RelayService {
   void debugSetConnectTimeout(Duration timeout) =>
       _connectTimeoutDuration = timeout;
 
+  /// Test-only seam: shorten the heartbeat without changing production timing.
+  void debugSetHeartbeatInterval(Duration interval) =>
+      _heartbeatInterval = interval;
+
+  /// Test-only seam: model an OS-frozen periodic timer before a resume event.
+  void debugPauseHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+  }
+
   /// Test-only seam: install the channel a subsequent `connect()` will see as
   /// its `prevChannel`, so a test can stand in a socket whose close never
   /// completes. Not part of the supported API.
@@ -349,13 +391,22 @@ class RelayService {
     final msg = parseRelayMessage(json);
     if (msg == null) return;
 
+    _markInboundHealthy();
+
     if (msg is WelcomeMessage) {
       // State first, then the completer: whoever awaits connect() re-reads the
       // connection state the instant it resolves.
       _setState(
         _currentState.copyWith(
           connectionState: RelayConnectionState.authenticated,
+          connectedAt: DateTime.now().toUtc(),
         ),
+      );
+      if (_channel != null) _startHeartbeat();
+      _log(
+        RelayLogLevel.info,
+        'relay socket authenticated',
+        fields: {'machineSlot': _relaySlotId},
       );
       _completeConnect();
     } else if (msg is ErrorMessage) {
@@ -471,6 +522,7 @@ class RelayService {
       decoded.kind,
     );
     if (msg == null) return;
+    _markInboundHealthy();
     if (_messageController.isClosed) return;
     _messageController.add(msg);
   }
@@ -483,6 +535,15 @@ class RelayService {
         error: error,
       );
     }
+    _log(
+      RelayLogLevel.info,
+      'relay socket disconnected',
+      fields: {
+        'machineSlot': _relaySlotId,
+        'socketAgeMs': _ageMs(_socketOpenedAt),
+        if (error != null) 'error': '$error',
+      },
+    );
     _cleanup();
     // Retire the dead channel: left here it becomes the `prevChannel` of the
     // NEXT dial, which would then tidy up a socket the peer already abandoned
@@ -572,8 +633,111 @@ class RelayService {
   }
 
   void _cleanup() {
+    _resetHeartbeat();
     _subscription?.cancel();
     _subscription = null;
+  }
+
+  /// Re-check a possibly frozen socket when the app returns to the foreground.
+  /// Retry remains the supervisor's job: this method only proves or closes the
+  /// socket it already owns.
+  void onResume() {
+    if (_currentState.connectionState != RelayConnectionState.authenticated) {
+      return;
+    }
+    final now = DateTime.now().toUtc();
+    final probe = _probeSentAt;
+    if (probe != null) {
+      if (now.difference(probe) >= _heartbeatInterval) {
+        _closeForHeartbeatTimeout(now);
+      }
+      return;
+    }
+    final inbound = _lastInboundAt;
+    if (inbound != null && now.difference(inbound) < _heartbeatInterval) return;
+    _sendHeartbeatProbe(now);
+    _scheduleHeartbeat();
+  }
+
+  void _startHeartbeat() {
+    _probeSentAt = null;
+    _lastInboundAt = DateTime.now().toUtc();
+    _scheduleHeartbeat();
+  }
+
+  void _scheduleHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
+      if (_currentState.connectionState != RelayConnectionState.authenticated) {
+        return;
+      }
+      final now = DateTime.now().toUtc();
+      final probe = _probeSentAt;
+      if (probe != null) {
+        if (now.difference(probe) >= _heartbeatInterval) {
+          _closeForHeartbeatTimeout(now);
+        }
+        return;
+      }
+      _sendHeartbeatProbe(now);
+    });
+  }
+
+  void _sendHeartbeatProbe(DateTime now) {
+    _probeSentAt = now;
+    _log(
+      RelayLogLevel.debug,
+      'relay heartbeat probe sent',
+      fields: {'machineSlot': _relaySlotId},
+    );
+    _send(const PingMessage().toJson());
+  }
+
+  void _markInboundHealthy() {
+    _lastInboundAt = DateTime.now().toUtc();
+    _probeSentAt = null;
+  }
+
+  void _closeForHeartbeatTimeout(DateTime now) {
+    final channel = _channel;
+    if (channel == null) return;
+    _log(
+      RelayLogLevel.warn,
+      'relay heartbeat timed out',
+      fields: {
+        'machineSlot': _relaySlotId,
+        'socketAgeMs': _ageMs(_socketOpenedAt, now),
+        'lastInboundAgeMs': _ageMs(_lastInboundAt, now),
+        'outstandingProbeAgeMs': _ageMs(_probeSentAt, now),
+      },
+    );
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    // Publish the drop synchronously. A half-open peer may never complete the
+    // WebSocket close handshake, and waiting for onDone would strand the
+    // supervisor behind the dead socket it is responsible for replacing.
+    _onDisconnected();
+    unawaited(channel.sink.close());
+  }
+
+  void _resetHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _lastInboundAt = null;
+    _probeSentAt = null;
+    _socketOpenedAt = null;
+  }
+
+  int? _ageMs(DateTime? at, [DateTime? now]) => at == null
+      ? null
+      : (now ?? DateTime.now().toUtc()).difference(at).inMilliseconds;
+
+  void _log(
+    RelayLogLevel level,
+    String message, {
+    Map<String, Object?>? fields,
+  }) {
+    _logger?.call(level, message, fields: fields);
   }
 
   void dispose() {

@@ -594,8 +594,8 @@ class HandlerActivityRecord {
   // unrenderable feed row, never at compile time.
   // 'continue' | 'handle' | 'escalate' | 'armed' | 'goal_edited' |
   // 'item_done' | 'item_blocked' | 'item_skipped' | 'item_failed' |
-  // 'instruction_dropped' | 'floor_warning' | 'evidence_rejected' |
-  // 'wrapped_up' | 'parked' | 'resumed'
+  // 'instruction_dropped' | 'instruction_authorized' | 'instruction_amended' |
+  // 'floor_warning' | 'evidence_rejected' | 'wrapped_up' | 'parked' | 'resumed'
   final String decision;
   final String reason;
   final String? detail;
@@ -631,6 +631,13 @@ class HandlerState {
   /// second tap from looking live during the round trip.
   final Set<String> pendingUndo;
 
+  /// Instructions whose `handler:instruct` is out and whose extracted items
+  /// have not come back, keyed by terminalId, oldest first. Held as the user's
+  /// own sentence because that is all there is to hold: the message is
+  /// unacknowledged, the bridge mints the ids, and extraction rewrites the text
+  /// — so nothing that comes back can be matched to what went out.
+  final Map<String, List<String>> pendingInstructions;
+
   const HandlerState({
     this.defaultTool,
     this.defaultNotifyOnly = false,
@@ -639,6 +646,7 @@ class HandlerState {
     required this.activity,
     this.snapshots = const [],
     this.pendingUndo = const {},
+    this.pendingInstructions = const {},
   });
 
   const HandlerState.initial()
@@ -648,7 +656,8 @@ class HandlerState {
       escalations = const [],
       activity = const [],
       snapshots = const [],
-      pendingUndo = const {};
+      pendingUndo = const {},
+      pendingInstructions = const {};
 
   // Absence of any session is the wire's implicit 'off' — there is no
   // standalone off/on flag now that arming is per-terminal.
@@ -660,6 +669,11 @@ class HandlerState {
   String? get latestEscalationId =>
       escalations.isEmpty ? null : escalations.last.escalationId;
 
+  /// What [terminalId] has in flight, oldest first — empty for a terminal with
+  /// nothing outstanding, so no caller needs a null branch to ask.
+  List<String> pendingInstructionsFor(String terminalId) =>
+      pendingInstructions[terminalId] ?? const [];
+
   HandlerState copyWith({
     String? defaultTool,
     bool? defaultNotifyOnly,
@@ -668,6 +682,7 @@ class HandlerState {
     List<HandlerActivityRecord>? activity,
     List<HandlerSnapshot>? snapshots,
     Set<String>? pendingUndo,
+    Map<String, List<String>>? pendingInstructions,
   }) {
     return HandlerState(
       defaultTool: defaultTool ?? this.defaultTool,
@@ -677,6 +692,7 @@ class HandlerState {
       activity: activity ?? this.activity,
       snapshots: snapshots ?? this.snapshots,
       pendingUndo: pendingUndo ?? this.pendingUndo,
+      pendingInstructions: pendingInstructions ?? this.pendingInstructions,
     );
   }
 }

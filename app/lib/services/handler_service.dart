@@ -4,6 +4,12 @@ import '../models/ab_message.dart';
 import '../models/handler_state.dart';
 import '../project/project_session.dart';
 
+/// What became of a call to [HandlerService.instruct]. A bool could not tell
+/// the two refusals apart, and they are owed different answers: a blank field
+/// is the user having typed nothing, which needs no reply, while a sentence
+/// already outstanding is a send that looked identical and did not happen.
+enum HandlerInstructResult { sent, empty, duplicate }
+
 /// Per-project mirror of the bridge Handler subsystem. Reduces `handler:*`
 /// inbound messages into a [HandlerState]; never persists (the bridge owns
 /// `handler-config.json` / `handler-activity.jsonl`).
@@ -24,6 +30,21 @@ class HandlerService {
   bool _disposed = false;
   // agent:prompt correlation ids — the driver only needs per-send uniqueness.
   int _reqCounter = 0;
+
+  // What each terminal's session looked like when its outstanding instructions
+  // went out, which is what [_retirePending] compares against. Service-local
+  // bookkeeping, not state: no surface renders it, and every sentence still
+  // outstanding for a terminal shares one entry (a baseline only ever moves on
+  // a status frame, and every survivor is re-baselined against the same one).
+  final Map<String, ({int backlog, int armedAt})> _instructBaselines = {};
+
+  // Terminals whose next status frame is already spent. An amendment is the one
+  // bridge outcome that BOTH records an activity row and emits a snapshot, and
+  // the snapshot carries a backlog its own drop has already shortened — so read
+  // as a survivor's evidence it would retire a second sentence whose extraction
+  // has not started. Marked when the row retires off it, and spent by
+  // [_retirePending] re-baselining that terminal instead of retiring off it.
+  final Set<String> _creditedStatus = {};
 
   // Judge picks, keyed by terminalId. `sessions` in [HandlerState] only holds
   // currently-armed sessions, so a disarmed terminal's judge pick would
@@ -107,6 +128,96 @@ class HandlerService {
     if (!_disposed) _stateController.add(_state);
   }
 
+  /// Which of [terminalId]'s sessions this instruction was sent against, so a
+  /// later snapshot can say whether the bridge has rewritten it since.
+  ({int backlog, int armedAt}) _baselineFor(String terminalId) {
+    final s = _state.sessions[terminalId];
+    return (backlog: s?.backlogTotal ?? 0, armedAt: s?.armedAt ?? 0);
+  }
+
+  /// Retires outstanding instructions terminal by terminal, on that terminal's
+  /// own evidence.
+  ///
+  /// A status frame says nothing about the terminal it was raised for: the
+  /// engine serialises EVERY armed session on every handler event, twice, so a
+  /// second armed terminal's ordinary supervision produces one within
+  /// milliseconds of a send. Retiring on the frame alone cleared terminal A's
+  /// sentence while A's extraction was still running — which took the "sending"
+  /// row away with the backlog unchanged, lifted the debounce so a re-tap
+  /// stacked the same work twice, and lifted the drawer's edit lock inside
+  /// exactly the window it exists to cover.
+  ///
+  /// The evidence is the session the sentence was sent against. Extraction
+  /// appends, so a backlog that is no longer the length it was has been
+  /// rewritten since; a different `armedAt` is a re-arm, which replaces the
+  /// session the queued extraction would have appended to and is the one path
+  /// that appends nothing and says nothing; and a terminal absent from the
+  /// snapshot has been disarmed or has exited. Survivors are re-baselined
+  /// against what was just observed, so the next sentence in the queue waits
+  /// for a change of its own rather than inheriting this one's.
+  ///
+  /// The cap path appends nothing and emits no status at all, so it is not
+  /// reachable from here — [_onHeavyJson] retires that one off its own activity
+  /// record. An amendment does emit one, and [_creditedStatus] is how that frame
+  /// re-baselines the survivors instead of answering for them too.
+  Map<String, List<String>> _retirePending(
+    Map<String, HandlerSessionState> sessions,
+  ) {
+    final next = <String, List<String>>{};
+    for (final entry in _state.pendingInstructions.entries) {
+      final terminalId = entry.key;
+      final session = sessions[terminalId];
+      final baseline = _instructBaselines[terminalId];
+      final credited = _creditedStatus.remove(terminalId);
+      final answered =
+          session == null ||
+          (!credited &&
+              (baseline == null ||
+                  session.backlogTotal != baseline.backlog ||
+                  session.armedAt != baseline.armedAt));
+      final kept = session == null
+          ? const <String>[]
+          : (answered ? entry.value.sublist(1) : entry.value);
+      if (kept.isEmpty) {
+        _instructBaselines.remove(terminalId);
+        continue;
+      }
+      next[terminalId] = kept;
+      _instructBaselines[terminalId] = (
+        backlog: session!.backlogTotal,
+        armedAt: session.armedAt,
+      );
+    }
+    return next;
+  }
+
+  /// Drops [terminalId]'s oldest outstanding sentence, for the signals that
+  /// arrive outside a status snapshot. The baseline is left where it is: the
+  /// session it was taken against has not moved.
+  ///
+  /// [spendsNextStatus] is whether the bridge emits a snapshot alongside this
+  /// record. It does for an amendment, and that snapshot's backlog is one item
+  /// shorter — which [_retirePending] would otherwise read as the NEXT sentence
+  /// having landed, taking its "sending" row away while its extraction is still
+  /// running and lifting the edit lock inside the window it exists to cover.
+  Map<String, List<String>> _withOldestPendingRetired(
+    String terminalId, {
+    required bool spendsNextStatus,
+  }) {
+    final outstanding = _state.pendingInstructionsFor(terminalId);
+    if (outstanding.isEmpty) return _state.pendingInstructions;
+    final next = Map<String, List<String>>.from(_state.pendingInstructions);
+    if (outstanding.length == 1) {
+      next.remove(terminalId);
+      _instructBaselines.remove(terminalId);
+      _creditedStatus.remove(terminalId);
+    } else {
+      next[terminalId] = outstanding.sublist(1);
+      if (spendsNextStatus) _creditedStatus.add(terminalId);
+    }
+    return next;
+  }
+
   void _onStatusJson(Map<String, dynamic> json) {
     if (_disposed) return;
     if (json['type'] != 'handler:status') return;
@@ -151,6 +262,9 @@ class HandlerService {
       for (final id in _state.pendingUndo)
         if (replayed[id]?.undoable ?? false) id,
     };
+    // Read before the state moves: [_retirePending] compares the snapshot
+    // against the session each sentence was sent against.
+    final pendingInstructions = _retirePending(sessions);
     final next = _state.copyWith(
       sessions: sessions,
       defaultNotifyOnly: msg.defaultNotifyOnly,
@@ -158,6 +272,7 @@ class HandlerService {
       defaultTool: msg.defaultTool,
       snapshots: snapshots,
       pendingUndo: pendingUndo,
+      pendingInstructions: pendingInstructions,
     );
     _emit(next);
   }
@@ -217,6 +332,21 @@ class HandlerService {
       case 'handler:activity':
         final msg = parseAbMessage(json);
         if (msg is! HandlerActivityMessage) return;
+        // The two outcomes an instruction can reach that [_retirePending] cannot
+        // read off the item count: a backlog already at the bridge's cap appends
+        // nothing and emits nothing, and an amendment moves the count for a
+        // reason that is this sentence's own answer rather than the next one's.
+        // Left unretired, the "sending" row stands forever and the edit lock it
+        // raises holds Delete — which under a full backlog is the only thing that
+        // frees room — until an unrelated handler event, a re-arm or a reconnect.
+        final amended = msg.decision == 'instruction_amended';
+        final pendingInstructions =
+            amended || msg.decision == 'instruction_dropped'
+            ? _withOldestPendingRetired(
+                msg.terminalId,
+                spendsNextStatus: amended,
+              )
+            : _state.pendingInstructions;
         final next = <HandlerActivityRecord>[
           HandlerActivityRecord(
             recordId: msg.recordId,
@@ -233,6 +363,7 @@ class HandlerService {
             activity: next.length > _activityCap
                 ? next.sublist(0, _activityCap)
                 : next,
+            pendingInstructions: pendingInstructions,
           ),
         );
         break;
@@ -322,13 +453,30 @@ class HandlerService {
   /// The goal is deliberately not a parameter: a changed goal arriving without
   /// a backlog re-extracts into the session, so the two edits stay separate
   /// calls.
-  void updateBacklog({
+  ///
+  /// An edit is refused outright while an instruction is outstanding for
+  /// [terminalId]: extraction appends behind this handoff, so NO list readable
+  /// at the moment of the edit is fresh, and the replace built from one deletes
+  /// the items the user just asked for with nothing said. The floor is here
+  /// rather than on the surface that noticed it because this is the only way an
+  /// edit reaches the wire — a second editing surface inherits it instead of
+  /// having to remember it. A surface that offers the edit anyway owes the user
+  /// the reason; the refusal alone is silent.
+  ///
+  /// Reports whether the replace went out, so a surface holding something the
+  /// user cannot get back — text they just typed — can keep it rather than
+  /// close over a send that did not happen. Reading the hold off the state
+  /// instead would be a second copy of this rule, and one that can go stale
+  /// between the frame a button was drawn in and the tap that fires it.
+  bool updateBacklog({
     required String terminalId,
     required List<HandlerInstructionItem> backlog,
     required bool notifyOnly,
   }) {
-    if (_disposed) return;
+    if (_disposed) return false;
+    if (_state.pendingInstructionsFor(terminalId).isNotEmpty) return false;
     arm(terminalId: terminalId, backlog: backlog, notifyOnly: notifyOnly);
+    return true;
   }
 
   /// Stack another instruction onto [terminalId]'s backlog. The bridge extracts
@@ -338,10 +486,31 @@ class HandlerService {
   ///
   /// No optimistic local append: the bridge mints the item ids and echoes the
   /// whole backlog back on `handler:status`, so an appended local item would
-  /// race that snapshot and show twice until it landed.
-  void instruct(String terminalId, String text) {
-    if (_disposed) return;
-    if (text.trim().isEmpty) return;
+  /// race that snapshot and show twice until it landed. The sentence itself is
+  /// recorded in [HandlerState.pendingInstructions] instead — extraction runs
+  /// behind a per-terminal serial chain and spawns a headless CLI, so the
+  /// seconds before the next snapshot are otherwise indistinguishable from a
+  /// tap that missed.
+  ///
+  /// That record is also the debounce. A sentence already in flight for this
+  /// terminal is refused, because the bridge APPENDS and nothing there absorbs
+  /// a duplicate: a second tap would put the same work in the backlog twice.
+  /// It holds for exactly as long as the ambiguity does rather than for a fixed
+  /// interval, and the cost is that the same words genuinely wanted twice wait
+  /// for the first to land.
+  ///
+  /// Reports which of the three happened, so a caller can keep the text it
+  /// would otherwise have cleared away AND tell a held send apart from an empty
+  /// one — a duplicate looks identical to a tap that missed, and it is the
+  /// primary action of the surface that sends it.
+  HandlerInstructResult instruct(String terminalId, String text) {
+    // Nothing to report on a torn-down service: the caller is going away too.
+    if (_disposed) return HandlerInstructResult.empty;
+    final sentence = text.trim();
+    if (sentence.isEmpty) return HandlerInstructResult.empty;
+    final outstanding = _state.pendingInstructionsFor(terminalId);
+    if (outstanding.contains(sentence)) return HandlerInstructResult.duplicate;
+    _instructBaselines[terminalId] = _baselineFor(terminalId);
     session.send(
       createAbMessage('handler:instruct', {
         'projectId': session.projectId,
@@ -349,6 +518,15 @@ class HandlerService {
         'text': text,
       }),
     );
+    _emit(
+      _state.copyWith(
+        pendingInstructions: {
+          ..._state.pendingInstructions,
+          terminalId: [...outstanding, sentence],
+        },
+      ),
+    );
+    return HandlerInstructResult.sent;
   }
 
   /// Undo [snapshot] — the one tap spec §5.2 trades prevention for. The bridge

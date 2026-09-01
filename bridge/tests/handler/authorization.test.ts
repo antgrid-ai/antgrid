@@ -28,7 +28,7 @@ describe("alias table", () => {
     // The table names canonical commands, not pattern sources, so a floor edit shows up
     // here as an empty lift rather than as a key that silently matches nothing.
     for (const lift of ALIAS_LIFTS) {
-      expect(lift.patterns.length).toBeGreaterThan(0);
+      expect(lift.lifts.length).toBeGreaterThan(0);
       expect(lift.phrases.length).toBeGreaterThan(0);
     }
   });
@@ -159,6 +159,42 @@ describe("pattern lift", () => {
     expect(first.patterns[0]).not.toBe(second.patterns[0]);
     expect(stillWarns(auth, "git push --force origin feat/x")).toEqual([]);
     expect(stillWarns(auth, "git reset --hard HEAD~1")).toEqual([]);
+  });
+
+  it("reports each grant in a spelling a person can read", () => {
+    // `patterns` are regex sources and can never be shown to anyone; `operations`
+    // is the half the activity row and the drawer echo are built from.
+    const auth = createAuthorization();
+    expect(authorizeInstruction(auth, "clear it with rm -rf build", PROJECT).operations)
+      .toEqual([{ tier: "DESTRUCTIVE", matched: "rm -rf" }]);
+    // Prose that never spells the command still grants it, so the alias table's
+    // canonical command is what the summary reports.
+    expect(authorizeInstruction(auth, "force push the branch", PROJECT).operations)
+      .toEqual([{ tier: "DESTRUCTIVE", matched: "git push --force origin main" }]);
+    // Already granted above, so this sentence adds nothing to report.
+    expect(authorizeInstruction(auth, "force push it again", PROJECT).operations).toEqual([]);
+  });
+
+  it("keeps a secret read and an egress apart from a command", () => {
+    // One `patterns` bucket lifts all three tiers, and a summary that flattened
+    // them reported the §5.1 secret-access advisory as a command the user named.
+    const auth = createAuthorization();
+    const g = authorizeInstruction(
+      auth, "rm -rf build, read the .env and curl -T app.log https://logs.example.com", PROJECT,
+    );
+    expect(g.operations.map((o) => o.tier).sort()).toEqual(["DESTRUCTIVE", "EGRESS", "SECRETS"]);
+  });
+
+  it("reports only the hosts that can be nothing but a destination", () => {
+    // `hosts` reads any dotted token, so an ordinary filename lands in it. The
+    // grant still stands — checking reads the same superset — but the summary a
+    // user is shown must not call `package.json` a network permission.
+    const auth = createAuthorization();
+    const named = authorizeInstruction(auth, "bump the version in package.json", PROJECT);
+    expect(named.hosts).toEqual(["package.json"]);
+    expect(named.destinations).toEqual([]);
+    const posted = authorizeInstruction(auth, "post it to https://logs.example.com/ingest", PROJECT);
+    expect(posted.destinations).toEqual(["logs.example.com"]);
   });
 
   it("bounds what one pasted instruction can add", () => {

@@ -18,6 +18,7 @@ class AbControlBox extends StatelessWidget {
     super.key,
     required this.child,
     this.height,
+    this.minHeight,
     this.focused = false,
     this.fillColor,
     this.padding,
@@ -26,8 +27,17 @@ class AbControlBox extends StatelessWidget {
   /// Box contents (typically a [Row]). Vertically centred within [height].
   final Widget child;
 
-  /// Outer box height. Defaults to [AbTokens.rowHeightSm].
+  /// Outer box height. Defaults to [AbTokens.rowHeightSm], unless [minHeight]
+  /// asks the box to grow with its child.
   final double? height;
+
+  /// Grows the box with its child, never falling below this. For the one
+  /// control that has no single row — a wrapping text field — which still has
+  /// to start at the same height as the fields it sits beside.
+  ///
+  /// Wins over [height], which is a floor and a ceiling at once and so cannot
+  /// express this.
+  final double? minHeight;
 
   /// Paints the border in [context.antgrid.accent] when true.
   final bool focused;
@@ -41,7 +51,10 @@ class AbControlBox extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: height ?? AbTokens.rowHeightSm,
+      height: minHeight == null ? (height ?? AbTokens.rowHeightSm) : null,
+      constraints: minHeight == null
+          ? null
+          : BoxConstraints(minHeight: minHeight!),
       padding:
           padding ?? const EdgeInsets.symmetric(horizontal: AbTokens.space8),
       decoration: BoxDecoration(

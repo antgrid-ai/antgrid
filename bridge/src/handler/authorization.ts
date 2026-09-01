@@ -26,10 +26,46 @@ export interface InstructionAuthorization {
   readonly hosts: Set<string>;
 }
 
+/**
+ * The floor tiers a PATTERN lift can silence. ABS_PATH takes a literal lift
+ * instead (`paths`), and §5.3 HARD takes none at all.
+ */
+export type LiftedTier = "DESTRUCTIVE" | "EGRESS" | "SECRETS";
+
+export interface LiftedOperation {
+  /**
+   * Which advisory this lift silences. Carried rather than dropped because the
+   * three tiers are three unlike permissions — a command that destroys, one that
+   * sends data out, one that reads a secret — and a summary that calls them all
+   * "commands" tells the user the wrong one was granted.
+   */
+  readonly tier: LiftedTier;
+  /** The operation spelled the way it was named. */
+  readonly matched: string;
+}
+
 export interface GrantSummary {
   patterns: string[];
+  /**
+   * The same operations `patterns` stand for, spelled the way they were named.
+   * A pattern is a regex source: it is the only stable key a lift can hang on,
+   * and it is also the one thing that can never be put in front of a user — so
+   * the readable half is carried out beside it rather than reconstructed by a
+   * caller that would have to re-derive it from the floor.
+   *
+   * Deduped, so an alias whose command trips two floor patterns reads as the one
+   * operation the user named.
+   */
+  operations: LiftedOperation[];
   paths: string[];
   hosts: string[];
+  /**
+   * The subset of `hosts` a summary may repeat back. `hosts` is a deliberate
+   * superset (see BARE_HOST) that only ever has to agree with itself across
+   * granting and checking; this half is what a user is shown, so it holds only
+   * the tokens that can be nothing but a destination.
+   */
+  destinations: string[];
 }
 
 // An instruction is free text of unbounded length, and these sets live for the whole
@@ -116,17 +152,26 @@ const ALIASES: Alias[] = [
 
 // ABS_PATH is excluded rather than incidentally absent: an alias grants an operation,
 // and a canonical command that ever grew a path must not hand out a literal lift.
-export const ALIAS_LIFTS: { phrases: RegExp[]; patterns: string[] }[] = ALIASES.map((a) => ({
+export const ALIAS_LIFTS: {
+  phrases: RegExp[];
+  lifts: { pattern: string; tier: LiftedTier }[];
+  command: string;
+}[] = ALIASES.map((a) => ({
   phrases: a.phrases,
-  patterns: classifyDestructive(a.command, "")
-    .warnings.filter((w) => w.tier !== "ABS_PATH")
-    .map((w) => w.pattern),
+  // Carried through for the grant summary: an alias fires on prose, and the
+  // canonical command is the only readable spelling of what it granted.
+  command: a.command,
+  lifts: classifyDestructive(a.command, "").warnings.flatMap((w) =>
+    w.tier === "ABS_PATH" || w.tier === "HARD" ? [] : [{ pattern: w.pattern, tier: w.tier }]),
 }));
 
 const URL_AUTHORITY = /\b[a-z][a-z0-9+.-]*:\/\/([^\s/?#'"<>]+)/gi;
 // Dotted names with an alphabetic final label. A filename like `dump.json` reads as a
 // host here; that is symmetric across granting and checking, so it costs nothing beyond
 // the odd unlifted warning. IPv6 literals are not recognized at all — same cost.
+// Nothing built from this set may be REPORTED — naming a source file is the commonest
+// thing a user types, and a summary reading it back as a network permission would be
+// false on most instructions. `GrantSummary.destinations` is the half that is shown.
 const BARE_HOST = /\b((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})\b/gi;
 const IPV4 = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g;
 
@@ -159,8 +204,11 @@ function normalizePath(p: string): string {
     .replace(/[.,;!?)\]]+$/, "");
 }
 
-function grant(into: Set<string>, value: string): void {
-  if (into.size < MAX_LITERALS) into.add(value);
+/** Whether this call is the one that granted `value` — a repeat grants nothing new. */
+function grant(into: Set<string>, value: string): boolean {
+  if (into.has(value) || into.size >= MAX_LITERALS) return false;
+  into.add(value);
+  return true;
 }
 
 // Both halves of the grant read an instruction as if every clause in it ASKED for
@@ -169,6 +217,22 @@ function grant(into: Set<string>, value: string): void {
 // to be written about a dangerous command is the one telling Handler not to run it.
 const PROHIBITION =
   /\b(?:never|not|don't|doesn't|didn't|won't|can't|cannot|shouldn't|mustn't|avoid(?:s|ing)?|refrain|instead\s+of|rather\s+than)\b/i;
+
+// The other polarity a clause can carry, and the one an instruction only started
+// carrying once a sentence could take an earlier one back: withdrawal. "actually
+// skip the force push" holds no word above, so the alias table read it as a
+// request and the feed said out loud that the user had permitted a force push for
+// the session — the inverse of what they wrote — while silencing the advisory for
+// every pass after it.
+//
+// Over-filtering is the safe direction here, so this is deliberately loose: a
+// clause wrongly read as a countermand costs one unlifted advisory row, and a
+// missed one costs a session-wide grant nobody asked for. "scratch" is the one
+// exception, pinned to its idiom — bare, it is a noun that turns up inside the
+// very paths a grant is about (`/etc/scratch/notes`), which is a false match on
+// the word rather than a wrong reading of the sentence.
+const COUNTERMAND =
+  /\b(?:skip(?:s|ped|ping)?|cancel(?:s|led|ling|ed|ing)?|drop(?:s|ped|ping)?|forget|scratch\s+(?:that|it)|undo|stop|no\s+longer|take\s+(?:that|it)\s+back)\b/i;
 
 // Clause-level, not sentence-level: "delete the build dir, but never touch
 // node_modules" has to keep its first half. Rejoined with newlines because every floor
@@ -180,7 +244,7 @@ const PROHIBITION =
 function grantableClauses(text: string): string {
   return text
     .split(/(?<=[.!?])\s+|[;\n]+|\s+but\s+/i)
-    .filter((clause) => !PROHIBITION.test(clause))
+    .filter((clause) => !PROHIBITION.test(clause) && !COUNTERMAND.test(clause))
     .join("\n");
 }
 
@@ -207,13 +271,25 @@ export function authorizeInstruction(
   // floor.hard is ignored, not consulted: §5.3 has no lift, so naming one of those
   // commands in an instruction must leave no trace here.
   const floor = classifyDestructive(asked, projectPath);
+  const operations: LiftedOperation[] = [];
+  const seen = new Set<string>();
+  const note = (tier: LiftedTier, matched: string) => {
+    if (seen.has(`${tier} ${matched}`)) return;
+    seen.add(`${tier} ${matched}`);
+    operations.push({ tier, matched });
+  };
   for (const w of floor.warnings) {
     if (w.tier === "ABS_PATH") grant(auth.paths, normalizePath(w.matched));
-    else grant(auth.patterns, w.pattern);
+    // The matched span, not the whole clause: a pattern lift is a claim about an
+    // OPERATION, and the sentence around it named a target the lift did not grant.
+    else if (w.tier !== "HARD" && grant(auth.patterns, w.pattern)) note(w.tier, w.matched);
   }
   for (const lift of ALIAS_LIFTS) {
     if (lift.phrases.some((re) => re.test(asked))) {
-      for (const p of lift.patterns) grant(auth.patterns, p);
+      // The table's canonical command rather than the prose that fired it: "force
+      // push the branch" is what the user wrote, and `git push --force` is what
+      // they can now expect to see run.
+      for (const l of lift.lifts) if (grant(auth.patterns, l.pattern)) note(l.tier, lift.command);
     }
   }
   // Harvested from the whole instruction rather than only from an egress match: the user
@@ -222,10 +298,14 @@ export function authorizeInstruction(
   for (const h of hostsIn(asked)) grant(auth.hosts, h);
 
   const added = <T>(set: Set<T>, n: number) => [...set].slice(n);
+  const destinations = destinationsIn(asked);
+  const hosts = added(auth.hosts, before.h);
   return {
     patterns: added(auth.patterns, before.p),
+    operations,
     paths: added(auth.paths, before.f),
-    hosts: added(auth.hosts, before.h),
+    hosts,
+    destinations: hosts.filter((h) => destinations.has(h)),
   };
 }
 

@@ -29,7 +29,9 @@ class RelayConnection {
     this.onDeviceRevoked,
     // Test seam: inject a fake RelayService. Production passes null.
     RelayService? relayOverride,
-  }) : relay = relayOverride ?? RelayService(crypto: crypto);
+  }) : relay =
+           relayOverride ??
+           RelayService(crypto: crypto, logger: _logRelayService);
 
   /// Fires when the relay tells us this device has been revoked from the
   /// account. Distinct from the supervisor's `Blocked(deviceRevoked)`, which
@@ -219,10 +221,13 @@ class RelayConnection {
     }
   }
 
-  /// App resume: hand the supervisor a plain re-evaluate so a connection that
-  /// was sitting on a long backoff while the app was in the background climbs
-  /// now instead of waiting out a timer the OS may have frozen.
-  void noteResume() => _supervisor?.noteResume();
+  /// App resume: validate an authenticated socket whose timers may have frozen,
+  /// then hand the supervisor a plain re-evaluate so a connection sitting on a
+  /// long backgrounded backoff climbs without waiting for that frozen timer.
+  void noteResume() {
+    relay.onResume();
+    _supervisor?.noteResume();
+  }
 
   /// The relay reports a drop to the SENDER only, so this counts the frames
   /// *we* lost — outbound requests. Dropped responses are the bridge's to
@@ -303,6 +308,24 @@ class RelayConnection {
   }
 
   bool get isDisposed => _disposed;
+}
+
+void _logRelayService(
+  RelayLogLevel level,
+  String message, {
+  Map<String, Object?>? fields,
+}) {
+  const component = 'RelayService';
+  switch (level) {
+    case RelayLogLevel.debug:
+      AbLog.debug(component, message, fields: fields);
+    case RelayLogLevel.info:
+      AbLog.info(component, message, fields: fields);
+    case RelayLogLevel.warn:
+      AbLog.warn(component, message, fields: fields);
+    case RelayLogLevel.error:
+      AbLog.error(component, message, fields: fields);
+  }
 }
 
 /// Holds the app's live relay sockets, one [RelayConnection] per bare machine
