@@ -16,6 +16,7 @@ import '../design/widgets/ab_disclosure_chevron.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
+import '../design/widgets/ab_row_trailing.dart';
 import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_snack_bar.dart';
@@ -77,8 +78,9 @@ class DrawerEntryRow extends ConsumerStatefulWidget {
 /// under — the chip was approximating that, and repeating it on the band that
 /// already names the machine says nothing.
 ///
-/// Stateless: the only per-row UI state is hover, owned by [HoverableDrawerRow].
-class MachineDrawerHeaderRow extends ConsumerWidget {
+/// Stateful for the two reveal bits a pointer cannot supply: keyboard focus,
+/// and the latch a confirm dialog holds while it is up.
+class MachineDrawerHeaderRow extends ConsumerStatefulWidget {
   final DrawerEntry entry;
 
   /// Hairline above, separating this machine's block from whatever precedes
@@ -89,40 +91,72 @@ class MachineDrawerHeaderRow extends ConsumerWidget {
   const MachineDrawerHeaderRow(this.entry, {super.key, this.showRule = true});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MachineDrawerHeaderRow> createState() =>
+      _MachineDrawerHeaderRowState();
+}
+
+class _MachineDrawerHeaderRowState
+    extends ConsumerState<MachineDrawerHeaderRow> {
+  bool _focused = false;
+  bool _latched = false;
+
+  void _setLatched(bool v) {
+    if (!mounted || _latched == v) return;
+    setState(() => _latched = v);
+  }
+
+  void _setFocused(bool v) {
+    if (!mounted || _focused == v) return;
+    setState(() => _focused = v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     perfRecorder.noteDrawerRebuild();
+    final entry = widget.entry;
     final machineUuid = entry.machineUuid!;
     final expanded = ref.watch(expandedDrawerIdsProvider).contains(machineUuid);
+    final offersRemove = _RemoveButton.offersFor(ref, entry);
 
     return HoverableDrawerRow(
-      above: showRule ? const DrawerBandRule() : null,
-      builder: (context, hovered, _) => DrawerBand(
-        label: entry.displayName,
-        // Kept on the band, unlike the local one: expanding a machine is what
-        // opens its control-plane socket, so there is something to disclose.
-        expanded: expanded,
-        // Status dots after the hover actions, and the LIVENESS dot last of
-        // all: it is [LocalMachineBand]'s host dot under another name, and only
-        // the final slot sits a fixed distance from the row's edge on both
-        // bands, so only there can the two share a column. Every dot reserves
-        // its slot whether or not it renders — one resolving must not slide the
-        // trash that shares this row out from under the pointer.
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          spacing: AbTokens.space4,
-          children: [
+      above: widget.showRule ? const DrawerBandRule() : null,
+      builder: (context, hovered, _) {
+        final revealed = hovered || _focused || _latched;
+        return DrawerBand(
+          label: entry.displayName,
+          // Kept on the band, unlike the local one: expanding a machine is what
+          // opens its control-plane socket, so there is something to disclose.
+          expanded: expanded,
+          // A band's liveness dot lives at the panel edge permanently, so the
+          // action shares its cell rather than claiming one of its own: a
+          // second cell would push the trash a slot inboard of every other
+          // row's, and collapsing the action would slide the dot on
+          // pointer-enter. [_DrawerEntryTrailing] emits no actions here for the
+          // same reason — two owners of one cell is a fight.
+          trailing: AbRowTrailingCell.kit([
             _DrawerEntryTrailing(
               entry: entry,
-              hovered: hovered,
+              revealed: revealed,
               showRemoteChip: false,
+              hostsActions: false,
             ),
             _MachineAggregateDot(machineUuid: machineUuid),
-            _MachineOnlineDot(machineUuid: machineUuid),
-          ],
-        ),
-        onTap: () =>
-            ref.read(expandedDrawerIdsProvider.notifier).toggle(machineUuid),
-      ),
+            if (offersRemove)
+              AbRowTrailingSwap(
+                revealed: revealed,
+                resting: _MachineOnlineDot(machineUuid: machineUuid),
+                action: _RemoveButton(entry: entry, onLatch: _setLatched),
+              )
+            else
+              AbRowTrailingCell(
+                child: _MachineOnlineDot(machineUuid: machineUuid),
+              ),
+          ]),
+          onFocusChange: _setFocused,
+          onTap: () =>
+              ref.read(expandedDrawerIdsProvider.notifier).toggle(machineUuid),
+        );
+      },
     );
   }
 }
@@ -162,9 +196,11 @@ class LocalMachineBand extends ConsumerWidget {
             // a desktop that opened a project earlier in the session that is a
             // live green dot pinned to a project it has nothing to do with. Every
             // other real-source surface in this drawer is gated the same way.
-            trailing: ref.watch(demoModeProvider)
-                ? null
-                : const _LocalHostDot(),
+            // The empty cell stays, so the demo band's title ellipsizes where
+            // the real one's does instead of running a cell further right.
+            trailing: AbRowTrailingCell(
+              child: ref.watch(demoModeProvider) ? null : const _LocalHostDot(),
+            ),
           ),
         ],
       ),
@@ -209,24 +245,16 @@ class _LocalHostDot extends ConsumerWidget {
       HostPhase.failed => (AbStatusTone.danger, AbDotStyle.filled, false),
       _ => (null, AbDotStyle.filled, false),
     };
-    if (tone == null) return const _BandDotSlot();
-    return _BandDotSlot(
-      child: AbStatusDot(tone: tone, style: style, pulse: pulse),
-    );
+    if (tone == null) return const SizedBox.shrink();
+    return AbStatusDot(tone: tone, style: style, pulse: pulse);
   }
 }
 
-/// One status-dot cell in a band's trailing kit.
+/// One INNER status-dot cell in a band's trailing kit.
 ///
-/// The width is reserved whether or not a dot renders. Two things depend on
-/// that. A band's trailing is right-anchored, so an empty cell that collapsed
-/// would drag everything to its left — including the hover-revealed trash,
-/// which would then slide out from under the pointer whenever a socket resolved
-/// or an agent asked a question. And because the cell is a constant width, the
-/// LAST one is a constant distance from the row's edge on every band, which is
-/// what lets [LocalMachineBand]'s host dot and a machine band's liveness dot
-/// share a column. Gaps belong to the composing [Row]'s `spacing`, so the
-/// alignment is not three widgets independently agreeing on an inset.
+/// The width is reserved whether or not a dot renders, so a socket resolving or
+/// an agent asking a question cannot widen this cell and shove the terminal
+/// [AbRowTrailingCell] outboard of the column it shares with every other row.
 ///
 /// The reserved width is a floor, not a cap: every dot here is [AbDotSize.sm]
 /// today, and a tight box would silently paint a larger one as a squashed
@@ -261,6 +289,7 @@ class DrawerBand extends StatelessWidget {
     this.trailing,
     this.expanded,
     this.onTap,
+    this.onFocusChange,
   });
 
   final String label;
@@ -269,6 +298,10 @@ class DrawerBand extends StatelessWidget {
   /// Non-null draws a disclosure chevron after the label.
   final bool? expanded;
   final VoidCallback? onTap;
+
+  /// How a band learns it is reachable by keyboard, so a hover-revealed action
+  /// can be revealed by focus too.
+  final ValueChanged<bool>? onFocusChange;
 
   @override
   Widget build(BuildContext context) {
@@ -298,6 +331,10 @@ class DrawerBand extends StatelessWidget {
       trailing: trailing,
       density: AbRowDensity.sm,
       horizontalPadding: 0,
+      // On the band rather than on [MachineDrawerHeaderRow], so the local band
+      // — which reveals nothing and would otherwise sit shorter — measures the
+      // same as a machine band beside it.
+      contentFloor: AbRowContentFloor.iconButton,
       // Bands sit in a run of rows that all clear each other by this much; a
       // band with no rule above it has nothing else keeping it off them.
       margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
@@ -308,6 +345,7 @@ class DrawerBand extends StatelessWidget {
       // flat run where the fill just tracks the pointer, so it ranks nothing
       // above its neighbours.
       onTap: onTap,
+      onFocusChange: onFocusChange,
     );
   }
 }
@@ -388,6 +426,18 @@ class _HoverableDrawerRowState extends State<HoverableDrawerRow> {
 
 class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
   Timer? _prefetchTimer;
+  bool _focused = false;
+  bool _latched = false;
+
+  void _setLatched(bool v) {
+    if (!mounted || _latched == v) return;
+    setState(() => _latched = v);
+  }
+
+  void _setFocused(bool v) {
+    if (!mounted || _focused == v) return;
+    setState(() => _focused = v);
+  }
 
   void _startPrefetch() {
     _prefetchTimer?.cancel();
@@ -439,12 +489,15 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
         title: Text(entry.displayName, style: drawerProjectTitleStyle(context)),
         trailing: _DrawerEntryTrailing(
           entry: entry,
-          hovered: hovered,
+          revealed: hovered || _focused || _latched,
           expanded: expanded,
+          onLatch: _setLatched,
         ),
         density: AbRowDensity.sm,
         horizontalPadding: 0, // gutter lives on the outer Padding
+        contentFloor: AbRowContentFloor.iconButton,
         margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
+        onFocusChange: _setFocused,
         onTap: () => machineUuid != null
             ? ref.read(expandedDrawerIdsProvider.notifier).toggle(machineUuid)
             : ref.read(collapsedDrawerIdsProvider.notifier).toggle(entry.id),
@@ -521,13 +574,17 @@ Color _leadingTint(BuildContext context, bool isWarm) {
 class _DrawerEntryTrailing extends ConsumerWidget {
   const _DrawerEntryTrailing({
     required this.entry,
-    required this.hovered,
+    required this.revealed,
     this.expanded,
     this.showRemoteChip = true,
+    this.hostsActions = true,
+    this.onLatch,
   });
 
   final DrawerEntry entry;
-  final bool hovered;
+
+  /// Hover, keyboard focus, or a confirm dialog this row's own trash has open.
+  final bool revealed;
 
   /// Non-null on a PROJECT row, which shows a rollup of its sub-tree while
   /// collapsed. Null on a machine band, which has [_MachineAggregateDot].
@@ -537,56 +594,78 @@ class _DrawerEntryTrailing extends ConsumerWidget {
   /// that it is remote adds nothing.
   final bool showRemoteChip;
 
+  /// False on a machine band, whose [AbRowTrailingSwap] owns the actions. Two
+  /// owners of one terminal cell would each claim to be outermost.
+  final bool hostsActions;
+
+  /// Held true while a revealed action is still working — the trash's confirm
+  /// dialog, the plus's create/start — so the row it was revealed from does not
+  /// collapse out from under it, taking the button's own in-flight state with
+  /// it.
+  final ValueChanged<bool>? onLatch;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final statusAsync = ref.watch(projectStatusProvider(entry.id));
     final status = statusAsync.value ?? const ProjectStatus.empty();
 
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      spacing: AbTokens.space4,
-      children: [
-        if (status.configError)
-          _ErrorDot(
-            key: ValueKey('drawer-error-dot-${entry.id}'),
-            message: status.configErrorMessage,
-          ),
-        if (status.activeCommandName != null)
-          _CommandIndicator(
-            key: ValueKey('drawer-cmd-indicator-${entry.id}'),
-            commandName: status.activeCommandName!,
-          ),
-        // A collapsed project still says whether something inside it needs
-        // the user — that is a call to action, and the sessions that would
-        // carry it are off screen. It does NOT say how many sessions it holds:
-        // a count is a number to read rather than a state to notice, and the
-        // drawer is scanned.
-        if (expanded == false) DrawerProjectAggregateDot(entryId: entry.id),
-        if (showRemoteChip && entry.kind == EntryKind.remote)
-          AbChip.system(label: 'REMOTE', color: context.antgrid.accent),
-        // Hover-only affordances; kept in the tree via Visibility so layout
-        // doesn't jitter on pointer-enter. `_RemoveButton` decides for itself
-        // whether it has anything to offer — see its doc for the two cases it
-        // withholds the trash.
-        Visibility(
-          visible: hovered,
-          maintainState: true,
-          maintainAnimation: true,
-          maintainSize: true,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            spacing: AbTokens.space4,
-            children: [
-              // No per-machine "New session" +: a machine is a container, not a
-              // project, so a session must name a project. The + lives on each
-              // advertised project row instead (see `_AdvertisedProjectRow`).
-              if (entry.machineUuid == null) _NewSessionButton(entry: entry),
-              _RemoveButton(entry: entry),
-            ],
-          ),
+    final actions = hostsActions && revealed;
+    // Asked unconditionally, ahead of `actions`: behind the `&&` the watch it
+    // performs would be retired every time the row un-reveals and re-added on
+    // the next hover, and `MachineDrawerHeaderRow` already asks it that way —
+    // one predicate must not have two subscription lifetimes.
+    final offersRemove = _RemoveButton.offersFor(ref, entry) && actions;
+    // No per-machine "New session" +: a machine is a container, not a project,
+    // so a session must name a project. The + lives on each advertised project
+    // row instead (see `_AdvertisedProjectRow`).
+    final offersNewSession = actions && entry.machineUuid == null;
+
+    final cells = <Widget>[
+      if (status.configError)
+        _ErrorDot(
+          key: ValueKey('drawer-error-dot-${entry.id}'),
+          message: status.configErrorMessage,
         ),
-      ],
-    );
+      if (status.activeCommandName != null)
+        _CommandIndicator(
+          key: ValueKey('drawer-cmd-indicator-${entry.id}'),
+          commandName: status.activeCommandName!,
+        ),
+      // A collapsed project still says whether something inside it needs the
+      // user — that is a call to action, and the sessions that would carry it
+      // are off screen. It does NOT say how many sessions it holds: a count is
+      // a number to read rather than a state to notice, and the drawer is
+      // scanned.
+      if (expanded == false &&
+          DrawerProjectAggregateDot.needsUser(ref, entry.id))
+        DrawerProjectAggregateDot(entryId: entry.id),
+      if (showRemoteChip && entry.kind == EntryKind.remote)
+        AbChip.system(label: 'REMOTE', color: context.antgrid.accent),
+    ];
+
+    // Actions outermost, and whatever ends up last carries the cell: the rail
+    // is a position in the row, not a property of any one glyph.
+    if (offersRemove || offersNewSession) {
+      if (offersNewSession) {
+        final plus = _NewSessionButton(entry: entry, onLatch: onLatch);
+        cells.add(offersRemove ? plus : AbRowTrailingCell(child: plus));
+      }
+      if (offersRemove) {
+        cells.add(
+          AbRowTrailingCell(
+            child: _RemoveButton(entry: entry, onLatch: onLatch),
+          ),
+        );
+      }
+    } else if (hostsActions && cells.isNotEmpty) {
+      // Only when this kit IS the row's outermost element. On a machine band it
+      // is nested inside one, and claiming a rail cell there would centre an
+      // 8px dot in a full button footprint in the MIDDLE of the band's kit.
+      cells.last = AbRowTrailingCell(child: cells.last);
+    }
+
+    return AbRowTrailingCell.kit(cells, ownsColumn: hostsActions) ??
+        const SizedBox.shrink();
   }
 }
 
@@ -603,12 +682,16 @@ class DrawerProjectAggregateDot extends ConsumerWidget {
 
   final String entryId;
 
+  /// Whether [entryId] has anything to say. The caller asks BEFORE building the
+  /// dot, because a trailing kit that drops absent children has to know they
+  /// are absent — a widget that shrinks itself away still occupies a slot and
+  /// its gap.
+  static bool needsUser(WidgetRef ref, String entryId) =>
+      agentWorkStatusNeedsUser(ref.watch(projectWorkStatusProvider(entryId)));
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final status = ref.watch(projectWorkStatusProvider(entryId));
-    if (!agentWorkStatusNeedsUser(status)) return const SizedBox.shrink();
-    return AgentWorkStatusDot(status: status);
-  }
+  Widget build(BuildContext context, WidgetRef ref) =>
+      AgentWorkStatusDot(status: ref.watch(projectWorkStatusProvider(entryId)));
 }
 
 /// Trash affordance for removing a project/machine from history.
@@ -626,7 +709,42 @@ class DrawerProjectAggregateDot extends ConsumerWidget {
 /// this is a guard rail, not a correctness fix.
 class _RemoveButton extends ConsumerStatefulWidget {
   final DrawerEntry entry;
-  const _RemoveButton({required this.entry});
+
+  /// Held true while the confirm dialog is up. The row that revealed this
+  /// button collapses on pointer-exit, and the pointer leaves it the moment the
+  /// modal opens — without the latch the trash unmounts under its own dialog.
+  final ValueChanged<bool>? onLatch;
+
+  const _RemoveButton({required this.entry, this.onLatch});
+
+  /// Whether [entry] has a trash to offer at all. Asked by the row rather than
+  /// answered by a self-shrinking build, because the trailing kit reserves the
+  /// outermost cell for whatever is genuinely last.
+  static bool offersFor(WidgetRef ref, DrawerEntry entry) {
+    // Inventory agents have no locally-stored state to remove (they're managed
+    // server-side).
+    if (entry is InventoryAgentEntry) return false;
+    // LOCAL projects only. A legacy per-project REMOTE row also has a null
+    // `machineUuid`, but its trash is "Forget agent" — the cheap, self-healing
+    // drop of cached coordinates a machine band keeps unconditionally — so
+    // gating it there would strand a row whose machine is gone with no way to
+    // clear the very cache that hides the button.
+    //
+    // A project nobody has opened has an empty cache and so reads as empty
+    // here; the confirm dialog is what covers that case, and it names what
+    // will be lost. Selected down to the bool: this is asked for every drawer
+    // row, and the list identity changes on every `session:updated` of the
+    // focused project.
+    if (entry is LocalProjectEntry &&
+        ref.watch(
+          sessionsForEntryProvider(
+            entry.id,
+          ).select((s) => s.any((e) => !e.archived)),
+        )) {
+      return false;
+    }
+    return true;
+  }
 
   @override
   ConsumerState<_RemoveButton> createState() => _RemoveButtonState();
@@ -639,30 +757,7 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
 
   @override
   Widget build(BuildContext context) {
-    final entry = widget.entry;
-    // Inventory agents have no locally-stored state to remove — hide the
-    // trash affordance entirely (they're managed server-side).
-    if (entry is InventoryAgentEntry) return const SizedBox.shrink();
-    final isLocal = entry is LocalProjectEntry;
-    // LOCAL projects only. A legacy per-project REMOTE row also has a null
-    // `machineUuid`, but its trash is "Forget agent" — the cheap, self-healing
-    // drop of cached coordinates a machine band keeps unconditionally — so
-    // gating it there would strand a row whose machine is gone with no way to
-    // clear the very cache that hides the button.
-    //
-    // A project nobody has opened has an empty cache and so reads as empty
-    // here; the confirm dialog is what covers that case, and it names what
-    // will be lost. Selected down to the bool: this widget is mounted for
-    // every drawer row, and the list identity changes on every
-    // `session:updated` of the focused project.
-    if (isLocal &&
-        ref.watch(
-          sessionsForEntryProvider(
-            entry.id,
-          ).select((s) => s.any((e) => !e.archived)),
-        )) {
-      return const SizedBox.shrink();
-    }
+    final isLocal = widget.entry is LocalProjectEntry;
     return AbIconButton(
       icon: AbIcons.trash,
       tooltip: isLocal ? 'Remove from history' : 'Forget agent',
@@ -675,42 +770,51 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
     // Captured before the dialog await: the removal below must still run if the
     // drawer rebuilt this row away while the confirm was open.
     final container = ref.container;
-    final ok = await AbConfirmDialog.show(
-      context: context,
-      title: isLocal
-          ? 'Remove ${entry.displayName}?'
-          : 'Forget ${entry.displayName}?',
-      body: isLocal
-          ? removeLocalProjectBody(container, entry.id)
-          : 'This clears the cached sessions and connection details for '
-                'this machine. It comes back on its own while it is signed '
-                'in to your account.',
-      confirmLabel: isLocal ? 'Remove' : 'Forget',
-      destructive: true,
-    );
-    if (!ok) return;
-    setState(() => _busy = true);
+    final onLatch = widget.onLatch;
+    onLatch?.call(true);
     try {
-      switch (entry) {
-        case LocalProjectEntry e:
-          // `ProjectsNotifier.remove` owns the local teardown: it stops the
-          // project's sessions/terminals, disposes its services + transport,
-          // then forgets the record.
-          await container.read(projectsProvider.notifier).remove(e.id);
-        case RemoteAgentEntry e:
-          await container
-              .read(machineConnectionProvider.notifier)
-              .forgetMachine(e.agent.agentDeviceId);
-        case InventoryAgentEntry _:
-          // Inventory agents are not stored locally — nothing to remove.
-          // The entry will disappear from the list when the account inventory
-          // is next refreshed or the device is deleted server-side.
-          break;
+      final ok = await AbConfirmDialog.show(
+        context: context,
+        title: isLocal
+            ? 'Remove ${entry.displayName}?'
+            : 'Forget ${entry.displayName}?',
+        body: isLocal
+            ? removeLocalProjectBody(container, entry.id)
+            : 'This clears the cached sessions and connection details for '
+                  'this machine. It comes back on its own while it is signed '
+                  'in to your account.',
+        confirmLabel: isLocal ? 'Remove' : 'Forget',
+        destructive: true,
+      );
+      if (!ok) return;
+      // No `mounted` EARLY RETURN here, only a guarded setState: a confirmed
+      // destructive action runs off the captured container, and bailing out
+      // because the row was rebuilt away would turn a Yes into a silent no-op.
+      if (mounted) setState(() => _busy = true);
+      try {
+        switch (entry) {
+          case LocalProjectEntry e:
+            // `ProjectsNotifier.remove` owns the local teardown: it stops the
+            // project's sessions/terminals, disposes its services + transport,
+            // then forgets the record.
+            await container.read(projectsProvider.notifier).remove(e.id);
+          case RemoteAgentEntry e:
+            await container
+                .read(machineConnectionProvider.notifier)
+                .forgetMachine(e.agent.agentDeviceId);
+          case InventoryAgentEntry _:
+            // Inventory agents are not stored locally — nothing to remove.
+            // The entry will disappear from the list when the account inventory
+            // is next refreshed or the device is deleted server-side.
+            break;
+        }
+      } finally {
+        // The row is usually gone after removal (entry dropped from the
+        // drawer); guard the setState so we don't touch a disposed State.
+        if (mounted) setState(() => _busy = false);
       }
     } finally {
-      // The row is usually gone after removal (entry dropped from the drawer);
-      // guard the setState so we don't touch a disposed State.
-      if (mounted) setState(() => _busy = false);
+      onLatch?.call(false);
     }
   }
 }
@@ -1029,7 +1133,16 @@ Future<bool> _openColdRemoteProject(
 /// double-tapping would otherwise spawn duplicate sessions.
 class _NewSessionButton extends ConsumerStatefulWidget {
   final DrawerEntry entry;
-  const _NewSessionButton({required this.entry});
+
+  /// Held true for as long as a tap is in flight. The row that revealed this
+  /// button collapses on pointer-exit, and a cold remote open runs for tens of
+  /// seconds — without the latch the button unmounts mid-activation, taking
+  /// [_NewSessionButtonState._busy] with it, so a re-hover and a second tap
+  /// launch a concurrent one. It is also what keeps the failure snackbar's
+  /// `mounted` check true.
+  final ValueChanged<bool>? onLatch;
+
+  const _NewSessionButton({required this.entry, this.onLatch});
 
   @override
   ConsumerState<_NewSessionButton> createState() => _NewSessionButtonState();
@@ -1048,11 +1161,14 @@ class _NewSessionButtonState extends ConsumerState<_NewSessionButton> {
   }
 
   Future<void> _onTap() async {
+    final onLatch = widget.onLatch;
     setState(() => _busy = true);
+    onLatch?.call(true);
     try {
       await _newSessionForEntry();
     } finally {
       if (mounted) setState(() => _busy = false);
+      onLatch?.call(false);
     }
   }
 
@@ -1132,26 +1248,24 @@ class _MachineOnlineDot extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final status = ref.watch(supervisorStatusProvider(machineUuid)).value;
-    if (status == null) return const _BandDotSlot();
+    if (status == null) return const SizedBox.shrink();
     final (tone, label) = connectionDisplayInfo(status);
     final online = status is Connected;
-    return _BandDotSlot(
-      // Colour is this dot's only channel, and it is the drawer's sole report
-      // that a machine is unreachable — so the ladder's own label carries it to
-      // anyone who cannot use hue.
-      child: Semantics(
-        label: label,
-        child: AbStatusDot(
-          tone: tone,
-          style: online ? AbDotStyle.filled : AbDotStyle.hollow,
-          // Pulse only while the ladder is still climbing. Stated as a
-          // whitelist over the sealed type, so a fifth [SupervisorStatus] has
-          // to opt in here rather than inherit an animation nothing stops: both
-          // settled states must hold still, `Released` being a deliberate
-          // teardown and `Blocked` staying sticky until a typed unblock input
-          // clears it.
-          pulse: status is Climbing,
-        ),
+    // Colour is this dot's only channel, and it is the drawer's sole report
+    // that a machine is unreachable — so the ladder's own label carries it to
+    // anyone who cannot use hue.
+    return Semantics(
+      label: label,
+      child: AbStatusDot(
+        tone: tone,
+        style: online ? AbDotStyle.filled : AbDotStyle.hollow,
+        // Pulse only while the ladder is still climbing. Stated as a
+        // whitelist over the sealed type, so a fifth [SupervisorStatus] has
+        // to opt in here rather than inherit an animation nothing stops: both
+        // settled states must hold still, `Released` being a deliberate
+        // teardown and `Blocked` staying sticky until a typed unblock input
+        // clears it.
+        pulse: status is Climbing,
       ),
     );
   }

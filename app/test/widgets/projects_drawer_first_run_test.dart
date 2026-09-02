@@ -137,14 +137,20 @@ void main() {
 
     expect(tester.takeException(), isNull);
 
-    // Still docked: below the project rows, above the account footer — which is
-    // pinned and therefore whole, not scrolled away with the checklist.
+    // Above the account footer, which is pinned and therefore whole rather than
+    // scrolled away with the checklist.
     final section = tester.getTopLeft(find.byType(FirstRunSetupSection)).dy;
-    expect(
-      section,
-      greaterThan(tester.getTopLeft(find.byType(DrawerEntryRow).first).dy),
-    );
     expect(section, lessThan(tester.getTopLeft(find.byType(AccountFooter)).dy));
+
+    // And below a WHOLE first row, not a sliver of one. This is the size where
+    // the checklist would otherwise take the entire body, and a drawer that
+    // lists no machine and no project is the thing minBodyExtent exists to
+    // prevent — a bound in scaled pixels, because the row it has to contain
+    // grows with the scaler and a raw token does not.
+    expect(
+      tester.getBottomLeft(find.byType(LocalMachineBand)).dy,
+      lessThanOrEqualTo(section),
+    );
     expect(tester.getSize(find.byType(AccountFooter)).height, 45);
 
     // The point of the dock: its viewport is shorter than the checklist inside

@@ -35,6 +35,16 @@ class AbRowAction {
   final AbIconButtonTone tone;
 }
 
+/// Minimum content height for a row that reveals an affordance on hover.
+///
+/// An [AbIconButton] is the tallest thing in an [AbRowDensity.sm] row, so
+/// mounting one on pointer-enter grows the row ~10px and shoves the list below
+/// it down. Anchoring the content instead is what lets the affordance be
+/// mounted and unmounted freely. An enum, not a `double`: the value is
+/// scaler-dependent, so any literal a caller could pass is right at exactly one
+/// UI Size.
+enum AbRowContentFloor { none, iconButton }
+
 /// Canonical list row: optional leading, title, optional subtitle,
 /// optional trailing actions or arbitrary trailing widget.
 ///
@@ -77,6 +87,8 @@ class AbListRow extends StatefulWidget {
     this.enabled = true,
     this.hoverable = false,
     this.leadingGapOverride,
+    this.contentFloor = AbRowContentFloor.none,
+    this.onFocusChange,
   }) : assert(
          actions == null || trailing == null,
          'AbListRow: pass actions or trailing, not both.',
@@ -141,6 +153,14 @@ class AbListRow extends StatefulWidget {
   /// (unless [selected]). Opt-in so list flavors stay flat by default.
   final bool hoverable;
 
+  /// Floor under the row's content height.
+  final AbRowContentFloor contentFloor;
+
+  /// Reports the focus highlight to the caller. A row that collapses its
+  /// hover-revealed actions has to know it can be reached by keyboard as well
+  /// as by pointer, or those actions become unreachable without a mouse.
+  final ValueChanged<bool>? onFocusChange;
+
   @override
   State<AbListRow> createState() => _AbListRowState();
 }
@@ -165,6 +185,29 @@ class _AbListRowState extends State<AbListRow> {
 
   bool get _isSelected =>
       widget.selected && widget.selectionStyle != AbRowSelection.none;
+
+  /// Whether this build will mount the detector that owns the focus highlight.
+  bool get _tracksFocus =>
+      widget.enabled &&
+      (widget.onTap != null ||
+          widget.onDoubleTap != null ||
+          widget.onLongPress != null);
+
+  @override
+  void didUpdateWidget(AbListRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Dropping the detector is silent: it reports no final `false`, so a row
+    // that goes disabled or non-interactive while focused would leave both the
+    // ring and any focus-revealed affordance latched on with nothing focused.
+    // Deferred because the caller answers with `setState`, and this runs inside
+    // the parent's build.
+    if (_focused && !_tracksFocus) {
+      _focused = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.onFocusChange?.call(false);
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -223,6 +266,11 @@ class _AbListRowState extends State<AbListRow> {
       ],
     ];
 
+    final rowChild = Row(
+      crossAxisAlignment: widget.crossAxisAlignment,
+      children: children,
+    );
+
     final showHover = widget.hoverable && _hovered && !_isSelected;
     Widget inner = Container(
       padding: _padding,
@@ -242,10 +290,15 @@ class _AbListRowState extends State<AbListRow> {
       // touch dimension. Declared unconditionally so an informational row
       // keeps the same height as its interactive neighbours in the same list.
       child: AbCompactTapTargets(
-        child: Row(
-          crossAxisAlignment: widget.crossAxisAlignment,
-          children: children,
-        ),
+        child: switch (widget.contentFloor) {
+          AbRowContentFloor.none => rowChild,
+          AbRowContentFloor.iconButton => ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: AbIconButton.boxExtent(context),
+            ),
+            child: rowChild,
+          ),
+        },
       ),
     );
 
@@ -285,11 +338,7 @@ class _AbListRowState extends State<AbListRow> {
       return Opacity(opacity: 0.4, child: content);
     }
 
-    final interactive =
-        widget.onTap != null ||
-        widget.onDoubleTap != null ||
-        widget.onLongPress != null;
-    if (interactive) {
+    if (_tracksFocus) {
       final focusChild = AbFocusRing(focused: _focused, child: content);
       // With a double-tap handler, drive taps through a
       // [SerialTapGestureRecognizer] so a single tap fires IMMEDIATELY
@@ -334,6 +383,7 @@ class _AbListRowState extends State<AbListRow> {
         mouseCursor: SystemMouseCursors.click,
         onShowFocusHighlight: (v) {
           if (_focused != v) setState(() => _focused = v);
+          widget.onFocusChange?.call(v);
         },
         // Only tracked when it can be seen: `_hovered` feeds nothing but the
         // `showHover` fill, so on a flat row — which every drawer row is — the

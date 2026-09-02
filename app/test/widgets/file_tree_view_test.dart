@@ -1,5 +1,4 @@
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
@@ -8,6 +7,8 @@ import 'package:antgrid/design/widgets/ab_swipe_actions.dart';
 import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/widgets/file_tree_view.dart';
+
+import '../helpers/hover.dart';
 
 void main() {
   FileNode makeTree() {
@@ -657,17 +658,6 @@ void main() {
       }
     }
 
-    /// Brings a row's action buttons under the pointer. They are mounted at
-    /// full size but `Visibility(visible: hovered)`, so they are findable
-    /// without this and untappable until it runs.
-    Future<void> hoverRow(WidgetTester tester, Finder target) async {
-      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
-      await gesture.addPointer(location: Offset.zero);
-      addTearDown(gesture.removePointer);
-      await gesture.moveTo(tester.getCenter(target));
-      await tester.pump();
-    }
-
     testWidgets('an unstaged file exposes Stage and Discard, not Unstage', (
       tester,
     ) async {
@@ -688,6 +678,8 @@ void main() {
           onDiscard: (_) {},
         ),
         () async {
+          await hoverRow(tester, find.text('main.dart'));
+
           expect(find.byTooltip('Stage Changes'), findsOneWidget);
           expect(find.byTooltip('Discard Changes'), findsOneWidget);
           expect(find.byTooltip('Unstage Changes'), findsNothing);
@@ -715,6 +707,8 @@ void main() {
           onDiscard: (_) {},
         ),
         () async {
+          await hoverRow(tester, find.text('main.dart'));
+
           expect(find.byTooltip('Unstage Changes'), findsOneWidget);
           expect(find.byTooltip('Stage Changes'), findsNothing);
           // Discard on a staged-only row is a revert to HEAD, not a no-op —
@@ -746,12 +740,16 @@ void main() {
           onResolveConflict: (p) => resolved = p,
         ),
         () async {
+          // Revealed first: a conflicted row withholds the other three even
+          // when everything it could offer is on screen, which is a claim an
+          // unrevealed row cannot make.
+          await hoverRow(tester, find.text('main.dart'));
+
           expect(find.byTooltip('Stage Changes'), findsNothing);
           expect(find.byTooltip('Unstage Changes'), findsNothing);
           expect(find.byTooltip('Discard Changes'), findsNothing);
           expect(discarded, isFalse);
 
-          await hoverRow(tester, find.text('main.dart'));
           await tester.tap(find.byTooltip('Mark Resolved'));
           await tester.pump();
           expect(resolved, 'project/lib/main.dart');
@@ -908,6 +906,8 @@ void main() {
           onDiscard: (_) {},
         ),
         () async {
+          await hoverRow(tester, find.text('main.dart'));
+
           expect(find.byTooltip('Mark Resolved'), findsNothing);
         },
       );
