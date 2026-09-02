@@ -598,8 +598,10 @@ class _DrawerEntryTrailing extends ConsumerWidget {
   /// owners of one terminal cell would each claim to be outermost.
   final bool hostsActions;
 
-  /// Held true while the trash's confirm dialog is up, so the row it was
-  /// revealed from does not collapse out from under the modal.
+  /// Held true while a revealed action is still working — the trash's confirm
+  /// dialog, the plus's create/start — so the row it was revealed from does not
+  /// collapse out from under it, taking the button's own in-flight state with
+  /// it.
   final ValueChanged<bool>? onLatch;
 
   @override
@@ -608,7 +610,11 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     final status = statusAsync.value ?? const ProjectStatus.empty();
 
     final actions = hostsActions && revealed;
-    final offersRemove = actions && _RemoveButton.offersFor(ref, entry);
+    // Asked unconditionally, ahead of `actions`: behind the `&&` the watch it
+    // performs would be retired every time the row un-reveals and re-added on
+    // the next hover, and `MachineDrawerHeaderRow` already asks it that way —
+    // one predicate must not have two subscription lifetimes.
+    final offersRemove = _RemoveButton.offersFor(ref, entry) && actions;
     // No per-machine "New session" +: a machine is a container, not a project,
     // so a session must name a project. The + lives on each advertised project
     // row instead (see `_AdvertisedProjectRow`).
@@ -641,7 +647,7 @@ class _DrawerEntryTrailing extends ConsumerWidget {
     // is a position in the row, not a property of any one glyph.
     if (offersRemove || offersNewSession) {
       if (offersNewSession) {
-        final plus = _NewSessionButton(entry: entry);
+        final plus = _NewSessionButton(entry: entry, onLatch: onLatch);
         cells.add(offersRemove ? plus : AbRowTrailingCell(child: plus));
       }
       if (offersRemove) {
@@ -651,11 +657,15 @@ class _DrawerEntryTrailing extends ConsumerWidget {
           ),
         );
       }
-    } else if (cells.isNotEmpty) {
+    } else if (hostsActions && cells.isNotEmpty) {
+      // Only when this kit IS the row's outermost element. On a machine band it
+      // is nested inside one, and claiming a rail cell there would centre an
+      // 8px dot in a full button footprint in the MIDDLE of the band's kit.
       cells.last = AbRowTrailingCell(child: cells.last);
     }
 
-    return AbRowTrailingCell.kit(cells) ?? const SizedBox.shrink();
+    return AbRowTrailingCell.kit(cells, ownsColumn: hostsActions) ??
+        const SizedBox.shrink();
   }
 }
 
@@ -1123,7 +1133,16 @@ Future<bool> _openColdRemoteProject(
 /// double-tapping would otherwise spawn duplicate sessions.
 class _NewSessionButton extends ConsumerStatefulWidget {
   final DrawerEntry entry;
-  const _NewSessionButton({required this.entry});
+
+  /// Held true for as long as a tap is in flight. The row that revealed this
+  /// button collapses on pointer-exit, and a cold remote open runs for tens of
+  /// seconds — without the latch the button unmounts mid-activation, taking
+  /// [_NewSessionButtonState._busy] with it, so a re-hover and a second tap
+  /// launch a concurrent one. It is also what keeps the failure snackbar's
+  /// `mounted` check true.
+  final ValueChanged<bool>? onLatch;
+
+  const _NewSessionButton({required this.entry, this.onLatch});
 
   @override
   ConsumerState<_NewSessionButton> createState() => _NewSessionButtonState();
@@ -1142,11 +1161,14 @@ class _NewSessionButtonState extends ConsumerState<_NewSessionButton> {
   }
 
   Future<void> _onTap() async {
+    final onLatch = widget.onLatch;
     setState(() => _busy = true);
+    onLatch?.call(true);
     try {
       await _newSessionForEntry();
     } finally {
       if (mounted) setState(() => _busy = false);
+      onLatch?.call(false);
     }
   }
 

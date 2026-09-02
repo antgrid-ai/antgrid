@@ -186,6 +186,29 @@ class _AbListRowState extends State<AbListRow> {
   bool get _isSelected =>
       widget.selected && widget.selectionStyle != AbRowSelection.none;
 
+  /// Whether this build will mount the detector that owns the focus highlight.
+  bool get _tracksFocus =>
+      widget.enabled &&
+      (widget.onTap != null ||
+          widget.onDoubleTap != null ||
+          widget.onLongPress != null);
+
+  @override
+  void didUpdateWidget(AbListRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Dropping the detector is silent: it reports no final `false`, so a row
+    // that goes disabled or non-interactive while focused would leave both the
+    // ring and any focus-revealed affordance latched on with nothing focused.
+    // Deferred because the caller answers with `setState`, and this runs inside
+    // the parent's build.
+    if (_focused && !_tracksFocus) {
+      _focused = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.onFocusChange?.call(false);
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final children = <Widget>[
@@ -315,11 +338,7 @@ class _AbListRowState extends State<AbListRow> {
       return Opacity(opacity: 0.4, child: content);
     }
 
-    final interactive =
-        widget.onTap != null ||
-        widget.onDoubleTap != null ||
-        widget.onLongPress != null;
-    if (interactive) {
+    if (_tracksFocus) {
       final focusChild = AbFocusRing(focused: _focused, child: content);
       // With a double-tap handler, drive taps through a
       // [SerialTapGestureRecognizer] so a single tap fires IMMEDIATELY

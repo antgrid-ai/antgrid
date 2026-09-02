@@ -21,7 +21,6 @@ import '../providers/providers.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
-import '../utils/platform_utils.dart';
 import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';
 import 'agent_panel.dart';
@@ -160,10 +159,8 @@ class _DragRegion extends ConsumerWidget {
 /// [WindowTitleBarContents._searchGutter]'s reserve measure it from here, so
 /// neither can disagree with what the buttons actually occupy.
 @visibleForTesting
-double iconSlotExtent(BuildContext context) => math.max(
-  MediaQuery.textScalerOf(context).scale(AbTokens.iconButtonBox),
-  isMobilePlatform ? AbTokens.tapTargetMin : 0.0,
-);
+double iconSlotExtent(BuildContext context) =>
+    AbIconButton.footprintWidth(context);
 
 /// Empty stand-in occupying exactly one [iconSlotExtent], for a pane toggle no
 /// route has published. A box that doesn't track the button's real footprint

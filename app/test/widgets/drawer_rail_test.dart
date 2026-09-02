@@ -6,6 +6,7 @@
 // in the type system connects a status dot centred in one row to a button
 // centred in the next, so only a measurement can hold them together.
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -553,6 +554,50 @@ void main() {
         tester.getCenter(dot).dx,
         lessThan(tester.getCenter(trash).dx),
         reason: 'the resting glyph sits inboard of the cell it cannot share',
+      );
+
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  testWidgets('a revealed action outlives the hover its own modal ends', (
+    tester,
+  ) async {
+    await _onPlatform(TargetPlatform.macOS, () async {
+      _useTallView(tester);
+      await _seed(stores);
+      await _pumpDrawer(tester, stores: stores);
+
+      final trash = _within(_entryRow(_bareName), find.byTooltip(_removeTip));
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+      await gesture.moveTo(tester.getCenter(_entryRow(_bareName)));
+      await tester.pump();
+      expect(trash, findsOneWidget);
+
+      await tester.tap(trash);
+      await tester.pumpAndSettle();
+      // The modal covers the row, so the pointer has already left it; moving
+      // the mouse away only makes that explicit.
+      await gesture.moveTo(Offset.zero);
+      await tester.pumpAndSettle();
+
+      expect(
+        trash,
+        findsOneWidget,
+        reason:
+            'the row must not collapse its actions out from under a dialog '
+            "one of them opened — the button's own in-flight state goes with "
+            'it',
+      );
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(
+        trash,
+        findsNothing,
+        reason: 'and the latch must release once the dialog is answered',
       );
 
       await tester.pumpWidget(const SizedBox());

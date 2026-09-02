@@ -170,6 +170,11 @@ void main() {
     // actions needs the bit, and every row that ignores it must be untouched.
     expect(tester.getSize(find.byType(AbListRow)), unfocused);
 
+    // A bit that is only ever set is a latch, not a report.
+    tester.binding.focusManager.primaryFocus?.unfocus();
+    await tester.pumpAndSettle();
+    expect(reported.last, isFalse);
+
     await pumpAntgrid(
       tester,
       SizedBox(
@@ -181,4 +186,51 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
+
+  // The detector that owns the focus highlight is mounted only for an enabled,
+  // interactive row, and it reports nothing on its way out. Without a closing
+  // report a row that reveals its trash on focus keeps it revealed with nothing
+  // focused — reachable from any affordance that disables the row it sits on.
+  for (final (name, dropped)
+      in <(String, AbListRow Function(ValueChanged<bool>))>[
+        (
+          'loses its tap handler',
+          (report) => AbListRow(
+            title: const Text('project-name'),
+            onFocusChange: report,
+          ),
+        ),
+        (
+          'is disabled',
+          (report) => AbListRow(
+            title: const Text('project-name'),
+            onTap: () {},
+            enabled: false,
+            onFocusChange: report,
+          ),
+        ),
+      ]) {
+    testWidgets('a focused row that $name reports the focus it drops', (
+      tester,
+    ) async {
+      final reported = <bool>[];
+      Future<void> pump(AbListRow row) =>
+          pumpAntgrid(tester, SizedBox(width: 300, child: row));
+
+      await pump(
+        AbListRow(
+          title: const Text('project-name'),
+          onTap: () {},
+          onFocusChange: reported.add,
+        ),
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pumpAndSettle();
+      expect(reported.last, isTrue);
+
+      await pump(dropped(reported.add));
+      await tester.pumpAndSettle();
+      expect(reported.last, isFalse);
+    });
+  }
 }

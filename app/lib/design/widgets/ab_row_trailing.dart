@@ -26,15 +26,21 @@ class AbRowTrailingCell extends StatelessWidget {
   final Widget? child;
 
   /// Assembles a trailing kit. Nulls are dropped BEFORE layout, so an absent
-  /// child costs no gap — `Row(spacing:)` charges one for a zero-width child,
-  /// which is what put a project row's `+` 4px inboard of everything else.
-  /// Returns null when nothing survives, so the caller can pass
-  /// `trailing: null` and reclaim `AbListRow`'s pre-trailing gap too.
-  static Widget? kit(List<Widget?> cells) {
+  /// child costs no gap — a child that decides its own emptiness inside `build`
+  /// and returns a zero-width widget is still charged one, so pass `null` and
+  /// let the kit drop it. Returns null when nothing survives, so the caller can
+  /// pass `trailing: null` and reclaim `AbListRow`'s pre-trailing gap too.
+  ///
+  /// [ownsColumn] is false for a kit assembled as one ELEMENT of another kit:
+  /// the panel-edge column belongs to the outer one, so an inner kit must
+  /// neither claim a cell nor be held to the rule that it ends in one.
+  static Widget? kit(List<Widget?> cells, {bool ownsColumn = true}) {
     final survivors = <Widget>[for (final cell in cells) ?cell];
     if (survivors.isEmpty) return null;
     assert(
-      survivors.last is AbRowTrailingCell || survivors.last is AbRowTrailingSwap,
+      !ownsColumn ||
+          survivors.last is AbRowTrailingCell ||
+          survivors.last is AbRowTrailingSwap,
       'AbRowTrailingCell.kit: the outermost element of a trailing kit must be '
       'an AbRowTrailingCell or AbRowTrailingSwap, so every row in the panel '
       'shares one trailing column.',
@@ -87,17 +93,25 @@ class AbRowTrailingSwap extends StatelessWidget {
   final Widget? resting;
 
   /// [AbCrossFade] keeps its child laid out, which is the whole point of the
-  /// shared cell — so the faded-out tenant needs the pointer and the semantics
-  /// tree taken off it by hand, or a 0-opacity trash still takes hits and is
-  /// still announced.
-  Widget _fade(bool visible, Widget child) => AbCrossFade(
-    visible: visible,
-    duration: AbTokens.motionSnap,
-    child: IgnorePointer(
-      ignoring: !visible,
-      child: ExcludeSemantics(excluding: !visible, child: child),
-    ),
-  );
+  /// shared cell — so the faded-out tenant needs the pointer taken off it by
+  /// hand, or a 0-opacity trash still takes hits.
+  ///
+  /// [announce] is what separates the two tenants. An invisible ACTION must
+  /// leave the semantics tree, or it is offered to a reader who cannot see it.
+  /// A resting STATUS glyph must not: [revealed] is driven by focus as well as
+  /// hover, so excluding it would delete the label at the exact moment a
+  /// screen-reader user arrives — the only report the row has for anyone who
+  /// cannot read the dot's hue. It reports a state, not a control, so it costs
+  /// nothing to leave announced under the action that covers it.
+  Widget _fade(bool visible, Widget child, {required bool announce}) =>
+      AbCrossFade(
+        visible: visible,
+        duration: AbTokens.motionSnap,
+        child: IgnorePointer(
+          ignoring: !visible,
+          child: ExcludeSemantics(excluding: !announce, child: child),
+        ),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -121,8 +135,8 @@ class AbRowTrailingSwap extends StatelessWidget {
       child: Stack(
         alignment: Alignment.center,
         children: [
-          if (resting != null) _fade(!revealed, resting),
-          _fade(revealed, action),
+          if (resting != null) _fade(!revealed, resting, announce: true),
+          _fade(revealed, action, announce: revealed),
         ],
       ),
     );

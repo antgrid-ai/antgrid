@@ -127,11 +127,17 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
         child: AbDockedColumn(
           // Keeps a strip of the list on screen however short the window gets;
           // otherwise a tall checklist leaves the sidebar showing no projects at
-          // all. Borrowed from the token scale as a floor, not a measurement —
-          // it answers how much list is worth keeping on screen, not how tall a
-          // row is, so it stays independent of the rows' own
-          // [AbRowContentFloor] and need never agree with it.
-          minBodyExtent: AbTokens.rowHeightLg,
+          // all. Borrowed from the token scale as a floor rather than measured
+          // off a row — it answers how much list is worth keeping, not how tall
+          // any one row is.
+          //
+          // Scaled all the same, because the rows it holds room for are: a band
+          // floors on [AbIconButton.boxExtent], so above UI Size ~1.15 a fixed
+          // 44 falls short of the FIRST row and the strip stops containing a
+          // whole one. The dock pays for it, and the dock scrolls.
+          minBodyExtent: MediaQuery.textScalerOf(
+            context,
+          ).scale(AbTokens.rowHeightLg),
           header: _TopChrome(
             onRefresh: _refreshBusy ? null : _refreshFromButton,
           ),
@@ -623,7 +629,14 @@ class _MachineProjects extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             for (final p in projects)
-              _AdvertisedProjectRow(machineUuid: machineUuid, project: p),
+              // Keyed: the row is stateful (focus latch) and the advert list is
+              // reordered and filtered live, so positional reconciliation would
+              // hand one project's state to another.
+              _AdvertisedProjectRow(
+                key: ValueKey(p.projectId),
+                machineUuid: machineUuid,
+                project: p,
+              ),
           ],
         );
       },
@@ -640,6 +653,7 @@ class _AdvertisedProjectRow extends ConsumerStatefulWidget {
   final String machineUuid;
   final AdvertisedProject project;
   const _AdvertisedProjectRow({
+    super.key,
     required this.machineUuid,
     required this.project,
   });
@@ -664,6 +678,13 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
     final isWarm = ref.watch(
       projectSessionRegistryProvider.select((open) => open.contains(regId)),
     );
+    // Watched HERE and not inside the builder below. A `ref.watch` reached from
+    // a descendant element's build is closed and re-subscribed on every rebuild
+    // of this element — `ConsumerStatefulElement` retires whatever the build
+    // itself did not re-read before its children run — so hovering the row
+    // would cancel and resume the work-status subscription on each frame.
+    final needsUser =
+        !expanded && DrawerProjectAggregateDot.needsUser(ref, regId);
     final label = widget.project.label;
     final name = (label != null && label.isNotEmpty)
         ? label
@@ -681,8 +702,7 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
             // `_DrawerEntryTrailing`'s — rollup inboard, action outermost — so
             // the two halves of the drawer are one row grammar down to their
             // metrics.
-            final aggregate =
-                (!expanded && DrawerProjectAggregateDot.needsUser(ref, regId))
+            final aggregate = needsUser
                 ? DrawerProjectAggregateDot(entryId: regId)
                 : null;
             final newSession = revealed

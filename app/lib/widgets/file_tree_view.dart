@@ -481,6 +481,18 @@ class _FileTreeRowState extends State<_FileTreeRow> {
             onUnstagePath != null ||
             onDiscardPath != null ||
             onResolvePath != null);
+    // What the ROW HEIGHT has to reserve, which is a question about the tree
+    // and not about this file: `hasActions` above is per-row, so floor-ing on
+    // it would let a row's height report whether that one path happens to be
+    // stageable. Touch mounts no buttons at all, and neither does a tree wired
+    // without git callbacks (the Files tab) — neither should pay a button's
+    // height on every row.
+    final reservesButtons =
+        showRowButtons &&
+        (widget.onStage != null ||
+            widget.onUnstage != null ||
+            widget.onDiscard != null ||
+            widget.onResolveConflict != null);
     // An OPEN directory carries no decoration of its own — in changesOnly mode
     // every directory left after pruning already implies a descendant changed,
     // so a dot on top of that is redundant noise. A folded one is the
@@ -502,11 +514,9 @@ class _FileTreeRowState extends State<_FileTreeRow> {
         selected: widget.isSelected,
         selectionStyle: AbRowSelection.surface,
         density: AbRowDensity.sm,
-        // A platform that never mounts the buttons must not pay their height
-        // for every row of the tree.
-        contentFloor: isMobilePlatform
-            ? AbRowContentFloor.none
-            : AbRowContentFloor.iconButton,
+        contentFloor: reservesButtons
+            ? AbRowContentFloor.iconButton
+            : AbRowContentFloor.none,
         onFocusChange: (v) {
           if (_focused != v && mounted) setState(() => _focused = v);
         },

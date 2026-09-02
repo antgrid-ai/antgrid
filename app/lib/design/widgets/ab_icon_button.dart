@@ -68,24 +68,30 @@ class AbIconButton extends StatefulWidget {
   /// Glyph size. Defaults to [AbTokens.iconButtonGlyph].
   final double? glyphSize;
 
-  /// Edge of this button's visual box in [context].
+  /// Edge of a button's visual box in [context].
   ///
   /// The authority on the button's own size, so a row anchoring its height on
   /// a button — or a cell aligning against one — reads the value from the
   /// widget that owns it instead of re-deriving a constant that the text
-  /// scaler beats above UI Size 1.0.
-  static double boxExtent(BuildContext context) =>
-      MediaQuery.textScalerOf(context).scale(AbTokens.iconButtonBox);
+  /// scaler beats above UI Size 1.0. [boxSize] mirrors the instance field of
+  /// the same name: a caller measuring a button that overrides its box has to
+  /// pass that override, or it reserves the default and the button overflows.
+  static double boxExtent(BuildContext context, {double? boxSize}) =>
+      MediaQuery.textScalerOf(context).scale(boxSize ?? AbTokens.iconButtonBox);
 
-  /// Width this button occupies in [context], tap inflation included.
+  /// Width a button occupies in [context], tap inflation included.
   ///
   /// [AbTapTarget] raises minWidth to [AbTokens.tapTargetMin] on mobile
   /// unconditionally (`compact` gates only minHeight), and that floor does not
   /// scale — so above ~1.84x the box overtakes it and the mobile width changes
   /// character. Both regimes are in the max.
-  static double footprintWidth(BuildContext context) => isMobilePlatform
-      ? math.max(AbTokens.tapTargetMin, boxExtent(context))
-      : boxExtent(context);
+  static double footprintWidth(BuildContext context, {double? boxSize}) =>
+      isMobilePlatform
+      ? math.max(
+          AbTokens.tapTargetMin,
+          boxExtent(context, boxSize: boxSize),
+        )
+      : boxExtent(context, boxSize: boxSize);
 
   @override
   State<AbIconButton> createState() => _AbIconButtonState();
@@ -135,7 +141,7 @@ class _AbIconButtonState extends State<AbIconButton> {
     // target height — the target stops growing with the row. A bounded host
     // (AbToolbar's fixed row height) clamps the box on its own.
     final scaler = MediaQuery.textScalerOf(context);
-    final boxSize = scaler.scale(widget.boxSize ?? AbTokens.iconButtonBox);
+    final boxSize = AbIconButton.boxExtent(context, boxSize: widget.boxSize);
     final glyphSize = scaler.scale(
       widget.glyphSize ?? AbTokens.iconButtonGlyph,
     );
