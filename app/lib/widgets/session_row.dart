@@ -159,10 +159,24 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       detached('SessionRow', 'session rename failed', _commitEdit);
 
   void _exitEdit() {
-    _editController?.dispose();
-    _editFocus?.dispose();
+    // Disposing a FocusNode detaches it, and `FocusManager._markDetached`
+    // removes it from `_dirtyNodes` — the very Set that
+    // `applyFocusChangesIfNeeded` is ITERATING when it notifies listeners. One
+    // caller is the field's own `onFocusChange`, and `detached` runs its action
+    // through `Future.sync`, so the whole path down to here executes inside
+    // that notification: disposing synchronously throws
+    // ConcurrentModificationError and kills the app. Hand the objects to a
+    // microtask so the notification unwinds first. The fields are cleared
+    // BEFORE it runs, so nothing reaches a disposed node in between and
+    // `dispose()` above cannot double-dispose.
+    final controller = _editController;
+    final focus = _editFocus;
     _editController = null;
     _editFocus = null;
+    scheduleMicrotask(() {
+      controller?.dispose();
+      focus?.dispose();
+    });
     if (mounted) {
       setState(() => _editing = false);
     } else {

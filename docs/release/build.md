@@ -49,3 +49,13 @@ symbols:
 - **iOS** — upload dSYMs, including Flutter's `App.framework.dSYM`, to App Store
   Connect. Xcode Cloud does this automatically; manual builds require
   `xcrun altool` or the Xcode Organizer.
+- **Desktop (Windows/macOS/Linux)** — nowhere to upload to. errex implements the
+  ingest API but not the symbol-upload one: `sentry-cli` posts to
+  `/api/0/organizations/<org>/chunk-upload/` (or the legacy
+  `/api/0/projects/<org>/<project>/files/dsyms/`), and errex answers **404** on
+  both while answering **401** on routes it does implement, such as
+  `/api/<project>/envelope/`. So do not add a `sentry-cli upload-dif` step to the
+  desktop workflows expecting it to work. Desktop NATIVE frames therefore arrive
+  as module + offset and must be symbolicated by hand against the build's PDBs;
+  DART frames stay readable because releases ship unobfuscated (see the top of
+  this file). Re-check this if errex gains the endpoint.

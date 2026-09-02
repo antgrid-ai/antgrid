@@ -11,6 +11,7 @@ import { resolveAbDir } from "./antgrid-dir";
 import { startOwnerWatchdog } from "./owner-watchdog";
 import { augmentHostPath } from "./host-path";
 import { runHookInvocation } from "./hook-runner";
+import { initCrashReporting, captureBridgeError, flushCrashReports } from "./crash-reporting";
 
 // Component-tagged child for this module's own lifecycle logs.
 const log = logger.child({ component: "bridge" });
@@ -60,6 +61,13 @@ program
   .argument("<event>")
   .argument("[payload]")
   .action(async (agent: string, event: string, payload?: string) => {
+    // Deliberately NOT crash-reported. A hook is spawned by the agent CLI, not
+    // by the app, so it is handed no bootstrap payload and there is no consent
+    // to act on — and the two costs land on a path the agent blocks on for
+    // every tool use: SDK init on entry, and a transport flush before an exit
+    // that is otherwise immediate. The field failure this would seem to catch
+    // (a hook that never runs at all — see the MSIX `<Application>` note in
+    // CLAUDE.md) is a CreateProcess denial, which no in-process SDK can observe.
     await runHookInvocation({ agent, event, payload });
     // Exit explicitly: hooks are advisory and must never linger. An agent that
     // holds this process's stdin open (copilot does) would otherwise keep the
@@ -101,6 +109,20 @@ program
     } catch (err) {
       console.error(`antgrid-bridge: ${(err as Error).message}`);
       process.exit(64); // EX_USAGE
+    }
+
+    // First thing after the payload, because the payload is where consent
+    // arrives — nothing before this point is reportable, which is the honest
+    // answer rather than a gap to close. Absence of the flag is OFF: a host
+    // started by the CLI or a test has nobody who consented to anything.
+    if (
+      initCrashReporting({
+        enabled: payload.telemetryEnabled ?? false,
+        dsn: process.env.SENTRY_DSN ?? "",
+        release: payload.ownerBuild,
+      })
+    ) {
+      log.debug("crash reporting enabled");
     }
 
     const host = new HostServer({
@@ -179,7 +201,12 @@ program
         await host.shutdown(reason);
       } catch (err) {
         log.error("Shutdown failed: %s", err);
+        captureBridgeError(err, "shutdown");
       }
+      // After the drain, not before: this is the last chance to send whatever
+      // the SDK's top-level handlers queued. ~15ms when there is nothing to
+      // send, so a clean exit is not measurably slower for a consenting host.
+      await flushCrashReports();
       clearTimeout(bail);
       process.exit(exitCode);
     };
@@ -200,6 +227,18 @@ program
     process.on("SIGINT", () => shutdown("SIGINT"));
     process.on("SIGTERM", () => shutdown("SIGTERM"));
     process.on("SIGHUP", () => shutdown("SIGHUP"));
+    // These own the EXIT; Sentry's own handler for each owns the CAPTURE (it is
+    // installed by initCrashReporting above), which is what keeps a fatal marked
+    // `handled: false` rather than re-reported here as an ordinary handled
+    // error — so there is deliberately no captureBridgeError call in either.
+    //
+    // **These must be registered for as much of the process's life as possible.**
+    // The SDK decides whether to exit on its own AT CRASH TIME, by counting the
+    // OTHER uncaughtException listeners: with one of ours present it defers and
+    // this teardown sweeps the PTYs; as the sole listener it logs and
+    // `process.exit(1)`s, skipping the sweep. That is survivable only in the
+    // window above, where no PTY exists yet — moving this registration any later
+    // (or `initCrashReporting` any earlier) widens it into one where it isn't.
     process.on("uncaughtException", (err) => { log.error("Uncaught exception: %s", err); shutdown("uncaughtException"); });
     process.on("unhandledRejection", (err) => { log.error("Unhandled rejection: %s", err); shutdown("unhandledRejection"); });
 
