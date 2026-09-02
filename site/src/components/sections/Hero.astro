@@ -5,8 +5,6 @@ import Button from "../ui/Button.astro";
 import ProofCard from "./ProofCard.astro";
 import { links } from "../../config";
 import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../../data/pricing";
-
-const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
 ---
 {/* The proof loop is the argument, so it gets the stage rather than a column:
     full shell width under the headline, which also puts it just below the fold
@@ -63,8 +61,11 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
           href={links.pricing}
           class="inline-flex items-center gap-2 rounded-full border border-signaldeep2 bg-signaldeep/40 px-3 py-1 font-mono text-marker text-signal2 transition-colors hover:border-signalbtn hover:text-signal3"
         >
-          <span class="rounded-full bg-signalbtn px-1.5 py-px text-pip font-medium text-page">{offerPct}% off</span>
-          Launch offer — Pro ${YEARLY_OFFER_USD} per seat / year
+          {/* Forwards, never as a discount off a struck price — same rule
+              PlanCard.astro states and for the same reason: $99 has never been
+              charged, so "% off" would invent a reference price. */}
+          <span class="rounded-full bg-signalbtn px-1.5 py-px text-pip font-medium text-page">Founding</span>
+          Pro ${YEARLY_OFFER_USD} per seat / year — ${YEARLY_LIST_USD} at launch
           <Icon name="tabler:arrow-right" width="12" height="12" />
         </a>
       )}

@@ -26,36 +26,49 @@ const agents = [
   { name: "Mistral Vibe", icon: "simple-icons:mistralai" },
 ];
 
-// Grouped into two rows rather than left to wrap: the ten chips are ~100px wider
-// than the shell at every desktop width, so a single flex row always broke 9 + 1
-// and stranded the dashed chip alone on the second line. Splitting on the
-// distinction the row already encodes costs no words and fixes the orphan.
-const groups = [agents.filter((a) => a.handler), agents.filter((a) => !a.handler)];
+// Two rows rather than one that wraps: the chips are ~100px wider than the shell
+// at every desktop width, so a single flex row breaks 9 + 1 and strands the
+// dashed chip alone on the second line. Splitting on the distinction the row
+// already encodes costs no words and fixes the orphan.
+const supervised = agents.filter((a) => a.handler);
+const unsupervised = agents.filter((a) => !a.handler);
+
+// Built from the same array the chips are, so the sentence cannot go on naming
+// three while a fourth chip lights up.
+const supervisedNames = supervised.map((a) => a.name);
 ---
 <section id="agents" class="border-b border-edge-inner bg-well">
   <div class="mx-auto max-w-shell px-6 py-8">
     <Eyebrow class="mb-4">The agent you already run</Eyebrow>
 
     <div class="flex flex-col gap-2">
-      {groups.map((group, gi) => (
-        <div class="flex flex-wrap items-center gap-2">
-          {group.map((a) => (
-            <Chip class="px-3 py-1.5 text-meta text-ink2">
-              {a.icon
-                ? <Icon name={a.icon} class={`shrink-0 ${a.handler ? "text-signal" : "text-muted2"}`} width="14" height="14" />
-                : <span class="flex size-3.5 shrink-0 items-center justify-center rounded-[3px] border border-edge-emph font-mono text-pip text-muted2" aria-hidden="true">{a.name[0]}</span>}
-              {a.name}
-            </Chip>
-          ))}
-          {gi === 1 && (
-            <Chip variant="dashed" class="px-3 py-1.5 text-meta"><Icon name="tabler:plus" width="13" height="13" />any terminal agent</Chip>
-          )}
-        </div>
-      ))}
+      <div class="flex flex-wrap items-center gap-2">
+        {supervised.map((a) => (
+          <Chip class="px-3 py-1.5 text-meta text-ink2">
+            {a.icon
+              ? <Icon name={a.icon} class="shrink-0 text-signal" width="14" height="14" />
+              : <span class="flex size-3.5 shrink-0 items-center justify-center rounded-[3px] border border-edge-emph font-mono text-pip text-muted2" aria-hidden="true">{a.name[0]}</span>}
+            {a.name}
+          </Chip>
+        ))}
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        {unsupervised.map((a) => (
+          <Chip class="px-3 py-1.5 text-meta text-ink2">
+            {a.icon
+              ? <Icon name={a.icon} class="shrink-0 text-muted2" width="14" height="14" />
+              : <span class="flex size-3.5 shrink-0 items-center justify-center rounded-[3px] border border-edge-emph font-mono text-pip text-muted2" aria-hidden="true">{a.name[0]}</span>}
+            {a.name}
+          </Chip>
+        ))}
+        <Chip variant="dashed" class="px-3 py-1.5 text-meta"><Icon name="tabler:plus" width="13" height="13" />any terminal agent</Chip>
+      </div>
     </div>
 
     <p class="mt-4 text-meta leading-relaxed text-muted2">
-      Handler supervises <span class="text-ink2">Claude Code</span>, <span class="text-ink2">Codex</span> and <span class="text-ink2">opencode</span> today. Every other agent runs as a named session — terminal, files, git and alerts.
+      Handler supervises {supervisedNames.map((name, i) => (
+        <>{i === 0 ? "" : i === supervisedNames.length - 1 ? " and " : ", "}<span class="text-ink2">{name}</span></>
+      ))} today. Every other agent runs as a named session — terminal, files, git and alerts.
     </p>
   </div>
 </section>

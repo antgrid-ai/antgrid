@@ -22,8 +22,10 @@ Arm its supervisor on a session and it goes further: it watches the agent's atte
 signals, answers what it can, escalates what it can't, and calls a task done only on
 concrete evidence — test output, exit codes, a diff — rather than the agent's own report.
 That part is opt-in and it is the paid tier — `CAPABILITIES` in
-[`bridge/src/entitlement.ts`](bridge/src/entitlement.ts) is the whole gate. Everything
-above it is free.
+[`bridge/src/entitlement.ts`](bridge/src/entitlement.ts) is the whole capability gate. The
+only other paid line is how many machines one account may run agents on
+(`FREE_WORKER_LIMIT` in [`web/src/billing/plans.ts`](web/src/billing/plans.ts)); everything
+else is free.
 
 Antgrid does not replace your agent and ships no model of its own.
 

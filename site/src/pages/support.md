@@ -32,11 +32,12 @@ Your agent's live output, files, and sessions appear once a project is running. 
 
 ## Signing in
 
-Antgrid supports three sign-in options:
+Antgrid supports four sign-in options:
 
 - **Email magic link** — enter your email, open the link we send you, then press **"Approve sign-in"** on the page it opens.
 - **GitHub**
 - **Google**
+- **Email and password** — available once you have set a password on your account; verify the address first.
 
 **Didn't get your magic-link email?** Check your spam folder and request a new link from the app. Links are single-use and expire after **10 minutes**.
 

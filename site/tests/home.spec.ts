@@ -41,12 +41,28 @@ test("privacy shows relay's-eye view and crypto chips", async ({ page }) => {
   await expect(page.getByText("AES-256-GCM")).toBeVisible();
 });
 
-test("cross-agent shows agents and the 3 steps", async ({ page }) => {
+// The roster lives in #agents now, not in the cross-agent band — asserting the
+// chip from an unscoped page locator kept this test green off the OTHER section.
+test("cross-agent shows the 3 steps", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: /bring the agent you already use\./i })).toBeVisible();
-  await expect(page.getByText("any terminal agent")).toBeVisible();
-  await expect(page.getByText("Windows, macOS, Linux")).toBeVisible();
-  await expect(page.getByText("Take it with you")).toBeVisible();
+  const section = page.locator("section").filter({ hasText: "Bring the agent you already use." });
+  await expect(section.getByRole("heading", { name: /bring the agent you already use\./i })).toBeVisible();
+  await expect(section.getByText("Windows, macOS, Linux")).toBeVisible();
+  await expect(section.getByText("Take it with you")).toBeVisible();
+});
+
+// The only wording assertion in this file, and it is not marketing copy: the
+// supervised three are whatever `handlerObservable` answers true for in
+// bridge/src/agents/registry.ts, so a fourth chip going accent — or the prose
+// falling out of step with the chips — is a false capability claim, not a
+// rewrite. The catch-all chip is the free-tier promise beside it.
+test("the agent roster names the supervised three and a catch-all", async ({ page }) => {
+  await page.goto("/#agents");
+  const agents = page.locator("#agents");
+  for (const name of ["Claude Code", "Codex", "opencode"]) {
+    await expect(agents.getByText(name, { exact: true })).toHaveCount(2);
+  }
+  await expect(agents.getByText("any terminal agent")).toBeVisible();
 });
 
 test("closing CTA band renders with app stores still pending", async ({ page }) => {

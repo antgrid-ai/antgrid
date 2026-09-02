@@ -32,6 +32,7 @@ Radha AI Products is the legal entity behind Antgrid. **Questions or concerns?**
 
 - **Account information** — name and email address (provided directly or via a third-party sign-in provider).
 - **Billing status** — your plan, subscription state, trial status, and transaction identifiers returned by our payment processors or app stores. **We do not collect or store full payment card numbers; these are handled entirely by our payment processors and the app stores.**
+- **Waitlist email address** — if you join the founding-pricing waitlist from our website or pricing page, we store the email address you submit and the page you submitted it from, so we can tell you when pricing opens. This does not create an account, and the submitting IP address is used only for rate limiting and is never stored on the record.
 
 ### Information collected automatically
 
@@ -107,6 +108,7 @@ We keep personal information only for as long as necessary for the purposes set 
 - **Session IP address and user-agent** — for the lifetime of the session; expired and deleted sessions are removed.
 - **Cross-device sign-in records** — automatically expire within approximately 10 minutes.
 - **Operational logs** (which may contain IP addresses) — retained for up to 30 days, then deleted.
+- **Waitlist email address** — until founding pricing opens and we have contacted you, or until you ask us to remove it, whichever comes first.
 
 When we no longer have a legitimate need to process your information, we delete or anonymize it, or securely isolate it where deletion is not immediately possible (for example, in backups).
 
@@ -121,6 +123,8 @@ Depending on your location, you may have the right to access, correct, update, o
 ### Account and data deletion
 
 You can request deletion of your account and associated personal data at any time by emailing [contact@radhaai.com](mailto:contact@radhaai.com) with the subject "Account Deletion Request" from your registered email address. Upon verification, we will delete or anonymize your account data, except where retention is required by law (for example, tax and transaction records). We will action verified deletion requests within 30 days.
+
+To be removed from the founding-pricing waitlist, email us from the address you submitted with the subject "Waitlist Removal" — no account is needed, and we delete the record on verification.
 
 If you purchased through the Apple App Store or Google Play, manage or cancel any active subscription through your store account before requesting deletion, as those subscriptions are managed by the store (see our [Cancellation & Refund Policy](/refunds)).
 
