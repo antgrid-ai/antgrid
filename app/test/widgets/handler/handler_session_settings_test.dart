@@ -78,6 +78,35 @@ Future<void> _pump(
   await tester.pump();
 }
 
+/// Mounts ONE half of the settings block. The arm sheet takes the posture half
+/// alone, because its composer's chip is already the judge picker there.
+Future<void> _pumpHalf(
+  WidgetTester tester,
+  Widget half, {
+  Map<String, bool> catalog = const {'claude': true},
+}) async {
+  useInMemoryPrefs();
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        agentCatalogProvider.overrideWith(
+          () => _SeededCatalog({
+            for (final e in catalog.entries)
+              e.key: _descriptor(e.key, judgeCapable: e.value),
+          }),
+        ),
+      ],
+      child: MaterialApp(
+        theme: ThemeData.dark().copyWith(
+          extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
+        ),
+        home: Scaffold(body: half),
+      ),
+    ),
+  );
+  await tester.pump();
+}
+
 AbSegmented<HandlerPersonality> _segmented(WidgetTester tester) =>
     tester.widget<AbSegmented<HandlerPersonality>>(
       find.byType(AbSegmented<HandlerPersonality>),
@@ -217,6 +246,51 @@ void main() {
         find.textContaining('Takes effect on the next pass.'),
         findsOneWidget,
       );
+    });
+
+    testWidgets('the posture half carries no judge picker of its own', (
+      tester,
+    ) async {
+      // On the arm sheet the composer's chip IS the judge picker, so mounting
+      // these rows too would be two controls for one value.
+      await _pumpHalf(
+        tester,
+        HandlerPostureControl(
+          terminalId: 't1',
+          value: _value(judgeTool: 'codex'),
+          onChanged: (_) {},
+        ),
+        catalog: const {'codex': false},
+      );
+
+      expect(find.text('HOW MUCH IT HANDLES'), findsOneWidget);
+      // The parked blurb REPLACES the personality one — a posture that is
+      // stored and inert must not also describe what it would be doing.
+      expect(find.text(handlerPostureParkedBlurb), findsOneWidget);
+      // The parked notice stays with the posture it parks: its copy never says
+      // "below", so on the arm sheet it points up at the chip and still reads
+      // true.
+      expect(find.textContaining(handlerJudgeParkedNotice('Codex')), findsOne);
+      expect(find.text('JUDGED BY'), findsNothing);
+      expect(find.text('MODEL'), findsNothing);
+    });
+
+    testWidgets('the judge half carries both picker rows and no posture', (
+      tester,
+    ) async {
+      await _pumpHalf(
+        tester,
+        HandlerJudgeControl(
+          terminalId: 't1',
+          value: _value(judgeTool: 'claude'),
+          onChanged: (_) {},
+        ),
+      );
+
+      expect(find.text('JUDGED BY'), findsOneWidget);
+      expect(find.text('MODEL'), findsOneWidget);
+      expect(find.text('HOW MUCH IT HANDLES'), findsNothing);
+      expect(find.byType(AbSegmented<HandlerPersonality>), findsNothing);
     });
 
     testWidgets('picking a judge clears the model with it', (tester) async {

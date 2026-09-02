@@ -838,8 +838,7 @@ const HandlerConfigureMessage = BaseMessage.extend({
 // envelope below rides on `.shape` so the two cannot drift apart.
 //
 // Keep whole-payload rules off this schema too: stacking is one line typed on a
-// phone (or one preset chip), and a cross-field precondition would put a form in
-// front of it.
+// phone, and a cross-field precondition would put a form in front of it.
 export const HandlerInstructWire = z.object({
   terminalId: z.string(),
   // Untrusted remote text that ends up interpolated into the extraction prompt.

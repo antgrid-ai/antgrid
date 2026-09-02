@@ -1,7 +1,7 @@
 // The pinned PA bar. It is one status row and nothing else: the instruction
-// field and the presets moved into the backlog drawer, because a second field
-// with its own send button, pinned under the composer, read as a rival place to
-// type with nothing on either saying who receives it.
+// composer moved into the backlog drawer, because a second field with its own
+// send button, pinned under the session composer, read as a rival place to type
+// with nothing on either saying who receives it.
 import 'package:antgrid/design/ab_colors.dart';
 import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
@@ -12,6 +12,7 @@ import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/handler/handler_backlog_drawer.dart';
+import 'package:antgrid/widgets/handler/handler_instruction_composer.dart';
 import 'package:antgrid/widgets/handler/handler_pa_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -161,12 +162,11 @@ void main() {
   });
 
   testWidgets('the bar offers no place to type of its own', (tester) async {
-    // The whole point of the collapse: the composer above it is the one field.
+    // The whole point of the collapse: the session composer above it is the
+    // one field, and Handler's own box lives a tap away in the drawer.
     await _pump(tester, sessions: {'t1': _armed()});
     expect(find.byType(AbTextField), findsNothing);
-    for (final preset in handlerPresetInstructions) {
-      expect(find.text(preset), findsNothing);
-    }
+    expect(find.byType(HandlerInstructionComposer), findsNothing);
     expect(find.text(handlerDisclaimerText), findsNothing);
   });
 
@@ -214,14 +214,14 @@ void main() {
     // The bar and the drawer are separate files wired only by this default, so
     // without this the row can be inert in the app while every other test here
     // passes against an injected opener. It matters more since the collapse:
-    // this row is now the ONLY way to reach the instruction field.
+    // this row is now the ONLY way to reach the instruction composer.
     await _pump(tester, sessions: {'t1': _armed()});
 
     await tester.tap(find.text('Nothing queued'));
     await tester.pumpAndSettle();
 
     expect(find.byType(HandlerBacklogDrawer), findsOneWidget);
-    expect(find.byType(AbTextField), findsOneWidget);
+    expect(find.byType(HandlerInstructionComposer), findsOneWidget);
   });
 
   testWidgets('a live park deadline runs a clock that stops on dispose', (

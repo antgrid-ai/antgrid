@@ -16,6 +16,7 @@ import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_kbd.dart';
 import '../../design/widgets/ab_loading.dart';
 import '../../design/widgets/ab_menu.dart';
+import '../../design/widgets/ab_prompt_field.dart';
 import '../../design/widgets/ab_snack_bar.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../design/widgets/ab_switch.dart';
@@ -687,7 +688,8 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                     // recents list above.
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxHeight: 176),
-                      child: _PromptField(
+                      child: AbPromptField(
+                        key: const Key('new-session-prompt-field'),
                         controller: _prompt,
                         focusNode: _promptFocus,
                         enabled: !isCustom,
@@ -921,68 +923,6 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
       preferred: AbMenuPlacement.above,
       builder: (_) => const _GearPopoverContent(),
     );
-  }
-}
-
-/// Multiline prompt input styled with the same tokened chrome as
-/// [AbTextField] (which is single-line only, hence a bare field here).
-/// `maxLines: null` grows with content; Enter/Shift+Enter handling lives on
-/// the caller-owned [focusNode] ([_NewSessionComposerState._onPromptKeyEvent]).
-class _PromptField extends StatelessWidget {
-  const _PromptField({
-    required this.controller,
-    required this.focusNode,
-    required this.enabled,
-    required this.readOnly,
-    required this.hintText,
-    required this.onChanged,
-  });
-
-  final TextEditingController controller;
-  final FocusNode focusNode;
-  final bool enabled;
-
-  /// Frozen but undimmed, unlike [enabled]: a prompt already on the wire is
-  /// still the thing the user is waiting on, so it has to stay readable — and
-  /// "busy" must not look like the custom-agent "this field is not yours".
-  final bool readOnly;
-
-  final String hintText;
-  final ValueChanged<String> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final field = TextField(
-      key: const Key('new-session-prompt-field'),
-      controller: controller,
-      focusNode: focusNode,
-      enabled: enabled,
-      readOnly: readOnly,
-      // A caret blinking in a field that cannot take the keystroke invites
-      // exactly the edit this lock exists to refuse.
-      showCursor: !readOnly,
-      maxLines: null,
-      minLines: 3,
-      onChanged: onChanged,
-      style: AbTokens.sansStyle(color: context.antgrid.textPrimary),
-      cursorColor: context.antgrid.accent,
-      decoration: InputDecoration(
-        isCollapsed: true,
-        filled: false,
-        border: InputBorder.none,
-        enabledBorder: InputBorder.none,
-        focusedBorder: InputBorder.none,
-        disabledBorder: InputBorder.none,
-        hintText: hintText,
-        hintStyle: AbTokens.sansStyle(color: context.antgrid.textMuted),
-        contentPadding: EdgeInsets.zero,
-      ),
-    );
-    // Disabled-state contract: opacity 0.4, no interaction.
-    if (!enabled) {
-      return IgnorePointer(child: Opacity(opacity: 0.4, child: field));
-    }
-    return field;
   }
 }
 

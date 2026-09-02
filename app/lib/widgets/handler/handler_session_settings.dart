@@ -17,7 +17,6 @@ import '../../models/agent_event.dart';
 import '../../models/handler_state.dart';
 import '../../providers/agent_catalog.dart';
 import '../../providers/capability_catalog.dart';
-import '../../providers/agent_transport.dart';
 import '../../providers/providers.dart';
 import '../../services/handler_service.dart';
 
@@ -37,6 +36,33 @@ const handlerPostureParkedBlurb =
 String handlerJudgeParkedNotice(String? judgeLabel) =>
     "${judgeLabel ?? 'This judge'} can't run headless, so nothing is judged. "
     'Pick one that can and this posture takes effect.';
+
+/// Just the judge half of [HandlerSessionSettingsValue] — what a picker that
+/// owns the judge and nothing else hands back. Null tool means the session's
+/// own CLI; null model means that CLI's default.
+typedef HandlerJudgePick = ({String? judgeTool, String? judgeModel});
+
+/// What a judge pick means on the ARM sheet: nothing is running yet, so the
+/// choice is simply the one the session opens under.
+const handlerJudgeScopeOnArm = 'Judges this session from the moment it arms.';
+
+/// What a judge pick means once the session is armed. Judge calls are
+/// serialised, so a session mid-pass finishes under the judge it started with —
+/// said plainly rather than implied, the same reason
+/// [HandlerSessionSettings.appliesNextPass] exists.
+const handlerJudgeScopeNextPass = 'Takes effect on the next pass.';
+
+/// The tool that will actually judge [terminalId] given an optional per-session
+/// [override] — the one resolution every surface naming the judge goes through,
+/// so a chip, a notice and the bridge can never name different tools.
+String? handlerEffectiveJudge(
+  WidgetRef ref,
+  String terminalId,
+  String? override,
+) {
+  final service = serviceWhenReady(ref, handlerServiceProvider);
+  return override ?? service?.resolvedDefaultTool(terminalId);
+}
 
 /// The two per-session choices Handler exposes: which CLI judges its pauses,
 /// and how far it leans toward answering them itself.
@@ -97,7 +123,11 @@ HandlerSessionSettingsValue handlerSessionSettingsFor(
 /// The controls, with no chrome and no commit of their own — both hosts own
 /// what a change means, and they mean different things (collected into an arm
 /// vs. sent as an edit).
-class HandlerSessionSettings extends ConsumerWidget {
+///
+/// Both halves, in the order the settings sheet wants them. A host that already
+/// carries a judge picker of its own (the arm sheet's composer chip) mounts
+/// [HandlerPostureControl] alone rather than offering the same value twice.
+class HandlerSessionSettings extends StatelessWidget {
   const HandlerSessionSettings({
     super.key,
     required this.terminalId,
@@ -117,14 +147,61 @@ class HandlerSessionSettings extends ConsumerWidget {
   final bool appliesNextPass;
 
   @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      // The posture leads and the judge follows: how much Handler decides
+      // alone is what a user opens this for, while the judge is machinery
+      // most sessions never touch.
+      HandlerPostureControl(
+        terminalId: terminalId,
+        value: value,
+        onChanged: onChanged,
+        appliesNextPass: appliesNextPass,
+      ),
+      HandlerJudgeControl(
+        terminalId: terminalId,
+        value: value,
+        onChanged: onChanged,
+      ),
+    ],
+  );
+}
+
+/// How much Handler decides alone, plus the two lines that qualify it: the
+/// posture blurb, and the parked notice when the judge can't run headless.
+///
+/// The notice stays HERE rather than with the picker it names because it is an
+/// answer about the posture — why this control is stored and inert. Its copy
+/// never says "below", so it reads true whether the picker that fixes it sits
+/// under this block (the settings sheet) or above it (the arm sheet's chip).
+class HandlerPostureControl extends ConsumerWidget {
+  const HandlerPostureControl({
+    super.key,
+    required this.terminalId,
+    required this.value,
+    required this.onChanged,
+    this.appliesNextPass = false,
+  });
+
+  final String terminalId;
+  final HandlerSessionSettingsValue value;
+  final ValueChanged<HandlerSessionSettingsValue> onChanged;
+
+  /// See [HandlerSessionSettings.appliesNextPass].
+  final bool appliesNextPass;
+
+  @override
   Widget build(BuildContext context, WidgetRef ref) {
     final p = context.antgrid;
-    final service = serviceWhenReady(ref, handlerServiceProvider);
     final catalog = ref.watch(agentCatalogProvider);
-    final judgeTools = ref.watch(judgeCapableToolsProvider);
-    final defaultTool = service?.resolvedDefaultTool(terminalId);
     // The tool that will actually run, which is what every claim below is about.
-    final effectiveJudge = value.judgeTool ?? defaultTool;
+    final effectiveJudge = handlerEffectiveJudge(
+      ref,
+      terminalId,
+      value.judgeTool,
+    );
     final judgeCapable = effectiveJudge == null
         ? null
         : catalog[effectiveJudge]?.judgeCapable;
@@ -132,17 +209,14 @@ class HandlerSessionSettings extends ConsumerWidget {
         ? null
         : (catalog[effectiveJudge]?.label ?? effectiveJudge);
     // A judge that cannot go headless runs no decide pass at all — the bridge
-    // gates the whole path on this same answer — so the posture below is stored
-    // and does nothing until the picker under it changes.
+    // gates the whole path on this same answer — so the posture here is stored
+    // and does nothing until the judge picker changes.
     final parked = judgeCapable == false;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        // The posture leads and the judge follows: how much Handler decides
-        // alone is what a user opens this for, while the judge is machinery
-        // most sessions never touch.
         const _Head(label: 'How much it handles'),
         Padding(
           padding: _gutter,
@@ -156,8 +230,8 @@ class HandlerSessionSettings extends ConsumerWidget {
             ],
             selected: value.personality,
             // Still selectable while parked: the choice is stored and starts
-            // working the moment the judge below is fixed. It just must not
-            // look like it is running.
+            // working the moment the judge is fixed. It just must not look
+            // like it is running.
             inactive: parked,
             onSelect: (preset) => onChanged((
               judgeTool: value.judgeTool,
@@ -176,11 +250,42 @@ class HandlerSessionSettings extends ConsumerWidget {
           // under a control that is working.
           color: parked ? p.textSecondary : p.textMuted,
         ),
-        // Between the two blocks, not under the judge: it answers both halves —
-        // why the posture above is inert, and what to change below to revive
-        // it. This is the one surface where the warning is actionable;
+        // This is the one class of surface where the warning is actionable;
         // everywhere else it appears it only diagnoses.
         if (parked) _Notice(text: handlerJudgeParkedNotice(judgeLabel)),
+      ],
+    );
+  }
+}
+
+/// Which CLI judges the session's pauses, and under which model.
+///
+/// Split out from the posture so a host that already names the judge somewhere
+/// else can leave this block off — two controls writing one value is a state
+/// the user has to reconcile.
+class HandlerJudgeControl extends ConsumerWidget {
+  const HandlerJudgeControl({
+    super.key,
+    required this.terminalId,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final String terminalId;
+  final HandlerSessionSettingsValue value;
+  final ValueChanged<HandlerSessionSettingsValue> onChanged;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final catalog = ref.watch(agentCatalogProvider);
+    final judgeTools = ref.watch(judgeCapableToolsProvider);
+    final defaultTool = handlerEffectiveJudge(ref, terminalId, null);
+    final effectiveJudge = value.judgeTool ?? defaultTool;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
         const Padding(
           padding: EdgeInsets.fromLTRB(
             AbTokens.space16,
@@ -275,7 +380,7 @@ class _ModelControlState extends ConsumerState<_ModelControl> {
     final tool = widget.judgeTool;
     final models = tool == null
         ? const <AgentCapabilityModel>[]
-        : _cachedModels(tool);
+        : cachedModelsFor(ref, tool);
     if (models.isEmpty) {
       return Padding(
         padding: _gutter,
@@ -299,18 +404,6 @@ class _ModelControlState extends ConsumerState<_ModelControl> {
       ],
       onSelected: (picked) => widget.onChanged(picked.isEmpty ? null : picked),
     );
-  }
-
-  /// Hydration is kicked off from build the way every other reader of this cache
-  /// does it — the notifier is idempotent and no-ops once a key has been read.
-  List<AgentCapabilityModel> _cachedModels(String tool) {
-    final key = capabilityCacheKey(
-      capabilitySourceKey(ref.watch(selectedTargetProvider)),
-      tool,
-    );
-    ref.read(capabilityCatalogProvider.notifier).ensureHydrated(key);
-    return ref.watch(capabilityCatalogProvider)[key]?.models ??
-        const <AgentCapabilityModel>[];
   }
 }
 

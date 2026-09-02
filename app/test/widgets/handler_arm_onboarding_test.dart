@@ -2,7 +2,9 @@ import 'dart:async';
 
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/handler_state.dart';
+import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -19,12 +21,34 @@ import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/handler/handler_arm_explainer.dart';
 import 'package:antgrid/widgets/handler/handler_away_hint.dart';
 import 'package:antgrid/widgets/handler/handler_item_status.dart';
+import 'package:antgrid/widgets/handler/handler_judge_chip.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
+
+/// The bridge is authoritative for what an agent is called and what it can do,
+/// so a judge picker has nothing to list until an advert has landed.
+class _SeededCatalog extends AgentCatalogNotifier {
+  _SeededCatalog(this.seed);
+
+  final Map<String, AgentDescriptor> seed;
+
+  @override
+  Map<String, AgentDescriptor> build() => seed;
+}
+
+AgentDescriptor _descriptor(String tool) => AgentDescriptor(
+  tool: tool,
+  label: tool[0].toUpperCase() + tool.substring(1),
+  chatCapable: true,
+  judgeCapable: true,
+  handlerTerminal: true,
+  handlerChat: true,
+);
 
 Widget _wrap(Widget child, {required List<Override> overrides}) {
   return ProviderScope(
@@ -252,6 +276,7 @@ void main() {
     Future<(FakeAgentTransport, ProviderContainer, BuildContext)> pumpArm(
       WidgetTester tester, {
       required bool armedOnce,
+      List<Override> extraOverrides = const [],
     }) async {
       useInMemoryPrefs();
       final store = await FirstRunStore.open();
@@ -273,6 +298,7 @@ void main() {
           firstRunStoreProvider.overrideWithValue(store),
           selectedRegistrationIdProvider.overrideWithValue('p'),
           projectSessionProvider('p').overrideWith((ref) => projectSession),
+          ...extraOverrides,
         ],
       );
       addTearDown(container.dispose);
@@ -461,6 +487,154 @@ void main() {
       await tester.pumpAndSettle();
       expect(armFrame(transport).containsKey('goal'), isFalse);
       await confirmArmed(tester, transport);
+    });
+
+    // The sharp edge of the whole feature: `handler:instruct` is DROPPED by the
+    // bridge when no armed session exists, and the drop is a log line no phone
+    // reads. So the sentence typed on this sheet cannot ride the arm, and
+    // cannot be smuggled in as the goal either — a goal grants nothing, and
+    // `instruct` is the one feed point for instruction-scoped authorization.
+    group('the arm sheet composer', () {
+      final field = find.byKey(const Key('handler-instruction-field'));
+
+      List<Map<String, dynamic>> instructs(FakeAgentTransport transport) =>
+          transport.sent
+              .where((m) => m['type'] == 'handler:instruct')
+              .toList();
+
+      /// Opens the first-arm sheet and leaves it on screen.
+      Future<void> openSheet(
+        WidgetTester tester,
+        ProviderContainer container,
+        BuildContext context,
+      ) async {
+        unawaited(
+          armWithFirstRunExplainer(
+            context: context,
+            container: container,
+            terminalId: 't1',
+            agentObservable: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('typed text is not on the wire before the arm is confirmed', (
+        tester,
+      ) async {
+        final (transport, container, context) = await pumpArm(
+          tester,
+          armedOnce: false,
+        );
+        await openSheet(tester, container, context);
+
+        await tester.enterText(field, 'also update the changelog');
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+
+        // The arm went; the instruction did not go with it.
+        expect(armFrame(transport)['armed'], true);
+        expect(instructs(transport), isEmpty);
+
+        await confirmArmed(tester, transport);
+      });
+
+      testWidgets('and lands exactly once when the bridge confirms', (
+        tester,
+      ) async {
+        final (transport, container, context) = await pumpArm(
+          tester,
+          armedOnce: false,
+        );
+        await openSheet(tester, container, context);
+
+        await tester.enterText(field, 'also update the changelog');
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+        await confirmArmed(tester, transport);
+
+        expect(instructs(transport), hasLength(1));
+        expect(instructs(transport).single['terminalId'], 't1');
+        expect(instructs(transport).single['text'], 'also update the changelog');
+      });
+
+      testWidgets('an untouched composer sends no instruction at all', (
+        tester,
+      ) async {
+        final (transport, container, context) = await pumpArm(
+          tester,
+          armedOnce: false,
+        );
+        await openSheet(tester, container, context);
+
+        // Arming with nothing typed is the ordinary case, and an empty
+        // `handler:instruct` would spend an extraction pass on nothing.
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+        await confirmArmed(tester, transport);
+
+        expect(instructs(transport), isEmpty);
+      });
+
+      testWidgets('an arm the bridge never confirms sends nothing', (
+        tester,
+      ) async {
+        // An entitlement refusal emits a status that does not list the session,
+        // which is indistinguishable from a dropped send — so the window
+        // closing is the end of it, not a late retry.
+        final (transport, container, context) = await pumpArm(
+          tester,
+          armedOnce: false,
+        );
+        await openSheet(tester, container, context);
+
+        await tester.enterText(field, 'also update the changelog');
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+        await tester.pump(kHandlerArmConfirmWindow + const Duration(seconds: 1));
+        await tester.pumpAndSettle();
+
+        expect(instructs(transport), isEmpty);
+      });
+
+      testWidgets('a judge picked here rides the arm, not a frame of its own', (
+        tester,
+      ) async {
+        final (transport, container, context) = await pumpArm(
+          tester,
+          armedOnce: false,
+          extraOverrides: [
+            agentCatalogProvider.overrideWith(
+              () => _SeededCatalog({
+                'claude': _descriptor('claude'),
+                'codex': _descriptor('codex'),
+              }),
+            ),
+          ],
+        );
+        await openSheet(tester, container, context);
+
+        await tester.tap(find.byType(HandlerJudgeChip));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Codex'));
+        await tester.pumpAndSettle();
+        // The panel stays open on a judge pick — the model is the next thing
+        // the user may want — so it has to be dismissed before the sheet's own
+        // commit is reachable.
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+
+        final configures = transport.sent
+            .where((m) => m['type'] == 'handler:configure')
+            .toList();
+        expect(configures, hasLength(1));
+        expect(configures.single['judgeTool'], 'codex');
+
+        await confirmArmed(tester, transport);
+      });
     });
   });
 

@@ -145,6 +145,7 @@ class ComposerChip extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.onTap,
+    this.secondaryLabel,
     this.attention = false,
     this.enabled = true,
   });
@@ -152,6 +153,11 @@ class ComposerChip extends StatelessWidget {
   final String icon;
   final String label;
   final void Function(BuildContext anchorContext) onTap;
+
+  /// A qualifier on the label that sheds FIRST — the chip's identity is the
+  /// primary label and must survive it. All-or-nothing rather than ellipsized:
+  /// half a model id names nothing, while the judge beside it still does.
+  final String? secondaryLabel;
 
   /// Accent styling for "needs a pick" states (e.g. "Select project…").
   final bool attention;
@@ -188,6 +194,21 @@ class ComposerChip extends StatelessWidget {
               // glyph stand in, rather than overflowing the row.
               final showLabel =
                   constraints.maxWidth >= kComposerChipFullMinWidth;
+              // The secondary is priced against the room the PAIR needs, so it
+              // is dropped while the primary still fits rather than pushing the
+              // primary into an ellipsis.
+              final secondary = secondaryLabel;
+              var showSecondary = false;
+              if (showLabel && secondary != null) {
+                final pair = _measureLabel(
+                  context,
+                  '$label  $secondary',
+                  labelStyle,
+                ).width;
+                showSecondary =
+                    constraints.maxWidth >=
+                    kComposerChipGlyphWidth + kComposerChipChevronWidth + pair;
+              }
               // Genuinely no room: nothing can be tapped in zero pixels.
               if (constraints.maxWidth <= 0) {
                 return const SizedBox.shrink();
@@ -232,6 +253,16 @@ class ComposerChip extends StatelessWidget {
                             style: labelStyle,
                           ),
                         ),
+                        if (showSecondary) ...[
+                          const SizedBox(width: AbTokens.space6),
+                          Text(
+                            secondary!,
+                            maxLines: 1,
+                            softWrap: false,
+                            overflow: TextOverflow.ellipsis,
+                            style: labelStyle.copyWith(color: p.textMuted),
+                          ),
+                        ],
                         const SizedBox(width: AbTokens.space6),
                         AbIcon(
                           AbIcons.chevronDown,

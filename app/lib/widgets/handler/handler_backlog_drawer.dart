@@ -7,7 +7,6 @@ import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_adaptive_sheet.dart';
 import '../../design/widgets/ab_button.dart';
-import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_dialog.dart';
 import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_icon.dart';
@@ -21,18 +20,9 @@ import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
 import '../../services/handler_service.dart';
 import '../../util/detached.dart';
+import 'handler_instruction_composer.dart';
 import 'handler_item_status.dart';
-
-/// The 1-tap presets. Each label is verbatim the instruction the chip sends: a
-/// chip is exactly the sentence the user would have typed, which is what keeps
-/// it on the same authorization path as typed text. Keeping label and payload
-/// one string is what stops the two drifting apart.
-const handlerPresetInstructions = <String>[
-  'Run Tests',
-  'Commit',
-  'Create PR',
-  'Clean Build',
-];
+import 'handler_session_settings.dart';
 
 /// What the sheet is called, and what it is called for. The surface keeps its
 /// own name first: a card, a menu entry and the pill all send the user here by
@@ -193,9 +183,9 @@ String? _sessionName(WidgetRef ref, String terminalId) {
 ///
 /// So it opens with the act rather than the absence, and answers the question an
 /// empty list raises in every one of those cases — whether an unfed Handler is
-/// doing anything at all. It offers no button: the presets and the field are
-/// already on screen under this list, and a second route to one action is how
-/// one action ends up with two names.
+/// doing anything at all. It offers no button: the composer is already on
+/// screen under this list, and a second route to one action is how one action
+/// ends up with two names.
 ///
 /// [hasGoal] is what stops the invitation reading as "nothing was received".
 /// The goal stands above this list and the bridge extracts items from it, so a
@@ -270,7 +260,7 @@ class _GoalLine extends StatelessWidget {
   }
 }
 
-/// Presets and the free-text field, here rather than pinned above the composer.
+/// The instruction box, here rather than pinned above the session composer.
 ///
 /// Queueing work for Handler to do later is a different act from talking to the
 /// agent now, and the two fields stacked said otherwise: same shape, same send
@@ -331,17 +321,14 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
     return null;
   }
 
-  /// Preset chips and typed text land here alike: one path, one message type,
-  /// so a rule that later applies to instructions cannot miss the chips.
-  ///
   /// Resolved through the container for the same reason [_sendEdit] is: this
   /// fires from a tap inside a sheet, which the send itself may pop.
   ///
-  /// The service owns both the empty check and the debounce, so a chip and the
-  /// field are refused on the same terms; this only decides what the user is
-  /// told about it. A blank field is silent — there was nothing to send and
-  /// the user knows it — while a duplicate is a send that looked identical to
-  /// one that worked and did not happen, on the primary action of the surface.
+  /// The service owns both the empty check and the debounce; this only decides
+  /// what the user is told about it. A blank field is silent — there was
+  /// nothing to send and the user knows it — while a duplicate is a send that
+  /// looked identical to one that worked and did not happen, on the primary
+  /// action of the surface.
   HandlerInstructResult _instruct(String text) {
     final result =
         focusedServiceOrNull(
@@ -383,6 +370,38 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
     _input.clear();
   }
 
+  HandlerSessionSettingsValue? _judge;
+
+  /// Seeded once, from the service rather than from a provider — the same rule
+  /// [_SettingsSheet] follows: reseeding on every rebuild lets the status
+  /// snapshot that confirms an edit land mid-gesture and reset the control.
+  HandlerSessionSettingsValue get _judgeValue =>
+      _judge ??
+      handlerSessionSettingsFor(
+        focusedServiceOrNull(ref.container, (s) => s.handlerService),
+        widget.terminalId,
+      );
+
+  /// The judge is what READS the sentence typed above it, so picking one here
+  /// commits immediately rather than waiting on some absent Save.
+  ///
+  /// `armed: true` on an already-armed session is the bridge's EDIT path, not a
+  /// second arm — safe only because this composer mounts under `session != null`.
+  void _commitJudge(HandlerJudgePick pick) {
+    final next = (
+      judgeTool: pick.judgeTool,
+      judgeModel: pick.judgeModel,
+      personality: _judgeValue.personality,
+    );
+    final edit = handlerSessionSettingsEdit(_judgeValue, next);
+    setState(() => _judge = next);
+    focusedServiceOrNull(ref.container, (s) => s.handlerService)?.arm(
+      terminalId: widget.terminalId,
+      judgeTool: edit.judgeTool,
+      judgeModel: edit.judgeModel,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     ref.listen(handlerStateProvider, (_, next) => _adoptGrant(next.value));
@@ -405,61 +424,34 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Wrapped, not scrolled. Four md chips overrun a narrow phone by
-          // roughly one label, and a strip that scrolls says so only to
-          // someone who already drags it — so the last preset was reachable
-          // only by accident, on the fastest route this sheet has to a useful
-          // backlog. A second run costs one row on the widths that need it and
-          // nothing on the widths that don't.
-          Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: AbTokens.space16,
-              vertical: AbTokens.space10,
-            ),
-            child: Wrap(
-              spacing: AbTokens.space14,
-              runSpacing: AbTokens.space10,
-              children: [
-                for (final preset in handlerPresetInstructions)
-                  AbChip.label(
-                    label: preset,
-                    color: p.textSecondary,
-                    size: AbChipSize.md,
-                    onTap: () => _instruct(preset),
-                  ),
-              ],
-            ),
-          ),
           Padding(
             padding: EdgeInsets.fromLTRB(
               AbTokens.space16,
-              0,
+              AbTokens.space8,
               AbTokens.space16,
               stillHeld == null && granted == null
                   ? AbTokens.space8
                   : AbTokens.space4,
             ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: AbTextField(
-                    controller: _input,
-                    // "Send", not "Add": a sentence here can take a line off this
-                    // list or reword one as readily as it can add one, and a
-                    // control promising to add is at its most wrong exactly when
-                    // the user is cancelling something.
-                    hintText: 'Send an instruction…',
-                    textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => _submitTyped(),
-                  ),
-                ),
-                const SizedBox(width: AbTokens.space6),
-                AbIconButton(
-                  icon: AbIcons.send,
-                  tooltip: 'Send to Handler',
-                  onTap: _submitTyped,
-                ),
-              ],
+            child: HandlerInstructionComposer(
+              terminalId: widget.terminalId,
+              controller: _input,
+              // "Send", not "Add": a sentence here can take a line off this
+              // list or reword one as readily as it can add one, and a control
+              // promising to add is at its most wrong exactly when the user is
+              // cancelling something.
+              hintText: 'Send an instruction…',
+              judge: (
+                judgeTool: _judgeValue.judgeTool,
+                judgeModel: _judgeValue.judgeModel,
+              ),
+              onJudgeChanged: _commitJudge,
+              judgeScopeNote: handlerJudgeScopeNextPass,
+              send: HandlerComposerSend(
+                tooltip: 'Send to Handler',
+                semanticLabel: 'Send to Handler',
+                onSend: _submitTyped,
+              ),
             ),
           ),
           // Answered where the send was made, and in the same verb the field,
@@ -468,8 +460,8 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
           // is unchanged, and the tail row saying so may be scrolled away —
           // which is a broken button, not a debounce.
           if (stillHeld != null)
-            // Full width so the line starts on the field's own left edge; the
-            // column around it centres anything that sizes to its child.
+            // Full width so the line starts on the composer's own left edge;
+            // the column around it centres anything that sizes to its child.
             SizedBox(
               width: double.infinity,
               child: Padding(
@@ -517,8 +509,8 @@ class _GrantEcho extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
-    // Full width so the lines start on the field's own left edge; the column
-    // around it centres anything that sizes to its child.
+    // Full width so the lines start on the composer's own left edge; the
+    // column around it centres anything that sizes to its child.
     return SizedBox(
       width: double.infinity,
       child: Padding(

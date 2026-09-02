@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:antgrid/design/widgets/ab_prompt_field.dart';
 import 'package:antgrid/design/widgets/ab_cross_fade.dart';
 import 'package:antgrid/design/widgets/ab_switch.dart';
 import 'package:antgrid/design/ab_theme.dart';
@@ -275,7 +276,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final promptField = tester.widget<TextField>(
+    final promptField = tester.widget<AbPromptField>(
       find.byKey(const Key('new-session-prompt-field')),
     );
     expect(promptField.enabled, isFalse);
@@ -1243,14 +1244,27 @@ void main() {
       begin(container);
       await settle(tester);
 
-      final field = tester.widget<TextField>(
+      final field = tester.widget<AbPromptField>(
         find.byKey(const Key('new-session-prompt-field')),
       );
       // Frozen, not disabled: the prompt already on the wire is the thing the
       // user is waiting on, so it stays legible and undimmed.
       expect(field.readOnly, isTrue);
       expect(field.enabled, isTrue);
-      expect(field.showCursor, isFalse);
+      // Read off the rendered field, because AbPromptField DERIVES this from
+      // readOnly rather than taking it — a caret blinking in a frozen prompt
+      // invites the edit the lock exists to refuse.
+      expect(
+        tester
+            .widget<TextField>(
+              find.descendant(
+                of: find.byKey(const Key('new-session-prompt-field')),
+                matching: find.byType(TextField),
+              ),
+            )
+            .showCursor,
+        isFalse,
+      );
 
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await settle(tester);
@@ -1381,8 +1395,10 @@ void main() {
       await tester.tap(find.byKey(const Key('new-session-prompt-field')));
       await tester.pumpAndSettle();
       final node = tester
-          .widget<TextField>(find.byKey(const Key('new-session-prompt-field')))
-          .focusNode!;
+          .widget<AbPromptField>(
+            find.byKey(const Key('new-session-prompt-field')),
+          )
+          .focusNode;
       expect(node.hasFocus, isTrue);
       return node;
     }
@@ -1518,7 +1534,7 @@ void main() {
       expect(statusText(tester), 'Waking mac-studio...');
       expect(
         tester
-            .widget<TextField>(
+            .widget<AbPromptField>(
               find.byKey(const Key('new-session-prompt-field')),
             )
             .readOnly,
