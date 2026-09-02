@@ -165,15 +165,20 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     // caller is the field's own `onFocusChange`, and `detached` runs its action
     // through `Future.sync`, so the whole path down to here executes inside
     // that notification: disposing synchronously throws
-    // ConcurrentModificationError and kills the app. Hand the objects to a
-    // microtask so the notification unwinds first. The fields are cleared
-    // BEFORE it runs, so nothing reaches a disposed node in between and
-    // `dispose()` above cannot double-dispose.
+    // ConcurrentModificationError and kills the app. Defer the disposal so the
+    // notification unwinds first. The fields are cleared BEFORE it runs, so
+    // nothing reaches a disposed node in between and `dispose()` above cannot
+    // double-dispose.
+    //
+    // Post-frame rather than a microtask: a microtask still lands inside the
+    // frame that is showing the field, so the TextField would outlive the
+    // controller and focus node it is built against. The setState below is what
+    // takes it down, and the callback runs after that rebuild.
     final controller = _editController;
     final focus = _editFocus;
     _editController = null;
     _editFocus = null;
-    scheduleMicrotask(() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       controller?.dispose();
       focus?.dispose();
     });

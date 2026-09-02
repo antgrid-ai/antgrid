@@ -47,6 +47,7 @@ void main() {
     try {
       final transport = FakeAgentTransport();
       final cache = await CachedSessionsStore.open();
+      addTearDown(cache.close);
       final projectSession = ProjectSession(
         projectId: _projectId,
         transport: transport,
@@ -54,6 +55,11 @@ void main() {
         cachedSessionsStore: cache,
         onClose: () async => await transport.dispose(),
       );
+      // Registered after the cache so it tears down FIRST (addTearDown is
+      // LIFO). Both own timers and stream subscriptions that would otherwise
+      // outlive the widget tree and fail some later test with a pending-timer
+      // assertion pointing nowhere near this file.
+      addTearDown(projectSession.close);
       final container = ProviderContainer(
         overrides: [
           selectedRegistrationIdProvider.overrideWithValue(_projectId),
