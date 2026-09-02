@@ -321,7 +321,7 @@ Future<void> main() async {
   );
 
   await initCrashReporting(
-    enabled: container.read(appSettingsServiceProvider).telemetryEnabled,
+    enabled: container.read(telemetryEnabledProvider),
     dsn: AppEnvironment.sentryDsn,
     runApp: () async {
       runApp(
@@ -363,7 +363,7 @@ class _TelemetryLifecycleObserver extends WidgetsBindingObserver {
 @visibleForTesting
 bool telemetryAllowed(ProviderContainer container) =>
     !container.read(demoModeProvider) &&
-    container.read(appSettingsServiceProvider).telemetryEnabled;
+    container.read(telemetryEnabledProvider);
 
 /// System-bar overlay style for [palette]: transparent bars (the app draws
 /// edge-to-edge on mobile, see main()) with icon brightness flipped off the

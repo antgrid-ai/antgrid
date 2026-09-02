@@ -56,6 +56,10 @@ symbols:
   both while answering **401** on routes it does implement, such as
   `/api/<project>/envelope/`. So do not add a `sentry-cli upload-dif` step to the
   desktop workflows expecting it to work. Desktop NATIVE frames therefore arrive
-  as module + offset and must be symbolicated by hand against the build's PDBs;
+  as module + offset, and hand-symbolicating one needs the matching PDBs/dSYMs —
+  which `build-desktop.yml` does not archive, so they die with the runner and a
+  native desktop report is unreadable today. Rebuilding the tag does not recover
+  them: the toolchains are not bit-reproducible, so the build ids would not match
+  the shipped binary. Uploading the symbol files as a build artifact is the fix.
   DART frames stay readable because releases ship unobfuscated (see the top of
   this file). Re-check this if errex gains the endpoint.
