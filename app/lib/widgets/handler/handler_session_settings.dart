@@ -84,7 +84,7 @@ String? handlerEffectiveJudge(
 /// The two per-session choices Handler exposes: which CLI judges its pauses,
 /// and how far it leans toward answering them itself.
 ///
-/// One value type shared by both hosts — the first-arm sheet, which collects it
+/// One value type shared by both hosts — the arm sheet, which collects it
 /// and sends it with the arm, and the settings sheet, which commits each change
 /// as it is made. A null judge means the session's own tool; a null model means
 /// that CLI's default. A null personality is NOT a preset: it means the far end

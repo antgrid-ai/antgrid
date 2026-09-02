@@ -133,11 +133,9 @@ const escalateOnlyNotice =
 /// What the shield says before it is pressed.
 ///
 /// Top-level so the precedence is unit-testable without pumping the panel, the
-/// same reason [handlerArmExplainerBody] is. Arming is one tap, so this tooltip
-/// is the only pre-arm surface that answers EVERY time: the explainer carries
-/// the same facts but sits behind FirstRunState.handlerArmedOnce, a once-ever
-/// latch, while coverage is per-agent — so a user whose first arm was a capable
-/// agent would meet an escalate-only one with no warning at all.
+/// same reason [handlerArmExplainerBody] is. This tooltip is the only surface
+/// that answers before the shield is pressed at all: the arm sheet carries the
+/// same facts, but only once the user has committed far enough to open it.
 ///
 /// [observable] false outranks [judgeCapable] false: a session that reports
 /// nothing cannot be watched, which makes what its judge could have done moot.

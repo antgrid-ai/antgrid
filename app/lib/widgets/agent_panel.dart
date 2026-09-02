@@ -475,24 +475,23 @@ class HandlerHeaderControl extends ConsumerWidget {
       return pill ?? const SizedBox.shrink();
     }
 
-    // Arming is one tap and this control composes no payload — no backlog, no
-    // judge override, no posture. Everything the session needs is either already
+    // This control composes no payload of its own — no backlog, no judge
+    // override, no posture. Everything the session needs is either already
     // stored on the bridge or extracted behind the handoff, so sending any of
-    // those keys here would overwrite state this control never showed. The
-    // first-arm sheet is no exception: it sends only what the user moved on it,
-    // and every later arm sends nothing at all.
-    // The goal is the exception and is not composed here either:
-    // armWithFirstRunExplainer carries the session's own opening prompt.
+    // those keys here would overwrite state this control never showed. The arm
+    // sheet is where a payload can come from, and it sends only what the user
+    // moved on it. The goal is not composed here either:
+    // armWithSheet carries the session's own opening prompt.
     void toggleArm() {
       if (service == null) return;
       if (session != null) {
         service.disarm(activeId);
         return;
       }
-      // Fire-and-forget: past the explainer await everything runs on the
+      // Fire-and-forget: past the sheet await everything runs on the
       // container, never this widget's ref, and nothing in the flow can throw.
       unawaited(
-        armWithFirstRunExplainer(
+        armWithSheet(
           context: context,
           container: ref.container,
           terminalId: activeId,
