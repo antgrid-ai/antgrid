@@ -561,4 +561,63 @@ void main() {
       expect(handlerPersonalityFromWire(42), isNull);
     });
   });
+
+  group('HandlerEntitlement.fromWire', () {
+    test('a refusal round-trips with the plan it names', () {
+      final e = HandlerEntitlement.fromWire({
+        'reason': 'not_entitled',
+        'tier': 'free',
+      })!;
+      expect(e.reason, HandlerEntitlementReason.notEntitled);
+      expect(e.tier, 'free');
+    });
+
+    test('an unreadable claim names no tier, because it has none to name', () {
+      final e = HandlerEntitlement.fromWire({'reason': 'unreadable'})!;
+      expect(e.reason, HandlerEntitlementReason.unreadable);
+      expect(e.tier, isNull);
+    });
+
+    test('a reason this app cannot name is still a refusal', () {
+      // Dropping it would restore the silence the field exists to end, and
+      // guessing which of the two known reasons it is would prescribe a fix
+      // that may be the wrong one — so the refusal stands with no reason.
+      final e = HandlerEntitlement.fromWire({'reason': 'seat_revoked'})!;
+      expect(e.reason, isNull);
+    });
+
+    test('nothing, or a malformed payload, is not a refusal', () {
+      // Presence is the whole signal, so inventing one out of noise would gate
+      // arming with nothing to say about why.
+      expect(HandlerEntitlement.fromWire(null), isNull);
+      expect(HandlerEntitlement.fromWire('not_entitled'), isNull);
+      expect(HandlerEntitlement.fromWire({'tier': 'free'}), isNull);
+    });
+  });
+
+  group('entitlement on the project state', () {
+    const refused = HandlerEntitlement(
+      reason: HandlerEntitlementReason.notEntitled,
+      tier: 'free',
+    );
+
+    test('a refusal can be cleared, not only set', () {
+      // An upgrade lifts it, and a gate that could only ever latch on would
+      // outlive the thing it describes with no frame able to correct it.
+      final gated = const HandlerState.initial().copyWith(entitlement: refused);
+      expect(gated.entitlement, refused);
+      expect(gated.copyWith(clearEntitlement: true).entitlement, isNull);
+      // An untouched copy carries it, like every other field here.
+      expect(gated.copyWith(defaultTool: 'claude-code').entitlement, refused);
+    });
+
+    test('it survives a narrowing that names no session', () {
+      // Project-scoped like defaultTool: the shield that most needs it sits
+      // over a session that is not armed, which is exactly when forTerminal
+      // has nothing to narrow to.
+      final state = const HandlerState.initial().copyWith(entitlement: refused);
+      expect(state.forTerminal(null).entitlement, refused);
+      expect(state.forTerminal('t1').entitlement, refused);
+    });
+  });
 }

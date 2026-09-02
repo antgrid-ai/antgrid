@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AbConfigSchema } from "./config";
+import { KNOWN_TIERS } from "./entitlement";
 
 const BaseMessage = z.object({
   id: z.string().uuid(),
@@ -1046,6 +1047,28 @@ const HandlerSessionSnapshot = z.object({
   personality: HandlerPersonalitySchema.optional(),
 });
 
+// Why this machine will not run the Handler, in the words the app has to answer
+// with. Mirrors `EntitlementRefusal` (./entitlement.ts) — the REFUSED half of
+// the verdict only, which is what makes presence on a status frame mean
+// "refused" with no second boolean to disagree with.
+//
+// A refusal is otherwise invisible: it leaves the slot in the ordinary
+// not-armed state, which is exactly what a tap that never registered looks
+// like, and the engine's warn line is on a machine the reader may not be
+// sitting at. This is the one thing the bridge knows and the app cannot derive.
+//
+// The two reasons are two different sentences, and collapsing them would send
+// half the users to the wrong fix: `not_entitled` is the paywall and the app
+// offers the upgrade, `unreadable` is a machine whose credentials stopped
+// answering and the app says to sign in again.
+export const HandlerEntitlementWire = z.object({
+  reason: z.enum(["not_entitled", "unreadable"]),
+  // The tier the claim carried, when it carried a recognised one — so the
+  // upgrade copy can name the plan the machine is actually on. Absent for
+  // `unreadable`, which is the case of having no readable tier at all.
+  tier: z.enum(KNOWN_TIERS).optional(),
+});
+
 const HandlerStatusMessage = BaseMessage.extend({
   type: z.literal("handler:status"),
   projectId: z.string(),
@@ -1066,6 +1089,16 @@ const HandlerStatusMessage = BaseMessage.extend({
   // and [] mean the same thing — unlike `observability`, presence here is not a
   // capability signal, so a bridge with nothing to report simply omits it.
   wrapUps: z.array(HandlerWrapUpWire).optional(),
+  // Present ONLY while this machine refuses Handler; absent is the ordinary
+  // entitled machine AND every bridge predating the field, which want the same
+  // rendering. Appended LAST for the reason `wrapUps` is — an older app still
+  // parses the frame and every key it already reads keeps its position.
+  //
+  // Project-scoped rather than per session, because entitlement is neither: it
+  // is a fact about the account behind the machine, and a session-shaped copy
+  // would have nowhere to live on the surface that needs it most — the shield
+  // over a session that is not armed and, while this is set, cannot become so.
+  entitlement: HandlerEntitlementWire.optional(),
 });
 
 const HandlerEscalationMessage = BaseMessage.extend({
@@ -2064,6 +2097,7 @@ export type HandlerConfigureMsg = z.infer<typeof HandlerConfigureMessage>;
 export type HandlerInstructMsg = z.infer<typeof HandlerInstructMessage>;
 export type HandlerSessionSnapshot = z.infer<typeof HandlerSessionSnapshot>;
 export type HandlerStatusMsg = z.infer<typeof HandlerStatusMessage>;
+export type HandlerEntitlement = z.infer<typeof HandlerEntitlementWire>;
 export type HandlerEscalationMsg = z.infer<typeof HandlerEscalationMessage>;
 export type HandlerActivityMsg = z.infer<typeof HandlerActivityMessage>;
 export type HandlerSnapshotMsg = z.infer<typeof HandlerSnapshotMessage>;

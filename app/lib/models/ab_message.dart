@@ -273,6 +273,12 @@ class HandlerStatusMessage {
   /// the wrap-up and the read.
   final List<Map<String, dynamic>> wrapUps;
 
+  /// Why this machine refuses Handler, present ONLY while it does — so absent
+  /// covers both the ordinary entitled machine and a bridge predating the
+  /// field, which want the same rendering. Left raw like [sessions]: the
+  /// parse lives with the model it builds ([HandlerEntitlement.fromWire]).
+  final Map<String, dynamic>? entitlement;
+
   const HandlerStatusMessage({
     required this.id,
     required this.timestamp,
@@ -281,6 +287,7 @@ class HandlerStatusMessage {
     required this.sessions,
     this.snapshots = const [],
     this.wrapUps = const [],
+    this.entitlement,
   });
 }
 
@@ -1449,6 +1456,9 @@ Object? parseAbMessage(Map<String, dynamic> json) {
           sessions: sessions,
           snapshots: snapshots,
           wrapUps: wrapUps,
+          entitlement: json['entitlement'] is Map<String, dynamic>
+              ? json['entitlement'] as Map<String, dynamic>
+              : null,
         );
       }
 

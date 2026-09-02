@@ -507,6 +507,10 @@ class HandlerHeaderControl extends ConsumerWidget {
       observable: coverage.observable,
       judgeCapable: coverage.judgeCapable,
       agentLabel: coverage.agentLabel,
+      // The refusal is answerable before the press, and this is the only
+      // surface that answers before one: the sheet says the same thing, but
+      // only once the user has committed far enough to open it.
+      entitlement: state.entitlement,
     );
 
     return Row(

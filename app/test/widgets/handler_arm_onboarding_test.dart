@@ -4,6 +4,7 @@ import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/handler_state.dart';
+import 'package:antgrid/navigation/root_navigator.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -284,6 +285,85 @@ void main() {
         'Arm Handler',
       );
     });
+
+    test('a refused machine outranks every coverage answer', () {
+      // Coverage describes what an arm WOULD get, and there is no arm to get
+      // it — so a fully covered agent on a refused machine still says why.
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: true,
+          judgeCapable: true,
+          entitlement: const HandlerEntitlement(
+            reason: HandlerEntitlementReason.notEntitled,
+            tier: 'free',
+          ),
+        ),
+        contains('Free plan'),
+      );
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: false,
+          judgeCapable: false,
+          agentLabel: 'Claude Code',
+          entitlement: const HandlerEntitlement(
+            reason: HandlerEntitlementReason.unreadable,
+          ),
+        ),
+        handlerEntitlementNotice(
+          const HandlerEntitlement(reason: HandlerEntitlementReason.unreadable),
+        ),
+      );
+    });
+
+    test("a session armed before the refusal is still the user's to disarm", () {
+      expect(
+        handlerShieldTooltip(
+          armed: true,
+          observable: true,
+          judgeCapable: true,
+          entitlement: const HandlerEntitlement(
+            reason: HandlerEntitlementReason.notEntitled,
+            tier: 'free',
+          ),
+        ),
+        'Disarm Handler',
+      );
+    });
+  });
+
+  group('handlerEntitlementNotice', () {
+    test('names the plan the machine is on when the bridge could read one', () {
+      // "You need Pro" alone leaves a paying user unable to tell whether they
+      // already have it.
+      expect(
+        handlerEntitlementNotice(
+          const HandlerEntitlement(
+            reason: HandlerEntitlementReason.notEntitled,
+            tier: 'free',
+          ),
+        ),
+        contains('Free plan'),
+      );
+    });
+
+    test('an unreadable claim is sent to sign-in, never to checkout', () {
+      final notice = handlerEntitlementNotice(
+        const HandlerEntitlement(reason: HandlerEntitlementReason.unreadable),
+      );
+      expect(notice, contains('Sign out and back in'));
+      expect(notice, isNot(contains('Pro')));
+    });
+
+    test('a reason this app cannot name still says arming will not work', () {
+      // Silence is the failure being fixed, so an unknown reason falls back to
+      // unavailability rather than to nothing.
+      expect(
+        handlerEntitlementNotice(const HandlerEntitlement()),
+        contains("isn't available"),
+      );
+    });
   });
 
   group('shieldShowsLabel', () {
@@ -368,6 +448,10 @@ void main() {
         UncontrolledProviderScope(
           container: container,
           child: MaterialApp(
+            // The flow's own failure reports go to the ROOT navigator's
+            // overlay, since every widget that could have shown one is gone by
+            // then — so the key has to be the one the provider hands out.
+            navigatorKey: container.read(rootNavigatorKeyProvider),
             theme: ThemeData.dark().copyWith(
               extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
             ),
@@ -383,6 +467,13 @@ void main() {
         container,
         tester.element(find.byKey(const ValueKey('probe'))),
       );
+    }
+
+    /// A toast dismisses itself on a timer, and a timer outliving the tree
+    /// fails the test — so every assertion on one has to let it finish.
+    Future<void> settleToast(WidgetTester tester) async {
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
     }
 
     Map<String, dynamic> armFrame(FakeAgentTransport transport) =>
@@ -551,6 +642,118 @@ void main() {
 
       expect(armFrame(transport)['personality'], 'watchdog');
       await confirmArmed(tester, transport);
+    });
+
+    /// The bridge saying this machine will not run Handler at all. Emitted with
+    /// no armed sessions, which is the state a refusal always leaves behind.
+    Future<void> refuse(
+      WidgetTester tester,
+      FakeAgentTransport transport,
+      Map<String, dynamic> entitlement,
+    ) async {
+      transport.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': <dynamic>[],
+        'entitlement': entitlement,
+      });
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a paywalled machine explains itself instead of arming', (
+      tester,
+    ) async {
+      final (transport, container, context) = await pumpArm(tester);
+      await refuse(tester, transport, {'reason': 'not_entitled', 'tier': 'free'});
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The arm sheet is a form that could not have committed, so it never
+      // opens: the refusal takes its place and offers the one fix it has.
+      expect(find.text('Handler needs Pro'), findsOneWidget);
+      expect(find.textContaining('Free plan'), findsOneWidget);
+      expect(find.widgetWithText(AbButton, 'See plans'), findsOneWidget);
+      expect(find.widgetWithText(AbButton, 'Arm Handler'), findsNothing);
+
+      await tester.tap(find.widgetWithText(AbButton, 'Not now'));
+      await tester.pumpAndSettle();
+      expect(
+        transport.sent.where((m) => m['type'] == 'handler:configure'),
+        isEmpty,
+      );
+    });
+
+    testWidgets('an unreadable claim is never sold an upgrade', (tester) async {
+      final (transport, container, context) = await pumpArm(tester);
+      await refuse(tester, transport, {'reason': 'unreadable'});
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // A purchase buys nothing here, and a button offering one would teach the
+      // user the wrong thing about what went wrong.
+      expect(find.text('Handler is unavailable'), findsOneWidget);
+      expect(find.widgetWithText(AbButton, 'See plans'), findsNothing);
+      expect(find.widgetWithText(AbButton, 'Close'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(AbButton, 'Close'));
+      await tester.pumpAndSettle();
+      expect(
+        transport.sent.where((m) => m['type'] == 'handler:configure'),
+        isEmpty,
+      );
+    });
+
+    testWidgets('a refusal the bridge stops sending stops gating the arm', (
+      tester,
+    ) async {
+      // The gate is derived per frame on both ends: an app told once that
+      // Handler is paywalled has no other way to learn that it no longer is.
+      final (transport, container, context) = await pumpArm(tester);
+      await refuse(tester, transport, {'reason': 'not_entitled', 'tier': 'free'});
+      transport.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': <dynamic>[],
+      });
+      await tester.pumpAndSettle();
+
+      await armThroughSheet(tester, container, context);
+
+      expect(armFrame(transport)['armed'], true);
+      await confirmArmed(tester, transport);
+    });
+
+    testWidgets('a refusal arriving on the answer to an arm is spoken', (
+      tester,
+    ) async {
+      // The stale-cache path: the app believed it was entitled, sent the arm,
+      // and the bridge answered no. Without this the send is indistinguishable
+      // from a tap that never registered until the confirmation window runs out
+      // — and, with no instruction riding on it, not even then.
+      final (transport, container, context) = await pumpArm(tester);
+
+      await armThroughSheet(tester, container, context);
+      expect(armFrame(transport)['armed'], true);
+
+      await refuse(tester, transport, {'reason': 'not_entitled', 'tier': 'free'});
+
+      expect(find.text('Handler not armed'), findsOneWidget);
+      expect(find.textContaining('Free plan'), findsOneWidget);
+      await settleToast(tester);
     });
 
     testWidgets('backing out of the sheet arms nothing', (tester) async {
@@ -735,9 +938,9 @@ void main() {
       testWidgets('an arm the bridge never confirms sends nothing', (
         tester,
       ) async {
-        // An entitlement refusal emits a status that does not list the session,
-        // which is indistinguishable from a dropped send — so the window
-        // closing is the end of it, not a late retry.
+        // A send that vanished with nothing coming back to explain it: the
+        // window closing is the end of it, not a late retry. The user is told,
+        // because the sentence they typed exists nowhere else once it shuts.
         final (transport, container, context) = await pumpArm(tester);
         await openSheet(tester, container, context);
 
@@ -748,6 +951,8 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(instructs(transport), isEmpty);
+        expect(find.text('Nothing was queued'), findsOneWidget);
+        await settleToast(tester);
       });
 
       testWidgets('a judge picked here rides the arm, not a frame of its own', (

@@ -16,6 +16,7 @@ import '../../providers/agent_catalog.dart';
 import '../../providers/first_run.dart';
 import '../../providers/providers.dart';
 import '../../providers/session_opening_prompt.dart';
+import '../../screens/upgrade_screen.dart';
 import '../../services/handler_service.dart';
 import 'handler_instruction_composer.dart';
 import 'handler_item_status.dart';
@@ -354,8 +355,9 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
 /// [FirstRunState.handlerArmedOnce] on every successful arm.
 ///
 /// Cancelling arms nothing. Takes a [ProviderContainer], not a WidgetRef: the
-/// caller's widget may be gone by the time the sheet resolves. [context] is only
-/// used before the await.
+/// caller's widget may be gone by the time the sheet resolves. [context] is
+/// re-checked with `context.mounted` past every await, because the refusal path
+/// below shows a second surface after one.
 ///
 /// The goal comes from [sessionOpeningPromptsProvider] rather than from the
 /// caller: both arm surfaces sit over a session the user did not have to
@@ -382,6 +384,25 @@ Future<void> armWithSheet({
   String? agentLabel,
   bool? judgeCapable,
 }) async {
+  // Asked BEFORE the arm sheet, never after: a sheet that cannot commit is a
+  // form the user fills in only to be told it was never going to send.
+  final refusal = focusedServiceOrNull(
+    container,
+    (s) => s.handlerService,
+  )?.currentState.entitlement;
+  if (refusal != null) {
+    if (!await _showHandlerRefusal(context, refusal)) return;
+    if (!context.mounted) return;
+    await openUpgrade(context, container);
+    if (!context.mounted) return;
+    // Falls THROUGH into the ordinary arm rather than re-reading the refusal
+    // it just showed: nothing re-emits a status frame when a device token is
+    // re-minted, so the app's copy is at its stalest exactly here — the moment
+    // after an upgrade. The bridge reads its verdict live at the arm, so
+    // letting the arm run is what asks the only party that knows; a refusal
+    // that still holds comes back on the frame that arm itself raises, and the
+    // latch below is what speaks it.
+  }
   final goal = container.read(sessionOpeningPromptsProvider)[terminalId];
   final decision = await showHandlerArmSheet(
     context,
@@ -409,6 +430,99 @@ Future<void> armWithSheet({
     terminalId,
     instruction: decision.instruction,
   );
+}
+
+/// Says why Handler will not arm on this machine, and offers the one fix the
+/// reason actually has. True when the user asked to see plans.
+///
+/// Only [HandlerEntitlementReason.notEntitled] offers that, because it is the
+/// only refusal a purchase lifts. Every other reason gets a single Close: a
+/// button that cannot help is worse than no button, since taking it teaches the
+/// user the wrong thing about what went wrong.
+///
+/// A sheet rather than a toast: this is the answer to a deliberate press, it
+/// carries an action, and a message that fades is how the press went unanswered
+/// in the first place.
+Future<bool> _showHandlerRefusal(
+  BuildContext context,
+  HandlerEntitlement entitlement,
+) async =>
+    await showAbAdaptiveSheet<bool>(
+      context,
+      child: _HandlerRefusalSheet(entitlement: entitlement),
+    ) ??
+    false;
+
+class _HandlerRefusalSheet extends StatelessWidget {
+  const _HandlerRefusalSheet({required this.entitlement});
+
+  final HandlerEntitlement entitlement;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final upgradable =
+        entitlement.reason == HandlerEntitlementReason.notEntitled;
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: abDialogTitlePadding,
+            child: abDialogTitle(
+              // Names the plan on the one sheet that can sell it, and the state
+              // on the one that cannot: a title promising Pro over a machine
+              // whose credentials simply stopped answering points the user at a
+              // purchase that changes nothing.
+              upgradable ? 'Handler needs Pro' : 'Handler is unavailable',
+              onClose: () => Navigator.of(context).maybePop(false),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AbTokens.space16,
+              0,
+              AbTokens.space16,
+              AbTokens.space16,
+            ),
+            child: Text(
+              handlerEntitlementNotice(entitlement),
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontSm,
+                color: p.textSecondary,
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AbTokens.space16,
+              0,
+              AbTokens.space16,
+              AbTokens.space16,
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                AbButton(
+                  label: upgradable ? 'Not now' : 'Close',
+                  onTap: () => Navigator.of(context).maybePop(false),
+                ),
+                if (upgradable) ...[
+                  const SizedBox(width: AbTokens.space8),
+                  AbButton(
+                    label: 'See plans',
+                    variant: AbButtonVariant.primary,
+                    onTap: () => Navigator.of(context).maybePop(true),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// How long to wait for the bridge's `handler:status` to list a just-armed
@@ -476,6 +590,15 @@ void latchHandlerArmedOnConfirmation(
 
   bool confirmed(HandlerState? state) =>
       state?.sessions.containsKey(terminalId) ?? false;
+  /// The other way an arm ends: the bridge answered, and its answer was no.
+  /// Ends the latch the same way a confirmation does — nothing is retired, and
+  /// the send is reported rather than left to time out in silence.
+  void refuse(HandlerEntitlement entitlement) {
+    _armLatches.remove(terminalId);
+    stop();
+    _reportArmRefused(container, entitlement, instruction);
+  }
+
   void latch() {
     _armLatches.remove(terminalId);
     stop();
@@ -495,7 +618,18 @@ void latchHandlerArmedOnConfirmation(
     );
   };
   sub = container.listen(handlerStateProvider, (_, next) {
-    if (confirmed(next.value)) latch();
+    if (confirmed(next.value)) {
+      latch();
+      return;
+    }
+    // A frame carrying a refusal is the bridge saying so as of that frame, and
+    // the refused arm raises one itself — so this answers within a round trip
+    // instead of after the confirmation window. Only frames that ARRIVE count,
+    // never the state already held: the refusal the user walked through to get
+    // here is still sitting there, and reading it would report an arm that is
+    // still in flight as dead.
+    final entitlement = next.value?.entitlement;
+    if (entitlement != null) refuse(entitlement);
   });
   timeout = Timer(kHandlerArmConfirmWindow, () {
     _armLatches.remove(terminalId);
@@ -577,11 +711,43 @@ void _reportArmInstructionLost(
       'Handler never confirmed the arm, so your instruction was not sent.',
 }) {
   if (text == null || text.trim().isEmpty) return;
-  // The navigator's OVERLAY, not its context: `Overlay.maybeOf` reads an
-  // inherited marker planted inside each overlay entry, so it answers only
-  // from within a mounted route. The navigator's own element sits above every
-  // entry and resolves to null, which would make this whole path a silent
-  // no-op — and there is no widget of ours alive here to ask instead.
+  _reportArmFailure(container, title: title, description: reason);
+}
+
+/// Says why an arm the bridge REFUSED went nowhere.
+///
+/// The one report on this flow that fires with no instruction riding on it: a
+/// plain arm that is refused loses no words of the user's, so the refusal
+/// itself is the whole of what there is to say — and saying nothing is what
+/// makes a paid feature indistinguishable from a dropped tap.
+void _reportArmRefused(
+  ProviderContainer container,
+  HandlerEntitlement entitlement,
+  String? instruction,
+) {
+  final notice = handlerEntitlementNotice(entitlement);
+  final lost = instruction != null && instruction.trim().isNotEmpty;
+  _reportArmFailure(
+    container,
+    title: 'Handler not armed',
+    description: lost
+        ? '$notice The instruction you typed with it was not sent.'
+        : notice,
+  );
+}
+
+/// The one way this flow speaks once its widgets are gone.
+///
+/// The navigator's OVERLAY, not its context: `Overlay.maybeOf` reads an
+/// inherited marker planted inside each overlay entry, so it answers only from
+/// within a mounted route. The navigator's own element sits above every entry
+/// and resolves to null, which would make this whole path a silent no-op — and
+/// there is no widget of ours alive here to ask instead.
+void _reportArmFailure(
+  ProviderContainer container, {
+  required String title,
+  required String description,
+}) {
   final overlay = container
       .read(rootNavigatorKeyProvider)
       .currentState
@@ -589,6 +755,10 @@ void _reportArmInstructionLost(
   if (overlay == null) return;
   showAbToastOn(
     overlay,
-    toast: AbToast(icon: AbIcons.warning, title: title, description: reason),
+    toast: AbToast(
+      icon: AbIcons.warning,
+      title: title,
+      description: description,
+    ),
   );
 }

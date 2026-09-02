@@ -337,7 +337,16 @@ class HandlerService {
       pendingUndo: pendingUndo,
       pendingInstructions: pendingInstructions,
     );
-    _emit(next);
+    // Set and cleared from the same frame, in two calls rather than one: the
+    // bridge omits the key the moment Handler is available again, and a
+    // refusal that could only ever latch on would survive the upgrade that
+    // lifted it. Never both arguments at once — see the copyWith rule.
+    final entitlement = HandlerEntitlement.fromWire(msg.entitlement);
+    _emit(
+      entitlement == null
+          ? next.copyWith(clearEntitlement: true)
+          : next.copyWith(entitlement: entitlement),
+    );
   }
 
   void _onHeavyJson(Map<String, dynamic> json) {

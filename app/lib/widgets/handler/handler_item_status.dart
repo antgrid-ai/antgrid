@@ -130,6 +130,41 @@ String unwatchableNotice(String? agentLabel) =>
 const escalateOnlyNotice =
     "This judge can't run headless, so every pause comes to you.";
 
+/// A plan name as the user meets it on their own billing surfaces, from the
+/// lowercase label the token carries.
+String _planLabel(String tier) =>
+    tier.isEmpty ? tier : '${tier[0].toUpperCase()}${tier.substring(1)}';
+
+/// Why Handler will not arm on this machine — the sentence a refusal is spoken
+/// with, wherever it is spoken.
+///
+/// One string per reason, shared by the shield's tooltip and the sheet the
+/// shield opens, for the reason this whole file exists: a user who hovers and
+/// then taps must not be told two different things about one refusal.
+///
+/// Each sentence names the fix its own reason actually has, which is why the
+/// two are not merged. `not_entitled` is a plan the user can change; the tier
+/// is named when the bridge could read one, because "you are on Free" answers
+/// a question "you need Pro" leaves open. `unreadable` is a machine whose
+/// credentials stopped answering — an upgrade buys nothing there, and offering
+/// one would sell a plan the user may already be paying for.
+///
+/// The null arm claims nothing beyond unavailability: a reason this app has no
+/// sentence for still has to say that arming will not work, since silence is
+/// the failure being fixed.
+String handlerEntitlementNotice(HandlerEntitlement e) => switch (e.reason) {
+  HandlerEntitlementReason.notEntitled =>
+    e.tier == null
+        ? 'Handler is part of Pro, and the plan this machine is signed in on '
+              "doesn't include it."
+        : 'Handler is part of Pro. This machine is signed in on the '
+              '${_planLabel(e.tier!)} plan.',
+  HandlerEntitlementReason.unreadable =>
+    "Antgrid can't confirm this machine's plan, so Handler is held back. Sign "
+        'out and back in on the computer running this project.',
+  null => "Handler isn't available on this machine right now.",
+};
+
 /// What the shield says before it is pressed.
 ///
 /// Top-level so the precedence is unit-testable without pumping the panel, the
@@ -140,13 +175,20 @@ const escalateOnlyNotice =
 /// [observable] false outranks [judgeCapable] false: a session that reports
 /// nothing cannot be watched, which makes what its judge could have done moot.
 /// Either being null claims nothing, exactly as the catalog requires.
+///
+/// [entitlement] outranks both, and is outranked only by [armed]. Coverage
+/// describes what an arm WOULD get, and a refused machine has no arm to get
+/// it — but a session armed before the refusal is still the user's to disarm,
+/// so that answer stays first.
 String handlerShieldTooltip({
   required bool armed,
   required bool? observable,
   required bool? judgeCapable,
   String? agentLabel,
+  HandlerEntitlement? entitlement,
 }) {
   if (armed) return 'Disarm Handler';
+  if (entitlement != null) return handlerEntitlementNotice(entitlement);
   if (observable == false) return unwatchableNotice(agentLabel);
   if (judgeCapable == false) return escalateOnlyNotice;
   return 'Arm Handler';

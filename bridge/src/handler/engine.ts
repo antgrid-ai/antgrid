@@ -1,6 +1,11 @@
 // bridge/src/handler/engine.ts
 import { createHash } from "node:crypto";
-import { createMessage, type AbMessage, type HandlerPersonality } from "../protocol";
+import {
+  createMessage,
+  type AbMessage,
+  type HandlerEntitlement,
+  type HandlerPersonality,
+} from "../protocol";
 import { classifyDestructive, describeWarning, type FloorWarning } from "./destructive-floor";
 import {
   authorizeInstruction, createAuthorization, partitionWarnings,
@@ -678,14 +683,33 @@ export class HandlerEngine {
   private entitledForHandler(terminalId: string, at: "arm" | "event"): boolean {
     const verdict = this.entitlement("handler");
     if (verdict.allowed) return true;
-    // The log line is the whole user-visible signal by design: the refusal
-    // lands in the not-armed state the app already renders, and Handler carries
-    // no upgrade path on either end of the wire.
+    // Logged for the machine's owner, who is the only reader who can see a
+    // tier claim go wrong. What the USER is told rides the status frame
+    // instead (see entitlementForApp) — a warn line on a desktop is no answer
+    // for a shield pressed on a phone.
     log.warn(
       "handler %s refused for %s: entitlement %s (tier=%s)",
       at, terminalId, verdict.reason, verdict.tier ?? "unknown",
     );
     return false;
+  }
+
+  /**
+   * The same verdict, shaped for the app — null whenever Handler is available,
+   * so a status frame carries this key only while the answer is "no".
+   *
+   * Derived on every emit rather than latched at the refusal: the claim is a
+   * thunk over a token re-minted roughly hourly, so an account that upgrades
+   * (or a machine whose credentials come back) is entitled from the next frame
+   * with nothing to clear. The app is told once and the shield stops gating —
+   * which is why nothing here is remembered between emits.
+   */
+  private entitlementForApp(): HandlerEntitlement | null {
+    const verdict = this.entitlement("handler");
+    if (verdict.allowed) return null;
+    return verdict.tier === undefined
+      ? { reason: verdict.reason }
+      : { reason: verdict.reason, tier: verdict.tier };
   }
 
   // Judge choice application, shared by fresh-arm and edit-arm. Fields arrive
@@ -812,9 +836,10 @@ export class HandlerEngine {
     if (!this.entitledForHandler(p.terminalId, "arm")) {
       // Refuse WITHOUT disarming, exactly as a malformed `handler:configure`
       // does (agent-core.ts): a live session must not be torn down by a request
-      // that failed to replace it. Re-emit status so the sender's UI resyncs to
-      // the state that actually holds — which, for a slot that was never armed,
-      // is the ordinary not-armed state every layer already renders.
+      // that failed to replace it. The re-emit is what ANSWERS the sender: the
+      // frame carries the refusal (entitlementForApp), so an app whose cached
+      // verdict was stale learns the real one within a round trip instead of
+      // waiting out its arm-confirmation window on a state that never moved.
       this.emitStatus();
       return;
     }
@@ -2548,6 +2573,7 @@ export class HandlerEngine {
       personality: s.personality ?? DEFAULT_PERSONALITY,
     }));
     const wrapUps = this.wrapUps();
+    const entitlement = this.entitlementForApp();
     this.deps.sendAb(createMessage("handler:status", {
       projectId: this.deps.projectId,
       // What an absent per-session judge resolves to for PTY slots — lets the
@@ -2561,6 +2587,11 @@ export class HandlerEngine {
       // Optional and appended LAST (see HandlerWrapUpWire): absent and [] mean the
       // same thing, so a project that has never wrapped up sends neither.
       ...(wrapUps.length ? { wrapUps: wrapUps.map(wrapUpWire) } : {}),
+      // Omitted whenever Handler is available, so the key's presence IS the
+      // refusal. Every emit carries it, not just the one arm() raises on its
+      // way out: the shield the user has yet to press is the surface that most
+      // needs to know, and it is on screen long before any arm.
+      ...(entitlement ? { entitlement } : {}),
     }));
   }
 }

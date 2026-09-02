@@ -816,6 +816,63 @@ class HandlerActivityRecord {
   });
 }
 
+/// Why this machine will not run Handler. Mirrors the bridge's
+/// `HandlerEntitlementWire` (`bridge/src/protocol.ts`), which carries only the
+/// REFUSED half of its verdict — so an instance of this EXISTING is the
+/// refusal, and there is no allowed case for a reader to check.
+enum HandlerEntitlementReason {
+  /// The plan this machine is signed in on does not include Handler. The one
+  /// refusal the user can lift from inside the app, and so the only one that
+  /// carries an upgrade offer.
+  notEntitled,
+
+  /// The machine holds credentials whose tier it cannot read — expired,
+  /// missing, or a label this bridge does not recognise. Not a paywall: an
+  /// upgrade buys nothing here, and offering one would sell a plan the user may
+  /// already have.
+  unreadable,
+}
+
+/// Null for a reason this app has no sentence for, which a newer bridge can
+/// send. Deliberately NOT folded into [HandlerEntitlementReason.unreadable]:
+/// the two refusals prescribe opposite fixes, so a guess is worse than the
+/// generic copy — and worse still is dropping the refusal, which is the silence
+/// this whole field exists to end.
+HandlerEntitlementReason? handlerEntitlementReasonFromWire(dynamic s) =>
+    switch (s) {
+      'not_entitled' => HandlerEntitlementReason.notEntitled,
+      'unreadable' => HandlerEntitlementReason.unreadable,
+      _ => null,
+    };
+
+/// The bridge's answer to "can this machine arm Handler at all", present only
+/// when the answer is no.
+class HandlerEntitlement {
+  const HandlerEntitlement({this.reason, this.tier});
+
+  /// Null when the bridge named a reason this app cannot speak to — see
+  /// [handlerEntitlementReasonFromWire].
+  final HandlerEntitlementReason? reason;
+
+  /// The plan the machine is actually on, when the bridge could read one, so
+  /// the upgrade copy can name it instead of talking around it. Absent
+  /// alongside [HandlerEntitlementReason.unreadable] by construction: that IS
+  /// the case of having no readable tier.
+  final String? tier;
+
+  /// Null unless the payload is a refusal object — a `reason` that is not even
+  /// a string is malformed, and inventing a gate out of it would block arming
+  /// with nothing to say about why.
+  static HandlerEntitlement? fromWire(dynamic json) {
+    if (json is! Map || json['reason'] is! String) return null;
+    final tier = json['tier'];
+    return HandlerEntitlement(
+      reason: handlerEntitlementReasonFromWire(json['reason']),
+      tier: tier is String ? tier : null,
+    );
+  }
+}
+
 /// Immutable app-side view of the bridge's Handler subsystem for one project.
 /// The bridge is the source of truth; this is rebuilt from `handler:*`
 /// messages and never persisted locally.
@@ -848,6 +905,12 @@ class HandlerState {
   /// — so nothing that comes back can be matched to what went out.
   final Map<String, List<String>> pendingInstructions;
 
+  /// Why this machine refuses Handler, or null when it does not. Project-scoped
+  /// because entitlement is an account fact rather than a session one, and the
+  /// surface that most needs it — the shield over a session that is not armed —
+  /// exists precisely where no session state does.
+  final HandlerEntitlement? entitlement;
+
   const HandlerState({
     this.defaultTool,
     required this.sessions,
@@ -857,6 +920,7 @@ class HandlerState {
     this.wrapUps = const [],
     this.pendingUndo = const {},
     this.pendingInstructions = const {},
+    this.entitlement,
   });
 
   const HandlerState.initial()
@@ -867,7 +931,8 @@ class HandlerState {
       snapshots = const [],
       wrapUps = const [],
       pendingUndo = const {},
-      pendingInstructions = const {};
+      pendingInstructions = const {},
+      entitlement = null;
 
   // Absence of any session is the wire's implicit 'off' — there is no
   // standalone off/on flag now that arming is per-terminal.
@@ -950,6 +1015,9 @@ class HandlerState {
     if (terminalId == null) {
       return HandlerState.initial().copyWith(
         defaultTool: defaultTool,
+        // Carried for the same reason [defaultTool] is: it describes the
+        // project, not the session this narrowing failed to name.
+        entitlement: entitlement,
         snapshots: mine,
         wrapUps: orphanedWrapUps,
         pendingUndo: undo,
@@ -981,6 +1049,8 @@ class HandlerState {
     List<HandlerWrapUp>? wrapUps,
     Set<String>? pendingUndo,
     Map<String, List<String>>? pendingInstructions,
+    HandlerEntitlement? entitlement,
+    bool clearEntitlement = false,
   }) {
     return HandlerState(
       defaultTool: defaultTool ?? this.defaultTool,
@@ -991,6 +1061,10 @@ class HandlerState {
       wrapUps: wrapUps ?? this.wrapUps,
       pendingUndo: pendingUndo ?? this.pendingUndo,
       pendingInstructions: pendingInstructions ?? this.pendingInstructions,
+      // The one field here that has to be CLEARABLE: a refusal is lifted by an
+      // upgrade or a fresh sign-in, and a gate that only ever latches on would
+      // outlive the thing it describes with no frame able to correct it.
+      entitlement: clearEntitlement ? null : (entitlement ?? this.entitlement),
     );
   }
 }
