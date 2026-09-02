@@ -15,7 +15,6 @@ import 'package:antgrid/providers/drawer_entries.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/widgets/account_footer.dart';
-import 'package:antgrid/widgets/drawer_entry_row.dart';
 import 'package:antgrid/widgets/first_run_checklist.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:flutter/foundation.dart';
@@ -137,13 +136,14 @@ void main() {
 
     expect(tester.takeException(), isNull);
 
-    // Still docked: below the project rows, above the account footer — which is
-    // pinned and therefore whole, not scrolled away with the checklist.
+    // Above the account footer, which is pinned and therefore whole rather than
+    // scrolled away with the checklist.
+    //
+    // No upper bound here: at this size the dock claims the entire body and the
+    // list is never built, so there is nothing above it to order against. That
+    // the dock sits below the list rather than floating inside it is a claim
+    // only a drawer tall enough to have one can make — the test above owns it.
     final section = tester.getTopLeft(find.byType(FirstRunSetupSection)).dy;
-    expect(
-      section,
-      greaterThan(tester.getTopLeft(find.byType(DrawerEntryRow).first).dy),
-    );
     expect(section, lessThan(tester.getTopLeft(find.byType(AccountFooter)).dy));
     expect(tester.getSize(find.byType(AccountFooter)).height, 45);
 

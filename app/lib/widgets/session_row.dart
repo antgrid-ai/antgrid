@@ -13,6 +13,7 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_menu.dart';
+import '../design/widgets/ab_row_trailing.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/session_entry.dart';
@@ -82,6 +83,10 @@ class _SessionRowState extends ConsumerState<SessionRow> {
 
   // Keep kebab mounted and visible while the action menu is actively open.
   bool _menuOpen = false;
+
+  // A collapsed kebab is unreachable without a pointer, so the row's own focus
+  // highlight has to reveal it too.
+  bool _focused = false;
 
   // Re-entrancy latch for _activate. A cold remote project tap kicks off an
   // up-to-30s pair+promote, so a rapid double-tap would otherwise launch two
@@ -272,30 +277,18 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           leadingGapOverride: AbTokens.drawerSessionLeadingGap,
           leading: SizedBox(
             width: AbTokens.drawerSessionLeadingSlot,
-            // Anchors the row's content height to the 24px iconButtonBox independently of
-            // trailing, so the row height stays strictly constant without
-            // reserving horizontal space for the kebab menu when unhovered.
-            height: AbTokens.iconButtonBox,
-            child: Center(
-              child: SizedBox(
-                width: AbTokens.drawerSessionLeadingSlot,
-                height: AbTokens.drawerLeadingSlot,
-                // Bias the dot slightly below its box centre. Row-centring lines up
-                // the dot with the title's line-box centre, but the visible glyphs
-                // of a text line sit a hair lower (the font reserves more space
-                // above the baseline than below), so a geometrically-centred dot
-                // reads as too high. The small downward nudge matches the optical
-                // centre of the text.
-                child: Align(
-                  alignment: const Alignment(0, _dotOpticalYBias),
-                  child: _leadingDot(work, deleting: deleting),
-                ),
-              ),
+            height: AbTokens.drawerLeadingSlot,
+            // Bias the dot slightly below its box centre. Row-centring lines up
+            // the dot with the title's line-box centre, but the visible glyphs
+            // of a text line sit a hair lower (the font reserves more space
+            // above the baseline than below), so a geometrically-centred dot
+            // reads as too high. The small downward nudge matches the optical
+            // centre of the text.
+            child: Align(
+              alignment: const Alignment(0, _dotOpticalYBias),
+              child: _leadingDot(work, deleting: deleting),
             ),
           ),
-          // Row height is anchored by the 24px leading slot, so swapping the
-          // title for the field doesn't change the height; the field expands
-          // to the full title width.
           title: (_editing && !deleting)
               ? _buildEditor()
               : Row(
@@ -340,20 +333,27 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // item on it (start/stop/rename/archive/delete, and the
           // working-directory rows pointing into a checkout that is going away)
           // acts on a session being removed.
-          trailing: ((_hovered || _menuOpen) && !_editing && !deleting)
-              ? _SessionMenu(
-                  entryId: widget.entryId,
-                  session: session,
-                  onMenuOpened: () {
-                    if (mounted) setState(() => _menuOpen = true);
-                  },
-                  onMenuClosed: () {
-                    if (mounted) setState(() => _menuOpen = false);
-                  },
+          trailing:
+              ((_hovered || _menuOpen || _focused) && !_editing && !deleting)
+              ? AbRowTrailingCell(
+                  child: _SessionMenu(
+                    entryId: widget.entryId,
+                    session: session,
+                    onMenuOpened: () {
+                      if (mounted) setState(() => _menuOpen = true);
+                    },
+                    onMenuClosed: () {
+                      if (mounted) setState(() => _menuOpen = false);
+                    },
+                  ),
                 )
               : null,
           selected: selected,
           enabled: !deleting,
+          contentFloor: AbRowContentFloor.iconButton,
+          onFocusChange: (v) {
+            if (mounted) setState(() => _focused = v);
+          },
           selectionStyle: AbRowSelection.surface,
           hoverable: true,
           density: AbRowDensity.sm,
@@ -490,7 +490,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   ///
   /// Deliberately a borderless, collapsed field — not [AbTextField] —
   /// matching the title [Text]'s font metrics, so swapping it in keeps the
-  /// row height (already anchored by the reserved kebab slot) stable while
+  /// row height (anchored by the row's own content floor) stable while
   /// expanding to the full title width. The selected-row fill and the accent
   /// cursor signal edit mode; a bordered box (`rowHeightSm`, 32px) would grow
   /// the row. The global `inputDecorationTheme` fills + outlines fields, so

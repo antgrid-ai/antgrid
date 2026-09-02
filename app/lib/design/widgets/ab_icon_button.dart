@@ -1,6 +1,9 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart' show Tooltip;
 import 'package:flutter/widgets.dart';
 
+import '../../utils/platform_utils.dart';
 import '../ab_tokens.dart';
 import '../ab_colors.dart';
 import 'ab_focus_ring.dart';
@@ -64,6 +67,25 @@ class AbIconButton extends StatefulWidget {
 
   /// Glyph size. Defaults to [AbTokens.iconButtonGlyph].
   final double? glyphSize;
+
+  /// Edge of this button's visual box in [context].
+  ///
+  /// The authority on the button's own size, so a row anchoring its height on
+  /// a button — or a cell aligning against one — reads the value from the
+  /// widget that owns it instead of re-deriving a constant that the text
+  /// scaler beats above UI Size 1.0.
+  static double boxExtent(BuildContext context) =>
+      MediaQuery.textScalerOf(context).scale(AbTokens.iconButtonBox);
+
+  /// Width this button occupies in [context], tap inflation included.
+  ///
+  /// [AbTapTarget] raises minWidth to [AbTokens.tapTargetMin] on mobile
+  /// unconditionally (`compact` gates only minHeight), and that floor does not
+  /// scale — so above ~1.84x the box overtakes it and the mobile width changes
+  /// character. Both regimes are in the max.
+  static double footprintWidth(BuildContext context) => isMobilePlatform
+      ? math.max(AbTokens.tapTargetMin, boxExtent(context))
+      : boxExtent(context);
 
   @override
   State<AbIconButton> createState() => _AbIconButtonState();

@@ -97,9 +97,10 @@ void main() {
     // projectWorkStatusProvider: that would assert against the override rather
     // than against the path a real advert takes.
     //
-    // Asserted by TYPE, not by key: the dot carries no key, so a
-    // `find.byKey` here passes whether or not it is rendered — which is what
-    // let the collapsed case go unnoticed when the rollup was added.
+    // Asserted by TYPE, and absence means absence: the row decides whether the
+    // dot exists at all (`DrawerProjectAggregateDot.needsUser`), so
+    // `findsNothing` is a widget missing from the tree rather than one that is
+    // mounted with nothing to draw.
     final callToAction = {
       AgentWorkStatus.attention,
       AgentWorkStatus.unread,
