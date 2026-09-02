@@ -97,7 +97,7 @@ final workspaceBadgesProvider = Provider<Map<WorkspaceView, int>>((ref) {
   // its own: the tab and its badge must never be able to answer differently
   // about what the tab holds, and one narrowing rule is what guarantees it.
   final pending = ref.watch(
-    focusedSessionHandlerStateProvider.select((s) => s.pendingEscalations),
+    focusedSessionHandlerStateProvider.select((s) => s.escalationBadgeCount),
   );
   return {
     if (gitCount > 0) WorkspaceView.git: gitCount,

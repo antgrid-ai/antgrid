@@ -478,9 +478,9 @@ class HandlerHeaderControl extends ConsumerWidget {
     // Arming is one tap and this control composes no payload — no backlog, no
     // judge override, no posture. Everything the session needs is either already
     // stored on the bridge or extracted behind the handoff, so sending any of
-    // those keys here would overwrite state this control never showed. That
-    // still holds now the first arm carries settings: the sheet sends only what
-    // the user moved on it, and every later arm sends nothing at all.
+    // those keys here would overwrite state this control never showed. The
+    // first-arm sheet is no exception: it sends only what the user moved on it,
+    // and every later arm sends nothing at all.
     // The goal is the exception and is not composed here either:
     // armWithFirstRunExplainer carries the session's own opening prompt.
     void toggleArm() {

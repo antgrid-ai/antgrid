@@ -170,6 +170,11 @@ class _JudgePanelState extends ConsumerState<_JudgePanel> {
   /// Stays open on a judge pick: the panel's other half is the model, and a
   /// judge change is exactly when the model most needs revisiting.
   void _pickJudge(String? tool) {
+    // Re-tapping the judge already in force is not a change. Firing anyway
+    // would hand `judgeModel: null` to the delta, which reads as "clear it" —
+    // so a tap that only confirmed the current pick would destroy the model
+    // override beside it. The panel stays open either way.
+    if (tool == _pick.judgeTool) return;
     // The free-text field IS the model for a tool with no catalog, so it is
     // cleared with the value it holds — otherwise the new judge is offered the
     // previous CLI's id back, which is a flag it rejects on every pass.

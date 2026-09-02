@@ -76,11 +76,6 @@ class HandlerScreen extends ConsumerWidget {
     final service = serviceWhenReady(ref, handlerServiceProvider);
     final container = ref.container;
 
-    // Watched for its subscription, not its value: `resolvedDefaultTool` below
-    // reads the SessionsService's current state directly, so without this the
-    // judge label on the session card would keep whatever it resolved to on
-    // first build.
-    ref.watch(activeSessionsProvider);
     // No catalog prediction here on purpose: every row on this screen is an
     // ARMED session, and the bridge's own per-session observability describes
     // its live mode and judge pick. The pre-arm guess belongs where nothing is
@@ -255,15 +250,15 @@ class HandlerScreen extends ConsumerWidget {
               for (final s in state.sessions.values)
                 _SessionCard(
                   session: s,
-                  // The session-list watch above already subscribes this build
-                  // to session-list changes, so the resolver read stays
-                  // reactive. The bare state.defaultTool is NOT a second
-                  // resolution rule — it only fires while the service is still
+                  // Through the shared resolver, which carries the session-list
+                  // subscription its own read needs — resolving off the service
+                  // directly here would pin whatever the list said on first
+                  // build. The bare state.defaultTool is NOT a second
+                  // resolution rule: it only fires while the service is still
                   // resolving (the resolver already includes it when the
                   // service is up).
                   judgeLabel:
-                      s.judgeTool ??
-                      service?.resolvedDefaultTool(s.terminalId) ??
+                      handlerEffectiveJudge(ref, s.terminalId, s.judgeTool) ??
                       state.defaultTool ??
                       'default',
                   // Resolved at tap time, not captured here: this fires from a
@@ -275,8 +270,11 @@ class HandlerScreen extends ConsumerWidget {
                     container,
                     (s) => s.handlerService,
                   )?.disarm(s.terminalId),
-                  onOpenSettings: () => unawaited(
-                    showHandlerSessionSettingsSheet(context, s.terminalId),
+                  onOpenSettings: () => detached(
+                    'HandlerScreen',
+                    'open session settings',
+                    () =>
+                        showHandlerSessionSettingsSheet(context, s.terminalId),
                   ),
                   onOpenBacklog: () => unawaited(
                     showHandlerBacklogDrawer(context, s.terminalId),
@@ -351,11 +349,7 @@ class HandlerScreen extends ConsumerWidget {
             itemCount: state.activity.length,
             itemBuilder: (_, i) {
               final a = state.activity[i];
-              return _ActivityRow(
-                record: a,
-                meta: meta(a.at),
-                p: p,
-              );
+              return _ActivityRow(record: a, meta: meta(a.at), p: p);
             },
           ),
       ],
@@ -1047,36 +1041,38 @@ String _itemDecisionLabel(String decision) {
 /// The glyph in the reserved rail. It earns the width the rail costs on every
 /// row: the feed is scanned for one kind of entry at a time far more often than
 /// it is read top to bottom.
-(String?, Color?) _activityGlyph(HandlerActivityRecord r, AbColors p) =>
-    switch (r.decision) {
-      'armed' => (AbIcons.shield, p.accent),
-      'goal_edited' => (AbIcons.list, p.textMuted),
-      // Watched, nothing sent. The one glyph in the rail that stands for an
-      // absence of action, so a column of them is what the eye skips over.
-      'continue' => (AbIcons.eye, p.textMuted),
-      'handle' => (AbIcons.send, p.accent),
-      'escalate' => (AbIcons.bell, p.accent),
-      'item_done' => (AbIcons.check, p.success),
-      'item_blocked' => (AbIcons.warning, p.warning),
-      'item_failed' => (AbIcons.error, p.error),
-      'item_skipped' => (AbIcons.close, p.textMuted),
-      'instruction_dropped' => (AbIcons.warning, p.textMuted),
-      // A key, not a shield: `armed` already owns the accent shield, and a feed
-      // scanned one kind of row at a time cannot be asked to tell two identical
-      // glyphs apart by what a session had already done. Permission, not alarm.
-      'instruction_authorized' => (AbIcons.password, p.accent),
-      // The drawer's own Edit mark. A change the user made by hand and one
-      // their sentence made for them are the same change to the same list, and
-      // giving the second its own glyph would teach the pencil a second meaning.
-      'instruction_amended' => (AbIcons.edit, p.accent),
-      // The remit being tested. Shield in the warning tone, beside `armed`'s.
-      'floor_warning' => (AbIcons.shield, p.warning),
-      'evidence_rejected' => (AbIcons.warning, p.warning),
-      'wrapped_up' => (AbIcons.check, p.textMuted),
-      'parked' => (AbIcons.stop, p.warning),
-      'resumed' => (AbIcons.start, p.textMuted),
-      _ => (null, null),
-    };
+(String?, Color?) _activityGlyph(
+  HandlerActivityRecord r,
+  AbColors p,
+) => switch (r.decision) {
+  'armed' => (AbIcons.shield, p.accent),
+  'goal_edited' => (AbIcons.list, p.textMuted),
+  // Watched, nothing sent. The one glyph in the rail that stands for an
+  // absence of action, so a column of them is what the eye skips over.
+  'continue' => (AbIcons.eye, p.textMuted),
+  'handle' => (AbIcons.send, p.accent),
+  'escalate' => (AbIcons.bell, p.accent),
+  'item_done' => (AbIcons.check, p.success),
+  'item_blocked' => (AbIcons.warning, p.warning),
+  'item_failed' => (AbIcons.error, p.error),
+  'item_skipped' => (AbIcons.close, p.textMuted),
+  'instruction_dropped' => (AbIcons.warning, p.textMuted),
+  // A key, not a shield: `armed` already owns the accent shield, and a feed
+  // scanned one kind of row at a time cannot be asked to tell two identical
+  // glyphs apart by what a session had already done. Permission, not alarm.
+  'instruction_authorized' => (AbIcons.password, p.accent),
+  // The drawer's own Edit mark. A change the user made by hand and one
+  // their sentence made for them are the same change to the same list, and
+  // giving the second its own glyph would teach the pencil a second meaning.
+  'instruction_amended' => (AbIcons.edit, p.accent),
+  // The remit being tested. Shield in the warning tone, beside `armed`'s.
+  'floor_warning' => (AbIcons.shield, p.warning),
+  'evidence_rejected' => (AbIcons.warning, p.warning),
+  'wrapped_up' => (AbIcons.check, p.textMuted),
+  'parked' => (AbIcons.stop, p.warning),
+  'resumed' => (AbIcons.start, p.textMuted),
+  _ => (null, null),
+};
 
 Widget? _activitySubtitle(HandlerActivityRecord r, AbColors p) {
   final detail = r.detail;

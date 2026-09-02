@@ -121,12 +121,23 @@ final focusedSessionCoverageProvider =
       // The judge the bridge would actually run, not the session's agent: once
       // a pick exists, warning about the agent's own headless reach describes a
       // judge that is not going to be used.
+      //
+      // The ARMED session's own report comes first, because it is the only half
+      // of this that is reactive: `lastKnownSettings` is a plain mutable field
+      // no provider watches, so a pick this app made optimistically moves
+      // nothing and would leave the shield and the away hint reporting the
+      // previous judge's coverage until the next status frame — exactly the
+      // window in which the user is deciding whether to walk away. The cache is
+      // the fallback for a session the state does not list (disarmed, or a
+      // status frame not yet landed).
+      //
       // Sourced through focusedSessionOrNull, never the handlerService facade:
       // this provider is watched, and the facade throws in the windows where a
       // project session is still resolving.
       final judge = entry == null
           ? agent
-          : focusedSessionOrNull(ref)
+          : handlerState.sessions[entry.id]?.judgeTool ??
+                focusedSessionOrNull(ref)
                     ?.handlerService
                     .lastKnownSettings(entry.id)
                     ?.tool ??

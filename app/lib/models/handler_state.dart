@@ -876,6 +876,20 @@ class HandlerState {
   int get pendingEscalations =>
       sessions.values.fold(0, (n, s) => n + s.pendingEscalations);
 
+  /// What a badge over the Handler tab counts.
+  ///
+  /// The larger of the sessions' own tally and the escalation rows actually
+  /// held, because the two fill from DIFFERENT frames: a `handler:escalation`
+  /// push appends a row without touching any session's `pendingEscalations`
+  /// (that only moves on the next `handler:status`), so folding the sessions
+  /// alone badges zero over a tab already rendering a NEEDS YOU card. A badge
+  /// and the surface it points at must never be able to answer differently
+  /// about what is waiting.
+  int get escalationBadgeCount =>
+      pendingEscalations > escalations.length
+      ? pendingEscalations
+      : escalations.length;
+
   // Folded on `at` rather than read off the tail: [escalations] is banded by
   // [compareEscalations], so `.last` is the newest NORMAL one and an urgent row
   // — the only kind anything asking for "the latest" would want to land on —
@@ -904,21 +918,44 @@ class HandlerState {
   /// [defaultTool] rides through unfiltered: it is the project's judge
   /// fallback, and the session card resolves its judge label against it.
   ///
-  /// A null [terminalId] narrows to nothing rather than to everything: an
-  /// unresolved focus names no session, and answering it with the project's
-  /// whole state would undo the narrowing at exactly that moment.
+  /// A null [terminalId] narrows the per-session fields to nothing rather than
+  /// to everything: an unresolved focus names no session, and answering it with
+  /// the project's whole state would undo the narrowing at exactly that moment.
+  ///
+  /// [snapshots] and [wrapUps] are the exception, and are narrowed by OWNERSHIP
+  /// rather than by focus: both are project-scoped precisely because they
+  /// outlive the session that produced them (see their own docs), so filtering
+  /// them on terminalId alone hides an undo offer the moment its session
+  /// disarms — which for a wrap-up is always, since a wrap-up disarms the
+  /// session it reports on. What is kept is this terminal's own plus every
+  /// ORPHAN no live session can claim: the narrowing still holds for sessions
+  /// that exist, and the account of finished work stays reachable.
   ///
   /// Built through [copyWith] rather than the constructor so a field added to
   /// this class later is CARRIED, not silently reset to its default on the one
   /// surface that reads a narrowed state. Whether it then needs narrowing of
   /// its own is a question a reader gets to see; a blank section is not.
   HandlerState forTerminal(String? terminalId) {
+    bool ownedOrOrphaned(String owner) =>
+        owner == terminalId || !sessions.containsKey(owner);
+    final mine = snapshots.where((s) => ownedOrOrphaned(s.terminalId)).toList();
+    final mineIds = {for (final s in mine) s.snapshotId};
+    // Filtered against the narrowed offers, not carried whole: a pending id
+    // naming a snapshot this state no longer holds marks a row that is not on
+    // screen.
+    final undo = pendingUndo.where(mineIds.contains).toSet();
+    final orphanedWrapUps = wrapUps
+        .where((w) => ownedOrOrphaned(w.terminalId))
+        .toList();
     if (terminalId == null) {
-      return HandlerState.initial().copyWith(defaultTool: defaultTool);
+      return HandlerState.initial().copyWith(
+        defaultTool: defaultTool,
+        snapshots: mine,
+        wrapUps: orphanedWrapUps,
+        pendingUndo: undo,
+      );
     }
     final session = sessions[terminalId];
-    final mine = snapshots.where((s) => s.terminalId == terminalId).toList();
-    final mineIds = {for (final s in mine) s.snapshotId};
     final instructions = pendingInstructions[terminalId];
     return copyWith(
       sessions: session == null ? const {} : {terminalId: session},
@@ -927,11 +964,8 @@ class HandlerState {
           .toList(),
       activity: activity.where((a) => a.terminalId == terminalId).toList(),
       snapshots: mine,
-      wrapUps: wrapUps.where((w) => w.terminalId == terminalId).toList(),
-      // Filtered against the narrowed offers, not carried whole: a pending id
-      // naming a snapshot this state no longer holds marks a row that is not
-      // on screen.
-      pendingUndo: pendingUndo.where(mineIds.contains).toSet(),
+      wrapUps: orphanedWrapUps,
+      pendingUndo: undo,
       pendingInstructions: instructions == null
           ? const {}
           : {terminalId: instructions},

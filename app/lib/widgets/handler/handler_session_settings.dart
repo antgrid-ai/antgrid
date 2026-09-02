@@ -18,7 +18,9 @@ import '../../models/handler_state.dart';
 import '../../providers/agent_catalog.dart';
 import '../../providers/capability_catalog.dart';
 import '../../providers/providers.dart';
+import '../../providers/sessions.dart';
 import '../../services/handler_service.dart';
+import '../../util/detached.dart';
 
 /// The sheet's own gutter. Everything on it lines up on this one inset.
 const _gutter = EdgeInsets.symmetric(horizontal: AbTokens.space16);
@@ -29,6 +31,14 @@ const _gutter = EdgeInsets.symmetric(horizontal: AbTokens.space16);
 const handlerPostureParkedBlurb =
     'Stored, but not running — nothing is being judged, so every pause comes '
     'to you whatever this says.';
+
+/// What the posture caption says when the far end has never named one. Claiming
+/// a preset here would be a control over nothing: the bridge that would have to
+/// honour it predates the setting, so no cell may read as chosen and no pick
+/// can be reported as taken.
+const handlerPostureUnreportedBlurb =
+    'This agent has not reported a posture — the machine it runs on is on a '
+    'build that predates the setting, so picking one changes nothing yet.';
 
 /// The escalate-only fact on the one surface that can act on it: the judge
 /// picker under this line is the fix, so it names the fix rather than stopping
@@ -60,6 +70,13 @@ String? handlerEffectiveJudge(
   String terminalId,
   String? override,
 ) {
+  // Watched for its subscription, not its value: `resolvedDefaultTool` reads
+  // the SessionsService's CURRENT state directly, which notifies nothing. The
+  // watch belongs here rather than at each call site — a modal route that does
+  // not rebuild on unrelated churn (the arm sheet, the settings sheet) would
+  // otherwise resolve the judge once, before the session list has filled in,
+  // and keep naming the wrong CLI for its whole life.
+  ref.watch(activeSessionsProvider);
   final service = serviceWhenReady(ref, handlerServiceProvider);
   return override ?? service?.resolvedDefaultTool(terminalId);
 }
@@ -70,11 +87,13 @@ String? handlerEffectiveJudge(
 /// One value type shared by both hosts — the first-arm sheet, which collects it
 /// and sends it with the arm, and the settings sheet, which commits each change
 /// as it is made. A null judge means the session's own tool; a null model means
-/// that CLI's default. Personality has no null: every preset is a real choice.
+/// that CLI's default. A null personality is NOT a preset: it means the far end
+/// has never reported one (see [handlerPersonalityFromWire]), and the control
+/// showing it must say so rather than name a preset the bridge cannot honour.
 typedef HandlerSessionSettingsValue = ({
   String? judgeTool,
   String? judgeModel,
-  HandlerPersonality personality,
+  HandlerPersonality? personality,
 });
 
 /// One [HandlerService.arm] call's worth of change: null on a field means
@@ -95,19 +114,30 @@ typedef HandlerSessionSettingsEdit = ({
 HandlerSessionSettingsEdit handlerSessionSettingsEdit(
   HandlerSessionSettingsValue from,
   HandlerSessionSettingsValue to,
-) => (
-  judgeTool: to.judgeTool == from.judgeTool ? null : (to.judgeTool ?? ''),
-  judgeModel: to.judgeModel == from.judgeModel ? null : (to.judgeModel ?? ''),
-  personality: to.personality == from.personality ? null : to.personality,
-);
+) {
+  final toolMoved = to.judgeTool != from.judgeTool;
+  return (
+    judgeTool: toolMoved ? (to.judgeTool ?? '') : null,
+    // A tool change ALWAYS carries the model, even when both sides read null:
+    // this app's view of the model is null whenever its cache is cold, and
+    // omitting the field then leaves the previous CLI's id on the bridge under
+    // the new judge — a flag it rejects on every pass, which is the one thing
+    // clearing the model across a tool change exists to prevent.
+    judgeModel: toolMoved || to.judgeModel != from.judgeModel
+        ? (to.judgeModel ?? '')
+        : null,
+    personality: to.personality == from.personality ? null : to.personality,
+  );
+}
 
 /// What a sheet opens on for [terminalId], read through the service cache so a
 /// disarmed session still offers back what it was last given (see
 /// [HandlerService.lastKnownSettings]).
 ///
-/// A session with nothing stored opens on the same preset the bridge would have
-/// judged it under, never on a blank control: the sheet has to show what is
-/// already true before it can be used to change it.
+/// The posture is carried through UNCOERCED: a bridge that has never reported
+/// one is not a bridge running [HandlerPersonality.watchdog], and seeding the
+/// default here would put a preset on screen as a live fact and then send
+/// nothing when the user "changed" it to the value already displayed.
 HandlerSessionSettingsValue handlerSessionSettingsFor(
   HandlerService? service,
   String terminalId,
@@ -116,7 +146,7 @@ HandlerSessionSettingsValue handlerSessionSettingsFor(
   return (
     judgeTool: stored?.tool,
     judgeModel: stored?.model,
-    personality: stored?.personality ?? HandlerPersonality.watchdog,
+    personality: stored?.personality,
   );
 }
 
@@ -212,6 +242,11 @@ class HandlerPostureControl extends ConsumerWidget {
     // gates the whole path on this same answer — so the posture here is stored
     // and does nothing until the judge picker changes.
     final parked = judgeCapable == false;
+    // Nothing reported one, so no cell may paint as chosen — the type argument
+    // is nullable for exactly that: `selected` matches no segment, which is the
+    // only honest rendering of "the far end has never named a posture".
+    final posture = value.personality;
+    final unreported = posture == null;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -220,7 +255,7 @@ class HandlerPostureControl extends ConsumerWidget {
         const _Head(label: 'How much it handles'),
         Padding(
           padding: _gutter,
-          child: AbSegmented<HandlerPersonality>(
+          child: AbSegmented<HandlerPersonality?>(
             segments: [
               for (final preset in HandlerPersonality.values)
                 AbSegment(
@@ -228,11 +263,11 @@ class HandlerPostureControl extends ConsumerWidget {
                   label: handlerPersonalityLabel(preset),
                 ),
             ],
-            selected: value.personality,
+            selected: posture,
             // Still selectable while parked: the choice is stored and starts
             // working the moment the judge is fixed. It just must not look
             // like it is running.
-            inactive: parked,
+            inactive: parked || unreported,
             onSelect: (preset) => onChanged((
               judgeTool: value.judgeTool,
               judgeModel: value.judgeModel,
@@ -241,14 +276,16 @@ class HandlerPostureControl extends ConsumerWidget {
           ),
         ),
         _Caption(
-          text: parked
+          text: unreported
+              ? handlerPostureUnreportedBlurb
+              : parked
               ? handlerPostureParkedBlurb
               : appliesNextPass
-              ? '${handlerPersonalityBlurb(value.personality)} Takes effect on the next pass.'
-              : handlerPersonalityBlurb(value.personality),
+              ? '${handlerPersonalityBlurb(posture)} Takes effect on the next pass.'
+              : handlerPersonalityBlurb(posture),
           // The parked line is the load-bearing one on this sheet, not an aside
           // under a control that is working.
-          color: parked ? p.textSecondary : p.textMuted,
+          color: parked || unreported ? p.textSecondary : p.textMuted,
         ),
         // This is the one class of surface where the warning is actionable;
         // everywhere else it appears it only diagnoses.
@@ -298,21 +335,33 @@ class HandlerJudgeControl extends ConsumerWidget {
         const _Head(label: 'Judged by'),
         _PickerRow(
           value: value.judgeTool == null
-              ? (defaultTool == null ? 'Default' : 'Default ($defaultTool)')
+              // The catalog's label, never the registry key — the menu below
+              // names every tool that way, and a row naming the same tool by
+              // its raw id reads as a different one.
+              ? (defaultTool == null
+                    ? 'Default'
+                    : 'Default (${catalog[defaultTool]?.label ?? defaultTool})')
               : (catalog[value.judgeTool]?.label ?? value.judgeTool!),
           entries: [
             AbMenuItem(label: 'Default', value: ''),
             for (final tool in judgeTools)
               AbMenuItem(label: catalog[tool]?.label ?? tool, value: tool),
           ],
-          onSelected: (picked) => onChanged((
-            judgeTool: picked.isEmpty ? null : picked,
-            // Cleared, never carried: a model id is a name only its own CLI
-            // answers to, so keeping it across a tool change hands the new
-            // judge a flag it rejects on every pass.
-            judgeModel: null,
-            personality: value.personality,
-          )),
+          onSelected: (picked) {
+            final tool = picked.isEmpty ? null : picked;
+            // Re-picking the tool already in force is not an edit. Firing
+            // anyway would carry the cleared model into the delta and wipe an
+            // override the user only opened the menu to read back.
+            if (tool == value.judgeTool) return;
+            onChanged((
+              judgeTool: tool,
+              // Cleared, never carried: a model id is a name only its own CLI
+              // answers to, so keeping it across a tool change hands the new
+              // judge a flag it rejects on every pass.
+              judgeModel: null,
+              personality: value.personality,
+            ));
+          },
         ),
         // A sub-label rather than a peer heading: a model names nothing without
         // the judge above it, so the two rows are one decision.
@@ -361,10 +410,16 @@ class _ModelControlState extends ConsumerState<_ModelControl> {
   @override
   void didUpdateWidget(_ModelControl old) {
     super.didUpdateWidget(old);
-    // Only when the value moved underneath us — a judge change clears the model,
-    // and the field would otherwise keep offering the previous CLI's id back.
-    // Never on every rebuild: that would fight the user's cursor as they type.
-    if (widget.model != old.model && (widget.model ?? '') != _controller.text) {
+    // A judge change resets the field unconditionally, even when the committed
+    // model was null on both sides: an id typed but never submitted survives
+    // that comparison, and the field would then offer the PREVIOUS CLI's id to
+    // the new judge — the one thing clearing the model on a tool change exists
+    // to prevent. Otherwise only when the value moved underneath us; never on
+    // every rebuild, which would fight the user's cursor as they type.
+    if (widget.judgeTool != old.judgeTool) {
+      _controller.text = widget.model ?? '';
+    } else if (widget.model != old.model &&
+        (widget.model ?? '') != _controller.text) {
       _controller.text = widget.model ?? '';
     }
   }
@@ -397,7 +452,12 @@ class _ModelControlState extends ConsumerState<_ModelControl> {
     final matches = models.where((m) => m.id == widget.model);
     final selected = matches.isEmpty ? null : matches.first;
     return _PickerRow(
-      value: selected?.name ?? 'Default',
+      // A model this catalog does not describe still names itself. The list is
+      // whatever a CHAT session of that tool happened to report, so an id the
+      // user typed on another surface — or one the bridge holds from a build
+      // ago — is routinely absent from it, and rendering it as "Default" would
+      // report a configured model as unset.
+      value: selected?.name ?? widget.model ?? 'Default',
       entries: [
         AbMenuItem(label: 'Default', value: ''),
         for (final m in models) AbMenuItem(label: m.name, value: m.id),
@@ -429,7 +489,7 @@ class _PickerRow extends StatelessWidget {
       child: Builder(
         builder: (anchorContext) => GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTap: () async {
+          onTap: () => detached('_PickerRow', 'open settings picker', () async {
             final anchor = abMenuAnchorRect(anchorContext);
             if (anchor == null) return;
             final picked = await showAbMenu<String>(
@@ -437,8 +497,11 @@ class _PickerRow extends StatelessWidget {
               anchorRect: anchor,
               entries: entries,
             );
-            if (picked != null) onSelected(picked);
-          },
+            // The menu outlives this row — a project switch or a host restart
+            // can tear the sheet down while it is up — and `onSelected` runs
+            // `setState` on the sheet's State.
+            if (picked != null && anchorContext.mounted) onSelected(picked);
+          }),
           // AbControlBox rather than a box of its own: the model row swaps
           // between this trigger and an AbTextField depending on whether the
           // machine has ever heard that CLI list its models, and only the
@@ -555,6 +618,10 @@ class _Notice extends StatelessWidget {
 /// Every change commits on the spot as a `handler:configure` carrying `armed:
 /// true`, which is the bridge's edit path: there is no Save, and no state here
 /// that a dismissal could strand.
+///
+/// `armed: true` is an EDIT only while a session exists to edit. This sheet is
+/// a modal and outlives the bar that opened it, so it closes itself rather than
+/// commit into a session that disarmed underneath it — see [_SettingsSheetState._commit].
 Future<void> showHandlerSessionSettingsSheet(
   BuildContext context,
   String terminalId,
@@ -586,17 +653,44 @@ class _SettingsSheetState extends ConsumerState<_SettingsSheet> {
       );
 
   void _commit(HandlerSessionSettingsValue next) {
+    if (!mounted) return;
+    final service = focusedServiceOrNull(
+      ref.container,
+      (s) => s.handlerService,
+    );
+    // `armed: true` on an already-armed session is the bridge's EDIT path — but
+    // sent once the session is GONE it is a fresh arm, which retires that
+    // slot's undo offers and puts Handler back to judging work the user let
+    // finish. Reachability is not the guarantee it looks like: this is a modal,
+    // and the PA bar row that opened it vanishes the moment an autonomous
+    // wrap-up or a dead PTY disarms the session underneath it.
+    final stillArmed =
+        ref.read(handlerStateProvider).value?.sessions[widget.terminalId] !=
+        null;
+    if (service == null || !stillArmed) {
+      Navigator.of(context).maybePop();
+      return;
+    }
     final edit = handlerSessionSettingsEdit(_current, next);
-    setState(() => _value = next);
-    // `armed: true` on an already-armed session is the bridge's EDIT path, not
-    // a second arm — which is why this sheet is only ever reachable from a
-    // surface that exists while the session is armed.
-    focusedServiceOrNull(ref.container, (s) => s.handlerService)?.arm(
+    // An all-null delta is not a cheap send: the bridge's edit path clears
+    // `lastJudgedContextHash` unconditionally, so a configure that changes
+    // nothing still buys a fresh judge pass — a real LLM call — over an agent
+    // that has not moved.
+    if (edit.judgeTool == null &&
+        edit.judgeModel == null &&
+        edit.personality == null) {
+      return;
+    }
+    // Pinned only once the send is real. A value pinned ahead of a dropped send
+    // is one no status frame can correct — `_current` prefers `_value` — so
+    // every later delta is computed against a `from` the bridge never held.
+    service.arm(
       terminalId: widget.terminalId,
       judgeTool: edit.judgeTool,
       judgeModel: edit.judgeModel,
       personality: edit.personality,
     );
+    setState(() => _value = next);
   }
 
   @override

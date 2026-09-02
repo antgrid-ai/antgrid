@@ -60,12 +60,12 @@ class CapabilityCatalogNotifier
       // re-read on every rebuild.
       _read.add(key);
     } catch (_) {
-      // read() cannot resolve the app-support directory on every host, and
-      // every caller starts this from a build method and discards the future —
-      // so an error escaping here surfaces as an unhandled async failure in the
-      // zone rather than anywhere a user could see. An unreadable cache is a
-      // missing catalog, which every reader already renders. Deliberately NOT
-      // latched into _read: a later build gets to try again.
+      // A backstop, not the mechanism: read() holds the "never throws" contract
+      // itself, and this only catches a `state =` write failing on a notifier
+      // disposed mid-read. Every caller starts this from a build method and
+      // discards the future, so anything escaping here surfaces as an unhandled
+      // async failure in the zone rather than anywhere a user could see.
+      // Deliberately NOT latched into _read: a later build gets to try again.
     } finally {
       _hydrating.remove(key);
     }

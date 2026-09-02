@@ -485,7 +485,12 @@ Size _measureLabel(BuildContext context, String label, TextStyle style) {
     textScaler: MediaQuery.textScalerOf(context),
     maxLines: 1,
   )..layout();
-  return painter.size;
+  final size = painter.size;
+  // A laid-out painter holds native paragraph memory that no GC finalizer
+  // reclaims, and this runs inside a LayoutBuilder on every chip that carries a
+  // secondary label — so leaking one per layout pass is a leak per frame.
+  painter.dispose();
+  return size;
 }
 
 /// Uppercase mono section header, mirroring `AbMenu`'s header treatment

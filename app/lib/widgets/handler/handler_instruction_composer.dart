@@ -184,7 +184,15 @@ class _HandlerInstructionComposerState
   /// this composer should not have to depend on.
   void _insertNewline() {
     final value = widget.controller.value;
-    final selection = value.selection.isValid
+    // `isValid` only asserts the offsets are non-negative — it says nothing
+    // about them fitting the text — and this controller is owned by the HOST,
+    // which may have replaced the text without moving the selection. An
+    // out-of-range one would make replaceRange throw from inside a key handler.
+    final inRange =
+        value.selection.isValid &&
+        value.selection.end <= value.text.length &&
+        value.selection.start <= value.selection.end;
+    final selection = inRange
         ? value.selection
         : TextSelection.collapsed(offset: value.text.length);
     widget.controller.value = TextEditingValue(

@@ -496,11 +496,29 @@ void main() {
 
     test('a terminal with nothing armed still keeps its leftovers', () {
       // Disarm is not the end of the session: the undo it took and the report
-      // it wrote are read afterwards, on this same tab.
+      // it wrote are read afterwards, on this same tab. With every session
+      // gone, every offer is an orphan — and an orphan belongs to no live
+      // session, so no focus can be moved to reach it.
       final after = mixed.copyWith(sessions: const {}).forTerminal('t1');
       expect(after.anyArmed, isFalse);
-      expect(after.snapshots.map((s) => s.snapshotId), ['s1']);
-      expect(after.wrapUps.map((w) => w.wrapUpId), ['w1']);
+      expect(after.snapshots.map((s) => s.snapshotId), ['s1', 's2']);
+      expect(after.wrapUps.map((w) => w.wrapUpId), ['w1', 'w2']);
+    });
+
+    test('an offer whose session is gone is never stranded', () {
+      // A wrap-up DISARMS the session it reports on, so filtering these by
+      // terminalId alone would hide the account of every finished session — and
+      // the undo offer behind it — behind a focus that can never name it again.
+      // A live session still owns its own, so the narrowing holds where it can.
+      final t2Done = mixed.copyWith(
+        sessions: {'t1': _session('t1', pending: 1)},
+      );
+      final one = t2Done.forTerminal('t1');
+      expect(one.snapshots.map((s) => s.snapshotId), ['s1', 's2']);
+      expect(one.wrapUps.map((w) => w.wrapUpId), ['w1', 'w2']);
+      // The per-session collections stay narrowed regardless.
+      expect(one.sessions.keys, ['t1']);
+      expect(one.activity.map((a) => a.recordId), ['r1']);
     });
 
     test('leaves the project-wide count alone for the surfaces that need it', () {

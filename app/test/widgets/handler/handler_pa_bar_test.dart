@@ -118,15 +118,28 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('the bar names the posture even when nobody has picked one', (
-    tester,
-  ) async {
+  testWidgets('the bar names the posture the bridge reported', (tester) async {
     // The bar is on screen for the whole time a session is armed and is the
     // only place the posture is visible at all, so "no chip" would be a state
     // the user has to be taught to read.
-    await _pump(tester, sessions: {'t1': _armed()});
+    await _pump(
+      tester,
+      sessions: {'t1': _armed(personality: HandlerPersonality.watchdog)},
+    );
     final p = tester.element(find.byType(HandlerPaBar)).antgrid;
     expect(_chip(tester, 'WATCHDOG').color, p.textMuted);
+  });
+
+  testWidgets('an unreported posture is a dash, never the default by name', (
+    tester,
+  ) async {
+    // This chip reads as a live fact about the session. A bridge too old to
+    // carry the field is not a bridge running watchdog, and naming the preset
+    // here would advertise a control over nothing.
+    await _pump(tester, sessions: {'t1': _armed()});
+    expect(find.text('WATCHDOG'), findsNothing);
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
+    expect(_chip(tester, '—').color, p.textMuted);
   });
 
   testWidgets('the posture chip is tinted where nothing is being judged', (
@@ -153,7 +166,7 @@ void main() {
     String? opened;
     await _pump(
       tester,
-      sessions: {'t1': _armed()},
+      sessions: {'t1': _armed(personality: HandlerPersonality.watchdog)},
       opener: (terminalId) => opened = terminalId,
     );
     await tester.tap(find.text('WATCHDOG'));

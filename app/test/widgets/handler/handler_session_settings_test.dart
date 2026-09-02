@@ -107,9 +107,11 @@ Future<void> _pumpHalf(
   await tester.pump();
 }
 
-AbSegmented<HandlerPersonality> _segmented(WidgetTester tester) =>
-    tester.widget<AbSegmented<HandlerPersonality>>(
-      find.byType(AbSegmented<HandlerPersonality>),
+// Nullable type argument: `selected` has to be able to match no cell at all,
+// which is how the control says the far end has never reported a posture.
+AbSegmented<HandlerPersonality?> _segmented(WidgetTester tester) =>
+    tester.widget<AbSegmented<HandlerPersonality?>>(
+      find.byType(AbSegmented<HandlerPersonality?>),
     );
 
 void main() {
@@ -156,14 +158,39 @@ void main() {
         _value(judgeTool: 'claude'),
       );
       expect(edit.judgeTool, 'claude');
-      expect(edit.judgeModel, isNull);
+      // Cleared, not omitted: this app's `from` reads null whenever its cache
+      // is cold, and the bridge may well be holding the PREVIOUS CLI's model.
+      // Omitting the key would leave that id in force under the new judge.
+      expect(edit.judgeModel, '');
     });
+
+    test('a tool change always carries the model, cold cache included', () {
+      final edit = handlerSessionSettingsEdit(
+        _value(judgeTool: 'codex'),
+        _value(judgeTool: 'claude'),
+      );
+      expect(edit.judgeTool, 'claude');
+      expect(edit.judgeModel, '');
+    });
+
+    test('a model-only edit leaves the tool alone', () {
+      final edit = handlerSessionSettingsEdit(
+        _value(judgeTool: 'codex', judgeModel: 'o3'),
+        _value(judgeTool: 'codex', judgeModel: 'o4-mini'),
+      );
+      expect(edit.judgeTool, isNull);
+      expect(edit.judgeModel, 'o4-mini');
+    });
+
   });
 
   group('handlerSessionSettingsFor', () {
-    test('a session with nothing stored opens on the bridge default', () {
+    test('a session with nothing stored reports no posture, never a guess', () {
+      // A bridge that has never named one is not a bridge running watchdog:
+      // seeding the default here would put a preset on screen as a live fact
+      // and then send nothing when the user "changed" it to what was shown.
       final seed = handlerSessionSettingsFor(null, 't1');
-      expect(seed.personality, HandlerPersonality.watchdog);
+      expect(seed.personality, isNull);
       expect(seed.judgeTool, isNull);
       expect(seed.judgeModel, isNull);
     });

@@ -12,6 +12,7 @@ import '../../design/widgets/ab_dialog.dart';
 import '../../design/widgets/ab_toast.dart';
 import '../../models/handler_state.dart';
 import '../../navigation/root_navigator.dart';
+import '../../providers/agent_catalog.dart';
 import '../../providers/first_run.dart';
 import '../../providers/providers.dart';
 import '../../providers/session_opening_prompt.dart';
@@ -88,10 +89,9 @@ typedef HandlerArmDecision = ({
 /// posture and an instruction composer on it. Returns what the user decided, or
 /// null if they backed out.
 ///
-/// A sheet rather than the confirm dialog it replaces, for one reason: this
-/// screen already tells a user their judge cannot run headless, and until now it
-/// offered nothing to do about it. The picker that fixes it belongs beside the
-/// warning, and a title/body/two-buttons dialog has nowhere to put a control.
+/// A sheet rather than a dialog, for one reason: this screen tells a user their
+/// judge cannot run headless, and the picker that fixes it belongs beside the
+/// warning. A title/body/two-buttons dialog has nowhere to put a control.
 ///
 /// Still first-arm only — every later arm stays one tap, and the same controls
 /// stay one tap away on the PA bar for the whole time a session is armed.
@@ -109,26 +109,31 @@ Future<HandlerArmDecision?> showHandlerArmSheet(
     terminalId: terminalId,
     initial: initial,
     hasOpeningPrompt: hasOpeningPrompt,
-    body: handlerArmExplainerBody(
-      agentObservable: agentObservable,
-      agentLabel: agentLabel,
-      hasOpeningPrompt: hasOpeningPrompt,
-      judgeCapable: judgeCapable,
-    ),
+    agentObservable: agentObservable,
+    agentLabel: agentLabel,
+    judgeCapable: judgeCapable,
   ),
 );
 
-class _ArmSheet extends StatefulWidget {
+class _ArmSheet extends ConsumerStatefulWidget {
   const _ArmSheet({
     required this.terminalId,
     required this.initial,
-    required this.body,
     required this.hasOpeningPrompt,
+    required this.agentObservable,
+    required this.agentLabel,
+    required this.judgeCapable,
   });
 
   final String terminalId;
   final HandlerSessionSettingsValue initial;
-  final String body;
+  final bool? agentObservable;
+  final String? agentLabel;
+
+  /// Whether the judge this sheet OPENED on can run headless. The seed only —
+  /// the body is recomputed against whatever judge is picked while it is up
+  /// (see [_ArmSheetState.build]).
+  final bool? judgeCapable;
 
   /// Steers the composer's hint alone. A seeded goal is already extracted on
   /// arm, and an instruction typed here is extracted a second time — nothing
@@ -137,11 +142,19 @@ class _ArmSheet extends StatefulWidget {
   final bool hasOpeningPrompt;
 
   @override
-  State<_ArmSheet> createState() => _ArmSheetState();
+  ConsumerState<_ArmSheet> createState() => _ArmSheetState();
 }
 
-class _ArmSheetState extends State<_ArmSheet> {
-  late HandlerSessionSettingsValue _value = widget.initial;
+class _ArmSheetState extends ConsumerState<_ArmSheet> {
+  /// The posture the sheet opens on. A fresh arm is the user CHOOSING one, so
+  /// the seed is a real preset even where nothing has reported one yet — unlike
+  /// the settings sheet, which reports what the far end holds and must show
+  /// "not reported" rather than invent it.
+  late HandlerSessionSettingsValue _value = (
+    judgeTool: widget.initial.judgeTool,
+    judgeModel: widget.initial.judgeModel,
+    personality: widget.initial.personality ?? HandlerPersonality.watchdog,
+  );
   final _instruction = TextEditingController();
 
   @override
@@ -153,6 +166,24 @@ class _ArmSheetState extends State<_ArmSheet> {
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
+    // Recomputed on every build, never frozen at open: the composer's judge
+    // chip is ON this sheet, so the escalate-only warning in this copy is one
+    // the user can fix while reading it. A body computed once would keep
+    // warning about a judge the sheet had already replaced, directly above the
+    // control that replaced it.
+    final effectiveJudge = handlerEffectiveJudge(
+      ref,
+      widget.terminalId,
+      _value.judgeTool,
+    );
+    final body = handlerArmExplainerBody(
+      agentObservable: widget.agentObservable,
+      agentLabel: widget.agentLabel,
+      hasOpeningPrompt: widget.hasOpeningPrompt,
+      judgeCapable: effectiveJudge == null
+          ? widget.judgeCapable
+          : ref.watch(agentCatalogProvider)[effectiveJudge]?.judgeCapable,
+    );
     return SingleChildScrollView(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -173,7 +204,7 @@ class _ArmSheetState extends State<_ArmSheet> {
               AbTokens.space16,
             ),
             child: Text(
-              widget.body,
+              body,
               style: AbTokens.sansStyle(
                 fontSize: AbTokens.fontSm,
                 color: p.textSecondary,
@@ -200,7 +231,10 @@ class _ArmSheetState extends State<_ArmSheet> {
                   // The empty backlog's own invitation, verbatim: one act
                   // worded one way wherever the user meets it.
                   : "Add what you want done while you're away.",
-              judge: (judgeTool: _value.judgeTool, judgeModel: _value.judgeModel),
+              judge: (
+                judgeTool: _value.judgeTool,
+                judgeModel: _value.judgeModel,
+              ),
               onJudgeChanged: (pick) => setState(
                 () => _value = (
                   judgeTool: pick.judgeTool,
@@ -234,7 +268,10 @@ class _ArmSheetState extends State<_ArmSheet> {
                   label: 'Arm Handler',
                   variant: AbButtonVariant.primary,
                   onTap: () => Navigator.of(context).maybePop((
-                    settings: handlerSessionSettingsEdit(widget.initial, _value),
+                    settings: handlerSessionSettingsEdit(
+                      widget.initial,
+                      _value,
+                    ),
                     instruction: _instruction.text,
                   )),
                 ),
@@ -361,8 +398,13 @@ void latchHandlerArmedOnConfirmation(
   // — the flag that retires it is set only on confirmation, and the shield
   // still reads unarmed — so two latches can be live over one session and both
   // would fire on the same status, sending two instructions for one intended
-  // arm. The newest supersedes: it carries the sentence the user typed last.
-  // The one it replaces reports nothing, because nothing about it failed.
+  // arm. The newest supersedes.
+  //
+  // It does NOT inherit the older one's sentence, because the reopened sheet
+  // builds a fresh composer: the second pass is blank unless the user retypes.
+  // So a superseded latch that was carrying words reports them lost rather than
+  // dropping them silently — the replacement usually carries none, and this is
+  // the only surface that ever held them.
   _armLatches.remove(terminalId)?.call();
   ProviderSubscription<AsyncValue<HandlerState>>? sub;
   Timer? timeout;
@@ -383,7 +425,16 @@ void latchHandlerArmedOnConfirmation(
     _sendArmInstruction(container, terminalId, instruction);
   }
 
-  _armLatches[terminalId] = stop;
+  _armLatches[terminalId] = () {
+    stop();
+    _reportArmInstructionLost(
+      container,
+      instruction,
+      reason:
+          'You re-armed before the first attempt was confirmed, so the '
+          'instruction you typed with it was not sent.',
+    );
+  };
   sub = container.listen(handlerStateProvider, (_, next) {
     if (confirmed(next.value)) latch();
   });
@@ -421,8 +472,31 @@ void _sendArmInstruction(
         (s) => s.handlerService,
       )?.instruct(terminalId, text) ??
       HandlerInstructResult.empty;
-  if (result == HandlerInstructResult.sent) return;
-  _reportArmInstructionLost(container, text);
+  switch (result) {
+    case HandlerInstructResult.sent:
+      return;
+    // The arm IS confirmed on this path — it is the only thing that gets here —
+    // so the send is what failed, and blaming the arm would point the user at a
+    // session that is armed and watching.
+    case HandlerInstructResult.empty:
+      _reportArmInstructionLost(
+        container,
+        text,
+        reason:
+            'The connection dropped before your instruction went out, so it '
+            'was not sent. The session is armed — send it again from the '
+            'backlog.',
+      );
+    // Already outstanding, so the words ARE queued. Saying "nothing was queued"
+    // here invites a re-send that stacks the same work twice.
+    case HandlerInstructResult.duplicate:
+      _reportArmInstructionLost(
+        container,
+        text,
+        title: 'Already queued',
+        reason: 'That instruction is already outstanding on this session.',
+      );
+  }
 }
 
 /// Says so when the sentence never made it.
@@ -431,22 +505,31 @@ void _sendArmInstruction(
 /// a refused entitlement emits a status that does not list the session — so
 /// without this the user's words vanish with no surface holding them, on the
 /// one screen whose whole job is to set expectations before they walk away.
-void _reportArmInstructionLost(ProviderContainer container, String? text) {
+///
+/// [reason] names what actually went wrong. The default is the timeout's — the
+/// only caller that genuinely never saw a confirmation — because a toast that
+/// blames the arm on a path where the arm succeeded sends the user looking in
+/// the wrong place.
+void _reportArmInstructionLost(
+  ProviderContainer container,
+  String? text, {
+  String title = 'Nothing was queued',
+  String reason =
+      'Handler never confirmed the arm, so your instruction was not sent.',
+}) {
   if (text == null || text.trim().isEmpty) return;
   // The navigator's OVERLAY, not its context: `Overlay.maybeOf` reads an
   // inherited marker planted inside each overlay entry, so it answers only
   // from within a mounted route. The navigator's own element sits above every
   // entry and resolves to null, which would make this whole path a silent
   // no-op — and there is no widget of ours alive here to ask instead.
-  final overlay = container.read(rootNavigatorKeyProvider).currentState?.overlay;
+  final overlay = container
+      .read(rootNavigatorKeyProvider)
+      .currentState
+      ?.overlay;
   if (overlay == null) return;
   showAbToastOn(
     overlay,
-    toast: const AbToast(
-      icon: AbIcons.warning,
-      title: 'Nothing was queued',
-      description:
-          'Handler never confirmed the arm, so your instruction was not sent.',
-    ),
+    toast: AbToast(icon: AbIcons.warning, title: title, description: reason),
   );
 }

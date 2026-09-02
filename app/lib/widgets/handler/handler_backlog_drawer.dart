@@ -385,21 +385,37 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
   /// The judge is what READS the sentence typed above it, so picking one here
   /// commits immediately rather than waiting on some absent Save.
   ///
-  /// `armed: true` on an already-armed session is the bridge's EDIT path, not a
-  /// second arm — safe only because this composer mounts under `session != null`.
+  /// `armed: true` on an already-armed session is the bridge's EDIT path — but
+  /// on a session that is GONE it is a fresh arm, which retires that slot's undo
+  /// offers. This composer mounts under `session != null`, but the judge PANEL
+  /// it opens is a route that outlives it: a wrap-up disarming the session under
+  /// an open drawer unmounts this State while the panel is still up and can
+  /// still call back. Hence both guards, not just the mount condition.
   void _commitJudge(HandlerJudgePick pick) {
+    if (!mounted) return;
+    final service = focusedServiceOrNull(
+      ref.container,
+      (s) => s.handlerService,
+    );
+    final stillArmed =
+        ref.read(handlerStateProvider).value?.sessions[widget.terminalId] !=
+        null;
+    if (service == null || !stillArmed) return;
     final next = (
       judgeTool: pick.judgeTool,
       judgeModel: pick.judgeModel,
       personality: _judgeValue.personality,
     );
     final edit = handlerSessionSettingsEdit(_judgeValue, next);
-    setState(() => _judge = next);
-    focusedServiceOrNull(ref.container, (s) => s.handlerService)?.arm(
+    // Pinned only once the send is real: `_judgeValue` prefers `_judge`, so a
+    // value pinned ahead of a dropped send is one no status frame can correct,
+    // and every later delta is computed against a `from` the bridge never held.
+    service.arm(
       terminalId: widget.terminalId,
       judgeTool: edit.judgeTool,
       judgeModel: edit.judgeModel,
     );
+    setState(() => _judge = next);
   }
 
   @override

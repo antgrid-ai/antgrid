@@ -33,8 +33,6 @@ export const PERSONALITY_RULES: Record<HandlerPersonality, string> = {
     "Handle wherever you can; escalate only where you must. Treat the goal as standing authority for the steps it plainly implies, and prefer answering the agent over parking the work. This widens what counts as handleable — it does not lower the confidence floor: an answer you are not confident in is still an escalation, however routine it looks. Keep `notify` brief.",
 };
 
-
-
 export const HandlerDecisionSchema = z.object({
   decision: z.enum(["continue", "handle", "escalate"]),
   confidence: z.number().min(0).max(1),

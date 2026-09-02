@@ -14,6 +14,7 @@ import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
 import '../../providers/value_controller.dart';
+import '../../util/detached.dart';
 import '../transcript/format.dart';
 import 'handler_backlog_drawer.dart';
 import 'handler_item_status.dart';
@@ -275,19 +276,29 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
             Builder(
               builder: (chipContext) => GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () => unawaited(
-                  showHandlerSessionSettingsSheet(chipContext, terminalId),
+                onTap: () => detached(
+                  'HandlerPaBar',
+                  'open session settings',
+                  () =>
+                      showHandlerSessionSettingsSheet(chipContext, terminalId),
                 ),
                 child: AbChip.system(
-                  label: handlerPersonalityLabel(
-                    session.personality ?? HandlerPersonality.watchdog,
-                  ).toUpperCase(),
+                  // An em-dash where the bridge has reported no posture at all,
+                  // never the default's name: this chip is read as a live fact
+                  // about the session, and naming a preset the far end has
+                  // never heard of is a claim about a control over nothing (see
+                  // handlerPersonalityFromWire). The chip still opens the sheet,
+                  // which is where that gets explained.
+                  label: session.personality == null
+                      ? '—'
+                      : handlerPersonalityLabel(
+                          session.personality!,
+                        ).toUpperCase(),
                   // Tinted where nothing is judging: the posture is stored and
                   // inert, and a bar naming it in ordinary chrome while every
                   // pause escalates says the opposite of what is happening.
                   color:
-                      session.observability ==
-                          HandlerObservability.escalateOnly
+                      session.observability == HandlerObservability.escalateOnly
                       ? p.warning
                       : p.textMuted,
                 ),
