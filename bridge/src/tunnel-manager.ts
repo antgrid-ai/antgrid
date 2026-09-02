@@ -13,7 +13,36 @@ interface WsUpstream {
   socket: WebSocket;
   open: boolean;
   pending: Array<{ data: string; binary: boolean }>;
+  pendingBytes: number;
+  checkoutId: string;
 }
+
+/** A tunnelId the app has sent data for while no upstream socket exists.
+ *  Either still buffering, or [poisoned] — the prefix is gone (overflowed,
+ *  expired, or the tunnel already closed), so what follows can no longer be
+ *  replayed as a faithful stream and the tunnel must be refused instead. */
+interface WsPreopen {
+  frames: Array<{ data: string; binary: boolean }>;
+  bytes: number;
+  poisoned: boolean;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const WS_PREOPEN_TTL_MS = 5_000;
+/** How long a poisoned tunnelId is remembered. A WebSocket carries a byte
+ *  stream, so an open that arrives after its buffered prefix died must be
+ *  refused rather than started mid-stream: a dev server handed a spliced
+ *  message stream believes it holds a valid session and hangs, where a refused
+ *  one gives the browser the close event its reconnect logic waits for.
+ *  Outlives the app's 30s tunnel timeout so the refusal beats the give-up. */
+const WS_POISON_TTL_MS = 35_000;
+const WS_PREOPEN_MAX_TUNNELS = 64;
+const WS_BUFFER_MAX_FRAMES = 64;
+const WS_BUFFER_MAX_BYTES = 1024 * 1024;
+const WS_PREOPEN_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+/** Both buffers are fed from the data path, so their drop paths must never log
+ *  per frame — a streaming socket would emit thousands of lines. */
+const WS_PREOPEN_WARN_INTERVAL_MS = 5_000;
 
 /** How long a sent response stays replayable. Must outlive the app's 30s tunnel
  *  timeout so a retry issued just before it gives up still finds the entry. */
@@ -78,6 +107,17 @@ export class TunnelManager {
   private inflight = new Map<string, Promise<void>>();
   /** Live WS relays, keyed by tunnelId — see [WsUpstream]. */
   private wsTunnels = new Map<string, WsUpstream>();
+  /** Async sealing can put the first data frame ahead of its open frame. Keep
+   *  that bounded orphan briefly so a Blazor/SignalR handshake is not lost.
+   *  Insertion-ordered: the oldest tombstone is the first eviction candidate. */
+  private wsPreopen = new Map<string, WsPreopen>();
+  private wsPreopenBytes = 0;
+  private wsPreopenWarnedAt = 0;
+  private wsPreopenTtlMs: number;
+  /** [stop] is terminal. Without this a frame still in flight when a checkout
+   *  is torn down re-arms a timer on a manager nothing owns any more — the
+   *  callers null nothing, so the flag is what has to hold the line. */
+  private stopped = false;
 
   constructor(opts: {
     projectId: string;
@@ -87,6 +127,7 @@ export class TunnelManager {
     sendEncrypted: (msg: AbMessage) => void;
     relayHost: string;
     connState: ConnState;
+    wsPreopenTtlMs?: number;
   }) {
     this.projectId = opts.projectId;
     this.portLabels = opts.portLabels;
@@ -95,6 +136,7 @@ export class TunnelManager {
     this.sendEncrypted = opts.sendEncrypted;
     this.relayHost = opts.relayHost;
     this.connState = opts.connState;
+    this.wsPreopenTtlMs = opts.wsPreopenTtlMs ?? WS_PREOPEN_TTL_MS;
   }
 
   onPortsUpdate(ports: PortInfo[]): void {
@@ -164,6 +206,9 @@ export class TunnelManager {
   }
 
   async onHttpRequest(msg: TunnelHttpRequest): Promise<void> {
+    // Deliberately NOT gated on [stopped], unlike the WS handlers: an HTTP
+    // request the app is waiting on costs it a 30s timeout if dropped, and
+    // serving one holds nothing open afterwards.
     // Outbox first, before anything can reach the dev server: this is the whole
     // safety property of the app's retry.
     const inflight = this.inflight.get(msg.requestId);
@@ -264,7 +309,32 @@ export class TunnelManager {
    *  through the normal `tunnel:ws-close` path, mirroring what a rejected
    *  browser-side connect would look like, rather than dropping silently. */
   onWsOpen(msg: TunnelWsOpen): void {
+    if (this.stopped) {
+      // Refuse rather than drop: this manager will never relay again, and the
+      // browser's socket only reconnects once it sees a close.
+      this.sendTunnel({
+        type: "tunnel:ws-close",
+        tunnelId: msg.tunnelId,
+        reason: "tunnel manager stopped",
+        checkoutId: msg.checkoutId,
+      });
+      return;
+    }
     if (this.wsTunnels.has(msg.tunnelId)) return; // duplicate open, ignore
+    if (this.wsPreopen.get(msg.tunnelId)?.poisoned) {
+      // Opening here would relay a stream whose prefix is missing. Refusing
+      // is what gets the browser a close event it can reconnect from. The
+      // tombstone is deliberately LEFT in place: frames still in flight behind
+      // this open must not start a second, tail-only buffer for the same id.
+      this.sendTunnel({
+        type: "tunnel:ws-close",
+        tunnelId: msg.tunnelId,
+        reason: "buffered frames were dropped before the tunnel opened",
+        checkoutId: msg.checkoutId,
+      });
+      return;
+    }
+    const preopen = this.takePreopen(msg.tunnelId);
     // The phone can only guess the scheme for a dev server it never saw
     // announce itself; `fetchLocalhost` has already corrected the guess for
     // this port by the time a page on it opens a socket.
@@ -283,13 +353,20 @@ export class TunnelManager {
       ...(secure ? { tls: { rejectUnauthorized: false } } : {}),
     };
     const socket = new WebSocket(url, wsOptions as unknown as string[]);
-    const entry: WsUpstream = { socket, open: false, pending: [] };
+    const entry: WsUpstream = {
+      socket,
+      open: false,
+      pending: preopen?.frames ?? [],
+      pendingBytes: preopen?.bytes ?? 0,
+      checkoutId: msg.checkoutId,
+    };
     this.wsTunnels.set(msg.tunnelId, entry);
 
     entry.socket.addEventListener("open", () => {
       entry.open = true;
       for (const frame of entry.pending) this.sendUpstream(entry, frame.data, frame.binary);
       entry.pending = [];
+      entry.pendingBytes = 0;
     });
     entry.socket.addEventListener("message", (event) => {
       const binary = typeof event.data !== "string";
@@ -306,30 +383,178 @@ export class TunnelManager {
         checkoutId: msg.checkoutId,
       });
     });
-    const teardown = (code?: number, reason?: string) => {
-      if (!this.wsTunnels.delete(msg.tunnelId)) return; // already closed the other way
-      this.sendTunnel({
-        type: "tunnel:ws-close",
-        tunnelId: msg.tunnelId,
-        ...(code !== undefined ? { code } : {}),
-        ...(reason ? { reason } : {}),
-        checkoutId: msg.checkoutId,
-      });
-    };
-    entry.socket.addEventListener("close", (event) => teardown(event.code, event.reason));
-    entry.socket.addEventListener("error", () => teardown());
+    entry.socket.addEventListener("close", (event) =>
+      this.teardownWs(msg.tunnelId, event.code, event.reason),
+    );
+    entry.socket.addEventListener("error", () => this.teardownWs(msg.tunnelId));
   }
 
-  /** A browser-sent frame to relay upstream. Queued on [WsUpstream.pending]
-   *  if the real connection hasn't finished its handshake yet. */
+  /** Tell the app a tunnel is over and stop relaying it. Idempotent: a close
+   *  already relayed the other way has removed the map entry, and this is what
+   *  keeps the socket's own close event from sending a second frame. */
+  private teardownWs(tunnelId: string, code?: number, reason?: string): void {
+    const entry = this.wsTunnels.get(tunnelId);
+    if (!entry) return;
+    this.wsTunnels.delete(tunnelId);
+    // The app answers a bridge-initiated close by dropping its own tunnel
+    // entry, so it never sends `tunnel:ws-close` back and [onWsClose] never
+    // runs for this id. Anything still in flight would otherwise land in
+    // [bufferPreopenFrame] and hold one of the 64 slots for a full TTL.
+    this.poisonPreopen(tunnelId);
+    this.sendTunnel({
+      type: "tunnel:ws-close",
+      tunnelId,
+      ...(code !== undefined ? { code } : {}),
+      ...(reason ? { reason } : {}),
+      checkoutId: entry.checkoutId,
+    });
+  }
+
+  /** A browser-sent frame to relay upstream. Buffered on [WsUpstream.pending]
+   *  while the real connection is still handshaking, or on [wsPreopen] when its
+   *  `tunnel:ws-open` has not landed yet. Both buffers are bounded, and both
+   *  answer an overflow by ending the tunnel rather than by relaying a stream
+   *  with a hole in it. */
   onWsData(msg: TunnelWsData): void {
+    if (this.stopped) return;
     const entry = this.wsTunnels.get(msg.tunnelId);
-    if (!entry) return; // closed/never opened — nothing to relay into
+    if (!entry) {
+      this.bufferPreopenFrame(msg);
+      return;
+    }
     if (!entry.open) {
+      // Same ceiling as the pre-open buffer, and for a stronger reason: this
+      // window is the LONGER of the two. A port that accepts TCP but stalls
+      // the upgrade — a dev server mid-startup, or an https-only port reached
+      // as `ws://` — holds it open for the OS connect timeout.
+      const bytes = Buffer.byteLength(msg.data);
+      if (
+        entry.pending.length >= WS_BUFFER_MAX_FRAMES
+        || entry.pendingBytes + bytes > WS_BUFFER_MAX_BYTES
+      ) {
+        log.warn(
+          "Closing WS tunnel %s: upstream handshake did not finish before its buffer filled",
+          msg.tunnelId,
+        );
+        // Report before closing: the socket's own close event runs the same
+        // teardown, and whichever wins owns the reason the app is told.
+        this.teardownWs(msg.tunnelId, undefined, "upstream handshake buffer overflow");
+        entry.socket.close();
+        return;
+      }
       entry.pending.push({ data: msg.data, binary: msg.binary === true });
+      entry.pendingBytes += bytes;
       return;
     }
     this.sendUpstream(entry, msg.data, msg.binary === true);
+  }
+
+  private bufferPreopenFrame(msg: TunnelWsData): void {
+    const existing = this.wsPreopen.get(msg.tunnelId);
+    if (existing?.poisoned) return; // already unreplayable; the open will be refused
+    const bytes = Buffer.byteLength(msg.data);
+
+    let pending = existing;
+    if (!pending) {
+      if (!this.makeRoomForPreopen()) {
+        // Throttled: this fires from the data path, once per frame of every
+        // unknown tunnel, and the tunnelId is what makes it diagnosable.
+        const now = Date.now();
+        if (now - this.wsPreopenWarnedAt >= WS_PREOPEN_WARN_INTERVAL_MS) {
+          this.wsPreopenWarnedAt = now;
+          log.warn(
+            "Dropping pre-open WS data for %s: %d tunnels already buffering",
+            msg.tunnelId,
+            this.wsPreopen.size,
+          );
+        }
+        return;
+      }
+      pending = {
+        frames: [],
+        bytes: 0,
+        poisoned: false,
+        // Captures the id, not the frame — a timer that closed over `msg`
+        // would pin its whole payload for the TTL even after a rejection.
+        timer: this.armPreopenTimer(msg.tunnelId, this.wsPreopenTtlMs),
+      };
+      this.wsPreopen.set(msg.tunnelId, pending);
+    }
+
+    if (
+      pending.frames.length >= WS_BUFFER_MAX_FRAMES
+      || pending.bytes + bytes > WS_BUFFER_MAX_BYTES
+      || this.wsPreopenBytes + bytes > WS_PREOPEN_MAX_TOTAL_BYTES
+    ) {
+      log.warn("Poisoning WS tunnel %s: pre-open buffer limit reached", msg.tunnelId);
+      this.poisonPreopen(msg.tunnelId);
+      return;
+    }
+    pending.frames.push({ data: msg.data, binary: msg.binary === true });
+    pending.bytes += bytes;
+    this.wsPreopenBytes += bytes;
+  }
+
+  /** Make a slot available under [WS_PREOPEN_MAX_TUNNELS], evicting the oldest
+   *  tombstone first — a dev server in a reconnect loop churns a fresh tunnelId
+   *  per attempt, and without this its dead ids starve the live one. */
+  private makeRoomForPreopen(): boolean {
+    if (this.wsPreopen.size < WS_PREOPEN_MAX_TUNNELS) return true;
+    for (const [id, pending] of this.wsPreopen) {
+      if (!pending.poisoned) continue;
+      clearTimeout(pending.timer);
+      this.wsPreopen.delete(id);
+      return true;
+    }
+    return false;
+  }
+
+  private armPreopenTimer(tunnelId: string, ms: number): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(() => {
+      const pending = this.wsPreopen.get(tunnelId);
+      if (!pending) return;
+      // First expiry drops the buffered prefix but REMEMBERS that it existed;
+      // the second retires the tombstone.
+      if (pending.poisoned) {
+        this.wsPreopen.delete(tunnelId);
+        return;
+      }
+      this.poisonPreopen(tunnelId);
+    }, ms);
+    if (typeof timer.unref === "function") timer.unref();
+    return timer;
+  }
+
+  /** Mark [tunnelId] unreplayable and release what it held. The entry stays as
+   *  a tombstone so a later open is refused rather than started mid-stream. */
+  private poisonPreopen(tunnelId: string): void {
+    const pending = this.wsPreopen.get(tunnelId);
+    if (pending) {
+      if (pending.poisoned) return;
+      clearTimeout(pending.timer);
+      this.wsPreopenBytes -= pending.bytes;
+      pending.frames = [];
+      pending.bytes = 0;
+      pending.poisoned = true;
+      pending.timer = this.armPreopenTimer(tunnelId, WS_POISON_TTL_MS);
+      return;
+    }
+    if (!this.makeRoomForPreopen()) return;
+    this.wsPreopen.set(tunnelId, {
+      frames: [],
+      bytes: 0,
+      poisoned: true,
+      timer: this.armPreopenTimer(tunnelId, WS_POISON_TTL_MS),
+    });
+  }
+
+  private takePreopen(tunnelId: string): WsPreopen | undefined {
+    const pending = this.wsPreopen.get(tunnelId);
+    if (!pending) return undefined;
+    clearTimeout(pending.timer);
+    this.wsPreopenBytes -= pending.bytes;
+    this.wsPreopen.delete(tunnelId);
+    return pending;
   }
 
   private sendUpstream(entry: WsUpstream, data: string, binary: boolean): void {
@@ -337,21 +562,44 @@ export class TunnelManager {
   }
 
   /** The app's side of the tunnel closed (the browser tab's WS closed) —
-   *  mirror it upstream. Idempotent: a close already relayed the other way
-   *  (via [onWsOpen]'s teardown) has already removed the map entry. */
+   *  mirror it upstream, or discard the pre-open buffer when the tunnel never
+   *  got that far. Idempotent: a close already relayed the other way (via
+   *  [teardownWs]) has already removed the map entry. */
   onWsClose(msg: TunnelWsClose): void {
+    if (this.stopped) return;
     const entry = this.wsTunnels.get(msg.tunnelId);
-    if (!entry) return;
+    if (!entry) {
+      this.takePreopen(msg.tunnelId);
+      return;
+    }
     this.wsTunnels.delete(msg.tunnelId);
     entry.socket.close();
   }
 
   stop(): void {
+    this.stopped = true;
     this.sentUrlDetails.clear();
     this.outbox.clear();
     this.outboxBytes = 0;
     this.inflight.clear();
-    for (const entry of this.wsTunnels.values()) entry.socket.close();
+    for (const [tunnelId, entry] of this.wsTunnels) {
+      // Delete BEFORE closing so the socket's own close event finds nothing
+      // and cannot send a second frame — and send here rather than leave it to
+      // that event, which a socket still CONNECTING never fires at all. A
+      // session deleted mid-handshake would otherwise leave the app's tunnel
+      // entry and the browser's socket waiting on a close that never comes.
+      this.wsTunnels.delete(tunnelId);
+      this.sendTunnel({
+        type: "tunnel:ws-close",
+        tunnelId,
+        reason: "tunnel manager stopped",
+        checkoutId: entry.checkoutId,
+      });
+      entry.socket.close();
+    }
     this.wsTunnels.clear();
+    for (const pending of this.wsPreopen.values()) clearTimeout(pending.timer);
+    this.wsPreopen.clear();
+    this.wsPreopenBytes = 0;
   }
 }
