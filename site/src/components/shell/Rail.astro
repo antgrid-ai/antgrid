@@ -40,7 +40,7 @@ interface Props {
 
 const { entries, footer = true, class: cls = "" } = Astro.props;
 ---
-<div class={`appwin-rail min-w-0 border-r border-ab-line bg-ab-deep py-2.5 ${cls}`}>
+<div class={`appwin-rail flex min-w-0 flex-col border-r border-ab-line bg-ab-deep py-2.5 ${cls}`}>
   <div class="px-2.5">
     <div class="flex items-center justify-center gap-1.5 rounded-md border border-ab-line-strong py-1.5 text-row text-ab-text2">
       <Icon name="tabler:plus" class="shrink-0" width="13" height="13" aria-hidden="true" />
@@ -97,11 +97,12 @@ const { entries, footer = true, class: cls = "" } = Astro.props;
 
   <slot />
 
-  {/* The account slot pins to the bottom of the real drawer. Here the window is
-      content-height, so it simply follows the list — pinning it would open the
-      dead column this scene has no rows to fill. */}
+  {/* The account row pins to the bottom of the real drawer, same as here: the
+      grid stretches this column to match its taller siblings (agent pane,
+      context pane), so `mt-auto` sends the row to that stretched edge instead
+      of leaving it stranded a few rows below the list. */}
   {footer && (
-  <div class="mt-3.5 border-t border-ab-line pt-2.5">
+  <div class="mt-auto border-t border-ab-line pt-2.5">
     <div class="flex items-center gap-2 px-3 py-0.5 text-row text-ab-mute">
       <Icon name="tabler:login" class="shrink-0 text-ab-dim" width="12" height="12" aria-hidden="true" />
       <span class="min-w-0 flex-1 truncate">Sign in</span>
