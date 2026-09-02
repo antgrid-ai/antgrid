@@ -17,12 +17,15 @@ interface Props {
 // card's claim on purpose: scrapers cache og:image by URL and re-shooting in
 // place leaves the superseded card in previews for as long as they hold it, so a
 // recut that changes what the card SAYS gets a new name. Keep it in step with
-// scripts/shoot-og.mjs, which writes it.
+// scripts/shoot-og.mjs, which writes it. The superseded PNG stays in public/og
+// even though nothing references it — that is the point of the scheme, not
+// leftovers: a scraper still holding the old URL re-fetches it, and deleting the
+// file turns every one of those cached previews into a broken image.
 const {
   title,
   description,
-  ogImage = "/og/one-screen.png",
-  ogImageAlt = "Every agent. Every machine. One screen. Below, antgrid checking an agent's work against test output while you slept.",
+  ogImage = "/og/control-plane.png",
+  ogImageAlt = "Your machines. Your agents. One control plane. Below, antgrid checking an agent's work against test output while you slept.",
   path = "/",
   robots,
 } = Astro.props;

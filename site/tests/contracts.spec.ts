@@ -110,6 +110,17 @@ test("every indexed page ships a description search engines will show whole", as
   }
 });
 
+// The filename tracks what the card SAYS (Seo.astro), so a recut renames it —
+// and the rename is a string in Seo.astro that nothing else checks. Get it wrong
+// and og:image 404s: every shared link loses its preview, on every page at once,
+// with the site otherwise green. Assert the file, never the name.
+test("the social card the meta tag names is actually in the build", async ({ page }) => {
+  await page.goto("/");
+  const src = await page.locator('meta[property="og:image"]').getAttribute("content");
+  const res = await page.request.get(new URL(src!).pathname);
+  expect(res.status(), `og:image is missing from the build: ${src}`).toBe(200);
+});
+
 test("the social card declares its dimensions so previews reserve the box", async ({ page }) => {
   // Without these a client fetches the PNG before it can size the card, and the
   // preview reflows around it — or renders the link bare while it waits.
