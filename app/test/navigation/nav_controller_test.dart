@@ -278,6 +278,25 @@ void main() {
     expect(c.read(pendingFilePathProvider), isNull);
   });
 
+  // A [NavLocation] can never ask for the agent transcript, so this write is
+  // only ever the null half — and it is the half that matters: the drains run
+  // in one post-frame callback with the agent's LAST, so a stamp a notification
+  // route left pending would override the tab this location just named.
+  test('apply drops an agent-page stamp the location did not name', () {
+    final nav = c.read(navControllerProvider.notifier);
+    nav.commit(_loc('a', view: WorkspaceView.git));
+    nav.commit(_loc('b'));
+    c.read(pendingAgentPageProvider.notifier).set((
+      target: const LocalProject('a'),
+      value: true,
+    ));
+
+    nav.back();
+
+    expect(c.read(pendingAgentPageProvider), isNull);
+    expect(c.read(pendingWorkspaceViewProvider)?.value, WorkspaceView.git);
+  });
+
   test('back restores the file recorded with the entry', () {
     final nav = c.read(navControllerProvider.notifier);
     nav.commit(

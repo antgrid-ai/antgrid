@@ -183,6 +183,12 @@ class NavController extends Notifier<NavState> {
         .set(
           loc.file == null ? null : (target: pendingTarget, value: loc.file!),
         );
+    // A [NavLocation] can never ASK for the agent transcript — there is no
+    // WorkspaceView for it — so this is only ever the null half. It belongs
+    // here all the same: the drains run in one post-frame callback with this
+    // one last, so a stamp an earlier location left would otherwise override
+    // the tab a back()/forward()/deep link just named.
+    ref.read(pendingAgentPageProvider.notifier).set(null);
   }
 }
 

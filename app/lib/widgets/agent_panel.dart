@@ -579,6 +579,10 @@ class HandlerHeaderControl extends ConsumerWidget {
     // is handed over as pending state instead — the same handover a deep link
     // naming a view uses, drained by the shell after the restore.
     void openHandler() {
+      // Every branch below lands on the handler tab, by handover or by call, so
+      // a pending agent-page stamp from an earlier navigation must not survive
+      // any of them — its drain runs last and would override the tab.
+      ref.read(pendingAgentPageProvider.notifier).set(null);
       final waiting = session?.runState == HandlerRunState.needsYou
           ? null
           : state.escalations

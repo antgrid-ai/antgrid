@@ -32,9 +32,12 @@ import '../models/session_entry.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
 import '../providers/demo_mode.dart';
+import '../providers/device_provisioning.dart' show localDeviceUuidProvider;
 import '../providers/new_session_picker.dart'
     show newSessionStartInFlightProvider;
+import '../providers/notification_route_apply.dart';
 import '../providers/providers.dart';
+import '../providers/recent_sessions.dart' show recentSessionsProvider;
 import '../providers/relay_error_banner.dart';
 import '../providers/session_search.dart';
 import '../providers/session_workspace_state.dart';
@@ -69,6 +72,7 @@ import '../widgets/workspace_panel.dart';
 import '../navigation/back_intent.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
+import '../navigation/notification_route.dart';
 import 'app_settings_screen.dart';
 
 /// Mobile page order. The drawer is NOT a page — it stays a `Scaffold.drawer`
@@ -294,6 +298,14 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           if (key != null && !_markNotified(key)) {
             return; // already surfaced (this surface or the live stream)
           }
+          // The one caller that names no route, so its toast never offers Open.
+          // Deliberate rather than overlooked: [DecodedPush] carries a
+          // projectId but no machine and no session, and a projectId alone is
+          // unroutable by design (`computeProjectId` hashes the folder path, so
+          // it can name the wrong machine with confidence).
+          // It can carry a route once the sealed payload reaches the app with
+          // machineUuid + terminalId on it; `decoded.sourceMessageId` is
+          // already the dedup key the applier wants.
           _onAgentNotification(title: decoded.title, body: decoded.body);
         } catch (e) {
           // Async listener: an uncaught throw here is an unhandled rejection.
@@ -439,6 +451,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       entryId: entryId,
       sessionId: msg.terminalId,
       kind: 'agent',
+      sourceMessageId: msg.id,
     );
   }
 
@@ -480,6 +493,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       entryId: entryId,
       sessionId: msg.sessionId,
       kind: 'agent',
+      sourceMessageId: msg.id,
     );
   }
 
@@ -499,6 +513,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       entryId: entryId,
       sessionId: esc.terminalId,
       kind: 'handler',
+      sourceMessageId: esc.escalationId,
     );
   }
 
@@ -506,18 +521,69 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// The foreground-push path has none: its payload names a projectId, which is
   /// not a machine (`computeProjectId` hashes the folder path alone) and so must
   /// never be used to pick an entry. [kind] is which surface the notification
-  /// belongs to, `'agent'` or `'handler'`.
+  /// belongs to, `'agent'` or `'handler'`. [sourceMessageId] is the producing
+  /// message's own id, which is what lets a second notification about the same
+  /// session build a route the applier can tell apart from the first.
   void _onAgentNotification({
     required String title,
     required String body,
     String? entryId,
     String? sessionId,
     String? kind,
+    String? sourceMessageId,
   }) {
     if (shouldShowInAppToast(_lifecycle)) {
+      final route = NotificationRoute(
+        registrationId: entryId,
+        terminalId: sessionId,
+        kind: kind,
+        sourceMessageId: sourceMessageId,
+      );
+      // The offer is gated on the route actually RESOLVING, not on the entryId
+      // being present: a chip that opens nothing is worse than no chip, and the
+      // two conditions part company on any id that names no place (a blank one
+      // among them). Resolved synchronously with what is already loaded, which
+      // is exact for the in-app producers — they carry a registrationId, and
+      // neither that rule nor the terminalId one consults the device uuid.
+      final resolves =
+          resolveNotificationRoute(
+            route,
+            known: ref.read(recentSessionsProvider),
+            localDeviceUuid: ref.read(localDeviceUuidProvider).value,
+          ) !=
+          null;
+      if (!resolves) {
+        showAbToastOverlay(
+          context,
+          toast: AbToast(icon: AbIcons.bell, title: title, description: body),
+        );
+        return;
+      }
+      // Both captured before the tap: applying the route switches projects,
+      // which unmounts this shell out from under the overlay entry still
+      // holding the callback. `context` read through the State getter at tap
+      // time would throw on the defunct element; the captured element answers
+      // `mounted` false instead, which is what the applier tests.
+      final container = ref.container;
+      final toastContext = context;
       showAbToastOverlay(
         context,
-        toast: AbToast(icon: AbIcons.bell, title: title, description: body),
+        toast: AbToast(
+          icon: AbIcons.bell,
+          title: title,
+          description: body,
+          actionLabel: 'Open',
+          onAction: () => detached(
+            'WorkspaceShell',
+            'notification route failed',
+            () => applyNotificationRoute(toastContext, container, route),
+          ),
+        ),
+        // The action cannot dismiss its own toast (`showAbToastOn`'s remove is
+        // local to that call), so it stays pressable for its whole life — long
+        // enough to be worth reaching for, and the applier absorbs the second
+        // press.
+        duration: const Duration(seconds: 8),
       );
       return;
     }
@@ -644,7 +710,15 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     try {
       await ref.read(projectSessionProvider(triggeredFor).future);
     } catch (_) {
-      // Surfaced elsewhere; nothing actionable here.
+      // Surfaced elsewhere; nothing actionable here — but the queued pick was
+      // this run's to resolve, and no later run will: left set it holds
+      // `reconcileActiveSession` off a fallback and leaves every surface
+      // handover unspendable, since the drains wait on it. Same clear, same
+      // guard as the requestList failure below.
+      if (mounted && ref.read(selectedRegistrationIdProvider) == triggeredFor) {
+        ref.read(pendingActiveSessionIdProvider.notifier).set(null);
+        ref.read(pendingSessionStartSuppressedIdProvider.notifier).set(null);
+      }
       return;
     }
     if (!mounted || ref.read(selectedRegistrationIdProvider) != triggeredFor) {
@@ -667,6 +741,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         // to a default and holds the explorer's checkout unsettled, so the
         // banner's "switch and back" would be the only way out.
         ref.read(pendingActiveSessionIdProvider.notifier).set(null);
+        ref.read(pendingSessionStartSuppressedIdProvider.notifier).set(null);
         ref
             .read(relayErrorBannerProvider.notifier)
             .set(
@@ -684,8 +759,15 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
     // 1. Pending session-id (from a cross-project session-row click).
     final pendingId = ref.read(pendingActiveSessionIdProvider);
+    // Honoured only for the id it names: every other site that queues a pending
+    // id leaves this one alone, so a value left over from a run that returned
+    // early must not answer for theirs.
+    final startSuppressed =
+        pendingId != null &&
+        ref.read(pendingSessionStartSuppressedIdProvider) == pendingId;
     if (pendingId != null) {
       ref.read(pendingActiveSessionIdProvider.notifier).set(null);
+      ref.read(pendingSessionStartSuppressedIdProvider.notifier).set(null);
       // `!s.deleting` on both filters below: a cross-project tap or a cold open
       // must not land on a session the bridge is already removing.
       final desired = list
@@ -695,7 +777,11 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         ref.read(activeSessionIdProvider.notifier).set(desired.id);
         // A start already queued behind an isolated checkout's setup run is
         // the create flow's own, prompt and all — see [sessionStartQueued].
-        if (!desired.running && !sessionStartQueued(desired.setup)) {
+        // A notification tap asked to SEE this session, not to resume it —
+        // see [pendingSessionStartSuppressedIdProvider].
+        if (!startSuppressed &&
+            !desired.running &&
+            !sessionStartQueued(desired.setup)) {
           // The cross-project half of a session-row / Recent-list tap, so a
           // refused start has to speak here too — otherwise the same tap reports
           // its failure only when the project happened to be focused already.
@@ -763,7 +849,15 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         orElse: () => active.first,
       );
       ref.read(activeSessionIdProvider.notifier).set(session.id);
-      if (!session.running && !sessionStartQueued(session.setup)) {
+      // The suppressor is honoured here too, not only in the branch above: a
+      // route naming a session this project no longer has (deleted since the
+      // cache write, or a stale terminalId) falls THROUGH to this pick, and
+      // starting `active.first` would spend tokens on an agent the tap never
+      // named — the exact cost the suppressor exists to prevent, arrived at by
+      // the one path where the user's intent is furthest from a resume.
+      if (!startSuppressed &&
+          !session.running &&
+          !sessionStartQueued(session.setup)) {
         await _startBestEffort(svc, session.id);
         if (!mounted) return;
         if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
@@ -1075,10 +1169,16 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // route has prefs or a PageView, and the build that finally lands one is the
     // frame the drain has to run on. Deferred a frame so the drain's provider
     // writes never land during build.
-    if (ref.watch(pendingWorkspaceViewProvider) != null) {
+    // Both read unconditionally, never as `a != null || b != null`: a
+    // short-circuited watch registers no dependency, so the second provider's
+    // own write would never rebuild this route.
+    final pendingView = ref.watch(pendingWorkspaceViewProvider);
+    final pendingAgentPage = ref.watch(pendingAgentPageProvider);
+    if (pendingView != null || pendingAgentPage != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         _drainPendingWorkspaceView();
+        _drainPendingAgentPage();
       });
     }
 
@@ -1532,6 +1632,11 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       notifier.set(null);
       return;
     }
+    // Not spent while a queued session id is still unresolved — see
+    // [_drainPendingAgentPage], which carries the same guard for the same
+    // reason. This is the drain a handler route uses, so the cross-project
+    // escalation tap is the flow that needs it most.
+    if (ref.read(pendingActiveSessionIdProvider) != null) return;
     final mobile = _isMobileLayout;
     // Mobile needs the PageView, which does not exist until a build past the
     // boot gate — and a tab switched behind the page the user is looking at
@@ -1549,6 +1654,83 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // same recovery [revealHandlerTab] gives the NEEDS YOU pill, since a
     // navigation can land while the panel is off screen entirely.
     _revealWorkspaceView(pending.value);
+  }
+
+  /// Show the agent transcript a navigation left in [pendingAgentPageProvider].
+  ///
+  /// Same three halves as [_drainPendingWorkspaceView] and for the same
+  /// reasons: a stamp for another project is spent unshown, and a mobile route
+  /// with no PageView yet leaves the request for the build that has one. The
+  /// desktop half is [_revealAgentPanel] — the mirror of the view drain's
+  /// [_openContextPanel], because the agent panel is only the default zone in
+  /// the layouts that still mount it.
+  void _drainPendingAgentPage() {
+    final pending = ref.read(pendingAgentPageProvider);
+    if (pending == null) return;
+    final notifier = ref.read(pendingAgentPageProvider.notifier);
+    if (pending.target != ref.read(selectedTargetProvider)) {
+      notifier.set(null);
+      return;
+    }
+    // Not spent while a queued session id is still unresolved. The
+    // cross-project applier seeds that id, activates the project, and stamps
+    // this request all before `_bootstrapSessions` has the new project's list,
+    // so the transcript this asks for is not the one on screen yet — and the
+    // per-session UI restore that resolving it arms would hide the panel again
+    // a frame after the reveal, with the request already spent. The rebuild
+    // that restore triggers is what retries it, exactly as the `hasClients`
+    // guard below leaves the request for the build that has a PageView. It is
+    // also what keeps [_revealAgentPanel]'s [_updateSessionUi] off a key
+    // pairing the NEW project's entryId with the session id the old one left
+    // in [activeSessionIdProvider].
+    //
+    // The retry therefore depends on that id eventually clearing. Every path
+    // that queues one clears it on the run that resolves it, and a run that
+    // returns early leaves the next project-open to do so — but a stamp whose
+    // id nothing ever resolves is never spent, which is the same shape as the
+    // stuck id already holding `reconcileActiveSession` off a fallback.
+    if (ref.read(pendingActiveSessionIdProvider) != null) return;
+    final mobile = _isMobileLayout;
+    if (mobile && !_pageController.hasClients) return;
+    notifier.set(null);
+    if (mobile) {
+      switchToAgentPage();
+      return;
+    }
+    _revealAgentPanel();
+  }
+
+  /// Give the agent panel room on a desktop-shaped layout, the inverse of
+  /// [_openContextPanel].
+  ///
+  /// Two shipped layouts hide it outright: [_PanelMode.contextExpanded] drops
+  /// [_agentPanel] from [_buildPanels] entirely, and the touch tablet keeps it
+  /// mounted at zero readable width under a context pane that is both open AND
+  /// expanded. The panel mode is per-session and restored on every focus
+  /// change, so a route into a session the user last left expanded would
+  /// otherwise reveal nothing and spend its request doing it. Never widens a
+  /// merely narrow split — only the modes where the transcript is not on
+  /// screen at all.
+  void _revealAgentPanel() {
+    if (_isMobileLayout) return;
+    if (isMobilePlatform) {
+      // Expanded is the whole of it: a normally-open pane takes a quarter of
+      // the width and leaves the transcript the other three, which is why
+      // `agentPanelVisible` reads that state as the agent being on screen.
+      // Un-expanding rather than closing is also the exact mirror of the mouse
+      // desktop's contextExpanded → normal below, and it keeps the file or
+      // diff the user deliberately opened.
+      if (_tabletEndDrawerOpen && _tabletContextPanelExpanded) {
+        _setTabletContextExpanded(false);
+      }
+      return;
+    }
+    if (_effectivePanelMode == _PanelMode.contextExpanded) {
+      setState(() {
+        _panelMode = _PanelMode.normal;
+        _updateSessionUi((s) => s.copyWith(panelMode: _panelMode!.name));
+      });
+    }
   }
 
   bool get _isMobileLayout =>
