@@ -372,6 +372,125 @@ void main() {
     await session.close();
   });
 
+  test('loadStashes sends git:stash-list with seeded projectId', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.loadStashes();
+    await Future<void>.delayed(Duration.zero);
+
+    final msg = t.sent.firstWhere((m) => m['type'] == 'git:stash-list');
+    expect(msg['projectId'], 'p');
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('git:stash-list-result populates git.stashes', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    t.emit('git:stash-list-result', {
+      'projectId': 'p',
+      'stashes': [
+        {
+          'ref': 'stash@{0}',
+          'branch': 'main',
+          'message': 'Before switching to dev',
+          'createdAt': 1700000000,
+        },
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.git.stashes, hasLength(1));
+    expect(svc.currentState.git.stashes.single.ref, 'stash@{0}');
+    expect(svc.currentState.git.stashes.single.branch, 'main');
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('restoreStash sends git:stash-pop with ref', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.restoreStash('stash@{0}');
+    await Future<void>.delayed(Duration.zero);
+
+    final msg = t.sent.firstWhere((m) => m['type'] == 'git:stash-pop');
+    expect(msg['projectId'], 'p');
+    expect(msg['ref'], 'stash@{0}');
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('dropStash sends git:stash-drop with ref', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.dropStash('stash@{0}');
+    await Future<void>.delayed(Duration.zero);
+
+    final msg = t.sent.firstWhere((m) => m['type'] == 'git:stash-drop');
+    expect(msg['projectId'], 'p');
+    expect(msg['ref'], 'stash@{0}');
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test(
+    'git:stash-pop-result failure surfaces gitOpFeedback and reloads the list',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      t.emit('git:stash-pop-result', {
+        'projectId': 'p',
+        'ref': 'stash@{0}',
+        'success': false,
+        'error': 'conflict',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.gitOpFeedback, 'conflict');
+      // Either outcome re-reads the list — see [FileService.restoreStash].
+      expect(t.sent.where((m) => m['type'] == 'git:stash-list'), isNotEmpty);
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test(
+    'git:stash-drop-result success stays silent but reloads the list',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      t.emit('git:stash-drop-result', {
+        'projectId': 'p',
+        'ref': 'stash@{0}',
+        'success': true,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.gitOpFeedback, isNull);
+      expect(t.sent.where((m) => m['type'] == 'git:stash-list'), isNotEmpty);
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
   test('git:stage-result failure surfaces gitOpFeedback', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);

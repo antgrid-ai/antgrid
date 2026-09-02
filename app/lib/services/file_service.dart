@@ -207,6 +207,30 @@ class FileService {
       if (!parsed.success) _emitOpFeedback(parsed.error ?? 'Unstage failed');
       return;
     }
+    if (parsed is GitStashListResultMessage) {
+      if (parsed.error == null) {
+        _setState(
+          _state.copyWith(
+            git: _state.git.copyWith(stashes: parsed.stashes),
+          ),
+        );
+      }
+      return;
+    }
+    if (parsed is GitStashPopResultMessage) {
+      if (!parsed.success) {
+        _emitOpFeedback(parsed.error ?? 'Could not restore the stash');
+      }
+      loadStashes();
+      return;
+    }
+    if (parsed is GitStashDropResultMessage) {
+      if (!parsed.success) {
+        _emitOpFeedback(parsed.error ?? 'Could not discard the stash');
+      }
+      loadStashes();
+      return;
+    }
     if (parsed is GitSyncResultMessage) {
       _handleGitSyncResult(parsed);
       return;
@@ -952,6 +976,50 @@ class FileService {
     if (_historyRequested) return false;
     _historyRequested = true;
     return true;
+  }
+
+  bool _stashesRequested = false;
+
+  /// Claims the first-ever stash load for this service's lifetime — same
+  /// contract as [claimHistoryLoad], and for the same reason: `GitPanel`
+  /// calls this on every build, and only the winning call may fire the
+  /// `git:stash-list` send.
+  bool claimStashLoad() {
+    if (_stashesRequested) return false;
+    _stashesRequested = true;
+    return true;
+  }
+
+  /// Fetch every stash in the repository. Called once when the Git tab first
+  /// mounts (via [claimStashLoad]) and again after every [restoreStash] /
+  /// [dropStash], since the list is the only honest record of what is left —
+  /// see [GitPaneState.stashes].
+  void loadStashes() {
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:stash-list', {'projectId': projectId}),
+    );
+  }
+
+  /// Reapplies [ref] and drops it on success — the Git panel banner's
+  /// "Restore". Callers on a branch OTHER than the one the stash was made on
+  /// should switch first: a pop is a 3-way merge against the stash's own
+  /// base, and popping onto an unrelated branch invites a conflict that has
+  /// nothing to do with what the user asked for.
+  void restoreStash(String ref) {
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:stash-pop', {'projectId': projectId, 'ref': ref}),
+    );
+  }
+
+  /// Discards [ref] permanently — the Git panel banner's "Discard". Callers
+  /// must confirm first.
+  void dropStash(String ref) {
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:stash-drop', {'projectId': projectId, 'ref': ref}),
+    );
   }
 
   /// History tab: fetch the first page of commits, replacing whatever was

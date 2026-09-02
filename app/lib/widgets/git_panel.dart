@@ -1,5 +1,5 @@
-import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../analytics/events.dart';
@@ -16,12 +16,15 @@ import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_inline_banner.dart';
 import '../design/widgets/ab_list_row.dart';
+import '../design/widgets/ab_menu.dart';
+import '../design/widgets/ab_segmented.dart';
+import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_separator.dart';
 import '../models/ab_message.dart'
-    show GitFileStatusEntry, GitCommitFileEntry, GitLogEntry;
+    show GitFileStatusEntry, GitCommitFileEntry, GitLogEntry, GitStashEntry;
 import '../models/git_sync_state.dart';
 import '../models/file_tree_models.dart';
 import '../navigation/back_intent.dart';
@@ -84,6 +87,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     final onScreen =
         ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.git;
     _maybeLoadHistory(fileService);
+    _maybeLoadStashes(fileService);
 
     // Loading/error keep the same header (no back affordance) so the panel
     // chrome doesn't jump when data arrives; the data case owns its own header
@@ -136,6 +140,17 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       fileService.loadHistory();
+    });
+  }
+
+  /// Same lazy, once-per-service-lifetime fetch as [_maybeLoadHistory], for
+  /// the stash banner's data — see [FileService.claimStashLoad].
+  void _maybeLoadStashes(FileService? fileService) {
+    if (fileService == null) return;
+    if (!fileService.claimStashLoad()) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      fileService.loadStashes();
     });
   }
 
@@ -328,6 +343,12 @@ class _GitPanelScaffold extends StatelessWidget {
         // four seconds; this failure needs an affordance that waits.
         if (git.lastSyncFailure case final failure?)
           _SyncFailureStrip(failure: failure, git: git),
+        // Stashes persist across sessions and reconnects (the list is read
+        // fresh off `git stash list` every time — see [FileService.loadStashes])
+        // so this stays up as long as any stash exists, not just right after
+        // the switch that created one.
+        for (final stash in git.stashes)
+          _StashBanner(stash: stash, fileService: fileService),
         const AbSeparator.horizontal(),
         Expanded(child: body),
       ],
@@ -957,6 +978,62 @@ class _SyncFailureStrip extends ConsumerWidget {
   }
 }
 
+/// One stashed set of changes, offered as Restore or Discard.
+///
+/// Persists until acted on — same reasoning as [_SyncFailureStrip]: a stash
+/// is exactly the kind of thing a snackbar (gone in four seconds) loses. Most
+/// often this is the ONE stash the New Session composer just created when a
+/// dirty branch switch was confirmed, but it renders every stash in the
+/// repository (`git stash` has one list, shared by every worktree) — so a
+/// stash made outside Antgrid, or a second one from a later switch, shows up
+/// here too rather than being invisible until the user thinks to run `git
+/// stash list` themselves.
+class _StashBanner extends StatelessWidget {
+  const _StashBanner({required this.stash, required this.fileService});
+
+  final GitStashEntry stash;
+  final FileService fileService;
+
+  Future<void> _discard(BuildContext context) async {
+    final confirmed = await AbConfirmDialog.show(
+      context: context,
+      title: 'Discard stash',
+      body:
+          'Permanently delete the changes stashed from '
+          '"${stash.branch.isEmpty ? 'an earlier branch' : stash.branch}"? '
+          'This cannot be undone.',
+      confirmLabel: 'Discard',
+      destructive: true,
+    );
+    if (confirmed) fileService.dropStash(stash.ref);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final from = stash.branch.isEmpty ? 'a branch switch' : stash.branch;
+    return AbInlineBanner(
+      text: 'Uncommitted changes stashed from "$from" are waiting.',
+      color: context.antgrid.warning,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AbButton(
+            label: 'Restore',
+            compact: true,
+            onTap: () => fileService.restoreStash(stash.ref),
+          ),
+          const SizedBox(width: AbTokens.space6),
+          AbButton(
+            label: 'Discard',
+            compact: true,
+            onTap: () => _discard(context),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _GitPanelBody extends ConsumerWidget {
   const _GitPanelBody({required this.state, required this.fileService});
 
@@ -975,8 +1052,9 @@ class _GitPanelBody extends ConsumerWidget {
         // "back" from.
         final showBack = !showSideBySide && isViewing;
 
+        final counts = _GitHeaderCounts.of(state.gitFileEntries);
         return _GitPanelScaffold(
-          counts: _GitHeaderCounts.of(state.gitFileEntries),
+          counts: counts,
           fileService: fileService,
           git: state.git,
           collapsedPaths: state.git.collapsedPaths,
@@ -991,6 +1069,7 @@ class _GitPanelBody extends ConsumerWidget {
             ref,
             showSideBySide: showSideBySide,
             isViewing: isViewing,
+            counts: counts,
           ),
         );
       },
@@ -1002,15 +1081,14 @@ class _GitPanelBody extends ConsumerWidget {
     WidgetRef ref, {
     required bool showSideBySide,
     required bool isViewing,
+    required _GitHeaderCounts counts,
   }) {
-    final list = _buildLeftColumn(context);
-
     if (showSideBySide) {
       return Row(
         children: [
           SizedBox(
             width: 280,
-            child: list,
+            child: _buildLeftColumn(context),
           ), // 280px non-ladder: side-by-side file list width
           const AbSeparator.vertical(weight: AbSeparatorWeight.strong),
           Expanded(child: _buildContentArea(context, ref)),
@@ -1023,7 +1101,7 @@ class _GitPanelBody extends ConsumerWidget {
       return _buildContentArea(context, ref);
     }
 
-    return list;
+    return _buildCompactChangesHistory(context, counts);
   }
 
   /// The panel's left column: the Changes tree on top, the commit History
@@ -1031,28 +1109,77 @@ class _GitPanelBody extends ConsumerWidget {
   /// between them — both stay on screen and each scrolls independently,
   /// so seeing what changed and seeing how it got there never cost a tap
   /// to switch between.
+  ///
+  /// With no working-tree changes the Changes tree has nothing to show but
+  /// an empty state, so it is dropped entirely rather than reserving 3/5 of
+  /// the column for it — History takes the full column instead.
   Widget _buildLeftColumn(BuildContext context) {
+    final historyColumn = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _GitHistorySectionHeader(
+          fileService: fileService,
+          history: state.git.history,
+        ),
+        const AbSeparator.horizontal(),
+        Expanded(
+          child: _HistoryList(git: state.git, fileService: fileService),
+        ),
+      ],
+    );
+
+    if (state.gitFileEntries.isEmpty) {
+      return historyColumn;
+    }
+
     return Column(
       children: [
         Expanded(flex: 3, child: _buildFileList(context)),
         const AbSeparator.horizontal(),
+        Expanded(flex: 2, child: historyColumn),
+      ],
+    );
+  }
+
+  /// The compact (phone-width) counterpart to [_buildLeftColumn]'s fixed 3:2
+  /// stack: a segmented Changes ⇄ History switch instead, each tab getting
+  /// the full column.
+  ///
+  /// The side-by-side layout's stack works because a docked context pane has
+  /// real vertical room; squeezed into a phone's own already-short height it
+  /// left History — arguably the more common reason to open this tab on
+  /// mobile, since editing/staging happens more on desktop — in a nested
+  /// scroll region under the Changes tree's own, fighting it for gesture
+  /// ownership and rarely showing more than a commit or two at once.
+  Widget _buildCompactChangesHistory(
+    BuildContext context,
+    _GitHeaderCounts counts,
+  ) {
+    final historyColumn = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _GitHistorySectionHeader(
+          fileService: fileService,
+          history: state.git.history,
+        ),
+        const AbSeparator.horizontal(),
         Expanded(
-          flex: 2,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _GitHistorySectionHeader(
-                fileService: fileService,
-                history: state.git.history,
-              ),
-              const AbSeparator.horizontal(),
-              Expanded(
-                child: _HistoryList(git: state.git, fileService: fileService),
-              ),
-            ],
-          ),
+          child: _HistoryList(git: state.git, fileService: fileService),
         ),
       ],
+    );
+
+    if (state.gitFileEntries.isEmpty) {
+      // Nothing to switch to — History alone gets the full column, same as
+      // the side-by-side layout's own empty-changes case.
+      return historyColumn;
+    }
+
+    return _ChangesHistorySwitcher(
+      changedCount: counts.revertablePaths.length,
+      commitCount: state.git.history.commits.length,
+      changes: _buildFileList(context),
+      history: historyColumn,
     );
   }
 
@@ -1222,6 +1349,77 @@ class _GitPanelBody extends ConsumerWidget {
         'Select a file to view',
         style: TextStyle(color: context.antgrid.textMuted),
       ),
+    );
+  }
+}
+
+/// Which tab [_ChangesHistorySwitcher] shows.
+enum _GitMobileTab { changes, history }
+
+/// Phone-width swap between the Changes tree and commit History — see
+/// [_GitPanelBody._buildCompactChangesHistory] for why this replaces the
+/// side-by-side layout's fixed 3:2 stack on a narrow screen.
+///
+/// An [IndexedStack], not a rebuild-on-switch: both tabs stay mounted so
+/// flipping back doesn't lose either list's scroll position or which commits
+/// are expanded, the same reasoning `WorkspaceShell` keeps its panels
+/// mounted rather than tearing them down on every toggle.
+class _ChangesHistorySwitcher extends StatefulWidget {
+  const _ChangesHistorySwitcher({
+    required this.changedCount,
+    required this.commitCount,
+    required this.changes,
+    required this.history,
+  });
+
+  final int changedCount;
+  final int commitCount;
+  final Widget changes;
+  final Widget history;
+
+  @override
+  State<_ChangesHistorySwitcher> createState() =>
+      _ChangesHistorySwitcherState();
+}
+
+class _ChangesHistorySwitcherState extends State<_ChangesHistorySwitcher> {
+  // Changes is "what do I need to act on" — stays the default landing tab
+  // even though History now gets the full column instead of a sliver of one.
+  _GitMobileTab _tab = _GitMobileTab.changes;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AbTokens.space12,
+            vertical: AbTokens.space8,
+          ),
+          child: AbSegmented<_GitMobileTab>(
+            segments: [
+              AbSegment(
+                value: _GitMobileTab.changes,
+                label: 'Changes · ${widget.changedCount}',
+              ),
+              AbSegment(
+                value: _GitMobileTab.history,
+                label: 'History · ${widget.commitCount}',
+              ),
+            ],
+            selected: _tab,
+            onSelect: (value) => setState(() => _tab = value),
+          ),
+        ),
+        const AbSeparator.horizontal(),
+        Expanded(
+          child: IndexedStack(
+            index: _tab.index,
+            children: [widget.changes, widget.history],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1396,8 +1594,10 @@ class _HistoryFooter extends StatelessWidget {
   }
 }
 
-/// One commit's row: an expand chevron, its subject, and the author/date/sha
-/// meta line. Tapping anywhere on the row toggles the file list beneath it.
+/// One commit's row: a graph-rail dot, its subject, and the author/date/sha
+/// meta line. Tapping anywhere on the row toggles the file list beneath it;
+/// long-pressing opens a copy-SHA menu — the touch replacement for a desktop
+/// row's spare icon buttons, which a phone-width row has no room for.
 class _CommitHeaderRow extends StatelessWidget {
   const _CommitHeaderRow({
     required this.commit,
@@ -1409,46 +1609,119 @@ class _CommitHeaderRow extends StatelessWidget {
   final bool expanded;
   final VoidCallback onTap;
 
+  Future<void> _showActions(BuildContext context, Offset globalPosition) async {
+    final action = await showAbMenu<String>(
+      context: context,
+      anchorRect: Rect.fromCenter(center: globalPosition, width: 1, height: 1),
+      header: commit.shortSha,
+      entries: const [
+        AbMenuItem(label: 'Copy full SHA', icon: AbIcons.copy, value: 'sha'),
+        AbMenuItem(
+          label: 'Copy short SHA',
+          icon: AbIcons.copy,
+          value: 'shortSha',
+        ),
+      ],
+    );
+    if (!context.mounted || action == null) return;
+    await Clipboard.setData(
+      ClipboardData(text: action == 'sha' ? commit.sha : commit.shortSha),
+    );
+    if (context.mounted) showAbSnackBar(context, 'Copied to clipboard');
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
     final when = DateTime.tryParse(commit.authorDate);
-    return AbListRow(
-      onTap: onTap,
-      hoverable: true,
-      density: AbRowDensity.md,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      titleMaxLines: 2,
-      leading: Padding(
-        padding: const EdgeInsets.only(top: 2),
-        child: AbIcon(
-          expanded ? AbIcons.chevronDown : AbIcons.chevronRight,
-          size: 12,
-          color: p.textMuted,
+    return GestureDetector(
+      // A void callback discards whatever future it starts — see
+      // util/detached.dart — so a rejected `showAbMenu`/clipboard write would
+      // otherwise reach `PlatformDispatcher.onError` as an unattributed fatal.
+      onLongPressStart: (details) => detached(
+        'GitPanel',
+        'commit history long-press actions',
+        () => _showActions(context, details.globalPosition),
+      ),
+      // The rail's line segments fill the row via Expanded, which needs a
+      // determinate height to resolve against — IntrinsicHeight measures the
+      // row's natural (title+subtitle) height first and hands that down,
+      // the same trick AbSegmented uses to stretch its own cell dividers.
+      child: IntrinsicHeight(
+        child: AbListRow(
+          onTap: onTap,
+          hoverable: true,
+          density: AbRowDensity.md,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          titleMaxLines: 2,
+          leading: _CommitRail(expanded: expanded),
+          // A commit subject clips at 2 lines; the tooltip is the only way to
+          // read the rest of a longer one, matching VS Code's history hover.
+          title: AbTooltip(
+            message: commit.subject,
+            child: Text(commit.subject),
+          ),
+          subtitle: Row(
+            children: [
+              Flexible(
+                child: Text(commit.authorName, overflow: TextOverflow.ellipsis),
+              ),
+              const SizedBox(width: AbTokens.space6),
+              if (when != null)
+                AbTooltip(
+                  message: absoluteTime(when),
+                  child: Text(relativeTime(when)),
+                ),
+              const Spacer(),
+              Text(
+                commit.shortSha,
+                style: AbTokens.monoStyle(
+                  fontSize: AbTokens.fontXxs,
+                  color: p.textMuted,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
-      // A commit subject clips at 2 lines; the tooltip is the only way to
-      // read the rest of a longer one, matching VS Code's history hover.
-      title: AbTooltip(message: commit.subject, child: Text(commit.subject)),
-      subtitle: Row(
+    );
+  }
+}
+
+/// The History list's graph rail: one continuous line down the column with a
+/// dot at each commit, filled with the accent while that commit is expanded.
+///
+/// Each row draws only its own short segment (top half-line, dot, bottom
+/// half-line), stretched to that row's height by the [IntrinsicHeight] in
+/// [_CommitHeaderRow] — with consecutive commit rows sitting flush against
+/// the hairline [AbSeparator] between them, the segments read as one
+/// unbroken rail with no cross-row layout coordination needed. The rail does
+/// NOT continue through an expanded commit's file list, the same way a git
+/// graph doesn't draw through expanded detail.
+class _CommitRail extends StatelessWidget {
+  const _CommitRail({required this.expanded});
+
+  final bool expanded;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final line = Expanded(child: Container(width: 1.5, color: p.borderDefault));
+    return SizedBox(
+      width: 16,
+      child: Column(
         children: [
-          Flexible(
-            child: Text(commit.authorName, overflow: TextOverflow.ellipsis),
-          ),
-          const SizedBox(width: AbTokens.space6),
-          if (when != null)
-            AbTooltip(
-              message: absoluteTime(when),
-              child: Text(relativeTime(when)),
-            ),
-          const Spacer(),
-          Text(
-            commit.shortSha,
-            style: AbTokens.monoStyle(
-              fontSize: AbTokens.fontXxs,
-              color: p.textMuted,
+          line,
+          Container(
+            width: 7,
+            height: 7,
+            margin: const EdgeInsets.symmetric(vertical: 3),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: expanded ? p.accent : p.textMuted,
             ),
           ),
+          line,
         ],
       ),
     );
@@ -1564,7 +1837,7 @@ class _CommitFileRow extends StatelessWidget {
       selected: selected,
       selectionStyle: AbRowSelection.surface,
       density: AbRowDensity.sm,
-      // Indented under the commit's own leading chevron so the file list
+      // Indented under the commit's own leading rail so the file list
       // reads as nested content, matching the depth-indent the Changes tab's
       // folder tree uses for the same reason.
       horizontalPadding: AbTokens.space12 + AbTokens.space16,

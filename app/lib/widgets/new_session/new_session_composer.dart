@@ -42,7 +42,11 @@ import 'environment_menu.dart';
 import 'project_menu.dart';
 
 typedef StartNewSessionCallback =
-    Future<void> Function(ProviderContainer ref, {bool allowActiveSessions});
+    Future<void> Function(
+      ProviderContainer ref, {
+      bool allowActiveSessions,
+      bool stashIfDirty,
+    });
 
 /// Whether the Start/Send affordance is enabled. Single source of truth for
 /// both the reactive `canSend` (built from watched values in `build`) and the
@@ -318,11 +322,13 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     _reportedAbort = null;
     try {
       var allowActiveSessions = false;
+      var stashIfDirty = false;
       while (true) {
         try {
           await widget.submit(
             ref.container,
             allowActiveSessions: allowActiveSessions,
+            stashIfDirty: stashIfDirty,
           );
           break;
         } on ActiveSessionsBranchSwitchException catch (e) {
@@ -358,6 +364,35 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
             return;
           }
           allowActiveSessions = true;
+        } on DirtyWorktreeBranchSwitchException catch (e) {
+          if (stashIfDirty) {
+            rethrow;
+          }
+          if (!mounted) return;
+          if (_endedByCancel) return;
+          final confirm = await AbConfirmDialog.show(
+            context: context,
+            title: 'Stash uncommitted changes?',
+            body:
+                'Switching to "${e.branch}" would overwrite uncommitted changes '
+                'in this folder. Antgrid can stash them first, then switch — '
+                'restore or discard the stash later from the Git tab.',
+            cancelLabel: 'Cancel',
+            confirmLabel: 'Stash & switch',
+            destructive: false,
+          );
+          if (confirm != true || !mounted) return;
+
+          final target = ref.read(selectedTargetProjectProvider);
+          final selection = ref.read(newSessionBranchSelectionProvider);
+          if (target == null ||
+              target.id != e.targetId ||
+              selection == null ||
+              selection.targetId != e.targetId ||
+              selection.branch != e.branch) {
+            return;
+          }
+          stashIfDirty = true;
         }
       }
     } on SessionLimitExceededException catch (e) {

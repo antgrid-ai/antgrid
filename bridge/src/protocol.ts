@@ -358,6 +358,60 @@ const GitUnstageResultMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+const GitStashEntrySchema = z.object({
+  ref: z.string(),
+  /** "" when unparseable — see `parseStashSubject` in git-branches.ts. */
+  branch: z.string(),
+  message: z.string(),
+  createdAt: z.number(),
+});
+
+const GitStashListRequestMessage = BaseMessage.extend({
+  type: z.literal("git:stash-list"),
+  projectId: z.string(),
+  ...CheckoutScoped,
+});
+
+const GitStashListResultMessage = BaseMessage.extend({
+  type: z.literal("git:stash-list-result"),
+  projectId: z.string(),
+  stashes: z.array(GitStashEntrySchema),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitStashPopMessage = BaseMessage.extend({
+  type: z.literal("git:stash-pop"),
+  projectId: z.string(),
+  ref: z.string(),
+  ...CheckoutScoped,
+});
+
+const GitStashPopResultMessage = BaseMessage.extend({
+  type: z.literal("git:stash-pop-result"),
+  projectId: z.string(),
+  ref: z.string(),
+  success: z.boolean(),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitStashDropMessage = BaseMessage.extend({
+  type: z.literal("git:stash-drop"),
+  projectId: z.string(),
+  ref: z.string(),
+  ...CheckoutScoped,
+});
+
+const GitStashDropResultMessage = BaseMessage.extend({
+  type: z.literal("git:stash-drop-result"),
+  projectId: z.string(),
+  ref: z.string(),
+  success: z.boolean(),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
 const GitLogEntrySchema = z.object({
   sha: z.string(),
   shortSha: z.string(),
@@ -2059,6 +2113,12 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   GitStageResultMessage,
   GitUnstageMessage,
   GitUnstageResultMessage,
+  GitStashListRequestMessage,
+  GitStashListResultMessage,
+  GitStashPopMessage,
+  GitStashPopResultMessage,
+  GitStashDropMessage,
+  GitStashDropResultMessage,
   GitLogRequestMessage,
   GitLogResultMessage,
   GitCommitFilesRequestMessage,
@@ -2196,6 +2256,13 @@ export type GitStage = z.infer<typeof GitStageMessage>;
 export type GitStageResult = z.infer<typeof GitStageResultMessage>;
 export type GitUnstage = z.infer<typeof GitUnstageMessage>;
 export type GitUnstageResult = z.infer<typeof GitUnstageResultMessage>;
+export type GitStashEntryWire = z.infer<typeof GitStashEntrySchema>;
+export type GitStashListRequest = z.infer<typeof GitStashListRequestMessage>;
+export type GitStashListResult = z.infer<typeof GitStashListResultMessage>;
+export type GitStashPop = z.infer<typeof GitStashPopMessage>;
+export type GitStashPopResult = z.infer<typeof GitStashPopResultMessage>;
+export type GitStashDrop = z.infer<typeof GitStashDropMessage>;
+export type GitStashDropResult = z.infer<typeof GitStashDropResultMessage>;
 export type GitLogEntryWire = z.infer<typeof GitLogEntrySchema>;
 export type GitLogRequest = z.infer<typeof GitLogRequestMessage>;
 export type GitLogResult = z.infer<typeof GitLogResultMessage>;
@@ -2305,6 +2372,8 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "git:status", "git:diff", "git:diff-content", "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
   "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
+  "git:stash-list", "git:stash-list-result", "git:stash-pop", "git:stash-pop-result",
+  "git:stash-drop", "git:stash-drop-result",
   "git:log", "git:log-result", "git:commit-files", "git:commit-files-result",
   "git:commit-diff", "git:commit-diff-content",
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
@@ -2383,6 +2452,8 @@ const KNOWN_TYPES = new Set<string>([
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
   "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
+  "git:stash-list", "git:stash-list-result", "git:stash-pop", "git:stash-pop-result",
+  "git:stash-drop", "git:stash-drop-result",
   "git:log", "git:log-result", "git:commit-files", "git:commit-files-result",
   "git:commit-diff", "git:commit-diff-content",
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",

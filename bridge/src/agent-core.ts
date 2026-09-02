@@ -55,7 +55,7 @@ import { snapshotAsksFor } from "./rpc/state-snapshot";
 import { StructuredAgentManager } from "./structured/structured-manager";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
 import { getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
-import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
+import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote, listStashes, stashPop, stashDrop } from "./git-branches";
 import { getGitLog, getCommitFiles, getCommitFileDiff } from "./git-log";
 import { gitPull, gitPush, readSyncState, fetchRemote, EMPTY_SYNC_STATE, type GitSyncState } from "./git-sync";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
@@ -1116,6 +1116,24 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         break;
       }
+      case "git:stash-list": {
+        handleGitStashList(runtime, msg.projectId).catch((err) =>
+          log.error("git:stash-list handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:stash-pop": {
+        handleGitStashPop(runtime, msg.projectId, msg.ref).catch((err) =>
+          log.error("git:stash-pop handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:stash-drop": {
+        handleGitStashDrop(runtime, msg.projectId, msg.ref).catch((err) =>
+          log.error("git:stash-drop handler failed: %s", err)
+        );
+        break;
+      }
       case "git:sync": {
         handleGitSync(runtime, msg.projectId, msg.op).catch((err) =>
           log.error("git:sync handler failed: %s", err)
@@ -2165,6 +2183,55 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       sendGitStatus(runtime);
       sendStatus(runtime);
     }
+  }
+
+  async function handleGitStashList(runtime: CheckoutRuntime, projectId: string) {
+    try {
+      const stashes = await listStashes(runtime.checkout.path);
+      sendFromRuntime(runtime, createMessage("git:stash-list-result", { projectId, stashes }));
+    } catch (err: any) {
+      sendFromRuntime(runtime, createMessage("git:stash-list-result", {
+        projectId,
+        stashes: [],
+        error: err?.message || String(err),
+      }));
+    }
+  }
+
+  async function handleGitStashPop(runtime: CheckoutRuntime, projectId: string, ref: string) {
+    try {
+      await stashPop(runtime.checkout.path, ref);
+      sendFromRuntime(runtime, createMessage("git:stash-pop-result", { projectId, ref, success: true }));
+      await refreshGitStatus(runtime);
+      sendGitStatus(runtime);
+      sendStatus(runtime);
+    } catch (err: any) {
+      sendFromRuntime(runtime, createMessage("git:stash-pop-result", {
+        projectId,
+        ref,
+        success: false,
+        error: err?.message || String(err),
+      }));
+    }
+    // Either outcome moves the stash LIST (removed on success, unchanged on
+    // failure) — the panel's banner needs the fresh read either way to know
+    // whether to keep showing this entry.
+    await handleGitStashList(runtime, projectId);
+  }
+
+  async function handleGitStashDrop(runtime: CheckoutRuntime, projectId: string, ref: string) {
+    try {
+      await stashDrop(runtime.checkout.path, ref);
+      sendFromRuntime(runtime, createMessage("git:stash-drop-result", { projectId, ref, success: true }));
+    } catch (err: any) {
+      sendFromRuntime(runtime, createMessage("git:stash-drop-result", {
+        projectId,
+        ref,
+        success: false,
+        error: err?.message || String(err),
+      }));
+    }
+    await handleGitStashList(runtime, projectId);
   }
 
   async function handleGitDiffRequest(runtime: CheckoutRuntime, projectId: string, path: string) {
