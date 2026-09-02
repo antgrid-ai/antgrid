@@ -201,13 +201,13 @@ export async function checkoutLocalBranch(
   }
 
   const attemptSwitch = async (): Promise<{ dirty: string[] } | null> => {
-    const proc = Bun.spawn(["git", "switch", branch], {
-      cwd: projectPath,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const stderr = (await new Response(proc.stderr).text()).trim();
-    const exitCode = await proc.exited;
+    // Through [runGit] for its `LC_ALL=C`: the two things read off this stderr
+    // — [isDirtyWorktreeRefusal] and [parseOverwrittenFiles] — are matches on
+    // git's own ENGLISH wording, so on a localized git a bare spawn reports
+    // every dirty-worktree refusal as CHECKOUT_FAILED and never offers the
+    // stash.
+    const { exitCode, stderr: rawStderr } = await runGit(projectPath, ["switch", branch]);
+    const stderr = rawStderr.trim();
     if (exitCode !== 0) {
       if (known && isDirtyWorktreeRefusal(stderr)) {
         return { dirty: parseOverwrittenFiles(stderr) };
@@ -230,18 +230,43 @@ export async function checkoutLocalBranch(
     // above would have named, since an untracked file in the way is exactly
     // what `isDirtyWorktreeRefusal` also matches.
     stashed = await stashPush(projectPath, `Before switching to ${branch}`);
-    const retried = await attemptSwitch();
-    if (retried) {
-      // The stash didn't clear whatever git objected to (a hook, a submodule
-      // oddity) — put it back rather than leaving the user's work stashed
-      // with the switch still refused, and report the ORIGINAL dirty files so
-      // the message still names something actionable.
-      await stashPopBestEffort(projectPath, stashed.ref);
-      throw new GitHelperError("DIRTY_WORKTREE", dirtyWorktreeError(branch, retried.dirty));
+    // EVERY failure past this point owes the pop, not just a second dirty
+    // refusal: `attemptSwitch` THROWS for any other reason git can refuse (a
+    // hook, a submodule, an `index.lock`), and the verification below throws
+    // too — and on those paths the caller reports a checkout failure while the
+    // user's tracked AND untracked work sits in a stash the error never
+    // mentions. The tree is empty of it and nothing in the app lists it.
+    try {
+      const retried = await attemptSwitch();
+      if (retried) {
+        // The stash didn't clear whatever git objected to — put it back rather
+        // than leaving the user's work stashed with the switch still refused,
+        // and report the ORIGINAL dirty files so the message still names
+        // something actionable.
+        await stashPopBestEffort(projectPath, stashed.ref);
+        throw new GitHelperError("DIRTY_WORKTREE", dirtyWorktreeError(branch, retried.dirty));
+      }
+      await verifyCurrentBranch(projectPath, branch);
+    } catch (err) {
+      // The `retried` arm above already popped and is re-thrown untouched;
+      // everything else lands here with the stash still held.
+      if (!(err instanceof GitHelperError && err.code === "DIRTY_WORKTREE")) {
+        await stashPopBestEffort(projectPath, stashed.ref);
+      }
+      throw err;
     }
+    return { current: branch, stashed };
   }
 
-  // Re-verify current branch
+  await verifyCurrentBranch(projectPath, branch);
+  return { current: branch, stashed };
+}
+
+/** Confirms `git switch` actually moved HEAD. Separate so the stash-and-retry
+ *  path above can run it INSIDE its rollback guard — a verification failure
+ *  after a successful stash is one of the two ways the user's work was left
+ *  stashed with only a "checkout failed" to explain it. */
+async function verifyCurrentBranch(projectPath: string, branch: string): Promise<void> {
   const verifyProc = Bun.spawn(["git", "branch", "--show-current"], {
     cwd: projectPath,
     stdout: "pipe",
@@ -253,20 +278,19 @@ export async function checkoutLocalBranch(
   if (verifyText !== branch) {
     throw new GitHelperError("CHECKOUT_FAILED", `Verification failed: expected branch '${branch}', got '${verifyText}'`);
   }
-
-  return { current: branch, stashed };
 }
 
+/** Local (non-network) git in this module. Deliberately [runGitRemote] with no
+ *  deadline rather than a bare spawn: its `LC_ALL=C` is what makes every prose
+ *  matcher here — [parseStashSubject]'s `WIP on`/`On`, [isDirtyWorktreeRefusal]'s
+ *  `would be overwritten by` — a fact rather than a guess about the user's
+ *  locale, and `GIT_OPTIONAL_LOCKS=0` keeps a read from contending with the
+ *  agent's own git for `index.lock`. */
 async function runGit(
   cwd: string,
   args: string[],
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  return { exitCode: await proc.exited, stdout, stderr };
+  return runGitRemote(cwd, args);
 }
 
 /** Internal to [checkoutLocalBranch]'s stash-and-retry path only — every other
@@ -317,12 +341,32 @@ export async function listStashes(projectPath: string): Promise<StashEntry[]> {
     });
 }
 
+/** The only shape a stash reference may take on its way to argv — exactly what
+ *  [listStashes] reports (git's own `%gd`), which is the only place the app
+ *  ever gets one.
+ *
+ *  Same hazard [checkoutLocalBranch] refuses a leading `-` for, and reachable
+ *  the same way: `parseMessageFast` validates the message TYPE alone on the
+ *  encrypted/local hot path, so `git:stash-pop`/`-drop`'s Zod `ref` never runs
+ *  and an arbitrary string arrives here POSITIONALLY. `git stash pop --index`
+ *  pops `stash@{0}` — not the entry the user tapped — and restores the index
+ *  with it; `git stash drop --help` opens git's help viewer, which under a
+ *  non-interactive `Bun.spawn` never exits and hangs the handler forever. */
+const STASH_REF_RE = /^stash@\{\d{1,9}\}$/;
+
+function assertStashRef(ref: string): void {
+  if (!STASH_REF_RE.test(ref)) {
+    throw new GitHelperError("STASH_FAILED", `'${ref}' is not a stash reference`);
+  }
+}
+
 /** Reapplies a stash and drops it on success — git's own `stash pop`, and the
  *  Restore affordance's whole meaning: "put it back", not "keep a copy too".
  *  A conflicting pop leaves the stash in the list, same as git itself, and is
  *  surfaced to the user as the ordinary working-tree conflict it now is
  *  rather than something this function tries to resolve or roll back. */
 export async function stashPop(projectPath: string, ref: string): Promise<void> {
+  assertStashRef(ref);
   const { exitCode, stdout, stderr } = await runGit(projectPath, ["stash", "pop", ref]);
   if (exitCode !== 0) {
     throw new GitHelperError("STASH_FAILED", stderr.trim() || stdout.trim() || `git stash pop ${ref} exited ${exitCode}`);
@@ -330,6 +374,7 @@ export async function stashPop(projectPath: string, ref: string): Promise<void> 
 }
 
 export async function stashDrop(projectPath: string, ref: string): Promise<void> {
+  assertStashRef(ref);
   const { exitCode, stderr } = await runGit(projectPath, ["stash", "drop", ref]);
   if (exitCode !== 0) {
     throw new GitHelperError("STASH_FAILED", stderr.trim() || `git stash drop ${ref} exited ${exitCode}`);

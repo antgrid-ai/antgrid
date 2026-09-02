@@ -89,13 +89,42 @@ describe("FileWatcher", () => {
       createConnState(),
     );
 
-    (watcher as unknown as { needsFullResync: boolean }).needsFullResync = true;
-    (watcher as unknown as { scheduleBatch: () => void }).scheduleBatch();
+    // The real callback, not the private field it sets: assigning
+    // `needsFullResync` by hand asserts only what the test just wrote, and
+    // deleting the null branch from `handleNativeEvent` left it green.
+    watcher.handleNativeEvent(null);
 
     await new Promise((r) => setTimeout(r, 200));
 
     expect(messages.some((m) => m.type === "tree:full")).toBe(true);
     expect(messages.some((m) => m.type === "tree:update")).toBe(false);
+
+    watcher.stop();
+  });
+
+  // A resync requested while the app is backgrounded must OUTLIVE the drop.
+  // `flushBatch` consumes the flag before it reaches the suppression gate, so
+  // returning there without restoring it silently loses the one signal that
+  // corrects a delta stream whose base is already wrong — and nothing ever
+  // asks again.
+  it("keeps a pending resync across a suppressed flush", async () => {
+    const messages: AbMessage[] = [];
+    const connState = createConnState();
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      connState,
+    );
+
+    connState.appFocusPaused = true;
+    watcher.handleNativeEvent(null);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(messages.length).toBe(0);
+
+    connState.appFocusPaused = false;
+    watcher.handleNativeEvent(null);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(messages.some((m) => m.type === "tree:full")).toBe(true);
 
     watcher.stop();
   });

@@ -115,7 +115,15 @@ export function classifySyncFailure(
     return "dirty-tree";
   }
   if (s.includes("conflict")) return "conflict";
-  if (s.includes("has no upstream branch") || s.includes("no upstream configured")) {
+  // The third wording is `pull`'s, and it is the only one that path can
+  // produce: `gitPush` passes `-u` explicitly, so the first two are push's
+  // alone and this arm was unreachable from a pull on an untracked branch —
+  // which is exactly the branch the app's Publish affordance exists for.
+  if (
+    s.includes("has no upstream branch")
+    || s.includes("no upstream configured")
+    || s.includes("no tracking information for the current branch")
+  ) {
     return "no-upstream";
   }
   // The URL sits between the two words ("repository 'https://…' not found"),

@@ -47,17 +47,30 @@ const LOG_RECORD_SEP = "\x1e";
  * correctness a hash cursor buys against a mid-scroll rebase isn't worth the
  * bridge tracking state for it. Requests `limit + 1` to answer [hasMore]
  * without a second round trip.
+ *
+ * Both are clamped HERE and not left to the schema: `parseMessageFast` is what
+ * validates the encrypted/local hot path and it checks the message type alone,
+ * so `git:log`'s Zod bounds and defaults never run on a real inbound frame. An
+ * absent field would reach git as `--skip=undefined -nNaN`, and an unbounded
+ * one would buffer the whole repository's history into one string and one wire
+ * frame.
  */
+export const MAX_LOG_PAGE = 500;
+
 export async function getGitLog(
   cwd: string,
   skip: number,
   limit: number,
 ): Promise<{ commits: GitLogEntry[]; hasMore: boolean }> {
+  const safeSkip = Number.isFinite(skip) ? Math.max(0, Math.floor(skip)) : 0;
+  const safeLimit = Number.isFinite(limit)
+    ? Math.min(MAX_LOG_PAGE, Math.max(1, Math.floor(limit)))
+    : 50;
   const format = ["%H", "%h", "%an", "%ae", "%aI", "%s"].join(LOG_FIELD_SEP);
   const r = await runGit(cwd, [
     "log",
-    `--skip=${skip}`,
-    `-n${limit + 1}`,
+    `--skip=${safeSkip}`,
+    `-n${safeLimit + 1}`,
     `--pretty=format:${format}${LOG_RECORD_SEP}`,
   ]);
   // Non-zero here is almost always "no commits yet" (unborn HEAD) rather than
@@ -68,8 +81,8 @@ export async function getGitLog(
     .split(LOG_RECORD_SEP)
     .map((rec) => (rec.startsWith("\n") ? rec.slice(1) : rec))
     .filter((rec) => rec.length > 0);
-  const hasMore = records.length > limit;
-  const commits = records.slice(0, limit).map((record) => {
+  const hasMore = records.length > safeLimit;
+  const commits = records.slice(0, safeLimit).map((record) => {
     const [sha, shortSha, authorName, authorEmail, authorDate, ...subjectParts] =
       record.split(LOG_FIELD_SEP);
     return {
@@ -103,6 +116,26 @@ export interface GitCommitFileEntry {
  *  merge's mainline (the branch that was actually checked out) rather than
  *  git's default of emitting nothing for a merge commit. */
 const COMMIT_DIFF_FLAGS = ["-M", "-r", "-m", "--first-parent", "--root", "--relative"];
+
+/** A commit id as this module will hand it to git: hex, full or abbreviated.
+ *
+ *  `parseMessageFast` is what the encrypted/local hot path validates inbound
+ *  frames with, and it checks the message TYPE and nothing else — so the Zod
+ *  `sha: z.string()` on `git:commit-files`/`git:commit-diff` never runs and a
+ *  sha reaches here as an arbitrary string. `diff-tree` takes the whole common
+ *  diff-option set, `--output=<file>` included, and a sha is POSITIONAL: one
+ *  starting with `-` is parsed as an option and writes a file outside the
+ *  checkout. Same hazard `checkoutLocalBranch` refuses a leading `-` for, and
+ *  the same shape `worktree-manager.ts` already gates a commit id on. */
+const COMMIT_SHA_RE = /^[0-9a-f]{4,64}$/i;
+
+/** Every git invocation here interpolates the sha positionally, so this is the
+ *  one place it can be bounded. Callers report the empty answer they would get
+ *  from an unknown commit — indistinguishable to the app, and correct: a sha
+ *  git could not name is a commit that is not there. */
+function isCommitSha(sha: string): boolean {
+  return COMMIT_SHA_RE.test(sha);
+}
 
 /** name-status -z: `<code>\0<path>\0` for a plain change, or
  *  `R<score>\0<oldpath>\0<newpath>\0` for a detected rename — same shape
@@ -157,6 +190,7 @@ function parseNumstatZ(stdout: string): Map<string, { additions: number; deletio
  *  at once, the same limitation [getDiffStats] works around for the working
  *  tree. */
 export async function getCommitFiles(cwd: string, sha: string): Promise<GitCommitFileEntry[]> {
+  if (!isCommitSha(sha)) return [];
   const [nameStatus, numstat] = await Promise.all([
     runGit(cwd, ["diff-tree", "--no-commit-id", "--name-status", "-z", ...COMMIT_DIFF_FLAGS, sha]),
     runGit(cwd, ["diff-tree", "--no-commit-id", "--numstat", "-z", ...COMMIT_DIFF_FLAGS, sha]),
@@ -182,16 +216,41 @@ export async function getCommitFileDiff(
   sha: string,
   path: string,
 ): Promise<{ diff: string | null; additions: number; deletions: number }> {
+  if (!isCommitSha(sha)) return { diff: null, additions: 0, deletions: 0 };
   const r = await runGit(cwd, [
     "diff-tree", "-p", "--no-commit-id", ...COMMIT_DIFF_FLAGS, sha, "--", path,
   ]);
   if (r.exitCode !== 0) return { diff: null, additions: 0, deletions: 0 };
 
+  return { diff: r.stdout || null, ...countPatchLines(r.stdout) };
+}
+
+/**
+ * Added/removed line counts for one unified patch.
+ *
+ * Counts only INSIDE a hunk, because a leading `+`/`-` is not by itself enough
+ * to tell content from a header: a removed line whose own text is `-- foo`
+ * arrives as `--- foo`, indistinguishable from the `--- a/path` header by
+ * prefix alone, and an added `++counter;` (C++, Perl) arrives as `+++counter;`.
+ * Prefix tests therefore drop exactly the lines the languages that use those
+ * prefixes are full of. A hunk opens at `@@` and the next file's preamble
+ * closes it at `diff --git`, so everything a header can be lands outside.
+ *
+ * Shared rather than inlined because the same count is taken for the working
+ * tree in agent-core's `git:diff` handler, and the two must never answer
+ * differently for identical patch text — the Changes tab and the History tab
+ * show the number beside the very same diff.
+ */
+export function countPatchLines(patch: string): { additions: number; deletions: number } {
   let additions = 0;
   let deletions = 0;
-  for (const line of r.stdout.split("\n")) {
-    if (line.startsWith("+") && !line.startsWith("+++")) additions++;
-    if (line.startsWith("-") && !line.startsWith("---")) deletions++;
+  let inHunk = false;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("diff --git ")) inHunk = false;
+    else if (line.startsWith("@@")) inHunk = true;
+    else if (!inHunk) continue;
+    else if (line.startsWith("+")) additions++;
+    else if (line.startsWith("-")) deletions++;
   }
-  return { diff: r.stdout || null, additions, deletions };
+  return { additions, deletions };
 }

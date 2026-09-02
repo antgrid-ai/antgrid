@@ -269,9 +269,15 @@ Future<void> _openPreviewLink(
 ) async {
   final scheme = target.scheme;
   final port = target.hasPort ? target.port : (scheme == 'https' ? 443 : 80);
-  final path = target.path.isEmpty
-      ? '/'
-      : '${target.path}${target.query.isEmpty ? '' : '?${target.query}'}';
+  // Reassembled rather than taken from the path alone. A hash-routed dev
+  // server (Vue Router's hash mode, Angular's HashLocationStrategy) keeps the
+  // WHOLE route in the fragment, so dropping it lands every such link on the
+  // app's root instead of the page it named; and a URL with no path at all
+  // still is not the origin once it carries a query.
+  final buffer = StringBuffer(target.path.isEmpty ? '/' : target.path);
+  if (target.query.isNotEmpty) buffer.write('?${target.query}');
+  if (target.fragment.isNotEmpty) buffer.write('#${target.fragment}');
+  final path = buffer.toString();
   try {
     final service = previewService();
     if (service == null) return;

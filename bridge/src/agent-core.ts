@@ -1063,20 +1063,37 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "git:stash-pop": {
-        handleGitStashPop(runtime, msg.projectId, msg.ref).catch((err) =>
-          log.error("git:stash-pop handler failed: %s", err)
+        // Tracked for the same reason `git:sync` below is, and more urgently:
+        // a pop rewrites the whole working tree, so it holds the checkout as
+        // its child's cwd for longer than a push does.
+        trackGitRefresh(
+          runtime,
+          handleGitStashPop(runtime, msg.projectId, msg.ref).catch((err) =>
+            log.error("git:stash-pop handler failed: %s", err)
+          ),
         );
         break;
       }
       case "git:stash-drop": {
-        handleGitStashDrop(runtime, msg.projectId, msg.ref).catch((err) =>
-          log.error("git:stash-drop handler failed: %s", err)
+        trackGitRefresh(
+          runtime,
+          handleGitStashDrop(runtime, msg.projectId, msg.ref).catch((err) =>
+            log.error("git:stash-drop handler failed: %s", err)
+          ),
         );
         break;
       }
       case "git:sync": {
-        handleGitSync(runtime, msg.projectId, msg.op).catch((err) =>
-          log.error("git:sync handler failed: %s", err)
+        // Tracked, not merely fired: a push/pull holds the checkout as its
+        // child's cwd for up to the transfer timeout, and `awaitGitRefreshes`
+        // is what teardown waits on before `git worktree remove`. Untracked,
+        // a session deleted mid-push takes a Windows sharing violation and is
+        // then undeletable forever.
+        trackGitRefresh(
+          runtime,
+          handleGitSync(runtime, msg.projectId, msg.op).catch((err) =>
+            log.error("git:sync handler failed: %s", err)
+          ),
         );
         break;
       }
@@ -1840,18 +1857,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     runtime: CheckoutRuntime = mainRuntime,
     state: GitSyncState = runtime.cachedGitSync,
     probed?: Awaited<ReturnType<typeof checkBranchAgainstRemote>>,
+    force = false,
   ) {
     sendFromRuntime(runtime, createMessage("git:sync-state", {
       projectId: project.id,
       branch: state.branch,
       remote: state.remote,
       remoteBranch: state.remoteBranch,
-      ahead: state.ahead,
-      behind: state.behind,
+      // A probe ASKED the remote, so its counts supersede the local ones for
+      // the frame that reports its verdict — sending `state: "behind"` beside
+      // a pre-fetch `behind: 0` describes two different moments as one.
+      // `checkBranchAgainstRemote` omits both whenever it could not count
+      // (`differs`, `unreachable`, `gone`), which is when the local pair is
+      // still the best answer there is.
+      ahead: probed?.ahead ?? state.ahead,
+      behind: probed?.behind ?? state.behind,
       hasUpstream: state.hasUpstream,
       hasRemote: state.hasRemote,
       ...(probed ? { state: probed.state } : {}),
-    }));
+    }), force);
   }
 
   /** One background-fetch pass — see [fetchRemote]. Pushes `git:sync-state`
@@ -2018,9 +2042,29 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     projectId: string,
     op: "push" | "pull",
   ) {
-    const result = await withGitSyncLock(runtime.checkout.id, () =>
-      op === "push" ? gitPush(runtime.checkout.path) : gitPull(runtime.checkout.path),
-    );
+    // A throw here owes a result frame just as much as a git failure does. The
+    // app's only other way out is a 150s wall-clock latch, and `Bun.spawn`
+    // throws SYNCHRONOUSLY when the cwd is gone — the normal state once a
+    // managed checkout is removed under an in-flight push (see
+    // [refreshGitStatus]) — so the common case would be a dead Push button for
+    // two and a half minutes reporting a timeout for a failure that was
+    // instant.
+    let result: Awaited<ReturnType<typeof gitPush>>;
+    try {
+      result = await withGitSyncLock(runtime.checkout.id, () =>
+        op === "push" ? gitPush(runtime.checkout.path) : gitPull(runtime.checkout.path),
+      );
+    } catch (err: any) {
+      sendFromRuntime(runtime, createMessage("git:sync-result", {
+        projectId,
+        op,
+        success: false,
+        branch: runtime.cachedGitSync.branch,
+        failureKind: "unknown" as const,
+        error: err?.message || String(err),
+      }));
+      return;
+    }
 
     sendFromRuntime(runtime, createMessage("git:sync-result", {
       projectId,
@@ -2041,8 +2085,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // ff-only refusal has already moved `refs/remotes`, so even a failure
     // changes the counts. A successful push moves nothing but `.git/`, which
     // the watcher ignores — nothing else would ever correct the indicator.
-    await refreshGitBranch(runtime);
-    await refreshGitStatus(runtime);
+    await Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)]);
     sendGitStatus(runtime);
     sendGitSyncState(runtime);
     sendStatus(runtime);
@@ -2055,8 +2098,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   ) {
     await refreshGitStatus(runtime);
     const state = runtime.cachedGitSync;
+    // Forced on every arm: this verb IS the app's hydrator, re-fired on every
+    // (re)establish, and `git:sync-state` is a replay type — so for an idle
+    // checkout the answer is byte-identical to the cached frame and the bus's
+    // dedup drops it before the asker sees it. Same reason [resyncState]
+    // forces its pair.
     if (!probeRemote || !state.branch) {
-      sendGitSyncState(runtime, state);
+      sendGitSyncState(runtime, state, undefined, true);
       return;
     }
     try {
@@ -2064,9 +2112,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // asked about reports `unreachable`, which the app renders as nothing
       // rather than as an error — the local counts beside it are still true.
       const probed = await checkBranchAgainstRemote(runtime.checkout.path, state.branch);
-      sendGitSyncState(runtime, state, probed);
+      sendGitSyncState(runtime, state, probed, true);
     } catch {
-      sendGitSyncState(runtime, state);
+      sendGitSyncState(runtime, state, undefined, true);
     }
   }
 
@@ -2327,6 +2375,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // exactly what the bus's dedup drops before any subscriber sees it.
       sendStatus(runtime, true);
       sendGitStatus(runtime, true);
+      sendGitSyncState(runtime, runtime.cachedGitSync, undefined, true);
       trackGitRefresh(
         runtime,
         Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)])
@@ -2966,6 +3015,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // identical to what the replay cache holds.
         sendStatus(runtime, true);
         sendGitStatus(runtime, true);
+        sendGitSyncState(runtime, runtime.cachedGitSync, undefined, true);
       },
       teardownCheckoutRuntime,
       resolveCheckout: async (checkoutId) => {

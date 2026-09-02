@@ -149,8 +149,9 @@ already has them.
   the modes the guest turned on over the SAME channel, so a session with DEC
   1004 focus reporting or mouse tracking on gets `CSI I`/`CSI O` on every window
   focus change and a mouse report per click — `isTerminalReport` (`keystrokes.ts`)
-  is what keeps those out of all three "the user acted" consumers (`sessions.touch`,
-  the handler's runaway guard, `userReply`) while still writing them to the PTY.
+  is what keeps those out of every "the user acted" consumer in agent-core's
+  `terminal:input` case while still writing them to the PTY. The guard is the
+  `break` those consumers all sit below, so one added there inherits it.
   Without it, clicking back into the window to ANSWER a blocked agent was itself
   what cleared its "needs you" dot.
 

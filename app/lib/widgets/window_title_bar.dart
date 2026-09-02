@@ -21,6 +21,7 @@ import '../providers/providers.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
+import '../util/detached.dart';
 import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';
 import 'agent_panel.dart';
@@ -523,7 +524,7 @@ class SessionBranchPill extends ConsumerWidget {
       branch: gitBranch,
       ahead: terminalState?.gitAhead ?? 0,
       behind: terminalState?.gitBehind ?? 0,
-      onTap: () async {
+      onTap: () => detached('WindowTitleBar', 'copy branch name', () async {
         await Clipboard.setData(ClipboardData(text: gitBranch));
         if (!context.mounted) return;
         showAbSnackBar(
@@ -531,7 +532,7 @@ class SessionBranchPill extends ConsumerWidget {
           'Copied "$gitBranch"',
           duration: const Duration(seconds: 2),
         );
-      },
+      }),
     );
     final width = maxWidth;
     return width == null

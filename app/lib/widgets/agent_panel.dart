@@ -238,6 +238,15 @@ class _HandlerMenuItem extends ConsumerWidget {
 
     void toggleArm() {
       if (service == null) return;
+      // The popup route closes first — its own doc says the content pops
+      // itself — or the menu stays up over the session it just changed,
+      // showing the stale label, and the explainer below opens over a live
+      // modal barrier. Both the explainer's anchor and the container are taken
+      // from surfaces that outlive the popped route.
+      final navigator = Navigator.of(context);
+      final host = navigator.context;
+      final container = ref.container;
+      navigator.pop();
       if (armed) {
         service.disarm(activeId);
         return;
@@ -247,8 +256,8 @@ class _HandlerMenuItem extends ConsumerWidget {
       // HandlerHeaderControl.toggleArm.
       unawaited(
         armWithFirstRunExplainer(
-          context: context,
-          container: ref.container,
+          context: host,
+          container: container,
           terminalId: activeId,
           agentObservable: coverage.observable,
           agentLabel: coverage.agentLabel,

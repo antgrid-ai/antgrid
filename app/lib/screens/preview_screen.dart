@@ -1353,6 +1353,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// screenshot channels — a message from a backgrounded tab can never be
   /// misattributed to whichever click is actually pending.
   void _onContextMenuMessage(int port, String rawMessage) {
+    // The fallback timer guards this too, and for the same reason: the page's
+    // reply arrives on a platform channel that outlives a dispose, and
+    // [_showContextMenu] below reads `context`.
+    if (!mounted) return;
     if (_pendingContextMenuPort != port) return;
     final anchor = _pendingContextMenuAnchor;
     _contextMenuFallbackTimer?.cancel();
@@ -1505,7 +1509,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         label: 'Reload',
         icon: AbIcons.refresh,
         enabled: controller != null,
-        onTap: () => controller?.reload(),
+        onTap: () => detached(
+          'PreviewScreen',
+          'reload page',
+          () async => controller?.reload(),
+        ),
       ),
     );
     entries.add(

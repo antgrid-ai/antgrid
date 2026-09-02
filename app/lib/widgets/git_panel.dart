@@ -137,10 +137,14 @@ class _GitPanelState extends ConsumerState<GitPanel> {
   void _maybeLoadHistory(FileService? fileService) {
     if (fileService == null) return;
     if (!fileService.claimHistoryLoad()) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      fileService.loadHistory();
-    });
+    // Deliberately NOT guarded on `mounted`: the claim is one-way for the
+    // SERVICE's lifetime, and the service outlives this panel. Skipping the
+    // send because the panel unmounted inside the frame (a view switch, a
+    // session switch) spends the claim with nothing sent, and history then
+    // sits on its "loading history..." placeholder forever — that is exactly
+    // the state a service which never asked reports, and nothing asks again.
+    // `loadHistory` touches no BuildContext; a disposed service drops it.
+    WidgetsBinding.instance.addPostFrameCallback((_) => fileService.loadHistory());
   }
 
   /// Same lazy, once-per-service-lifetime fetch as [_maybeLoadHistory], for
@@ -148,10 +152,10 @@ class _GitPanelState extends ConsumerState<GitPanel> {
   void _maybeLoadStashes(FileService? fileService) {
     if (fileService == null) return;
     if (!fileService.claimStashLoad()) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      fileService.loadStashes();
-    });
+    // Unguarded for the same reason as [_maybeLoadHistory], and it matters
+    // more here: nothing else in the app ever calls `loadStashes` again, so a
+    // spent claim with no send hides the stash banner for good.
+    WidgetsBinding.instance.addPostFrameCallback((_) => fileService.loadStashes());
   }
 
   /// Steps out ONE level: the file opened from a diff, then the diff itself.
@@ -303,6 +307,11 @@ class _GitHeaderCounts {
   final Set<String> changedFolders;
 }
 
+/// How much of the panel the stash banners may claim before they scroll among
+/// themselves — about three, leaving the changes list the rest. See where it is
+/// used for why an unbounded run of them is a layout failure, not just noise.
+const double _stashBannerMaxHeight = 132;
+
 /// The shared git-panel chrome: header + separator + expanded body, defined
 /// once so the loading/error/data branches can't drift in how they wrap the
 /// header. [onBack] is forwarded to the header (only the compact diff-viewing
@@ -347,8 +356,26 @@ class _GitPanelScaffold extends StatelessWidget {
         // fresh off `git stash list` every time — see [FileService.loadStashes])
         // so this stays up as long as any stash exists, not just right after
         // the switch that created one.
-        for (final stash in git.stashes)
-          _StashBanner(stash: stash, fileService: fileService),
+        //
+        // Bounded and scrollable rather than spread straight into this Column:
+        // the list is every stash in the REPOSITORY (shared across worktrees,
+        // and including any made outside Antgrid), so a developer with an
+        // ordinary stash habit stacked a dozen full-width banners above the
+        // changes list, squeezing it to nothing on desktop and overflowing the
+        // viewport outright on a phone. Every entry stays reachable.
+        if (git.stashes.isNotEmpty)
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: _stashBannerMaxHeight),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final stash in git.stashes)
+                    _StashBanner(stash: stash, fileService: fileService),
+                ],
+              ),
+            ),
+          ),
         const AbSeparator.horizontal(),
         Expanded(child: body),
       ],
@@ -1026,7 +1053,8 @@ class _StashBanner extends StatelessWidget {
           AbButton(
             label: 'Discard',
             compact: true,
-            onTap: () => _discard(context),
+            onTap: () =>
+                detached('GitPanel', 'discard stash', () => _discard(context)),
           ),
         ],
       ),

@@ -10,6 +10,7 @@ import '../design/ab_colors.dart';
 import '../design/widgets/ab_diff_stat.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../util/detached.dart';
 import 'code_syntax.dart';
 import 'git_status_color.dart';
 import 'send_to_agent_comment.dart';
@@ -709,7 +710,11 @@ class _DiffViewerState extends State<DiffViewer> {
           final text = _lastSelection?.plainText;
           selectableRegionState.hideToolbar();
           if (text == null || text.trim().isEmpty) return;
-          _sendSelectionToAgent(text);
+          detached(
+            'DiffViewer',
+            'send selection to agent',
+            () => _sendSelectionToAgent(text),
+          );
         },
       ),
     ];

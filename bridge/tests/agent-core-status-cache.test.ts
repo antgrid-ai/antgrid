@@ -85,6 +85,19 @@ async function bootCore(): Promise<{ bus: MessageBus; sent: AbMessage[] }> {
   core.attachTransport(bus);
   core.onHandshakeComplete();
   await waitFor(() => sent.some((m) => m.type === "agent:status"), "the first agent:status");
+  // Boot sends a git-less status IMMEDIATELY and re-sends once the background
+  // `refreshGitBranch`/`refreshGitStatus` pair lands, so a test that counts
+  // status frames races an emit it never asked for. `git:sync-state` is the
+  // last call in that same `.then()`, synchronously after the re-send, so it is
+  // the marker that the refresh is fully out — and it is emitted for a
+  // non-repository too (an unresolvable branch reads back as EMPTY_SYNC_STATE).
+  // Draining it here is also what makes the counts below MEAN something: the
+  // re-send then carries no terminal and no branch, so the bus dedups it, and
+  // the only thing that can move the count afterwards is a pull's recompute.
+  await waitFor(
+    () => sent.some((m) => m.type === "git:sync-state"),
+    "the boot git refresh to land",
+  );
   return { bus, sent };
 }
 

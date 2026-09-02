@@ -16,6 +16,7 @@ import '../providers/new_session_picker.dart';
 import '../providers/session_mode.dart';
 import '../providers/sessions.dart';
 import '../services/sessions_service.dart';
+import '../util/detached.dart';
 import 'mode_segmented.dart';
 import 'session_agent_mark.dart';
 
@@ -83,7 +84,11 @@ class SessionModeControl extends ConsumerWidget {
       // Both cells inert while a flip is in flight, so a second tap can't queue
       // a second one. No reason attached: the user just tapped.
       enabled: !inFlight,
-      onChanged: (target) => _switchMode(context, ref, active, target),
+      onChanged: (target) => detached(
+        'SessionModeControl',
+        'switch session mode',
+        () => _switchMode(context, ref.container, active, target),
+      ),
     );
     // Dimming a control whose whole job is to look chooseable reads as broken,
     // so the pending state pulses instead.
@@ -135,7 +140,22 @@ class SessionModeMenuItem extends ConsumerWidget {
         // Inert while a flip is in flight, so a second tap can't queue a
         // second one — same contract as SessionModeControl.
         if (inFlight) return;
-        _switchMode(context, ref, active, target);
+        // The popup route closes BEFORE the confirm dialog opens. This row is
+        // the content of a `showAbPanel` PopupRoute, which its own doc says
+        // pops itself; leaving it up stacks the dialog over a live modal
+        // barrier and then leaves the menu covering the session it just
+        // changed. The dialog anchors on the NAVIGATOR's context, which
+        // outlives the route being popped, and the container is read before
+        // the pop for the same reason.
+        final navigator = Navigator.of(context);
+        final host = navigator.context;
+        final container = ref.container;
+        navigator.pop();
+        detached(
+          'SessionModeMenuItem',
+          'switch session mode',
+          () => _switchMode(host, container, active, target),
+        );
       },
     );
     return inFlight ? PulsingOpacity(child: row) : row;
@@ -189,14 +209,15 @@ String? _modeSwitchWarning(AgentWorkStatus? status, String agent) =>
 
 Future<void> _switchMode(
   BuildContext context,
-  WidgetRef ref,
+  ProviderContainer container,
   SessionEntry session,
   String target,
 ) async {
-  // Captured before the dialog: the focused project can re-resolve while it is
-  // open, and a WidgetRef read past that point throws. Everything downstream
-  // goes through the container so an unmount mid-flip still clears `pending`.
-  final container = ref.container;
+  // Takes the container, never a `WidgetRef`: the focused project can
+  // re-resolve while the dialog is open, and one caller pops its own popup
+  // route before getting here — a ref read past either point throws.
+  // Everything downstream goes through it so an unmount mid-flip still clears
+  // `pending`.
   final agent =
       container.read(focusedMachineToolsProvider).value?.labels[session.tool] ??
       sessionAgentDisplayLabel(session, container.read(agentCatalogProvider));

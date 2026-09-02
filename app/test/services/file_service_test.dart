@@ -445,8 +445,11 @@ void main() {
     await session.close();
   });
 
+  // Neither result asks for the list back: the agent follows every pop and
+  // drop with a fresh `git:stash-list-result` on BOTH outcomes, so a request
+  // from here is a second round trip for a list already on the wire.
   test(
-    'git:stash-pop-result failure surfaces gitOpFeedback and reloads the list',
+    'git:stash-pop-result failure surfaces gitOpFeedback without re-asking',
     () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
@@ -461,8 +464,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(svc.currentState.gitOpFeedback, 'conflict');
-      // Either outcome re-reads the list — see [FileService.restoreStash].
-      expect(t.sent.where((m) => m['type'] == 'git:stash-list'), isNotEmpty);
+      expect(t.sent.where((m) => m['type'] == 'git:stash-list'), isEmpty);
 
       await svc.dispose();
       await session.close();
@@ -470,7 +472,7 @@ void main() {
   );
 
   test(
-    'git:stash-drop-result success stays silent but reloads the list',
+    'git:stash-drop-result success stays silent and re-asks nothing',
     () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
@@ -484,12 +486,35 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(svc.currentState.gitOpFeedback, isNull);
-      expect(t.sent.where((m) => m['type'] == 'git:stash-list'), isNotEmpty);
+      expect(t.sent.where((m) => m['type'] == 'git:stash-list'), isEmpty);
 
       await svc.dispose();
       await session.close();
     },
   );
+
+  // A one-way claim spent by a build whose send never runs hides the banner for
+  // the service's whole life, so `loadStashes` also registers a hydrator: the
+  // list has to survive a reconnect, and nothing else ever re-reads it.
+  test('loadStashes re-asks on every re-establish', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.loadStashes();
+    await Future<void>.delayed(Duration.zero);
+    expect(t.sent.where((m) => m['type'] == 'git:stash-list'), hasLength(1));
+
+    t.redriveHydrators();
+    await Future<void>.delayed(Duration.zero);
+    expect(
+      t.sent.where((m) => m['type'] == 'git:stash-list').length,
+      greaterThan(1),
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
 
   test('git:stage-result failure surfaces gitOpFeedback', () async {
     final t = FakeAgentTransport();

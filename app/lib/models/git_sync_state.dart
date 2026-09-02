@@ -93,7 +93,7 @@ class GitSyncState {
   String? get remoteRefLabel {
     final r = remote;
     final b = remoteBranch;
-    if (r == null || b == null) return null;
+    if (r == null || r.isEmpty || b == null || b.isEmpty) return null;
     return '$r/$b';
   }
 
@@ -182,7 +182,7 @@ class GitSyncFailure {
   String? get remoteRefLabel {
     final r = remote;
     final b = remoteBranch;
-    if (r == null || b == null) return null;
+    if (r == null || r.isEmpty || b == null || b.isEmpty) return null;
     return '$r/$b';
   }
 

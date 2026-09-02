@@ -59,6 +59,11 @@ class FileService {
   /// is never more than one page request to bound at a time).
   ReplyLatch? _historyLatch;
 
+  /// The offset [_historyLatch] is waiting on. `git:log-result` carries no
+  /// request id, and the offset is the only thing that distinguishes one page
+  /// from another — see [_handleGitLogResult] for what a mismatched page costs.
+  int? _pendingLogSkip;
+
   /// Bounds `git:commit-files`, keyed by sha rather than a single slot like
   /// [_historyLatch]: the History tab lets more than one commit's file list
   /// stay expanded and loading at once (see [GitHistoryState]), so a dropped
@@ -217,18 +222,19 @@ class FileService {
       }
       return;
     }
+    // Neither result asks for the list back: the agent already follows every
+    // pop and drop with a fresh `git:stash-list-result` on both outcomes, so a
+    // request here is a second round trip for a list already on its way.
     if (parsed is GitStashPopResultMessage) {
       if (!parsed.success) {
         _emitOpFeedback(parsed.error ?? 'Could not restore the stash');
       }
-      loadStashes();
       return;
     }
     if (parsed is GitStashDropResultMessage) {
       if (!parsed.success) {
         _emitOpFeedback(parsed.error ?? 'Could not discard the stash');
       }
-      loadStashes();
       return;
     }
     if (parsed is GitSyncResultMessage) {
@@ -254,6 +260,15 @@ class FileService {
   }
 
   void _handleGitSyncResult(GitSyncResultMessage msg) {
+    // A result for an op we are not waiting on is stale — a push whose latch
+    // already timed out, landing after the user started a pull. Settling the
+    // pull's latch on it would clear `syncing`, toast "Push complete" and
+    // re-enable both buttons while the pull is still running, and the pull's
+    // own reply would then arrive with nothing left to settle. A result with
+    // NO op in flight still lands: that is the other device having synced, and
+    // its outcome is the honest state for this one too.
+    final syncing = _state.git.syncing;
+    if (syncing != null && msg.op != syncing) return;
     _syncLatch?.settle();
     _syncLatch = null;
     final failure = msg.failure;
@@ -404,6 +419,15 @@ class FileService {
   }
 
   void _handleGitLogResult(GitLogResultMessage msg) {
+    // Correlated on the offset, because the append below is unconditional and
+    // a page that is not the one in flight appends the WRONG commits: a
+    // timed-out `skip: 50` arriving after the user scrolled and asked for
+    // `skip: 50` again lands twice, duplicating commits 51-100 in the list and
+    // pushing every later page's offset past real history. The same reply also
+    // settles whichever latch is current, so the page actually in flight then
+    // has nothing to time out on.
+    if (_pendingLogSkip != null && msg.skip != _pendingLogSkip) return;
+    _pendingLogSkip = null;
     _historyLatch?.settle();
     _historyLatch = null;
     if (msg.error != null) {
@@ -991,15 +1015,29 @@ class FileService {
   }
 
   /// Fetch every stash in the repository. Called once when the Git tab first
-  /// mounts (via [claimStashLoad]) and again after every [restoreStash] /
-  /// [dropStash], since the list is the only honest record of what is left —
-  /// see [GitPaneState.stashes].
+  /// mounts (via [claimStashLoad]); the agent pushes a fresh list itself after
+  /// every pop and drop, since the list is the only honest record of what is
+  /// left — see [GitPaneState.stashes].
   void loadStashes() {
-    session.sendForCheckout(
-      checkoutId,
-      createAbMessage('git:stash-list', {'projectId': projectId}),
-    );
+    // Registered on the first ask rather than in the constructor, for the same
+    // reason history is not hydrated at all: a FileService exists whether or
+    // not the Git panel is ever opened. Once the panel HAS asked, the list has
+    // to survive a reconnect — [claimStashLoad] is one-shot for the service's
+    // lifetime and nothing else ever re-reads it, so the banner would go on
+    // offering a stash the agent popped while the socket was down.
+    // Registering IS the first ask — a hydrator fires immediately when the
+    // session is already established and on the next establishment otherwise,
+    // so a separate send here would only double it. Re-registering under the
+    // same key supersedes, so repeat calls are free.
+    session.hydrateCheckout(checkoutId, _stashHydratorKey, _hydrateStashes);
   }
+
+  static const _stashHydratorKey = 'git:stash-list';
+
+  Future<void> _hydrateStashes() => session.sendForCheckout(
+    checkoutId,
+    createAbMessage('git:stash-list', {'projectId': projectId}),
+  );
 
   /// Reapplies [ref] and drops it on success — the Git panel banner's
   /// "Restore". Callers on a branch OTHER than the one the stash was made on
@@ -1027,12 +1065,22 @@ class FileService {
   void loadHistory() {
     _historyLatch?.settle();
     final latch = _historyLatch = ReplyLatch();
+    // Keeps whatever is already loaded on screen. `_handleGitLogResult`
+    // replaces the list wholesale for a `skip == 0` page, so clearing it here
+    // buys nothing and costs the caller its view: `_HistoryList` renders its
+    // full-pane spinner for exactly "initialLoad with no commits", which on a
+    // pull-to-refresh tore the RefreshIndicator out from under the gesture
+    // that started it and dropped the scroll position with it. Only a list
+    // that is genuinely empty is an initial load.
+    final history = _state.git.history;
     _setState(
       _state.copyWith(
         git: _state.git.copyWith(
-          history: GitHistoryState.empty.copyWith(
+          history: history.copyWith(
             loadingMore: true,
-            initialLoad: true,
+            initialLoad: history.commits.isEmpty,
+            hasMore: true,
+            clearError: true,
           ),
         ),
       ),
@@ -1058,6 +1106,7 @@ class FileService {
   }
 
   void _requestLogPage({required int skip, required ReplyLatch latch}) {
+    _pendingLogSkip = skip;
     session.sendForCheckout(
       checkoutId,
       createAbMessage('git:log', {
@@ -1072,6 +1121,7 @@ class FileService {
       ) {
         if (_disposed || _historyLatch != latch) return;
         _historyLatch = null;
+        _pendingLogSkip = null;
         _setState(
           _state.copyWith(
             git: _state.git.copyWith(
@@ -1278,6 +1328,7 @@ class FileService {
     _syncLatch = null;
     _historyLatch?.settle();
     _historyLatch = null;
+    _pendingLogSkip = null;
     for (final latch in _commitFilesLatches.values) {
       latch.settle();
     }
@@ -1289,6 +1340,7 @@ class FileService {
     session.unhydrateCheckout(checkoutId, 'file:selected');
     session.unhydrateCheckout(checkoutId, _treeHydratorKey);
     session.unhydrateCheckout(checkoutId, _syncHydratorKey);
+    session.unhydrateCheckout(checkoutId, _stashHydratorKey);
     await _heavySub?.cancel();
     _heavySub = null;
     await _statusSub?.cancel();
