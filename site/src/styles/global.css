@@ -136,9 +136,39 @@ body {
 
 /* ---- Atmosphere -------------------------------------------------------- */
 
-/* Signal radial glow — position with inset utilities on an absolute wrapper. */
+/* Signal radial glow — position with inset utilities on an absolute wrapper.
+   Only safe where a frame contains it (the closing CTA's bordered card); the hero
+   is full-bleed and needs .glow-hero below. */
 .glow-signal {
   background: radial-gradient(closest-side, rgba(210, 84, 42, 0.16), transparent 70%);
+}
+
+/* The hero's light, which is two different devices because a phone has no room
+   for the desktop one. Wide: a compact halo about a third of the frame across,
+   with dark air either side — the falloff is visible on every axis, which is the
+   only reason it reads as a light source at all. Narrow: that same fixed 980px
+   halo is wider than the viewport, so no falloff lands inside the frame and the
+   light flattens into a brown tint over the headline, ending in one hard
+   horizontal terminus under the kicker.
+   So below md it stops being an orb and becomes an edge: the gradient's centre
+   sits ON the top edge, so there is never a circle to resolve, and the falloff
+   runs down the one axis a phone has room for. Alpha drops with it — 0.16 across
+   the whole of a small frame is a far larger event than 0.16 across a third of a
+   large one, and it is sitting behind the lowest-contrast text on the page. */
+.glow-hero {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 340px;
+  background: radial-gradient(ellipse 150% 100% at 50% 0%, rgba(210, 84, 42, 0.11), transparent 72%);
+}
+@media (min-width: 48rem) {
+  .glow-hero {
+    inset: -14rem auto auto 50%;
+    height: 620px;
+    width: min(980px, 68vw);
+    transform: translateX(-50%);
+    background: radial-gradient(closest-side, rgba(210, 84, 42, 0.16), transparent 70%);
+  }
 }
 
 /* The namesake, made literal. Ruled lines at one pitch (square cells at any
@@ -166,6 +196,17 @@ body {
    background tiles from — percentages would drift off the grid. */
 .live-cells {
   mask-image: radial-gradient(130% 85% at 50% 8%, black 8%, transparent 72%);
+}
+/* Not below md. The cells are placed in raw px against a wide canvas, so on a
+   phone only the leftmost column is on screen and every one of those sits behind
+   the copy rather than beside it — a warm block fading in and out under muted
+   body text reads as a rendering fault, not as a machine waking up. The static
+   field stays; liveness is carried in the same viewport by the beta pill and by
+   the ProofCard's own loop, which says it far better than a background can. */
+@media (max-width: 47.999rem) {
+  .live-cells {
+    display: none;
+  }
 }
 .live-cells rect {
   fill: rgba(210, 84, 42, 0.14);

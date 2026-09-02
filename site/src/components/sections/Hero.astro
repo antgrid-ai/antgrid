@@ -19,7 +19,11 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
       stop around 1568px because past the shell the mask has faded the field out
       anyway, and the life belongs where the content is. */}
   <svg class="live-cells pointer-events-none absolute inset-0 h-full w-full" aria-hidden="true">
-    <rect x="96" y="128" width="64" height="32" style="animation-delay:0s" />
+    {/* Right gutter, not the left one. The shell is 72rem, so at 1440 a cell at
+        x=96 lands in the margin and reads as intended — but the margin shrinks
+        with the viewport, and by 1280 that same cell is a warm block sitting on
+        the kicker. Past the right edge it is simply clipped away instead. */}
+    <rect x="1216" y="128" width="64" height="32" style="animation-delay:0s" />
     <rect x="352" y="96" width="32" height="32" style="animation-delay:12.8s" />
     <rect x="640" y="160" width="32" height="32" style="animation-delay:4.8s" />
     <rect x="960" y="128" width="64" height="32" style="animation-delay:19.2s" />
@@ -35,7 +39,9 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
     <rect x="1024" y="448" width="32" height="32" style="animation-delay:11.2s" />
     <rect x="1376" y="512" width="64" height="32" style="animation-delay:17.6s" />
   </svg>
-  <div class="pointer-events-none absolute -top-56 left-1/2 h-[620px] w-[980px] -translate-x-1/2 glow-signal" aria-hidden="true"></div>
+  {/* Geometry lives with the paint in .glow-hero, not in utilities here: the
+      two change together across the md breakpoint and are meaningless apart. */}
+  <div class="glow-hero pointer-events-none" aria-hidden="true"></div>
 
   <div class="relative mx-auto max-w-shell px-6 pt-12 md:pt-18">
     <div class="mb-7 flex flex-wrap items-center gap-x-5 gap-y-3">
