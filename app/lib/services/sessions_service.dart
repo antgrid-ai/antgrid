@@ -57,6 +57,13 @@ class SessionOperationException implements Exception {
   String toString() => message ?? errorCode ?? 'Session operation failed';
 }
 
+/// One party waiting on a listing. [includeArchived] is what it asked for,
+/// which bounds which listings may answer it — see `_handleListResult`.
+typedef _PendingListing = ({
+  PendingReply<List<SessionEntry>> reply,
+  bool includeArchived,
+});
+
 class SessionsState {
   final String projectId;
   final List<SessionEntry> sessions;
@@ -115,7 +122,12 @@ class SessionsService {
   /// screen" the same way, so an empty declaration is nothing to restate.
   String? _focused;
 
-  final Map<String, PendingReply<List<SessionEntry>>> _pendingList = {};
+  /// Everyone waiting on a listing, keyed by the requestId they sent — or, for
+  /// a [nextListing] waiter, by an id that never went on the wire. See
+  /// [_handleListResult] for why a listing answers more than its own request.
+  final Map<String, _PendingListing> _pendingList = {};
+  final _listingsController =
+      StreamController<List<SessionEntry>>.broadcast();
   final Map<String, PendingReply<SessionEntry?>> _pendingMutations = {};
   final Map<String, PendingReply<SessionEntry?>> _pendingRefusableMutations =
       {};
@@ -125,6 +137,14 @@ class SessionsService {
 
   Stream<SessionsState> get stateStream => _stateController.stream;
   SessionsState get currentState => _state;
+
+  /// Every `session:list:result` as it lands, whoever asked for it and whether
+  /// or not it changed anything. [stateStream] cannot serve this: it drops a
+  /// listing identical to the state it already holds, which a bridge answering
+  /// a re-driven pull with an unchanged list routinely is — so a surface that
+  /// waits for "the bridge has answered" rather than "the list changed" (the
+  /// bootstrap's unanswered-listing notice) has to listen here.
+  Stream<List<SessionEntry>> get listings => _listingsController.stream;
   String get projectId => session.projectId;
 
   SessionsService.fromSession(this.session, {required this.cache})
@@ -187,9 +207,24 @@ class SessionsService {
     );
     _writeThrough(sessions);
 
-    if (requestId != null) {
-      _pendingList.remove(requestId)?.complete(sessions);
+    // A listing is idempotent view state, so one answers every waiter it
+    // satisfies and not only the request that carried its id: the hydrator's
+    // own pull and the bootstrap's go out within the same frame on a project
+    // open, and under a congested uplink whichever reply lands first is the
+    // answer to both. Without this the bootstrap can time out, and report that
+    // the sessions could not be loaded, above a list the other reply has
+    // already filled in. The one shape that does not satisfy a waiter is an
+    // archived-carrying listing answering a request that asked for none.
+    final carriesArchived = sessions.any((s) => s.archived);
+    for (final id in _pendingList.keys.toList()) {
+      final waiter = _pendingList[id]!;
+      final matches =
+          id == requestId || (!waiter.includeArchived && !carriesArchived);
+      if (!matches) continue;
+      _pendingList.remove(id);
+      waiter.reply.complete(sessions);
     }
+    if (!_listingsController.isClosed) _listingsController.add(sessions);
   }
 
   void _handleResult(Map<String, dynamic> j) {
@@ -294,11 +329,7 @@ class SessionsService {
 
   Future<List<SessionEntry>> requestList({bool includeArchived = false}) {
     final requestId = _newRequestId();
-    final pending = _newPending<List<SessionEntry>>(
-      () => _pendingList.remove(requestId),
-    );
-    _pendingList[requestId] = pending;
-    _setState(_state.copyWith(loading: true, clearError: true));
+    _registerListing(requestId, includeArchived: includeArchived);
     unawaited(
       _send(
         createAbMessage('session:list', {
@@ -307,7 +338,41 @@ class SessionsService {
         }),
       ),
     );
-    return pending.future;
+    return _pendingList[requestId]!.reply.future;
+  }
+
+  /// The next listing to land, from whichever request produces it, or a
+  /// [TimeoutException] after [timeout]. Sends nothing: the caller has already
+  /// asked and is extending its wait past [_kPendingReplyTimeout] because a late
+  /// reply is not a lost one — the bridge answers instantly, and the reply
+  /// queues behind bulk terminal output on the way back. A re-established
+  /// stream re-drives the hydrator's pull, so a reply that genuinely was lost
+  /// is answered by that one instead.
+  ///
+  /// Holds [SessionsState.loading] for its whole wait, the same as
+  /// [requestList], so the workspace keeps saying it is waiting rather than
+  /// calling the project empty a few seconds early.
+  Future<List<SessionEntry>> nextListing({required Duration timeout}) {
+    final waiterId = _newRequestId();
+    _registerListing(waiterId, includeArchived: false, timeout: timeout);
+    return _pendingList[waiterId]!.reply.future;
+  }
+
+  void _registerListing(
+    String id, {
+    required bool includeArchived,
+    Duration timeout = _kPendingReplyTimeout,
+  }) {
+    final pending = _newPending<List<SessionEntry>>(() {
+      _pendingList.remove(id);
+      // `loading` is "someone is still waiting on the bridge". The last waiter
+      // lapsing has to clear it, or an uncached project sits on "waiting for
+      // agent…" with no way to create a session for as long as the reply never
+      // comes (the only reader is `TerminalScreen`'s empty-state gate).
+      if (_pendingList.isEmpty) _setState(_state.copyWith(loading: false));
+    }, timeout: timeout);
+    _pendingList[id] = (reply: pending, includeArchived: includeArchived);
+    _setState(_state.copyWith(loading: true, clearError: true));
   }
 
   Future<SessionEntry?> create({
@@ -534,11 +599,12 @@ class SessionsService {
     await _statusSub?.cancel();
     _statusSub = null;
     await _stateController.close();
+    await _listingsController.close();
   }
 
   void _failPending(Object error) {
     for (final p in _pendingList.values) {
-      p.fail(error);
+      p.reply.fail(error);
     }
     _pendingList.clear();
     for (final p in _pendingMutations.values) {

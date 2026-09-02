@@ -71,6 +71,17 @@ import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import 'app_settings_screen.dart';
 
+/// How long past the service's own 15s reply bound the bootstrap keeps waiting
+/// for a session listing before it says so. Sized to outlast a reply queued
+/// behind a full-screen agent repaint on a slow uplink (tens of seconds) while
+/// still bounding how long an uncached project can sit on "waiting for agent…"
+/// with no way to create a session.
+const _kLateListingGrace = Duration(seconds: 45);
+
+/// The banner code the bootstrap files an unanswered listing under. App-side,
+/// never a bridge code: `friendlyErrorCopy` carries its copy.
+const _kSessionsBannerCode = 'SESSIONS';
+
 /// Mobile page order. The drawer is NOT a page — it stays a `Scaffold.drawer`
 /// so it slides in as a panel over the content rather than replacing it — but
 /// the swipe that reveals it is the same continuous rightward gesture that
@@ -133,6 +144,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   bool _prefsApplied = false;
   SessionUiKey? _sessionUiKey;
   final _mobileScaffoldKey = GlobalKey<ScaffoldState>();
+
+  /// Armed only after the bootstrap gave up on the session list: the one
+  /// listing that eventually lands retires the notice. See [_bootstrapSessions].
+  StreamSubscription<List<SessionEntry>>? _sessionsListingSub;
 
   /// Desktop-shaped layout, touch platform only: both the projects sidebar
   /// and the context panel are docked panes like the mouse desktop's Row
@@ -417,6 +432,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     WidgetsBinding.instance.removeObserver(this);
     _unsubscribeForegroundPush?.call();
     _unsubscribeForegroundPush = null;
+    _sessionsListingSub?.cancel();
+    _sessionsListingSub = null;
     _pageController.dispose();
     super.dispose();
   }
@@ -623,9 +640,13 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     }
 
     final svc = ref.read(sessionsServiceProvider);
+    // A fresh attempt: whatever an earlier run left on the banner — for this
+    // project or another, the banner is root-scoped — describes a wait that is
+    // over.
+    _clearSessionsBanner();
     List<SessionEntry> list;
     try {
-      list = await svc.requestList();
+      list = await _awaitSessionList(svc);
     } catch (e) {
       // Transport switched / service stopped mid-flight is benign — the
       // next project-open will retry. But a genuine error here means the
@@ -638,15 +659,29 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         // to a default and holds the explorer's checkout unsettled, so the
         // banner's "switch and back" would be the only way out.
         ref.read(pendingActiveSessionIdProvider.notifier).set(null);
+        AbLog.warn(
+          'WorkspaceShell',
+          'session list unanswered',
+          fields: {'project': triggeredFor, 'error': '$e'},
+        );
         ref
             .read(relayErrorBannerProvider.notifier)
             .set(
               RelayErrorBanner(
                 'SESSIONS',
-                'Couldn\'t load this project\'s sessions: $e — '
-                    'switch projects and back to retry.',
+                'No answer from the agent for this project\'s sessions: $e',
               ),
             );
+        // The wait is over but the reply may still come — on a reconnect the
+        // re-driven pull answers for it — and the notice must go with it, or
+        // it sits above a list that is by then correct until the user closes
+        // it by hand.
+        _sessionsListingSub?.cancel();
+        _sessionsListingSub = svc.listings.listen((_) {
+          _sessionsListingSub?.cancel();
+          _sessionsListingSub = null;
+          if (mounted) _clearSessionsBanner();
+        });
       }
       return;
     }
@@ -747,6 +782,31 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // move server-side recency (`SessionManager.focus` is still a no-op), so
       // nothing here may depend on it reordering the list — see the pick above.
       svc.focus(session.id);
+    }
+  }
+
+  /// The bootstrap's own list pull, extended past the service's 15s bound.
+  ///
+  /// Over a congested uplink the bridge answers within milliseconds and the
+  /// reply then queues behind bulk terminal output for tens of seconds
+  /// (measured: 27–30s behind a `claude --resume` repaint on a home
+  /// connection). Bannering at 15s called that a failure the user had to
+  /// recover from by hand, while the list filled in on its own moments later.
+  /// So a lapse first waits for the next listing to land from any request —
+  /// the late reply, or the hydrator's re-driven pull after a reconnect — and
+  /// only a wait that outlasts [_kLateListingGrace] as well is reported.
+  Future<List<SessionEntry>> _awaitSessionList(SessionsService svc) async {
+    try {
+      return await svc.requestList();
+    } on TimeoutException {
+      return svc.nextListing(timeout: _kLateListingGrace);
+    }
+  }
+
+  void _clearSessionsBanner() {
+    final notifier = ref.read(relayErrorBannerProvider.notifier);
+    if (ref.read(relayErrorBannerProvider)?.code == _kSessionsBannerCode) {
+      notifier.set(null);
     }
   }
 

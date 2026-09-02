@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/services/session_delete_policy.dart';
 
+import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
@@ -471,4 +472,136 @@ void main() {
       await session.close();
     },
   );
+
+  // A project open sends two `session:list`s in one frame (the hydrator's and
+  // the bootstrap's), and over a congested uplink either reply can land first.
+  // Both are the same idempotent listing, so whichever comes first is the
+  // answer to every waiter — the alternative was a bootstrap timing out above
+  // a list the other reply had already filled in.
+  group('listing waiters', () {
+    Map<String, dynamic> entry(String id, {bool archived = false}) => {
+      'id': id,
+      'name': id,
+      'createdAt': 0,
+      'lastUsedAt': 0,
+      'archived': archived,
+      'running': false,
+      'mode': 'terminal',
+    };
+
+    test('a listing from any request answers a pending requestList', () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      final future = svc.requestList();
+      await Future<void>.delayed(Duration.zero);
+      t.emit('session:list:result', {
+        'requestId': 'someone-elses',
+        'sessions': [entry('s1')],
+      });
+
+      final list = await future;
+      expect(list.map((s) => s.id), ['s1']);
+      expect(svc.currentState.loading, isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('nextListing sends nothing and completes on the next listing', () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      // The session's own hydrator pulls a listing on establishment; the
+      // waiter must add nothing to that.
+      await Future<void>.delayed(Duration.zero);
+      final pullsBefore = t.sent.where((m) => m['type'] == 'session:list');
+      final future = svc.nextListing(timeout: const Duration(seconds: 30));
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        t.sent.where((m) => m['type'] == 'session:list').length,
+        pullsBefore.length,
+      );
+      expect(svc.currentState.loading, isTrue);
+
+      t.emit('session:list:result', {
+        'requestId': 'hydrator',
+        'sessions': [entry('s1')],
+      });
+      expect((await future).map((s) => s.id), ['s1']);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test(
+      'an archived-carrying listing does not answer a waiter that asked for none',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await makeSession(t);
+        final cache = await CachedSessionsStore.open();
+        final svc = SessionsService.fromSession(session, cache: cache);
+
+        List<SessionEntry>? answer;
+        svc.requestList().then((l) => answer = l).ignore();
+        await Future<void>.delayed(Duration.zero);
+        final own =
+            t.sent.lastWhere((m) => m['type'] == 'session:list')['requestId'];
+
+        t.emit('session:list:result', {
+          'requestId': 'archived-pull',
+          'sessions': [entry('s1'), entry('s2', archived: true)],
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(answer, isNull, reason: 'a wider listing is not its answer');
+
+        // Its own reply always is, whatever it carries.
+        t.emit('session:list:result', {
+          'requestId': own,
+          'sessions': [entry('s1'), entry('s2', archived: true)],
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(answer?.map((s) => s.id), ['s1', 's2']);
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    // `loading` is what `TerminalScreen` gates its empty state on: while it is
+    // set the workspace says it is waiting, so the last waiter lapsing has to
+    // clear it or an unanswered project can never offer "+ new session".
+    test('loading holds while any waiter is pending, then clears', () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      fakeAsync((async) {
+        svc.requestList().ignore();
+        svc.nextListing(timeout: const Duration(seconds: 40)).ignore();
+        async.flushMicrotasks();
+        expect(svc.currentState.loading, isTrue);
+
+        async.elapse(const Duration(seconds: 16));
+        async.flushMicrotasks();
+        expect(
+          svc.currentState.loading,
+          isTrue,
+          reason: 'the longer waiter is still pending',
+        );
+
+        async.elapse(const Duration(seconds: 25));
+        async.flushMicrotasks();
+        expect(svc.currentState.loading, isFalse);
+      });
+
+      await svc.dispose();
+      await session.close();
+    });
+  });
 }

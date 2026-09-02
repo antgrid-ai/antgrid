@@ -94,6 +94,14 @@ String? friendlyErrorCopy(String? code) => switch (code) {
   'WORKTREE_WORKING_DIR_UNSAFE' =>
     'This session\'s agent.workingDir must be a path relative to the isolated '
         'checkout. Fix it in antgrid.yaml on that machine.',
+  // App-authored, not a bridge code: the workspace bootstrap's session listing
+  // went unanswered past its whole wait (`WorkspaceShellState._awaitSessionList`).
+  // The socket is usually healthy and the reply merely queued, so this promises
+  // the list rather than prescribing a recovery — the banner retires itself
+  // the moment a listing lands.
+  'SESSIONS' =>
+    'Still waiting for the agent to list this project\'s sessions. They\'ll '
+        'appear as soon as it answers.',
   _ => null,
 };
 

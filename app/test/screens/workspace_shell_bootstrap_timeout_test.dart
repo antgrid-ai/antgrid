@@ -7,6 +7,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:antgrid/providers/relay_error_banner.dart';
+import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/util/ab_log.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -86,5 +88,93 @@ void main() {
       isNotEmpty,
       reason: 'the dropped reply should be reported to app.log',
     );
+  });
+
+  // Over a congested uplink the bridge's reply queues behind bulk terminal
+  // output for tens of seconds (measured 27–30s). That is a late listing, not a
+  // lost one, so the bootstrap keeps waiting past the service's 15s bound and
+  // the eventual reply — from whichever request produced it — completes the
+  // open as if it had been prompt.
+  testWidgets('a listing late past 15s still completes the bootstrap', (
+    tester,
+  ) async {
+    final transport = FakeAgentTransport();
+    final container = await pumpWorkspaceShell(
+      tester,
+      transport: (_) => transport,
+    );
+    await tester.pump();
+    await tester.pump();
+
+    await tester.pump(const Duration(seconds: 20));
+    expect(container.read(relayErrorBannerProvider), isNull);
+    expect(
+      container.read(sessionsStateProvider).value?.loading,
+      isTrue,
+      reason: 'the grace wait keeps the workspace on "waiting for agent"',
+    );
+
+    transport.emit('session:list:result', {
+      'requestId': 'hydrator-not-bootstrap',
+      'sessions': [stoppedSession()],
+    });
+    await tester.pump();
+
+    expect(container.read(relayErrorBannerProvider), isNull);
+    expect(
+      transport.sent.where((m) => m['type'] == 'session:start'),
+      isNotEmpty,
+      reason: 'the late listing drives the same auto-start a prompt one does',
+    );
+    // The auto-start's own reply goes unanswered; let its bound lapse inside
+    // the test so nothing leaks into the next one.
+    await tester.pump(const Duration(seconds: 20));
+  });
+
+  testWidgets('a listing outlasting the grace is reported, then retired', (
+    tester,
+  ) async {
+    final transport = FakeAgentTransport();
+    final container = await pumpWorkspaceShell(
+      tester,
+      transport: (_) => transport,
+    );
+    await tester.pump();
+    await tester.pump();
+
+    // 15s pending bound + 45s grace, and a little.
+    await tester.pump(const Duration(seconds: 61));
+    await tester.runAsync(AbLog.flush);
+
+    expect(container.read(relayErrorBannerProvider)?.code, 'SESSIONS');
+    expect(
+      container.read(sessionsStateProvider).value?.loading,
+      isFalse,
+      reason: 'with no waiter left the workspace must offer "+ new session"',
+    );
+    expect(
+      transport.sent.where((m) => m['type'] == 'session:start'),
+      isEmpty,
+    );
+    expect(
+      logLines().where(
+        (l) =>
+            l['component'] == 'WorkspaceShell' &&
+            l['msg'] == 'session list unanswered',
+      ),
+      isNotEmpty,
+    );
+
+    // A listing that lands after the notice — a reconnect's re-driven pull —
+    // makes it untrue, and it goes on its own.
+    transport.emit('session:list:result', {
+      'requestId': 'redriven',
+      'sessions': [stoppedSession()],
+    });
+    await tester.pump();
+    expect(container.read(relayErrorBannerProvider), isNull);
+    // The listing's reconcile focuses the session, and that reply goes
+    // unanswered; let its bound lapse inside the test.
+    await tester.pump(const Duration(seconds: 20));
   });
 }
