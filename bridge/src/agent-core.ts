@@ -1328,6 +1328,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             if (runtime.disposed) return;
             if (!snap) {
               log.warn("snapshot requested for unknown terminal %s", msg.terminalId);
+              // Refused rather than ignored: the app keeps a tab for every id it
+              // ever saw, and a pull nothing answers leaves that tab blank on
+              // every reconnect (a setup transcript from before a restart is the
+              // usual one). The refusal is what lets it drop the tab.
+              sendFromRuntime(runtime, createMessage("control:result", {
+                ok: false,
+                verb: "terminal:snapshot:request",
+                terminalId: msg.terminalId,
+                error: {
+                  code: "UNKNOWN_TERMINAL",
+                  message: `no terminal ${msg.terminalId} in this checkout`,
+                },
+              }));
               return;
             }
             sendFromRuntime(runtime, createMessage("terminal:snapshot", {

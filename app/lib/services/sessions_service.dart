@@ -59,6 +59,10 @@ class SessionOperationException implements Exception {
 
 /// One party waiting on a listing. [includeArchived] is what it asked for,
 /// which bounds which listings may answer it — see `_handleListResult`.
+/// One `session:list:result`, landed. [restated] says it was identical to the
+/// state already held, so [SessionsService.stateStream] said nothing about it.
+typedef SessionListing = ({List<SessionEntry> sessions, bool restated});
+
 typedef _PendingListing = ({
   PendingReply<List<SessionEntry>> reply,
   bool includeArchived,
@@ -126,8 +130,7 @@ class SessionsService {
   /// a [nextListing] waiter, by an id that never went on the wire. See
   /// [_handleListResult] for why a listing answers more than its own request.
   final Map<String, _PendingListing> _pendingList = {};
-  final _listingsController =
-      StreamController<List<SessionEntry>>.broadcast();
+  final _listingsController = StreamController<SessionListing>.broadcast();
   final Map<String, PendingReply<SessionEntry?>> _pendingMutations = {};
   final Map<String, PendingReply<SessionEntry?>> _pendingRefusableMutations =
       {};
@@ -143,8 +146,9 @@ class SessionsService {
   /// listing identical to the state it already holds, which a bridge answering
   /// a re-driven pull with an unchanged list routinely is — so a surface that
   /// waits for "the bridge has answered" rather than "the list changed" (the
-  /// bootstrap's unanswered-listing notice) has to listen here.
-  Stream<List<SessionEntry>> get listings => _listingsController.stream;
+  /// bootstrap's unanswered-listing notice, the checkout sweep's second look)
+  /// has to listen here.
+  Stream<SessionListing> get listings => _listingsController.stream;
   String get projectId => session.projectId;
 
   SessionsService.fromSession(this.session, {required this.cache})
@@ -202,9 +206,11 @@ class SessionsService {
   void _handleListResult(Map<String, dynamic> j) {
     final requestId = j['requestId'] as String?;
     final sessions = _parseSessions(j['sessions']);
+    final before = _state;
     _setState(
       _state.copyWith(sessions: sessions, loading: false, clearError: true),
     );
+    final restated = identical(_state, before);
     _writeThrough(sessions);
 
     // A listing is idempotent view state, so one answers every waiter it
@@ -224,7 +230,9 @@ class SessionsService {
       _pendingList.remove(id);
       waiter.reply.complete(sessions);
     }
-    if (!_listingsController.isClosed) _listingsController.add(sessions);
+    if (!_listingsController.isClosed) {
+      _listingsController.add((sessions: sessions, restated: restated));
+    }
   }
 
   void _handleResult(Map<String, dynamic> j) {

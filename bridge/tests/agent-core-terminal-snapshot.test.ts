@@ -169,7 +169,7 @@ test("a warm snapshot request is answered with no history claim", async () => {
   expect(reply.scrollback).not.toContain("\x1b[3J");
 });
 
-test("a snapshot request for an unknown terminal sends nothing", async () => {
+test("a snapshot request for an unknown terminal is refused, not ignored", async () => {
   const { bus, sent } = await bootWithTerminal();
   sent.length = 0;
 
@@ -180,4 +180,15 @@ test("a snapshot request for an unknown terminal sends nothing", async () => {
   );
   await new Promise((resolve) => setTimeout(resolve, 400));
   expect(sent.filter((m) => m.type === "terminal:snapshot")).toEqual([]);
+  // The app holds a tab for the id it asked about and needs a reply that names
+  // it to let go; a silent miss leaves that tab blank on every reconnect.
+  const refusals = sent.filter((m) => m.type === "control:result");
+  expect(refusals).toHaveLength(1);
+  expect(refusals[0]).toMatchObject({
+    ok: false,
+    verb: "terminal:snapshot:request",
+    terminalId: "never-existed",
+    checkoutId: "main",
+    error: { code: "UNKNOWN_TERMINAL" },
+  });
 });

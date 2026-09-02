@@ -55,7 +55,16 @@ class ProjectSession {
   late final ProjectStatusNotifier status;
   late final CheckoutServices _mainCheckoutServices;
   final Map<String, CheckoutServices> _checkoutServices = {};
-  Set<String> _pendingCheckoutSweep = const {};
+
+  /// Checkouts the latest session list names, or null before the first list.
+  /// Null and "nothing but main" are different answers: before the first list
+  /// nothing is known to be dead, so nothing may be staged for the sweep.
+  Set<String>? _liveCheckouts;
+
+  /// Non-live checkout id → the sweep tick it was staged at. Released on the
+  /// first tick strictly after that one — see [_sweepCheckouts].
+  Map<String, int> _pendingCheckoutSweep = {};
+  int _checkoutSweepTick = 0;
   final StreamController<CheckoutServices> _checkoutBundlesController =
       StreamController<CheckoutServices>.broadcast();
   FileService get fileService => _mainCheckoutServices.fileService;
@@ -72,6 +81,8 @@ class ProjectSession {
   StreamSubscription? _fragSendErrSub;
   StreamSubscription? _streamReadySub;
   StreamSubscription? _checkoutSessionSub;
+  StreamSubscription? _checkoutListingSub;
+  StreamSubscription? _checkoutRefusalSub;
   bool _closed = false;
 
   ProjectSession({
@@ -110,10 +121,29 @@ class ProjectSession {
       final live = <String>{'main'};
       for (final entry in state.sessions) {
         live.add(entry.checkoutId);
+      }
+      _liveCheckouts = live;
+      for (final entry in state.sessions) {
         if (entry.checkoutId != 'main') servicesForCheckout(entry.checkoutId);
       }
-      _sweepCheckouts(live);
+      _sweepCheckouts();
     });
+    // A listing identical to the state already held never reaches the listener
+    // above, and after a delete that is every listing there is: the one that
+    // dropped the session changed the state, and each pull after it restates
+    // the same list. The sweep is deferred by one listing (see _sweepCheckouts)
+    // and would wait for a change that never comes, holding the dead bundle —
+    // and its hydrators — until some unrelated session moved.
+    _checkoutListingSub = sessionsService.listings
+        .where((listing) => listing.restated)
+        .listen((listing) {
+          _liveCheckouts = {
+            'main',
+            for (final entry in listing.sessions) entry.checkoutId,
+          };
+          _sweepCheckouts();
+        });
+    _checkoutRefusalSub = statusStream.listen(_onCheckoutRefusal);
     handlerService = HandlerService.fromSession(this);
     agentSessionService = AgentSessionService.fromSession(this);
     if (transport is StreamTransport) {
@@ -240,6 +270,15 @@ class ProjectSession {
     if (existing != null) return existing;
     final bundle = CheckoutServices(this, checkoutId);
     _checkoutServices[checkoutId] = bundle;
+    // A bundle for a checkout the list already says is gone is staged the
+    // moment it exists. Its creator is a reader with a stale id — a focus
+    // provider falling back to its cache — and the bundle's own hydrators start
+    // pulling for the dead checkout at once, so it must not wait for a listing
+    // to notice it.
+    final live = _liveCheckouts;
+    if (live != null && !live.contains(checkoutId)) {
+      _pendingCheckoutSweep.putIfAbsent(checkoutId, () => _checkoutSweepTick);
+    }
     _checkoutBundlesController.add(bundle);
     return bundle;
   }
@@ -247,28 +286,67 @@ class ProjectSession {
   CheckoutServices? existingServicesForCheckout(String checkoutId) =>
       _checkoutServices[checkoutId];
 
-  /// Releases bundles whose session is gone. Deferred by one emission: the
+  /// Releases bundles whose session is gone. Deferred by one listing: the
   /// providers that read a bundle are driven by the SAME session list, so
-  /// disposing on the emission that drops the session would tear it down under
+  /// disposing on the listing that drops the session would tear it down under
   /// a focus that has not moved off it yet. A bundle absent from two successive
   /// listings has no reader left. Every service holds transport hydrators, so
   /// leaving them registered replays requests for a deleted checkout on every
   /// reconnect.
-  void _sweepCheckouts(Set<String> live) {
-    for (final id in _pendingCheckoutSweep) {
-      if (live.contains(id)) continue;
-      unawaited(_checkoutServices.remove(id)?.dispose() ?? Future.value());
-      // Symmetric with the bridge's own dropCheckoutReplay: a removed worktree
-      // must not keep seeding a bundle that a stale id could still recreate.
-      _router.dropCheckoutReplay(id);
+  ///
+  /// Ticked once per listing whether or not it changed anything — a listing
+  /// the state dedupe swallowed is still a second look — so an entry staged at
+  /// an earlier tick is released here and one staged during this tick waits.
+  void _sweepCheckouts() {
+    _checkoutSweepTick++;
+    final live = _liveCheckouts ?? const {'main'};
+    for (final entry in _pendingCheckoutSweep.entries.toList()) {
+      if (live.contains(entry.key)) continue;
+      if (entry.value >= _checkoutSweepTick) continue;
+      _releaseCheckout(entry.key);
     }
     // Union, not just the bundle map: a checkout can leave durable frames the
     // router retains without ever getting a bundle (an archived session still
     // in the bridge's replay cache), and nothing else would ever evict them.
-    _pendingCheckoutSweep = <String>{
-      ..._checkoutServices.keys,
-      ..._router.replayCheckoutIds,
-    }.where((id) => !live.contains(id)).toSet();
+    _pendingCheckoutSweep = {
+      for (final id in <String>{
+        ..._checkoutServices.keys,
+        ..._router.replayCheckoutIds,
+      })
+        if (!live.contains(id))
+          id: _pendingCheckoutSweep[id] ?? _checkoutSweepTick,
+    };
+  }
+
+  void _releaseCheckout(String id) {
+    _pendingCheckoutSweep.remove(id);
+    unawaited(_checkoutServices.remove(id)?.dispose() ?? Future.value());
+    // Symmetric with the bridge's own dropCheckoutReplay: a removed worktree
+    // must not keep seeding a bundle that a stale id could still recreate.
+    _router.dropCheckoutReplay(id);
+  }
+
+  /// The bridge refuses every checkout-variable verb for a checkout it has no
+  /// runtime for with `UNKNOWN_CHECKOUT`. Coming from a bundle the list does not
+  /// name either, that is the bridge and the list agreeing the checkout is
+  /// gone, and the bundle is released at once: the refusal is answering one of
+  /// its own hydrators, which re-fire on every reconnect and are answered the
+  /// same way each time. `control:result` is not a parsed message, so this
+  /// reads the raw envelope. A checkout the list still names is left alone —
+  /// the runtime may simply not be up yet.
+  void _onCheckoutRefusal(Map<String, dynamic> json) {
+    if (json['type'] != 'control:result' || json['ok'] != false) return;
+    final error = json['error'];
+    if (error is! Map || error['code'] != 'UNKNOWN_CHECKOUT') return;
+    final id = checkoutIdForEnvelope(json);
+    if (id == 'main') return;
+    final live = _liveCheckouts;
+    if (live == null || live.contains(id)) return;
+    if (!_checkoutServices.containsKey(id) &&
+        !_router.replayCheckoutIds.contains(id)) {
+      return;
+    }
+    _releaseCheckout(id);
   }
 
   Iterable<CheckoutServices> get checkoutServiceBundles =>
@@ -327,6 +405,8 @@ class ProjectSession {
       if (_fragSendErrSub != null) _fragSendErrSub!.cancel(),
       if (_streamReadySub != null) _streamReadySub!.cancel(),
       if (_checkoutSessionSub != null) _checkoutSessionSub!.cancel(),
+      if (_checkoutListingSub != null) _checkoutListingSub!.cancel(),
+      if (_checkoutRefusalSub != null) _checkoutRefusalSub!.cancel(),
       sessionsService.dispose(),
       handlerService.dispose(),
       agentSessionService.dispose(),

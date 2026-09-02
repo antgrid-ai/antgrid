@@ -152,20 +152,112 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       await Future<void>.delayed(Duration.zero);
 
-      // Two DISTINCT listings without the session: the sweep is deferred by one
-      // emission (see _sweepCheckouts), and SessionsService drops a listing
-      // identical to the one it already holds.
+      // Two IDENTICAL listings without the session: the sweep is deferred by
+      // one listing (see _sweepCheckouts), and after a delete every listing
+      // restates the same list — SessionsService's state dedupe swallows the
+      // second, and the sweep must still count it.
       t.emit('session:list:result', {'sessions': <dynamic>[]});
       await Future<void>.delayed(Duration.zero);
-      t.emit('session:list:result', {
-        'sessions': [_sessionRow('other', 'main')],
-      });
+      t.emit('session:list:result', {'sessions': <dynamic>[]});
       await Future<void>.delayed(Duration.zero);
       await Future<void>.delayed(Duration.zero);
 
       final revived = session.servicesForCheckout('wt1');
       await Future<void>.delayed(Duration.zero);
       expect(revived.terminalService.currentState.tabs, isEmpty);
+    });
+
+    test('a bundle built for a dropped checkout is staged at once', () async {
+      final t = FakeAgentTransport();
+      final session = await openSession(t);
+      addTearDown(session.close);
+
+      t.emit('session:list:result', {'sessions': <dynamic>[]});
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      // A reader holding a stale id (a focus provider's cache fallback)
+      // resurrects the bundle after the list has already dropped it.
+      final stale = session.servicesForCheckout('wt1');
+      t.emit('session:list:result', {'sessions': <dynamic>[]});
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        session.existingServicesForCheckout('wt1'),
+        isNull,
+        reason: 'one restated listing later the stale bundle is gone; waiting '
+            'for a change the list will never make held it forever',
+      );
+      expect(identical(session.servicesForCheckout('wt1'), stale), isFalse);
+    });
+
+    test('an UNKNOWN_CHECKOUT refusal releases a bundle the list does not name',
+        () async {
+      final t = FakeAgentTransport();
+      final session = await openSession(t);
+      addTearDown(session.close);
+
+      t.emit('agent:status', _statusFor('wt1', 's1'));
+      t.emit('session:list:result', {
+        'sessions': [_sessionRow('s1', 'wt1')],
+      });
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      expect(session.existingServicesForCheckout('wt1'), isNotNull);
+
+      // The list drops the session; its bundle is staged, not yet released.
+      t.emit('session:list:result', {'sessions': <dynamic>[]});
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      expect(session.existingServicesForCheckout('wt1'), isNotNull);
+
+      // The bridge refuses one of the bundle's own pulls: the list and the
+      // bridge agree the checkout is gone, so nothing is left to wait for.
+      t.emit('control:result', {
+        'ok': false,
+        'verb': 'terminal:snapshot:request',
+        'checkoutId': 'wt1',
+        'error': {'code': 'UNKNOWN_CHECKOUT', 'message': 'unknown checkout'},
+      });
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(session.existingServicesForCheckout('wt1'), isNull);
+      final revived = session.servicesForCheckout('wt1');
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        revived.terminalService.currentState.tabs,
+        isEmpty,
+        reason: 'the replay is dropped with the bundle',
+      );
+    });
+
+    test('an UNKNOWN_CHECKOUT refusal leaves a listed checkout alone', () async {
+      final t = FakeAgentTransport();
+      final session = await openSession(t);
+      addTearDown(session.close);
+
+      t.emit('session:list:result', {
+        'sessions': [_sessionRow('s1', 'wt1')],
+      });
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      final bundle = session.existingServicesForCheckout('wt1');
+      expect(bundle, isNotNull);
+
+      // A runtime that is not up yet answers the same way; the list is the
+      // authority on whether the checkout exists.
+      t.emit('control:result', {
+        'ok': false,
+        'verb': 'terminal:snapshot:request',
+        'checkoutId': 'wt1',
+        'error': {'code': 'UNKNOWN_CHECKOUT', 'message': 'unknown checkout'},
+      });
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(identical(session.existingServicesForCheckout('wt1'), bundle), isTrue);
     });
 
     test('kCheckoutDurableReplayTypes are all checkout-variable', () {

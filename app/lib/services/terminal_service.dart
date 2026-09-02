@@ -139,8 +139,9 @@ class TerminalService {
   Future<void> _rehydrateTerminals() async {
     if (_disposed) return;
     // Cleared first and unconditionally, because a request is not a promise of
-    // a reply: an id the agent no longer knows is answered with a log line and
-    // no frame, and a send in a keyless window vanishes. Only the tabs whose
+    // a reply: an id the agent no longer knows is refused with no snapshot
+    // (an older agent only logs it), and a send in a keyless window vanishes.
+    // Only the tabs whose
     // reply lands re-arm a cutoff (in _applySnapshot), so a clear made
     // conditional on one would strand a cutoff above every seq a respawned PTY
     // emits and leave the pane blank behind a live process.
@@ -170,9 +171,9 @@ class TerminalService {
     if (invalidated) _setState(_state.copyWith(tabs: rehydrated));
     for (final tab in rehydrated.values) {
       // A pending tab is the app's own optimistic invention — the agent has
-      // never confirmed the id, so it would answer "snapshot requested for
-      // unknown terminal" and send nothing. Its own terminal:started carries
-      // the pull.
+      // never confirmed the id, so it would refuse the pull as an unknown
+      // terminal, which is the answer that drops a tab. Its own
+      // terminal:started carries the pull.
       if (_pendingTerminalIds.contains(tab.terminalId)) continue;
       _requestTerminalSnapshot(tab.terminalId);
     }
@@ -340,9 +341,34 @@ class TerminalService {
 
   void _onStatusJson(Map<String, dynamic> json) {
     if (_disposed) return;
+    if (json['type'] == 'control:result') {
+      _handleControlResult(json);
+      return;
+    }
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
     _handle(parsed);
+  }
+
+  /// `control:result` is not a parsed message, so the one refusal this service
+  /// acts on is read off the raw envelope: a snapshot pull the agent answered
+  /// with `UNKNOWN_TERMINAL`. The tab asked for a terminal the agent has no
+  /// record of — a setup transcript that did not survive a bridge restart, a
+  /// PTY forgotten while this app was away — and nothing will ever paint it, so
+  /// it is dropped as a delete would drop it, minus the stop (there is nothing
+  /// to stop) and the deleted-id suppression (the agent may yet report it
+  /// running again, and then it is a real terminal). A pending tab is the
+  /// app's own optimistic invention and is settled by its own start reply.
+  void _handleControlResult(Map<String, dynamic> json) {
+    if (json['ok'] != false) return;
+    if (json['verb'] != 'terminal:snapshot:request') return;
+    final error = json['error'];
+    if (error is! Map || error['code'] != 'UNKNOWN_TERMINAL') return;
+    final terminalId = json['terminalId'];
+    if (terminalId is! String) return;
+    if (_pendingTerminalIds.contains(terminalId)) return;
+    if (!_state.tabs.containsKey(terminalId)) return;
+    _dropTab(terminalId);
   }
 
   void _handle(Object message) {
@@ -865,6 +891,13 @@ class TerminalService {
       _canceledPendingTerminalIds.add(terminalId);
     }
     _settlePendingTerminal(terminalId);
+    if (!_state.tabs.containsKey(terminalId)) return;
+    _dropTab(terminalId);
+  }
+
+  /// Removes a held tab and every per-terminal record behind it, and moves the
+  /// active id off it. The agent side is the caller's business.
+  void _dropTab(String terminalId) {
     final tab = _state.tabs[terminalId];
     if (tab == null) return;
     _resizeTimers.remove(terminalId)?.cancel();

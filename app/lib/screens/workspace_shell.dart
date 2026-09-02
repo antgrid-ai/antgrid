@@ -49,7 +49,7 @@ import '../services/push_background_handler.dart'
     show decodePush, pushDataOf, pushDedupKey;
 import '../services/push_identity.dart';
 import '../services/sessions_service.dart'
-    show SessionOperationException, SessionsService;
+    show SessionListing, SessionOperationException, SessionsService;
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../utils/notification_routing.dart';
@@ -147,7 +147,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   /// Armed only after the bootstrap gave up on the session list: the one
   /// listing that eventually lands retires the notice. See [_bootstrapSessions].
-  StreamSubscription<List<SessionEntry>>? _sessionsListingSub;
+  StreamSubscription<SessionListing>? _sessionsListingSub;
 
   /// Desktop-shaped layout, touch platform only: both the projects sidebar
   /// and the context panel are docked panes like the mouse desktop's Row

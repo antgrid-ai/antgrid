@@ -187,6 +187,43 @@ void main() {
     },
   );
 
+  test(
+    'a snapshot pull refused as an unknown terminal drops the tab',
+    () async {
+      if (_skipWithoutNative()) return;
+      // The agent keeps no record of the id (a transcript from before a bridge
+      // restart), so nothing will ever paint the tab: every reconnect would
+      // re-pull and be refused again, and the pane sits blank under a live
+      // dot. The refusal names the tab, and the tab goes.
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      await seedTabA(t);
+      expect(session.terminalService.currentState.tabs.keys, ['a']);
+
+      t.emit('control:result', {
+        'ok': false,
+        'verb': 'terminal:snapshot:request',
+        'terminalId': 'a',
+        'error': {'code': 'UNKNOWN_TERMINAL', 'message': 'no terminal a'},
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(session.terminalService.currentState.tabs, isEmpty);
+      expect(session.terminalService.currentState.activeTerminalId, isNull);
+      expect(
+        t.sent.where((m) => m['type'] == 'terminal:stop'),
+        isEmpty,
+        reason: 'there is nothing on the agent to stop',
+      );
+
+      // Not a delete: the agent reporting it running again is a real terminal.
+      await seedTabA(t);
+      expect(session.terminalService.currentState.tabs.keys, ['a']);
+
+      await session.close();
+    },
+  );
+
   test('a legacy snapshot does not stack a copy per attach', () async {
     if (_skipWithoutNative()) return;
     final t = FakeAgentTransport();

@@ -531,6 +531,10 @@ const ControlResultMessage = BaseMessage.extend({
   verb: z.string().optional(),
   projectId: z.string().optional(),
   error: z.object({ code: z.string(), message: z.string() }).optional(),
+  // Set only on a refusal of a terminal-keyed verb (UNKNOWN_TERMINAL), so the
+  // app can tell WHICH tab the refusal is about — the request carried no
+  // requestId to correlate by.
+  terminalId: z.string().optional(),
   ...CheckoutScoped,
 });
 
