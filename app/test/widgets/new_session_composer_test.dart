@@ -8,6 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/widgets/ab_cross_fade.dart';
 import 'package:antgrid/design/widgets/ab_switch.dart';
 import 'package:antgrid/design/ab_theme.dart';
+import 'package:antgrid/launcher/host_control_client.dart'
+    show HostControlException;
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
@@ -177,7 +179,7 @@ Widget _host({
 }) {
   final composer = NewSessionComposer(
     onOpenFolder: onOpenFolder ?? () {},
-    submit: submit ?? (_, {allowActiveSessions = false}) async {},
+    submit: submit ?? (_, {allowActiveSessions = false, stashIfDirty = false}) async {},
   );
   return ProviderScope(
     overrides: overrides,
@@ -201,7 +203,7 @@ void main() {
       await tester.pumpWidget(
         _host(
           overrides: _baseOverrides(target: _project),
-          submit: (ref, {allowActiveSessions = false}) async {
+          submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
             submitCount++;
           },
         ),
@@ -234,7 +236,7 @@ void main() {
     await tester.pumpWidget(
       _host(
         overrides: _baseOverrides(target: _project),
-        submit: (ref, {allowActiveSessions = false}) async {
+        submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
           submitCount++;
         },
       ),
@@ -661,7 +663,7 @@ void main() {
                   builder: (context, ref, _) => ref.watch(_composerVisible)
                       ? NewSessionComposer(
                           onOpenFolder: () {},
-                          submit: (_, {allowActiveSessions = false}) async {},
+                          submit: (_, {allowActiveSessions = false, stashIfDirty = false}) async {},
                         )
                       : const SizedBox.shrink(),
                 ),
@@ -934,7 +936,7 @@ void main() {
                 ),
               ),
             ],
-            submit: (ref, {allowActiveSessions = false}) async {
+            submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
               submitCalls.add(allowActiveSessions);
               if (!allowActiveSessions) {
                 throw ActiveSessionsBranchSwitchException(
@@ -985,7 +987,7 @@ void main() {
               ),
             ),
           ],
-          submit: (ref, {allowActiveSessions = false}) async {
+          submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
             submitCalls.add(allowActiveSessions);
             if (!allowActiveSessions) {
               throw ActiveSessionsBranchSwitchException(
@@ -1018,6 +1020,115 @@ void main() {
     });
   });
 
+  group('git checkout refusals', () {
+    testWidgets(
+      'DIRTY_WORKTREE offers to stash and retries on confirm',
+      (tester) async {
+        var submitCalls = <bool>[];
+        await tester.pumpWidget(
+          _host(
+            overrides: [
+              ..._baseOverrides(target: _project),
+              newSessionBranchSelectionProvider.overrideWith(
+                () => ValueController(
+                  const NewSessionBranchSelection(
+                    targetId: 'p-my-repo',
+                    branch: 'dev',
+                  ),
+                ),
+              ),
+            ],
+            submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+              submitCalls.add(stashIfDirty);
+              if (!stashIfDirty) {
+                throw DirtyWorktreeBranchSwitchException(
+                  targetId: _project.id,
+                  branch: 'dev',
+                );
+              }
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.byKey(const Key('new-session-prompt-field')),
+          'start session',
+        );
+        await tester.pump();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(submitCalls, [false]);
+        expect(find.text('Stash uncommitted changes?'), findsOneWidget);
+
+        await tester.tap(find.text('Stash & switch'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(submitCalls, [false, true]);
+      },
+    );
+
+    // Only the TYPED DirtyWorktreeBranchSwitchException gets the stash offer
+    // above — a bare HostControlException carrying the same code (e.g. from a
+    // caller that skipped the conversion `startNewSession` does) has no safe
+    // retry to offer here, so it must land as clear, specific text (naming
+    // the files, as the bridge's own message does) rather than the raw
+    // exception dump the generic catch-all prints.
+    testWidgets(
+      'DIRTY_WORKTREE shows the bridge message, not a raw exception dump',
+      (tester) async {
+        await tester.pumpWidget(
+          _host(
+            overrides: [
+              ..._baseOverrides(target: _project),
+              newSessionBranchSelectionProvider.overrideWith(
+                () => ValueController(
+                  const NewSessionBranchSelection(
+                    targetId: 'p-my-repo',
+                    branch: 'dev',
+                  ),
+                ),
+              ),
+            ],
+            submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
+              throw HostControlException(
+                'DIRTY_WORKTREE',
+                'Switching to "dev" would overwrite uncommitted changes in: '
+                    'a.txt. Commit, stash, or discard them first.',
+              );
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.byKey(const Key('new-session-prompt-field')),
+          'start session',
+        );
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(
+          find.text(
+            'Switching to "dev" would overwrite uncommitted changes in: '
+            'a.txt. Commit, stash, or discard them first.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.textContaining('HostControlException'), findsNothing);
+        expect(find.textContaining('Failed to start session'), findsNothing);
+
+        await tester.pump(const Duration(seconds: 8));
+        await tester.pump(const Duration(milliseconds: 300));
+      },
+    );
+  });
+
   group('create-time isolation refusals', () {
     /// Submits, then settles far enough for the refusal's snack bar to render.
     Future<void> submitPrompt(WidgetTester tester) async {
@@ -1038,7 +1149,7 @@ void main() {
 
     Widget refusingHost(SessionOperationException refusal) => _host(
       overrides: _baseOverrides(target: _project),
-      submit: (ref, {allowActiveSessions = false}) async => throw refusal,
+      submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async => throw refusal,
     );
 
     testWidgets('a mapped code replaces the bridge wording', (tester) async {
@@ -1226,7 +1337,7 @@ void main() {
       await tester.pumpWidget(
         _host(
           overrides: _baseOverrides(target: _project),
-          submit: (ref, {allowActiveSessions = false}) async {
+          submit: (ref, {allowActiveSessions = false, stashIfDirty = false}) async {
             submitCount++;
           },
         ),
@@ -1485,7 +1596,7 @@ void main() {
                   builder: (context, ref, _) => ref.watch(_composerVisible)
                       ? NewSessionComposer(
                           onOpenFolder: () {},
-                          submit: (_, {allowActiveSessions = false}) async {},
+                          submit: (_, {allowActiveSessions = false, stashIfDirty = false}) async {},
                         )
                       : const SizedBox.shrink(),
                 ),

@@ -604,6 +604,11 @@ class TerminalService {
         layout: msg.layout ?? _state.layout,
         commands: msg.commands ?? _state.commands,
         gitBranch: msg.git?.branch ?? _state.gitBranch,
+        // Taken from the same frame as the branch, never carried: a status with
+        // no git block means the checkout stopped being a repository, and
+        // keeping the previous counts beside a cleared branch is worse than 0.
+        gitAhead: msg.git?.ahead ?? 0,
+        gitBehind: msg.git?.behind ?? 0,
         // Carried, not defaulted: a status frame says nothing about an
         // in-flight branch list or a checkout error, and rebuilding without
         // them empties an open branch picker and swallows the failure toast.

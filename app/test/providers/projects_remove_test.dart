@@ -8,10 +8,8 @@ import 'package:antgrid/project/project_status.dart';
 import 'package:antgrid/project/project_status_cache.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/projects.dart';
-import 'package:antgrid/providers/recent_ports.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/project_store.dart';
-import 'package:antgrid/storage/recent_ports_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -56,7 +54,7 @@ void main() {
   });
 
   test(
-    'remove purges cached sessions, recent ports, and the status cache file',
+    'remove purges cached sessions and the status cache file',
     () async {
       final projectStore = await ProjectStore.open();
       await projectStore.upsert(_project('p1'));
@@ -66,15 +64,10 @@ void main() {
       await cachedSessions.put('p1', [_session('a')]);
       await cachedSessions.put('p2', [_session('b')]);
 
-      final recentPorts = await RecentPortsStore.open();
-      await recentPorts.add('p1', 3000, 'http');
-      await recentPorts.add('p2', 8080, 'http');
-
       final container = ProviderContainer(
         overrides: [
           projectStoreProvider.overrideWithValue(projectStore),
           cachedSessionsStoreProvider.overrideWithValue(cachedSessions),
-          recentPortsStoreProvider.overrideWithValue(recentPorts),
           projectStatusCacheProvider.overrideWithValue(statusCache),
           // Real registry whose onEvict WRITES a status file — this reproduces
           // the eviction-writes-status race the delete path must defeat.
@@ -97,7 +90,6 @@ void main() {
       );
       addTearDown(container.dispose);
       addTearDown(cachedSessions.close);
-      addTearDown(recentPorts.close);
 
       // Mark p1 warm so the delete-path eviction actually fires onEvict (which
       // writes the status file we then expect to be purged).
@@ -110,12 +102,10 @@ void main() {
       // p1 fully purged...
       expect(container.read(projectsProvider).map((p) => p.projectId), ['p2']);
       expect(cachedSessions.get('p1'), isEmpty);
-      expect(recentPorts.list('p1'), isEmpty);
       expect(await statusCache.read('p1'), isNull);
 
       // ...p2 untouched.
       expect(cachedSessions.get('p2').map((s) => s.id), ['b']);
-      expect(recentPorts.list('p2').map((e) => e.port), [8080]);
     },
   );
 }

@@ -3,6 +3,8 @@
 // NOTHING for Alt+<printable>, and an over-eager paste interception swallows the
 // chord an agent CLI binds for itself (Claude Code's paste-image is ctrl+v
 // everywhere except Windows/WSL, where it is alt+v).
+import 'dart:ui' as ui;
+
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -457,5 +459,106 @@ void main() {
 
       expect(written, isNot(contains(_esc)));
     },
+  );
+
+  _platformTestWidgets(
+    'Windows: an injected Ctrl+V still pastes when the embedder '
+    'de-synchronizes Ctrl mid-chord',
+    TargetPlatform.windows,
+    (tester) async {
+      // Windows clipboard history (Win+V) pastes by injecting Ctrl+V with no
+      // scancode, which sets VK_CONTROL but not VK_LCONTROL. Flutter's Windows
+      // embedder re-syncs the SIDED modifiers on every key event, decides the
+      // Ctrl it just delivered is not down, and synthesizes an up for it BEFORE
+      // the V — then a down again after it. Measured on Flutter 3.44 /
+      // Windows 11; without the wrapper's own view of the chord this pasted
+      // nothing and typed a bare `v` into the agent.
+      final written = await pumpTerminal(
+        tester,
+        't-injected-paste',
+        clipboardText: 'pasted',
+      );
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      _synthesizedControl(ui.KeyEventType.up);
+      await tester.sendKeyDownEvent(
+        LogicalKeyboardKey.keyV,
+        character: 'v',
+      );
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+      _synthesizedControl(ui.KeyEventType.down);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+
+      expect(String.fromCharCodes(written), 'pasted');
+    },
+  );
+
+  _platformTestWidgets(
+    'Windows: a numpad key with NumLock off reaches the PTY',
+    TargetPlatform.windows,
+    (tester) async {
+      // No character metadata is exactly what NumLock-off looks like, and
+      // Ghostty's shim resolves a numpad key to neither a key enum nor
+      // printable text — so before this the whole numpad wrote nothing at all.
+      final written = await pumpTerminal(tester, 't-numpad-navigation');
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.numpad4);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.numpad4);
+      await tester.pumpAndSettle();
+
+      // Left arrow, DECCKM off.
+      expect(written, [_esc, 0x5B, 0x44]);
+    },
+  );
+
+  _platformTestWidgets(
+    'Windows: a Ctrl the wrapper never saw pressed still counts as held',
+    TargetPlatform.windows,
+    (tester) async {
+      // The mirror is three-valued for this case: Ctrl-clicking into the
+      // terminal while already holding Ctrl leaves it with no real event for
+      // that key, so it must defer to `HardwareKeyboard` rather than call the
+      // chord released and eat the paste.
+      final written = await pumpTerminal(
+        tester,
+        't-ctrl-before-focus',
+        clipboardText: 'deferred',
+      );
+
+      // A synthesized down is how the framework reports a modifier it caught up
+      // on rather than saw pressed, so it updates `HardwareKeyboard` while the
+      // mirror deliberately learns nothing from it.
+      _synthesizedControl(ui.KeyEventType.down);
+      await tester.pumpAndSettle();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV, character: 'v');
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+      _synthesizedControl(ui.KeyEventType.up);
+      await tester.pumpAndSettle();
+
+      expect(String.fromCharCodes(written), 'deferred');
+    },
+  );
+}
+
+/// Dispatches the synthesized Ctrl event Flutter's Windows embedder emits when
+/// it re-synchronizes modifier state. `KeyEventSimulator` only produces real
+/// events, and the whole point of the case under test is that these are not.
+///
+/// `keyEventManager` is the only door a synthesized event can come through —
+/// its replacement (`HardwareKeyboard.addHandler`) receives events rather than
+/// injecting them, and updating `HardwareKeyboard` alone would never reach the
+/// focus-manager handler under test.
+// ignore: deprecated_member_use
+void _synthesizedControl(ui.KeyEventType type) {
+  // ignore: deprecated_member_use
+  ServicesBinding.instance.keyEventManager.handleKeyData(
+    ui.KeyData(
+      timeStamp: Duration.zero,
+      type: type,
+      physical: PhysicalKeyboardKey.controlLeft.usbHidUsage,
+      logical: LogicalKeyboardKey.controlLeft.keyId,
+      character: null,
+      synthesized: true,
+    ),
   );
 }

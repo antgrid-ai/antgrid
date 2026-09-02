@@ -351,6 +351,26 @@ class DemoTransport extends BufferedAgentTransport {
       case 'git:list-branches':
         return <Map<String, Object?>>[kDemoGitBranches];
 
+      // No fixture curates a commit log, and fabricating SHAs/dates that
+      // nothing else in the demo can act on risks looking broken rather than
+      // read-only — an empty page (renders as "No commits yet") is the
+      // honest answer, consistent with every other git verb here refusing to
+      // mutate anything real. Answered explicitly rather than falling into
+      // the fire-and-forget default: unlike a mutation, the History tab is
+      // WAITING on this reply and would otherwise sit on its spinner for the
+      // full gitActionTimeout.
+      case 'git:log':
+        return <Map<String, Object?>>[
+          <String, Object?>{
+            'type': 'git:log-result',
+            'projectId': kDemoProjectId,
+            'checkoutId': 'main',
+            'commits': const <Object?>[],
+            'skip': message['skip'] as int? ?? 0,
+            'hasMore': false,
+          },
+        ];
+
       case 'git:checkout':
         return <Map<String, Object?>>[
           <String, Object?>{
@@ -379,6 +399,34 @@ class DemoTransport extends BufferedAgentTransport {
       case 'git:unstage':
         return <Map<String, Object?>>[
           _gitFailure('git:unstage-result', files: message['files']),
+        ];
+
+      case 'git:sync':
+        return <Map<String, Object?>>[
+          <String, Object?>{
+            ..._gitFailure('git:sync-result'),
+            'op': message['op'] as String? ?? 'push',
+            'branch': kDemoBranch,
+            'failureKind': 'unknown',
+          },
+        ];
+
+      // Non-zero counts on purpose: the demo should show the sync control in
+      // the state worth looking at, not greyed out with nothing to do.
+      case 'git:sync-status':
+        return <Map<String, Object?>>[
+          <String, Object?>{
+            'type': 'git:sync-state',
+            'projectId': kDemoProjectId,
+            'checkoutId': 'main',
+            'branch': kDemoBranch,
+            'remote': 'origin',
+            'remoteBranch': kDemoBranch,
+            'ahead': 2,
+            'behind': 1,
+            'hasUpstream': true,
+            'hasRemote': true,
+          },
         ];
 
       case 'file:search':

@@ -78,6 +78,7 @@ const GitCheckoutParams = z.object({
   projectId: z.string(),
   branch: z.string().min(1),
   allowActiveSessions: z.boolean().optional(),
+  stashIfDirty: z.boolean().optional(),
 });
 
 /** Desktop warm-core cap (mirrors the app's kWarmCapLocal). The host runs on a
@@ -987,7 +988,7 @@ export class HostServer {
         error: { code: "E_BAD_PARAMS", message: parsed.error.issues.map((i) => i.message).join("; ") },
       });
     }
-    const { projectId, branch, allowActiveSessions } = parsed.data;
+    const { projectId, branch, allowActiveSessions, stashIfDirty } = parsed.data;
     if (!isSafeProjectId(projectId)) {
       return createMessage("response", {
         requestId: req.requestId,
@@ -1045,12 +1046,12 @@ export class HostServer {
         }
       }
 
-      const res = await checkoutLocalBranch(seen.path, branch);
+      const res = await checkoutLocalBranch(seen.path, branch, { stashIfDirty });
       await this.refreshWarmGitState(projectId, seen.path);
       return createMessage("response", {
         requestId: req.requestId,
         ok: true,
-        result: { current: res.current },
+        result: { current: res.current, stashed: res.stashed },
       });
     } catch (err: any) {
       return createMessage("response", {
@@ -1367,9 +1368,9 @@ export class HostServer {
             }
           }
 
-          const res = await checkoutLocalBranch(req.projectPath, req.branch);
+          const res = await checkoutLocalBranch(req.projectPath, req.branch, { stashIfDirty: req.stashIfDirty });
           await this.refreshWarmGitState(req.projectId, req.projectPath);
-          return { id: req.id, ok: true, type: "git:checkout", current: res.current };
+          return { id: req.id, ok: true, type: "git:checkout", current: res.current, stashed: res.stashed };
         } catch (err: any) {
           return {
             id: req.id,

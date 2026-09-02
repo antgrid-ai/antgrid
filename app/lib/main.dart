@@ -40,7 +40,6 @@ import 'providers/projects.dart';
 import 'providers/provider_retry.dart';
 import 'providers/push.dart';
 import 'providers/recent_agents.dart';
-import 'providers/recent_ports.dart';
 import 'navigation/nav_console.dart';
 import 'navigation/nav_controller.dart';
 import 'navigation/nav_serialization.dart';
@@ -60,7 +59,6 @@ import 'storage/drawer_order_store.dart';
 import 'storage/first_run_store.dart';
 import 'storage/project_store.dart';
 import 'storage/recent_agents_store.dart';
-import 'storage/recent_ports_store.dart';
 import 'storage/update_handoff_store.dart';
 import 'update/update_gate.dart';
 import 'util/ab_log.dart';
@@ -140,7 +138,6 @@ Future<void> main() async {
   final (
     projectStore,
     recentAgentsStore,
-    recentPortsStore,
     drawerOrderStore,
     drawerCollapsedStore,
     cachedSessionsStore,
@@ -150,7 +147,6 @@ Future<void> main() async {
   ) = await (
     ProjectStore.open(),
     RecentAgentsStore.open(),
-    RecentPortsStore.open(),
     DrawerOrderStore.open(),
     DrawerCollapsedStore.open(),
     CachedSessionsStore.open(),
@@ -195,7 +191,6 @@ Future<void> main() async {
     overrides: [
       projectStoreProvider.overrideWithValue(projectStore),
       recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
-      recentPortsStoreProvider.overrideWithValue(recentPortsStore),
       drawerOrderStoreProvider.overrideWithValue(drawerOrderStore),
       drawerCollapsedStoreProvider.overrideWithValue(drawerCollapsedStore),
       cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),

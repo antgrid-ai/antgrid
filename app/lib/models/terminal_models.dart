@@ -111,6 +111,12 @@ class TerminalState {
   final LayoutConfig? layout;
   final List<CommandInfo>? commands;
   final String? gitBranch;
+
+  /// Ahead/behind for [gitBranch], carried on the same `agent:status` frame it
+  /// comes from. Local counts, so as fresh as the last fetch — see
+  /// `GitSyncState` for why nothing on this path may reach the network.
+  final int gitAhead;
+  final int gitBehind;
   final List<String> gitBranches;
   final bool gitBranchesLoading;
   final String? gitBranchesError;
@@ -125,6 +131,8 @@ class TerminalState {
     this.layout,
     this.commands,
     this.gitBranch,
+    this.gitAhead = 0,
+    this.gitBehind = 0,
     this.gitBranches = const [],
     this.gitBranchesLoading = false,
     this.gitBranchesError,
@@ -152,6 +160,8 @@ class TerminalState {
     LayoutConfig? layout,
     List<CommandInfo>? commands,
     String? gitBranch,
+    int? gitAhead,
+    int? gitBehind,
     List<String>? gitBranches,
     bool? gitBranchesLoading,
     String? gitBranchesError,
@@ -171,6 +181,8 @@ class TerminalState {
       layout: layout ?? this.layout,
       commands: commands ?? this.commands,
       gitBranch: gitBranch ?? this.gitBranch,
+      gitAhead: gitAhead ?? this.gitAhead,
+      gitBehind: gitBehind ?? this.gitBehind,
       gitBranches: gitBranches ?? this.gitBranches,
       gitBranchesLoading: gitBranchesLoading ?? this.gitBranchesLoading,
       gitBranchesError: clearGitBranchesError
