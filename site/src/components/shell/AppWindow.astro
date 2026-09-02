@@ -1,0 +1,71 @@
+---
+import { Icon } from "astro-icon/components";
+import Mark from "../ui/Mark.astro";
+
+// The one window chrome every scene reuses. Scenes fill panes; they never draw
+// their own frame. Two spellings of the frame is how two scenes end up reading
+// as two different products.
+//
+// This bar is the app's own, not a generic window: Antgrid draws its own title
+// bar (no OS one exists), so the mac traffic lights this used to carry were a
+// stock "screenshot" signal for a product that has never looked like that. The
+// order below — mark, sidebar toggle, history, centred session search, the
+// Remote pill, the panel toggle, then hand-drawn window controls — is the order
+// the app ships. Changing it here without changing it there sells a window the
+// reader will not find.
+//
+// Everything inside a scene is painted from the `ab-` tokens (global.css),
+// which mirror app/lib/design/ab_colors.dart. A scene that reaches for
+// --color-panel or --color-chrome has quietly turned the window back into a
+// site card, which is the one thing this component exists to prevent.
+interface Props {
+  /** 3 gives the context column back above 64rem. Only the workspace wants it. */
+  panes?: 2 | 3;
+  /** The app's `Remote on` state chip. Off is the fresh-install default. */
+  remote?: boolean;
+  class?: string;
+}
+
+const { panes = 2, remote = true, class: cls = "" } = Astro.props;
+---
+<div class={`appwin overflow-hidden rounded-lg border border-ab-line-strong bg-ab-deep shadow-[0_24px_70px_-30px_rgba(0,0,0,0.9)] ${cls}`}>
+  {/* Decorative throughout: nothing in this bar is a control anyone can press,
+      so it is hidden from assistive tech rather than announced as a toolbar of
+      dead buttons. The scenes below it carry the readable content. */}
+  <div class="flex h-9 items-center gap-1.5 border-b border-ab-line bg-ab-deepest px-2" aria-hidden="true">
+    <Mark class="size-3.5 shrink-0 text-ab-text2" />
+    <Icon name="tabler:layout-sidebar" class="shrink-0 text-ab-dim" width="14" height="14" />
+    <span class="hidden shrink-0 items-center gap-0.5 pl-1 sm:flex">
+      <Icon name="tabler:chevron-left" class="text-ab-dim" width="14" height="14" />
+      <Icon name="tabler:chevron-right" class="text-ab-line-strong" width="14" height="14" />
+    </span>
+
+    <span class="flex flex-1 justify-center px-2">
+      <span class="hidden w-full max-w-[22rem] items-center gap-1.5 rounded-md border border-ab-line bg-ab-surface px-2 py-1 md:flex">
+        <Icon name="tabler:search" class="shrink-0 text-ab-dim" width="12" height="12" />
+        <span class="truncate text-meta text-ab-dim">Search sessions…</span>
+      </span>
+    </span>
+
+    {remote && (
+      <span class="hidden shrink-0 items-center gap-1.5 rounded-md border border-ab-run/35 bg-ab-run/10 px-2 py-1 text-meta text-ab-run sm:flex">
+        <Icon name="tabler:antenna-bars-5" width="12" height="12" />
+        Remote on
+      </span>
+    )}
+    <Icon name="tabler:layout-sidebar-right" class="ml-1 shrink-0 text-ab-dim" width="14" height="14" />
+    <span class="ml-1 flex shrink-0 items-center gap-2.5 pl-1">
+      <Icon name="tabler:minus" class="text-ab-mute" width="12" height="12" />
+      <Icon name="tabler:square" class="text-ab-mute" width="10" height="10" />
+      <Icon name="tabler:x" class="text-ab-mute" width="12" height="12" />
+    </span>
+  </div>
+
+  {/* Pane order is document order; which of them survive a given width is
+      decided in .appwin-panes (global.css), not here. */}
+  <div class={`appwin-panes ${panes === 3 ? "appwin-panes--3" : ""}`}>
+    <slot name="rail" />
+    <slot />
+    <slot name="ctx" />
+  </div>
+</div>

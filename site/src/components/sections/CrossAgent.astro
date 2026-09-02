@@ -1,13 +1,8 @@
 ---
 import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
-import Chip from "../ui/Chip.astro";
 import UseCase from "../ui/UseCase.astro";
 
-// Keep in lockstep with AGENTS in bridge/src/agents/registry.ts — these are the
-// agents wired for notifications and session naming. Anything else still runs (the
-// "any terminal agent" chip), it just gets no integration, so it must not be named here.
-const agents = ["Claude Code", "Codex", "opencode", "Cursor", "GitHub Copilot", "Kilo", "Kimi", "Mistral Vibe"];
 const steps = [
   { n: 1, icon: "tabler:download", title: "Install on your machine", body: "The desktop app runs your agents in real terminals and links them to your phone — Windows, macOS, Linux.", accent: false },
   { n: 2, icon: "tabler:terminal-2", title: "Run any agent", body: "Start Claude Code, Codex or Cursor exactly how you do now. antgrid wraps them — no workflow change.", accent: false },
@@ -23,13 +18,9 @@ const steps = [
     antgrid doesn't replace your coding agent — it's the command centre over the ones you already run. No new model, no new CLI to learn.
   </p>
 
-  <div class="mb-6 flex flex-wrap gap-2">
-    {agents.map((a) => (
-      <Chip class="px-3 py-1.5 text-meta text-ink2"><Icon name="tabler:terminal-2" class="text-signal" width="14" height="14" />{a}</Chip>
-    ))}
-    <Chip variant="dashed" class="px-3 py-1.5 text-meta"><Icon name="tabler:plus" width="13" height="13" />any terminal agent</Chip>
-  </div>
-
+  {/* The roster moved to Compat.astro, directly under the hero: "does this work
+      with my agent" gates whether a reader keeps scrolling, so it cannot be
+      answered in section seven. This section keeps the promise and the setup. */}
   <UseCase class="mb-14 max-w-xl">Pick the agent per task, not per tool — the command centre stays the same.</UseCase>
 
   <p class="mb-6 font-mono text-marker uppercase tracking-[0.18em] text-muted2">How it works</p>

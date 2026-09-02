@@ -1,36 +1,50 @@
 # Antgrid
 
-**Your agent says it's done. Make it prove it.**
+**Your machines. Your agents. One control plane.**
 
-Evidence-gated supervision for the CLI coding agents you already run — on your own
-hardware, end-to-end encrypted.
+Every CLI coding agent you run, on every machine you own, in one place — end-to-end
+encrypted, on hardware you control.
 
+[![CI](https://github.com/antgrid-ai/antgrid/actions/workflows/ci.yml/badge.svg)](https://github.com/antgrid-ai/antgrid/actions/workflows/ci.yml)
 [![License: Elastic License 2.0](https://img.shields.io/badge/license-Elastic%20License%202.0-4b5563?style=flat)](LICENSE.md)
 [![Latest release](https://img.shields.io/github/v/release/antgrid-ai/antgrid?style=flat&logo=github&label=release)](https://github.com/antgrid-ai/antgrid/releases/latest)
 [![Stars](https://img.shields.io/github/stars/antgrid-ai/antgrid?style=flat&logo=github)](https://github.com/antgrid-ai/antgrid/stargazers)
 
 Antgrid runs the coding agents you already use — Claude Code, Codex, Cursor and others —
-in real terminals on your own hardware. Arm its supervisor on a session and it watches the
-agent's attention signals, answers what it can, escalates what it can't, and calls a task
-done only on concrete evidence — test output, exit codes, a diff — rather than the agent's
-own report.
+in real terminals on your own hardware, and puts one screen over all of them: every
+session on every machine you have signed in, grouped by the machine it is on. Around each
+agent it puts the context you need to check the work yourself — multi-session terminals, a
+file tree, git review with diffs, and a live browser preview. The same workspace opens on
+a phone, over a relay that is end-to-end encrypted and cannot read a byte of what passes
+through it.
 
-Around each agent it puts the context you need to check that work yourself: multi-session
-terminals, a file tree, git review with diffs, and a live browser preview. The same
-workspace opens on a phone, over a relay that is end-to-end encrypted and cannot read a
-byte of what passes through it.
+Arm its supervisor on a session and it goes further: it watches the agent's attention
+signals, answers what it can, escalates what it can't, and calls a task done only on
+concrete evidence — test output, exit codes, a diff — rather than the agent's own report.
+That part is opt-in and it is the paid tier — `CAPABILITIES` in
+[`bridge/src/entitlement.ts`](bridge/src/entitlement.ts) is the whole capability gate. The
+only other paid line is how many machines one account may run agents on
+(`FREE_WORKER_LIMIT` in [`web/src/billing/plans.ts`](web/src/billing/plans.ts)); everything
+else is free.
 
 Antgrid does not replace your agent and ships no model of its own.
 
-> Status: pre-release, working towards v1.
+> [!NOTE]
+> **Pre-release, working towards v1.**
+>
+> **Licence** — source-available under [Elastic License 2.0](#licence): free to read,
+> fork, modify and self-host, including commercially. Not OSI open source.
+>
+> **Contributing** — bug reports are welcome; pull requests are not open yet
+> ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Features
 
-- **Supervisor.** Arm it on a session and it watches the agent's attention signals,
-  answers what it can, escalates what it can't, and calls a task done only on concrete
-  evidence — test output, exit codes — rather than the agent's own report. You can also
-  give it follow-up steps to carry out once the task is done; it works through them in
-  order and stays armed until each one is satisfied.
+- **Supervisor** *(paid tier)*. Arm it on a session and it watches the agent's attention
+  signals, answers what it can, escalates what it can't, and calls a task done only on
+  concrete evidence — test output, exit codes — rather than the agent's own report. You
+  can also give it follow-up steps to carry out once the task is done; it works through
+  them in order and stays armed until each one is satisfied.
 - **Bring your own agent.** Claude Code, Codex, opencode, Cursor, GitHub Copilot,
   Antigravity, Kilo, Kimi and Mistral Vibe are wired for notifications and session naming
   — the current set is `AGENTS` in [`bridge/src/agents/registry.ts`](bridge/src/agents/registry.ts).
@@ -82,6 +96,16 @@ feature flag.
 
 Encryption protects the transport. It does not sandbox the agent, and it cannot make an
 untrusted agent safe to run on your machine.
+
+And two things the list above is not. It is not an audit: there has been no external
+penetration test and no certification. And it does not empty the trust boundary — it moves
+the relay out of it, not our account service. Your phone learns a machine's Ed25519
+identity from your account's device inventory, which `app.antgrid.ai` serves, so that
+service is trusted to hand you the right key even though the relay never is.
+
+None of this needs taking on trust. The handshake specification, both implementations and
+the relay itself are linked above and in this repo; [SECURITY.md](SECURITY.md) is the
+reporting policy if you find something wrong with them.
 
 ## Architecture
 

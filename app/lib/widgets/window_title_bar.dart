@@ -21,7 +21,7 @@ import '../providers/providers.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
-import '../utils/platform_utils.dart';
+import '../util/detached.dart';
 import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';
 import 'agent_panel.dart';
@@ -160,10 +160,8 @@ class _DragRegion extends ConsumerWidget {
 /// [WindowTitleBarContents._searchGutter]'s reserve measure it from here, so
 /// neither can disagree with what the buttons actually occupy.
 @visibleForTesting
-double iconSlotExtent(BuildContext context) => math.max(
-  MediaQuery.textScalerOf(context).scale(AbTokens.iconButtonBox),
-  isMobilePlatform ? AbTokens.tapTargetMin : 0.0,
-);
+double iconSlotExtent(BuildContext context) =>
+    AbIconButton.footprintWidth(context);
 
 /// Empty stand-in occupying exactly one [iconSlotExtent], for a pane toggle no
 /// route has published. A box that doesn't track the button's real footprint
@@ -441,7 +439,13 @@ class WindowTitleBarContents extends ConsumerWidget {
 /// `agent_panel.dart` — the mobile header and the desktop `AgentBar` — kept as
 /// one widget so the two cannot drift apart.
 class TitleBarBreadcrumb extends ConsumerWidget {
-  const TitleBarBreadcrumb({super.key});
+  const TitleBarBreadcrumb({super.key, this.showBranchPill = true});
+
+  /// False on the mobile agent-panel header ([AgentPanel]), which folds the
+  /// pill into its overflow menu instead — a phone-width row has no space to
+  /// spare for an unshrinkable sibling beside the title. Desktop's
+  /// [AgentBar] keeps the default, where the pill still sits inline.
+  final bool showBranchPill;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -483,30 +487,59 @@ class TitleBarBreadcrumb extends ConsumerWidget {
           ),
           SessionSharedWorkspaceBadge(session: active),
         ],
-        if (gitBranch != null) ...[
+        if (showBranchPill && gitBranch != null) ...[
           const SizedBox(width: AbTokens.space8),
           // Bounded, not Flexible: the breadcrumb is the only child that should
           // absorb slack, and a second flexible sibling would split it evenly
           // and truncate the name long before the row is actually tight. The
           // cap is what keeps a long branch from making the badge + pill an
           // unshrinkable floor on a narrow window.
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 160),
-            child: AbBranchPill(
-              branch: gitBranch,
-              onTap: () async {
-                await Clipboard.setData(ClipboardData(text: gitBranch));
-                if (!context.mounted) return;
-                showAbSnackBar(
-                  context,
-                  'Copied "$gitBranch"',
-                  duration: const Duration(seconds: 2),
-                );
-              },
-            ),
-          ),
+          const SessionBranchPill(maxWidth: 160),
         ],
       ],
     );
+  }
+}
+
+/// The active session's git branch pill — tap to copy. Extracted so both the
+/// inline breadcrumb ([TitleBarBreadcrumb]) and the mobile overflow menu
+/// ([AgentPanel]'s header) share one behavior instead of drifting apart.
+/// Renders nothing while there is no branch to show.
+class SessionBranchPill extends ConsumerWidget {
+  const SessionBranchPill({super.key, this.maxWidth});
+
+  /// Caps the pill's width when it sits beside the breadcrumb — an
+  /// unshrinkable sibling would otherwise floor the title's own space on a
+  /// narrow window. Null renders it at its natural width, for a slot (the
+  /// mobile overflow menu) nothing else competes with for room.
+  final double? maxWidth;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final terminalState = ref.watch(terminalStateProvider).value;
+    final gitBranch = terminalState?.gitBranch;
+    if (gitBranch == null) return const SizedBox.shrink();
+
+    final pill = AbBranchPill(
+      branch: gitBranch,
+      ahead: terminalState?.gitAhead ?? 0,
+      behind: terminalState?.gitBehind ?? 0,
+      onTap: () => detached('WindowTitleBar', 'copy branch name', () async {
+        await Clipboard.setData(ClipboardData(text: gitBranch));
+        if (!context.mounted) return;
+        showAbSnackBar(
+          context,
+          'Copied "$gitBranch"',
+          duration: const Duration(seconds: 2),
+        );
+      }),
+    );
+    final width = maxWidth;
+    return width == null
+        ? pill
+        : ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: width),
+            child: pill,
+          );
   }
 }

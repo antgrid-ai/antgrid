@@ -506,6 +506,12 @@ The `.env.example` files are documentation and drift.
 `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
 `CORS_ORIGINS`.
 
+`CORS_ORIGINS` must list the **marketing site's** origin in staging and
+production, not just the app's: `site/` is a static build on another host and its
+founding-price capture POSTs to `/api/waitlist` here (`WEB_URL` in
+`site/src/config.ts`). Omit it and every submit fails in the browser as a network
+error, with nothing in the web service's logs to say why.
+
 **`web/.env` — defaulted, safe to omit:** `NODE_ENV` (`development`),
 `EMAIL_FROM`, `PORT` (8787). `BETTER_AUTH_URL` auto-derives to
 `http://localhost:${PORT}` in development and test; it is required only in

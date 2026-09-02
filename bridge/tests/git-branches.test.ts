@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { listLocalBranches, checkoutLocalBranch, GitHelperError } from "../src/git-branches";
+import { listLocalBranches, checkoutLocalBranch, listStashes, stashPop, stashDrop, GitHelperError } from "../src/git-branches";
 
 async function run(cwd: string, args: string[]) {
   const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
@@ -180,7 +180,7 @@ describe("git-branches helper", () => {
     }
   });
 
-  it("throws CHECKOUT_FAILED on conflicting dirty working tree", async () => {
+  it("throws DIRTY_WORKTREE, naming the file, on conflicting uncommitted changes", async () => {
     await run(dir, ["init"]);
     await run(dir, ["config", "user.email", "test@antgrid.local"]);
     await run(dir, ["config", "user.name", "Test"]);
@@ -204,11 +204,88 @@ describe("git-branches helper", () => {
       expect(true).toBe(false);
     } catch (err: any) {
       expect(err).toBeInstanceOf(GitHelperError);
-      expect(err.code).toBe("CHECKOUT_FAILED");
+      expect(err.code).toBe("DIRTY_WORKTREE");
+      expect(err.message).toContain("file.txt");
+      expect(err.message).toContain("dev");
     }
 
     // Verify uncommitted content remains intact
     const content = Bun.file(join(dir, "file.txt"));
     expect(await content.text()).toBe("conflicting uncommitted content\n");
+  });
+
+  it("stashes conflicting uncommitted changes and switches when stashIfDirty is set", async () => {
+    await run(dir, ["init"]);
+    await run(dir, ["config", "user.email", "test@antgrid.local"]);
+    await run(dir, ["config", "user.name", "Test"]);
+    // Otherwise a Windows machine's global core.autocrlf rewrites LF -> CRLF
+    // on checkout, and the content assertions below would be testing git's
+    // line-ending conversion instead of the stash-and-retry logic.
+    await run(dir, ["config", "core.autocrlf", "false"]);
+    writeFileSync(join(dir, "file.txt"), "master content\n");
+    await run(dir, ["add", "."]);
+    await run(dir, ["commit", "-m", "initial"]);
+
+    await run(dir, ["checkout", "-b", "dev"]);
+    writeFileSync(join(dir, "file.txt"), "dev content\n");
+    await run(dir, ["commit", "-am", "dev commit"]);
+
+    const catalog = await listLocalBranches(dir);
+    const initialBranch = catalog.branches.find((b) => b !== "dev")!;
+    await run(dir, ["checkout", initialBranch]);
+
+    writeFileSync(join(dir, "file.txt"), "conflicting uncommitted content\n");
+    writeFileSync(join(dir, "untracked.txt"), "untracked\n");
+
+    const res = await checkoutLocalBranch(dir, "dev", { stashIfDirty: true });
+    expect(res.current).toBe("dev");
+    expect(res.stashed).toBeDefined();
+    expect(res.stashed!.branch).toBe(initialBranch);
+
+    // The switch actually landed, on dev's own committed content — the stash
+    // is not silently reapplied.
+    const content = await Bun.file(join(dir, "file.txt")).text();
+    expect(content).toBe("dev content\n");
+    expect(await Bun.file(join(dir, "untracked.txt")).exists()).toBe(false);
+
+    const stashes = await listStashes(dir);
+    expect(stashes).toHaveLength(1);
+    expect(stashes[0]!.ref).toBe(res.stashed!.ref);
+    expect(stashes[0]!.branch).toBe(initialBranch);
+  });
+
+  it("pops a stash back onto the branch it came from, and drops it explicitly", async () => {
+    await run(dir, ["init"]);
+    await run(dir, ["config", "user.email", "test@antgrid.local"]);
+    await run(dir, ["config", "user.name", "Test"]);
+    await run(dir, ["config", "core.autocrlf", "false"]);
+    writeFileSync(join(dir, "file.txt"), "v1\n");
+    await run(dir, ["add", "."]);
+    await run(dir, ["commit", "-m", "initial"]);
+
+    const initialBranch = (await listLocalBranches(dir)).current!;
+    await run(dir, ["checkout", "-b", "other"]);
+    writeFileSync(join(dir, "file.txt"), "other content\n");
+    await run(dir, ["commit", "-am", "other commit"]);
+    await run(dir, ["checkout", initialBranch]);
+    writeFileSync(join(dir, "file.txt"), "dirty again\n");
+
+    const res = await checkoutLocalBranch(dir, "other", { stashIfDirty: true });
+    expect(res.stashed).toBeDefined();
+
+    // Popping back onto the branch it was stashed FROM (not wherever HEAD
+    // happens to be) is what the app's Restore action does — popping onto
+    // "other" instead would 3-way merge against the wrong base and conflict.
+    await run(dir, ["checkout", initialBranch]);
+    await stashPop(dir, res.stashed!.ref);
+    expect(await listStashes(dir)).toHaveLength(0);
+    expect(await Bun.file(join(dir, "file.txt")).text()).toBe("dirty again\n");
+
+    // Drop path: stash again, then discard it instead of restoring.
+    await run(dir, ["checkout", initialBranch]);
+    writeFileSync(join(dir, "file.txt"), "dirty once more\n");
+    const res2 = await checkoutLocalBranch(dir, "other", { stashIfDirty: true });
+    await stashDrop(dir, res2.stashed!.ref);
+    expect(await listStashes(dir)).toHaveLength(0);
   });
 });

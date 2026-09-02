@@ -19,22 +19,26 @@ import { links } from "../config";
     {BETA_FREE && (
       <div class="mb-6 flex items-start justify-center gap-2.5 rounded-lg border border-signaldeep2 bg-signaldeep/30 px-4 py-3 text-note text-ink2">
         <Icon name="tabler:sparkles" class="mt-0.5 shrink-0 text-signal" width="15" height="15" />
-        <span>antgrid is <span class="font-medium text-ink">free while in beta</span> — everything below is included. Paid plans activate when the beta ends; prices shown are launch prices.</span>
+        <span>antgrid is <span class="font-medium text-ink">free while in beta</span> — everything below is included. Paid plans activate when the beta ends; prices shown are founding prices.</span>
       </div>
     )}
     <div class={`grid gap-3.5 ${BETA_FREE ? "md:grid-cols-2" : "md:grid-cols-3"}`}>
       <PlanCard plan={free} />
-      {!BETA_FREE && <PlanCard plan={trial} />}
-      <PlanCard plan={proYearly} />
+      {!BETA_FREE && <PlanCard plan={trial} waitlistSource="pricing" />}
+      <PlanCard plan={proYearly} waitlistSource="pricing" />
     </div>
     <div class="mt-3.5 flex flex-wrap items-center justify-between gap-4 rounded-lg border border-edge bg-panel px-5 py-4.5">
       <div class="min-w-0">
         <div class="mb-1 flex items-baseline gap-2.5">
           <span class="font-mono text-lede font-medium text-ink">Enterprise</span>
         </div>
-        <div class="text-meta text-muted">Unlimited seats · SSO, audit log &amp; IP allowlist · invoiced annually</div>
+        {/* SSO, audit log and IP allowlist are named as roadmap, not as shipped:
+            the capability flags exist in web's plan model but nothing reads them
+            yet. Asking for the buyer's requirements is also the better opener —
+            it starts a conversation where a feature list ends one. */}
+        <div class="text-meta text-muted">Unlimited seats · invoiced annually · SSO, audit log and IP allowlist on the roadmap — tell us your requirements and your timeline.</div>
       </div>
-      <a href={links.support} class="font-mono text-meta text-signal2 hover:text-signal">Talk to us</a>
+      <a href={links.enterprise} class="font-mono text-meta text-signal2 hover:text-signal">Talk to sales</a>
     </div>
     <p class="mt-5.5 text-center text-meta text-faint">All plans include end-to-end encryption. The relay never sees your code.</p>
     <PricingFaq />

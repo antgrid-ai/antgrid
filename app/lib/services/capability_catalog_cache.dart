@@ -69,9 +69,16 @@ class CapabilityCatalogCache {
   }
 
   Future<CapabilityCatalog?> read(String key) async {
-    final f = await _fileFor(key);
-    if (!await f.exists()) return null;
     try {
+      // Inside the try, not before it: resolving the app-support directory is
+      // itself a platform call that can fail (a host with no such directory,
+      // a plugin the test harness has not stubbed), and so is `exists()`. Left
+      // outside, they broke this method's "never throws on read" contract for
+      // the one case that is not the file being absent — and every caller
+      // starts it from a build method and discards the future, so the throw
+      // lands in the zone as an unhandled async error nobody can see.
+      final f = await _fileFor(key);
+      if (!await f.exists()) return null;
       final json = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
       return CapabilityCatalog.fromJson(json);
     } on FormatException {
@@ -79,6 +86,12 @@ class CapabilityCatalogCache {
     } on FileSystemException {
       return null;
     } on TypeError {
+      return null;
+    } catch (_) {
+      // The catch-all IS the contract: "never throws on read" is what every
+      // caller relies on to start this and walk away, so a platform channel
+      // failing in a way the clauses above do not name must still read as a
+      // missing catalog, which every reader already renders.
       return null;
     }
   }

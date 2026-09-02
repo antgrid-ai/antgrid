@@ -10,11 +10,13 @@ class AbBranchPill extends StatelessWidget {
     super.key,
     required this.branch,
     this.ahead = 0,
+    this.behind = 0,
     this.onTap,
   });
 
   final String branch;
   final int ahead;
+  final int behind;
   final VoidCallback? onTap;
 
   @override
@@ -42,12 +44,31 @@ class AbBranchPill extends StatelessWidget {
               maxLines: 1,
               softWrap: false,
               overflow: TextOverflow.ellipsis,
+              // Default TextWidthBasis.parent reports the FULL Flexible share
+              // as this Text's width regardless of how short `branch` is, so
+              // a one-word branch still claims the whole cap and leaves a
+              // sibling with nothing to shrink into. longestLine reports the
+              // actual ink width instead — unchanged once ellipsis is
+              // actually clipping (that already fills the share).
+              textWidthBasis: TextWidthBasis.longestLine,
               style: AbTokens.monoStyle(
                 fontSize: AbTokens.fontXs,
                 color: palette.textMuted,
               ),
             ),
           ),
+          // Behind before ahead, the order every SCM status line uses.
+          if (behind > 0) ...[
+            const SizedBox(width: AbTokens.space4),
+            Text(
+              '↓$behind',
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXs,
+                color: palette.textMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
           if (ahead > 0) ...[
             const SizedBox(width: AbTokens.space4),
             Text(

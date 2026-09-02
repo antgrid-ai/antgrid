@@ -36,6 +36,9 @@ const REPLAY_TYPES: ReadonlySet<string> = new Set([
   "agent:projects",
   "agent:tools",
   "git:status",
+  // Latest-wins ahead/behind. Without the replay a reconnecting app shows a
+  // synced branch until the next op, which is the exact wrong answer.
+  "git:sync-state",
   "tree:full",
   // Latest per-project handler snapshot (armed sessions + open escalations).
   // Must be cached: the app rebuilds its escalation list from the status

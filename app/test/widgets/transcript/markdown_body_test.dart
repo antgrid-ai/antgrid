@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import 'package:antgrid/widgets/transcript/markdown_body.dart';
@@ -15,11 +16,13 @@ void main() {
     tester,
   ) async {
     await tester.pumpWidget(
-      const MaterialApp(
-        home: Scaffold(
-          body: SingleChildScrollView(
-            child: TranscriptMarkdown(
-              data: 'hi **bold**\n\n```dart\nfinal x = 1;\n```',
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: TranscriptMarkdown(
+                data: 'hi **bold**\n\n```dart\nfinal x = 1;\n```',
+              ),
             ),
           ),
         ),

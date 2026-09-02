@@ -372,6 +372,150 @@ void main() {
     await session.close();
   });
 
+  test('loadStashes sends git:stash-list with seeded projectId', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.loadStashes();
+    await Future<void>.delayed(Duration.zero);
+
+    final msg = t.sent.firstWhere((m) => m['type'] == 'git:stash-list');
+    expect(msg['projectId'], 'p');
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('git:stash-list-result populates git.stashes', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    t.emit('git:stash-list-result', {
+      'projectId': 'p',
+      'stashes': [
+        {
+          'ref': 'stash@{0}',
+          'branch': 'main',
+          'message': 'Before switching to dev',
+          'createdAt': 1700000000,
+        },
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.git.stashes, hasLength(1));
+    expect(svc.currentState.git.stashes.single.ref, 'stash@{0}');
+    expect(svc.currentState.git.stashes.single.branch, 'main');
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('restoreStash sends git:stash-pop with ref', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.restoreStash('stash@{0}');
+    await Future<void>.delayed(Duration.zero);
+
+    final msg = t.sent.firstWhere((m) => m['type'] == 'git:stash-pop');
+    expect(msg['projectId'], 'p');
+    expect(msg['ref'], 'stash@{0}');
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('dropStash sends git:stash-drop with ref', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.dropStash('stash@{0}');
+    await Future<void>.delayed(Duration.zero);
+
+    final msg = t.sent.firstWhere((m) => m['type'] == 'git:stash-drop');
+    expect(msg['projectId'], 'p');
+    expect(msg['ref'], 'stash@{0}');
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  // Neither result asks for the list back: the agent follows every pop and
+  // drop with a fresh `git:stash-list-result` on BOTH outcomes, so a request
+  // from here is a second round trip for a list already on the wire.
+  test(
+    'git:stash-pop-result failure surfaces gitOpFeedback without re-asking',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      t.emit('git:stash-pop-result', {
+        'projectId': 'p',
+        'ref': 'stash@{0}',
+        'success': false,
+        'error': 'conflict',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.gitOpFeedback, 'conflict');
+      expect(t.sent.where((m) => m['type'] == 'git:stash-list'), isEmpty);
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test(
+    'git:stash-drop-result success stays silent and re-asks nothing',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      t.emit('git:stash-drop-result', {
+        'projectId': 'p',
+        'ref': 'stash@{0}',
+        'success': true,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.gitOpFeedback, isNull);
+      expect(t.sent.where((m) => m['type'] == 'git:stash-list'), isEmpty);
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  // A one-way claim spent by a build whose send never runs hides the banner for
+  // the service's whole life, so `loadStashes` also registers a hydrator: the
+  // list has to survive a reconnect, and nothing else ever re-reads it.
+  test('loadStashes re-asks on every re-establish', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.loadStashes();
+    await Future<void>.delayed(Duration.zero);
+    expect(t.sent.where((m) => m['type'] == 'git:stash-list'), hasLength(1));
+
+    t.redriveHydrators();
+    await Future<void>.delayed(Duration.zero);
+    expect(
+      t.sent.where((m) => m['type'] == 'git:stash-list').length,
+      greaterThan(1),
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
+
   test('git:stage-result failure surfaces gitOpFeedback', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
@@ -670,5 +814,176 @@ void main() {
         await session.close();
       },
     );
+  });
+
+  group('History tab', () {
+    test('loadHistory replaces the list; loadMoreHistory appends', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      svc.loadHistory();
+      expect(svc.currentState.git.history.initialLoad, isTrue);
+      expect(t.sent.last['type'], 'git:log');
+      expect(t.sent.last['skip'], 0);
+
+      t.emit('git:log-result', {
+        'projectId': 'p',
+        'commits': [
+          {
+            'sha': 'a' * 40,
+            'shortSha': 'aaaaaaa',
+            'subject': 'first',
+            'authorName': 'Ada',
+            'authorEmail': 'ada@example.com',
+            'authorDate': '2026-01-01T00:00:00Z',
+          },
+        ],
+        'skip': 0,
+        'hasMore': true,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.git.history.commits, hasLength(1));
+      expect(svc.currentState.git.history.initialLoad, isFalse);
+      expect(svc.currentState.git.history.hasMore, isTrue);
+
+      svc.loadMoreHistory();
+      expect(t.sent.last['type'], 'git:log');
+      expect(t.sent.last['skip'], 1);
+
+      t.emit('git:log-result', {
+        'projectId': 'p',
+        'commits': [
+          {
+            'sha': 'b' * 40,
+            'shortSha': 'bbbbbbb',
+            'subject': 'second',
+            'authorName': 'Ada',
+            'authorEmail': 'ada@example.com',
+            'authorDate': '2025-12-31T00:00:00Z',
+          },
+        ],
+        'skip': 1,
+        'hasMore': false,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        svc.currentState.git.history.commits.map((c) => c.subject),
+        ['first', 'second'],
+      );
+      expect(svc.currentState.git.history.hasMore, isFalse);
+
+      // No more pages and nothing loading — a scroll-triggered call must not
+      // fire a third request.
+      svc.loadMoreHistory();
+      expect(t.sent.where((m) => m['type'] == 'git:log'), hasLength(2));
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a dropped git:log leaves an error after the timeout', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(
+        session,
+        gitActionTimeout: const Duration(milliseconds: 40),
+      );
+
+      svc.loadHistory();
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(svc.currentState.git.history.loadingMore, isFalse);
+      expect(svc.currentState.git.history.error, isNotNull);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test(
+      'toggleCommitExpanded fetches a commit\'s files once and caches them',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(session);
+
+        svc.toggleCommitExpanded('sha1');
+        expect(svc.currentState.git.history.expandedShas, {'sha1'});
+        expect(t.sent.last['type'], 'git:commit-files');
+        expect(t.sent.last['sha'], 'sha1');
+
+        t.emit('git:commit-files-result', {
+          'projectId': 'p',
+          'sha': 'sha1',
+          'files': [
+            {
+              'path': 'a.txt',
+              'status': 'M',
+              'additions': 3,
+              'deletions': 1,
+            },
+          ],
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(svc.currentState.git.history.filesBySha['sha1'], hasLength(1));
+
+        // Collapse, then re-expand: the cache means no second fetch.
+        svc.toggleCommitExpanded('sha1');
+        expect(svc.currentState.git.history.expandedShas, isEmpty);
+        svc.toggleCommitExpanded('sha1');
+        expect(svc.currentState.git.history.expandedShas, {'sha1'});
+        expect(t.sent.where((m) => m['type'] == 'git:commit-files'), hasLength(1));
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test('requestCommitDiff opens a commit-scoped diff distinct from a '
+        'working-tree diff for the same path', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      svc.requestCommitDiff('sha1', 'a.txt');
+      expect(svc.currentState.git.diffLoading, isTrue);
+      expect(svc.currentState.git.diffCommitSha, 'sha1');
+      expect(t.sent.last['type'], 'git:commit-diff');
+      expect(t.sent.last['sha'], 'sha1');
+      expect(t.sent.last['path'], 'a.txt');
+
+      // A working-tree diff-content reply for the SAME path must not
+      // overwrite the commit-scoped one that's in flight.
+      t.emit('git:diff-content', {
+        'projectId': 'p',
+        'path': 'a.txt',
+        'diff': 'stale working-tree diff',
+        'additions': 9,
+        'deletions': 9,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.git.diffLoading, isTrue);
+      expect(svc.currentState.git.diffContent, isNull);
+
+      t.emit('git:commit-diff-content', {
+        'projectId': 'p',
+        'sha': 'sha1',
+        'path': 'a.txt',
+        'diff': '@@ -1 +1 @@',
+        'additions': 1,
+        'deletions': 0,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.git.diffLoading, isFalse);
+      expect(svc.currentState.git.diffContent, '@@ -1 +1 @@');
+      expect(svc.currentState.git.diffCommitSha, 'sha1');
+
+      // Switching to the working-tree diff for a different path clears the
+      // commit scope.
+      svc.requestDiff('b.txt');
+      expect(svc.currentState.git.diffCommitSha, isNull);
+
+      await svc.dispose();
+      await session.close();
+    });
   });
 }

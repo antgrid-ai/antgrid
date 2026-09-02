@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show RpcException;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,10 +18,12 @@ import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_kbd.dart';
 import '../../design/widgets/ab_loading.dart';
 import '../../design/widgets/ab_menu.dart';
+import '../../design/widgets/ab_prompt_field.dart';
 import '../../design/widgets/ab_snack_bar.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../design/widgets/ab_switch.dart';
 import '../../design/widgets/ab_tooltip.dart';
+import '../../launcher/host_control_client.dart' show HostControlException;
 
 // The send key moved to the design system (shared with the transcript
 // composer); re-exported so existing importers keep resolving it from here.
@@ -41,7 +45,11 @@ import 'environment_menu.dart';
 import 'project_menu.dart';
 
 typedef StartNewSessionCallback =
-    Future<void> Function(ProviderContainer ref, {bool allowActiveSessions});
+    Future<void> Function(
+      ProviderContainer ref, {
+      bool allowActiveSessions,
+      bool stashIfDirty,
+    });
 
 /// Whether the Start/Send affordance is enabled. Single source of truth for
 /// both the reactive `canSend` (built from watched values in `build`) and the
@@ -317,11 +325,13 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     _reportedAbort = null;
     try {
       var allowActiveSessions = false;
+      var stashIfDirty = false;
       while (true) {
         try {
           await widget.submit(
             ref.container,
             allowActiveSessions: allowActiveSessions,
+            stashIfDirty: stashIfDirty,
           );
           break;
         } on ActiveSessionsBranchSwitchException catch (e) {
@@ -357,6 +367,35 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
             return;
           }
           allowActiveSessions = true;
+        } on DirtyWorktreeBranchSwitchException catch (e) {
+          if (stashIfDirty) {
+            rethrow;
+          }
+          if (!mounted) return;
+          if (_endedByCancel) return;
+          final confirm = await AbConfirmDialog.show(
+            context: context,
+            title: 'Stash uncommitted changes?',
+            body:
+                'Switching to "${e.branch}" would overwrite uncommitted changes '
+                'in this folder. Antgrid can stash them first, then switch — '
+                'restore or discard the stash later from the Git tab.',
+            cancelLabel: 'Cancel',
+            confirmLabel: 'Stash & switch',
+            destructive: false,
+          );
+          if (confirm != true || !mounted) return;
+
+          final target = ref.read(selectedTargetProjectProvider);
+          final selection = ref.read(newSessionBranchSelectionProvider);
+          if (target == null ||
+              target.id != e.targetId ||
+              selection == null ||
+              selection.targetId != e.targetId ||
+              selection.branch != e.branch) {
+            return;
+          }
+          stashIfDirty = true;
         }
       }
     } on SessionLimitExceededException catch (e) {
@@ -379,6 +418,28 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
             e.message,
             'Could not start the session.',
           ),
+          duration: const Duration(seconds: 8),
+        );
+      }
+    } on HostControlException catch (e) {
+      // A local branch checkout's refusal (e.g. DIRTY_WORKTREE — uncommitted
+      // changes the switch would overwrite) is already user-facing text from
+      // the bridge, naming the files in the way; showing `e.toString()`
+      // instead would print the exception's type and code as if they were
+      // part of the sentence.
+      if (mounted && !_endedByCancel) {
+        showAbSnackBar(
+          context,
+          sessionRefusalCopy(e.code, e.message, 'Could not switch branch.'),
+          duration: const Duration(seconds: 8),
+        );
+      }
+    } on RpcException catch (e) {
+      // Same refusal, over the remote control plane.
+      if (mounted && !_endedByCancel) {
+        showAbSnackBar(
+          context,
+          sessionRefusalCopy(e.code, e.message, 'Could not switch branch.'),
           duration: const Duration(seconds: 8),
         );
       }
@@ -687,7 +748,8 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                     // recents list above.
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxHeight: 176),
-                      child: _PromptField(
+                      child: AbPromptField(
+                        key: const Key('new-session-prompt-field'),
                         controller: _prompt,
                         focusNode: _promptFocus,
                         enabled: !isCustom,
@@ -921,68 +983,6 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
       preferred: AbMenuPlacement.above,
       builder: (_) => const _GearPopoverContent(),
     );
-  }
-}
-
-/// Multiline prompt input styled with the same tokened chrome as
-/// [AbTextField] (which is single-line only, hence a bare field here).
-/// `maxLines: null` grows with content; Enter/Shift+Enter handling lives on
-/// the caller-owned [focusNode] ([_NewSessionComposerState._onPromptKeyEvent]).
-class _PromptField extends StatelessWidget {
-  const _PromptField({
-    required this.controller,
-    required this.focusNode,
-    required this.enabled,
-    required this.readOnly,
-    required this.hintText,
-    required this.onChanged,
-  });
-
-  final TextEditingController controller;
-  final FocusNode focusNode;
-  final bool enabled;
-
-  /// Frozen but undimmed, unlike [enabled]: a prompt already on the wire is
-  /// still the thing the user is waiting on, so it has to stay readable — and
-  /// "busy" must not look like the custom-agent "this field is not yours".
-  final bool readOnly;
-
-  final String hintText;
-  final ValueChanged<String> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final field = TextField(
-      key: const Key('new-session-prompt-field'),
-      controller: controller,
-      focusNode: focusNode,
-      enabled: enabled,
-      readOnly: readOnly,
-      // A caret blinking in a field that cannot take the keystroke invites
-      // exactly the edit this lock exists to refuse.
-      showCursor: !readOnly,
-      maxLines: null,
-      minLines: 3,
-      onChanged: onChanged,
-      style: AbTokens.sansStyle(color: context.antgrid.textPrimary),
-      cursorColor: context.antgrid.accent,
-      decoration: InputDecoration(
-        isCollapsed: true,
-        filled: false,
-        border: InputBorder.none,
-        enabledBorder: InputBorder.none,
-        focusedBorder: InputBorder.none,
-        disabledBorder: InputBorder.none,
-        hintText: hintText,
-        hintStyle: AbTokens.sansStyle(color: context.antgrid.textMuted),
-        contentPadding: EdgeInsets.zero,
-      ),
-    );
-    // Disabled-state contract: opacity 0.4, no interaction.
-    if (!enabled) {
-      return IgnorePointer(child: Opacity(opacity: 0.4, child: field));
-    }
-    return field;
   }
 }
 

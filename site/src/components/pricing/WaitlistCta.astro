@@ -1,0 +1,165 @@
+---
+import { links } from "../../config";
+
+import type { WaitlistSource } from "../../data/pricing";
+
+interface Props {
+  /** Which surface the address came from — sent as `source` to the API. */
+  source: WaitlistSource;
+  /** Unique per instance: two captures can share a page (label/status ids). */
+  id: string;
+}
+const { source, id } = Astro.props;
+const inputId = `${id}-email`;
+const statusId = `${id}-status`;
+---
+{/* `action` is the real endpoint rather than a data-* attribute so the markup
+    states its own target, but the submit button ships DISABLED: without the
+    script a native cross-origin POST would land the reader on a raw JSON body,
+    and a disabled default button also blocks implicit submission from the
+    input. The script enables it — so scriptless readers get the noscript note
+    instead of a control that looks live and is not. */}
+<form
+  action={links.waitlist}
+  method="post"
+  novalidate
+  data-waitlist={source}
+  class="flex flex-col gap-2"
+>
+  <label class="sr-only" for={inputId}>Email address for founding-pricing news</label>
+  <div class="flex flex-col gap-2 sm:flex-row">
+    <input
+      type="email"
+      id={inputId}
+      name="email"
+      required
+      autocomplete="email"
+      spellcheck="false"
+      placeholder="you@company.com"
+      aria-describedby={statusId}
+      class="min-w-0 flex-1 rounded-md border border-edge bg-page px-3.5 py-3 text-note text-ink placeholder:text-faint"
+    />
+    <button
+      type="submit"
+      disabled
+      data-waitlist-submit
+      class="inline-flex shrink-0 items-center justify-center rounded-md bg-signalbtn px-5 py-3 text-note font-medium text-page transition-colors duration-200 hover:bg-signal disabled:cursor-not-allowed disabled:opacity-60 motion-reduce:transition-none"
+    >Join the list</button>
+  </div>
+  {/* Reserves TWO lines, not one: every message here is 60+ characters and wraps
+      at the card's mobile width, so a one-line reservation still grows the card
+      under the thumb that just tapped it. */}
+  <p id={statusId} data-waitlist-status role="status" aria-live="polite" class="min-h-8 text-marker"></p>
+  <noscript>
+    {/* Amber, the site's one meaning for it: this path needs a human. */}
+    <p class="text-marker text-amber">Joining needs JavaScript. Turn it on, or email contact@radhaai.com with the subject “Founding pricing” and we will add you.</p>
+  </noscript>
+</form>
+
+<style>
+  /* Tone lives in CSS keyed off a data attribute rather than in class strings the
+     script swaps, so every colour stays a token the stylesheet can see. */
+  [data-waitlist-status] {
+    color: var(--color-muted2);
+  }
+  [data-waitlist-status][data-tone="ok"] {
+    color: var(--color-ok);
+  }
+  [data-waitlist-status][data-tone="error"] {
+    color: var(--color-amber);
+  }
+</style>
+
+<script>
+  // Astro bundles a component script once per page however many times the
+  // component renders, so this binds every capture on the page in one pass.
+  const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+  // One verb in three tenses. Spelled out rather than derived from the button's
+  // rendered text: reading the label back and appending "ing"/"ed" makes the
+  // markup's whitespace load-bearing, and survives no copy change.
+  const IDLE_LABEL = "Join the list";
+  const BUSY_LABEL = "Joining…";
+  const DONE_LABEL = "Joined";
+
+  for (const form of document.querySelectorAll<HTMLFormElement>("form[data-waitlist]")) {
+    const input = form.querySelector<HTMLInputElement>('input[type="email"]');
+    const button = form.querySelector<HTMLButtonElement>("[data-waitlist-submit]");
+    const status = form.querySelector<HTMLParagraphElement>("[data-waitlist-status]");
+    if (!input || !button || !status) continue;
+
+    // The markup ships it disabled, so a reader whose script never ran gets the
+    // noscript note rather than a control that looks live. Enabling it here is
+    // what says the handler below is attached.
+    button.disabled = false;
+
+    const say = (message: string, tone?: "ok" | "error") => {
+      status.textContent = message;
+      if (tone) status.dataset.tone = tone;
+      else delete status.dataset.tone;
+    };
+
+    const toIdle = () => {
+      button.disabled = false;
+      button.textContent = IDLE_LABEL;
+      // Disabling the control a reader just activated blurs it and focus falls to
+      // <body>, so their next Tab restarts at the top of the page. Reclaim it only
+      // if that is in fact where it went — someone who tabbed on keeps their place.
+      if (document.activeElement === document.body) button.focus();
+    };
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      // `disabled` is the whole re-entry guard: it blocks the click and the
+      // Enter-key implicit submit alike, and it is never lifted after a success.
+      if (button.disabled) return;
+
+      const email = input.value.trim();
+      if (!EMAIL.test(email)) {
+        say("That does not look like an email address. Check it and try again.", "error");
+        input.focus();
+        return;
+      }
+
+      button.disabled = true;
+      button.textContent = BUSY_LABEL;
+      say("");
+
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ email, source: form.dataset.waitlist }),
+        });
+        // The API's `error` is a machine code ("BAD_REQUEST"), never reader-facing
+        // copy — the status is what the wording below is chosen from.
+        const body = await response.json().catch(() => null);
+
+        if (response.ok && body?.ok) {
+          input.readOnly = true;
+          button.textContent = DONE_LABEL;
+          say("You have joined the list. We will email you before founding pricing opens.", "ok");
+          // The button stays disabled for good on this path, so the blur above is
+          // permanent unless focus is placed somewhere. The input is the right
+          // landing spot rather than the status line: it is still focusable when
+          // read-only, it sits before the message in tab order, and its
+          // aria-describedby already points at that message.
+          if (document.activeElement === document.body) input.focus();
+          return;
+        }
+
+        toIdle();
+        if (response.status === 429) {
+          say("Too many tries from here. Wait a minute, then try again.", "error");
+        } else if (response.status === 400) {
+          say("That address was not accepted. Check it and try again.", "error");
+        } else {
+          say("The list did not answer. Try again in a moment.", "error");
+        }
+      } catch {
+        toIdle();
+        say("We could not reach the list. Check your connection and try again.", "error");
+      }
+    });
+  }
+</script>

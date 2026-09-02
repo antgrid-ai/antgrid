@@ -6,6 +6,7 @@ import {
   buildRetryPrompt,
   buildShapeRetryPrompt,
   parseDecisionFromOutput,
+  PERSONALITY_RULES,
 } from "../../src/handler/decision";
 
 const GOAL = "Migrating auth";
@@ -342,5 +343,61 @@ describe("parseDecisionFromOutput", () => {
     expect(r.decision).toBeNull();
     expect(r.error).toBeTruthy();
     expect(buildRetryPrompt("ORIG", r.error!)).toContain("ORIG");
+  });
+});
+
+describe("posture in the decide prompt", () => {
+  const build = (personality?: "watchdog" | "closer" | "autopilot") =>
+    buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "ctx", personality });
+
+  it("judges under the cautious preset when the caller names none", () => {
+    expect(build()).toContain(build("watchdog").split("POSTURE")[1]);
+  });
+
+  it("prints exactly one posture", () => {
+    const p = build("closer");
+    expect(p.match(/POSTURE/g)).toHaveLength(1);
+    expect(p).not.toContain("Escalate freely");
+    expect(p).not.toContain("Handle wherever you can");
+  });
+
+  // The two rules a preset may never read as permission to override. Ordering is
+  // the whole guard: printed above the posture they frame it, printed below it
+  // they read as exceptions to it.
+  it("prints the posture below the rules it is subordinate to", () => {
+    const p = build("autopilot");
+    expect(p.indexOf("Escalating always trumps making progress")).toBeLessThan(p.indexOf("POSTURE"));
+    expect(p.indexOf("If you cannot answer with high confidence, escalate")).toBeLessThan(p.indexOf("POSTURE"));
+  });
+
+  // The widest preset is the one that could plausibly be written as a licence to
+  // guess. It must say the opposite in its own words, not merely inherit it.
+  it("keeps the confidence floor inside the most permissive preset", () => {
+    expect(build("autopilot")).toContain("it does not lower the confidence floor");
+  });
+
+  // Evidence is the anti-inflation guard; a posture that could soften it would let
+  // the confident presets close items on belief.
+  it("says nothing about what evidence a transition needs", () => {
+    for (const rule of Object.values(PERSONALITY_RULES)) {
+      expect(rule).not.toContain("evidence");
+      expect(rule).not.toContain("transition");
+    }
+  });
+
+  // The rules list is one argument read top to bottom; a posture spliced into the
+  // middle of it separates `reply`/`action` from the rules they belong with.
+  it("leaves the rules list unbroken", () => {
+    const p = build("closer");
+    expect(p.indexOf("Set either `reply` or `action`")).toBeLessThan(p.indexOf("POSTURE"));
+  });
+
+  // Both retry legs append to the original prompt rather than rebuilding one, so
+  // the posture rides through for free — asserted because a future retry that
+  // composed its own prompt would drop it silently.
+  it("survives both retry legs", () => {
+    const p = build("closer");
+    expect(buildRetryPrompt(p, "bad json")).toContain("POSTURE");
+    expect(buildShapeRetryPrompt(p, "two moves")).toContain("POSTURE");
   });
 });

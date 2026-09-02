@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:webview_all/webview_all.dart';
 
@@ -26,7 +27,6 @@ import '../providers/demo_mode.dart';
 import '../services/preview_service.dart';
 import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
-import '../providers/recent_ports.dart';
 import '../providers/visible_surface.dart';
 import '../util/detached.dart';
 import '../util/external_url.dart';
@@ -35,21 +35,20 @@ import '../widgets/preview_tab_bar.dart';
 import '../util/ab_log.dart';
 import '../widgets/new_session/environment_menu.dart'
     show PanelHint, PanelRow, PanelSectionHeader;
-import '../widgets/port_entry.dart';
-import '../widgets/port_list_widget.dart';
 import '../util/image_thumbnail.dart';
 import '../widgets/preview_draw_overlay.dart';
 import '../widgets/send_capture_to_agent.dart';
 import '../widgets/preview_empty_state.dart';
 import '../widgets/send_to_agent_comment.dart';
 import '../design/widgets/ab_loading.dart';
+import 'preview_context_menu_script.dart';
 import 'preview_element_picker_script.dart';
 import 'preview_screenshot_script.dart';
 
-/// The browser preview screen. Shows detected ports, a URL bar at the top of
-/// the panel with refresh/external-browser/element-picker actions, a popup
-/// tab switcher ([PreviewTabsButton]) over the open ports, and one embedded
-/// webview per open port.
+/// The browser preview screen. A URL bar at the top of the panel with
+/// refresh/external-browser/element-picker actions, a popup tab switcher
+/// ([PreviewTabsButton]) over the open ports, and one embedded webview per
+/// open port.
 class PreviewScreen extends ConsumerStatefulWidget {
   const PreviewScreen({super.key});
 
@@ -140,6 +139,19 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// [_backFromPreview].
   final GlobalKey<PreviewDrawOverlayState> _drawKey = GlobalKey();
 
+  /// Port + Flutter-global anchor position of an in-flight right-click, from
+  /// [_onSecondaryPointerDown] until either [_onContextMenuMessage] resolves
+  /// it with real DOM context (a link, a selection, an editable field) or
+  /// [_contextMenuFallbackTimer] gives up and shows a generic menu anyway —
+  /// right-click doing nothing at all (the native WebView2 menu is disabled
+  /// at the plugin level with no Dart-side toggle) is the bug this exists to
+  /// fix, so SOME menu has to appear even when the page swallows the click or
+  /// the content script hasn't loaded yet. Desktop only; right-click has no
+  /// touch equivalent.
+  int? _pendingContextMenuPort;
+  Offset? _pendingContextMenuAnchor;
+  Timer? _contextMenuFallbackTimer;
+
   /// True while the address bar is armed to open a NEW tab (via the "+"
   /// button) rather than navigate the active one — the two share the same
   /// field, so this is what disambiguates a submit between them. Irrelevant
@@ -183,8 +195,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         }
         final id = ref.read(previewStateProvider).value?.activeTabId;
         final tabState = id != null ? _tabStates[id] : null;
-        if (tabState == null) return;
-        final display = _toDisplayUrl(tabState, tabState.currentUrl);
+        // No active tab — nothing to restore to, so discard the edit outright
+        // rather than leaving whatever was typed on screen.
+        final display = tabState == null
+            ? ''
+            : _toDisplayUrl(tabState, tabState.currentUrl);
         if (_addrController.text != display) {
           _addrController.text = display;
         }
@@ -250,11 +265,23 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         'AntgridScreenshotCapture',
         onMessageReceived: (msg) => _onScreenshotMessage(port, msg.message),
       )
+      ..addJavaScriptChannel(
+        'AntgridContextMenu',
+        onMessageReceived: (msg) => _onContextMenuMessage(port, msg.message),
+      )
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (_) {
             _clearPickerIfArmedOn(port);
             _refreshHistoryFlags(port);
+            // Persistent (unlike the picker), so it's re-armed on every real
+            // navigation rather than only while some tool is active — see
+            // kContextMenuScript's doc. Touch platforms have no right-click.
+            if (!isMobilePlatform) {
+              unawaited(
+                _tabStates[port]?.controller?.runJavaScript(kContextMenuScript),
+              );
+            }
             if (_refreshingPort == port && mounted) {
               setState(() => _refreshingPort = null);
             }
@@ -316,6 +343,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   void dispose() {
     _addrController.dispose();
     _addrFocus.dispose();
+    _contextMenuFallbackTimer?.cancel();
     _tabStates.clear();
     super.dispose();
   }
@@ -396,10 +424,6 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         return;
       }
       final (port, scheme, path) = target;
-      final projectId = ref.read(selectedRegistrationIdProvider);
-      if (projectId != null) {
-        ref.read(recentPortsProvider(projectId).notifier).add(port, scheme);
-      }
       unawaited(_openPort(port, scheme, path: path));
       _addrFocus.unfocus();
       return;
@@ -570,18 +594,25 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     if (_drawActiveForPort != null && !openPorts.contains(_drawActiveForPort)) {
       _drawActiveForPort = null;
     }
+    // No active tab (none open, or the last one just closed) — the address
+    // bar has no live URL to show, so it must not keep displaying whatever
+    // was last typed/loaded. Skipped while composing a new tab: that flow
+    // already owns the field (see [_startComposingNewTab]).
+    if (state.activeTabId == null && !_composingNewTab) {
+      _syncAddrField('');
+    }
 
     // The address bar (and the rest of the toolbar chrome) is always on
     // screen from here on — like a real browser, not just once a tab is
     // open — so it's the one place to type a port whether that opens the
     // first tab, a later one, or navigates the active one.
-    return _buildPreviewView(state, openPorts);
+    return _buildPreviewView(state);
   }
 
   /// Content below the toolbar: the open tabs' webviews, a loading spinner
-  /// while the first tab's proxy binds, the detected-port list to reopen
-  /// one, or the truly-empty message when nothing's ever been detected.
-  Widget _buildBody(PreviewState state, Set<int> openPorts) {
+  /// while the first tab's proxy binds, or the empty-state recent-ports
+  /// quick-pick once nothing's open.
+  Widget _buildBody(PreviewState state) {
     if (state.tabs.isNotEmpty) {
       final active = state.activeTab ?? state.tabs.first;
       // Tab open but proxy not ready yet.
@@ -638,33 +669,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       );
     }
 
-    // No tabs open — offer the recent-ports quick-pick as a fallback path
-    // when nothing has ever been detected either. Source the project id from
-    // the focus provider (not previewServiceProvider) so this build path
-    // stays cheap and doesn't construct the session/service.
-    if (state.ports.isEmpty) {
-      final projectId = ref.watch(selectedRegistrationIdProvider);
-      return _framed(
-        PreviewEmptyState(
-          action: projectId == null
-              ? null
-              : RecentPortsRow(
-                  projectId: projectId,
-                  onSelected: (port, scheme) =>
-                      unawaited(_openPort(port, scheme)),
-                ),
-        ),
-      );
-    }
-
-    // Ports known but every tab was closed -- show the port list to reopen.
-    return _framed(
-      PortListWidget(
-        ports: state.ports,
-        openPorts: openPorts,
-        onPortSelected: (port, scheme) => unawaited(_openPort(port, scheme)),
-      ),
-    );
+    // No tabs open — just the plain empty state. Detected ports
+    // (`state.ports`) are shown only through the open-tabs UI now: bridge-side
+    // detection is a text heuristic over agent/process output and can list a
+    // port nothing is actually serving, so it's not worth surfacing as a
+    // standalone "closed tabs" reopen list either.
+    return _framed(const PreviewEmptyState());
   }
 
   /// Insets [child] into a rounded, subtly-bordered browser-window frame —
@@ -1070,7 +1080,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// one, and navigating the active tab are all just "type in the top bar
   /// and press Enter" (see [_handleAddressSubmit]) instead of three
   /// different surfaces (a centered form, a dialog, a field).
-  Widget _buildPreviewView(PreviewState state, Set<int> openPorts) {
+  Widget _buildPreviewView(PreviewState state) {
     // [previewStateProvider] keeps its last value while it re-runs, so this
     // view can render one frame past a session that was invalidated (host
     // restart, LRU evict) — long enough for a raw façade read to throw during
@@ -1191,7 +1201,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                     ),
                 ],
         ),
-        Expanded(child: _buildBody(state, openPorts)),
+        Expanded(child: _buildBody(state)),
       ],
     );
   }
@@ -1317,6 +1327,223 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     });
   }
 
+  /// Right-click detection. A plain [Listener], not a gesture recognizer —
+  /// coexists with the [EagerGestureRecognizer] the webview itself claims
+  /// (see [_buildTabWebView]) the same way the mobile pull-to-refresh
+  /// [Listener] below already does: a `Listener` never enters the gesture
+  /// arena, so it can't take the click away from the page's own handling.
+  void _onSecondaryPointerDown(int port, PointerDownEvent event) {
+    if (event.buttons & kSecondaryMouseButton == 0) return;
+    _pendingContextMenuPort = port;
+    _pendingContextMenuAnchor = event.position;
+    _contextMenuFallbackTimer?.cancel();
+    _contextMenuFallbackTimer = Timer(const Duration(milliseconds: 350), () {
+      if (_pendingContextMenuPort != port || !mounted) return;
+      final anchor = _pendingContextMenuAnchor;
+      _pendingContextMenuPort = null;
+      _pendingContextMenuAnchor = null;
+      if (anchor != null) {
+        _showContextMenu(port, anchor, const PreviewContextMenuInfo.empty());
+      }
+    });
+  }
+
+  /// Handles the `AntgridContextMenu` channel's reply to a right-click.
+  /// [port] is bound at channel-registration time, same as the picker and
+  /// screenshot channels — a message from a backgrounded tab can never be
+  /// misattributed to whichever click is actually pending.
+  void _onContextMenuMessage(int port, String rawMessage) {
+    // The fallback timer guards this too, and for the same reason: the page's
+    // reply arrives on a platform channel that outlives a dispose, and
+    // [_showContextMenu] below reads `context`.
+    if (!mounted) return;
+    if (_pendingContextMenuPort != port) return;
+    final anchor = _pendingContextMenuAnchor;
+    _contextMenuFallbackTimer?.cancel();
+    _pendingContextMenuPort = null;
+    _pendingContextMenuAnchor = null;
+    if (anchor == null) return;
+    final info = parseContextMenuMessage(rawMessage);
+    if (info == null) return;
+    _showContextMenu(port, anchor, info);
+  }
+
+  Future<void> _copyToClipboard(String text, [String? confirm]) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (confirm != null && mounted) showAbSnackBar(context, confirm);
+  }
+
+  /// Opens a link/image address found by the content script — routed through
+  /// [openContentLink] rather than [_openPort] directly so an EXTERNAL link
+  /// (something other than this device's own dev server) still does the
+  /// right thing (system browser, with the same deceptive-link checks a
+  /// terminal hyperlink or a chat markdown link already gets) instead of
+  /// being silently dropped.
+  void _openContextMenuLink(String href) {
+    detached(
+      'PreviewScreen',
+      'open context-menu link',
+      () => openContentLink(
+        context,
+        href,
+        fileService: () =>
+            focusedCheckoutServiceOrNull(ref.container, (s) => s.fileService),
+        previewService: () => focusedCheckoutServiceOrNull(
+          ref.container,
+          (s) => s.previewService,
+        ),
+        // Already on the Preview tab — this IS that surface.
+        revealView: (_) {},
+      ),
+    );
+  }
+
+  /// Builds and shows the right-click menu for [port]'s tab at [anchor] —
+  /// Flutter GLOBAL coordinates from the [Listener] that caught the click,
+  /// not the DOM event's own CSS-pixel position, which would need a
+  /// scale-factor translation the Listener's coordinates never require.
+  ///
+  /// Every row's `onTap` always runs through [detached] where it does
+  /// anything async — see `util/detached.dart` — since [showAbMenu]'s own
+  /// `onTap` is exactly the void-callback boundary that rule exists for.
+  void _showContextMenu(int port, Offset anchor, PreviewContextMenuInfo info) {
+    final tabState = _tabStates[port];
+    final controller = tabState?.controller;
+    final entries = <AbMenuEntry>[];
+
+    if (info.href case final href?) {
+      final host = Uri.tryParse(href)?.host ?? '';
+      entries.add(
+        AbMenuItem(
+          label: isLocalDevHost(host)
+              ? 'Open link in new tab'
+              : 'Open link in browser',
+          icon: AbIcons.openExternal,
+          onTap: () => _openContextMenuLink(href),
+        ),
+      );
+      entries.add(
+        AbMenuItem(
+          label: 'Copy link',
+          icon: AbIcons.copy,
+          onTap: () => detached(
+            'PreviewScreen',
+            'copy link',
+            () => _copyToClipboard(href, 'Copied link'),
+          ),
+        ),
+      );
+    }
+
+    if (info.imgSrc case final imgSrc? when imgSrc != info.href) {
+      final host = Uri.tryParse(imgSrc)?.host ?? '';
+      entries.add(
+        AbMenuItem(
+          label: isLocalDevHost(host)
+              ? 'Open image in new tab'
+              : 'Open image in browser',
+          icon: AbIcons.openExternal,
+          onTap: () => _openContextMenuLink(imgSrc),
+        ),
+      );
+      entries.add(
+        AbMenuItem(
+          label: 'Copy image address',
+          icon: AbIcons.copy,
+          onTap: () => detached(
+            'PreviewScreen',
+            'copy image address',
+            () => _copyToClipboard(imgSrc, 'Copied image address'),
+          ),
+        ),
+      );
+    }
+
+    if (info.selectionText.isNotEmpty) {
+      if (entries.isNotEmpty) entries.add(const AbMenuDivider());
+      entries.add(
+        AbMenuItem(
+          label: 'Copy',
+          icon: AbIcons.copy,
+          onTap: () => detached(
+            'PreviewScreen',
+            'copy selection',
+            () => _copyToClipboard(info.selectionText, 'Copied'),
+          ),
+        ),
+      );
+      if (info.editable) {
+        entries.add(
+          AbMenuItem(
+            label: 'Cut',
+            onTap: () => detached('PreviewScreen', 'cut selection', () async {
+              await _copyToClipboard(info.selectionText, 'Cut');
+              await controller?.runJavaScript(
+                kContextMenuDeleteSelectionScript,
+              );
+            }),
+          ),
+        );
+      }
+    }
+    if (info.editable) {
+      entries.add(
+        AbMenuItem(
+          label: 'Paste',
+          enabled: controller != null,
+          onTap: () => detached('PreviewScreen', 'paste into page', () async {
+            final ctrl = controller;
+            if (ctrl == null) return;
+            final data = await Clipboard.getData(Clipboard.kTextPlain);
+            final text = data?.text;
+            if (text == null || text.isEmpty) return;
+            await ctrl.runJavaScript(buildContextMenuPasteScript(text));
+          }),
+        ),
+      );
+    }
+
+    if (entries.isNotEmpty) entries.add(const AbMenuDivider());
+    entries.add(
+      AbMenuItem(
+        label: 'Reload',
+        icon: AbIcons.refresh,
+        enabled: controller != null,
+        onTap: () => detached(
+          'PreviewScreen',
+          'reload page',
+          () async => controller?.reload(),
+        ),
+      ),
+    );
+    entries.add(
+      AbMenuItem(
+        label: 'Copy page URL',
+        icon: AbIcons.copy,
+        enabled: tabState != null,
+        onTap: () {
+          if (tabState == null) return;
+          detached(
+            'PreviewScreen',
+            'copy page url',
+            () => _copyToClipboard(
+              _toDisplayUrl(tabState, info.pageUrl ?? tabState.currentUrl),
+              'Copied page URL',
+            ),
+          );
+        },
+      ),
+    );
+
+    unawaited(
+      showAbMenu<void>(
+        context: context,
+        anchorRect: Rect.fromCenter(center: anchor, width: 1, height: 1),
+        entries: entries,
+      ),
+    );
+  }
+
   Widget _buildTabWebView(PreviewTab tab) {
     final controller = _tabStates[tab.port]?.controller;
     if (controller == null) return const SizedBox.shrink();
@@ -1337,7 +1564,15 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         },
       ),
     );
-    if (!isMobilePlatform) return webview;
+    if (!isMobilePlatform) {
+      // Same reasoning as the mobile Listener below — sees the raw
+      // right-click regardless of what the EagerGestureRecognizer above does
+      // with it, without taking the click away from the page.
+      return Listener(
+        onPointerDown: (e) => _onSecondaryPointerDown(tab.port, e),
+        child: webview,
+      );
+    }
     // A Listener sees every raw pointer regardless of which gesture recognizer
     // wins the arena, so this coexists with the EagerGestureRecognizer above
     // (which still owns the drag for the page's own scrolling) without

@@ -9,12 +9,10 @@ import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_status.dart';
 import 'package:antgrid/project/project_status_cache.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
-import 'package:antgrid/providers/recent_ports.dart';
 import 'package:antgrid/project/project_session_registry.dart'
     show projectStatusCacheProvider;
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
-import 'package:antgrid/storage/recent_ports_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -45,7 +43,6 @@ void main() {
     // forgetMachine purges each forgotten agent's per-entry footprint, so the
     // container must provide the stores purgeEntryState reads.
     final cachedSessions = await CachedSessionsStore.open();
-    final recentPorts = await RecentPortsStore.open();
     final statusTmp = await Directory.systemTemp.createTemp(
       'antgrid-forget-buildc-',
     );
@@ -54,14 +51,12 @@ void main() {
       overrides: [
         recentAgentsStoreProvider.overrideWithValue(recentStore),
         cachedSessionsStoreProvider.overrideWithValue(cachedSessions),
-        recentPortsStoreProvider.overrideWithValue(recentPorts),
         projectStatusCacheProvider.overrideWithValue(statusCache),
       ],
     );
     addTearDown(container.dispose);
     addTearDown(recentStore.close);
     addTearDown(cachedSessions.close);
-    addTearDown(recentPorts.close);
     addTearDown(() async {
       try {
         await statusTmp.delete(recursive: true);
@@ -156,8 +151,6 @@ void main() {
 
       final cachedSessions = await CachedSessionsStore.open();
       addTearDown(cachedSessions.close);
-      final recentPorts = await RecentPortsStore.open();
-      addTearDown(recentPorts.close);
       await cachedSessions.put('M.project', [
         SessionEntry(
           id: 's1',
@@ -184,7 +177,6 @@ void main() {
         overrides: [
           recentAgentsStoreProvider.overrideWithValue(recentStore),
           cachedSessionsStoreProvider.overrideWithValue(cachedSessions),
-          recentPortsStoreProvider.overrideWithValue(recentPorts),
           projectStatusCacheProvider.overrideWithValue(statusCache),
         ],
       );

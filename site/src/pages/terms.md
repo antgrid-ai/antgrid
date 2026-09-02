@@ -25,7 +25,7 @@ The Services are intended for users who are at least 18 years old.
 
 ## 1. Our Services
 
-Antgrid is a command centre for AI coding agents that you run on your own machine and can monitor and control remotely from your other devices. **Local use of Antgrid is free.** Paid plans add encrypted remote control and related features (see Section 5).
+Antgrid is a command centre for AI coding agents that you run on your own machine and can monitor and control remotely from your other devices. **Antgrid has a free plan, and encrypted remote control is included on it.** Paid plans add more worker machines per person, the Handler assistant, and team seats (see Section 5).
 
 The Services are not intended for use in any jurisdiction where such use would be contrary to law or would subject us to any registration requirement. You access the Services on your own initiative and are responsible for compliance with applicable local laws.
 

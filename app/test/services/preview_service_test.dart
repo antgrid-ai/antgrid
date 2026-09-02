@@ -239,6 +239,78 @@ void main() {
       await session.close();
     });
 
+    test('WebSocket frames wait for open and retain browser order', () async {
+      final t = _GateFirstWsSendTransport();
+      final session = await _newSession(t);
+      addTearDown(() async => session.close());
+      final svc = session.previewService;
+      final port = await freePort();
+      // Not discarded: `openTab` passes allowFallback:false, so a lost port
+      // race binds no proxy and every assertion below would then be aimed at
+      // whatever else holds the port.
+      expect(await svc.openTab(port), SelectPortResult.opened);
+      addTearDown(() async => svc.closeTab(port));
+
+      final ws = await WebSocket.connect('ws://localhost:$port/_blazor');
+      addTearDown(() async => ws.close());
+      // A gate left held would leave the outbound queue's tail pending forever.
+      addTearDown(t.releaseOpen);
+
+      ws.add('signalr-handshake');
+      ws.add(<int>[0, 1, 2, 255]);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      // The open send is deliberately held incomplete. No data send may even
+      // start while it is still being sealed/routed.
+      expect(t.tunnelFrames.map((m) => m['type']), <String>['tunnel:ws-open']);
+
+      // Close the browser socket while the gate still holds: the close frame
+      // must queue BEHIND the data it follows, not race ahead of it. Asserting
+      // only that a close eventually arrives would pass on plain
+      // fire-and-forget sends, which is the property under test.
+      await ws.close();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(t.tunnelFrames.map((m) => m['type']), <String>['tunnel:ws-open']);
+
+      t.releaseOpen();
+      await _waitUntil(
+        () => t.tunnelFrames.any((m) => m['type'] == 'tunnel:ws-close'),
+      );
+      expect(t.tunnelFrames.map((m) => m['type']), <String>[
+        'tunnel:ws-open',
+        'tunnel:ws-data',
+        'tunnel:ws-data',
+        'tunnel:ws-close',
+      ]);
+      expect(t.tunnelFrames[1]['data'], 'signalr-handshake');
+      expect(t.tunnelFrames[1]['binary'], isNull);
+      expect(t.tunnelFrames[2]['binary'], isTrue);
+      expect(t.tunnelFrames[2]['data'], 'AAEC/w==');
+    });
+
+    test('a tunnel whose open cannot be delivered closes the browser socket', () async {
+      final t = _GateFirstWsSendTransport();
+      final session = await _newSession(t);
+      addTearDown(() async => session.close());
+      final svc = session.previewService;
+      final port = await freePort();
+      expect(await svc.openTab(port), SelectPortResult.opened);
+      addTearDown(() async => svc.closeTab(port));
+
+      // A send with no session keys installed completes SUCCESSFULLY and
+      // delivers nothing — the state a relay reconnect passes through, and
+      // exactly when a previewed page's own socket reconnects.
+      t.setEstablished(false);
+
+      final ws = await WebSocket.connect('ws://localhost:$port/_blazor');
+      // The browser must see a real close it can reconnect from, rather than
+      // holding a socket against a tunnel the bridge never heard of. Drained
+      // rather than awaiting `done`: the close frame is only processed once
+      // something reads the stream.
+      await ws.drain<void>().timeout(const Duration(seconds: 2));
+      expect(t.sent.any((m) => m['type'] == 'tunnel:ws-open'), isFalse);
+    });
+
     test(
       'openTab (relay) with a path lands the tab there behind the proxy',
       () async {
@@ -752,4 +824,41 @@ void main() {
 class _LocalFakeTransport extends FakeAgentTransport {
   @override
   bool get isLocal => true;
+}
+
+class _GateFirstWsSendTransport extends FakeAgentTransport {
+  final Completer<void> _openGate = Completer<void>();
+  final List<Map<String, dynamic>> started = <Map<String, dynamic>>[];
+
+  /// [started] records every frame the session sends — a project bind alone
+  /// emits several before any tunnel exists — so order assertions have to be
+  /// made against the tunnel's own frames.
+  List<Map<String, dynamic>> get tunnelFrames => [
+    for (final m in started)
+      if ((m['type'] as String).startsWith('tunnel:')) m,
+  ];
+
+  void releaseOpen() {
+    if (!_openGate.isCompleted) _openGate.complete();
+  }
+
+  @override
+  Future<void> send(
+    Map<String, dynamic> message, {
+    String channel = 'control',
+  }) async {
+    started.add(message);
+    if (message['type'] == 'tunnel:ws-open') await _openGate.future;
+    await super.send(message, channel: channel);
+  }
+}
+
+Future<void> _waitUntil(bool Function() condition) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 2));
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      throw TimeoutException('condition was not met');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
 }

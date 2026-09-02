@@ -568,6 +568,7 @@ Future<AgentTransport?> _buildLocalTransportFor(
     device: device,
     licenseApiUrl: device != null ? ref.read(licenseApiUrlProvider) : null,
     relayUrl: device != null ? ref.read(defaultRelayUrlProvider) : null,
+    telemetryEnabled: ref.read(telemetryEnabledProvider),
   );
   // NOTE: we deliberately do NOT terminate the host on app quit, even when this
   // process spawned it (result.owned). The host is a machine-level singleton

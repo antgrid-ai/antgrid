@@ -13,13 +13,11 @@ import 'package:antgrid/providers/entry_cleanup.dart';
 import 'package:antgrid/providers/projects.dart' show projectStoreProvider;
 import 'package:antgrid/providers/providers.dart'
     show preferencesServiceProvider, storageServiceProvider;
-import 'package:antgrid/providers/recent_ports.dart';
 import 'package:antgrid/services/preferences_service.dart';
 import 'package:antgrid/services/storage_service.dart';
 import 'package:antgrid/storage/agent_catalog_store.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/project_store.dart';
-import 'package:antgrid/storage/recent_ports_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/test/test_flutter_secure_storage_platform.dart';
 import 'package:flutter_secure_storage_platform_interface/flutter_secure_storage_platform_interface.dart';
@@ -52,12 +50,9 @@ void main() {
   });
 
   test(
-    'purgeEntryState clears recentPorts + statusCache even when the cachedSessions '
+    'purgeEntryState clears statusCache even when the cachedSessions '
     'clear throws (failure isolation)',
     () async {
-      final recentPorts = await RecentPortsStore.open();
-      addTearDown(recentPorts.close);
-      await recentPorts.add('p1', 3000, 'http');
       await cache.write('p1', const ProjectStatus.empty());
 
       final container = ProviderContainer(
@@ -66,7 +61,6 @@ void main() {
           cachedSessionsStoreProvider.overrideWith(
             (ref) => throw StateError('cached sessions store unavailable'),
           ),
-          recentPortsStoreProvider.overrideWithValue(recentPorts),
           projectStatusCacheProvider.overrideWithValue(cache),
         ],
       );
@@ -76,7 +70,6 @@ void main() {
       // Must not throw despite the first clear failing.
       await purgeEntryState(ref, 'p1');
 
-      expect(recentPorts.list('p1'), isEmpty);
       expect(await cache.read('p1'), isNull);
     },
   );
@@ -84,9 +77,6 @@ void main() {
   test(
     'purgeEntryState surfaces a swallowed store failure to onError (not silent)',
     () async {
-      final recentPorts = await RecentPortsStore.open();
-      addTearDown(recentPorts.close);
-      await recentPorts.add('p1', 3000, 'http');
       await cache.write('p1', const ProjectStatus.empty());
 
       final container = ProviderContainer(
@@ -94,7 +84,6 @@ void main() {
           cachedSessionsStoreProvider.overrideWith(
             (ref) => throw StateError('cached sessions store unavailable'),
           ),
-          recentPortsStoreProvider.overrideWithValue(recentPorts),
           projectStatusCacheProvider.overrideWithValue(cache),
         ],
       );
@@ -111,7 +100,6 @@ void main() {
       // The swallowed failure is reported with its store label...
       expect(failures, ['cachedSessions']);
       // ...and the other stores still cleared (isolation preserved).
-      expect(recentPorts.list('p1'), isEmpty);
       expect(await cache.read('p1'), isNull);
     },
   );
@@ -133,8 +121,6 @@ void main() {
     test('wipes every account-derived cache', () async {
       final cachedSessions = await CachedSessionsStore.open();
       addTearDown(cachedSessions.close);
-      final recentPorts = await RecentPortsStore.open();
-      addTearDown(recentPorts.close);
       final catalog = AgentCatalogStore();
       final pairedStore = StorageService();
       final prefsService = PreferencesService();
@@ -154,7 +140,6 @@ void main() {
       cachedSessions.putLabel(entryId, 'Biller');
       cachedSessions.putStatus(entryId, 'attention');
       await cachedSessions.flushNow();
-      await recentPorts.add(entryId, 3000, 'http');
       await cache.write(entryId, const ProjectStatus.empty());
       await catalog.write(const {
         'claude': AgentDescriptor(
@@ -175,7 +160,6 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           cachedSessionsStoreProvider.overrideWithValue(cachedSessions),
-          recentPortsStoreProvider.overrideWithValue(recentPorts),
           projectStatusCacheProvider.overrideWithValue(cache),
           agentCatalogStoreProvider.overrideWithValue(catalog),
           storageServiceProvider.overrideWithValue(pairedStore),
@@ -196,7 +180,6 @@ void main() {
       expect(cachedSessions.has(entryId), isFalse);
       expect(cachedSessions.label(entryId), isNull);
       expect(cachedSessions.statusOf(entryId), isNull);
-      expect(recentPorts.list(entryId), isEmpty);
       expect(await cache.read(entryId), isNull);
       expect(await catalog.read(), isEmpty);
       expect(secureBacking, isNot(contains(scopedStorageKey('paired_agents'))));
@@ -211,15 +194,9 @@ void main() {
       expect(reopenedSessions.entries(), isEmpty);
       expect(reopenedSessions.labels(), isEmpty);
       expect(reopenedSessions.allStatuses(), isEmpty);
-      final reopenedPorts = await RecentPortsStore.open();
-      addTearDown(reopenedPorts.close);
-      expect(reopenedPorts.list(entryId), isEmpty);
     });
 
     test('a failing store is reported and does not strand the rest', () async {
-      final recentPorts = await RecentPortsStore.open();
-      addTearDown(recentPorts.close);
-      await recentPorts.add('p1', 3000, 'http');
       await cache.write('p1', const ProjectStatus.empty());
       final pairedStore = StorageService();
       secureBacking[scopedStorageKey('paired_agents')] = '[]';
@@ -230,7 +207,6 @@ void main() {
           cachedSessionsStoreProvider.overrideWith(
             (ref) => throw StateError('cached sessions store unavailable'),
           ),
-          recentPortsStoreProvider.overrideWithValue(recentPorts),
           projectStatusCacheProvider.overrideWithValue(cache),
           agentCatalogStoreProvider.overrideWithValue(AgentCatalogStore()),
           storageServiceProvider.overrideWithValue(pairedStore),
@@ -247,7 +223,6 @@ void main() {
       );
 
       expect(failures, ['cachedSessions']);
-      expect(recentPorts.list('p1'), isEmpty);
       expect(await cache.read('p1'), isNull);
       expect(secureBacking, isNot(contains(scopedStorageKey('paired_agents'))));
     });

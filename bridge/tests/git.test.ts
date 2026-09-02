@@ -51,6 +51,28 @@ describe("git helpers", () => {
     });
   });
 
+  it("reports each file in a wholly-untracked directory individually, not the collapsed dir entry", async () => {
+    mkdirSync(join(dir, "newdir"));
+    writeFileSync(join(dir, "newdir", "a.txt"), "a\n");
+    writeFileSync(join(dir, "newdir", "b.txt"), "b\n");
+    const status = await getGitStatus(dir);
+    expect(status.map((e) => e.path)).not.toContain("newdir/");
+    expect(status).toContainEqual({
+      path: "newdir/a.txt",
+      status: "U",
+      staged: false,
+      additions: 1,
+      deletions: 0,
+    });
+    expect(status).toContainEqual({
+      path: "newdir/b.txt",
+      status: "U",
+      staged: false,
+      additions: 1,
+      deletions: 0,
+    });
+  });
+
   it("gitStage moves a modified file into the staged bucket", async () => {
     writeFileSync(join(dir, "tracked.txt"), "v2\n");
     const res = await gitStage(dir, ["tracked.txt"]);

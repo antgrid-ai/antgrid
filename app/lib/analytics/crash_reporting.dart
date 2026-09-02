@@ -1,4 +1,11 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart' show kReleaseMode, visibleForTesting;
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
+
+import '../util/ab_log.dart';
 
 final _pathLike = RegExp(r'([a-zA-Z]:)?[\\/][^\s"]+');
 
@@ -35,15 +42,22 @@ Object? _redactDeep(Object? value) {
 // than mutated in place: 9.x makes absPath/contextLine settable, but
 // preContext/postContext/vars stay getter-only, so a frame is the one object
 // here that assignment alone can't neutralize.
+//
+// module/package are redacted alongside absPath because the frames
+// sentry-native contributes carry an absolute module path there; on a Dart
+// frame both are null, so it costs nothing. fileName deliberately is NOT, and
+// that is where this diverges from the bridge's twin on purpose: a Dart frame's
+// fileName is a `package:`/`dart:` URI naming our own source, and _pathLike
+// would eat everything after its first slash — identity lost, nothing gained.
 SentryStackFrame _scrubFrame(SentryStackFrame f) => SentryStackFrame(
   absPath: _redactNullable(f.absPath),
   fileName: f.fileName,
   function: f.function,
-  module: f.module,
+  module: _redactNullable(f.module),
   lineNo: f.lineNo,
   colNo: f.colNo,
   inApp: f.inApp,
-  package: f.package,
+  package: _redactNullable(f.package),
   native: f.native,
   platform: f.platform,
   imageAddr: f.imageAddr,
@@ -136,6 +150,51 @@ SentryEvent? scrubCrashEvent(SentryEvent event) {
   return event;
 }
 
+/// Whether this platform's native Sentry SDK is the sentry-native C library.
+/// Only that one reads [SentryFlutterOptions.nativeDatabasePath]; the Apple and
+/// Android SDKs pick their own location and ignore it.
+@visibleForTesting
+bool get usesNativeCrashDatabase => Platform.isWindows || Platform.isLinux;
+
+/// Where sentry-native keeps its crash database, given the app's per-user
+/// support directory.
+@visibleForTesting
+String nativeCrashDatabasePath(String supportDir) =>
+    p.join(supportDir, '.sentry-native');
+
+/// Resolves a WRITABLE crash-database directory, or null to leave the SDK on
+/// its own default.
+///
+/// `sentry_flutter` never assigns `nativeDatabasePath` itself, and sentry-native
+/// then falls back to `.sentry-native` relative to the CURRENT WORKING
+/// DIRECTORY. That is unwritable in exactly the configuration we ship on
+/// Windows: a Store-launched MSIX gets `C:\Windows\System32` as its cwd, and
+/// its own install dir under `WindowsApps` is read-only. `sentry_init` then
+/// fails and native crash capture is absent with NO symptom to notice it by —
+/// no handler process, no database, and (because auto-session-tracking is a
+/// native option) no release-health sessions either, which is what would
+/// otherwise have shown the pipeline was dead. Anchoring the path to the
+/// support directory is what makes native capture work in a packaged build.
+Future<String?> _resolveNativeDatabasePath() async {
+  if (!usesNativeCrashDatabase) return null;
+  try {
+    final dir = await getApplicationSupportDirectory();
+    return nativeCrashDatabasePath(dir.path);
+  } catch (e) {
+    // Crash reporting must never be the reason the app fails to start; the SDK
+    // falls back to the cwd-relative default, which is today's behaviour. Logged
+    // rather than swallowed because that fallback IS the bug this function
+    // exists to fix, and it has no other symptom — no handler, no database, no
+    // release-health session, nothing that looks like a failure.
+    AbLog.warn(
+      'crashReporting',
+      'support dir unresolvable; leaving nativeDatabasePath at the SDK default',
+      fields: {'error': '$e'},
+    );
+    return null;
+  }
+}
+
 Future<void> initCrashReporting({
   required bool enabled,
   required String dsn,
@@ -145,12 +204,39 @@ Future<void> initCrashReporting({
     await runApp();
     return;
   }
+  final nativeDatabasePath = await _resolveNativeDatabasePath();
   await SentryFlutter.init((options) {
     options.dsn = dsn;
     options.sendDefaultPii = false;
     options.attachScreenshot = false;
+    // The SDK reports its OWN failures at debug level and nowhere else, so a
+    // release build that cannot initialise its native layer looks exactly like
+    // one that simply never crashed. Costly to leave on in production (every
+    // envelope is logged), so it is on everywhere else instead.
+    options.debug = !kReleaseMode;
+    if (nativeDatabasePath != null) {
+      options.nativeDatabasePath = nativeDatabasePath;
+    }
     // attachViewHierarchy is @experimental and defaults to false; no explicit
     // set needed.
     options.beforeSend = (event, hint) => scrubCrashEvent(event);
+    // beforeSend is NOT the whole story on the platforms that have a native
+    // layer. A native crash is written and posted by that layer itself, and the
+    // C binding only ever sets dsn/release/database_path and friends — it never
+    // calls `sentry_options_set_before_send` — so nothing sent from there passes
+    // through the callback above. Breadcrumbs are the part of that envelope we
+    // still control: NativeScopeObserver mirrors the Dart scope down, and
+    // beforeBreadcrumb runs before the observers are notified, so scrubbing here
+    // is what keeps a path out of the copy the native layer holds. The frames
+    // and contexts of a native crash remain outside our reach by construction.
+    options.beforeBreadcrumb = (breadcrumb, hint) {
+      if (breadcrumb == null) return null;
+      breadcrumb.message = _redactNullable(breadcrumb.message);
+      final data = breadcrumb.data;
+      if (data != null) {
+        breadcrumb.data = Map<String, dynamic>.from(_redactDeep(data) as Map);
+      }
+      return breadcrumb;
+    };
   }, appRunner: runApp);
 }

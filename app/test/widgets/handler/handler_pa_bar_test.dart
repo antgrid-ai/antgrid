@@ -1,7 +1,9 @@
 // The pinned PA bar. It is one status row and nothing else: the instruction
-// field and the presets moved into the backlog drawer, because a second field
-// with its own send button, pinned under the composer, read as a rival place to
-// type with nothing on either saying who receives it.
+// composer moved into the backlog drawer, because a second field with its own
+// send button, pinned under the session composer, read as a rival place to type
+// with nothing on either saying who receives it.
+import 'package:antgrid/design/ab_colors.dart';
+import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/providers/first_run.dart';
@@ -10,6 +12,7 @@ import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/handler/handler_backlog_drawer.dart';
+import 'package:antgrid/widgets/handler/handler_instruction_composer.dart';
 import 'package:antgrid/widgets/handler/handler_pa_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -28,6 +31,8 @@ HandlerSessionState _armed({
   int? pendingEscalations,
   String? parkKind,
   int? parkedUntil,
+  HandlerPersonality? personality,
+  HandlerObservability? observability,
 }) => HandlerSessionState(
   terminalId: 't1',
   runState: runState,
@@ -38,7 +43,15 @@ HandlerSessionState _armed({
   escalations: escalations,
   parkKind: parkKind,
   parkedUntil: parkedUntil,
+  personality: personality,
+  observability: observability,
 );
+
+/// The chip's colour is the whole assertion, and the harness below mounts no
+/// palette extension — so read the one the bar itself resolved rather than
+/// guessing which fallback is in force.
+AbChip _chip(WidgetTester tester, String label) =>
+    tester.widget<AbChip>(find.widgetWithText(AbChip, label));
 
 HandlerInstructionItem _item(String id, String text, String status) =>
     HandlerInstructionItem(id: id, text: text, status: status, createdAt: 1);
@@ -105,13 +118,68 @@ Future<void> _pump(
 }
 
 void main() {
+  testWidgets('the bar names the posture the bridge reported', (tester) async {
+    // The bar is on screen for the whole time a session is armed and is the
+    // only place the posture is visible at all, so "no chip" would be a state
+    // the user has to be taught to read.
+    await _pump(
+      tester,
+      sessions: {'t1': _armed(personality: HandlerPersonality.watchdog)},
+    );
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
+    expect(_chip(tester, 'WATCHDOG').color, p.textMuted);
+  });
+
+  testWidgets('an unreported posture is a dash, never the default by name', (
+    tester,
+  ) async {
+    // This chip reads as a live fact about the session. A bridge too old to
+    // carry the field is not a bridge running watchdog, and naming the preset
+    // here would advertise a control over nothing.
+    await _pump(tester, sessions: {'t1': _armed()});
+    expect(find.text('WATCHDOG'), findsNothing);
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
+    expect(_chip(tester, '—').color, p.textMuted);
+  });
+
+  testWidgets('the posture chip is tinted where nothing is being judged', (
+    tester,
+  ) async {
+    // Escalate-only means no decide pass runs at all, so a bar naming a
+    // posture in ordinary chrome would say the opposite of what is happening.
+    await _pump(
+      tester,
+      sessions: {
+        't1': _armed(
+          personality: HandlerPersonality.closer,
+          observability: HandlerObservability.escalateOnly,
+        ),
+      },
+    );
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
+    expect(_chip(tester, 'CLOSER').color, p.warning);
+  });
+
+  testWidgets('tapping the posture chip does not open the backlog', (
+    tester,
+  ) async {
+    String? opened;
+    await _pump(
+      tester,
+      sessions: {'t1': _armed(personality: HandlerPersonality.watchdog)},
+      opener: (terminalId) => opened = terminalId,
+    );
+    await tester.tap(find.text('WATCHDOG'));
+    await tester.pump();
+    expect(opened, isNull);
+  });
+
   testWidgets('the bar offers no place to type of its own', (tester) async {
-    // The whole point of the collapse: the composer above it is the one field.
+    // The whole point of the collapse: the session composer above it is the
+    // one field, and Handler's own box lives a tap away in the drawer.
     await _pump(tester, sessions: {'t1': _armed()});
     expect(find.byType(AbTextField), findsNothing);
-    for (final preset in handlerPresetInstructions) {
-      expect(find.text(preset), findsNothing);
-    }
+    expect(find.byType(HandlerInstructionComposer), findsNothing);
     expect(find.text(handlerDisclaimerText), findsNothing);
   });
 
@@ -159,14 +227,14 @@ void main() {
     // The bar and the drawer are separate files wired only by this default, so
     // without this the row can be inert in the app while every other test here
     // passes against an injected opener. It matters more since the collapse:
-    // this row is now the ONLY way to reach the instruction field.
+    // this row is now the ONLY way to reach the instruction composer.
     await _pump(tester, sessions: {'t1': _armed()});
 
     await tester.tap(find.text('Nothing queued'));
     await tester.pumpAndSettle();
 
     expect(find.byType(HandlerBacklogDrawer), findsOneWidget);
-    expect(find.byType(AbTextField), findsOneWidget);
+    expect(find.byType(HandlerInstructionComposer), findsOneWidget);
   });
 
   testWidgets('a live park deadline runs a clock that stops on dispose', (

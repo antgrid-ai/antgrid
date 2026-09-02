@@ -57,6 +57,7 @@ class AbSegmented<T> extends StatelessWidget {
     required this.onSelect,
     this.onDisabledTap,
     this.iconOnly = false,
+    this.inactive = false,
   });
 
   final List<AbSegment<T>> segments;
@@ -71,6 +72,16 @@ class AbSegmented<T> extends StatelessWidget {
   /// vocabulary — the box, the divider and the accent fill still say "two
   /// options, one chosen", which is the part a lone icon button cannot say.
   final bool iconOnly;
+
+  /// Paints the selected cell as chosen-but-not-in-effect: the accent fill and
+  /// accent label give way to a neutral selection, so a control whose value is
+  /// stored and does nothing yet cannot read as one that is running.
+  ///
+  /// Every cell stays live — the choice is still the user's to make, and it
+  /// starts working the moment whatever parked it is fixed. That is what
+  /// separates this from `AbSegment.enabled: false`, which refuses the choice
+  /// outright and says nothing about whether the chosen one is in force.
+  final bool inactive;
 
   /// Tap on a disabled cell. Defaults to surfacing [AbSegment.disabledReason]
   /// as a snack bar — hover can't be relied on for the reason (touch
@@ -109,6 +120,7 @@ class AbSegmented<T> extends StatelessWidget {
                   onSelect: onSelect,
                   onDisabledTap: onDisabledTap,
                   iconOnly: iconOnly,
+                  inactive: inactive,
                 ),
               ],
             ],
@@ -127,6 +139,7 @@ class _SegmentCell<T> extends StatefulWidget {
     required this.onSelect,
     required this.onDisabledTap,
     required this.iconOnly,
+    required this.inactive,
   });
 
   final AbSegment<T> segment;
@@ -134,6 +147,7 @@ class _SegmentCell<T> extends StatefulWidget {
   final ValueChanged<T> onSelect;
   final ValueChanged<AbSegment<T>>? onDisabledTap;
   final bool iconOnly;
+  final bool inactive;
 
   @override
   State<_SegmentCell<T>> createState() => _SegmentCellState<T>();
@@ -165,7 +179,7 @@ class _SegmentCellState<T> extends State<_SegmentCell<T>> {
     final fg = !s.enabled
         ? p.textDisabled
         : widget.selected
-        ? p.accent
+        ? (widget.inactive ? p.textSecondary : p.accent)
         : _hovered
         ? p.textSecondary
         : p.textMuted;
@@ -179,7 +193,9 @@ class _SegmentCellState<T> extends State<_SegmentCell<T>> {
         // in height rather than shipping a 29x18 target to phones.
         vertical: widget.iconOnly ? AbTokens.space6 : AbTokens.space4,
       ),
-      color: widget.selected ? p.accent.withAlpha(40) : null,
+      color: widget.selected
+          ? (widget.inactive ? p.bgSelected : p.accent.withAlpha(40))
+          : null,
       alignment: Alignment.center,
       child: widget.iconOnly
           ? AbIcon(s.icon!, size: 13, color: fg)
