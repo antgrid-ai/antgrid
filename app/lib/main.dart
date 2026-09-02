@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:app_links/app_links.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart'
+    show FlutterLocalNotificationsPlugin;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -35,6 +37,7 @@ import 'providers/drawer_order.dart';
 import 'providers/first_run.dart';
 import 'providers/host_status.dart';
 import 'providers/local_host_warmup.dart';
+import 'providers/notification_route_apply.dart';
 import 'providers/post_signin_provisioning.dart';
 import 'providers/projects.dart';
 import 'providers/provider_retry.dart';
@@ -43,6 +46,7 @@ import 'providers/recent_agents.dart';
 import 'navigation/nav_console.dart';
 import 'navigation/nav_controller.dart';
 import 'navigation/nav_serialization.dart';
+import 'navigation/notification_route.dart';
 import 'navigation/platform_route_guard.dart';
 import 'navigation/root_navigator.dart';
 import 'screens/app_shell.dart';
@@ -51,7 +55,10 @@ import 'screens/device_cap_dialog.dart';
 import 'screens/sign_in_screen.dart';
 import 'services/devices_api.dart' show DeviceCapInfo;
 import 'services/app_settings_service.dart';
+import 'services/local_notification_service.dart';
+import 'services/notification_tap.dart';
 import 'services/push_background_handler.dart';
+import 'services/push_identity.dart';
 import 'providers/update_available.dart';
 import 'storage/cached_sessions_store.dart';
 import 'storage/drawer_collapsed_store.dart';
@@ -62,6 +69,7 @@ import 'storage/recent_agents_store.dart';
 import 'storage/update_handoff_store.dart';
 import 'update/update_gate.dart';
 import 'util/ab_log.dart';
+import 'util/detached.dart';
 import 'widgets/auth_splash.dart';
 import 'widgets/demo_frame.dart';
 import 'window/window_chrome.dart';
@@ -310,6 +318,42 @@ Future<void> main() async {
   // Subscribe for in-flight links while the app is running.
   appLinks.uriLinkStream.listen((uri) => unawaited(handleLink(uri)));
 
+  // The one place a tapped notification is turned into a navigation, whichever
+  // surface delivered it. No context: an OS-level tap has no widget behind it,
+  // so the applier falls back to the root navigator.
+  Future<void> handleNotificationRoute(NotificationRoute? route) async {
+    if (route == null) return;
+    await applyNotificationRoute(null, container, route);
+  }
+
+  // Unconditional and platform-independent — a desktop tap is worth as much as
+  // a phone one. Registering it is not evidence a tap can ever arrive: fln
+  // installs its method-call handler only inside `initialize`, which the demo's
+  // shell mount deliberately skips, so an install that has only ever shown the
+  // sample project has no warm-tap channel at all. Nothing is logged here.
+  LocalNotificationService().onTap = (response) => detached(
+    'Main',
+    'notification tap failed',
+    () => handleNotificationRoute(routeOfTapResponse(response)),
+  );
+
+  // iOS ONLY — see [pushTapRegistrationSupported] for why the narrowing is the
+  // substance. Even on iOS this callback is not ours alone: push forwards fln's
+  // local-notification userInfo down it with no source filter, which is why a
+  // map that decodes to nothing returns quietly rather than logging.
+  if (pushTapRegistrationSupported(defaultTargetPlatform)) {
+    Push.instance.addOnNotificationTap(
+      (data) => detached('Main', 'push notification tap failed', () async {
+        final decoded = await decodePush(
+          pushDataMap(data),
+          pushIdentity: PushIdentity.secure(),
+        );
+        if (decoded == null) return;
+        await handleNotificationRoute(routeOfPush(decoded));
+      }),
+    );
+  }
+
   analytics.track(AnalyticsEvents.appActive);
   WidgetsBinding.instance.addObserver(
     _TelemetryLifecycleObserver(onPause: analytics.flush),
@@ -331,6 +375,53 @@ Future<void> main() async {
   // half-open connection. It's best-effort and invalidates currentUserProvider
   // when it completes, so the UI updates as soon as the session lands.
   unawaited(appLinks.getInitialLink().then(handleLink));
+
+  // The notification that launched a terminated app. Each source is read
+  // EXACTLY once, because none of them is drained by the read: push's
+  // terminated-tap value is a static it never clears, fln's iOS
+  // launch-response dict is never emptied, and Android's `onNewIntent` re-arms
+  // the launch intent — so a later re-read is a guaranteed duplicate rather
+  // than a retry. Both iOS sources are read, because either can be the one that
+  // fired (push's skip guard keys on a launch option an fln-launched start
+  // never sets) and the applier's value-dedup absorbs the overlap.
+  detached('Main', 'cold-start notification tap failed', () async {
+    // `runApp` only SCHEDULES the first frame, so the root navigator is not
+    // attached yet. The applier's cross-project path hands its route to a
+    // pending slot and then pushes on that navigator; reading before it exists
+    // spends the route on nothing, with no retry behind it.
+    await WidgetsBinding.instance.endOfFrame;
+    // Platform-gated (see [launchDetailsSupported]) AND wrapped: the gate keeps
+    // the known-broken platforms out, the try keeps an unknown one from taking
+    // the whole cold-start block — the push read below it included — with it.
+    if (launchDetailsSupported(defaultTargetPlatform)) {
+      try {
+        final details = await FlutterLocalNotificationsPlugin()
+            .getNotificationAppLaunchDetails();
+        // The response is the gate, not `didNotificationLaunchApp`: a route
+        // needs a payload, and only the response carries one.
+        final response = details?.notificationResponse;
+        if (response != null) {
+          await handleNotificationRoute(routeOfTapResponse(response));
+        }
+      } catch (e) {
+        AbLog.error(
+          'Main',
+          'notification launch details failed',
+          fields: {'error': '$e'},
+        );
+      }
+    }
+    if (defaultTargetPlatform != TargetPlatform.iOS) return;
+    final tapped =
+        await Push.instance.notificationTapWhichLaunchedAppFromTerminated;
+    if (tapped == null) return;
+    final decoded = await decodePush(
+      pushDataMap(tapped),
+      pushIdentity: PushIdentity.secure(),
+    );
+    if (decoded == null) return;
+    await handleNotificationRoute(routeOfPush(decoded));
+  });
 }
 
 class _TelemetryLifecycleObserver extends WidgetsBindingObserver {

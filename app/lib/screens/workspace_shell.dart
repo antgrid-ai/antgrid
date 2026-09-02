@@ -49,7 +49,7 @@ import '../providers/visible_surface.dart';
 import '../services/app_settings_service.dart';
 import '../services/local_notification_service.dart';
 import '../services/push_background_handler.dart'
-    show decodePush, pushDataOf, pushDedupKey;
+    show decodePush, pushDataOf, pushDedupKey, routeOfPush;
 import '../services/push_identity.dart';
 import '../services/sessions_service.dart'
     show SessionOperationException, SessionsService;
@@ -298,15 +298,18 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           if (key != null && !_markNotified(key)) {
             return; // already surfaced (this surface or the live stream)
           }
-          // The one caller that names no route, so its toast never offers Open.
-          // Deliberate rather than overlooked: [DecodedPush] carries a
-          // projectId but no machine and no session, and a projectId alone is
-          // unroutable by design (`computeProjectId` hashes the folder path, so
-          // it can name the wrong machine with confidence).
-          // It can carry a route once the sealed payload reaches the app with
-          // machineUuid + terminalId on it; `decoded.sourceMessageId` is
-          // already the dedup key the applier wants.
-          _onAgentNotification(title: decoded.title, body: decoded.body);
+          // The only caller whose route is built from the wire rather than
+          // from a drawer entry: a push arrives from a machine this install has
+          // to name for itself, so [routeOfPush] addresses it by machine +
+          // project (or by session id) and answers null for a payload sealed by
+          // a bridge that carried neither — a projectId alone is unroutable by
+          // design, since `computeProjectId` hashes the folder path and can
+          // name the wrong machine with confidence.
+          _onAgentNotification(
+            title: decoded.title,
+            body: decoded.body,
+            route: routeOfPush(decoded),
+          );
         } catch (e) {
           // Async listener: an uncaught throw here is an unhandled rejection.
           AbLog.error(
@@ -448,10 +451,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     _onAgentNotification(
       title: title,
       body: body,
-      entryId: entryId,
-      sessionId: msg.terminalId,
-      kind: 'agent',
-      sourceMessageId: msg.id,
+      route: NotificationRoute(
+        registrationId: entryId,
+        terminalId: msg.terminalId,
+        kind: 'agent',
+        sourceMessageId: msg.id,
+      ),
     );
   }
 
@@ -490,10 +495,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     _onAgentNotification(
       title: title,
       body: body,
-      entryId: entryId,
-      sessionId: msg.sessionId,
-      kind: 'agent',
-      sourceMessageId: msg.id,
+      route: NotificationRoute(
+        registrationId: entryId,
+        terminalId: msg.sessionId,
+        kind: 'agent',
+        sourceMessageId: msg.id,
+      ),
     );
   }
 
@@ -510,49 +517,48 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     _onAgentNotification(
       title: title,
       body: body,
-      entryId: entryId,
-      sessionId: esc.terminalId,
-      kind: 'handler',
-      sourceMessageId: esc.escalationId,
+      route: NotificationRoute(
+        registrationId: entryId,
+        terminalId: esc.terminalId,
+        kind: 'handler',
+        sourceMessageId: esc.escalationId,
+      ),
     );
   }
 
-  /// [entryId] is the registry key of the project the notification came from.
-  /// The foreground-push path has none: its payload names a projectId, which is
-  /// not a machine (`computeProjectId` hashes the folder path alone) and so must
-  /// never be used to pick an entry. [kind] is which surface the notification
-  /// belongs to, `'agent'` or `'handler'`. [sourceMessageId] is the producing
-  /// message's own id, which is what lets a second notification about the same
-  /// session build a route the applier can tell apart from the first.
+  /// [route] is what tapping this notification should open, or null when the
+  /// producer could name nothing addressable — which is the foreground-push
+  /// path against a bridge that sealed no machine, since a projectId alone is
+  /// not a machine (`computeProjectId` hashes the folder path) and must never
+  /// be used to pick an entry.
   void _onAgentNotification({
     required String title,
     required String body,
-    String? entryId,
-    String? sessionId,
-    String? kind,
-    String? sourceMessageId,
+    NotificationRoute? route,
   }) {
-    if (shouldShowInAppToast(_lifecycle)) {
-      final route = NotificationRoute(
-        registrationId: entryId,
-        terminalId: sessionId,
-        kind: kind,
-        sourceMessageId: sourceMessageId,
-      );
-      // The offer is gated on the route actually RESOLVING, not on the entryId
-      // being present: a chip that opens nothing is worse than no chip, and the
-      // two conditions part company on any id that names no place (a blank one
-      // among them). Resolved synchronously with what is already loaded, which
-      // is exact for the in-app producers — they carry a registrationId, and
-      // neither that rule nor the terminalId one consults the device uuid.
-      final resolves =
-          resolveNotificationRoute(
+    // Gated on the route actually RESOLVING, not on one having been built: an
+    // offer that opens nothing is worse than none, and the two conditions part
+    // company on any id that names no place (a blank one among them). Resolved
+    // synchronously against what is already loaded, which is exact for the
+    // in-app producers — they carry a registrationId, and neither that rule nor
+    // the terminalId one consults the device uuid.
+    //
+    // This answer gates the CHIP only, never the OS notification's payload
+    // below: a chip lives 8s, so "resolves now" is as good as "resolves when
+    // pressed", while an OS notification sits in the shade indefinitely and the
+    // applier re-resolves at tap time against freshly awaited state. Gating the
+    // payload here would bake a cold-cache miss into a notification that would
+    // have resolved fine an hour later.
+    final destination = route == null
+        ? null
+        : resolveNotificationRoute(
             route,
             known: ref.read(recentSessionsProvider),
             localDeviceUuid: ref.read(localDeviceUuidProvider).value,
-          ) !=
-          null;
-      if (!resolves) {
+          );
+    final tappable = destination == null ? null : route;
+    if (shouldShowInAppToast(_lifecycle)) {
+      if (tappable == null) {
         showAbToastOverlay(
           context,
           toast: AbToast(icon: AbIcons.bell, title: title, description: body),
@@ -576,7 +582,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           onAction: () => detached(
             'WorkspaceShell',
             'notification route failed',
-            () => applyNotificationRoute(toastContext, container, route),
+            () => applyNotificationRoute(toastContext, container, tappable),
           ),
         ),
         // The action cannot dismiss its own toast (`showAbToastOn`'s remove is
@@ -590,7 +596,19 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // App is not focused (occluded or minimized): only the OS notification can
     // surface above the foreground app — an in-app toast would be painted
     // behind it. Fire-and-forget; `show` logs delivery failures internally.
-    _osNotifications.show(title: title, body: body);
+    //
+    // The payload is the whole tap: `main` decodes it back into this same route
+    // and applies it. Carried whenever the producer named one — `route`, not the
+    // chip's `tappable` — because resolution is redone at tap time and this
+    // notification outlives the state it would have been judged against here.
+    // Null rather than an empty route when there is nothing to name at all: on
+    // Windows the payload is what makes a body tap arrive as
+    // `selectedNotificationAction`, and an empty one lands nowhere.
+    _osNotifications.show(
+      title: title,
+      body: body,
+      payload: route == null ? null : encodeNotificationRoute(route),
+    );
   }
 
   // ── Preferences ──────────────────────────────────────────────────────
