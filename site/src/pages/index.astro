@@ -10,15 +10,29 @@ import Privacy from "../components/sections/Privacy.astro";
 import CrossAgent from "../components/sections/CrossAgent.astro";
 import ClosingCta from "../components/sections/ClosingCta.astro";
 
+// NOT "remote dev": that names the cloud-workspace category (Codespaces, Gitpod,
+// devcontainers) and claims the opposite of what this is — the agents run on
+// hardware you own. "Remote control" is accurate and is the phrase people search
+// when they want a machine of their own driven from somewhere else. Under 60
+// characters so a result page shows it whole rather than cutting the agents off.
+const TITLE = "antgrid — remote control for Claude Code, Codex and Cursor";
+
 // Under ~125 characters so a mobile link preview shows it whole — Google's
 // ~155 is the looser bound, and this is the page people actually share. It has
 // to keep the end-to-end claim through any rewrite: that is the positioning the
 // product is sold on, and home.spec.ts asserts it for exactly that reason.
+//
+// It names the agents, because "Claude Code" is what a person types into a
+// search box and "coding agent" is not, and it leads with WHERE they run: the
+// thing a reader is likeliest to get wrong here is assuming the work happens in
+// our cloud. The wedge is carried in the hero's own words rather than
+// paraphrased — a description promising a different sentence than the one the
+// page opens with is why people bounce off a result they chose.
 const DESCRIPTION =
-  "Claude Code, Codex and Cursor on your own machines. antgrid sequences the work and proves it's done. End-to-end encrypted.";
+  "Claude Code and Codex on your own machines, steered from your phone. Done means proven, not claimed. End-to-end encrypted.";
 ---
 <Base
-  title="antgrid — remote dev for concurrent coding agents"
+  title={TITLE}
   description={DESCRIPTION}
   path="/"
 >

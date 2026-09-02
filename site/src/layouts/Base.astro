@@ -10,8 +10,9 @@ interface Props {
   ogImage?: string;
   ogImageAlt?: string;
   path?: string;
+  robots?: string;
 }
-const { title, description, ogImage, ogImageAlt, path } = Astro.props;
+const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
 ---
 <html lang="en">
   <head>
@@ -25,7 +26,7 @@ const { title, description, ogImage, ogImageAlt, path } = Astro.props;
     <Font cssVariable="--font-archivo" preload />
     <Font cssVariable="--font-inter" preload />
     <Font cssVariable="--font-jetbrains" preload />
-    <Seo title={title} description={description} ogImage={ogImage} ogImageAlt={ogImageAlt} path={path} />
+    <Seo title={title} description={description} ogImage={ogImage} ogImageAlt={ogImageAlt} path={path} robots={robots} />
   </head>
   <body class="bg-page text-ink font-sans">
     <Nav />

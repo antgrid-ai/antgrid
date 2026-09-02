@@ -6,6 +6,11 @@ interface Props {
   ogImage?: string;
   ogImageAlt?: string;
   path?: string;
+  // Only ever set to keep a page OUT of the index (/404). Left undefined the tag
+  // is omitted entirely rather than emitted as "index, follow" — that is already
+  // the default, and a page that states it invites the question of which pages
+  // set it deliberately.
+  robots?: string;
 }
 // The two defaults describe the same file — a page overriding one must override
 // the other, or the card ships someone else's alt text. The filename tracks the
@@ -19,6 +24,7 @@ const {
   ogImage = "/og/one-screen.png",
   ogImageAlt = "Every agent. Every machine. One screen. Below, antgrid checking an agent's work against test output while you slept.",
   path = "/",
+  robots,
 } = Astro.props;
 const canonical = new URL(path, SITE_URL).href;
 const ogUrl = new URL(ogImage, SITE_URL).href;
@@ -27,6 +33,7 @@ const ogUrl = new URL(ogImage, SITE_URL).href;
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>{title}</title>
 <meta name="description" content={description} />
+{robots && <meta name="robots" content={robots} />}
 <link rel="canonical" href={canonical} />
 {/* Keep in lockstep with --color-page in styles/global.css. */}
 <meta name="theme-color" content="#101015" />

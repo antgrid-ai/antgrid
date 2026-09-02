@@ -119,3 +119,43 @@ test("the social card declares its dimensions so previews reserve the box", asyn
   const alt = await page.locator('meta[property="og:image:alt"]').getAttribute("content");
   expect(alt, "the card carries no alt text").toBeTruthy();
 });
+
+// Every in-page anchor the site links to must exist. home.spec.ts's dead-link
+// sweep skips "/#..." hrefs — it resolves them over HTTP, where the fragment is
+// never sent — so a renamed section id breaks navigation with nothing red. These
+// are the only links on the site that can rot silently.
+test("every in-page anchor the nav and footer offer has a section to land on", async ({ page }) => {
+  await page.goto("/");
+  const fragments = await page.locator("a[href^='/#'], a[href^='#']").evaluateAll((els) =>
+    [...new Set(els.map((e) => (e as HTMLAnchorElement).getAttribute("href")!.split("#")[1]))]
+  );
+  expect(fragments.length, "the home page offers no in-page anchors at all").toBeGreaterThan(0);
+  for (const id of fragments) {
+    await expect(page.locator(`#${id}`), `nothing on the page has id="${id}"`).toHaveCount(1);
+  }
+});
+
+// Features has to open on the paid feature. Handler is the only thing anyone pays
+// for and its section sits ABOVE the fleet view, so aiming this at #fleet scrolled
+// the reader straight past it — a revenue link that resolved fine and pointed at
+// the wrong thing, which is why it is pinned by target here rather than by wording.
+test("Features opens the section that sells Handler", async ({ page }) => {
+  await page.goto("/");
+  const features = page.getByRole("link", { name: /^Features$/ });
+  expect(await features.count(), "no Features link").toBeGreaterThan(0);
+  for (let i = 0; i < (await features.count()); i++) {
+    await expect(features.nth(i)).toHaveAttribute("href", "/#handler");
+  }
+  await expect(page.locator("#handler")).toContainText("Handler");
+});
+
+// The 404 template answers EVERY unknown path, so without this a mistyped inbound
+// link can be indexed under its own URL as a page that says nothing exists.
+test("the not-found page is kept out of the index", async ({ page }) => {
+  await page.goto("/404");
+  await expect(page.locator('meta[name="robots"]')).toHaveAttribute("content", /noindex/);
+
+  // Real pages must NOT inherit it — a stray default here delists the whole site.
+  await page.goto("/");
+  await expect(page.locator('meta[name="robots"]')).toHaveCount(0);
+});

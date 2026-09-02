@@ -18,7 +18,11 @@ export const links = {
   // the product entry point; billing sign-in stays on links.signIn.
   startFree: "/#download",
   pricing: "/pricing",
-  features: "/#fleet",
+  // #handler, not #fleet. Phases.astro sits ABOVE Fleet.astro on the home page,
+  // so a "Features" link aimed at the fleet view opened one section PAST the only
+  // feature anyone pays for. Anchor hrefs are excluded from the dead-link sweep in
+  // home.spec.ts, so the id this depends on is pinned in contracts.spec.ts instead.
+  features: "/#handler",
   download: "/#download",
   getStarted: "/get-started",
   downloadMacos: `${RELEASES_URL}/releases/latest/download/antgrid-macos.dmg`,
