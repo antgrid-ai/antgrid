@@ -160,8 +160,6 @@ program
       onShutdownRequested: () => void shutdown("app-close"),
     });
 
-    await host.startControlPlane();    // bind loopback control + write host.json
-
     // RSS sampler runs for the whole host process when --debug-perf is set —
     // started here (not gated on a first project) so a machine-only warm-up
     // spawn that only ever serves project:open RPCs is still sampled. Labelled
@@ -211,10 +209,12 @@ program
       process.exit(exitCode);
     };
 
-    // Wire teardown BEFORE the (possibly multi-second) first-project open, so an
-    // owner death or signal mid-open can't leave the host registered on the
-    // relay for an app that's already gone. The owner-watchdog self-exits when
-    // the spawning app's pid vanishes — the backstop for exits that never reach
+    // Wire teardown BEFORE the control plane comes up, so an owner death or a
+    // signal during bring-up or the first-project open can't leave the host
+    // registered on the relay for an app that's already gone. `host.shutdown()`
+    // is null-safe against a host that never started, which is what lets this
+    // sit ahead of it. The owner-watchdog self-exits when the spawning app's
+    // pid vanishes — the backstop for exits that never reach
     // the app's didRequestAppExit teardown (force-kill, crash, or a window close
     // under `flutter run --machine`), which would otherwise orphan this
     // machine-level host.
@@ -236,11 +236,16 @@ program
     // The SDK decides whether to exit on its own AT CRASH TIME, by counting the
     // OTHER uncaughtException listeners: with one of ours present it defers and
     // this teardown sweeps the PTYs; as the sole listener it logs and
-    // `process.exit(1)`s, skipping the sweep. That is survivable only in the
-    // window above, where no PTY exists yet — moving this registration any later
-    // (or `initCrashReporting` any earlier) widens it into one where it isn't.
+    // `process.exit(1)`s, skipping the sweep. Hence the order below: everything
+    // between initCrashReporting and here is straight-line setup that opens
+    // nothing, whereas startControlPlane publishes host.json and only THEN
+    // spends seconds on the relay handshake and OAuth mint — with host.json on
+    // disk the app can drive project:open over loopback for that whole stretch,
+    // so it is not a window in which "no PTY exists yet" may be assumed.
     process.on("uncaughtException", (err) => { log.error("Uncaught exception: %s", err); shutdown("uncaughtException"); });
     process.on("unhandledRejection", (err) => { log.error("Unhandled rejection: %s", err); shutdown("unhandledRejection"); });
+
+    await host.startControlPlane();    // bind loopback control + write host.json
 
     // Inline the first project when one was provided. An eager warm-up spawn
     // (app launch) sends no firstProject — the control plane is already up from
@@ -253,6 +258,12 @@ program
         await host.open(payload.firstProject.projectId, payload.firstProject.projectPath, payload.firstProject.mode);
       } catch (err) {
         console.error(`antgrid-bridge: failed to open first project: ${(err as Error).message}`);
+        // Reported explicitly: this exit is a bare process.exit, so it reaches
+        // neither the shutdown path's flush nor either top-level handler, and a
+        // mint failure against a revoked credential pair lands here and nowhere
+        // else.
+        captureBridgeError(err, "first-project-open");
+        await flushCrashReports();
         process.exit(1);
       }
     }

@@ -5,6 +5,8 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
+import '../util/ab_log.dart';
+
 final _pathLike = RegExp(r'([a-zA-Z]:)?[\\/][^\s"]+');
 
 String _redact(String input) => input.replaceAll(_pathLike, '<redacted-path>');
@@ -40,15 +42,22 @@ Object? _redactDeep(Object? value) {
 // than mutated in place: 9.x makes absPath/contextLine settable, but
 // preContext/postContext/vars stay getter-only, so a frame is the one object
 // here that assignment alone can't neutralize.
+//
+// module/package are redacted alongside absPath because the frames
+// sentry-native contributes carry an absolute module path there; on a Dart
+// frame both are null, so it costs nothing. fileName deliberately is NOT, and
+// that is where this diverges from the bridge's twin on purpose: a Dart frame's
+// fileName is a `package:`/`dart:` URI naming our own source, and _pathLike
+// would eat everything after its first slash — identity lost, nothing gained.
 SentryStackFrame _scrubFrame(SentryStackFrame f) => SentryStackFrame(
   absPath: _redactNullable(f.absPath),
   fileName: f.fileName,
   function: f.function,
-  module: f.module,
+  module: _redactNullable(f.module),
   lineNo: f.lineNo,
   colNo: f.colNo,
   inApp: f.inApp,
-  package: f.package,
+  package: _redactNullable(f.package),
   native: f.native,
   platform: f.platform,
   imageAddr: f.imageAddr,
@@ -171,9 +180,17 @@ Future<String?> _resolveNativeDatabasePath() async {
   try {
     final dir = await getApplicationSupportDirectory();
     return nativeCrashDatabasePath(dir.path);
-  } catch (_) {
+  } catch (e) {
     // Crash reporting must never be the reason the app fails to start; the SDK
-    // falls back to the cwd-relative default, which is today's behaviour.
+    // falls back to the cwd-relative default, which is today's behaviour. Logged
+    // rather than swallowed because that fallback IS the bug this function
+    // exists to fix, and it has no other symptom — no handler, no database, no
+    // release-health session, nothing that looks like a failure.
+    AbLog.warn(
+      'crashReporting',
+      'support dir unresolvable; leaving nativeDatabasePath at the SDK default',
+      fields: {'error': '$e'},
+    );
     return null;
   }
 }
@@ -203,5 +220,23 @@ Future<void> initCrashReporting({
     // attachViewHierarchy is @experimental and defaults to false; no explicit
     // set needed.
     options.beforeSend = (event, hint) => scrubCrashEvent(event);
+    // beforeSend is NOT the whole story on the platforms that have a native
+    // layer. A native crash is written and posted by that layer itself, and the
+    // C binding only ever sets dsn/release/database_path and friends — it never
+    // calls `sentry_options_set_before_send` — so nothing sent from there passes
+    // through the callback above. Breadcrumbs are the part of that envelope we
+    // still control: NativeScopeObserver mirrors the Dart scope down, and
+    // beforeBreadcrumb runs before the observers are notified, so scrubbing here
+    // is what keeps a path out of the copy the native layer holds. The frames
+    // and contexts of a native crash remain outside our reach by construction.
+    options.beforeBreadcrumb = (breadcrumb, hint) {
+      if (breadcrumb == null) return null;
+      breadcrumb.message = _redactNullable(breadcrumb.message);
+      final data = breadcrumb.data;
+      if (data != null) {
+        breadcrumb.data = Map<String, dynamic>.from(_redactDeep(data) as Map);
+      }
+      return breadcrumb;
+    };
   }, appRunner: runApp);
 }

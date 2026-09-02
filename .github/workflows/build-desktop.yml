@@ -277,13 +277,13 @@ jobs:
             --target bun-darwin-arm64 \
             --outfile bridge/dist/antgrid-bridge-arm64 \
             --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' \
-            --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN }}"' \
+            --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN_BRIDGE }}"' \
             --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
           bun build bridge/src/index.ts --compile \
             --target bun-darwin-x64 \
             --outfile bridge/dist/antgrid-bridge-x64 \
             --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' \
-            --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN }}"' \
+            --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN_BRIDGE }}"' \
             --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
           lipo -create -output bridge/dist/antgrid-bridge \
             bridge/dist/antgrid-bridge-arm64 \
@@ -642,7 +642,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force bridge/dist | Out-Null
-          bun build bridge/src/index.ts --compile --target bun-windows-x64 --outfile bridge/dist/antgrid-bridge.exe --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN }}"' --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
+          bun build bridge/src/index.ts --compile --target bun-windows-x64 --outfile bridge/dist/antgrid-bridge.exe --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN_BRIDGE }}"' --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
 
       - name: Smoke test compiled bridge hook
         shell: pwsh
@@ -846,7 +846,7 @@ jobs:
             --target bun-linux-x64 \
             --outfile bridge/dist/antgrid-bridge \
             --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' \
-            --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN }}"' \
+            --define 'process.env.SENTRY_DSN="${{ secrets.SENTRY_DSN_BRIDGE }}"' \
             --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
 
       - name: Smoke test compiled bridge hook
