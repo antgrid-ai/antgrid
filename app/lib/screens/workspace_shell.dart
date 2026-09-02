@@ -423,7 +423,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   // ── Terminal notifications ───────────────────────────────────────────
 
-  void _onNotification(TerminalNotificationMessage msg) {
+  void _onNotification(TerminalNotificationMessage msg, String entryId) {
     // A session terminal's id IS the session id (service PTYs use their own,
     // which never matches an active session).
     if (_isViewingSession(msg.terminalId)) return;
@@ -433,7 +433,13 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     final title = (msg.title != null && msg.title!.isNotEmpty)
         ? msg.title!
         : 'Agent';
-    _onAgentNotification(title: title, body: body);
+    _onAgentNotification(
+      title: title,
+      body: body,
+      entryId: entryId,
+      sessionId: msg.terminalId,
+      kind: 'agent',
+    );
   }
 
   /// Reads the live focus state into [isViewingSession] — every surfacer below
@@ -449,7 +455,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     lifecycle: _lifecycle,
   );
 
-  void _onAgentNotificationPush(NotificationPushMessage msg) {
+  void _onAgentNotificationPush(NotificationPushMessage msg, String entryId) {
     if (_isViewingSession(msg.sessionId)) return;
     const labels = {
       'permission_request': 'Permission needed',
@@ -468,10 +474,16 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     final body = (msg.message != null && msg.message!.isNotEmpty)
         ? msg.message!
         : label;
-    _onAgentNotification(title: title, body: body);
+    _onAgentNotification(
+      title: title,
+      body: body,
+      entryId: entryId,
+      sessionId: msg.sessionId,
+      kind: 'agent',
+    );
   }
 
-  void _onHandlerEscalation(HandlerEscalation esc) {
+  void _onHandlerEscalation(HandlerEscalation esc, String entryId) {
     // Handler escalations name their session in `terminalId`.
     if (_isViewingSession(esc.terminalId)) return;
     // Route through the shared surfacer (foreground toast / background OS
@@ -481,10 +493,27 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         ? 'Handler — urgent'
         : 'Handler needs you';
     final body = esc.question.isNotEmpty ? esc.question : 'Agent needs you';
-    _onAgentNotification(title: title, body: body);
+    _onAgentNotification(
+      title: title,
+      body: body,
+      entryId: entryId,
+      sessionId: esc.terminalId,
+      kind: 'handler',
+    );
   }
 
-  void _onAgentNotification({required String title, required String body}) {
+  /// [entryId] is the registry key of the project the notification came from.
+  /// The foreground-push path has none: its payload names a projectId, which is
+  /// not a machine (`computeProjectId` hashes the folder path alone) and so must
+  /// never be used to pick an entry. [kind] is which surface the notification
+  /// belongs to, `'agent'` or `'handler'`.
+  void _onAgentNotification({
+    required String title,
+    required String body,
+    String? entryId,
+    String? sessionId,
+    String? kind,
+  }) {
     if (shouldShowInAppToast(_lifecycle)) {
       showAbToastOverlay(
         context,
@@ -922,45 +951,49 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // OS notification while backgrounded (gated in _onNotification). The
     // provider reloads on project switch and replays a carried-over value;
     // guard against re-handling the same emission.
-    ref.listen<AsyncValue<TerminalNotificationMessage>>(
+    ref.listen<AsyncValue<ProjectScoped<TerminalNotificationMessage>>>(
       terminalNotificationsProvider,
       (prev, next) {
-        final msg = next.value;
-        if (msg == null) return;
-        if (prev?.value == msg) return; // carried-over value on reload
-        _onNotification(msg);
+        final scoped = next.value;
+        if (scoped == null) return;
+        if (prev?.value == scoped) return; // carried-over value on reload
+        _onNotification(scoped.message, scoped.entryId);
       },
     );
 
-    ref.listen<AsyncValue<NotificationPushMessage>>(
+    ref.listen<AsyncValue<ProjectScoped<NotificationPushMessage>>>(
       agentPushNotificationsProvider,
       (prev, next) {
-        final msg = next.value;
-        if (msg == null) return;
-        if (prev?.value == msg) return; // carried-over value on reload
+        final scoped = next.value;
+        if (scoped == null) return;
+        if (prev?.value == scoped) return; // carried-over value on reload
+        final msg = scoped.message;
         // Shared dedup key with the FCM path: the bridge seals
         // `sourceMessageId === msg.id` for agent notifications, so this id
         // guards both surfaces — a connected-but-backgrounded phone that gets
         // the same event live AND via push surfaces it only once (matches the
         // handler-escalation path below).
         if (!_markNotified(msg.id)) return; // once/id
-        _onAgentNotificationPush(msg);
+        _onAgentNotificationPush(msg, scoped.entryId);
       },
     );
 
-    ref.listen<AsyncValue<HandlerEscalation>>(handlerEscalationsProvider, (
-      prev,
-      next,
-    ) {
-      final esc = next.value;
-      if (esc == null) return;
-      // Shared dedup key with the FCM path: the bridge seals
-      // `sourceMessageId === escalationId` for handler pushes, so this same id
-      // guards both surfaces and a single escalation is surfaced only once
-      // whether it arrives live or via push.
-      if (!_markNotified(esc.escalationId)) return; // once/id
-      _onHandlerEscalation(esc);
-    });
+    ref.listen<AsyncValue<ProjectScoped<HandlerEscalation>>>(
+      handlerEscalationsProvider,
+      (prev, next) {
+        final scoped = next.value;
+        if (scoped == null) return;
+        final esc = scoped.message;
+        // Shared dedup key with the FCM path: the bridge seals
+        // `sourceMessageId === escalationId` for handler pushes, so this same
+        // id guards both surfaces and a single escalation is surfaced only once
+        // whether it arrives live or via push. Keying on the escalationId alone
+        // — not the project-scoped record — is also what keeps the provider's
+        // per-rebuild re-seed idempotent.
+        if (!_markNotified(esc.escalationId)) return; // once/id
+        _onHandlerEscalation(esc, scoped.entryId);
+      },
+    );
 
     // Surface launcher/transport errors inline (local-mode spawn
     // failures, a relay stream transport that errors) instead of leaving the
