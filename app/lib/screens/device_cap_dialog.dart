@@ -7,13 +7,21 @@ import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
+import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
-import '../design/widgets/ab_tooltip.dart';
 import '../providers/auth.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/post_signin_provisioning.dart';
 import '../services/devices_api.dart';
+import '../util/detached.dart';
+import '../util/external_url.dart';
+
+/// Where the worker-cap variant sends someone who wants more machines. There is
+/// no checkout to send them to during the beta, so the ask is captured on the
+/// site instead; no price is named here or on the way out, because none is
+/// committed to yet.
+const _foundingPricingUrl = 'https://antgrid.ai/pricing';
 
 /// Shows the device-cap remediation dialog and resolves when it is dismissed.
 /// Always clears [deviceCapProvider] on close so a later provisioning attempt
@@ -34,8 +42,7 @@ Future<void> showDeviceCapDialog(
 /// same way: revoke one of the listed devices, then retry provisioning this
 /// machine. Only the copy differs — `appDeviceLimit` is an abuse ceiling that
 /// pricing never mentions, so its variant never offers upgrading, while the
-/// worker cap is the paid axis and shows an upgrade affordance (disabled until
-/// checkout ships).
+/// worker cap is the paid axis and points at the founding-price waitlist.
 class DeviceCapDialog extends ConsumerStatefulWidget {
   const DeviceCapDialog({super.key, required this.info});
 
@@ -206,20 +213,30 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
                 runSpacing: AbTokens.space8,
                 children: [
                   if (_isWorker) ...[
-                    // Checkout is not wired yet, so the paid path is shown and
-                    // legibly shut rather than absent. The tooltip alone would
-                    // leave the button unexplained on mobile (no hover), hence
-                    // the inline label beside it.
+                    // The machine slot cannot be bought during the beta, so the
+                    // paid path leads somewhere that works instead of standing
+                    // there disabled. The line says why the button is a
+                    // waitlist and not a purchase; a tooltip could not, having
+                    // no hover on mobile.
                     Text(
-                      'Coming soon',
+                      'More machines aren\'t on sale yet.',
                       style: AbTokens.sansStyle(
                         fontSize: AbTokens.fontXs,
                         color: p.textMuted,
                       ),
                     ),
-                    const AbTooltip(
-                      message: 'Coming soon',
-                      child: AbButton(label: 'Upgrade'),
+                    AbButton(
+                      label: 'Join the waitlist',
+                      leading: AbIcon(
+                        AbIcons.openExternal,
+                        size: AbTokens.iconButtonGlyph,
+                        color: p.textSecondary,
+                      ),
+                      onTap: () => detached(
+                        'DeviceCapDialog',
+                        'open founding-pricing waitlist',
+                        () => openExternalUrl(context, _foundingPricingUrl),
+                      ),
                     ),
                   ],
                   AbButton(

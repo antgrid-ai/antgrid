@@ -1,10 +1,19 @@
 ---
 import Base from "../layouts/Base.astro";
 ---
-<Base title="Page not found — antgrid" description="That page doesn't exist." path="/404">
+{/* noindex because this file is served for EVERY unknown path, not just /404 —
+    without it a mistyped or expired inbound link puts a page reading "Page not
+    found" into the index under whatever URL was requested. `follow` so the links
+    out of it still pass the crawler back into the real pages. */}
+<Base
+  title="Page not found — antgrid"
+  description="That page doesn't exist. Head back to the antgrid home page, or check the support page for setup and account help."
+  path="/404"
+  robots="noindex, follow"
+>
   <section class="mx-auto max-w-3xl px-6 py-24 text-center">
     <p class="mb-3 font-mono text-marker uppercase tracking-[0.18em] text-signal">404</p>
     <h1 class="mb-3 font-display text-title font-semibold text-ink">Page not found.</h1>
-    <p class="text-muted">That page doesn't exist. <a class="text-signal underline" href="/">Head back home</a>.</p>
+    <p class="text-muted">That page doesn't exist. <a class="text-signal underline" href="/">Head back home</a>, or try <a class="text-signal underline" href="/support">support</a>.</p>
   </section>
 </Base>

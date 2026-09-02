@@ -24,11 +24,11 @@ import Wordmark from "../components/ui/Wordmark.astro";
       {/* Type and card share one 39rem column so the composition stays centred —
           left-anchoring the way the hero does leaves a third of this canvas dead,
           which reads as overflow rather than intent at thumbnail size. */}
-      {/* The hero headline, and unlike the copy it replaced it stands on its own:
-          "antgrid starts the next one." needed a setup line above it to mean
-          anything, which is why this card used to carry one. It does not need one
-          now, and the ProofCard below already supplies the 2am story that line was
-          telling — it timestamps 02:58 and says "While you slept".
+      {/* The hero headline, and it stands on its own the way the copy before it
+          did not: "antgrid starts the next one." needed a setup line above it to
+          mean anything, which is why this card used to carry one. It does not
+          need one now, and the ProofCard below already supplies the 2am story
+          that line was telling — it timestamps 02:58 and says "While you slept".
 
           Two text lines is the budget, not a preference: the card is a fixed
           1200x630 and the ProofCard's amber wake sits on the bottom edge with no
@@ -46,13 +46,15 @@ import Wordmark from "../components/ui/Wordmark.astro";
             slack: the amber wake sits on the bottom edge). */}
         <Wordmark class="mb-2.5 h-6 w-auto text-signal" />
         {/* inline-block per sentence, as in the hero, so the two lines break
-            between sentences rather than wherever 39rem happens to fall. 2.75rem
-            rather than the hero's fluid scale: "Every agent. Every machine." has
-            to clear this column on one line, and at 3rem it does not. */}
-        <p class="font-display text-[2.75rem] font-semibold leading-[1.05] tracking-[-0.032em] text-ink">
-          <span class="inline-block">Every agent.</span>{" "}
-          <span class="inline-block">Every machine.</span>{" "}
-          <span class="inline-block">One screen.</span>
+            between sentences rather than wherever 39rem happens to fall. 2.5rem
+            rather than the hero's fluid scale: this headline is a sentence longer
+            than the one it replaced, and "Your machines. Your agents." has to
+            clear this column on one line — at 2.75rem it does not, and the third
+            line that buys costs the amber wake its place on the bottom edge. */}
+        <p class="font-display text-[2.5rem] font-semibold leading-[1.05] tracking-[-0.032em] text-ink">
+          <span class="inline-block">Your machines.</span>{" "}
+          <span class="inline-block">Your agents.</span>{" "}
+          <span class="inline-block">One control plane.</span>
         </p>
       </div>
       {/* 39rem, not max-w-xl: wide enough that the snapshot row stops wrapping to

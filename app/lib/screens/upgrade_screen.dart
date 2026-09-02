@@ -30,10 +30,13 @@ const _proYearlyFeatures = [
 
 /// TEMP-PROMO: why the plan can't be bought, said in the CTA itself. "Coming
 /// soon" reads as half-built to someone who arrived from a site that told them
-/// the beta is free. Same wording as web's `UNAVAILABLE_CTA_LABEL` and the
-/// marketing site's `PlanCard.astro`. Carries no beta flag of its own: the
-/// whole static block this belongs to is deleted when checkout opens — see the
-/// TEMP-PROMO marker at the foot of this file.
+/// the beta is free. This is now the only DEAD paid CTA left: web's pricing page
+/// and the marketing site's plan cards capture an address in place, and
+/// `device_cap_dialog.dart` — the app's own answer to the same problem — sends
+/// the reader out to the site's capture rather than standing there disabled.
+/// Carries no beta flag of its own: the whole static block this belongs to is
+/// deleted when checkout opens — see the TEMP-PROMO marker at the foot of this
+/// file.
 const _unavailableCtaLabel = 'Available after beta';
 
 /// The machine count sits mid-sentence, so it has to agree with its noun —

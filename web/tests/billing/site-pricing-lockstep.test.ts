@@ -77,8 +77,9 @@ describe("site marketing constants track the shipped catalog", () => {
     const { listPriceCents, offerPriceCents } = PRICING.pro_yearly;
 
     // `offerPriceCents` is optional — a plan may carry list price only. The site
-    // renders the offer struck through against the list, so its absence breaks
-    // the card outright; compare only once there is something to compare.
+    // quotes both figures (the list price forwards as "$99 at launch", never
+    // struck through), so its absence leaves the card quoting a price billing
+    // does not hold; compare only once there is something to compare.
     if (offerPriceCents === undefined) throw new Error("pro_yearly carries no offer price, but the site quotes one");
 
     expect({

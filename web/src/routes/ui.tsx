@@ -1535,10 +1535,10 @@ export function uiRoutes(deps: {
     const userId = c.get("userId");
     await provisionProductAccountForUser(deps.db, userId);
     const plans = await listActivePlans(deps.db);
-    // TEMP-PROMO: every plan renders as a disabled "Coming soon" card while
-    // in-app purchases aren't live — grep "TEMP-PROMO" repo-wide for every
-    // related spot (backend grant logic in web/src/models/subscription.ts
-    // plus the matching disabled UI in web/src/ui/pricing.tsx).
+    // TEMP-PROMO: no plan can be bought while in-app purchases aren't live, so
+    // the Pro card takes waitlist signups instead of running a checkout — grep
+    // "TEMP-PROMO" repo-wide for every related spot (backend grant logic in
+    // web/src/models/subscription.ts plus the static UI in web/src/ui/pricing.tsx).
     //
     // TO RESTORE ONCE PAYMENT INTEGRATION SHIPS: delete the `const plans =`
     // line above and the `c.html(...)` call below, then uncomment the two
@@ -1555,7 +1555,7 @@ export function uiRoutes(deps: {
     //   if (plan && isPlanId(plan.slug)) currentPlanSlug = plan.slug;
     // }
     return c.html(
-      <PricingPage user={{ email: c.get("userEmail") }} plans={plans} env={deps.env} />
+      <PricingPage user={{ email: c.get("userEmail") }} plans={plans} />
       // <PricingPage
       //   user={{ email: c.get("userEmail") }}
       //   plans={plans}

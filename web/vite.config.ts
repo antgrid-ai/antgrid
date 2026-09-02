@@ -25,6 +25,7 @@ export default defineConfig({
         checkout: resolve(import.meta.dirname, "src/ui/entries/checkout.ts"),
         dashboard: resolve(import.meta.dirname, "src/ui/entries/dashboard.ts"),
         devices: resolve(import.meta.dirname, "src/ui/entries/devices.ts"),
+        waitlist: resolve(import.meta.dirname, "src/ui/entries/waitlist.ts"),
       },
       output: {
         entryFileNames: "[name].[hash].js",

@@ -112,6 +112,42 @@
      so they can't drift apart. Prose caps (max-w-xl/2xl) are deliberately NOT
      tied to this: body copy stays at a readable measure however wide the shell. */
   --container-shell: 72rem;
+
+  /* ---- App material -----------------------------------------------------
+     The APP's palette (app/lib/design/ab_colors.dart), carried here so the
+     hand-built app shell reads as the product sitting on the page rather than
+     as more page with a border around it.
+
+     These are deliberately NOT reconciled with the site ramp above. The app is
+     Zinc-neutral and the site is warm-neutral, and that difference is the only
+     thing doing the work — an app window painted in --color-panel is just a
+     card. Keep every `ab-` token pointing at the Dart value it mirrors; the two
+     drifting apart is silent and shows up as a window that looks almost right.
+
+     The accent is absent on purpose: the app's `accent`/`accentHighlight`/
+     `accentMuted` are ALREADY #db6f4b / #ea997f / #d2542a, byte-identical to
+     --color-signal / signal2 / signalbtn above, so the shell uses those. */
+  --color-ab-deepest: #09090b;
+  --color-ab-deep: #0c0c0f;
+  --color-ab-surface: #18181b;
+  --color-ab-raised: #1f1f23;
+  --color-ab-elevated: #27272a;
+  --color-ab-selected: #2f2f35;
+  --color-ab-line-soft: #1a1a1f;
+  --color-ab-line: #27272a;
+  --color-ab-line-strong: #3f3f46;
+  --color-ab-text: #e4e4e7;
+  --color-ab-text2: #a1a1aa;
+  --color-ab-mute: #71717a;
+  --color-ab-dim: #52525b;
+  /* Status tones. `attn` is the app's statusAttention and it means what amber
+     means everywhere else on this site: a human is needed. Nothing else in a
+     scene may take it. */
+  --color-ab-run: #8fcfae;
+  --color-ab-think: #e2c792;
+  --color-ab-attn: #e5a055;
+  --color-ab-ok: #22c55e;
+  --color-ab-err: #f87171;
 }
 
 html {
@@ -136,9 +172,39 @@ body {
 
 /* ---- Atmosphere -------------------------------------------------------- */
 
-/* Signal radial glow — position with inset utilities on an absolute wrapper. */
+/* Signal radial glow — position with inset utilities on an absolute wrapper.
+   Only safe where a frame contains it (the closing CTA's bordered card); the hero
+   is full-bleed and needs .glow-hero below. */
 .glow-signal {
   background: radial-gradient(closest-side, rgba(210, 84, 42, 0.16), transparent 70%);
+}
+
+/* The hero's light, which is two different devices because a phone has no room
+   for the desktop one. Wide: a compact halo about a third of the frame across,
+   with dark air either side — the falloff is visible on every axis, which is the
+   only reason it reads as a light source at all. Narrow: that same fixed 980px
+   halo is wider than the viewport, so no falloff lands inside the frame and the
+   light flattens into a brown tint over the headline, ending in one hard
+   horizontal terminus under the kicker.
+   So below md it stops being an orb and becomes an edge: the gradient's centre
+   sits ON the top edge, so there is never a circle to resolve, and the falloff
+   runs down the one axis a phone has room for. Alpha drops with it — 0.16 across
+   the whole of a small frame is a far larger event than 0.16 across a third of a
+   large one, and it is sitting behind the lowest-contrast text on the page. */
+.glow-hero {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 340px;
+  background: radial-gradient(ellipse 150% 100% at 50% 0%, rgba(210, 84, 42, 0.11), transparent 72%);
+}
+@media (min-width: 48rem) {
+  .glow-hero {
+    inset: -14rem auto auto 50%;
+    height: 620px;
+    width: min(980px, 68vw);
+    transform: translateX(-50%);
+    background: radial-gradient(closest-side, rgba(210, 84, 42, 0.16), transparent 70%);
+  }
 }
 
 /* The namesake, made literal. Ruled lines at one pitch (square cells at any
@@ -166,6 +232,17 @@ body {
    background tiles from — percentages would drift off the grid. */
 .live-cells {
   mask-image: radial-gradient(130% 85% at 50% 8%, black 8%, transparent 72%);
+}
+/* Not below md. The cells are placed in raw px against a wide canvas, so on a
+   phone only the leftmost column is on screen and every one of those sits behind
+   the copy rather than beside it — a warm block fading in and out under muted
+   body text reads as a rendering fault, not as a machine waking up. The static
+   field stays; liveness is carried in the same viewport by the beta pill and by
+   the ProofCard's own loop, which says it far better than a background can. */
+@media (max-width: 47.999rem) {
+  .live-cells {
+    display: none;
+  }
 }
 .live-cells rect {
   fill: rgba(210, 84, 42, 0.14);
@@ -281,5 +358,86 @@ html.js .reveal.in {
      flips mid-session the rows must not keep transitioning. */
   .pc-loop .pc-row {
     transition: none;
+  }
+}
+
+
+/* ---- App shell --------------------------------------------------------- */
+
+/* The window's pane geometry. In CSS rather than utilities because the three
+   columns collapse in a specific ORDER as width runs out — the context pane
+   first, then the rail — and that sequence is one decision that belongs in one
+   place, not spread across three responsive prefixes on three elements. */
+.appwin-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+.appwin-rail,
+.appwin-ctx {
+  display: none;
+}
+@media (min-width: 40rem) {
+  .appwin-panes {
+    grid-template-columns: 12.5rem minmax(0, 1fr);
+  }
+  .appwin-rail {
+    display: block;
+  }
+}
+/* Only the three-pane variant ever gets the context column back, and only once
+   the agent pane can still hold a terminal line without wrapping it. The
+   context column is sized by its tab strip, not by its content: Preview /
+   Files / Git / Terminals / Handler is the app's full set and all five have to
+   fit on one line, because a wrapped or clipped strip is the one detail that
+   gives a hand-built window away. */
+@media (min-width: 64rem) {
+  .appwin-panes--3 {
+    grid-template-columns: 13rem minmax(0, 1fr) 21rem;
+  }
+  .appwin-panes--3 .appwin-ctx {
+    display: block;
+  }
+}
+@media (min-width: 80rem) {
+  .appwin-panes {
+    grid-template-columns: 14rem minmax(0, 1fr);
+  }
+  .appwin-panes--3 {
+    grid-template-columns: 14rem minmax(0, 1fr) 24rem;
+  }
+}
+
+/* The hero window runs off the bottom of its section, so the reader feels the
+   app continue past the fold rather than watching a card end. The fade is a
+   sibling rather than a pseudo-element on the window itself — as a child it
+   would sit under the window's own border and leave a bright hairline across
+   the point the page is trying to dissolve. */
+.appwin-bleed > .appwin {
+  border-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.appwin-caret {
+  display: inline-block;
+  width: 0.5em;
+  height: 1.05em;
+  vertical-align: -0.18em;
+  background: var(--color-signal);
+  animation: ab-caret 1.1s steps(2) infinite;
+}
+@keyframes ab-caret {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .appwin-caret {
+    animation: none;
   }
 }

@@ -32,6 +32,7 @@ Radha AI Products is the legal entity behind Antgrid. **Questions or concerns?**
 
 - **Account information** — name and email address (provided directly or via a third-party sign-in provider).
 - **Billing status** — your plan, subscription state, trial status, and transaction identifiers returned by our payment processors or app stores. **We do not collect or store full payment card numbers; these are handled entirely by our payment processors and the app stores.**
+- **Waitlist email address** — if you join the founding-pricing waitlist from our website or pricing page, we store the email address you submit and the page you submitted it from, so we can tell you when pricing opens. This does not create an account, and the submitting IP address is used only for rate limiting and is never stored on the record.
 
 ### Information collected automatically
 
@@ -60,7 +61,7 @@ Because of our end-to-end encryption, we do **not** have access to, and do **not
 
 All agent-to-app traffic is end-to-end encrypted after a handshake using X25519 key exchange and AES-256-GCM authenticated encryption. Encryption keys are generated on your devices, are per-connection, and are never persisted by us. As a result, **we cannot read the contents of the data you transmit through the Services.**
 
-For full transparency about what the relay *can* see: the relay authenticates devices using their public keys and routes messages by device identity, so it processes device identifiers and the public keys exchanged during the handshake. When a recipient device is temporarily offline, the relay briefly buffers a small number of still-encrypted messages in memory so they can be delivered on reconnect; these buffers are never written to disk and remain encrypted. The relay does **not** store your IP address in a database or link it to your account; IP addresses on the relay are held only in memory for the duration of a connection (for rate limiting) and may appear in short-lived operational logs.
+For full transparency about what the relay *can* see: the relay authenticates devices using their public keys and routes messages by device identity, so it processes device identifiers and the public keys exchanged during the handshake. When a recipient device is not connected, the relay does not hold the message: the frame is refused and dropped. Nothing is queued, buffered, or written to disk. The relay returns the same response whether the recipient is offline or the sender is not permitted to reach it, so it never discloses which of your devices are online. The relay does **not** store your IP address in a database or link it to your account; IP addresses on the relay are held only in memory for the duration of a connection (for rate limiting) and may appear in short-lived operational logs.
 
 ## 4. Analytics, Crash Reporting, and Tracking
 
@@ -107,6 +108,7 @@ We keep personal information only for as long as necessary for the purposes set 
 - **Session IP address and user-agent** — for the lifetime of the session; expired and deleted sessions are removed.
 - **Cross-device sign-in records** — automatically expire within approximately 10 minutes.
 - **Operational logs** (which may contain IP addresses) — retained for up to 30 days, then deleted.
+- **Waitlist email address** — until founding pricing opens and we have contacted you, or until you ask us to remove it, whichever comes first.
 
 When we no longer have a legitimate need to process your information, we delete or anonymize it, or securely isolate it where deletion is not immediately possible (for example, in backups).
 
@@ -121,6 +123,8 @@ Depending on your location, you may have the right to access, correct, update, o
 ### Account and data deletion
 
 You can request deletion of your account and associated personal data at any time by emailing [contact@radhaai.com](mailto:contact@radhaai.com) with the subject "Account Deletion Request" from your registered email address. Upon verification, we will delete or anonymize your account data, except where retention is required by law (for example, tax and transaction records). We will action verified deletion requests within 30 days.
+
+To be removed from the founding-pricing waitlist, email us from the address you submitted with the subject "Waitlist Removal" — no account is needed, and we delete the record on verification.
 
 If you purchased through the Apple App Store or Google Play, manage or cancel any active subscription through your store account before requesting deletion, as those subscriptions are managed by the store (see our [Cancellation & Refund Policy](/refunds)).
 

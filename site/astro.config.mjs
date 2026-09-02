@@ -81,5 +81,24 @@ export default defineConfig({
   // the docs document, so only the nesting should need to change.
   experimental: { fonts },
   vite: { plugins: [tailwindcss()] },
-  integrations: [icon(), sitemap({ filter: (page) => !page.includes("/og-card") })],
+  integrations: [
+    // simple-icons is named explicitly because astro-icon otherwise assigns an
+    // installed collection `["*"]` and inlines the whole pack into the build's
+    // virtual module — 3,700 icons and ~4.7MB of source, to draw seven brand
+    // marks in Compat.astro. Collections left unnamed (tabler) keep `*`.
+    icon({
+      include: {
+        "simple-icons": [
+          "claudecode",
+          "openai",
+          "opencode",
+          "cursor",
+          "githubcopilot",
+          "kimi",
+          "mistralai",
+        ],
+      },
+    }),
+    sitemap({ filter: (page) => !page.includes("/og-card") }),
+  ],
 });
