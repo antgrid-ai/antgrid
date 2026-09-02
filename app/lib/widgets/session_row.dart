@@ -13,6 +13,7 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_menu.dart';
+import '../design/widgets/ab_row_trailing.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/session_entry.dart';
@@ -26,6 +27,7 @@ import '../providers/open_checkout.dart';
 import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
 import '../providers/session_delete_pending.dart';
+import '../providers/session_workspace_state.dart';
 import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
@@ -39,16 +41,11 @@ import 'session_delete_flow.dart';
 import 'session_deleting_badge.dart';
 import 'session_fork_dialog.dart';
 import 'session_isolation_badge.dart';
+import 'session_approval_badge.dart';
 import 'session_rename_dialog.dart';
 import 'session_shared_workspace_badge.dart';
 import 'session_start_refusal.dart';
 
-/// One row in the sessions sub-tree of [ProjectsDrawer]. Tapping focuses the
-/// session: if its parent project is not currently active, switches projects
-/// first (carrying the desired session id via [pendingActiveSessionIdProvider]
-/// for `_bootstrapSessions` to honour). If the session is stopped, sends
-/// `session:start` — overrides multi-session spec §3's "no auto-start on
-/// select" rule per the collapsible-drawer spec.
 /// Fraction (-1..1) by which the status dot is shifted down within its leading
 /// box to sit on the title's optical centre rather than its line-box centre.
 /// ~0.45 of the 3px free half-space ≈ a 1.3px nudge — the measured gap for a
@@ -62,6 +59,15 @@ const String _startNoAnswerMessage =
     "The agent didn't answer. If the session doesn't come up in a moment, try "
     'again.';
 
+/// One row in the sessions sub-tree of [ProjectsDrawer]. Tapping focuses the
+/// session: if its parent project is not currently active, switches projects
+/// first (carrying the desired session id via [pendingActiveSessionIdProvider]
+/// for `_bootstrapSessions` to honour). A stopped session is started by that
+/// same tap: the kebab's explicit Start is the same intent and must not answer
+/// differently, so a tap that only focused would split one intent across two
+/// controls. The exception is a start already queued behind an isolated
+/// checkout's setup run: that one belongs to the create flow, and re-issuing it
+/// here is a second start nobody asked for.
 class SessionRow extends ConsumerStatefulWidget {
   final String entryId;
   final SessionEntry session;
@@ -77,6 +83,10 @@ class _SessionRowState extends ConsumerState<SessionRow> {
 
   // Keep kebab mounted and visible while the action menu is actively open.
   bool _menuOpen = false;
+
+  // A collapsed kebab is unreachable without a pointer, so the row's own focus
+  // highlight has to reveal it too.
+  bool _focused = false;
 
   // Re-entrancy latch for _activate. A cold remote project tap kicks off an
   // up-to-30s pair+promote, so a rapid double-tap would otherwise launch two
@@ -267,30 +277,18 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           leadingGapOverride: AbTokens.drawerSessionLeadingGap,
           leading: SizedBox(
             width: AbTokens.drawerSessionLeadingSlot,
-            // Anchors the row's content height to the 24px iconButtonBox independently of
-            // trailing, so the row height stays strictly constant without
-            // reserving horizontal space for the kebab menu when unhovered.
-            height: AbTokens.iconButtonBox,
-            child: Center(
-              child: SizedBox(
-                width: AbTokens.drawerSessionLeadingSlot,
-                height: AbTokens.drawerLeadingSlot,
-                // Bias the dot slightly below its box centre. Row-centring lines up
-                // the dot with the title's line-box centre, but the visible glyphs
-                // of a text line sit a hair lower (the font reserves more space
-                // above the baseline than below), so a geometrically-centred dot
-                // reads as too high. The small downward nudge matches the optical
-                // centre of the text.
-                child: Align(
-                  alignment: const Alignment(0, _dotOpticalYBias),
-                  child: _leadingDot(work, deleting: deleting),
-                ),
-              ),
+            height: AbTokens.drawerLeadingSlot,
+            // Bias the dot slightly below its box centre. Row-centring lines up
+            // the dot with the title's line-box centre, but the visible glyphs
+            // of a text line sit a hair lower (the font reserves more space
+            // above the baseline than below), so a geometrically-centred dot
+            // reads as too high. The small downward nudge matches the optical
+            // centre of the text.
+            child: Align(
+              alignment: const Alignment(0, _dotOpticalYBias),
+              child: _leadingDot(work, deleting: deleting),
             ),
           ),
-          // Row height is anchored by the 24px leading slot, so swapping the
-          // title for the field doesn't change the height; the field expands
-          // to the full title width.
           title: (_editing && !deleting)
               ? _buildEditor()
               : Row(
@@ -323,6 +321,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                       // persisted cache, which carries no setup state at all.
                       setup: ref.watch(sessionSetupProvider(session.id)),
                     ),
+                    SessionApprovalBadge(session: session),
                     SessionSharedWorkspaceBadge(session: session),
                     SessionDeletingBadge(deleting: deleting),
                   ],
@@ -334,20 +333,27 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // item on it (start/stop/rename/archive/delete, and the
           // working-directory rows pointing into a checkout that is going away)
           // acts on a session being removed.
-          trailing: ((_hovered || _menuOpen) && !_editing && !deleting)
-              ? _SessionMenu(
-                  entryId: widget.entryId,
-                  session: session,
-                  onMenuOpened: () {
-                    if (mounted) setState(() => _menuOpen = true);
-                  },
-                  onMenuClosed: () {
-                    if (mounted) setState(() => _menuOpen = false);
-                  },
+          trailing:
+              ((_hovered || _menuOpen || _focused) && !_editing && !deleting)
+              ? AbRowTrailingCell(
+                  child: _SessionMenu(
+                    entryId: widget.entryId,
+                    session: session,
+                    onMenuOpened: () {
+                      if (mounted) setState(() => _menuOpen = true);
+                    },
+                    onMenuClosed: () {
+                      if (mounted) setState(() => _menuOpen = false);
+                    },
+                  ),
                 )
               : null,
           selected: selected,
           enabled: !deleting,
+          contentFloor: AbRowContentFloor.iconButton,
+          onFocusChange: (v) {
+            if (mounted) setState(() => _focused = v);
+          },
           selectionStyle: AbRowSelection.surface,
           hoverable: true,
           density: AbRowDensity.sm,
@@ -484,7 +490,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   ///
   /// Deliberately a borderless, collapsed field — not [AbTextField] —
   /// matching the title [Text]'s font metrics, so swapping it in keeps the
-  /// row height (already anchored by the reserved kebab slot) stable while
+  /// row height (anchored by the row's own content floor) stable while
   /// expanding to the full title width. The selected-row fill and the accent
   /// cursor signal edit mode; a bordered box (`rowHeightSm`, 32px) would grow
   /// the row. The global `inputDecorationTheme` fills + outlines fields, so
@@ -797,10 +803,7 @@ class _SessionMenu extends ConsumerWidget {
             // as a refused create.
             if (fork == null) {
               if (anchor.mounted) {
-                reportSessionNotice(
-                  anchor,
-                  sessionForkRefusalCopy(null, null),
-                );
+                reportSessionNotice(anchor, sessionForkRefusalCopy(null, null));
               }
               return;
             }
@@ -847,6 +850,7 @@ class _SessionMenu extends ConsumerWidget {
           final archived = await svc.archive(session.id);
           if (archived != null) {
             clearChatComposerDraft(ref, session.id);
+            clearSessionWorkspaceState(ref, entryId, session.id);
           }
           _disconnectIfEmpty(ref);
         case _SessionAction.delete:
@@ -914,6 +918,7 @@ class _SessionMenu extends ConsumerWidget {
     );
     if (result == SessionDeleteResult.deleted) {
       clearChatComposerDraft(ref, capturedId);
+      clearSessionWorkspaceState(ref, entryId, capturedId);
       _disconnectIfEmpty(ref);
     }
   }

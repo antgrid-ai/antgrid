@@ -128,8 +128,9 @@ class _HandlerReplyFormState extends State<_HandlerReplyForm> {
 }
 
 /// Warns that approving sends the reply as the user, not the agent — shown
-/// only when the escalation crossed a standing-order safety floor (spec
-/// §Safety invariants: floor blocks always route through a human).
+/// only when the escalation crossed a standing-order safety floor. That floor is
+/// the one tier no instruction can lift, so it always costs a human who reads
+/// the text behind this banner.
 class _FloorBanner extends StatelessWidget {
   const _FloorBanner({required this.rule});
   final String rule;

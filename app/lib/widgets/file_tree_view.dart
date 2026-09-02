@@ -365,6 +365,14 @@ List<GitFileStatusEntry> _descendantEntries(
   return out;
 }
 
+/// One row of the tree.
+///
+/// The tree's trailing rule is COLLAPSE AND FLOOR, NO CELL: the git actions
+/// are dropped from layout until the row is revealed, and the row's height is
+/// anchored by [AbRowContentFloor] so mounting them shifts nothing. It takes
+/// no shared trailing cell, unlike the drawer's rows — its outermost element
+/// is a variable-width diff-stat badge inside a resizable pane, so there is no
+/// fixed panel edge for a column to align against.
 class _FileTreeRow extends StatefulWidget {
   final FileNode node;
   final int depth;
@@ -400,11 +408,14 @@ class _FileTreeRow extends StatefulWidget {
   State<_FileTreeRow> createState() => _FileTreeRowState();
 }
 
-// Hover-revealed actions, same convention as session_row.dart /
-// drawer_entry_row.dart: mobile has no hover, so actions start visible;
-// desktop reveals them only on hover.
+// Reveal, same convention as session_row.dart / drawer_entry_row.dart: mobile
+// has no pointer to reveal anything with, so its affordance bit starts true.
 class _FileTreeRowState extends State<_FileTreeRow> {
   late bool _hovered = isMobilePlatform;
+
+  /// Keyboard focus reveals too, or the actions would be unreachable without a
+  /// pointer once they are dropped from layout at rest.
+  bool _focused = false;
 
   void _onEnter(PointerEnterEvent _) {
     if (isMobilePlatform) return;
@@ -470,6 +481,18 @@ class _FileTreeRowState extends State<_FileTreeRow> {
             onUnstagePath != null ||
             onDiscardPath != null ||
             onResolvePath != null);
+    // What the ROW HEIGHT has to reserve, which is a question about the tree
+    // and not about this file: `hasActions` above is per-row, so floor-ing on
+    // it would let a row's height report whether that one path happens to be
+    // stageable. Touch mounts no buttons at all, and neither does a tree wired
+    // without git callbacks (the Files tab) — neither should pay a button's
+    // height on every row.
+    final reservesButtons =
+        showRowButtons &&
+        (widget.onStage != null ||
+            widget.onUnstage != null ||
+            widget.onDiscard != null ||
+            widget.onResolveConflict != null);
     // An OPEN directory carries no decoration of its own — in changesOnly mode
     // every directory left after pruning already implies a descendant changed,
     // so a dot on top of that is redundant noise. A folded one is the
@@ -477,6 +500,7 @@ class _FileTreeRowState extends State<_FileTreeRow> {
     final hasDecoration =
         (!isDirectory && widget.changeEntries.isNotEmpty) ||
         widget.rollupEntries.isNotEmpty;
+    final showActions = hasActions && (_hovered || _focused);
 
     Widget row = MouseRegion(
       cursor: widget.onTap != null
@@ -490,6 +514,12 @@ class _FileTreeRowState extends State<_FileTreeRow> {
         selected: widget.isSelected,
         selectionStyle: AbRowSelection.surface,
         density: AbRowDensity.sm,
+        contentFloor: reservesButtons
+            ? AbRowContentFloor.iconButton
+            : AbRowContentFloor.none,
+        onFocusChange: (v) {
+          if (_focused != v && mounted) setState(() => _focused = v);
+        },
         leading: Padding(
           padding: EdgeInsets.only(left: widget.depth * AbTokens.space16),
           child: isDirectory
@@ -515,55 +545,50 @@ class _FileTreeRowState extends State<_FileTreeRow> {
           ),
           overflow: TextOverflow.ellipsis,
         ),
-        trailing: (hasActions || hasDecoration)
+        // Actions outermost, badge inboard: at rest the change count is the
+        // only tenant and sits flush at the gutter on every row, so the column
+        // it forms is what the eye scans. Only a revealed row's badge steps
+        // inboard, and only while the row is revealed.
+        trailing: (showActions || hasDecoration)
             ? Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (hasActions)
-                    Visibility(
-                      // Reserved size (not just visibility) so the row never
-                      // jitters width on hover — same technique
-                      // session_row.dart uses for its hover-only kebab menu.
-                      visible: _hovered,
-                      maintainState: true,
-                      maintainAnimation: true,
-                      maintainSize: true,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (onStagePath != null)
-                            AbIconButton(
-                              icon: AbIcons.gitStage,
-                              onTap: onStagePath,
-                              tooltip: 'Stage Changes',
-                            ),
-                          if (onUnstagePath != null)
-                            AbIconButton(
-                              icon: AbIcons.gitUnstage,
-                              onTap: onUnstagePath,
-                              tooltip: 'Unstage Changes',
-                            ),
-                          if (onDiscardPath != null)
-                            AbIconButton(
-                              icon: AbIcons.revert,
-                              onTap: onDiscardPath,
-                              tooltip: 'Discard Changes',
-                            ),
-                          if (onResolvePath != null)
-                            AbIconButton(
-                              icon: AbIcons.check,
-                              onTap: onResolvePath,
-                              tooltip: 'Mark Resolved',
-                            ),
-                        ],
-                      ),
-                    ),
-                  if (hasActions && hasDecoration)
-                    const SizedBox(width: AbTokens.space4),
                   if (hasDecoration)
                     widget.rollupEntries.isNotEmpty
                         ? _FolderRollupBadge(entries: widget.rollupEntries)
                         : _DiffStatBadge(entries: widget.changeEntries),
+                  if (showActions && hasDecoration)
+                    const SizedBox(width: AbTokens.space4),
+                  if (showActions)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (onStagePath != null)
+                          AbIconButton(
+                            icon: AbIcons.gitStage,
+                            onTap: onStagePath,
+                            tooltip: 'Stage Changes',
+                          ),
+                        if (onUnstagePath != null)
+                          AbIconButton(
+                            icon: AbIcons.gitUnstage,
+                            onTap: onUnstagePath,
+                            tooltip: 'Unstage Changes',
+                          ),
+                        if (onDiscardPath != null)
+                          AbIconButton(
+                            icon: AbIcons.revert,
+                            onTap: onDiscardPath,
+                            tooltip: 'Discard Changes',
+                          ),
+                        if (onResolvePath != null)
+                          AbIconButton(
+                            icon: AbIcons.check,
+                            onTap: onResolvePath,
+                            tooltip: 'Mark Resolved',
+                          ),
+                      ],
+                    ),
                 ],
               )
             : null,

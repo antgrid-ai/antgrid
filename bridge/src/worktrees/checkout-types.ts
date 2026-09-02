@@ -29,6 +29,10 @@ export interface CheckoutSetupProgress {
   stepIndex: number;
   stepCount: number;
   stepName?: string;
+  /** Every step's name, in plan order. Carried on every report of a run rather
+   *  than once, so a reader that missed the first one is not left with a ledger
+   *  it can only render as blanks. Absent for a checkout with no block at all. */
+  stepNames?: string[];
   terminalId?: string;
   exitCode?: number;
   /** One-line failure summary. */

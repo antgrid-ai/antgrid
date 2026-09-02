@@ -50,13 +50,18 @@ SessionSetup _setup(
   startedAt: startedAt,
 );
 
-SessionEntry _entry(SessionSetup? setup) => SessionEntry(
+SessionEntry _entry(
+  SessionSetup? setup, {
+  bool running = false,
+  String mode = 'terminal',
+}) => SessionEntry(
   id: _sessionId,
   name: 'Fix auth bug',
   createdAt: 0,
   lastUsedAt: 0,
   archived: false,
-  running: false,
+  running: running,
+  mode: mode,
   checkoutId: 'worktree-1',
   checkoutKind: 'managed-worktree',
   setup: setup,
@@ -68,6 +73,8 @@ Future<void> pumpBanner(
   WidgetTester tester,
   SessionSetup? setup, {
   List<Override> extraOverrides = const [],
+  bool sessionRunning = false,
+  String mode = 'terminal',
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -76,7 +83,10 @@ Future<void> pumpBanner(
           () => ValueController<String?>(_sessionId),
         ),
         freshSessionsStateProvider.overrideWithValue(
-          SessionsState(projectId: _projectId, sessions: [_entry(setup)]),
+          SessionsState(
+            projectId: _projectId,
+            sessions: [_entry(setup, running: sessionRunning, mode: mode)],
+          ),
         ),
         ...extraOverrides,
       ],
@@ -138,17 +148,37 @@ void main() {
       await unmount(tester);
     });
 
-    // Skip is the common case ("the deps are cached") and it is the only thing
-    // on screen that explains why the agent has not started, so it must be
-    // reachable for the whole run.
-    testWidgets('offers Skip and the log, and refuses to be dismissed', (
+    // While a start is queued the terminal pane below IS this transcript and
+    // carries both verbs itself, so the banner stands down to a headline: a
+    // second `Start agent now` 100px away is not an alternative but a race,
+    // since only one of them can end the run. The dismiss is refused for the
+    // whole run either way — the banner is the only account of why the agent
+    // has not started.
+    testWidgets('stands down to the pane while a start is queued', (
       tester,
     ) async {
       await pumpBanner(tester, _setup('running', pendingStart: true));
 
-      expect(find.text('Skip'), findsOneWidget);
-      expect(find.byTooltip('View setup log'), findsOneWidget);
+      expect(find.text('Start agent now'), findsNothing);
+      expect(find.byTooltip('View setup log'), findsNothing);
       expect(find.byTooltip('Dismiss'), findsNothing);
+      await unmount(tester);
+    });
+
+    // A chat session renders AgentTranscriptView in the pane's slot and mounts
+    // no provisioning pane at all, so standing down there would leave a
+    // four-minute install with no output anywhere on screen.
+    testWidgets('keeps the log and the release for a chat session', (
+      tester,
+    ) async {
+      await pumpBanner(
+        tester,
+        _setup('running', pendingStart: true),
+        mode: 'chat',
+      );
+
+      expect(find.byTooltip('View setup log'), findsOneWidget);
+      expect(find.text('Start agent now'), findsOneWidget);
       await unmount(tester);
     });
 
@@ -184,7 +214,62 @@ void main() {
       );
       expect(find.byType(AbProgressRule), findsOneWidget);
       expect(find.byTooltip('Dismiss'), findsNothing);
+      // And the disclosure is back: the agent owns the pane now, so the strip
+      // is once more the only way to reach the run still holding the tree.
+      expect(find.byTooltip('View setup log'), findsOneWidget);
       await unmount(tester);
+    });
+
+    // `startAgent: immediate`, or a start the user released by hand: the agent
+    // is typing into a tree this run has not finished building, so commands it
+    // runs can fail for a reason that is not its fault. A neutral "preparing"
+    // line would be promising a wait that is already over.
+    group('with the agent already live', () {
+      testWidgets('warns rather than promising a wait', (tester) async {
+        await pumpBanner(
+          tester,
+          _setup('running'),
+          sessionRunning: true,
+        );
+
+        expect(
+          find.text('Workspace still installing — 2 of 4 · Install dependencies'),
+          findsOneWidget,
+        );
+        expect(_banner(tester).color, kDefaultPalette.warning);
+        await unmount(tester);
+      });
+
+      // Releasing an agent that is already up is meaningless; ending the
+      // install holding its tree is not.
+      testWidgets('offers the cancel instead of the release', (tester) async {
+        await pumpBanner(
+          tester,
+          _setup('running'),
+          sessionRunning: true,
+        );
+
+        expect(find.text('Start agent now'), findsNothing);
+        expect(find.text('Cancel setup'), findsOneWidget);
+        // Still not dismissible, and the log still reachable: the strip is the
+        // only account of the run now that the pane belongs to the agent.
+        expect(find.byTooltip('Dismiss'), findsNothing);
+        expect(find.byTooltip('View setup log'), findsOneWidget);
+        await unmount(tester);
+      });
+
+      // The gate outranks it: a session cannot be both queued and running, and
+      // reading the two in the wrong order would warn at a user who is waiting.
+      testWidgets('a finished run is unaffected by the agent', (tester) async {
+        await pumpBanner(
+          tester,
+          _setup('done', stepIndex: 3),
+          sessionRunning: true,
+        );
+
+        expect(find.text('Workspace ready'), findsOneWidget);
+        expect(_banner(tester).color, kDefaultPalette.textMuted);
+      });
     });
   });
 
@@ -298,8 +383,9 @@ void main() {
     /// it actually lands: on the `session:setup` frame.
     Future<FakeAgentTransport> pumpWired(
       WidgetTester tester,
-      SessionSetup setup,
-    ) async {
+      SessionSetup setup, {
+      String mode = 'terminal',
+    }) async {
       final transport = FakeAgentTransport();
       final cache = await CachedSessionsStore.open();
       final session = ProjectSession(
@@ -314,6 +400,7 @@ void main() {
       await pumpBanner(
         tester,
         setup,
+        mode: mode,
         extraOverrides: [
           selectedRegistrationIdProvider.overrideWith((ref) => _projectId),
           projectSessionProvider(_projectId)
@@ -323,13 +410,18 @@ void main() {
       return transport;
     }
 
-    testWidgets('Skip sends session:setup for this session', (tester) async {
+    // Driven in chat mode, which is where the banner still owns the release:
+    // a terminal-mode session mounts the provisioning pane, and that pane's
+    // copy of this button is the one under test in
+    // `terminal_screen_provisioning_test.dart`.
+    testWidgets('the release sends session:setup for this session', (tester) async {
       final transport = await pumpWired(
         tester,
         _setup('running', pendingStart: true),
+        mode: 'chat',
       );
 
-      await tester.tap(find.text('Skip'));
+      await tester.tap(find.text('Start agent now'));
       await tester.pump();
       await tester.pump();
 

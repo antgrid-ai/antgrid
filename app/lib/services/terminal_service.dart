@@ -145,7 +145,30 @@ class TerminalService {
     // conditional on one would strand a cutoff above every seq a respawned PTY
     // emits and leave the pane blank behind a live process.
     _snapshotSeq.clear();
-    for (final tab in _state.tabs.values) {
+    // The geometry is invalidated on the same grounds as the cutoff above: a
+    // reattach can hide a resize the agent never applied, and an
+    // exit-and-respawn nothing on the wire reported (the seq reasoning in the
+    // constructor). Neither is detectable from the app's side, and the driver's
+    // gate compares against what it BELIEVES it sent, so an unmoving panel
+    // never reopens it. Bumped for every live tab rather than only the
+    // re-pulled ones; the bridge folds a resize that changes nothing away, so a
+    // bump that proves unnecessary costs no SIGWINCH.
+    //
+    // The `focusResumed` caller keeps its transport, so nothing was lost there
+    // — but it shares this path because the same edge covers a heavy
+    // re-subscribe, which an unwitnessed respawn can hide just as a reconnect
+    // can.
+    final rehydrated = Map<String, TerminalTab>.from(_state.tabs);
+    var invalidated = false;
+    for (final entry in _state.tabs.entries) {
+      if (!_hasLivePty(entry.value)) continue;
+      rehydrated[entry.key] = entry.value.copyWith(
+        sizeEpoch: entry.value.sizeEpoch + 1,
+      );
+      invalidated = true;
+    }
+    if (invalidated) _setState(_state.copyWith(tabs: rehydrated));
+    for (final tab in rehydrated.values) {
       // A pending tab is the app's own optimistic invention — the agent has
       // never confirmed the id, so it would answer "snapshot requested for
       // unknown terminal" and send nothing. Its own terminal:started carries
@@ -153,6 +176,33 @@ class TerminalService {
       if (_pendingTerminalIds.contains(tab.terminalId)) continue;
       _requestTerminalSnapshot(tab.terminalId);
     }
+  }
+
+  /// Whether a resize aimed at [tab] can reach a PTY.
+  ///
+  /// A pending id is the app's own optimistic invention the agent has never
+  /// confirmed, and an exited tab has no PTY behind it — an agent tab keeps
+  /// rendering the terminal view past its own exit, so a geometry
+  /// invalidation on either only buys a frame the bridge logs as unknown and
+  /// drops.
+  bool _hasLivePty(TerminalTab tab) =>
+      tab.sessionState == TerminalSessionState.running &&
+      !_pendingTerminalIds.contains(tab.terminalId);
+
+  /// Retires whatever the driver believes [terminalId]'s geometry is, so its
+  /// next build re-sends at an unchanged panel size.
+  ///
+  /// Called wherever a resize the app already reported as accepted is known
+  /// not to have reached the PTY. `sendResize` answers at QUEUE time, and the
+  /// 100ms debounce it arms can still be cancelled or discarded afterwards;
+  /// the caller has booked the size by then, so nothing but an epoch bump
+  /// reopens its gate.
+  void _invalidateGeometry(String terminalId) {
+    final tab = _state.tabs[terminalId];
+    if (tab == null) return;
+    final tabs = Map<String, TerminalTab>.from(_state.tabs);
+    tabs[terminalId] = tab.copyWith(sizeEpoch: tab.sizeEpoch + 1);
+    _setState(_state.copyWith(tabs: tabs));
   }
 
   void _setState(TerminalState state) {
@@ -353,6 +403,13 @@ class TerminalService {
 
     if (existing != null) {
       existing.ghostty.setSessionRunning(true);
+      // A start on an id the app already holds is a RESPAWN, and the new PTY
+      // carries whatever `TerminalManager.lastDriverGeometry` held — the size
+      // of whichever terminal resized last in that bridge process, or 80x24 on
+      // a bridge that has never seen a resize — not the one the driver sent the
+      // dead one. The driver gates its re-sends on the last size it believes
+      // the PTY has, so without this bump it computes the same grid, sees no
+      // change, and leaves a wide panel rendering a narrower process.
       tabs[msg.terminalId] = existing.copyWith(
         sessionState: TerminalSessionState.running,
         shell: msg.shell,
@@ -360,6 +417,7 @@ class TerminalService {
         rows: msg.rows,
         clearExitCode: true,
         type: msg.terminalType,
+        sizeEpoch: existing.sizeEpoch + 1,
       );
     } else {
       final tab = _createTab(
@@ -401,8 +459,11 @@ class TerminalService {
         clientId == null ||
         (msg.driverClientId != clientId &&
             (pendingBase == null || msg.driverClientId != pendingBase));
+    var dropped = false;
     if (stalePending) {
-      _resizeTimers.remove(msg.terminalId)?.cancel();
+      final queued = _resizeTimers.remove(msg.terminalId);
+      queued?.cancel();
+      dropped = queued != null;
       _resizeBaseDrivers.remove(msg.terminalId);
     }
     final tabs = Map<String, TerminalTab>.from(_state.tabs);
@@ -410,6 +471,10 @@ class TerminalService {
       cols: msg.cols,
       rows: msg.rows,
       driverClientId: msg.driverClientId,
+      // The caller booked that size the moment `sendResize` queued it, so a
+      // frame cancelled here would otherwise leave its gate shut against a
+      // geometry the PTY never received.
+      sizeEpoch: dropped ? tab.sizeEpoch + 1 : null,
     );
     _setState(_state.copyWith(tabs: tabs));
   }
@@ -468,6 +533,14 @@ class TerminalService {
       final existing = _state.tabs[info.terminalId];
       if (existing != null) {
         existing.ghostty.setSessionRunning(info.running);
+        // The same respawn `_handleTerminalStarted` bumps on, seen through the
+        // status frame instead: a client that missed the live started frame
+        // builds its tabs from this replay (see the discovery pull below), so
+        // without the bump here the driver's booking survives a PTY that never
+        // received it — on the one path a relay app actually uses.
+        final respawned =
+            info.running &&
+            existing.sessionState == TerminalSessionState.exited;
         final updated = existing.copyWith(
           name: info.name,
           sessionState: info.running
@@ -477,6 +550,7 @@ class TerminalService {
           cols: info.cols,
           rows: info.rows,
           type: info.type,
+          sizeEpoch: respawned ? existing.sizeEpoch + 1 : null,
         );
         newTabs[info.terminalId] = info.driverClientId == null
             ? updated.copyWith(clearDriverClientId: true)
@@ -662,14 +736,27 @@ class TerminalService {
     sendInput(agentTabs.first.terminalId, text);
   }
 
-  void sendResize(
+  /// Queues a debounced `terminal:resize`, reporting whether it was QUEUED.
+  ///
+  /// False means nothing was queued and nothing ever will be for this call —
+  /// the per-install client id has not resolved yet (see
+  /// `terminalStateProvider`, which pushes it in), or the service is gone. The
+  /// caller must not record the size as sent: the wrapper gates re-sends on the
+  /// last size it believes the PTY has, so a drop booked as a send strands the
+  /// PTY at the previous geometry until the panel happens to change size again.
+  ///
+  /// True is not a delivery receipt. The 100ms debounce this arms can still be
+  /// cancelled (`_handleTerminalSize`, `deleteTerminal`) or discarded by its own
+  /// driver guard, and every such path owes the caller an `_invalidateGeometry`
+  /// — that bump is what retires a booking the wire never honoured.
+  bool sendResize(
     String terminalId,
     int cols,
     int rows, {
     String? baseDriverClientId,
   }) {
     final clientId = _clientId;
-    if (clientId == null) return;
+    if (_disposed || clientId == null) return false;
     _resizeTimers[terminalId]?.cancel();
     _resizeBaseDrivers[terminalId] = baseDriverClientId;
     _resizeTimers[terminalId] = Timer(const Duration(milliseconds: 100), () {
@@ -680,6 +767,9 @@ class TerminalService {
           currentDriver != null &&
           currentDriver != baseDriverClientId &&
           currentDriver != clientId) {
+        // Discarded, not sent — and the caller booked this size when the queue
+        // accepted it, so hand back the invalidation edge that reopens its gate.
+        _invalidateGeometry(terminalId);
         return;
       }
       _send(
@@ -692,6 +782,7 @@ class TerminalService {
         }),
       );
     });
+    return true;
   }
 
   void requestStart(

@@ -35,6 +35,10 @@ class AgentDescriptor {
   /// The same question for chat sessions, where any chat driver qualifies.
   final bool handlerChat;
 
+  final List<String> terminalApprovalPolicies;
+  final List<String> chatApprovalPolicies;
+  final String? approvalPolicyRisk;
+
   const AgentDescriptor({
     required this.tool,
     required this.label,
@@ -42,6 +46,9 @@ class AgentDescriptor {
     required this.judgeCapable,
     required this.handlerTerminal,
     required this.handlerChat,
+    this.terminalApprovalPolicies = const ['default'],
+    this.chatApprovalPolicies = const ['default'],
+    this.approvalPolicyRisk,
   });
 
   /// Null for a malformed entry. A partial descriptor is dropped rather than
@@ -64,6 +71,13 @@ class AgentDescriptor {
     final terminal = handler['terminal'];
     final chat = handler['chat'];
     if (terminal is! bool || chat is! bool) return null;
+    final policies = json['approvalPolicies'];
+    final terminalPolicies = policies is Map && policies['terminal'] is List
+        ? (policies['terminal'] as List).whereType<String>().toList()
+        : const <String>['default'];
+    final chatPolicies = policies is Map && policies['chat'] is List
+        ? (policies['chat'] as List).whereType<String>().toList()
+        : const <String>['default'];
     return AgentDescriptor(
       tool: tool,
       label: label,
@@ -71,6 +85,9 @@ class AgentDescriptor {
       judgeCapable: judgeCapable,
       handlerTerminal: terminal,
       handlerChat: chat,
+      terminalApprovalPolicies: terminalPolicies,
+      chatApprovalPolicies: chatPolicies,
+      approvalPolicyRisk: json['approvalPolicyRisk'] as String?,
     );
   }
 
@@ -82,6 +99,11 @@ class AgentDescriptor {
     'chatCapable': chatCapable,
     'judgeCapable': judgeCapable,
     'handler': {'terminal': handlerTerminal, 'chat': handlerChat},
+    'approvalPolicies': {
+      'terminal': terminalApprovalPolicies,
+      'chat': chatApprovalPolicies,
+    },
+    if (approvalPolicyRisk != null) 'approvalPolicyRisk': approvalPolicyRisk,
   };
 
   // Value equality is load-bearing: the catalog notifier compares a merged map
@@ -95,7 +117,10 @@ class AgentDescriptor {
       other.chatCapable == chatCapable &&
       other.judgeCapable == judgeCapable &&
       other.handlerTerminal == handlerTerminal &&
-      other.handlerChat == handlerChat;
+      other.handlerChat == handlerChat &&
+      _listEquals(other.terminalApprovalPolicies, terminalApprovalPolicies) &&
+      _listEquals(other.chatApprovalPolicies, chatApprovalPolicies) &&
+      other.approvalPolicyRisk == approvalPolicyRisk;
 
   @override
   int get hashCode => Object.hash(
@@ -105,5 +130,16 @@ class AgentDescriptor {
     judgeCapable,
     handlerTerminal,
     handlerChat,
+    Object.hashAll(terminalApprovalPolicies),
+    Object.hashAll(chatApprovalPolicies),
+    approvalPolicyRisk,
   );
+}
+
+bool _listEquals(List<String> a, List<String> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
 }

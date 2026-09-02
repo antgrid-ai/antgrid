@@ -514,6 +514,15 @@ export class TerminalManager {
     session.write(data);
   }
 
+  submit(terminalId: string, line: string): void {
+    const session = this.sessions.get(terminalId);
+    if (!session) {
+      log.warn(`Terminal "${terminalId}" not found for submit`);
+      return;
+    }
+    session.submit(line);
+  }
+
   /**
    * Raw scrollback tail, for readers that want the program's OUTPUT — the
    * handler's LLM context and the local API. Anything replayed INTO an app's

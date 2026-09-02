@@ -17,6 +17,23 @@ class TerminalTab {
   final String? type; // "agent" | "service"
   final bool unread;
 
+  /// Bumped whenever what the app knew about this PTY's geometry stops being
+  /// trustworthy — a reconnect, a same-id respawn, or a resize the service
+  /// queued and then discarded.
+  ///
+  /// The driver only re-sends `terminal:resize` when its computed grid differs
+  /// from the last size it believes the PTY received, so a size that never
+  /// arrived (a send dropped in a keyless window, or a queued one cancelled
+  /// before it reached the wire) and one a fresh PTY never had (a respawn takes
+  /// the bridge's `lastDriverGeometry`, which is whatever terminal resized
+  /// last — 80x24 only on a bridge that has never seen a resize) are both
+  /// disagreements nothing else can detect: the panel is not moving, so the
+  /// wrapper computes the same grid forever and the gate stays shut. The
+  /// counter is the invalidation edge that reopens it, invalidated by the same
+  /// events as the snapshot-seq cutoff in `TerminalService._rehydrateTerminals`
+  /// and for the same reason.
+  final int sizeEpoch;
+
   /// Ghostty controller — the agent's PTY bytes are fed in via
   /// `ghostty.appendOutputBytes(...)` from terminal_service, and user
   /// input is routed back through `attachExternalTransport` to the
@@ -34,6 +51,7 @@ class TerminalTab {
     this.exitCode,
     this.type,
     this.unread = false,
+    this.sizeEpoch = 0,
     GhosttyTerminalController? ghostty,
   }) : ghostty =
            ghostty ??
@@ -64,6 +82,7 @@ class TerminalTab {
     bool clearExitCode = false,
     String? type,
     bool? unread,
+    int? sizeEpoch,
   }) {
     return TerminalTab(
       terminalId: terminalId,
@@ -78,6 +97,7 @@ class TerminalTab {
       exitCode: clearExitCode ? null : (exitCode ?? this.exitCode),
       type: type ?? this.type,
       unread: unread ?? this.unread,
+      sizeEpoch: sizeEpoch ?? this.sizeEpoch,
       ghostty: ghostty,
     );
   }

@@ -16,11 +16,11 @@ import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/git_panel.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../helpers/hover.dart';
 import '../helpers/prefs_test_mock.dart';
 
 void main() {
@@ -133,17 +133,6 @@ void main() {
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
-  }
-
-  /// Brings a tree row's action buttons under the pointer — they are mounted
-  /// at full size but `Visibility(visible: hovered)`, so they are findable
-  /// without this and untappable until it runs.
-  Future<void> hoverRow(WidgetTester tester, Finder target) async {
-    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
-    await gesture.addPointer(location: Offset.zero);
-    addTearDown(gesture.removePointer);
-    await gesture.moveTo(tester.getCenter(target));
-    await tester.pump();
   }
 
   Map<String, dynamic>? sentOfType(String type) {

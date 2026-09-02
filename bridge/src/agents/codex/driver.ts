@@ -26,7 +26,14 @@ export function createDriver(ctx: DriverCtx): StructuredDriver {
   const chatAug = ctx.chatAugment();
   const spawned = spawnCodex({
     cwd: ctx.projectPath,
-    args: ["app-server", ...codexUnifiedExecArgs(), ...codexNotifyOnlyArgs(chatAug.args)],
+    args: [
+      "app-server",
+      ...codexUnifiedExecArgs(),
+      ...(ctx.approvalPolicy === "bypass"
+        ? ["-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"']
+        : []),
+      ...codexNotifyOnlyArgs(chatAug.args),
+    ],
     env: chatAug.env,
   });
   const driver = new CodexDriver({

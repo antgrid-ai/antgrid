@@ -110,7 +110,7 @@ async function armThrough(tierClaim: (() => TierClaim) | undefined): Promise<Arm
 
   const terminalId = `t-${randomUUID()}`;
   bus.dispatchInbound(
-    createMessage("handler:configure", { projectId: core.projectId, terminalId, armed: true, notifyOnly: true }),
+    createMessage("handler:configure", { projectId: core.projectId, terminalId, armed: true }),
     "control",
   );
   // The honored path publishes a new status synchronously; the refused path

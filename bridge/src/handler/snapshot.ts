@@ -1,6 +1,6 @@
 // bridge/src/handler/snapshot.ts
 
-// Snapshot-before-act (spec §5.2). The advisory floor stopped being a gate, and
+// Snapshot-before-act. The advisory floor stopped being a gate, and
 // what buys that back is reversibility: for a flagged action that is destructive
 // but *preparable*, Handler takes a cheap snapshot and proceeds without waking
 // anyone. Being wrong then costs one tap instead of a lost afternoon.
@@ -67,7 +67,7 @@ async function defaultRunGit(cwd: string, args: string[]): Promise<GitRun> {
 // Plans — what the injected text asks for
 // ---------------------------------------------------------------------------
 
-/** The four §5.2 rows, named after the action rather than the mechanism. */
+/** The four preparable operations, named after the action rather than the mechanism. */
 export type SnapshotAction = "reset_hard" | "force_push" | "rm_rf" | "git_clean";
 
 export type SnapshotPlan =
@@ -229,7 +229,7 @@ function tokenize(segment: string): string[] {
 const COMMAND_HEADS = new Set(["rm", "git"]);
 
 /**
- * Token ranges, one per §5.2 command found anywhere in the segment.
+ * Token ranges, one per preparable command found anywhere in the segment.
  *
  * The verb is deliberately NOT required at token 0. The judge's reply is prose
  * ("Yes, go ahead — run rm -rf node_modules and reinstall"), and the floor
@@ -260,8 +260,9 @@ function operandsAfter(tokens: string[], from: number, to: number = tokens.lengt
 }
 
 /**
- * Which §5.2 rows the injected text asks for. Pure: it never touches git or the
- * filesystem, so the engine can decide whether a snapshot is even worth running.
+ * Which of the four actions the injected text asks for. Pure: it never touches
+ * git or the filesystem, so the engine can decide whether a snapshot is even
+ * worth running.
  */
 function planCommand(tokens: string[], from: number, to: number, trigger: string): SnapshotPlan | null {
   const head = tokens[from]!;
@@ -331,8 +332,17 @@ export function planSnapshots(text: string): SnapshotPlan[] {
   return plans;
 }
 
+/** The DESTRUCTIVE-tier pattern sources one canonical command trips. Shared by
+ *  both sets below so a floor edit that stops matching a canonical command
+ *  empties the same way in each — and never one silently. */
+function floorPatternsFor(command: string): string[] {
+  return classifyDestructive(command, "").warnings
+    .filter((w) => w.tier === "DESTRUCTIVE")
+    .map((w) => w.pattern);
+}
+
 /**
- * Floor pattern source → the §5.2 action that would protect what it flags.
+ * Floor pattern source → the snapshot action that would protect what it flags.
  *
  * The backstop for the two parsers drifting apart: the floor decides what is
  * flagged, this planner decides what is protected, and a shape only the first
@@ -348,10 +358,33 @@ export const SNAPSHOT_PATTERNS: ReadonlyMap<string, SnapshotAction> = new Map(
     ["rm -rf build", "rm_rf"],
     ["git clean -fd", "git_clean"],
   ] as const).flatMap(([command, action]) =>
-    classifyDestructive(command, "").warnings
-      .filter((w) => w.tier === "DESTRUCTIVE")
-      .map((w) => [w.pattern, action] as [string, SnapshotAction]),
+    floorPatternsFor(command).map((p) => [p, action] as [string, SnapshotAction]),
   ),
+);
+
+/**
+ * Floor patterns for which no §5.2 action exists BY CONSTRUCTION.
+ *
+ * A separate set rather than more rows in the map above, because it answers a
+ * different question: these move state that is not in the project at all — a
+ * remote's default branch, a deleted ref, a published version — so there is
+ * nothing local a snapshot could hold. That is not the same as the patterns which
+ * merely have no plan yet, and the engine says so out loud instead of passing over
+ * them in the silence that reads like a fully protected action.
+ *
+ * Derived by running the floor over one canonical command per row, the same way
+ * the map above is, so a floor edit cannot leave a stale key here.
+ */
+export const NO_SNAPSHOT_PATTERNS: ReadonlySet<string> = new Set(
+  ([
+    "gh pr merge 1",
+    "gh pr close 1",
+    "gh release delete v1",
+    "gh repo delete owner/name",
+    "git branch -D topic",
+    "git tag -d v1",
+    "npm publish",
+  ] as const).flatMap(floorPatternsFor),
 );
 
 // ---------------------------------------------------------------------------
@@ -771,7 +804,7 @@ function contextFrom(opts: SnapshotOptions): Ctx {
 }
 
 /**
- * Snapshot every §5.2 action the injected text asks for, in the order it asks.
+ * Snapshot every action the injected text asks for, in the order it asks.
  * At least one outcome per plan, so a text that both resets and deletes reports
  * each independently — one of them failing does not silently downgrade the
  * other. A push naming several refspecs reports one outcome per ref.

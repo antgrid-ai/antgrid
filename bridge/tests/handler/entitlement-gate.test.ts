@@ -58,7 +58,6 @@ function makeEngine(claim?: () => TierClaim, over: Record<string, unknown> = {})
     clearTrashFn: async () => {},
     loadSnapshotsFn: () => stored,
     saveSnapshotsFn: (e: StoredSnapshot[]) => { stored = e; },
-    loadConfigFn: () => ({ version: 2, defaultNotifyOnly: false }),
     appendActivityFn: (r: unknown) => activity.push(r),
     loadSessionFn: () => null,
     saveSessionFn: (r: HandlerSessionRecord) => saved.push(r),
@@ -91,7 +90,7 @@ async function capturingWarnings(fn: () => Promise<void> | void): Promise<string
 describe("arm()", () => {
   it("arms normally when the token's tier grants Handler", () => {
     const { engine, sent, saved, activity } = makeEngine(credentialed("pro"));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect(lastStatus(sent).sessions).toHaveLength(1);
     expect(lastStatus(sent).sessions[0]!.state).toBe("watching");
     expect(saved.at(-1)?.armed).toBe(true);
@@ -100,7 +99,7 @@ describe("arm()", () => {
 
   it("refuses an arm whose tier does not grant Handler, via the Handler-off path", async () => {
     const { engine, sent, saved, activity } = makeEngine(credentialed("free"));
-    const warned = await capturingWarnings(() => { engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false }); });
+    const warned = await capturingWarnings(() => { engine.arm({ terminalId: "t1", goal: GOAL }); });
     expect(warned).toContain("entitlement not_entitled");
 
     // The refusal IS the not-armed state, byte-for-byte: no session row, so the
@@ -115,7 +114,7 @@ describe("arm()", () => {
 
   it("still emits status on a refusal, so a sender's optimistic UI resyncs", () => {
     const { engine, sent } = makeEngine(credentialed("free"));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect(sent.filter((m) => m.type === "handler:status")).toHaveLength(1);
   });
 
@@ -123,7 +122,7 @@ describe("arm()", () => {
     // The token is missing, malformed or expired — every one of those reaches
     // the engine as `tier: null`, and a paid capability must not open on it.
     const { engine, sent, saved } = makeEngine(credentialed(null));
-    const warned = await capturingWarnings(() => { engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false }); });
+    const warned = await capturingWarnings(() => { engine.arm({ terminalId: "t1", goal: GOAL }); });
     expect(warned).toContain("entitlement unreadable");
     expect(lastStatus(sent).sessions).toEqual([]);
     expect(saved).toEqual([]);
@@ -136,10 +135,10 @@ describe("arm()", () => {
     const { engine, sent, saved } = makeEngine(credentialed("free"), {
       loadSessionFn: (): HandlerSessionRecord => ({
         version: 2, terminalId: "t1", armed: true, suspended: true, goal: GOAL,
-        backlog: [], notifyOnly: false, armedAt: 1, escalations: [],
+        backlog: [], armedAt: 1, escalations: [],
       }),
     });
-    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.arm({ terminalId: "t1" });
     expect(lastStatus(sent).sessions).toEqual([]);
     expect(saved).toEqual([]);
   });
@@ -150,7 +149,7 @@ describe("handleEvent()", () => {
     const { engine, injected } = makeEngine(credentialed("pro"), {
       runDecisionFn: async () => handleDecision,
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toEqual([["t1", "carry on"]]);
   });
@@ -162,7 +161,7 @@ describe("handleEvent()", () => {
     const { engine, saved, injected } = makeEngine(() => ({ credentialed: true, tier }), {
       runDecisionFn: async () => handleDecision,
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect(saved.at(-1)?.armed).toBe(true);
 
     tier = "free";
@@ -180,7 +179,7 @@ describe("handleEvent()", () => {
   it("leaves no session row behind after a mid-session downgrade", async () => {
     let tier = "pro";
     const { engine, sent } = makeEngine(() => ({ credentialed: true, tier }));
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     tier = "free";
     await capturingWarnings(() => engine.handleEvent({ terminalId: "t1", event: "turn_end" }));
     expect(lastStatus(sent).sessions).toEqual([]);
@@ -203,7 +202,7 @@ describe("the local/offline developer flow", () => {
     const { engine, sent, injected } = makeEngine(undefined, {
       runDecisionFn: async () => handleDecision,
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect(lastStatus(sent).sessions).toHaveLength(1);
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toEqual([["t1", "carry on"]]);
@@ -215,7 +214,7 @@ describe("the local/offline developer flow", () => {
     const { engine, sent, injected } = makeEngine(() => ({ credentialed: false, tier: null }), {
       runDecisionFn: async () => handleDecision,
     });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect(lastStatus(sent).sessions).toHaveLength(1);
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     expect(injected).toEqual([["t1", "carry on"]]);
@@ -225,7 +224,7 @@ describe("the local/offline developer flow", () => {
     // The default the constructor installs. A HandlerEngine assembled without a
     // host — which is every unit test in this directory — must still arm.
     const { engine, sent } = makeEngine(undefined, { entitlement: undefined });
-    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    engine.arm({ terminalId: "t1", goal: GOAL });
     expect(lastStatus(sent).sessions).toHaveLength(1);
   });
 });

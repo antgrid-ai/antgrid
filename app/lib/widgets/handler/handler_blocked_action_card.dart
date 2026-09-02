@@ -14,7 +14,7 @@ const handlerDismissLabel = 'Dismiss';
 const handlerReplyInsteadLabel = 'Reply instead…';
 
 /// Inline card for an escalation the bridge raised because a harness guard —
-/// the reply-shape rules, the §5.3 destructive floor, or the runaway guard —
+/// the reply-shape rules, the hard destructive floor, or the runaway guard —
 /// refused an action Handler wanted to take (`kind: 'guard_blocked'`).
 ///
 /// It is a REPORT, not a question: the action was never taken, so nothing the

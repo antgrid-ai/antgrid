@@ -7,6 +7,8 @@
 // applies to BOTH axes; a grid that fits is letterboxed (centered) at its
 // natural size, since the scale never enlarges. Separately, a view that
 // never gains focus must never claim the driver role by sending a resize.
+import 'dart:async';
+
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/providers/client_id.dart';
@@ -92,9 +94,14 @@ TerminalTab _tab({
   return tab;
 }
 
-Widget _wrap(Widget child) => ProviderScope(
+/// [clientId] lets a test hold the provider in `AsyncLoading`: the real one
+/// reads SharedPreferences, so a terminal can be on screen before it resolves,
+/// and the load→data transition is the rebuild the wrapper's retry depends on.
+Widget _wrap(Widget child, {Future<String>? clientId}) => ProviderScope(
   overrides: [
-    clientIdProvider.overrideWith((ref) async => _myClientId),
+    clientIdProvider.overrideWith(
+      (ref) => clientId ?? Future.value(_myClientId),
+    ),
     // _buildTerminal watches agentTerminalProvider for the send-to-agent
     // overlay; these tabs are not the agent, so pin it null to keep the
     // throwing focused-session façades out of the test.
@@ -121,6 +128,11 @@ void main() {
     useInMemoryPrefs();
     _settingsPrefs = await openAppSettingsPrefs();
   });
+
+  // Every test here overrides the platform and clears it as its last statement,
+  // which a failing `expect` skips — leaking the override into every test after
+  // it and turning one real failure into a cascade of platform-dependent ones.
+  tearDown(() => debugDefaultTargetPlatformOverride = null);
 
   testWidgets(
     'non-driver grid larger than the viewport is scaled down, not scrolled',
@@ -439,6 +451,226 @@ void main() {
     expect(resizes, isNotEmpty);
     expect(resizes.last['clientId'], _myClientId);
     expect(resizes.last['baseDriverClientId'], _otherClientId);
+
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets(
+    'driver grid settles to a grown panel while the wrapper keeps rebuilding',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      final h = await _makeService(addTearDown);
+      h.service.setClientId(_myClientId);
+
+      // The grid-freeze delay measures quiet on the SIZE, not on rebuilds:
+      // LayoutBuilder re-runs its builder on every parent rebuild, so re-arming
+      // per rebuild lets a wrapper rebuilding faster than the delay (a
+      // streaming agent) hold the timer off forever and strand the grid at the
+      // pre-resize width — content clipped at the stale column with dead space
+      // beside it.
+      final tab = _tab(id: 't8', cols: 80, driverClientId: _myClientId);
+
+      final width = ValueNotifier<double>(300);
+      final rebuilds = ValueNotifier<int>(0);
+      addTearDown(() {
+        width.dispose();
+        rebuilds.dispose();
+      });
+
+      await tester.pumpWidget(
+        _wrap(
+          AnimatedBuilder(
+            animation: Listenable.merge([width, rebuilds]),
+            builder: (context, _) => Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: width.value,
+                height: 400,
+                child: TerminalViewWrapper(
+                  tab: tab,
+                  terminalService: h.service,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.getSize(find.byType(GhosttyTerminalView)).width,
+        closeTo(300, _epsilon),
+      );
+
+      width.value = 600;
+      for (var i = 0; i < 12; i++) {
+        rebuilds.value++;
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+
+      expect(
+        tester.getSize(find.byType(GhosttyTerminalView)).width,
+        closeTo(600, _epsilon),
+      );
+
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'a resize dropped for a not-yet-resolved client id is retried, not booked',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      final h = await _makeService(addTearDown);
+      // Deliberately unresolved: the terminal is on screen before the
+      // per-install id is read off disk, which is the startup order the wrapper
+      // has to survive. `sendResize` drops those, and booking one as sent would
+      // leave the PTY at its spawn geometry with nothing left to trigger a
+      // re-send.
+      final clientId = Completer<String>();
+      final tab = _tab(id: 't9', cols: 80, driverClientId: null);
+
+      // Built ONCE. Completing the id below is the only thing that rebuilds
+      // this tree, so the test fails if the wrapper stops watching
+      // `clientIdProvider` — pumping a second tree by hand would supply the
+      // rebuild the production path is supposed to provide for itself.
+      await tester.pumpWidget(
+        _wrap(
+          SizedBox(
+            width: 300,
+            height: 400,
+            child: TerminalViewWrapper(tab: tab, terminalService: h.service),
+          ),
+          clientId: clientId.future,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(
+        h.transport.sent.where((m) => m['type'] == 'terminal:resize'),
+        isEmpty,
+        reason: 'no client id yet, so nothing can be stamped and sent',
+      );
+
+      // The id lands: the size is still unsent, so the same geometry must go
+      // out now rather than wait for a panel resize.
+      h.service.setClientId(_myClientId);
+      clientId.complete(_myClientId);
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 150));
+
+      final resizes = h.transport.sent
+          .where((m) => m['type'] == 'terminal:resize')
+          .toList();
+      expect(resizes, isNotEmpty);
+      expect(resizes.last['clientId'], _myClientId);
+
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets('a sizeEpoch bump reopens the resize gate at an unchanged size', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    final h = await _makeService(addTearDown);
+    h.service.setClientId(_myClientId);
+    // Drives its own PTY, so the driver branch is live and the settled size is
+    // what the resize is derived from.
+    var tab = _tab(id: 't10', cols: 80, driverClientId: _myClientId);
+
+    Future<void> show() async {
+      await tester.pumpWidget(
+        _wrap(
+          SizedBox(
+            width: 500,
+            height: 400,
+            child: TerminalViewWrapper(tab: tab, terminalService: h.service),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+    }
+
+    await show();
+    expect(
+      h.transport.sent.where((m) => m['type'] == 'terminal:resize'),
+      isNotEmpty,
+    );
+
+    // Panel unchanged: the booked size still stands, so nothing goes out. This
+    // is the gate that strands a respawned PTY, and it has to be shut here for
+    // the bump below to prove anything.
+    h.transport.sent.clear();
+    await show();
+    expect(
+      h.transport.sent.where((m) => m['type'] == 'terminal:resize'),
+      isEmpty,
+    );
+
+    // The service reports the geometry as no longer trustworthy — a re-drive
+    // or a respawn. The panel STILL has not moved, so the bump is the only
+    // thing that can put the size back on the wire.
+    tab = tab.copyWith(sizeEpoch: tab.sizeEpoch + 1);
+    await show();
+
+    final resizes = h.transport.sent
+        .where((m) => m['type'] == 'terminal:resize')
+        .toList();
+    expect(resizes, isNotEmpty);
+    expect(resizes.last['clientId'], _myClientId);
+
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('swapping which terminal an unkeyed wrapper shows re-sends', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    final h = await _makeService(addTearDown);
+    h.service.setClientId(_myClientId);
+
+    // Only `terminal_screen` keys the wrapper by terminalId; the pinned pane,
+    // the detail view and the setup banner all mount it unkeyed, so this swap
+    // REUSES one State. Both tabs drive, sit at the same epoch and are shown at
+    // the same panel size — so every gate the wrapper carries per-PTY reads as
+    // "already sent" unless the swap itself retires them.
+    final a = _tab(id: 'swap-a', cols: 80, driverClientId: _myClientId);
+    final b = _tab(id: 'swap-b', cols: 80, driverClientId: _myClientId);
+
+    Future<void> show(TerminalTab tab) async {
+      await tester.pumpWidget(
+        _wrap(
+          SizedBox(
+            width: 500,
+            height: 400,
+            child: TerminalViewWrapper(tab: tab, terminalService: h.service),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+    }
+
+    await show(a);
+    expect(
+      h.transport.sent.where((m) => m['type'] == 'terminal:resize'),
+      isNotEmpty,
+    );
+
+    h.transport.sent.clear();
+    await show(b);
+
+    final resizes = h.transport.sent
+        .where((m) => m['type'] == 'terminal:resize')
+        .toList();
+    expect(
+      resizes.map((m) => m['terminalId']),
+      contains('swap-b'),
+      reason: "the new PTY has never been told this panel's grid",
+    );
 
     debugDefaultTargetPlatformOverride = null;
   });

@@ -278,23 +278,28 @@ class HandlerStatusMessage {
   /// What an absent per-session judge tool resolves to for PTY slots (the
   /// project's agent tool); chat slots resolve from their own session entry.
   final String? defaultTool;
-  final bool defaultNotifyOnly;
   final List<Map<String, dynamic>> sessions;
 
-  /// Every §5.2 snapshot the project still knows about, replayed like the
+  /// Every snapshot the project still knows about, replayed like the
   /// escalations so an app that restarted between the advert and the tap can
   /// still reach the undo. Project-level, not per session: the offer matters
   /// most once the session that took it has wrapped up.
   final List<Map<String, dynamic>> snapshots;
+
+  /// The morning-after wrap-up reports, replayed on the same terms as the
+  /// snapshots — the session they describe is disarmed by the time anyone reads
+  /// one, so the replay is the only path that survives an app restart between
+  /// the wrap-up and the read.
+  final List<Map<String, dynamic>> wrapUps;
 
   const HandlerStatusMessage({
     required this.id,
     required this.timestamp,
     required this.projectId,
     this.defaultTool,
-    required this.defaultNotifyOnly,
     required this.sessions,
     this.snapshots = const [],
+    this.wrapUps = const [],
   });
 }
 
@@ -1907,6 +1912,15 @@ Object? parseAbMessage(Map<String, dynamic> json) {
             if (s is Map<String, dynamic>) snapshots.add(s);
           }
         }
+        // Same guard, same reason — and here absent and empty genuinely mean
+        // the same thing, so presence is never read as a capability signal.
+        final wrapUpsJson = json['wrapUps'];
+        final wrapUps = <Map<String, dynamic>>[];
+        if (wrapUpsJson is List) {
+          for (final w in wrapUpsJson) {
+            if (w is Map<String, dynamic>) wrapUps.add(w);
+          }
+        }
         return HandlerStatusMessage(
           id: id,
           timestamp: timestamp,
@@ -1914,9 +1928,9 @@ Object? parseAbMessage(Map<String, dynamic> json) {
           defaultTool: json['defaultTool'] is String
               ? json['defaultTool'] as String
               : null,
-          defaultNotifyOnly: json['defaultNotifyOnly'] == true,
           sessions: sessions,
           snapshots: snapshots,
+          wrapUps: wrapUps,
         );
       }
 

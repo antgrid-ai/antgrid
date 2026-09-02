@@ -86,11 +86,11 @@ class LocalNotificationService {
   /// `ios/NotificationService` renders the APNs alert, and the forked `push`
   /// plugin never forwards `response.actionIdentifier`.
   ///
-  /// TODO(handler): quick-choice notification actions (spec §4.6) need, in
-  /// order: `choices` sealed into the push payload and carried through
-  /// `DecodedPush`; a pending-answer store flushed once `handler:status`
-  /// replays the still-unanswered escalation; then `showsUserInterface: true`
-  /// actions here so the tap resumes the app instead of a headless isolate.
+  /// TODO(handler): quick-choice notification actions need, in order:
+  /// `choices` sealed into the push payload and carried through `DecodedPush`;
+  /// a pending-answer store flushed once `handler:status` replays the
+  /// still-unanswered escalation; then `showsUserInterface: true` actions here
+  /// so the tap resumes the app instead of a headless isolate.
   Future<void> show({required String title, required String body}) async {
     if (!_ready) return;
     final id = _nextId;

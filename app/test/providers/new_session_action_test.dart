@@ -668,6 +668,7 @@ class _StubSessionsService extends SessionsService {
     String? command,
     String? args,
     String? mode,
+    String approvalPolicy = 'default',
     String isolation = 'shared',
     String? baseBranch,
   }) async {

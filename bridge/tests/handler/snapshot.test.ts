@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import {
   planSnapshots, takeSnapshots, undoSnapshot, sessionTrashDir, clearSessionTrash, describeSnapshot,
-  releaseSnapshots, SNAPSHOT_PATTERNS,
+  releaseSnapshots, SNAPSHOT_PATTERNS, NO_SNAPSHOT_PATTERNS,
   type GitRun, type SnapshotEntry, type StashSnapshot, type PrePushSnapshot, type TrashSnapshot,
   type SnapshotOutcome,
 } from "../../src/handler/snapshot";
@@ -68,7 +68,7 @@ const take = (f: Fixture, text: string, extra: Partial<Parameters<typeof takeSna
 // ---------------------------------------------------------------------------
 
 describe("planSnapshots", () => {
-  test("recognizes the four §5.2 rows", () => {
+  test("recognizes the four snapshot actions", () => {
     expect(planSnapshots("git reset --hard HEAD~1")).toEqual([
       { action: "reset_hard", trigger: "git reset --hard HEAD~1", targetRef: "HEAD~1" },
     ]);
@@ -802,13 +802,30 @@ describe("module surface", () => {
     }
   });
 
-  test("SNAPSHOT_PATTERNS maps a live floor pattern for each §5.2 action", () => {
+  test("SNAPSHOT_PATTERNS maps a live floor pattern for each snapshot action", () => {
     expect([...new Set(SNAPSHOT_PATTERNS.values())].sort())
       .toEqual(["force_push", "git_clean", "reset_hard", "rm_rf"]);
     for (const [pattern, action] of SNAPSHOT_PATTERNS) {
       const cmd = { reset_hard: "git reset --hard HEAD", force_push: "git push --force origin main",
         rm_rf: "rm -rf build", git_clean: "git clean -fd" }[action];
       expect(classifyDestructive(cmd, "/proj").warnings.map((w) => w.pattern)).toContain(pattern);
+    }
+  });
+
+  test("NO_SNAPSHOT_PATTERNS names only shapes §5.2 can never cover", () => {
+    const outward = [
+      "gh pr merge 1", "gh pr close 1", "gh release delete v1", "gh repo delete owner/name",
+      "git branch -D topic", "git tag -d v1", "npm publish",
+    ];
+    expect(NO_SNAPSHOT_PATTERNS.size).toBeGreaterThan(0);
+    for (const pattern of NO_SNAPSHOT_PATTERNS) expect(SNAPSHOT_PATTERNS.has(pattern)).toBe(false);
+    for (const cmd of outward) {
+      const flagged = classifyDestructive(cmd, "/proj").warnings
+        .filter((w) => w.tier === "DESTRUCTIVE").map((w) => w.pattern);
+      expect(flagged.some((p) => NO_SNAPSHOT_PATTERNS.has(p))).toBe(true);
+      // Planning nothing is the correct answer, not a parser gap: the state these
+      // move is outside the project, so there is nothing local to hold.
+      expect(planSnapshots(cmd)).toEqual([]);
     }
   });
 

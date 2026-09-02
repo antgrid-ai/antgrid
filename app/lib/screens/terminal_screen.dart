@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_colors.dart';
+import '../design/ab_tokens.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_loading.dart';
@@ -13,10 +14,12 @@ import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
 import '../providers/new_session_picker.dart' show enterNewSession;
 import '../providers/providers.dart';
+import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
 import '../services/sessions_service.dart' show SessionOperationException;
 import '../util/ab_log.dart';
 import '../util/detached.dart';
+import '../widgets/session_setup_progress.dart';
 import '../widgets/session_start_refusal.dart';
 import '../widgets/terminal_view_wrapper.dart';
 
@@ -55,6 +58,23 @@ class TerminalScreen extends ConsumerWidget {
     // Empty-state branches — render BEFORE picking a tab so the legacy
     // type=='agent' fallback can't shadow a deliberate stopped state.
     if (activeSession != null && !activeSession.running) {
+      // A queued session reports `running: false` for the whole setup run, so
+      // this branch is reached by one whose agent is on its way — calling it
+      // stopped, over a Start button that only re-enters the same gate, is the
+      // one account of itself the workspace must never give.
+      if (sessionStartQueued(
+        ref.watch(sessionSetupProvider(activeSession.id)),
+      )) {
+        // Keyed by session, for the same reason `AgentTranscriptView` is
+        // (agent_panel.dart): without it Flutter reuses one State across a
+        // session switch, and the in-flight verb — plus the refusal snackbar
+        // it is waiting on — would land on whichever session is on screen by
+        // the time the reply arrives.
+        return _ProvisioningSessionState(
+          key: ValueKey(activeSession.id),
+          sessionId: activeSession.id,
+        );
+      }
       return activeSession.mode == 'chat'
           ? _StoppedSessionEmptyState(
               sessionId: activeSession.id,
@@ -269,6 +289,183 @@ class _NoSessionEmptyState extends ConsumerWidget {
           onTap: () => enterNewSession(ref.container),
         ),
       ),
+    );
+  }
+}
+
+/// Rendered inside the terminal pane while an isolated session's agent is
+/// QUEUED behind its checkout's `worktree.setup` run.
+///
+/// The pane IS the transcript here rather than the banner's one-line tail: for
+/// the whole run the setup PTY is the only live output the session has, and the
+/// state this replaced left it collapsed behind a chevron above an empty pane
+/// that called the session stopped.
+///
+/// Both verbs it offers end the wait, and they are not the same answer: `skip`
+/// releases the agent and lets the run finish anyway ("the deps are cached"),
+/// `cancel` kills the run first. The bridge has accepted `cancel` since the
+/// verb shipped; this is the first surface to offer it.
+class _ProvisioningSessionState extends ConsumerStatefulWidget {
+  const _ProvisioningSessionState({super.key, required this.sessionId});
+
+  final String sessionId;
+
+  @override
+  ConsumerState<_ProvisioningSessionState> createState() =>
+      _ProvisioningSessionStateState();
+}
+
+class _ProvisioningSessionStateState
+    extends ConsumerState<_ProvisioningSessionState> {
+  /// The verb in flight, or null. Held as the verb rather than a bool so the
+  /// pending dot lands on the control the user actually pressed — and shared
+  /// across both, since they are alternatives and a second press would race the
+  /// first for a run only one of them can end.
+  SessionSetupAction? _acting;
+
+  Future<void> _act(SessionSetupAction verb) async {
+    if (_acting != null) return;
+    setState(() => _acting = verb);
+    // Captured before the first await: a settling run rebuilds this pane away
+    // — the agent spawns, the session flips `running` — and a `ref` read after
+    // that throws.
+    final container = ref.container;
+    final entryId = container.read(selectedRegistrationIdProvider);
+    try {
+      if (entryId == null) {
+        // A project mid-re-resolve has no registration to address, which is
+        // reachable across a run this long. Saying so is the whole contract
+        // below: a press that produces no wire traffic and no message is
+        // indistinguishable from a dropped tap.
+        if (mounted) {
+          showAbSnackBar(
+            context,
+            '${sessionSetupFailureCopy(verb)} — this project is reconnecting.',
+          );
+        }
+        return;
+      }
+      final result = await runSessionSetupAction(
+        container,
+        entryId: entryId,
+        sessionId: widget.sessionId,
+        action: verb,
+      );
+      if (!mounted || result.ok) return;
+      // Only while this session is still the one on screen: a refusal narrated
+      // over a DIFFERENT session's pane reads as that session having failed.
+      // The key above makes this rare rather than impossible — the pane is
+      // rebuilt away on a switch, but a reply can still land first.
+      if (container.read(activeSessionIdProvider) != widget.sessionId) return;
+      // Nothing else on screen changes when a setup verb is refused, so a log
+      // line alone would make a refusal indistinguishable from a dropped press.
+      showAbSnackBar(
+        context,
+        '${sessionSetupFailureCopy(verb)} — ${result.error}',
+      );
+    } finally {
+      // The success path usually never reaches this: releasing the agent
+      // spawns the PTY, which flips `running` and renders the terminal over
+      // this widget.
+      if (mounted) setState(() => _acting = null);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.antgrid;
+    final setup = ref.watch(sessionSetupProvider(widget.sessionId));
+    final terminalId = setup?.terminalId;
+    final terminalService = serviceWhenReady(ref, terminalServiceProvider);
+    final tabs =
+        ref.watch(terminalStateProvider).value?.tabs ??
+        const <String, TerminalTab>{};
+    final tab = terminalId == null ? null : tabs[terminalId];
+    return ColoredBox(
+      color: colors.bgDeepest,
+      child: Column(
+        children: [
+          // Above the transcript, not below it: the ledger is orientation the
+          // user reads once, and the log is the thing that keeps moving.
+          if (setup != null) SetupStepLedger(setup: setup),
+          Expanded(
+            child: tab == null || terminalService == null
+                // Not a dead end: the run has yet to report the PTY it spawned,
+                // or a reconnect has yet to recover the transcript. The wait
+                // itself is the same either way, so the copy states it rather
+                // than reporting the missing log.
+                ? const AbEmptyState(
+                    title: 'Preparing workspace…',
+                    subtitle: 'The agent starts when provisioning finishes.',
+                  )
+                : TerminalViewWrapper(
+                    key: ValueKey(tab.terminalId),
+                    tab: tab,
+                    terminalService: terminalService,
+                  ),
+          ),
+          _buildActions(colors),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActions(AbColors colors) {
+    return Container(
+      decoration: BoxDecoration(
+        color: colors.bgElevated,
+        border: Border(top: BorderSide(color: colors.borderSubtle)),
+      ),
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space12,
+        vertical: AbTokens.space8,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              'Waiting for workspace setup',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: colors.textMuted,
+              ),
+            ),
+          ),
+          _action(SessionSetupAction.cancel, 'Cancel setup'),
+          const SizedBox(width: AbTokens.space8),
+          _action(
+            SessionSetupAction.skip,
+            'Start agent now',
+            variant: AbButtonVariant.primary,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _action(
+    SessionSetupAction verb,
+    String label, {
+    AbButtonVariant variant = AbButtonVariant.normal,
+  }) {
+    final acting = _acting;
+    return AbButton(
+      label: label,
+      variant: variant,
+      // The dot is what separates "busy" from "broken": `onTap: null` also buys
+      // AbButton's dimmed disabled state, and dimming alone on a control the
+      // user just pressed reads as one that died under the press.
+      leading: acting == verb ? const AbLoadingDot(size: 8) : null,
+      onTap: acting != null
+          // `onTap` is a VoidCallback, so nothing awaits this — detached rather
+          // than an `async` closure whose rejection would reach
+          // PlatformDispatcher.onError as a fatal.
+          ? null
+          : () => detached(
+              'TerminalScreen',
+              'session:setup ${verb.wire} failed',
+              () => _act(verb),
+            ),
     );
   }
 }

@@ -346,13 +346,14 @@ describe("CheckoutSetupRunner step markers", () => {
 
     // The seed transition carries the terminal id, which is how the app learns
     // which log to replay.
+    const stepNames = ["Copy env files", "Install dependencies"];
     expect(progress).toEqual([{
-      state: "running", stepIndex: 0, stepCount: 2, stepName: "Copy env files", terminalId,
+      state: "running", stepIndex: 0, stepCount: 2, stepName: "Copy env files", stepNames, terminalId,
     }]);
 
     expect(runner.handleTitle(terminalId, "antgrid-setup:1/2:Install dependencies")).toBe(true);
     expect(progress[1]).toEqual({
-      state: "running", stepIndex: 1, stepCount: 2, stepName: "Install dependencies", terminalId,
+      state: "running", stepIndex: 1, stepCount: 2, stepName: "Install dependencies", stepNames, terminalId,
     });
 
     // Owned but not a marker: swallowed all the same, or the session namer would
@@ -378,8 +379,11 @@ describe("CheckoutSetupRunner step markers", () => {
       JSON.stringify({ exitCode: 4, stepIndex: 1, stepName: "Two", message: "Two failed (exit 4)" }),
     );
     expect(runner.handleExit(terminalId)).toBe(true);
+    // The whole ledger rides every report, the terminal one included: the app
+    // renders which step failed against the names of the ones around it.
     expect(progress.at(-1)).toEqual({
-      state: "failed", stepIndex: 1, stepCount: 2, stepName: "Two", terminalId,
+      state: "failed", stepIndex: 1, stepCount: 2, stepName: "Two",
+      stepNames: ["One", "Two"], terminalId,
       exitCode: 4, message: "Two failed (exit 4)",
     });
     // The staging files are the runner's, not the user's — and a stale result

@@ -28,6 +28,7 @@ import 'projects.dart';
 import 'provider_retry.dart';
 import 'providers.dart';
 import 'recent_agents.dart';
+import 'session_opening_prompt.dart';
 import 'sessions.dart';
 import 'ui_attention_providers.dart';
 
@@ -137,6 +138,9 @@ Future<void> startNewSession(
       ? selection.branch
       : null;
   final isolated = ref.read(newSessionIsolatedProvider);
+  final selectedAgent = ref.read(newSessionAgentProvider);
+  final selectedMode = ref.read(newSessionModeProvider);
+  final approvalPolicy = ref.read(newSessionApprovalPolicyProvider);
   final start = ref.read(newSessionStartProgressProvider.notifier);
   bool intentIsCurrent() {
     final currentTarget = ref.read(selectedTargetProjectProvider);
@@ -147,6 +151,9 @@ Future<void> startNewSession(
         : null;
     return currentTarget?.id == target.id &&
         ref.read(newSessionIsolatedProvider) == isolated &&
+        ref.read(newSessionAgentProvider) == selectedAgent &&
+        ref.read(newSessionModeProvider) == selectedMode &&
+        ref.read(newSessionApprovalPolicyProvider) == approvalPolicy &&
         currentBranch == explicitBranch &&
         !ref.read(newSessionStartCancelRequestedProvider);
   }
@@ -302,7 +309,7 @@ Future<void> startNewSession(
 
     // 3. Create + start the session, then mark it active.
     final svc = ref.read(sessionsServiceProvider);
-    final agent = ref.read(newSessionAgentProvider);
+    final agent = selectedAgent;
     final customCmd = ref.read(newSessionCustomCmdProvider).trim();
     final cliArgs = ref.read(newSessionCliArgsProvider).trim();
     final tool = newSessionAgentToolKey(agent); // null when custom
@@ -318,7 +325,7 @@ Future<void> startNewSession(
       descriptor: tool == null ? null : ref.read(agentCatalogProvider)[tool],
     );
     final mode = (tool != null && chatCapable == true)
-        ? ref.read(newSessionModeProvider)
+        ? selectedMode
         : 'terminal';
 
     // An agent rejection (`ok:false`) comes back as a null result, but a
@@ -335,6 +342,7 @@ Future<void> startNewSession(
         command: command,
         args: cliArgs.isEmpty ? null : cliArgs,
         mode: mode,
+        approvalPolicy: approvalPolicy,
         isolation: isolated ? 'worktree' : 'shared',
         baseBranch: isolated ? explicitBranch : null,
       );
@@ -380,6 +388,13 @@ Future<void> startNewSession(
         initialPrompt: prompt.isEmpty ? null : prompt,
         raiseRefusal: true,
       );
+      // Nothing else keeps this sentence: the bridge takes it as one-shot argv
+      // and the draft is cleared below. Arming Handler happens later, on
+      // another surface, and this is what lets that arm carry the user's own
+      // words as the session goal instead of none.
+      ref
+          .read(sessionOpeningPromptsProvider.notifier)
+          .remember(created.id, prompt);
 
       // A start survives the user walking away from the canvas, so only steal
       // the focus of someone still standing on it — otherwise the session they

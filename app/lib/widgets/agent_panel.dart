@@ -47,6 +47,7 @@ import 'handler/handler_pa_bar.dart';
 import 'remote_access_control.dart';
 import 'remote_host_chip.dart';
 import 'session_agent_mark.dart';
+import 'session_approval_badge.dart';
 import 'session_mode_control.dart';
 import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
@@ -100,6 +101,8 @@ class AgentPanel extends ConsumerWidget {
               ),
               const SizedBox(width: AbTokens.space6),
               const SessionAgentMark(),
+              const SizedBox(width: AbTokens.space6),
+              const ActiveSessionApprovalBadge(),
               // space12, not space8: the work-status badge overhangs the mark
               // by 2px (see AgentWorkStatusBadge's Positioned offset in
               // SessionAgentMark) and needs the wider gap to actually clear
@@ -329,6 +332,8 @@ class AgentBar extends ConsumerWidget {
           const SizedBox(width: AbTokens.space6),
         ],
         const SessionAgentMark(),
+        const SizedBox(width: AbTokens.space6),
+        const ActiveSessionApprovalBadge(),
         // space12, not space8 — see the matching comment in AgentPanel's
         // mobile header above.
         const SizedBox(width: AbTokens.space12),
@@ -550,10 +555,12 @@ class HandlerHeaderControl extends ConsumerWidget {
       return pill ?? const SizedBox.shrink();
     }
 
-    // Spec §4.1: arming is one tap and carries no payload — no goal, no
-    // backlog, no judge override. Everything the session needs is either
-    // already stored on the bridge or extracted behind the handoff, so sending
-    // any of those keys here would overwrite state this control never showed.
+    // Arming is one tap and this control composes no payload — no backlog, no
+    // judge override. Everything the session needs is either already stored on
+    // the bridge or extracted behind the handoff, so sending any of those keys
+    // here would overwrite state this control never showed.
+    // The goal is the exception and is not composed here either:
+    // armWithFirstRunExplainer carries the session's own opening prompt.
     void toggleArm() {
       if (service == null) return;
       if (session != null) {
@@ -566,23 +573,20 @@ class HandlerHeaderControl extends ConsumerWidget {
         armWithFirstRunExplainer(
           context: context,
           container: ref.container,
-          service: service,
           terminalId: activeId,
-          notifyOnly: state.defaultNotifyOnly,
           agentObservable: coverage.observable,
           agentLabel: coverage.agentLabel,
+          judgeCapable: coverage.judgeCapable,
         ),
       );
     }
 
-    // Arming is one tap, so this tooltip is the only place the pre-arm
-    // coverage answer can reach the user — an agent that reports nothing
-    // arms just as silently as one that is merely quiet.
-    final shieldTooltip = session != null
-        ? 'Disarm Handler'
-        : coverage.observable == false
-        ? unwatchableNotice(coverage.agentLabel)
-        : 'Arm Handler';
+    final shieldTooltip = handlerShieldTooltip(
+      armed: session != null,
+      observable: coverage.observable,
+      judgeCapable: coverage.judgeCapable,
+      agentLabel: coverage.agentLabel,
+    );
 
     return Row(
       mainAxisSize: MainAxisSize.min,

@@ -9,8 +9,6 @@ worktree:
         run: bun install
       - name: Generate Prisma client
         run: bun run --filter antgrid-web prisma:generate
-      - name: Apply local database migrations
-        run: bun run --filter antgrid-web migrate
       - name: Install Flutter packages
         run: flutter pub get
         workingDir: app
@@ -19,3 +17,8 @@ worktree:
         workingDir: packages/antgrid_relay_client
     timeoutMs: 900000
     onFailure: warn
+    # The agent is useful before the installs finish — reading, planning and
+    # searching all work in a tree that is only checked out — and the five
+    # steps here are minutes on a cold worktree. It does race step 1: the
+    # service `.env` files can land after the agent is already up.
+    startAgent: immediate

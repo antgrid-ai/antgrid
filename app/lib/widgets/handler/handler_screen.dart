@@ -7,6 +7,7 @@ import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_chip.dart';
+import '../../design/widgets/ab_confirm_dialog.dart';
 import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_list_row.dart';
@@ -18,6 +19,7 @@ import '../../design/widgets/ab_tooltip.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
+import '../../util/detached.dart';
 import '../../util/relative_time.dart';
 import 'handler_backlog_drawer.dart';
 import 'handler_blocked_action_card.dart';
@@ -43,9 +45,13 @@ class HandlerScreen extends ConsumerWidget {
   Widget _body(BuildContext context, WidgetRef ref, HandlerState? state) {
     final p = context.antgrid;
 
-    // Undo offers keep this screen alive after the last disarm: a wrapped-up
-    // session is exactly when the force push it made at 3am gets read.
-    if (state == null || (!state.anyArmed && state.snapshots.isEmpty)) {
+    // Undo offers and wrap-up reports keep this screen alive after the last
+    // disarm: a wrapped-up session is exactly when the force push it made at
+    // 3am — and the account of what it did — get read.
+    if (state == null ||
+        (!state.anyArmed &&
+            state.snapshots.isEmpty &&
+            state.wrapUps.isEmpty)) {
       return const Padding(
         padding: EdgeInsets.all(AbTokens.space24),
         child: Center(
@@ -81,6 +87,7 @@ class HandlerScreen extends ConsumerWidget {
       ...state.escalations.map((e) => e.terminalId),
       ...state.activity.map((a) => a.terminalId),
       ...state.snapshots.map((s) => s.terminalId),
+      ...state.wrapUps.map((w) => w.terminalId),
     };
     final showSessionLabels = distinctTerminals.length > 1;
 
@@ -108,11 +115,55 @@ class HandlerScreen extends ConsumerWidget {
       focusedServiceOrNull(container, (s) => s.handlerService)?.reply(e, text);
     }
 
-    Widget meta(String terminalId, int at) => _RowMeta(
+    // Confirmed for one action out of four. Undoing a hard reset, a recursive
+    // delete or a clean touches this machine only; undoing a force push writes
+    // to a shared remote, and the row it is offered on is a scrolling list row
+    // whose whole body is the tap target, because the snapshot buys prevention
+    // back as one tap.
+    // The dialog is the only thing standing between a thumb landing where the
+    // scroll stopped and a ref overwritten for everyone on it.
+    //
+    // Re-resolved after the dialog for the same reason `answer` re-resolves
+    // after its sheet: the focused project's session can be rebuilt while the
+    // dialog is open, and the build-time instance is disposed by then.
+    Future<void> undo(HandlerSnapshot s) async {
+      if (s.action == 'force_push') {
+        final ok = await AbConfirmDialog.show(
+          context: context,
+          title: 'Undo this force push?',
+          // No promise of recovery: the bridge pins the current remote tip
+          // before overwriting it, but only when the ref still exists there —
+          // a ref already gone from the remote is restored with a bare
+          // `--force` and nothing pinned (snapshot.ts).
+          body:
+              'This force-pushes the remote back to where it was before the '
+              "agent's push. Whatever is on it now is overwritten.\n\n"
+              '${s.summary}',
+          confirmLabel: 'Undo force push',
+          destructive: true,
+        );
+        if (!ok) return;
+      }
+      focusedServiceOrNull(container, (x) => x.handlerService)?.undo(s);
+    }
+
+    // `urgent` rides the meta column rather than each row's own body: an
+    // escalation renders as one of three unrelated widgets (blocked card,
+    // decision card, plain row) and this is the only piece all three share, so
+    // it is the only place the marker cannot be added to two of them and
+    // forgotten on the third.
+    Widget meta(String terminalId, int at, {bool urgent = false}) => _RowMeta(
       sessionName: showSessionLabels ? nameOf(terminalId) : null,
       at: at,
       p: p,
+      urgent: urgent,
     );
+
+    // The urgency test itself, once, for that same reason: spelled out at each
+    // of the three call sites it is three chances to omit, and a fourth row
+    // shape starts life without it.
+    Widget escalationMeta(HandlerEscalation e) =>
+        meta(e.terminalId, e.at, urgent: e.urgency == 'high');
 
     return CustomScrollView(
       slivers: [
@@ -130,7 +181,7 @@ class HandlerScreen extends ConsumerWidget {
                 if (e.kind == 'guard_blocked')
                   HandlerBlockedActionCard(
                     escalation: e,
-                    trailing: meta(e.terminalId, e.at),
+                    trailing: escalationMeta(e),
                     // Re-resolved through the container for the same reason
                     // `answer` re-resolves after its sheet: the build-time
                     // instance can be disposed by the time a tap lands.
@@ -145,7 +196,7 @@ class HandlerScreen extends ConsumerWidget {
                 else if (e.choices != null)
                   HandlerDecisionCard(
                     escalation: e,
-                    trailing: meta(e.terminalId, e.at),
+                    trailing: escalationMeta(e),
                     // The id, not the choice: the service resolves it against
                     // the escalation's own offered set, so the text on the wire
                     // is always the one the bridge authored.
@@ -196,7 +247,7 @@ class HandlerScreen extends ConsumerWidget {
                         ),
                       ],
                     ),
-                    trailing: meta(e.terminalId, e.at),
+                    trailing: escalationMeta(e),
                     onTap: () => answer(e),
                   ),
             ],
@@ -241,6 +292,31 @@ class HandlerScreen extends ConsumerWidget {
             ],
           ),
         ],
+        // Below Sessions because a report is not an action, and directly above
+        // Undo because its last line points at that section.
+        if (state.wrapUps.isNotEmpty) ...[
+          _section('Wrap-up', state.wrapUps.length, p.textMuted, p),
+          SliverList.builder(
+            itemCount: state.wrapUps.length,
+            itemBuilder: (_, i) {
+              final w = state.wrapUps[state.wrapUps.length - 1 - i];
+              return _WrapUpCard(
+                wrapUp: w,
+                meta: meta(w.terminalId, w.at),
+                // Derived, never read off the record: an undo taken after the
+                // wrap-up spends its entry and a re-arm retires the offers
+                // outright, so a count frozen at compose time is a lie on the
+                // one surface built to be read hours later. This is the same
+                // list the Undo section below renders, so the two cannot
+                // disagree.
+                openUndos: state.snapshots
+                    .where((s) => s.terminalId == w.terminalId && !s.undone)
+                    .length,
+                p: p,
+              );
+            },
+          ),
+        ],
         if (state.snapshots.isNotEmpty) ...[
           _section('Undo', state.snapshots.length, p.warning, p),
           // Lazy for the same reason the activity feed below is: the store keeps up
@@ -253,10 +329,8 @@ class HandlerScreen extends ConsumerWidget {
                 snapshot: s,
                 meta: meta(s.terminalId, s.at),
                 pending: state.pendingUndo.contains(s.snapshotId),
-                onUndo: () => focusedServiceOrNull(
-                  container,
-                  (x) => x.handlerService,
-                )?.undo(s),
+                onUndo: () =>
+                    detached('HandlerScreen', 'undo snapshot', () => undo(s)),
                 p: p,
               );
             },
@@ -314,10 +388,15 @@ class _RowMeta extends StatelessWidget {
     required this.sessionName,
     required this.at,
     required this.p,
+    this.urgent = false,
   });
   final String? sessionName;
   final int at;
   final AbColors p;
+
+  /// Only escalations pass this. Snapshots and activity rows are history, and
+  /// nothing about them is waiting on the user.
+  final bool urgent;
 
   @override
   Widget build(BuildContext context) {
@@ -329,6 +408,10 @@ class _RowMeta extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
+        // Above the session name, so the eye reaches it on the way down to the
+        // timestamp rather than after it. System-assigned data, so the mono
+        // uppercase chip, matching ESCALATE ONLY on the session card.
+        if (urgent) AbChip.system(label: 'URGENT', color: p.warning),
         if (sessionName != null) Text(sessionName!, style: style),
         Text(_fmtTime(at), style: style),
       ],
@@ -378,8 +461,8 @@ String? handlerParkNote(HandlerSessionState session, {DateTime? now}) {
 ///
 /// Only the status line's own two ends are fixed — the run-state word and the
 /// Armed chip. Everything else that could grow (the judge name, the session
-/// name, the notify-only marker) either shrinks or sits on a line below, so a
-/// narrow context panel or a scaled text size cannot overflow the row.
+/// name) either shrinks or sits on a line below, so a narrow context panel or
+/// a scaled text size cannot overflow the row.
 class _SessionCard extends StatelessWidget {
   const _SessionCard({
     required this.session,
@@ -557,27 +640,12 @@ class _SessionCard extends StatelessWidget {
                 // only render when several sessions are on screen, which is
                 // exactly when they share a prefix and a truncated one
                 // identifies nothing.
-                if (sessionName != null || session.notifyOnly)
-                  Row(
-                    children: [
-                      if (sessionName != null)
-                        Flexible(
-                          child: Text(
-                            sessionName!,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: mutedMono,
-                          ),
-                        ),
-                      // A notify-only session never acts on the user's behalf,
-                      // which is the single biggest thing this card can be
-                      // wrong about by staying silent.
-                      if (session.notifyOnly) ...[
-                        if (sessionName != null)
-                          const SizedBox(width: AbTokens.space6),
-                        AbChip.system(label: 'NOTIFY ONLY', color: p.warning),
-                      ],
-                    ],
+                if (sessionName != null)
+                  Text(
+                    sessionName!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: mutedMono,
                   ),
                 const SizedBox(height: AbTokens.space2),
                 Text(
@@ -739,8 +807,9 @@ String _snapshotActionLabel(String action) {
 /// and clipping that would hide the only thing the row says about it.
 const _undoColumnWidth = 68.0;
 
-/// One reversible flagged action. The whole row is the tap target: §5.2 buys
-/// prevention back as one tap, so nothing here opens a sheet or a form.
+/// One reversible flagged action. The whole row is the tap target: the
+/// snapshot buys prevention back as one tap, so nothing here opens a sheet or
+/// a form.
 class _SnapshotRow extends StatelessWidget {
   const _SnapshotRow({
     required this.snapshot,
@@ -833,6 +902,95 @@ class _SnapshotRow extends StatelessWidget {
   }
 }
 
+/// The one report of a finished session, and the only Handler surface that
+/// outlives the app restart between the 3am wrap-up and the 9am read — the
+/// activity feed below is rebuilt from live messages and replays nothing.
+///
+/// Sans throughout: every line here is either the user's own goal, the judge's
+/// prose about their backlog items, or a chrome label. Nothing is a path, a ref
+/// or a command, which is what makes the undo row beside it mono and this one
+/// not.
+///
+/// No `onTap`. The card is a report; the Undo section directly below owns the
+/// only action a reader of it can take.
+class _WrapUpCard extends StatelessWidget {
+  const _WrapUpCard({
+    required this.wrapUp,
+    required this.meta,
+    required this.openUndos,
+    required this.p,
+  });
+  final HandlerWrapUp wrapUp;
+  final Widget meta;
+
+  /// Undo offers still standing for this session, counted live by the caller.
+  final int openUndos;
+  final AbColors p;
+
+  /// Named after the outcome the backlog drawer and the feed already use for
+  /// the same four states — a third spelling would read as a third concept.
+  String _outcomeLabel(String status) => switch (status) {
+    'done' => 'Done',
+    'failed' => 'Failed',
+    'blocked' => 'Blocked',
+    _ => 'Skipped',
+  };
+
+  /// The failures and blocks are what the user has to act on, so they are the
+  /// two the eye can find without reading — which is the whole reason the
+  /// summary puts the non-`done` outcomes at its centre.
+  Color _outcomeColor(String status) => switch (status) {
+    'failed' => p.error,
+    'blocked' => p.warning,
+    _ => p.textMuted,
+  };
+
+  Widget _line(String text, Color color) => Text(
+    text,
+    style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: color),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    return AbListRow(
+      // The feed's own `wrapped_up` glyph, so the durable card and the live row
+      // read as one thing rather than two events.
+      leading: HandlerRail(icon: AbIcons.check, color: p.textMuted),
+      subtitleMaxLines: 2,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      title: Text(
+        'Wrapped up',
+        style: AbTokens.sansStyle(fontWeight: FontWeight.w600),
+      ),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (wrapUp.goal.isNotEmpty) _line(wrapUp.goal, p.textMuted),
+          for (final o in wrapUp.outcomes)
+            _line(
+              '${_outcomeLabel(o.status)}: ${o.items.join(', ')}'
+              '${o.more > 0 ? ' +${o.more} more' : ''}',
+              _outcomeColor(o.status),
+            ),
+          // Frozen on the record on purpose, unlike the undo count below: the
+          // bridge drops the session's escalations on disarm, so nothing can
+          // re-derive what it was stopped from doing.
+          if (wrapUp.blockedTotal > 0)
+            _line(
+              '${wrapUp.blockedTotal} action(s) Handler could not take'
+              '${wrapUp.blockedReasons.isEmpty ? '' : ': ${wrapUp.blockedReasons.join('; ')}'}',
+              p.warning,
+            ),
+          if (openUndos > 0)
+            _line('$openUndos flagged action(s) can still be undone', p.accent),
+        ],
+      ),
+      trailing: meta,
+    );
+  }
+}
+
 String _itemDecisionLabel(String decision) {
   switch (decision) {
     case 'item_done':
@@ -847,36 +1005,64 @@ String _itemDecisionLabel(String decision) {
 }
 
 /// What one activity row says, and in what tone.
-(String, Color?) _activityTitle(HandlerActivityRecord r, AbColors p) =>
-    switch (r.decision) {
-      'armed' => ('Armed', null),
-      'goal_edited' => ('Goal edited', null),
-      'handle' => ('Auto-answered: ${r.reason}', null),
-      'escalate' => ('Escalated: ${r.reason}', null),
-      // Skipped and failed read exactly like done, deliberately: §4.3 requires
-      // a skip to be as visible as a completion, or "3 items skipped as moot"
-      // becomes the summary an assistant that simply gave up would also write.
-      'item_done' ||
-      'item_blocked' ||
-      'item_skipped' ||
-      'item_failed' => ('${_itemDecisionLabel(r.decision)}: ${r.reason}', null),
-      // Work the user asked for that will never be tracked. The status snapshot
-      // that follows is identical to the one before, so this row is the only
-      // place the instruction leaves a trace.
-      'instruction_dropped' => ('Instruction dropped: ${r.reason}', null),
-      // Advisory floor hit (spec §5.1). The action went through — this row is
-      // the audit trail prevention was traded for, so it is never conditional
-      // on what Handler decided afterwards.
-      'floor_warning' => ('Flagged: ${r.reason}', p.warning),
-      // A completion the harness refused to bank. The status snapshot that
-      // follows is identical to the one before it, so this row is the only trace
-      // of a session that will now not wrap up on its own.
-      'evidence_rejected' => ('Completion not verified: ${r.reason}', p.warning),
-      'wrapped_up' => ('Wrapped up', null),
-      'parked' => ('Paused: ${r.reason}', null),
-      'resumed' => ('Resumed: ${r.reason}', null),
-      _ => (r.reason, null),
-    };
+(String, Color?) _activityTitle(
+  HandlerActivityRecord r,
+  AbColors p,
+) => switch (r.decision) {
+  'armed' => ('Armed', null),
+  'goal_edited' => ('Goal edited', null),
+  // The pass that decided nothing needed doing, and the most frequent row in
+  // the feed by a wide margin. It keeps the judge's reason — that is the only
+  // trace of what Handler saw while the user was away — but takes the muted
+  // tone, because a feed scanned for what went wrong has to be skimmable past
+  // the rows where nothing did.
+  //
+  // Named off the run state rather than in words of its own: the header pill
+  // above this feed says "Watching" for the same state, and two spellings on
+  // one screen read as two different sessions.
+  'continue' => (
+    '${handlerRunStateLabel(HandlerRunState.watching)}: ${r.reason}',
+    p.textMuted,
+  ),
+  'handle' => ('Auto-answered: ${r.reason}', null),
+  'escalate' => ('Escalated: ${r.reason}', null),
+  // Skipped and failed read exactly like done, deliberately: a skip has to be
+  // as visible as a completion, or "3 items skipped as moot" becomes the
+  // summary an assistant that simply gave up would also write.
+  'item_done' ||
+  'item_blocked' ||
+  'item_skipped' ||
+  'item_failed' => ('${_itemDecisionLabel(r.decision)}: ${r.reason}', null),
+  // Work the user asked for that will never be tracked. The status snapshot
+  // that follows is identical to the one before, so this row is the only
+  // place the instruction leaves a trace.
+  'instruction_dropped' => ('Instruction dropped: ${r.reason}', null),
+  // What an instruction permitted, beside what it asked for. "Clear out the
+  // build dir" reads as a chore and also lifts the flag off that command for
+  // the whole session, so the scope is stated rather than the act alone. The
+  // bridge puts a lone lift in the reason and the totals there only once
+  // there is more than one — so this row leads with what was allowed, the
+  // same way round as the `floor_warning` row about the same command.
+  'instruction_authorized' => ('Allowed for this session: ${r.reason}', null),
+  // The list changed and the user did not touch it — they said something, and
+  // Handler took a line off it or rewrote one. Named after the drawer they
+  // recognise, with the item quoted in their own words: which of their lines
+  // moved is the whole question, and it is the one thing the backlog itself can
+  // no longer answer once the line is gone.
+  'instruction_amended' => ('Backlog updated: ${r.reason}', null),
+  // Advisory floor hit. The action went through — this row is the audit trail
+  // prevention was traded for, so it is never conditional on what Handler
+  // decided afterwards.
+  'floor_warning' => ('Flagged: ${r.reason}', p.warning),
+  // A completion the harness refused to bank. The status snapshot that
+  // follows is identical to the one before it, so this row is the only trace
+  // of a session that will now not wrap up on its own.
+  'evidence_rejected' => ('Completion not verified: ${r.reason}', p.warning),
+  'wrapped_up' => ('Wrapped up', null),
+  'parked' => ('Paused: ${r.reason}', null),
+  'resumed' => ('Resumed: ${r.reason}', null),
+  _ => (r.reason, null),
+};
 
 /// The glyph in the reserved rail. It earns the width the rail costs on every
 /// row: the feed is scanned for one kind of entry at a time far more often than
@@ -885,6 +1071,9 @@ String _itemDecisionLabel(String decision) {
     switch (r.decision) {
       'armed' => (AbIcons.shield, p.accent),
       'goal_edited' => (AbIcons.list, p.textMuted),
+      // Watched, nothing sent. The one glyph in the rail that stands for an
+      // absence of action, so a column of them is what the eye skips over.
+      'continue' => (AbIcons.eye, p.textMuted),
       'handle' => (AbIcons.send, p.accent),
       'escalate' => (AbIcons.bell, p.accent),
       'item_done' => (AbIcons.check, p.success),
@@ -892,6 +1081,15 @@ String _itemDecisionLabel(String decision) {
       'item_failed' => (AbIcons.error, p.error),
       'item_skipped' => (AbIcons.close, p.textMuted),
       'instruction_dropped' => (AbIcons.warning, p.textMuted),
+      // A key, not a shield: `armed` already owns the accent shield, and a feed
+      // scanned one kind of row at a time cannot be asked to tell two identical
+      // glyphs apart by what a session had already done. Permission, not alarm.
+      'instruction_authorized' => (AbIcons.password, p.accent),
+      // The drawer's own Edit mark. A change the user made by hand and one
+      // their sentence made for them are the same change to the same list, and
+      // giving the second its own glyph would teach the pencil a second meaning.
+      'instruction_amended' => (AbIcons.edit, p.accent),
+      // The remit being tested. Shield in the warning tone, beside `armed`'s.
       'floor_warning' => (AbIcons.shield, p.warning),
       'evidence_rejected' => (AbIcons.warning, p.warning),
       'wrapped_up' => (AbIcons.check, p.textMuted),
@@ -913,12 +1111,18 @@ Widget? _activitySubtitle(HandlerActivityRecord r, AbColors p) {
   switch (r.decision) {
     case 'armed':
     case 'goal_edited':
-    case 'wrapped_up':
     case 'resumed':
+    // The judge's reason is the whole of a continue row and it is already the
+    // title; the bridge sends no detail with one, and inventing a second line
+    // for the feed's most repeated row would cost the rows around it.
+    case 'continue':
       return null;
     case 'handle':
       return detail == null ? null : Text('→ $detail', style: mono);
     case 'floor_warning':
+    // Commands, absolute paths and hosts — read as data, never as prose, and the
+    // only part of the row a user can check against what they meant to allow.
+    case 'instruction_authorized':
       return detail == null ? null : Text(detail, style: mono);
     case 'parked':
       // The bridge stamps the wake deadline into detail as an ISO instant.
@@ -933,9 +1137,19 @@ Widget? _activitySubtitle(HandlerActivityRecord r, AbColors p) {
     case 'item_failed':
     case 'instruction_dropped':
     case 'evidence_rejected':
+    // The items themselves, quoted — the user's own prose, and read as prose.
+    case 'instruction_amended':
+    // One line of the same summary the Wrap-up card renders in full. The card
+    // is the durable copy; this row is the live one, and it is blank without
+    // this arm because the title carries no reason for a wrap-up.
+    case 'wrapped_up':
       return detail == null ? null : Text(detail, style: sans);
     default:
-      return Text(r.decision, style: mono);
+      // A kind this build has no arm for — a bridge ahead of the app. The row
+      // still says something (its reason is the title), so the fallback prints
+      // whatever came with it rather than the protocol word, which is a name the
+      // user has never seen and cannot act on.
+      return detail == null ? null : Text(detail, style: sans);
   }
 }
 

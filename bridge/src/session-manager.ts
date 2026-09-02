@@ -12,9 +12,11 @@ import {
 } from "./known-agents";
 import { augmentAgentLaunch, injectsHookAliveProbe } from "./agent-launch-augmenter";
 import { agentSpec } from "./agents/registry";
+import { resolveApprovalPolicy } from "./agent-approval-policy";
 // Aliased: this module declares its own, unrelated `AgentSpec` (the launch
 // triple) right below.
 import type { AgentSpec as RegistryAgentSpec } from "./agents/types";
+import type { ApprovalPolicy } from "./agents/types";
 import { stripAnsi } from "./handler/context";
 import { resumeArgv, sessionResumable } from "./agent-resume";
 import { isChatCapableTool } from "./structured/chat-capable";
@@ -57,6 +59,7 @@ export interface SessionLaunchSpec {
   args?: string;
   // 'chat' routes session:start to the structured driver instead of a PTY.
   mode?: "terminal" | "chat";
+  approvalPolicy?: ApprovalPolicy;
   /** Shared is the historical default. Worktree is host-gated and never accepts
    * a path from the caller. */
   isolation?: "shared" | "worktree";
@@ -124,7 +127,7 @@ export interface SessionManagerOpts {
   cursorDir?: string;
   /** Called by start()/stop() for a mode:'chat' session instead of the PTY path.
    *  Injected by agent-core to drive the StructuredAgentManager. */
-  onStartChat?: (opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string }) => void;
+  onStartChat?: (opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string; approvalPolicy: ApprovalPolicy }) => void;
   /** May return the teardown promise. The structured driver's dispose is what
    *  releases the agent's own process lock (codex's ~/.codex sqlite), so a
    *  caller that restarts this slot on another runtime must be able to await
@@ -159,14 +162,25 @@ export interface SessionManagerOpts {
    *  checkout is removed: on Windows a live `bun install` holding the worktree
    *  as its cwd makes `git worktree remove` fail. */
   cancelCheckoutSetup?: (checkoutId: string) => Promise<void>;
-  /** Whether this checkout has a `worktree.setup` block AT ALL, answered from
-   *  its own antgrid.yaml. Read once per managed checkout on load, and only to
-   *  keep "died mid-run" apart from "never had a run": every checkout cut before
+  /** What this checkout's own antgrid.yaml asks of a provisioning run.
+   *
+   *  `declares` is whether there is a `worktree.setup` block AT ALL. It keeps
+   *  "died mid-run" apart from "never had a run": every checkout cut before
    *  this feature shipped carries no marker either, and reporting those as
    *  `interrupted` puts a "Setup didn't finish" banner on every isolated session
-   *  the user already had. Unanswerable (an unreadable config) reads as true, so
-   *  the doubt surfaces rather than hides. */
-  checkoutDeclaresSetup?: (checkout: CheckoutRecord) => boolean;
+   *  the user already had. It also gates the `services:` deferral.
+   *
+   *  `startAgent` is whether the agent waits for the run (see the config
+   *  schema). Deliberately a SEPARATE axis from the deferral: `services:` stay
+   *  held either way, because `bun run dev` against an empty `node_modules`
+   *  fails with nobody watching, unlike an agent.
+   *
+   *  Unanswerable (an unreadable config) fails closed on BOTH: the doubt gets
+   *  the banner, and it does not get to say the agent may skip the wait. */
+  checkoutSetupPolicy?: (checkout: CheckoutRecord) => {
+    declares: boolean;
+    startAgent: "afterSetup" | "immediate";
+  };
   /** Re-push the checkout's workspace state AFTER the session is announced.
    *  `prepareCheckoutRuntime` emits it too, but nothing replays a push frame
    *  and at that point no app knows the checkout exists — so its subscriber
@@ -193,6 +207,7 @@ interface PersistedEntry {
   // PTY (terminal) vs structured-driver (chat) session. Fixed at creation —
   // the two use different backends, so there is no post-hoc switch.
   mode: "terminal" | "chat";
+  approvalPolicy: ApprovalPolicy;
   // True once the user has named this session (manual rename or explicit
   // create-time name). Auto-naming from the agent title is suppressed forever
   // after — manual always wins. Backfilled from the name pattern on load.
@@ -261,6 +276,7 @@ const PersistedEntrySchema = z
     command: z.string().optional().catch(undefined),
     args: z.string().optional().catch(undefined),
     mode: z.enum(["terminal", "chat"]).optional().catch(undefined),
+    approvalPolicy: z.enum(["default", "bypass"]).optional().catch(undefined),
     manuallyRenamed: z.boolean().optional().catch(undefined),
     autoTitleRank: z.enum(TITLE_RANKS).optional().catch(undefined),
     agentSessionId: z.string().optional().catch(undefined),
@@ -290,6 +306,7 @@ const PersistedEntrySchema = z
       // Files written before this feature lack mode → 'terminal' (PTY), the
       // only backend those builds had.
       mode: s.mode ?? "terminal",
+      approvalPolicy: s.approvalPolicy ?? "default",
       // Backfill: files written before this feature lack the flag. A name that
       // isn't a default "Session N" was user-chosen → treat as manual so
       // live-follow never clobbers it. Default names start following.
@@ -426,6 +443,10 @@ interface SetupRuntime {
   stepIndex: number;
   stepCount: number;
   stepName?: string;
+  /** Every step's name, in plan order, for the app's ledger. Retained like
+   *  `terminalId` rather than overwritten: a recovered state has none and a
+   *  report that omits them must not blank a ledger already on screen. */
+  stepNames?: string[];
   terminalId?: string;
   exitCode?: number;
   message?: string;
@@ -630,6 +651,7 @@ export class SessionManager {
         // the delete, and this peek has no core to ask.
         deleting: false,
         tool: e.tool, command: e.command, args: e.args, mode: e.mode,
+        approvalPolicy: e.approvalPolicy,
         // Pessimistic, unlike `agentSessionResumable` below: hiding a control
         // the live list then shows is recoverable; offering Fork on a cold peek
         // that cannot resolve the checkout's agent spec is a menu item that can
@@ -741,7 +763,7 @@ export class SessionManager {
     }
 
     // Never inherit raw command/args. A fork launches the registry default.
-    const entry = this.buildEntry(undefined, { tool, mode: source.mode });
+    const entry = this.buildEntry(undefined, { tool, mode: source.mode, approvalPolicy: source.approvalPolicy });
     // Named after its source rather than left as the next "Session N": what a
     // fork is FOR is that it came from somewhere, and the drawer row is where
     // the user reads that. Assigned here instead of passed to buildEntry so
@@ -777,7 +799,7 @@ export class SessionManager {
 
     return this.createWorktree(
       undefined,
-      { tool, mode: source.mode, isolation: "worktree" },
+      { tool, mode: source.mode, approvalPolicy: source.approvalPolicy, isolation: "worktree" },
       entry,
       // A thunk, not a value: an argument expression is evaluated before the
       // call, so resolving HEAD eagerly here would answer "no committed HEAD"
@@ -801,6 +823,12 @@ export class SessionManager {
     // session:result error, rather than persisting an entry that fails every
     // start() forever (and re-fails on each reconnect once it's on disk).
     if (spec?.tool) resolveAgent(spec.tool);
+    const mode = spec?.mode ?? "terminal";
+    const approvalPolicy = spec?.approvalPolicy ?? "default";
+    if (approvalPolicy === "bypass") {
+      if (spec?.command) throw new Error("Custom-command sessions do not support bypass approval policy");
+      resolveApprovalPolicy(spec?.tool ?? this.agentSpec.name, mode, approvalPolicy);
+    }
     const id = crypto.randomUUID();
     const now = Date.now();
     const entry: PersistedEntry = {
@@ -812,7 +840,8 @@ export class SessionManager {
       tool: spec?.tool,
       command: spec?.command,
       args: spec?.args,
-      mode: spec?.mode ?? "terminal",
+      mode,
+      approvalPolicy,
       manuallyRenamed: name !== undefined,
       checkoutId: "main",
       checkoutKind: "main",
@@ -917,8 +946,8 @@ export class SessionManager {
       // strands the dev server, and stamping the `done` such a run reports
       // banners "Workspace ready" on a project that never opted in, on this
       // launch and (through recoverSetupStates) on every launch after it.
-      const declaresSetup = !!this.opts.runCheckoutSetup
-        && this.opts.checkoutDeclaresSetup?.(checkout) !== false;
+      const policy = this.opts.checkoutSetupPolicy?.(checkout);
+      const declaresSetup = !!this.opts.runCheckoutSetup && policy?.declares !== false;
       await this.opts.prepareCheckoutRuntime?.(checkout, { deferServices: declaresSetup });
       runtimePrepared = true;
       const checkoutSpec = await this.opts.resolveAgentSpec?.(checkout.id) ?? this.agentSpec;
@@ -934,7 +963,9 @@ export class SessionManager {
       // Seeded before the commit so the entry the create reply carries already
       // says `running` — the app must never see an isolated session that looks
       // provisioned for the frame before the first progress lands.
-      const setup = declaresSetup ? this.beginSetup(entry.id, true) : undefined;
+      const setup = declaresSetup
+        ? this.beginSetup(entry.id, true, undefined, policy?.startAgent)
+        : undefined;
       this.entries.set(entry.id, entry);
       await this.flushNowOrThrow();
       this.notifyObservers();
@@ -1575,6 +1606,7 @@ export class SessionManager {
     sessionId: string,
     holdsServices: boolean,
     pendingStart?: { initialPrompt?: string },
+    startAgent: "afterSetup" | "immediate" = "afterSetup",
   ): SetupRuntime {
     const setup: SetupRuntime = {
       runId: this.nextSetupRunId++,
@@ -1585,7 +1617,15 @@ export class SessionManager {
       pendingStart,
       // Survives across reruns so a second one can still re-arm the start.
       lastQueuedPrompt: pendingStart?.initialPrompt ?? this.setups.get(sessionId)?.lastQueuedPrompt,
-      gateReleased: false,
+      // Born open under `immediate`, which is the whole of that policy: an open
+      // gate is one `setupGate` declines to report, so `start()` falls straight
+      // through to the spawn with no branch of its own. Everything downstream
+      // still works because it is the same state a Skip produces — the run
+      // keeps reporting. It releases nothing by itself, though: a caller that
+      // ALSO queues a start (only `rerunSetup` does) owes it a
+      // `firePendingStart`, since an open gate is exactly what stops the
+      // settle from firing one.
+      gateReleased: startAgent === "immediate",
       holdsServices,
     };
     this.setups.set(sessionId, setup);
@@ -1610,6 +1650,7 @@ export class SessionManager {
     setup.stepName = progress.stepName;
     setup.exitCode = progress.exitCode;
     setup.message = progress.message;
+    if (progress.stepNames !== undefined) setup.stepNames = progress.stepNames;
     // Kept when a later report omits it: the transcript stays reachable after
     // the run ends, which is the point of the expandable log.
     if (progress.terminalId !== undefined) setup.terminalId = progress.terminalId;
@@ -1783,8 +1824,19 @@ export class SessionManager {
     const requeue = previous?.lastQueuedPrompt !== undefined && !this.isRunning(entry)
       ? { initialPrompt: previous.lastQueuedPrompt }
       : undefined;
-    const setup = this.beginSetup(entry.id, false, requeue);
+    // Re-read rather than remembered from create: a rerun is exactly when the
+    // config has changed since, and the answer this run owes is the one on the
+    // checkout's branch NOW.
+    const setup = this.beginSetup(
+      entry.id, false, requeue, this.opts.checkoutSetupPolicy?.(checkout)?.startAgent,
+    );
     this.notifyObservers();
+    // A gate born open holds nothing back, so a start queued behind it has
+    // nobody to fire it: `firePendingStart` runs only when a run SETTLES, which
+    // under `immediate` is the entire wait that policy exists to remove. Create
+    // never meets this — it queues no start of its own — and a rerun does,
+    // because it re-arms the prompt the previous run spent.
+    if (setup.gateReleased && setup.pendingStart) this.firePendingStart(entry.id);
     run(checkout, entry.id, (progress) => this.onSetupProgress(entry.id, setup.runId, progress));
   }
 
@@ -1850,7 +1902,9 @@ export class SessionManager {
       // `interrupted`, with a "Run setup" button `rerunSetup` can only answer
       // with WORKTREE_MISSING.
       if (!record) continue;
-      if (!record.setupState && this.opts.checkoutDeclaresSetup?.(record) === false) continue;
+      // `declares` only: a recovered state has no runner to wait for, so this
+      // path has no gate to seed and `startAgent` says nothing about it.
+      if (!record.setupState && this.opts.checkoutSetupPolicy?.(record)?.declares === false) continue;
       // `done` is deliberately NOT re-seeded. A finished run offers no action,
       // and `startedAt` can only fall back to the session's creation time — so
       // a recovered success re-announces "Workspace ready" for every isolated
@@ -1899,6 +1953,7 @@ export class SessionManager {
       const chatAlreadyRunning = this.runningChat.has(id);
       this.runningChat.add(id);
       const chatTool = entry.tool ?? "codex";
+      resolveApprovalPolicy(chatTool, "chat", entry.approvalPolicy);
       const resumeId = entry.conversationStart === "fork" ? undefined : this.resumeIdFor(chatTool, entry);
       this.noteConversationStart(entry, resumeId !== undefined);
       this.opts.onStartChat?.({
@@ -1907,6 +1962,7 @@ export class SessionManager {
         resumeId,
         config: entry.config,
         initialPrompt: this.forkInitialPrompt(entry, initialPrompt),
+        approvalPolicy: entry.approvalPolicy,
       });
       entry.lastUsedAt = Date.now();
       this.completeForkLaunch(entry);
@@ -1973,6 +2029,7 @@ export class SessionManager {
       // for auto-naming. Additive flags/env only; fail-open inside the augmenter.
       const aug = augmentAgentLaunch(entry.tool, this.opts.storeDir, this.opts.cursorDir);
       baseArgs = [...baseArgs, ...aug.args];
+      baseArgs = [...baseArgs, ...resolveApprovalPolicy(entry.tool, "terminal", entry.approvalPolicy)];
       launchEnv = { ...launchEnv, ...aug.env };
       notificationsInjected = aug.notificationsInjected;
       // Resume the slot's last-active conversation (held in resumeArgs, appended
@@ -1980,6 +2037,7 @@ export class SessionManager {
       // for codex's `resume` subcommand).
       resumeArgs = entry.conversationStart === "fork" ? [] : this.resumeArgsFor(entry.tool, entry);
     } else if (entry.command) {
+      if (entry.approvalPolicy === "bypass") throw new Error("Custom-command sessions do not support bypass approval policy");
       // Custom command lines never resume and get no per-spawn hooks: the user
       // owns the whole line, so we don't inject title/resume integration and no
       // agentSessionId is ever captured for them.
@@ -1997,6 +2055,7 @@ export class SessionManager {
         notificationsInjected = aug.notificationsInjected;
         resumeArgs = entry.conversationStart === "fork" ? [] : this.resumeArgsFor(sessionAgentSpec.name, entry);
       }
+      baseArgs = [...baseArgs, ...resolveApprovalPolicy(sessionAgentSpec.name, "terminal", entry.approvalPolicy)];
     }
     if (!base) {
       // No per-session spec and the first-run wizard hasn't supplied an
@@ -2095,9 +2154,12 @@ export class SessionManager {
     // Some registry agents have no verified launch-argv form for an opening
     // prompt. Their PTY still buffers input during startup, which gives every
     // registered terminal agent the same transcript-fork capability without
-    // inventing unsupported CLI flags.
+    // inventing unsupported CLI flags. The submit gap is best-effort on this
+    // path alone: the prompt is buffered before the TUI attaches, so both
+    // writes can still land in the agent's first read — never worse than the
+    // single write it replaces, but not a guarantee either.
     if (entry.conversationStart === "fork" && entry.forkTranscript && promptArgs.length === 0) {
-      this.tm.write(id, `${launchPrompt}\r`);
+      this.tm.submit(id, launchPrompt);
     }
     entry.lastUsedAt = Date.now();
     // Transcript forks have been handed to the spawned process. Native forks
@@ -2257,6 +2319,7 @@ export class SessionManager {
     if (mode === "chat" && !isChatCapableTool(entry.tool)) {
       throw new Error(`tool has no chat driver: ${entry.tool}`);
     }
+    resolveApprovalPolicy(entry.tool ?? this.agentSpec.name, mode, entry.approvalPolicy);
     // Read with the OLD mode — the same expression toWire uses.
     const wasRunning = entry.mode === "chat" ? this.runningChat.has(id) : this.tm.has(id);
     // Held across the teardown only: the exit-driven handler teardown fires
@@ -2478,6 +2541,7 @@ export class SessionManager {
       forkedFromSessionId: e.forkedFromSessionId,
       args: e.args,
       mode: e.mode,
+      approvalPolicy: e.approvalPolicy,
       agentSessionResumable: this.agentSessionResumable(e),
       // Read from the owning core's reduction (work-status.ts), never folded
       // here: one per-session reduction, not two that can disagree. Undefined
@@ -2510,6 +2574,7 @@ export class SessionManager {
       stepIndex: setup.stepIndex,
       stepCount: setup.stepCount,
       stepName: setup.stepName,
+      stepNames: setup.stepNames,
       terminalId: setup.terminalId,
       exitCode: setup.exitCode,
       message: setup.message,

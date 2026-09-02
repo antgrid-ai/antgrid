@@ -582,6 +582,24 @@ final newSessionModeProvider =
       () => ValueController('terminal'),
     );
 
+final newSessionApprovalPolicyProvider =
+    NotifierProvider<ValueController<String>, String>(
+      () => ValueController('default'),
+    );
+
+final newSessionBypassSupportProvider = Provider.autoDispose<AgentDescriptor?>((
+  ref,
+) {
+  final key = newSessionAgentToolKey(ref.watch(newSessionAgentProvider));
+  if (key == null) return null;
+  final descriptor = ref.watch(agentCatalogProvider)[key];
+  if (descriptor == null) return null;
+  final policies = ref.watch(newSessionModeProvider) == 'chat'
+      ? descriptor.chatApprovalPolicies
+      : descriptor.terminalApprovalPolicies;
+  return policies.contains('bypass') ? descriptor : null;
+});
+
 /// Resolve whether [a] supports Chat mode, most specific source first:
 ///
 /// 1. [wireChatCapable] — the TARGET machine's own advert. It alone knows what
@@ -833,6 +851,7 @@ void resetNewSessionForm(ProviderContainer ref) {
   ref.read(newSessionCliArgsProvider.notifier).set('');
   ref.read(newSessionNameProvider.notifier).set('');
   ref.read(newSessionModeProvider.notifier).set('terminal');
+  ref.read(newSessionApprovalPolicyProvider.notifier).set('default');
   ref.read(selectedTargetProjectProvider.notifier).set(null);
   ref.read(selectedSourceIdProvider.notifier).set('local');
   ref.read(newSessionAgentTouchedProvider.notifier).set(false);

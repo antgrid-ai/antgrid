@@ -75,7 +75,7 @@ class HandlerInstructionItem {
   final String text;
 
   /// Ids this item waits on, extracted from the user's own ordering words. The
-  /// bridge derives `blocked` from them; the app never authors one (spec §3.3).
+  /// bridge derives `blocked` from them; the app never authors one.
   final List<String>? dependsOn;
   final String? condition;
 
@@ -151,7 +151,6 @@ class HandlerInstructionItem {
 /// `HandlerSessionSnapshot` (`bridge/src/protocol.ts`).
 class HandlerSessionState {
   final String terminalId;
-  final bool notifyOnly;
   final HandlerRunState runState;
   final int pendingEscalations;
   final int armedAt;
@@ -191,7 +190,6 @@ class HandlerSessionState {
 
   const HandlerSessionState({
     required this.terminalId,
-    required this.notifyOnly,
     required this.runState,
     required this.pendingEscalations,
     required this.armedAt,
@@ -209,7 +207,7 @@ class HandlerSessionState {
 
   /// Only `done` counts, never the other terminal states: `skipped` and
   /// `failed` close an item without achieving it, and reporting them as
-  /// progress is the summary-inflation failure mode spec §4.3 guards against.
+  /// progress is the summary-inflation failure mode this guards against.
   int get backlogDone => backlog.where((i) => i.status == 'done').length;
 
   HandlerSessionState copyWith({
@@ -218,7 +216,6 @@ class HandlerSessionState {
     List<HandlerEscalation>? escalations,
   }) => HandlerSessionState(
     terminalId: terminalId,
-    notifyOnly: notifyOnly,
     runState: runState ?? this.runState,
     pendingEscalations: pendingEscalations ?? this.pendingEscalations,
     armedAt: armedAt,
@@ -235,14 +232,12 @@ class HandlerSessionState {
   static HandlerSessionState? fromWire(dynamic json) {
     if (json is! Map) return null;
     final terminalId = json['terminalId'];
-    final notifyOnly = json['notifyOnly'];
     final state = json['state'];
     final pendingEscalations = json['pendingEscalations'];
     final armedAt = json['armedAt'];
     final goal = json['goal'];
     final backlogJson = json['backlog'];
     if (terminalId is! String ||
-        notifyOnly is! bool ||
         state is! String ||
         pendingEscalations is! num ||
         armedAt is! num ||
@@ -279,7 +274,6 @@ class HandlerSessionState {
     final parkedUntil = json['parkedUntil'];
     return HandlerSessionState(
       terminalId: terminalId,
-      notifyOnly: notifyOnly,
       runState: runState,
       pendingEscalations: pendingEscalations.toInt(),
       armedAt: armedAt.toInt(),
@@ -295,8 +289,8 @@ class HandlerSessionState {
   }
 }
 
-/// One 1-tap answer offered on a decision card (spec §4.6). Mirrors the
-/// bridge's `EscalationChoiceWire` (`bridge/src/protocol.ts`) and
+/// One 1-tap answer offered on a decision card. Mirrors the bridge's
+/// `EscalationChoiceWire` (`bridge/src/protocol.ts`) and
 /// `EscalationChoiceSchema` (`bridge/src/handler/session-store.ts`) — three
 /// hand-written copies of one shape, so the bounds below move with them.
 class HandlerEscalationChoice {
@@ -400,6 +394,30 @@ class HandlerEscalationChoice {
     return choices;
   }
 }
+
+/// Urgent first, then oldest-first within each band.
+///
+/// The band exists for the rows that unblock a session for one tap: the engine
+/// mints `high` itself, with no judge call at all, for a blocking prompt — a
+/// permission request or a question the agent is stopped on right now — and a
+/// flat oldest-first order filed those under every stale question already on
+/// the list.
+///
+/// It is NOT only that. `escalate` passes the judge's own `notify.urgency`
+/// through (bridge/src/handler/engine.ts), and the decide prompt offers the
+/// model both words, so a judge-authored `high` sorts into the same band and
+/// wears the same marker. Nothing on the wire tells the two apart today;
+/// anything that needs to must reach for `kind`, not `urgency`.
+///
+/// Age still decides WITHIN a band and never across it: a `normal` that has
+/// waited an hour is not the thing holding the agent up. An urgency a newer
+/// bridge invents ranks as `normal` — the safe band, since it claims nothing.
+int compareEscalations(HandlerEscalation a, HandlerEscalation b) {
+  final byUrgency = _urgencyRank(a.urgency) - _urgencyRank(b.urgency);
+  return byUrgency != 0 ? byUrgency : a.at.compareTo(b.at);
+}
+
+int _urgencyRank(String urgency) => urgency == 'high' ? 0 : 1;
 
 class HandlerEscalation {
   final String escalationId;
@@ -505,7 +523,7 @@ class HandlerEscalation {
 }
 
 /// One snapshot the bridge took before injecting a flagged reply, and the undo
-/// it offers (spec §5.2). Mirrors `HandlerSnapshotWire` (`bridge/src/protocol.ts`).
+/// it offers. Mirrors `HandlerSnapshotWire` (`bridge/src/protocol.ts`).
 ///
 /// Project-scoped rather than nested under a session: the offer outlives the
 /// session that took it, and a wrapped-up session is when it matters most.
@@ -584,6 +602,124 @@ class HandlerSnapshot {
   }
 }
 
+/// One outcome group of a wrap-up — every item the session left in that state,
+/// sampled. Mirrors `HandlerWrapUpWire.outcomes` (`bridge/src/protocol.ts`).
+class HandlerWrapUpOutcome {
+  // 'done' | 'failed' | 'blocked' | 'skipped'
+  final String status;
+
+  /// The TRUE count [items] was sampled from. Kept rather than a second `more`
+  /// field for the reason the bridge keeps it that way: two numbers that must
+  /// agree are two numbers that can disagree.
+  final int total;
+  final List<String> items;
+
+  const HandlerWrapUpOutcome({
+    required this.status,
+    required this.total,
+    required this.items,
+  });
+
+  int get more => total - items.length;
+
+  static const _statuses = {'done', 'failed', 'blocked', 'skipped'};
+
+  static HandlerWrapUpOutcome? fromWire(dynamic json) {
+    if (json is! Map) return null;
+    final status = json['status'];
+    final total = json['total'];
+    final itemsJson = json['items'];
+    if (status is! String ||
+        !_statuses.contains(status) ||
+        total is! num ||
+        itemsJson is! List) {
+      return null;
+    }
+    return HandlerWrapUpOutcome(
+      status: status,
+      total: total.toInt(),
+      items: [
+        for (final i in itemsJson)
+          if (i is String) i,
+      ],
+    );
+  }
+}
+
+/// The morning-after report of one finished session. Mirrors
+/// `HandlerWrapUpWire` (`bridge/src/protocol.ts`), which is hand-mirrored in
+/// turn from `WrapUpRecord` (`bridge/src/handler/wrap-up.ts`) — nothing checks
+/// the wire→Dart hop, so a field renamed there fails here as a card that draws
+/// nothing rather than as a parse error.
+///
+/// The count of undos still open is deliberately NOT a field: it outlives the
+/// record, so a frozen copy becomes a lie both when an undo is taken after the
+/// wrap-up and when a re-arm retires the offers outright. It is derived from
+/// [HandlerState.snapshots] at render time instead. The blocked-report count
+/// and reasons ARE frozen here, because they die with the session — the bridge
+/// drops its escalations on disarm and nothing can re-derive them.
+class HandlerWrapUp {
+  final String wrapUpId;
+
+  /// The supervised slot the session ran in.
+  final String terminalId;
+  final int at;
+  final String goal;
+  final List<HandlerWrapUpOutcome> outcomes;
+  final int blockedTotal;
+  final List<String> blockedReasons;
+
+  const HandlerWrapUp({
+    required this.wrapUpId,
+    required this.terminalId,
+    required this.at,
+    required this.goal,
+    required this.outcomes,
+    required this.blockedTotal,
+    required this.blockedReasons,
+  });
+
+  /// Null on any shape miss, and an outcome whose `status` this build does not
+  /// know is DROPPED rather than thrown: a bridge ahead of the app must cost
+  /// one group off a report, never the whole report.
+  static HandlerWrapUp? fromWire(dynamic json) {
+    if (json is! Map) return null;
+    final wrapUpId = json['wrapUpId'];
+    final terminalId = json['terminalId'];
+    final at = json['at'];
+    final goal = json['goal'];
+    final outcomesJson = json['outcomes'];
+    final blockedTotal = json['blockedTotal'];
+    final blockedReasonsJson = json['blockedReasons'];
+    if (wrapUpId is! String ||
+        terminalId is! String ||
+        at is! num ||
+        goal is! String ||
+        outcomesJson is! List ||
+        blockedTotal is! num ||
+        blockedReasonsJson is! List) {
+      return null;
+    }
+    final outcomes = <HandlerWrapUpOutcome>[];
+    for (final o in outcomesJson) {
+      final parsed = HandlerWrapUpOutcome.fromWire(o);
+      if (parsed != null) outcomes.add(parsed);
+    }
+    return HandlerWrapUp(
+      wrapUpId: wrapUpId,
+      terminalId: terminalId,
+      at: at.toInt(),
+      goal: goal,
+      outcomes: outcomes,
+      blockedTotal: blockedTotal.toInt(),
+      blockedReasons: [
+        for (final r in blockedReasonsJson)
+          if (r is String) r,
+      ],
+    );
+  }
+}
+
 class HandlerActivityRecord {
   final String recordId;
   final int at;
@@ -594,8 +730,8 @@ class HandlerActivityRecord {
   // unrenderable feed row, never at compile time.
   // 'continue' | 'handle' | 'escalate' | 'armed' | 'goal_edited' |
   // 'item_done' | 'item_blocked' | 'item_skipped' | 'item_failed' |
-  // 'instruction_dropped' | 'floor_warning' | 'evidence_rejected' |
-  // 'wrapped_up' | 'parked' | 'resumed'
+  // 'instruction_dropped' | 'instruction_authorized' | 'instruction_amended' |
+  // 'floor_warning' | 'evidence_rejected' | 'wrapped_up' | 'parked' | 'resumed'
   final String decision;
   final String reason;
   final String? detail;
@@ -617,7 +753,6 @@ class HandlerState {
   /// What an absent per-session judge tool resolves to for PTY slots — the
   /// project's agent tool. Chat slots resolve from their own session entry.
   final String? defaultTool;
-  final bool defaultNotifyOnly;
   final Map<String, HandlerSessionState> sessions; // keyed by terminalId
   final List<HandlerEscalation> escalations;
   final List<HandlerActivityRecord> activity;
@@ -626,29 +761,43 @@ class HandlerState {
   /// survive the disarm of the session that took them.
   final List<HandlerSnapshot> snapshots;
 
+  /// Wrap-up reports for this project, oldest first. Project-scoped for the
+  /// same reason as [snapshots]: the session each one describes is disarmed by
+  /// the time it is read.
+  final List<HandlerWrapUp> wrapUps;
+
   /// Snapshot ids whose `handler:undo` is out and whose result has not come
   /// back yet. The bridge re-states the entry either way, so this only keeps a
   /// second tap from looking live during the round trip.
   final Set<String> pendingUndo;
 
+  /// Instructions whose `handler:instruct` is out and whose extracted items
+  /// have not come back, keyed by terminalId, oldest first. Held as the user's
+  /// own sentence because that is all there is to hold: the message is
+  /// unacknowledged, the bridge mints the ids, and extraction rewrites the text
+  /// — so nothing that comes back can be matched to what went out.
+  final Map<String, List<String>> pendingInstructions;
+
   const HandlerState({
     this.defaultTool,
-    this.defaultNotifyOnly = false,
     required this.sessions,
     required this.escalations,
     required this.activity,
     this.snapshots = const [],
+    this.wrapUps = const [],
     this.pendingUndo = const {},
+    this.pendingInstructions = const {},
   });
 
   const HandlerState.initial()
     : defaultTool = null,
-      defaultNotifyOnly = false,
       sessions = const {},
       escalations = const [],
       activity = const [],
       snapshots = const [],
-      pendingUndo = const {};
+      wrapUps = const [],
+      pendingUndo = const {},
+      pendingInstructions = const {};
 
   // Absence of any session is the wire's implicit 'off' — there is no
   // standalone off/on flag now that arming is per-terminal.
@@ -657,26 +806,42 @@ class HandlerState {
   int get pendingEscalations =>
       sessions.values.fold(0, (n, s) => n + s.pendingEscalations);
 
-  String? get latestEscalationId =>
-      escalations.isEmpty ? null : escalations.last.escalationId;
+  // Folded on `at` rather than read off the tail: [escalations] is banded by
+  // [compareEscalations], so `.last` is the newest NORMAL one and an urgent row
+  // — the only kind anything asking for "the latest" would want to land on —
+  // can never be it.
+  String? get latestEscalationId {
+    HandlerEscalation? newest;
+    for (final e in escalations) {
+      if (newest == null || e.at >= newest.at) newest = e;
+    }
+    return newest?.escalationId;
+  }
+
+  /// What [terminalId] has in flight, oldest first — empty for a terminal with
+  /// nothing outstanding, so no caller needs a null branch to ask.
+  List<String> pendingInstructionsFor(String terminalId) =>
+      pendingInstructions[terminalId] ?? const [];
 
   HandlerState copyWith({
     String? defaultTool,
-    bool? defaultNotifyOnly,
     Map<String, HandlerSessionState>? sessions,
     List<HandlerEscalation>? escalations,
     List<HandlerActivityRecord>? activity,
     List<HandlerSnapshot>? snapshots,
+    List<HandlerWrapUp>? wrapUps,
     Set<String>? pendingUndo,
+    Map<String, List<String>>? pendingInstructions,
   }) {
     return HandlerState(
       defaultTool: defaultTool ?? this.defaultTool,
-      defaultNotifyOnly: defaultNotifyOnly ?? this.defaultNotifyOnly,
       sessions: sessions ?? this.sessions,
       escalations: escalations ?? this.escalations,
       activity: activity ?? this.activity,
       snapshots: snapshots ?? this.snapshots,
+      wrapUps: wrapUps ?? this.wrapUps,
       pendingUndo: pendingUndo ?? this.pendingUndo,
+      pendingInstructions: pendingInstructions ?? this.pendingInstructions,
     );
   }
 }

@@ -86,6 +86,28 @@ class SessionSetupBannerUiController
     );
   }
 
+  /// Drop an expansion the banner has stopped offering a chevron for.
+  ///
+  /// Masking the expansion at the render site is not enough on its own: the
+  /// state is per session and outlives the run that set it, so the moment the
+  /// mask lifts — the gate releases, the agent spawns — a full setup log
+  /// unfolds between the banner and the agent the user was waiting for,
+  /// without them having touched anything.
+  ///
+  /// Deferred, because the only caller is a `build`: a notifier mutated inside
+  /// one is a Riverpod error. Same shape as the success hold below.
+  void collapseIfExpanded(String sessionId) {
+    if (state.expandedSessionId != sessionId) return;
+    Timer(Duration.zero, () {
+      if (state.expandedSessionId != sessionId) return;
+      state = SessionSetupBannerUiState(
+        hiddenRunKeys: state.hiddenRunKeys,
+        expandedSessionId: null,
+        actingSessionIds: state.actingSessionIds,
+      );
+    });
+  }
+
   void hideSuccessAfterDelay(String runKey) {
     if (state.hiddenRunKeys.contains(runKey) ||
         _successTimers.containsKey(runKey)) {
@@ -174,6 +196,20 @@ final sessionStartQueuedProvider = Provider.autoDispose.family<bool, String>((
 /// as "needs starting" and sends a SECOND `session:start`. That one carries no
 /// `initialPrompt`, and it replaces the queued one the user actually typed.
 bool sessionStartQueued(SessionSetup? setup) => setup?.pendingStart ?? false;
+
+/// What to tell the user when a setup verb is refused.
+///
+/// Shared by the banner and the provisioning pane: both offer `skip` under the
+/// same label, and a refusal that read differently depending on which control
+/// the user happened to press would describe the same bridge answer twice.
+///
+/// `skip` is worded for what it does — release the queued agent — rather than
+/// for its wire name: the run it is named after keeps going either way.
+String sessionSetupFailureCopy(SessionSetupAction verb) => switch (verb) {
+  SessionSetupAction.skip => "Couldn't start the agent",
+  SessionSetupAction.cancel => "Couldn't stop setup",
+  SessionSetupAction.rerun => "Couldn't start setup",
+};
 
 /// Sends `session:setup` for [sessionId] in [entryId] and reports what came
 /// back.

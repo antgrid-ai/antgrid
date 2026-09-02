@@ -682,8 +682,8 @@ packages:
     dependency: "direct overridden"
     description:
       path: "pkgs/vte/ghostty_vte"
-      ref: c262d5f2002d26b2116b2c5c943a46a63f994133
-      resolved-ref: c262d5f2002d26b2116b2c5c943a46a63f994133
+      ref: "6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee"
+      resolved-ref: "6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee"
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.1.4+antgrid.1"
@@ -691,8 +691,8 @@ packages:
     dependency: "direct main"
     description:
       path: "pkgs/vte/ghostty_vte_flutter"
-      ref: c262d5f2002d26b2116b2c5c943a46a63f994133
-      resolved-ref: c262d5f2002d26b2116b2c5c943a46a63f994133
+      ref: "6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee"
+      resolved-ref: "6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee"
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.1.4+antgrid.1"
@@ -1204,8 +1204,8 @@ packages:
     dependency: "direct overridden"
     description:
       path: "pkgs/pty/portable_pty"
-      ref: c262d5f2002d26b2116b2c5c943a46a63f994133
-      resolved-ref: c262d5f2002d26b2116b2c5c943a46a63f994133
+      ref: "6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee"
+      resolved-ref: "6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee"
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.0.6+antgrid.2"
@@ -1795,66 +1795,66 @@ packages:
     dependency: "direct main"
     description:
       name: webview_all
-      sha256: "0d931d87cb5da00582d3fa280122e354ff63feabd8703df735e8e133931a38bc"
+      sha256: "90a3d188fcba65a7cdcaf9cbb645624e784b05e319fbff3f63a690b5f71e38d1"
       url: "https://pub.dev"
     source: hosted
-    version: "1.3.10"
+    version: "1.4.1"
   webview_all_android:
     dependency: transitive
     description:
       name: webview_all_android
-      sha256: d773845e69cfcd1c107c0662ad8f28bfa708b4e96fa3d763163f500448951cb0
+      sha256: "54848cda817a64471501db0d2bf975bd26beeee16eec424ffe64578c28cdfd6c"
       url: "https://pub.dev"
     source: hosted
-    version: "1.3.10"
+    version: "1.4.1"
   webview_all_linux:
     dependency: transitive
     description:
       name: webview_all_linux
-      sha256: "4098d0cdf5a9ac40f8c3b14bf0f2354e2e266fac060783684af79fa6b5dc75e5"
+      sha256: "4f116f9dc8d6a5a2672a86941b14782211d36fc67affd8bced320a8b60be276a"
       url: "https://pub.dev"
     source: hosted
-    version: "1.3.10"
+    version: "1.4.1"
   webview_all_ohos:
     dependency: transitive
     description:
       name: webview_all_ohos
-      sha256: c3259b0f4fc979080f342ae998abe1bcab2ea5d7e20b094e468fdeeea1b85d95
+      sha256: af26fe5b387b642c9cf9b6bfe23f84a7d36bbbf35ac04354b6c9f4d734de8bf1
       url: "https://pub.dev"
     source: hosted
-    version: "1.3.10"
+    version: "1.4.1"
   webview_all_web:
     dependency: transitive
     description:
       name: webview_all_web
-      sha256: "4fd58ef6ca89ba9fcea90a49b0f23b59b2be2ff98149bf6c31a099be409301b5"
+      sha256: "767a5bf5b7f7cc51cb905798ada48df0c100559d581e1bd1fc85d34e5bf68a4c"
       url: "https://pub.dev"
     source: hosted
-    version: "1.3.10"
+    version: "1.4.1"
   webview_all_windows:
     dependency: transitive
     description:
       name: webview_all_windows
-      sha256: f79f2b596e246a8881d210ccf3263bb80d3a3ce42d6f4dfbdc9a82fb2b26de81
+      sha256: d9b81f16ec41fe19ea966ad690dba6ed65989d2287b04da0eeb19905e4eb3d2f
       url: "https://pub.dev"
     source: hosted
-    version: "1.3.10"
+    version: "1.4.1"
   webview_all_wkwebview:
     dependency: transitive
     description:
       name: webview_all_wkwebview
-      sha256: b404133dce72965701e45d9e013c6d1f19c79183b858abff5aecdddeac7feed1
+      sha256: "7545caa17def777b0ec2c4767803299b170f744a1dae9ffac59a8dfe0f63295e"
       url: "https://pub.dev"
     source: hosted
-    version: "1.3.10"
+    version: "1.4.1"
   webview_platform_interface:
     dependency: transitive
     description:
       name: webview_platform_interface
-      sha256: "22e5782499b21117c8d80a14ecee666b9aac66d4551e37650b0ab18df077a0e1"
+      sha256: "50b00322919bdae4b27cdb6e1d0ad9bf4348d26a592bf6bab6610e36af083335"
       url: "https://pub.dev"
     source: hosted
-    version: "1.3.10"
+    version: "1.4.1"
   win32:
     dependency: transitive
     description:

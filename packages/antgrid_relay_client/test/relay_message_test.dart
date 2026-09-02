@@ -17,6 +17,14 @@ void main() {
       expect(w.serverTime, '2026-07-16T00:00:00.000Z');
     });
 
+    test('parses pong message', () {
+      expect(parseRelayMessage({'type': 'pong'}), isA<PongMessage>());
+      expect(
+        parseRelayMessage({'type': 'pong', 'extra': true}),
+        isA<PongMessage>(),
+      );
+    });
+
     test('welcome with non-int epoch returns null', () {
       expect(
         parseRelayMessage({
@@ -175,6 +183,10 @@ void main() {
         'type': 'stream-close',
         'streamId': 's1',
       });
+    });
+
+    test('PingMessage.toJson', () {
+      expect(const PingMessage().toJson(), {'type': 'ping'});
     });
   });
 

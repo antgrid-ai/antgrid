@@ -34,6 +34,23 @@ const handlerDefaultItemStatus = 'queued';
 /// inside a 44px box.
 const handlerStatusColumnWidth = 44.0;
 
+/// The column itself, so every word that stands in it — item status or not —
+/// is one description of one thing. A row hand-rolling the same floor, tier and
+/// alignment sits adjacent to these in one list, where half a point of drift
+/// reads as a rendering bug.
+Widget _statusColumn(Widget child) => ConstrainedBox(
+  constraints: const BoxConstraints(minWidth: handlerStatusColumnWidth),
+  child: Align(alignment: Alignment.centerRight, child: child),
+);
+
+Widget _statusWord(String word, Color color) => Text(
+  word,
+  maxLines: 1,
+  softWrap: false,
+  overflow: TextOverflow.ellipsis,
+  style: AbTokens.monoStyle(fontSize: AbTokens.fontXxs, color: color),
+);
+
 /// One backlog item's status, drawn identically on the Handler card and in the
 /// backlog drawer — the same item described two ways on two surfaces of one
 /// feature reads as two different items.
@@ -49,26 +66,34 @@ class HandlerItemStatusLabel extends StatelessWidget {
   final String status;
 
   @override
-  Widget build(BuildContext context) {
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minWidth: handlerStatusColumnWidth),
-      child: Align(
-        alignment: Alignment.centerRight,
-        child: status == handlerDefaultItemStatus
-            ? const SizedBox.shrink()
-            : Text(
-                status,
-                maxLines: 1,
-                softWrap: false,
-                overflow: TextOverflow.ellipsis,
-                style: AbTokens.monoStyle(
-                  fontSize: AbTokens.fontXxs,
-                  color: handlerItemStatusColor(context.antgrid, status),
-                ),
-              ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => _statusColumn(
+    status == handlerDefaultItemStatus
+        ? const SizedBox.shrink()
+        : _statusWord(status, handlerItemStatusColor(context.antgrid, status)),
+  );
+}
+
+/// The word an outstanding instruction wears while it is one. Deliberately the
+/// verb the drawer's field and send button already use ("Send an instruction…",
+/// "Send to Handler"), so the action is called the same thing at every step —
+/// and a verb that stays true for a sentence taking a line off the list, which
+/// "adding" beside a countermand promises the opposite of.
+const handlerPendingInstructionLabel = 'sending';
+
+/// The same column, for a sentence the bridge has not turned into items yet.
+///
+/// It lives beside the item vocabulary rather than in it: no item ever carries
+/// this word, and taking [handlerItemStatusColor] would file the user's own
+/// unextracted sentence under a status the bridge never wrote. What it does
+/// share is the column — the sentence has to start on the same edge as every
+/// real row's text, and that geometry is described here once.
+class HandlerPendingLabel extends StatelessWidget {
+  const HandlerPendingLabel({super.key});
+
+  @override
+  Widget build(BuildContext context) => _statusColumn(
+    _statusWord(handlerPendingInstructionLabel, context.antgrid.textMuted),
+  );
 }
 
 /// What a run state is CALLED. `parked` is spoken as "Paused" everywhere — the
@@ -105,6 +130,30 @@ String unwatchableNotice(String? agentLabel) =>
 const escalateOnlyNotice =
     "This judge can't run headless, so every pause comes to you.";
 
+/// What the shield says before it is pressed.
+///
+/// Top-level so the precedence is unit-testable without pumping the panel, the
+/// same reason [handlerArmExplainerBody] is. Arming is one tap, so this tooltip
+/// is the only pre-arm surface that answers EVERY time: the explainer carries
+/// the same facts but sits behind FirstRunState.handlerArmedOnce, a once-ever
+/// latch, while coverage is per-agent — so a user whose first arm was a capable
+/// agent would meet an escalate-only one with no warning at all.
+///
+/// [observable] false outranks [judgeCapable] false: a session that reports
+/// nothing cannot be watched, which makes what its judge could have done moot.
+/// Either being null claims nothing, exactly as the catalog requires.
+String handlerShieldTooltip({
+  required bool armed,
+  required bool? observable,
+  required bool? judgeCapable,
+  String? agentLabel,
+}) {
+  if (armed) return 'Disarm Handler';
+  if (observable == false) return unwatchableNotice(agentLabel);
+  if (judgeCapable == false) return escalateOnlyNotice;
+  return 'Arm Handler';
+}
+
 /// Statuses an item never leaves, so they are the ones that don't count as
 /// remaining work.
 const _terminalItemStatuses = {'done', 'skipped', 'failed'};
@@ -113,7 +162,7 @@ const _terminalItemStatuses = {'done', 'skipped', 'failed'};
 ///
 /// Only `done` counts towards the numerator, never the other terminal states: a
 /// skipped or failed item ends without being achieved, and folding it into
-/// progress is the summary inflation spec §4.3 guards against. `left` is
+/// progress is the summary inflation this guards against. `left` is
 /// everything still open — queued, active and blocked alike — because from the
 /// outside they are all work that has not happened yet.
 String handlerProgressLabel(HandlerSessionState session) {

@@ -257,7 +257,7 @@
     },
     {
       "name": "pong",
-      "dart": "tolerated",
+      "dart": "parsed",
       "json": {
         "type": "pong"
       }
@@ -309,7 +309,7 @@
     },
     {
       "name": "ping",
-      "dartEmits": false,
+      "dartEmits": true,
       "json": {
         "type": "ping"
       }

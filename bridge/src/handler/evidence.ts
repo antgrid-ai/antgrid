@@ -1,6 +1,6 @@
 // bridge/src/handler/evidence.ts
 
-// Citation primitives for the §2.1 evidence gate. Deliberately dependency-free —
+// Citation primitives for the evidence gate. Deliberately dependency-free —
 // backlog.ts imports this, and backlog.ts is the module every other handler file
 // leans on, so a single import the other way would close a cycle.
 //
