@@ -38,7 +38,7 @@ function makeAuthenticatingRelayFactory() {
       close: () => {},
       attachStream: (_bus: MessageBus, streamOpts: AttachStreamOpts) => {
         streamOpts.onAdmitted?.("s1");
-        return { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
+        return { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} };
       },
       sendPushDeliver: () => {},
     }) as unknown as RelayClient;

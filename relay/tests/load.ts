@@ -36,6 +36,7 @@ const config: RelayConfig = {
   jsonRateLimitPerSec: 10000,
   jsonRateLimitBurst: 10000,
   maxStreamsPerConnection: 1024,
+  backpressureLimitBytes: 16 * 1024 * 1024,
   clockSkewMs: 120000,
   replayTtlMs: 300000,
   pingIntervalMs: 0,

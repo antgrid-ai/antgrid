@@ -221,6 +221,12 @@ export interface AgentCore {
   /** True when any of this project's sessions runs somewhere other than main's
    *  working tree, and therefore needs checkout-scoped routing. */
   hasIsolatedSessions(): boolean;
+  /** One terminal's current screen as the composed `terminal:snapshot` the
+   *  resync push would send for it, addressed the way the app knows the
+   *  terminal (external id + checkout) — returned, not published, so a single
+   *  stream can send it in place of output it dropped. `null` when the screen
+   *  is gone (exited terminal, or no terminal manager yet). */
+  composeTerminalSnapshot(terminalId: string, checkoutId: string): Promise<AbMessage | null>;
   /** True when a work-status key is bound to the main checkout (or is not a
    *  session at all). Pre-handshake this answers true — nothing is isolated
    *  yet, so no guard should be narrowed away. */
@@ -635,13 +641,30 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     };
   }
 
-  function sendTerminalFrame(msg: AbMessage): void {
+  /** Rewrite a frame's INTERNAL terminal id to the one the app knows and stamp
+   *  the owning checkout — the shape every terminal frame leaves the core in. */
+  function stampTerminalFrame(msg: AbMessage): AbMessage {
     const terminalId = "terminalId" in msg && typeof msg.terminalId === "string"
       ? msg.terminalId
       : null;
-    if (!terminalId) { sendAb(msg); return; }
+    if (!terminalId) return msg;
     const { runtime, externalId } = terminalOwner(terminalId);
-    sendFromRuntime(runtime, { ...msg, terminalId: externalId } as AbMessage);
+    return { ...msg, terminalId: externalId, checkoutId: runtime.checkout.id } as AbMessage;
+  }
+
+  function sendTerminalFrame(msg: AbMessage): void {
+    sendAb(stampTerminalFrame(msg));
+  }
+
+  /** The inverse of `terminalOwner`: the id a PTY runs under, given the id the
+   *  app addresses it by and the checkout it was advertised in. A session PTY
+   *  and every main-checkout slot are keyed by their own id, so a miss is the
+   *  id itself. */
+  function internalTerminalIdOf(externalId: string, checkoutId: string): string {
+    for (const [internalId, owner] of terminalOwners) {
+      if (owner.externalId === externalId && owner.checkoutId === checkoutId) return internalId;
+    }
+    return externalId;
   }
 
   function nextKeypair(): EphemeralKeypair {
@@ -1369,7 +1392,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const fw = runtime.fileWatcher;
         if (!fw) break;
         const { tree, seq } = fw.getTreeSnapshot();
-        sendFromRuntime(runtime, createMessage("file:tree:snapshot", { tree, seq }));
+        // The seq moves on every change the watcher sees, suppressed or not, so
+        // a requester holding the current one holds the current tree — and the
+        // tree is the bulk of this reply, sent on every reconnect and resume
+        // by every open checkout, ahead of whatever the app is waiting on.
+        // `sinceSeq` is the app's own last snapshot seq, so an app predating
+        // it never sends one and always gets the tree.
+        if (msg.sinceSeq !== undefined && msg.sinceSeq === seq) {
+          sendFromRuntime(runtime, createMessage("file:tree:snapshot", { seq, unchanged: true }));
+        } else {
+          sendFromRuntime(runtime, createMessage("file:tree:snapshot", { tree, seq }));
+        }
         // The app asks for this on every (re)connect and on a pull-to-refresh,
         // and the git decorations belong to the same picture as the tree —
         // answering with a tree alone left the changes list showing whatever
@@ -3373,6 +3406,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     hasIsolatedSessions(): boolean {
       return sessions?.hasIsolatedSessions() ?? false;
+    },
+    async composeTerminalSnapshot(terminalId: string, checkoutId: string): Promise<AbMessage | null> {
+      if (!manager) return null;
+      const internalId = internalTerminalIdOf(terminalId, checkoutId);
+      const snap = await manager.getAttachSnapshot(internalId);
+      if (!snap) return null;
+      // Screen-only, like the resync push, and for the same reason: nothing
+      // here knows what the app's engine holds, and a history blob erases.
+      return stampTerminalFrame(createMessage("terminal:snapshot", {
+        terminalId: internalId,
+        scrollback: snap.text,
+        seq: snap.seq,
+        composed: true,
+      }));
     },
     isMainCheckoutSession(id: string): boolean {
       return sessions?.isMainCheckoutSession(id) ?? true;

@@ -60,6 +60,40 @@ describe("StreamMux (unit, stub transport)", () => {
     expect(sent).toEqual([{ streamId: handle.streamId, msg, channel: "control" }]);
   });
 
+  test("admit shapes bus frames only, after mayDeliver; sendFrame bypasses it but not the gate", () => {
+    // `admit` is the output governor's hook: it may drop a bus frame, and it
+    // must never see the frames the governor itself sends in their place —
+    // those go through `sendFrame`, which answers only to the authorization
+    // gate (a switched-off machine streams nothing, governed or not).
+    const { transport, sent } = makeTransport();
+    const mux = new StreamMux(transport);
+    const bus = new MessageBus();
+    let allowed = true;
+    const seen: string[] = [];
+    const handle = mux.attach(bus, {
+      mayDeliver: () => allowed,
+      admit: (msg) => { seen.push(msg.type); return msg.type !== "terminal:output"; },
+    });
+
+    bus.publish(createMessage("terminal:output", { terminalId: "t", data: "x" }), "control");
+    const pong = createMessage("pong", {});
+    bus.publish(pong, "control");
+    expect(sent.map((s) => s.msg)).toEqual([pong]);
+
+    const screen = createMessage("terminal:snapshot", { terminalId: "t", scrollback: "", seq: 1 });
+    handle.sendFrame(screen);
+    expect(sent.map((s) => s.msg)).toEqual([pong, screen]);
+    expect(sent[1]!).toMatchObject({ streamId: handle.streamId, channel: "control" });
+    expect(seen).toEqual(["terminal:output", "pong"]);
+
+    allowed = false;
+    bus.publish(createMessage("pong", {}), "control");
+    handle.sendFrame(screen);
+    expect(sent).toHaveLength(2);
+    // Not consulted for a frame the gate already refused.
+    expect(seen).toEqual(["terminal:output", "pong"]);
+  });
+
   test("mayDeliver gates outbound bus AND tunnel frames, and is re-read on every send", () => {
     // The outbound half of the machine mobile-access gate. Read live, not
     // captured: flipping the switch back on must resume the SAME stream — the

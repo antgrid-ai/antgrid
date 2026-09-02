@@ -1482,13 +1482,21 @@ const TerminalSnapshotMessage = BaseMessage.extend({
 
 const FileTreeSnapshotRequestMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot:request"),
+  // The seq of the snapshot the requester already holds. Matching the current
+  // one is answered `unchanged` with no tree — the request is sent on every
+  // reconnect and resume by every open checkout, and the tree is most of it.
+  sinceSeq: z.number().int().nonnegative().optional(),
   ...CheckoutScoped,
 });
 
 const FileTreeSnapshotMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot"),
-  tree: FileTreeNodeSchema,
+  // Absent only with `unchanged`, which is only ever sent to a requester that
+  // named the seq it holds — an older app never does, so it never sees a
+  // tree-less reply.
+  tree: FileTreeNodeSchema.optional(),
   seq: z.number().int().nonnegative(),
+  unchanged: z.boolean().optional(),
   ...CheckoutScoped,
 });
 

@@ -32,6 +32,15 @@ export interface RelayConfig {
    * relay runs out of memory. Raise it freely; it is not a product limit.
    */
   maxStreamsPerConnection: number;
+  /**
+   * Bytes one connection may have queued toward a slow peer before further
+   * frames to it are DROPPED (`ws.send()` returns 0) rather than buffered.
+   * Bun's default is the same 16 MB, but set explicitly so the drop the
+   * forwarder accounts for is a number an operator can read here rather than a
+   * runtime default. A phone on a weak link queues at the relay long before
+   * this; the sender is told (`MESSAGE_RATE_LIMITED`) so it can resync.
+   */
+  backpressureLimitBytes: number;
   /** ± window a hello `ts` may deviate from server time (step 2). */
   clockSkewMs: number;
   /** How long a `(deviceId, nonce)` hello pair is remembered (replay guard). */
@@ -149,6 +158,7 @@ export function loadConfig(): RelayConfig {
     jsonRateLimitPerSec: parseInt(process.env.JSON_RATE_LIMIT_PER_SEC || "10", 10),
     jsonRateLimitBurst: parseInt(process.env.JSON_RATE_LIMIT_BURST || "30", 10),
     maxStreamsPerConnection: parseInt(process.env.MAX_STREAMS_PER_CONNECTION || "1024", 10),
+    backpressureLimitBytes: parseInt(process.env.BACKPRESSURE_LIMIT_BYTES || String(16 * 1024 * 1024), 10),
     clockSkewMs,
     replayTtlMs,
     pingIntervalMs: parseInt(process.env.PING_INTERVAL_MS || "30000", 10),

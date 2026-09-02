@@ -676,9 +676,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         // re-driven pull answers for it — and the notice must go with it, or
         // it sits above a list that is by then correct until the user closes
         // it by hand.
-        _sessionsListingSub?.cancel();
+        unawaited(_sessionsListingSub?.cancel());
         _sessionsListingSub = svc.listings.listen((_) {
-          _sessionsListingSub?.cancel();
+          unawaited(_sessionsListingSub?.cancel());
           _sessionsListingSub = null;
           if (mounted) _clearSessionsBanner();
         });

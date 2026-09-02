@@ -23,7 +23,7 @@ export interface ConnState {
   bumpFileSeq(): number;
 }
 
-export function createConnState(): ConnState {
+export function createConnState(opts: { fileSeqBase?: number } = {}): ConnState {
   const seqs = new Map<string, number>();
   const state = {
     appFocusPaused: false,
@@ -31,7 +31,12 @@ export function createConnState(): ConnState {
     get suppressed(): boolean {
       return !state.peerOnline || state.appFocusPaused;
     },
-    fileSeq: 0,
+    // Seeded per process, not from 0: the app hands its last snapshot seq back
+    // (`file:tree:snapshot:request.sinceSeq`) to ask whether its tree is still
+    // current, and a counter restarting at 0 on every bridge life would
+    // re-reach a value the app remembers from the previous one — answering
+    // "unchanged" for a tree that is not, with nothing left to correct it.
+    fileSeq: opts.fileSeqBase ?? Math.floor(Math.random() * 2 ** 40),
     bumpTerminalSeq(id: string): number {
       const next = (seqs.get(id) ?? 0) + 1;
       seqs.set(id, next);

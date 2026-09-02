@@ -32,7 +32,7 @@ function stubRelayClient(): RelayClient {
     setBus: () => {},
     connect: () => {},
     close: () => {},
-    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {} }),
+    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} }),
     sendPushDeliver: () => {},
   } as unknown as RelayClient;
 }

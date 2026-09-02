@@ -4,6 +4,7 @@ import { MessageBus, type InboundSource } from "./message-bus";
 import { LocalListener } from "./local-listener";
 import { createRelayPromotion, type RelayPromotionController, type RelayPromotionDeps } from "./relay-promotion";
 import type { AttachStreamOpts, StreamHandle } from "./stream-mux";
+import { OutputGovernor } from "./output-governor";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
 import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnStart, userReply, type WorkStatusState } from "./work-status";
@@ -469,7 +470,16 @@ export class ProjectCore {
     // has never dialled in.
     let peerConnected = false;
 
-    const handle = remote.attachStream(bus, {
+    // Shapes THIS stream's terminal output so a flood cannot hold every other
+    // frame behind it on the machine's one uplink; the loopback desktop is not
+    // subscribed through it and is never shaped. Its `send` reaches for the
+    // stream below only from a timer, long after attach has returned.
+    const governor = new OutputGovernor({
+      compose: (terminalId, checkoutId) => core.composeTerminalSnapshot(terminalId, checkoutId),
+      send: (msg) => stream.sendFrame(msg),
+    });
+
+    const stream = remote.attachStream(bus, {
       // Outbound half of the mobile-access gate. The inbound half (agent-core's
       // currentPhoneAllowed) only stops the phone DRIVING this project; without
       // this one a core the phone cold-started keeps streaming its terminal, file
@@ -478,6 +488,7 @@ export class ProjectCore {
       // to tear down. Fail-closed, same as the inbound side.
       mayDeliver: () => (this.deps.remoteAccessEnabled?.() ?? false)
         && (!core.hasIsolatedSessions() || remote.currentPeerSupportsCheckoutRouting?.() === true),
+      admit: (msg) => governor.admit(msg),
       onAdmitted: () => { this.relayRegistered = true; settleOnce({ ok: true }); },
       onRejected: (code, message) => { this.relayRegistered = false; settleOnce({ ok: false, code, message }); },
       // Suppress the heavy stream while the phone is gone; it rebuilds from
@@ -499,6 +510,15 @@ export class ProjectCore {
       },
       onTunnel: (raw) => core.handleTunnelMessage(raw),
     });
+    // The governor's catch-up timers die with the stream, or a detached project
+    // keeps composing screens for nobody.
+    const handle: StreamHandle = {
+      ...stream,
+      detach: () => {
+        governor.dispose();
+        stream.detach();
+      },
+    };
 
     core.setPlainHook((d) => handle.sendTunnel(d));
     // Mark this connection as REMOTE for the core's mobile-access gate (and name

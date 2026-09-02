@@ -5,12 +5,24 @@ describe("ConnState", () => {
   let state: ConnState;
   beforeEach(() => { state = createConnState(); });
 
-  it("starts unsuppressed (focused + peer online) with zero seq", () => {
+  it("starts unsuppressed (focused + peer online) with zero terminal seq", () => {
     expect(state.appFocusPaused).toBe(false);
     expect(state.peerOnline).toBe(true);
     expect(state.suppressed).toBe(false);
-    expect(state.fileSeq).toBe(0);
     expect(state.terminalSeq("any")).toBe(0);
+  });
+
+  it("seeds the file seq per process so a restart never re-reaches an app's remembered one", () => {
+    // Two lives of the bridge answering `sinceSeq` from the same 0 would call a
+    // changed tree unchanged. Not pinned to any value — only to being an
+    // integer the wire schema accepts and to differing across creations.
+    const seeds = new Set(Array.from({ length: 8 }, () => createConnState().fileSeq));
+    for (const seed of seeds) {
+      expect(Number.isInteger(seed)).toBe(true);
+      expect(seed).toBeGreaterThanOrEqual(0);
+    }
+    expect(seeds.size).toBeGreaterThan(1);
+    expect(createConnState({ fileSeqBase: 7 }).fileSeq).toBe(7);
   });
 
   it("focus pause suppresses and resumes independently of peer presence", () => {
@@ -44,9 +56,10 @@ describe("ConnState", () => {
   });
 
   it("bumpFileSeq increments monotonically", () => {
-    expect(state.bumpFileSeq()).toBe(1);
-    expect(state.bumpFileSeq()).toBe(2);
-    expect(state.fileSeq).toBe(2);
+    const base = state.fileSeq;
+    expect(state.bumpFileSeq()).toBe(base + 1);
+    expect(state.bumpFileSeq()).toBe(base + 2);
+    expect(state.fileSeq).toBe(base + 2);
   });
 
   it("clearTerminal removes a terminal's seq state", () => {

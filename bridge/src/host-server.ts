@@ -1803,6 +1803,7 @@ export class HostServer {
         return {
           streamId: handle.streamId,
           sendTunnel: (data) => handle.sendTunnel(data),
+          sendFrame: (msg) => handle.sendFrame(msg),
           detach: () => {
             if (this.streamIds.get(projectId) === handle.streamId) this.streamIds.delete(projectId);
             handle.detach();

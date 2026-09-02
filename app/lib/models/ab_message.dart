@@ -735,14 +735,19 @@ class FileTreeSnapshotRequestMessage {
 class FileTreeSnapshotMessage {
   final String id;
   final int timestamp;
-  final FileNode tree;
+
+  /// Null only when [unchanged]: the bridge answered a request that named the
+  /// seq it already holds, so the tree the requester has IS this one.
+  final FileNode? tree;
   final int seq;
+  final bool unchanged;
 
   const FileTreeSnapshotMessage({
     required this.id,
     required this.timestamp,
     required this.tree,
     required this.seq,
+    this.unchanged = false,
   });
 }
 
@@ -1379,7 +1384,17 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     case 'file:tree:snapshot':
       final treeJson = json['tree'];
       final seq = json['seq'];
-      if (treeJson is! Map<String, dynamic> || seq is! int) return null;
+      if (seq is! int) return null;
+      if (json['unchanged'] == true) {
+        return FileTreeSnapshotMessage(
+          id: id,
+          timestamp: timestamp,
+          tree: null,
+          seq: seq,
+          unchanged: true,
+        );
+      }
+      if (treeJson is! Map<String, dynamic>) return null;
       final tree = FileNode.fromJson(treeJson);
       if (tree == null) return null;
       return FileTreeSnapshotMessage(

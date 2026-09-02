@@ -589,6 +589,51 @@ void main() {
       await session.close();
     });
 
+    test('a re-pull names the seq it holds, and an unchanged answer keeps the '
+        'tree', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session, checkoutId: 'wt-1');
+      await Future<void>.delayed(Duration.zero);
+
+      Iterable<Map<String, dynamic>> requests() => t.sent.where(
+        (m) =>
+            m['type'] == 'file:tree:snapshot:request' &&
+            m['checkoutId'] == 'wt-1',
+      );
+      // Holding nothing, the first pull can name nothing.
+      expect(requests().single.containsKey('sinceSeq'), isFalse);
+
+      t.emit('file:tree:snapshot', {
+        'checkoutId': 'wt-1',
+        'seq': 41,
+        'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+      expect(requests().last['sinceSeq'], 41);
+
+      // The bridge confirms the held tree is current: nothing to apply, and
+      // nothing lost.
+      t.emit('file:tree:snapshot', {
+        'checkoutId': 'wt-1',
+        'seq': 41,
+        'unchanged': true,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.root!.children, hasLength(1));
+
+      // The user's own refresh doubts what is held, so it never names it.
+      svc.requestFullTree();
+      await Future<void>.delayed(Duration.zero);
+      expect(requests().last.containsKey('sinceSeq'), isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
+
     test('re-pulls on reconnect and stops after dispose', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);

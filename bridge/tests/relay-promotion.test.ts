@@ -25,7 +25,7 @@ const ENABLE = createMessage("agent:enableRelay", {
 
 function makeMachineSession(overrides: Partial<MachineRelaySession> = {}): MachineRelaySession {
   return {
-    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {} }),
+    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} }),
     currentPeerPubkey: () => null,
     sendPushDeliver: () => {},
     agentDeviceId: "0bbd1111-2222-3333-4444-555566667777",
@@ -38,7 +38,7 @@ function makeMachineSession(overrides: Partial<MachineRelaySession> = {}): Machi
  *  bring-up, exactly one attach per promotion) did not. */
 function makeDeps(session: MachineRelaySession) {
   const calls = { ensureMachineRelay: 0, attach: 0, detach: 0 };
-  const handle: StreamHandle = { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
+  const handle: StreamHandle = { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} };
   return {
     calls,
     ensureMachineRelay: async (_msg: Extract<AbMessage, { type: "agent:enableRelay" }>) => {
@@ -130,7 +130,7 @@ test("a disableRelay landing mid-start cancels the in-flight attach", async () =
   const ctrl = createRelayPromotion({
     bus,
     ensureMachineRelay: async () => { ensureCalls++; return gate; },
-    attach: () => { attachCalls++; return { handle: { streamId: "s1", detach: () => {}, sendTunnel: () => {} }, detach: () => {} }; },
+    attach: () => { attachCalls++; return { handle: { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} }, detach: () => {} }; },
   });
 
   expect(ctrl.handleInbound(ENABLE)).toBe(true); // start() begins, awaiting ensureMachineRelay
@@ -159,7 +159,7 @@ test("ensureMachineRelay rejecting surfaces relayError(ENABLE_FAILED) and allows
       if (fail) throw new Error("boom: machine socket failed to start");
       return makeMachineSession();
     },
-    attach: () => { attachCalls++; return { handle: { streamId: "s1", detach: () => {}, sendTunnel: () => {} }, detach: () => {} }; },
+    attach: () => { attachCalls++; return { handle: { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} }, detach: () => {} }; },
   });
 
   ctrl.handleInbound(ENABLE);

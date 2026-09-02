@@ -97,6 +97,18 @@ describe("loadConfig", () => {
     expect(cfg.jsonRateLimitPerSec).toBe(10);
     expect(cfg.jsonRateLimitBurst).toBe(30);
     expect(cfg.maxStreamsPerConnection).toBe(1024);
+    expect(cfg.backpressureLimitBytes).toBe(16 * 1024 * 1024);
+  });
+
+  test("backpressureLimitBytes respects its env override", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    process.env.BACKPRESSURE_LIMIT_BYTES = "1048576";
+    try {
+      expect(loadConfig().backpressureLimitBytes).toBe(1_048_576);
+    } finally {
+      delete process.env.BACKPRESSURE_LIMIT_BYTES;
+    }
   });
 
   test("maxStreamsPerConnection respects its env override", () => {

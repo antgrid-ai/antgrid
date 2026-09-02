@@ -76,6 +76,7 @@ export const defaultConfig: RelayConfig = {
   jsonRateLimitPerSec: 10,
   jsonRateLimitBurst: 30,
   maxStreamsPerConnection: 1024,
+  backpressureLimitBytes: 16 * 1024 * 1024,
   clockSkewMs: 120000,
   replayTtlMs: 300000,
   pingIntervalMs: 0, // disabled in tests

@@ -80,9 +80,16 @@ class FileService {
 
   static const _treeHydratorKey = 'file:tree';
 
-  Future<void> _hydrateTree() => session.sendForCheckout(
+  /// Pull the tree. Names the seq already held so an unchanged tree comes back
+  /// as a few bytes rather than the whole thing — every open checkout sends
+  /// this on every reconnect and resume, ahead of whatever the user is waiting
+  /// on. [force] asks for the tree regardless: the user's own refresh doubts
+  /// what is held, and that doubt is the request.
+  Future<void> _hydrateTree({bool force = false}) => session.sendForCheckout(
     checkoutId,
-    createAbMessage('file:tree:snapshot:request', {}),
+    createAbMessage('file:tree:snapshot:request', {
+      if (!force && _snapshotSeq >= 0) 'sinceSeq': _snapshotSeq,
+    }),
   );
 
   void _setState(FileTreeState state) {
@@ -95,8 +102,16 @@ class FileService {
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
     if (parsed is FileTreeSnapshotMessage) {
+      final tree = parsed.tree;
+      // Tree-less means the bridge confirmed the one held is current; a
+      // tree-less reply that arrives holding nothing is a bridge answering a
+      // seq this service never sent, and there is nothing to apply either way.
+      if (tree == null) {
+        if (_state.root != null) _snapshotSeq = parsed.seq;
+        return;
+      }
       _snapshotSeq = parsed.seq;
-      _setState(_state.copyWith(root: parsed.tree));
+      _setState(_state.copyWith(root: tree));
       return;
     }
     if (parsed is TreeUpdateMessage) {
@@ -534,7 +549,7 @@ class FileService {
 
   void requestFullTree() {
     _setState(_state.copyWith(expandedPaths: {}));
-    unawaited(_hydrateTree());
+    unawaited(_hydrateTree(force: true));
   }
 
   void setFilterQuery(String? query) {

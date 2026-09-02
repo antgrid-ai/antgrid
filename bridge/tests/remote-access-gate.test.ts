@@ -392,7 +392,7 @@ test("promotion wires (and clears) the gate's peer provider", async () => {
   // Stub machine relay session whose currentPeerPubkey is observable through
   // the wired provider — mirrors what HostServer.ensureMachineRelay() returns.
   const machineSession: MachineRelaySession = {
-    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {} }),
+    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} }),
     currentPeerPubkey: () => "promoted-phone-pk",
     sendPushDeliver: () => {},
     agentDeviceId: "0bbd1111-2222-3333-4444-555566667777",
@@ -406,7 +406,7 @@ test("promotion wires (and clears) the gate's peer provider", async () => {
     attach: (remote) => {
       setPeerPubkeyProvider(() => remote.currentPeerPubkey());
       return {
-        handle: { streamId: "s1", detach: () => {}, sendTunnel: () => {} },
+        handle: { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} },
         detach: () => { setPeerPubkeyProvider(null); },
       };
     },

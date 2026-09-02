@@ -102,6 +102,34 @@ test("a tree snapshot request re-sends an UNCHANGED git status", async () => {
   await waitFor(() => countOf(sent, "git:status") > before, "git:status after the request");
 });
 
+test("a tree request naming the seq the bridge holds is answered without the tree", async () => {
+  const { bus, sent } = await bootCore();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  type Snapshot = Extract<AbMessage, { type: "file:tree:snapshot" }>;
+  const snapshots = () => sent.filter((m): m is Snapshot => m.type === "file:tree:snapshot");
+
+  bus.dispatchInbound(createMessage("file:tree:snapshot:request", {}), "control", "loopback");
+  await waitFor(() => snapshots().length === 1, "the full tree");
+  const first = snapshots()[0]!;
+  expect(first.tree).toBeDefined();
+  expect(first.unchanged).toBeUndefined();
+
+  // Every open checkout re-pulls on every reconnect and resume, ahead of what
+  // the user is waiting on; an unchanged tree must cost the uplink nothing.
+  bus.dispatchInbound(createMessage("file:tree:snapshot:request", { sinceSeq: first.seq }), "control", "loopback");
+  await waitFor(() => snapshots().length === 2, "the short answer");
+  const second = snapshots()[1]!;
+  expect(second.unchanged).toBe(true);
+  expect(second.tree).toBeUndefined();
+  expect(second.seq).toBe(first.seq);
+
+  // A seq the bridge does not hold — an older process, or a tree that moved —
+  // gets the whole tree again.
+  bus.dispatchInbound(createMessage("file:tree:snapshot:request", { sinceSeq: first.seq - 1 }), "control", "loopback");
+  await waitFor(() => snapshots().length === 3, "the tree after a stale seq");
+  expect(snapshots()[2]!.tree).toBeDefined();
+});
+
 test("a preview snapshot request re-emits the detected ports alongside it", async () => {
   const { bus, sent } = await bootCore();
   await new Promise((resolve) => setTimeout(resolve, 200));

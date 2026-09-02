@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { CONTROL_STREAM_ID } from "antgrid-wire";
 import type { Channel, MessageBus } from "./message-bus";
-import { createMessage, parseMessageFast } from "./protocol";
+import { createMessage, parseMessageFast, type AbMessage } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { logger } from "./logger";
 
@@ -21,6 +21,10 @@ export interface StreamHandle {
   detach(): void;
   /** Send a tunnel-protocol (preview channel) message tagged with this stream. */
   sendTunnel(data: object): void;
+  /** Send one AbMessage to THIS stream's peer alone, bypassing the bus — for a
+   *  frame that exists only because of what this stream dropped (the output
+   *  governor's catch-up screen), which no other subscriber should see. */
+  sendFrame(msg: AbMessage): void;
 }
 
 export interface AttachStreamOpts {
@@ -46,6 +50,11 @@ export interface AttachStreamOpts {
    *  answer to no switch); callers that HAVE a switch must fail closed in their
    *  own provider, not here. */
   mayDeliver?: () => boolean;
+  /** Outbound shaping, consulted after `mayDeliver` on every bus frame: false
+   *  drops the frame for this stream only. Bus frames alone — `sendTunnel` and
+   *  `sendFrame` are never shaped, the latter because it is how the shaper
+   *  itself sends. */
+  admit?: (msg: AbMessage) => boolean;
 }
 
 /** The slice of the machine {@link RelayClient} the mux drives. Kept minimal so
@@ -98,6 +107,7 @@ export class StreamMux {
     const unsub = bus.subscribe({
       deliver: (msg, channel) => {
         if (!mayDeliver()) return;
+        if (opts.admit && !opts.admit(msg)) return;
         this.transport.sendEnvelope(streamId, msg, channel);
       },
     });
@@ -114,6 +124,10 @@ export class StreamMux {
       sendTunnel: (data) => {
         if (!mayDeliver()) return;
         this.transport.sendEnvelope(streamId, data, "preview");
+      },
+      sendFrame: (msg) => {
+        if (!mayDeliver()) return;
+        this.transport.sendEnvelope(streamId, msg, "control");
       },
     };
   }

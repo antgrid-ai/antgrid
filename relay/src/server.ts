@@ -148,6 +148,15 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   const DROP_LOG_WINDOW_MS = 1000;
   const droppedByBucket = new Map<string, number>();
   let dropFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  // Lifetime counters for /metrics. A routed frame has two ways to die here —
+  // our own token bucket, and the recipient's socket refusing to queue more —
+  // and the two call for opposite remedies (a lower budget vs a slower sender
+  // or a faster peer), so they are never summed.
+  const routedDrops = { rateLimit: 0, backpressure: 0 };
+  // Frames Bun queued rather than wrote because the peer is behind. Not a loss,
+  // but the leading indicator of one: a rising count is a peer whose link
+  // cannot carry what its bridge sends it.
+  let routedBackpressured = 0;
 
   function recordDroppedFrame(bucket: string): void {
     droppedByBucket.set(bucket, (droppedByBucket.get(bucket) ?? 0) + 1);
@@ -161,7 +170,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         buckets[k] = n;
       }
       droppedByBucket.clear();
-      logger.warn("Routed frames dropped (rate limit)", {
+      logger.warn("Routed frames dropped", {
         total,
         windowMs: DROP_LOG_WINDOW_MS,
         buckets,
@@ -571,7 +580,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     // this costs no visibility into the sealed payload.
     const key = `${pairKey(sender.deviceId, header.to)}|${header.channel}`;
     if (!routeRateLimiter.allow(key)) {
-      recordDroppedFrame(key);
+      routedDrops.rateLimit++;
+      recordDroppedFrame(`${key}|rate-limit`);
       sendError(ws, "MESSAGE_RATE_LIMITED", "Message rate limit exceeded", true);
       return;
     }
@@ -585,7 +595,21 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       ts: Date.now(),
     };
     // Forward verbatim: the kind byte and sealed payload are opaque to us.
-    target.ws.send(encodeRouteFrame(outHeader, decoded.payload, decoded.kind));
+    // `send` answers 0 when the recipient's queue is past `backpressureLimit`
+    // and the frame was DROPPED — silently, from the sender's point of view,
+    // until this tells it. Reported as the same retryable code as the token
+    // bucket's drop because both clients already read that code as "the relay
+    // dropped one of your frames, re-issue what is safe to", and a new code
+    // would be rejected at parse by every bridge and app in the field. -1 is
+    // a frame queued behind a slow peer: delivered, but the warning sign.
+    const sent = target.ws.send(encodeRouteFrame(outHeader, decoded.payload, decoded.kind));
+    if (sent === 0) {
+      routedDrops.backpressure++;
+      recordDroppedFrame(`${key}|backpressure`);
+      sendError(ws, "MESSAGE_RATE_LIMITED", "Recipient is not keeping up; frame dropped", true);
+      return;
+    }
+    if (sent === -1) routedBackpressured++;
     recordMessage();
   }
 
@@ -630,6 +654,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         return Response.json({
           activeConnections: connections.getConnectionCount(),
           messagesPerSec: Math.round(messagesPerSec * 100) / 100,
+          routedDrops: { ...routedDrops },
+          routedBackpressured,
           uptime: Math.floor((t - startTime) / 1000),
         });
       }
@@ -675,6 +701,11 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     },
     websocket: {
       maxPayloadLength: MAX_FRAME_PAYLOAD,
+      backpressureLimit: config.backpressureLimitBytes,
+      // Drop, never close: a phone that fell behind for a second must not lose
+      // its socket and pay a full reconnect + handshake for it. The forwarder
+      // reads `send()`'s answer and tells the sender instead.
+      closeOnBackpressureLimit: false,
       open(ws) {
         connections.incrementIpCount(ws.data.ip);
         const timer = setTimeout(() => {
