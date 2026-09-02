@@ -11,6 +11,7 @@ import { resolveAbDir } from "./antgrid-dir";
 import { startOwnerWatchdog } from "./owner-watchdog";
 import { augmentHostPath } from "./host-path";
 import { runHookInvocation } from "./hook-runner";
+import { initCrashReporting, captureBridgeError, flushCrashReports } from "./crash-reporting";
 
 // Component-tagged child for this module's own lifecycle logs.
 const log = logger.child({ component: "bridge" });
@@ -60,6 +61,13 @@ program
   .argument("<event>")
   .argument("[payload]")
   .action(async (agent: string, event: string, payload?: string) => {
+    // Deliberately NOT crash-reported. A hook is spawned by the agent CLI, not
+    // by the app, so it is handed no bootstrap payload and there is no consent
+    // to act on — and the two costs land on a path the agent blocks on for
+    // every tool use: SDK init on entry, and a transport flush before an exit
+    // that is otherwise immediate. The field failure this would seem to catch
+    // (a hook that never runs at all — see the MSIX `<Application>` note in
+    // CLAUDE.md) is a CreateProcess denial, which no in-process SDK can observe.
     await runHookInvocation({ agent, event, payload });
     // Exit explicitly: hooks are advisory and must never linger. An agent that
     // holds this process's stdin open (copilot does) would otherwise keep the
@@ -103,6 +111,20 @@ program
       process.exit(64); // EX_USAGE
     }
 
+    // First thing after the payload, because the payload is where consent
+    // arrives — nothing before this point is reportable, which is the honest
+    // answer rather than a gap to close. Absence of the flag is OFF: a host
+    // started by the CLI or a test has nobody who consented to anything.
+    if (
+      initCrashReporting({
+        enabled: payload.telemetryEnabled ?? false,
+        dsn: process.env.SENTRY_DSN ?? "",
+        release: payload.ownerBuild,
+      })
+    ) {
+      log.debug("crash reporting enabled");
+    }
+
     const host = new HostServer({
       ...(payload.machine
         ? {
@@ -137,8 +159,6 @@ program
       // graceful path as SIGTERM (defined below) so PTYs are killed cleanly.
       onShutdownRequested: () => void shutdown("app-close"),
     });
-
-    await host.startControlPlane();    // bind loopback control + write host.json
 
     // RSS sampler runs for the whole host process when --debug-perf is set —
     // started here (not gated on a first project) so a machine-only warm-up
@@ -179,15 +199,22 @@ program
         await host.shutdown(reason);
       } catch (err) {
         log.error("Shutdown failed: %s", err);
+        captureBridgeError(err, "shutdown");
       }
+      // After the drain, not before: this is the last chance to send whatever
+      // the SDK's top-level handlers queued. ~15ms when there is nothing to
+      // send, so a clean exit is not measurably slower for a consenting host.
+      await flushCrashReports();
       clearTimeout(bail);
       process.exit(exitCode);
     };
 
-    // Wire teardown BEFORE the (possibly multi-second) first-project open, so an
-    // owner death or signal mid-open can't leave the host registered on the
-    // relay for an app that's already gone. The owner-watchdog self-exits when
-    // the spawning app's pid vanishes — the backstop for exits that never reach
+    // Wire teardown BEFORE the control plane comes up, so an owner death or a
+    // signal during bring-up or the first-project open can't leave the host
+    // registered on the relay for an app that's already gone. `host.shutdown()`
+    // is null-safe against a host that never started, which is what lets this
+    // sit ahead of it. The owner-watchdog self-exits when the spawning app's
+    // pid vanishes — the backstop for exits that never reach
     // the app's didRequestAppExit teardown (force-kill, crash, or a window close
     // under `flutter run --machine`), which would otherwise orphan this
     // machine-level host.
@@ -200,8 +227,25 @@ program
     process.on("SIGINT", () => shutdown("SIGINT"));
     process.on("SIGTERM", () => shutdown("SIGTERM"));
     process.on("SIGHUP", () => shutdown("SIGHUP"));
+    // These own the EXIT; Sentry's own handler for each owns the CAPTURE (it is
+    // installed by initCrashReporting above), which is what keeps a fatal marked
+    // `handled: false` rather than re-reported here as an ordinary handled
+    // error — so there is deliberately no captureBridgeError call in either.
+    //
+    // **These must be registered for as much of the process's life as possible.**
+    // The SDK decides whether to exit on its own AT CRASH TIME, by counting the
+    // OTHER uncaughtException listeners: with one of ours present it defers and
+    // this teardown sweeps the PTYs; as the sole listener it logs and
+    // `process.exit(1)`s, skipping the sweep. Hence the order below: everything
+    // between initCrashReporting and here is straight-line setup that opens
+    // nothing, whereas startControlPlane publishes host.json and only THEN
+    // spends seconds on the relay handshake and OAuth mint — with host.json on
+    // disk the app can drive project:open over loopback for that whole stretch,
+    // so it is not a window in which "no PTY exists yet" may be assumed.
     process.on("uncaughtException", (err) => { log.error("Uncaught exception: %s", err); shutdown("uncaughtException"); });
     process.on("unhandledRejection", (err) => { log.error("Unhandled rejection: %s", err); shutdown("unhandledRejection"); });
+
+    await host.startControlPlane();    // bind loopback control + write host.json
 
     // Inline the first project when one was provided. An eager warm-up spawn
     // (app launch) sends no firstProject — the control plane is already up from
@@ -214,6 +258,12 @@ program
         await host.open(payload.firstProject.projectId, payload.firstProject.projectPath, payload.firstProject.mode);
       } catch (err) {
         console.error(`antgrid-bridge: failed to open first project: ${(err as Error).message}`);
+        // Reported explicitly: this exit is a bare process.exit, so it reaches
+        // neither the shutdown path's flush nor either top-level handler, and a
+        // mint failure against a revoked credential pair lands here and nowhere
+        // else.
+        captureBridgeError(err, "first-project-open");
+        await flushCrashReports();
         process.exit(1);
       }
     }

@@ -12,7 +12,9 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_tooltip.dart';
@@ -110,11 +112,14 @@ class AgentPanel extends ConsumerWidget {
               // the breadcrumb — same convention as _SessionMark's use of
               // space12 in recent_session_row_widget.dart.
               const SizedBox(width: AbTokens.space12),
-              const Expanded(child: TitleBarBreadcrumb()),
+              // Branch pill folded into the overflow menu below: it lives
+              // inside the breadcrumb on desktop, but on a phone-width row it
+              // competes with the title for the one flexible slot.
+              const Expanded(
+                child: TitleBarBreadcrumb(showBranchPill: false),
+              ),
               const SizedBox(width: AbTokens.space6),
-              const SessionModeControl(),
-              const SizedBox(width: AbTokens.space8),
-              const HandlerHeaderControl(),
+              const _SessionOverflowButton(),
             ],
           )
         else
@@ -138,6 +143,152 @@ class AgentPanel extends ConsumerWidget {
         const HandlerPaBar(),
         const CommandTray(),
       ],
+    );
+  }
+}
+
+/// Mobile-only overflow trigger for the branch pill, the terminal/chat switch
+/// and the Handler shield/pill — see the comment above its call site in
+/// [AgentPanel.build]. Fitting all three inline left too little width for the
+/// session title itself on a phone; folding them behind one kebab is what
+/// gives the title (and its rename tap target) its room back. Desktop's
+/// [AgentBar] keeps them inline — the context panel there is wide enough.
+class _SessionOverflowButton extends StatelessWidget {
+  const _SessionOverflowButton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Builder(
+      // AbCompactTapTargets: the toolbar row already owns its height, so the
+      // button's mobile tap-target inflation (24px visual -> 44px hit box)
+      // must not widen the box this anchors the popup to — without it the
+      // popup opened ~10px below where the icon actually sits, reading as a
+      // stray gap between the kebab and the menu instead of Chrome's flush
+      // hang-under.
+      builder: (anchor) => AbCompactTapTargets(
+        child: AbIconButton(
+          icon: AbIcons.more,
+          tooltip: 'Session options',
+          onTap: () => detached(
+            'AgentPanel',
+            'session overflow menu failed',
+            () => _open(anchor),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _open(BuildContext anchor) async {
+    final anchorRect = abMenuAnchorRect(anchor);
+    if (anchorRect == null) return;
+    await showAbPanel<void>(
+      context: anchor,
+      anchorRect: anchorRect,
+      width: 220,
+      // Tight, hanging right under the button — the Chrome kebab-menu look —
+      // rather than the wider 4px default gap other (non-adjacent) popups use.
+      gap: 2,
+      preferred: AbMenuPlacement.below,
+      builder: (_) => const _SessionOverflowMenu(),
+    );
+  }
+}
+
+/// The overflow popup's content: the branch as a menu header (Chrome's own
+/// tab-context-menu convention — the thing the menu is ABOUT, named once at
+/// the top) over two plain text rows, rather than the header's own
+/// button/segmented-control chrome. [AbLiveMenuRow] is what a menu row that
+/// has to watch a provider renders as — see its doc for why a static
+/// [AbMenuItem] can't do this.
+class _SessionOverflowMenu extends ConsumerWidget {
+  const _SessionOverflowMenu();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final branch = ref.watch(terminalStateProvider).value?.gitBranch;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (branch != null) AbMenuHeaderLabel(branch),
+        const SessionModeMenuItem(),
+        const _HandlerMenuItem(),
+      ],
+    );
+  }
+}
+
+/// [HandlerHeaderControl]'s arm/disarm action, redone as a single text row —
+/// the pending-escalation pill it also carries is a status surface (still
+/// reachable from the Handler tab and the transcript's own away-hint/PA bar),
+/// not an action, so a Chrome-style action menu doesn't restate it.
+class _HandlerMenuItem extends ConsumerWidget {
+  const _HandlerMenuItem();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final activeId = ref.watch(activeSessionIdProvider);
+    if (activeId == null) return const SizedBox.shrink();
+
+    final state =
+        ref.watch(handlerStateProvider).value ?? const HandlerState.initial();
+    final armed = state.sessions[activeId] != null;
+    final service = serviceWhenReady(ref, handlerServiceProvider);
+    // Pre-arm coverage prediction — same shared derivation the header shield
+    // and the away hint use, so this row never disagrees with them.
+    final coverage = ref.watch(focusedSessionCoverageProvider);
+
+    void toggleArm() {
+      if (service == null) return;
+      // The popup route closes first — its own doc says the content pops
+      // itself — or the menu stays up over the session it just changed,
+      // showing the stale label, and the explainer below opens over a live
+      // modal barrier. Both the explainer's anchor and the container are taken
+      // from surfaces that outlive the popped route.
+      final navigator = Navigator.of(context);
+      final host = navigator.context;
+      final container = ref.container;
+      navigator.pop();
+      if (armed) {
+        service.disarm(activeId);
+        return;
+      }
+      // Fire-and-forget: past the explainer await everything runs on the
+      // container, never this widget's ref — same contract as
+      // HandlerHeaderControl.toggleArm.
+      unawaited(
+        armWithSheet(
+          context: host,
+          container: container,
+          terminalId: activeId,
+          agentObservable: coverage.observable,
+          agentLabel: coverage.agentLabel,
+          judgeCapable: coverage.judgeCapable,
+        ),
+      );
+    }
+
+    // A refusal outranks the coverage notice, the order the header shield's
+    // tooltip already uses: coverage describes what an arm would get, and a
+    // refusal decides whether one can happen at all.
+    String? tooltip() {
+      if (armed) return null;
+      final entitlement = state.entitlement;
+      if (entitlement != null) return handlerEntitlementNotice(entitlement);
+      // Arming an unwatchable agent still works (it just never leaves
+      // WATCHING) — the tooltip explains why rather than blocking the tap.
+      if (coverage.observable == false) {
+        return unwatchableNotice(coverage.agentLabel);
+      }
+      return null;
+    }
+
+    return AbLiveMenuRow(
+      label: armed ? 'Disarm Handler' : 'Arm Handler',
+      icon: AbIcons.shield,
+      tooltip: tooltip(),
+      onTap: toggleArm,
     );
   }
 }

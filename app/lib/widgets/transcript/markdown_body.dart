@@ -1,11 +1,15 @@
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:markdown_widget/markdown_widget.dart';
 
 import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_icon_button.dart';
+import '../../providers/providers.dart';
+import '../../providers/visible_surface.dart';
+import '../../util/external_url.dart';
 import '../markdown_document_config.dart';
 import '../markdown_heading_configs.dart';
 
@@ -13,12 +17,12 @@ import '../markdown_heading_configs.dart';
 /// transcript ListView scrolls), AbTokens-themed, code fences get a copy
 /// button. Mirrors `markdown_document_config.dart` — the file viewer's own
 /// config — so a document and a message render the same markdown alike.
-class TranscriptMarkdown extends StatelessWidget {
+class TranscriptMarkdown extends ConsumerWidget {
   final String data;
   const TranscriptMarkdown({super.key, required this.data});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.antgrid;
     return MarkdownBlock(
       data: data,
@@ -39,12 +43,28 @@ class TranscriptMarkdown extends StatelessWidget {
           // Underline is the whole affordance — links take body color, no tint.
           // The package default is GitHub blue (#0969DA), a light-theme link
           // color that lands near 3:1 on our dark surfaces.
+          // `onTap` routes through the same file/preview/browser split every
+          // other link-bearing surface uses — see [openContentLink].
           LinkConfig(
             style: AbTokens.sansStyle(
               fontSize: AbTokens.fontMd,
               color: c.textPrimary,
               height: 1.55,
             ).copyWith(decoration: TextDecoration.underline),
+            onTap: (url) => openContentLink(
+              context,
+              url,
+              fileService: () => focusedCheckoutServiceOrNull(
+                ref.container,
+                (s) => s.fileService,
+              ),
+              previewService: () => focusedCheckoutServiceOrNull(
+                ref.container,
+                (s) => s.previewService,
+              ),
+              revealView: (view) =>
+                  ref.read(workspaceMenuControlProvider)?.reveal(view),
+            ),
           ),
           CodeConfig(
             // Match body (fontMd), not the smaller fontSm, so an inline-code run

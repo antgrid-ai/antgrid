@@ -86,6 +86,23 @@ class ActiveSessionsBranchSwitchException implements Exception {
       'ActiveSessionsBranchSwitchException($targetId, $branch)';
 }
 
+/// Thrown when the pre-start branch switch refuses because the folder's
+/// working tree is dirty (`DIRTY_WORKTREE`) and the caller hasn't already
+/// opted into stashing. The composer catches this, offers to stash, and
+/// retries with `stashIfDirty: true` — see [startNewSession].
+class DirtyWorktreeBranchSwitchException implements Exception {
+  final String targetId;
+  final String branch;
+  const DirtyWorktreeBranchSwitchException({
+    required this.targetId,
+    required this.branch,
+  });
+
+  @override
+  String toString() =>
+      'DirtyWorktreeBranchSwitchException($targetId, $branch)';
+}
+
 /// Start action for the New Session page.
 ///
 /// Activates the picker-selected target project so `selectedRegistrationIdProvider`
@@ -112,6 +129,7 @@ class ActiveSessionsBranchSwitchException implements Exception {
 Future<void> startNewSession(
   ProviderContainer ref, {
   bool allowActiveSessions = false,
+  bool stashIfDirty = false,
 }) async {
   final target = ref.read(selectedTargetProjectProvider);
   if (target == null) return;
@@ -207,6 +225,7 @@ Future<void> startNewSession(
               projectPath: target.detail,
               branch: explicitBranch,
               allowActiveSessions: allowActiveSessions,
+              stashIfDirty: stashIfDirty,
             );
           } finally {
             client.close();
@@ -225,6 +244,7 @@ Future<void> startNewSession(
             projectId: target.projectId ?? target.id,
             branch: explicitBranch,
             allowActiveSessions: allowActiveSessions,
+            stashIfDirty: stashIfDirty,
           );
         }
       } on HostControlException catch (e) {
@@ -234,10 +254,22 @@ Future<void> startNewSession(
             branch: explicitBranch,
           );
         }
+        if (e.code == 'DIRTY_WORKTREE' && !stashIfDirty) {
+          throw DirtyWorktreeBranchSwitchException(
+            targetId: target.id,
+            branch: explicitBranch,
+          );
+        }
         rethrow;
       } on RpcException catch (e) {
         if (e.code == 'ACTIVE_SESSIONS') {
           throw ActiveSessionsBranchSwitchException(
+            targetId: target.id,
+            branch: explicitBranch,
+          );
+        }
+        if (e.code == 'DIRTY_WORKTREE' && !stashIfDirty) {
+          throw DirtyWorktreeBranchSwitchException(
             targetId: target.id,
             branch: explicitBranch,
           );

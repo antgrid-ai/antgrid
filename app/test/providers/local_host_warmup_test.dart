@@ -14,7 +14,7 @@ import 'package:antgrid/providers/device_provisioning.dart'
 import 'package:antgrid/providers/local_host_warmup.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/app_settings_service.dart'
-    show defaultRelayUrlProvider;
+    show defaultRelayUrlProvider, telemetryEnabledProvider;
 import 'package:antgrid/services/auth_service.dart' show CurrentUser;
 import 'package:antgrid/services/keychain_device_store.dart';
 
@@ -30,6 +30,10 @@ class _RecordingLauncher extends LocalAgentLauncher {
   /// these tests guard.
   final clientIds = <String?>[];
 
+  /// The consent the provider read for each spawn — pinned because a host that
+  /// reports without it is the failure this whole path exists to prevent.
+  final telemetryFlags = <bool>[];
+
   /// When set, warmHost records its call then parks until completed — holds a
   /// respawn open so a second event can be delivered mid-flight.
   Completer<void>? block;
@@ -40,9 +44,11 @@ class _RecordingLauncher extends LocalAgentLauncher {
     String? licenseApiUrl,
     String? relayUrl,
     bool forceRespawn = false,
+    bool telemetryEnabled = false,
   }) async {
     calls.add((hasDevice: device != null, forceRespawn: forceRespawn));
     clientIds.add(device?.clientId);
+    telemetryFlags.add(telemetryEnabled);
     final gate = block;
     if (gate != null) await gate.future;
   }
@@ -100,6 +106,7 @@ void main() {
           ), // signed out
           defaultRelayUrlProvider.overrideWithValue('ws://test.relay'),
           licenseApiUrlProvider.overrideWithValue('http://test.license'),
+          telemetryEnabledProvider.overrideWithValue(true),
         ],
       );
       addTearDown(container.dispose);
@@ -113,6 +120,9 @@ void main() {
 
       // Initial warm-up: machine-less, no respawn.
       expect(launcher.calls, [(hasDevice: false, forceRespawn: false)]);
+      // The provider must READ the setting and hand it down; dropping the
+      // argument would leave the host permanently unable to report.
+      expect(launcher.telemetryFlags, [isTrue]);
 
       // Simulate sign-in: device now provisioned + currentUser non-null. Flipping
       // _authState re-resolves currentUserProvider, which fires the warm-up's listener.
@@ -147,6 +157,7 @@ void main() {
           currentUserProvider.overrideWith((ref) => ref.watch(_authState)),
           defaultRelayUrlProvider.overrideWithValue('ws://test.relay'),
           licenseApiUrlProvider.overrideWithValue('http://test.license'),
+          telemetryEnabledProvider.overrideWithValue(true),
         ],
       );
       addTearDown(container.dispose);
@@ -184,6 +195,7 @@ void main() {
         currentUserProvider.overrideWith((ref) => ref.watch(_authState)),
         defaultRelayUrlProvider.overrideWithValue('ws://test.relay'),
         licenseApiUrlProvider.overrideWithValue('http://test.license'),
+        telemetryEnabledProvider.overrideWithValue(true),
       ],
     );
     addTearDown(container.dispose);
@@ -230,6 +242,7 @@ void main() {
         currentUserProvider.overrideWith((ref) => ref.watch(_authState)),
         defaultRelayUrlProvider.overrideWithValue('ws://test.relay'),
         licenseApiUrlProvider.overrideWithValue('http://test.license'),
+        telemetryEnabledProvider.overrideWithValue(true),
       ],
     );
     addTearDown(container.dispose);
@@ -257,6 +270,9 @@ void main() {
         ),
         currentUserProvider.overrideWith((ref) => ref.watch(_authState)),
         defaultRelayUrlProvider.overrideWithValue('ws://test.relay'),
+        // Present so the swallowed failure is the launcher's own throw, not an
+        // unresolved provider read on the way to it.
+        telemetryEnabledProvider.overrideWithValue(true),
       ],
     );
     addTearDown(container.dispose);
@@ -302,6 +318,7 @@ class _ThrowingLauncher extends LocalAgentLauncher {
     String? licenseApiUrl,
     String? relayUrl,
     bool forceRespawn = false,
+    bool telemetryEnabled = false,
   }) async {
     throw StateError('spawn boom');
   }

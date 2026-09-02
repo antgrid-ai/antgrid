@@ -3,6 +3,7 @@ import 'package:uuid/uuid.dart';
 import 'agent_event.dart' show parseAgentEvent;
 import 'agent_hello.dart';
 import 'file_tree_models.dart';
+import 'git_sync_state.dart';
 import 'handler_state.dart' show HandlerEscalationChoice;
 import 'layout_models.dart';
 import 'preview_models.dart';
@@ -105,12 +106,30 @@ class ProxyStatusInfo {
 class GitInfo {
   final String branch;
 
-  const GitInfo({required this.branch});
+  /// Against the upstream REF, so as fresh as the last fetch — the same
+  /// contract `GitSyncState` documents. Both default to 0 rather than being
+  /// nullable: a bridge that predates the fields reports nothing, and "no
+  /// commits either way" is the right thing to render for an unknown answer.
+  final int ahead;
+  final int behind;
+  final bool hasUpstream;
+
+  const GitInfo({
+    required this.branch,
+    this.ahead = 0,
+    this.behind = 0,
+    this.hasUpstream = false,
+  });
 
   static GitInfo? fromJson(Map<String, dynamic> json) {
     final branch = json['branch'];
     if (branch is! String) return null;
-    return GitInfo(branch: branch);
+    return GitInfo(
+      branch: branch,
+      ahead: json['ahead'] is int ? json['ahead'] as int : 0,
+      behind: json['behind'] is int ? json['behind'] as int : 0,
+      hasUpstream: json['hasUpstream'] == true,
+    );
   }
 }
 
@@ -594,6 +613,245 @@ class GitUnstageResultMessage {
   });
 }
 
+/// One `git stash` entry, as `git:stash-list-result` reports it.
+class GitStashEntry {
+  /// e.g. `stash@{0}` — stable only until the next pop/drop shifts the list.
+  final String ref;
+
+  /// The branch HEAD pointed at when this stash was created; "" if the
+  /// bridge couldn't parse it back off git's own reflog subject.
+  final String branch;
+  final String message;
+
+  /// Unix seconds.
+  final int createdAt;
+
+  const GitStashEntry({
+    required this.ref,
+    required this.branch,
+    required this.message,
+    required this.createdAt,
+  });
+}
+
+class GitStashListResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final List<GitStashEntry> stashes;
+  final String? error;
+
+  const GitStashListResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.stashes,
+    this.error,
+  });
+}
+
+class GitStashPopResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final String ref;
+  final bool success;
+  final String? error;
+
+  const GitStashPopResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.ref,
+    required this.success,
+    this.error,
+  });
+}
+
+class GitStashDropResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final String ref;
+  final bool success;
+  final String? error;
+
+  const GitStashDropResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.ref,
+    required this.success,
+    this.error,
+  });
+}
+
+/// One row of `git:log-result` — a commit as the History tab lists it.
+class GitLogEntry {
+  final String sha;
+  final String shortSha;
+  final String subject;
+  final String authorName;
+  final String authorEmail;
+  final String authorDate;
+
+  const GitLogEntry({
+    required this.sha,
+    required this.shortSha,
+    required this.subject,
+    required this.authorName,
+    required this.authorEmail,
+    required this.authorDate,
+  });
+}
+
+class GitLogResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final List<GitLogEntry> commits;
+  final int skip;
+  final bool hasMore;
+  final String? error;
+
+  const GitLogResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.commits,
+    required this.skip,
+    required this.hasMore,
+    this.error,
+  });
+}
+
+/// One file changed within a single commit — `git:commit-files-result`'s
+/// per-path entry. No `staged` field (unlike [GitFileStatusEntry]): a commit
+/// has no index/worktree split, only what it changed.
+class GitCommitFileEntry {
+  final String path;
+  final String status;
+  final String? oldPath;
+  final int additions;
+  final int deletions;
+
+  const GitCommitFileEntry({
+    required this.path,
+    required this.status,
+    this.oldPath,
+    required this.additions,
+    required this.deletions,
+  });
+}
+
+class GitCommitFilesResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final String sha;
+  final List<GitCommitFileEntry> files;
+  final String? error;
+
+  const GitCommitFilesResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.sha,
+    required this.files,
+    this.error,
+  });
+}
+
+class GitCommitDiffContentMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final String sha;
+  final String path;
+  final String? diff;
+  final int additions;
+  final int deletions;
+
+  const GitCommitDiffContentMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.sha,
+    required this.path,
+    this.diff,
+    required this.additions,
+    required this.deletions,
+  });
+}
+
+class GitSyncResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final GitSyncOp op;
+  final bool success;
+
+  /// Null on a detached HEAD — the one shape with no branch to name.
+  final String? branch;
+  final String? remote;
+  final String? remoteBranch;
+  final String? summary;
+  final String? error;
+  final GitSyncFailureKind? failureKind;
+
+  /// Git's own invocation and stderr, present only on failure. Carried whole
+  /// because they are what the agent handoff forwards.
+  final String? command;
+  final String? stderr;
+
+  const GitSyncResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.op,
+    required this.success,
+    this.branch,
+    this.remote,
+    this.remoteBranch,
+    this.summary,
+    this.error,
+    this.failureKind,
+    this.command,
+    this.stderr,
+  });
+
+  /// The failure this result describes, or null when it succeeded. Folds the
+  /// wire fields into the shape the toast and the agent handoff both read, so
+  /// neither has to know which of `error`/`summary` carries the message.
+  GitSyncFailure? get failure {
+    if (success) return null;
+    return GitSyncFailure(
+      op: op,
+      kind: failureKind ?? GitSyncFailureKind.unknown,
+      message: error ?? '${op.label} failed',
+      branch: branch,
+      remote: remote,
+      remoteBranch: remoteBranch,
+      command: command,
+      stderr: stderr,
+    );
+  }
+}
+
+class GitSyncStateMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final GitSyncState state;
+
+  const GitSyncStateMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.state,
+  });
+}
+
 class SearchMatchEntry {
   final String path;
   final int line;
@@ -1063,6 +1321,19 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         mimeType: json['mimeType'] as String?,
       );
 
+    case 'file:resolve-path-result':
+      final projectId = json['projectId'];
+      final requestId = json['requestId'];
+      if (projectId is! String || requestId is! String) return null;
+      return FileResolvePathResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        requestId: requestId,
+        relPath: json['relPath'] as String?,
+        isDirectory: json['isDirectory'] as bool? ?? false,
+      );
+
     case 'ports:update':
       final projectId = json['projectId'];
       if (projectId is! String) return null;
@@ -1290,6 +1561,217 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         success: unstageSuccess,
         files: unstageFiles,
         error: json['error'] as String?,
+      );
+
+    case 'git:stash-list-result':
+      final stashProjectId = json['projectId'];
+      if (stashProjectId is! String) return null;
+      final stashesJson = json['stashes'];
+      final stashes = <GitStashEntry>[];
+      if (stashesJson is List) {
+        for (final s in stashesJson) {
+          if (s is! Map) continue;
+          final ref = s['ref'];
+          final branch = s['branch'];
+          final message = s['message'];
+          final createdAt = s['createdAt'];
+          if (ref is! String ||
+              branch is! String ||
+              message is! String ||
+              createdAt is! int) {
+            continue;
+          }
+          stashes.add(
+            GitStashEntry(
+              ref: ref,
+              branch: branch,
+              message: message,
+              createdAt: createdAt,
+            ),
+          );
+        }
+      }
+      return GitStashListResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: stashProjectId,
+        stashes: stashes,
+        error: json['error'] as String?,
+      );
+
+    case 'git:stash-pop-result':
+      final popProjectId = json['projectId'];
+      final popRef = json['ref'];
+      final popSuccess = json['success'];
+      if (popProjectId is! String || popRef is! String || popSuccess is! bool) {
+        return null;
+      }
+      return GitStashPopResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: popProjectId,
+        ref: popRef,
+        success: popSuccess,
+        error: json['error'] as String?,
+      );
+
+    case 'git:stash-drop-result':
+      final dropProjectId = json['projectId'];
+      final dropRef = json['ref'];
+      final dropSuccess = json['success'];
+      if (dropProjectId is! String ||
+          dropRef is! String ||
+          dropSuccess is! bool) {
+        return null;
+      }
+      return GitStashDropResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: dropProjectId,
+        ref: dropRef,
+        success: dropSuccess,
+        error: json['error'] as String?,
+      );
+
+    case 'git:log-result':
+      final projectId = json['projectId'];
+      final skip = json['skip'];
+      final hasMore = json['hasMore'];
+      if (projectId is! String || skip is! int || hasMore is! bool) {
+        return null;
+      }
+      final commitsJson = json['commits'];
+      final commits = <GitLogEntry>[];
+      if (commitsJson is List) {
+        for (final c in commitsJson) {
+          if (c is! Map) continue;
+          final sha = c['sha'];
+          final shortSha = c['shortSha'];
+          final subject = c['subject'];
+          final authorName = c['authorName'];
+          final authorEmail = c['authorEmail'];
+          final authorDate = c['authorDate'];
+          if (sha is! String ||
+              shortSha is! String ||
+              subject is! String ||
+              authorName is! String ||
+              authorEmail is! String ||
+              authorDate is! String) {
+            continue;
+          }
+          commits.add(
+            GitLogEntry(
+              sha: sha,
+              shortSha: shortSha,
+              subject: subject,
+              authorName: authorName,
+              authorEmail: authorEmail,
+              authorDate: authorDate,
+            ),
+          );
+        }
+      }
+      return GitLogResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        commits: commits,
+        skip: skip,
+        hasMore: hasMore,
+        error: json['error'] as String?,
+      );
+
+    case 'git:commit-files-result':
+      final projectId = json['projectId'];
+      final sha = json['sha'];
+      if (projectId is! String || sha is! String) return null;
+      final filesJson = json['files'];
+      final files = <GitCommitFileEntry>[];
+      if (filesJson is List) {
+        for (final f in filesJson) {
+          if (f is! Map) continue;
+          final path = f['path'];
+          final status = f['status'];
+          if (path is! String || status is! String) continue;
+          files.add(
+            GitCommitFileEntry(
+              path: path,
+              status: status,
+              oldPath: f['oldPath'] as String?,
+              additions: f['additions'] as int? ?? 0,
+              deletions: f['deletions'] as int? ?? 0,
+            ),
+          );
+        }
+      }
+      return GitCommitFilesResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        sha: sha,
+        files: files,
+        error: json['error'] as String?,
+      );
+
+    case 'git:commit-diff-content':
+      final projectId = json['projectId'];
+      final sha = json['sha'];
+      final path = json['path'];
+      if (projectId is! String || sha is! String || path is! String) {
+        return null;
+      }
+      return GitCommitDiffContentMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        sha: sha,
+        path: path,
+        diff: json['diff'] as String?,
+        additions: json['additions'] as int? ?? 0,
+        deletions: json['deletions'] as int? ?? 0,
+      );
+
+    case 'git:sync-result':
+      final syncProjectId = json['projectId'];
+      final syncSuccess = json['success'];
+      final syncOpRaw = json['op'];
+      if (syncProjectId is! String ||
+          syncSuccess is! bool ||
+          syncOpRaw is! String) {
+        return null;
+      }
+      // An unknown op is the one field with no safe fallback: a result the app
+      // cannot attribute to the button that is spinning would clear the wrong
+      // one. Rejecting the frame leaves the wall-clock latch to unstick it.
+      final syncOp = GitSyncOp.fromWire(syncOpRaw);
+      if (syncOp == null) return null;
+      final syncKindRaw = json['failureKind'];
+      return GitSyncResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: syncProjectId,
+        op: syncOp,
+        success: syncSuccess,
+        branch: json['branch'] as String?,
+        remote: json['remote'] as String?,
+        remoteBranch: json['remoteBranch'] as String?,
+        summary: json['summary'] as String?,
+        error: json['error'] as String?,
+        failureKind: syncKindRaw is String
+            ? GitSyncFailureKind.fromWire(syncKindRaw)
+            : null,
+        command: json['command'] as String?,
+        stderr: json['stderr'] as String?,
+      );
+
+    case 'git:sync-state':
+      final syncStateProjectId = json['projectId'];
+      if (syncStateProjectId is! String) return null;
+      return GitSyncStateMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: syncStateProjectId,
+        state: GitSyncState.fromJson(json),
       );
 
     case 'file:search-result':

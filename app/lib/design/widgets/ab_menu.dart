@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui' show ImageFilter, lerpDouble;
 
 import 'package:flutter/material.dart';
@@ -98,20 +99,7 @@ class AbMenu extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (header != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
-                child: Text(
-                  header!.toUpperCase(),
-                  // Antgrid spec: menu header is mono — the slot is usually
-                  // a session/branch/ref identifier ("SESSION · refactor-…").
-                  style: AbTokens.monoStyle(
-                    fontSize: AbTokens.fontXs,
-                    letterSpacing: 0.66,
-                    color: p.textMuted,
-                  ),
-                ),
-              ),
+            if (header != null) AbMenuHeaderLabel(header!),
             // `FocusTraversalGroup` keeps Tab/Shift-Tab cycling inside the
             // menu rather than escaping to the page beneath while the
             // popup route is on top.
@@ -153,6 +141,130 @@ class AbMenu extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// Menu-row metrics, shared by [AbLiveMenuRow] and `_MenuItemTile`. The two
+/// row kinds sit in the same popup — a live row next to a static one — so any
+/// drift between them reads as two different controls rather than one list.
+const _menuRowPadding = EdgeInsets.symmetric(horizontal: 8, vertical: 6);
+const double _menuRowIconSize = 13;
+const double _menuRowIconGap = 9;
+
+/// Header-row padding, shared by [AbMenu]'s own `header` and the standalone
+/// [AbMenuHeaderLabel] that reproduces it for a [showAbPanel] popup.
+const _menuHeaderPadding = EdgeInsets.fromLTRB(10, 8, 10, 6);
+
+/// A [AbMenu] header row's chrome (uppercase mono label, muted), as a
+/// standalone widget — for a popup opened via [showAbPanel] rather than
+/// [showAbMenu]: that route's content is a live `builder`, not [AbMenu]'s
+/// static `items`, so it cannot use [AbMenu.header] and instead composes this
+/// directly above its own rows.
+class AbMenuHeaderLabel extends StatelessWidget {
+  const AbMenuHeaderLabel(this.text, {super.key});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: _menuHeaderPadding,
+      child: Text(
+        text.toUpperCase(),
+        // Antgrid spec: menu header is mono — the slot is usually a
+        // session/branch/ref identifier ("SESSION · refactor-…").
+        style: AbTokens.monoStyle(
+          fontSize: AbTokens.fontXs,
+          letterSpacing: 0.66,
+          color: context.antgrid.textMuted,
+        ),
+      ),
+    );
+  }
+}
+
+/// One row of a live popup, styled to match [AbMenuItem]'s rendering
+/// (`_MenuItemTile` below) — for a [showAbPanel] popup, where a row's label
+/// or enabled state must react to a provider rather than being fixed at
+/// menu-open time the way [AbMenuItem]/[showAbMenu]'s static entries are.
+///
+/// Plain text + optional leading icon, no button chrome (border, fill,
+/// segmented cells) — the menu-row look every other kebab in the app already
+/// uses, so a popup built from live widgets doesn't read as a different kind
+/// of control just because it has to watch a provider.
+class AbLiveMenuRow extends StatelessWidget {
+  const AbLiveMenuRow({
+    super.key,
+    required this.label,
+    required this.onTap,
+    this.icon,
+    this.enabled = true,
+    this.disabledReason,
+    this.tooltip,
+  });
+
+  final String label;
+
+  /// Null renders the row inert (dimmed, no tap) with no way to reach it —
+  /// use [enabled]/[disabledReason] instead when the row should stay
+  /// reachable so its reason can surface.
+  final VoidCallback? onTap;
+
+  final String? icon;
+
+  /// False dims the row and, on tap, surfaces [disabledReason] as a snack bar
+  /// instead of calling [onTap] — same contract as [AbSegment.disabledReason].
+  final bool enabled;
+  final String? disabledReason;
+
+  /// Always-available hover/long-press hint, independent of [enabled] — for a
+  /// row that stays fully tappable but wants to explain itself first (e.g. an
+  /// agent Handler can't observe).
+  final String? tooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final live = enabled && onTap != null;
+    final fg = live ? p.textSecondary : p.textDisabled;
+    final iconFg = live ? p.textMuted : p.textDisabled;
+
+    void activate() {
+      if (!live) {
+        final reason = enabled ? null : disabledReason;
+        if (reason != null) showAbSnackBar(context, reason);
+        return;
+      }
+      onTap!();
+    }
+
+    Widget tile = MouseRegion(
+      cursor: live ? SystemMouseCursors.click : SystemMouseCursors.basic,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: activate,
+        child: Container(
+          padding: _menuRowPadding,
+          child: Row(
+            children: [
+              if (icon != null) ...[
+                AbIcon(icon!, size: _menuRowIconSize, color: iconFg),
+                const SizedBox(width: _menuRowIconGap),
+              ],
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(fontSize: AbTokens.fontSm, color: fg),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    final hint = tooltip ?? (enabled ? null : disabledReason);
+    if (hint != null) tile = AbTooltip(message: hint, child: tile);
+    return tile;
   }
 }
 
@@ -299,8 +411,10 @@ enum AbMenuPlacement { below, above }
 ///
 /// [bounds] (overlay coordinates) optionally restricts the area the
 /// menu may occupy — useful when the anchor lives inside a drawer or
-/// other sub-region that the popup shouldn't visually escape. When
-/// null, the menu is clamped only by the overlay's [SafeArea] insets.
+/// other sub-region that the popup shouldn't visually escape. It is always
+/// intersected with [safeMenuBounds] — the screen inset by its safe-area
+/// padding, in the same absolute frame as [anchorRect] — which is the whole
+/// clamp when [bounds] is null.
 /// Pass `MenuBoundsScope.maybeOf(context)` to auto-pick up the nearest
 /// scope.
 ///
@@ -348,6 +462,52 @@ Rect? abMenuAnchorRect(BuildContext context) {
   final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
   if (overlay == null) return null;
   return box.localToGlobal(Offset.zero, ancestor: overlay) & box.size;
+}
+
+/// The overlay's full extent, inset by the device's safe-area padding
+/// (notch/status bar/home indicator) — in the SAME overlay-absolute frame
+/// [abMenuAnchorRect] returns. Used as the default clamp region for both
+/// popup routes below.
+///
+/// Deliberately NOT a `SafeArea` widget wrapping the route's content: a
+/// `SafeArea` shifts its child's own coordinate origin by the inset, and
+/// [_AbMenuLayoutDelegate] positions its child using [anchorRect] — already
+/// expressed in absolute overlay coordinates. Nesting the layout inside a
+/// `SafeArea` re-applied that same top inset a SECOND time on top of an
+/// anchor that was already safely below it, so a menu anchored near the top
+/// of the screen (a phone header's kebab) opened a whole status-bar's-height
+/// below the button it belonged to, reading as a stray gap rather than a
+/// popup hanging off its trigger. Feeding the inset into the delegate's own
+/// `bounds` clamp keeps content off the unsafe edges without moving the
+/// coordinate frame the anchor math depends on.
+Rect safeMenuBounds(BuildContext context) {
+  final padding = MediaQuery.paddingOf(context);
+  final size = MediaQuery.sizeOf(context);
+  return Rect.fromLTWH(
+    padding.left,
+    padding.top,
+    math.max(0, size.width - padding.left - padding.right),
+    math.max(0, size.height - padding.top - padding.bottom),
+  );
+}
+
+/// The region a popup may actually occupy: a caller's scoped [bounds]
+/// INTERSECTED with [safeMenuBounds], never one or the other.
+///
+/// The two answer different questions — a scope says which sub-region of the
+/// screen the popup belongs to (a drawer, a rail) and knows nothing about the
+/// notch — so treating them as alternatives silently drops the inset for every
+/// scoped caller. Every `MenuBoundsScope` in the app is a full-height drawer
+/// whose rect reaches both screen edges, which is exactly where the home
+/// indicator and the status bar are: its footer menu's last row would sit
+/// under them. The `SafeArea` this replaced was additive for the same reason.
+Rect _resolveMenuBounds(BuildContext context, Rect? bounds) {
+  final safe = safeMenuBounds(context);
+  if (bounds == null) return safe;
+  final clamped = bounds.intersect(safe);
+  // A scope lying wholly outside the safe area has no honest intersection;
+  // the safe rect is at least on screen.
+  return clamped.isEmpty ? safe : clamped;
 }
 
 /// Show an arbitrary LIVE widget in the AbMenu popup chrome, anchored like
@@ -444,17 +604,15 @@ class _AbPanelRoute<T> extends PopupRoute<T> {
         ),
       ),
     );
-    return SafeArea(
-      child: CustomSingleChildLayout(
-        delegate: _AbMenuLayoutDelegate(
-          anchorRect: anchorRect,
-          preferred: preferred,
-          gap: gap,
-          bounds: bounds,
-        ),
-        child: capturedThemes.wrap(
-          FadeTransition(opacity: animation, child: keyboard),
-        ),
+    return CustomSingleChildLayout(
+      delegate: _AbMenuLayoutDelegate(
+        anchorRect: anchorRect,
+        preferred: preferred,
+        gap: gap,
+        bounds: _resolveMenuBounds(context, bounds),
+      ),
+      child: capturedThemes.wrap(
+        FadeTransition(opacity: animation, child: keyboard),
       ),
     );
   }
@@ -615,17 +773,15 @@ class _AbMenuRoute<T> extends PopupRoute<T> {
         child: menu,
       ),
     );
-    return SafeArea(
-      child: CustomSingleChildLayout(
-        delegate: _AbMenuLayoutDelegate(
-          anchorRect: anchorRect,
-          preferred: preferred,
-          gap: gap,
-          bounds: bounds,
-        ),
-        child: capturedThemes.wrap(
-          FadeTransition(opacity: animation, child: keyboard),
-        ),
+    return CustomSingleChildLayout(
+      delegate: _AbMenuLayoutDelegate(
+        anchorRect: anchorRect,
+        preferred: preferred,
+        gap: gap,
+        bounds: _resolveMenuBounds(context, bounds),
+      ),
+      child: capturedThemes.wrap(
+        FadeTransition(opacity: animation, child: keyboard),
       ),
     );
   }
@@ -781,7 +937,7 @@ class _MenuItemTileState extends State<_MenuItemTile> {
       child: GestureDetector(
         onTap: _activate,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          padding: _menuRowPadding,
           decoration: BoxDecoration(
             color: active ? p.bgHover : Colors.transparent,
             borderRadius: AbTokens.borderRadius3,
@@ -790,8 +946,8 @@ class _MenuItemTileState extends State<_MenuItemTile> {
             children: [
               if (i.icon != null)
                 Padding(
-                  padding: const EdgeInsets.only(right: 9),
-                  child: AbIcon(i.icon!, size: 13, color: iconFg),
+                  padding: const EdgeInsets.only(right: _menuRowIconGap),
+                  child: AbIcon(i.icon!, size: _menuRowIconSize, color: iconFg),
                 ),
               Expanded(
                 child: Text(

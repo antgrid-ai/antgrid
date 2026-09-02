@@ -138,6 +138,10 @@ class MachineSession {
   final _streamReadyController =
       StreamController<({String projectId, String streamId})>.broadcast();
 
+  /// channel → the decrypt-and-dispatch chain currently draining for it. See
+  /// [_onRouted]; an entry lives only while that channel has work in flight.
+  final Map<String, Future<void>> _inboundTails = {};
+
   /// projectId → streamId, learned from `agent:projects` / `stream-ready`.
   final Map<String, String> _projectStreamIds = {};
   final Map<String, Completer<String>> _streamReadyWaiters = {};
@@ -540,7 +544,27 @@ class MachineSession {
     if (msg.kind == FrameKind.handshake) return;
     final keys = _keys;
     if (keys == null) return; // pre-establishment: driver owns sealed frames
-    unawaited(_decryptAndDispatch(msg, keys));
+    // Chained per channel, never fired independently: `open()` is async and the
+    // platform AES-GCM implementation dispatches by payload size, so a small
+    // frame otherwise overtakes a large one — a `{"type":6}` ping ahead of the
+    // 30 KB render batch it acknowledges, one `terminal:output` chunk ahead of
+    // another, or a fragment ahead of its predecessor in [_reassembler]. The
+    // relay delivers a channel in order; this is what keeps that true through
+    // decryption. Channels stay independent of each other.
+    final ahead = _inboundTails[msg.channel] ?? Future<void>.value();
+    final next = ahead.then((_) => _decryptAndDispatch(msg, keys));
+    // A rejection must not strand every frame queued behind it.
+    final chained = next.catchError((Object _) {});
+    _inboundTails[msg.channel] = chained;
+    unawaited(
+      chained.whenComplete(() {
+        // Only the tail retires the entry — a later frame has already replaced
+        // it, and dropping that would let the next frame race this one.
+        if (identical(_inboundTails[msg.channel], chained)) {
+          _inboundTails.remove(msg.channel);
+        }
+      }),
+    );
   }
 
   Future<void> _decryptAndDispatch(
@@ -801,6 +825,7 @@ class MachineSession {
       if (!w.isCompleted) w.completeError(StateError('session disposed'));
     }
     _streamReadyWaiters.clear();
+    _inboundTails.clear();
     await _established$.close();
     await _takeovers.close();
     await _sessionDown.close();

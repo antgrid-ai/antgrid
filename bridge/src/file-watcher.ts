@@ -1,5 +1,5 @@
 import chokidar, { type FSWatcher } from "chokidar";
-import { relative, extname, basename, join, isAbsolute } from "node:path";
+import { relative, resolve, sep, extname, basename, join, isAbsolute } from "node:path";
 import { statSync, watch as fsWatch, type FSWatcher as NodeFSWatcher } from "node:fs";
 import { logger } from "./logger";
 const log = logger.child({ component: "file-watcher" });
@@ -44,6 +44,10 @@ export class FileWatcher {
     removed: new Set(),
   };
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Set when the native recursive watcher reports a change with no path —
+   *  see [startNativeRecursiveWatch] — so [flushBatch] falls back to a full
+   *  resync instead of sending an incremental batch it knows is incomplete. */
+  private needsFullResync = false;
 
   constructor(
     project: ProjectInfo,
@@ -149,28 +153,7 @@ export class FileWatcher {
       this.nativeWatcher = fsWatch(
         this.projectRoot,
         { recursive: true, persistent: true },
-        (_event, filename) => {
-          if (filename == null) return;
-          // Usually relative to projectRoot (String() also covers a Buffer if
-          // the platform yields one) — but Windows also delivers the ABSOLUTE
-          // watched root for events on the directory itself, so re-derive
-          // rather than trust it.
-          const raw = String(filename);
-          const rel = (isAbsolute(raw) ? relative(this.projectRoot, raw) : raw)
-            .replace(/\\/g, "/");
-          // `ignore` THROWS on a path that isn't root-relative instead of
-          // answering, and this callback runs on a libuv event with no caller
-          // to catch it — an unhandled RangeError that takes the watcher down
-          // (the chokidar path guards the same way for the same reason). The
-          // root itself and anything above it are honestly "not ignored", but
-          // there is also nothing under them to report.
-          if (!rel || rel === "." || rel === ".." || rel.startsWith("../")) return;
-          // The recursive stream sees the whole tree (the OS can't prune at the
-          // subscription level); apply the same ignore rules chokidar's
-          // `ignored` would, so node_modules/build/etc. churn is dropped here.
-          if (this.ig.ignores(rel)) return;
-          this.onNativeChange(join(this.projectRoot, rel));
-        },
+        (_event, filename) => this.handleNativeEvent(filename),
       );
       this.nativeWatcher.on("error", (err) =>
         log.error("File watcher error: %s", err),
@@ -186,6 +169,49 @@ export class FileWatcher {
       );
       this.startChokidarWatch();
     }
+  }
+
+  /**
+   * One event off the native recursive watcher.
+   *
+   * A named method rather than the inline closure it used to be, so the
+   * buffer-overflow branch below is reachable from a test — driving it through
+   * a real overflow means provoking one from the OS, and the private field it
+   * sets can be assigned directly without the branch that sets it ever running.
+   */
+  handleNativeEvent(filename: string | Buffer | null): void {
+    if (filename == null) {
+      // Windows' (and reportedly macOS's) recursive fs.watch reports exactly
+      // this — a change with no path — when its internal notification buffer
+      // overflows: a burst of filesystem activity (a new directory landing
+      // with many files in one go is enough, measured on Windows) drops the
+      // per-file events instead of queuing them, rather than raising an error.
+      // There is no path to diff here, so treat it as "something changed,
+      // scope unknown" and let flushBatch fall back to a full resync —
+      // otherwise some of the affected files never appear until the app's own
+      // pull-to-refresh forces a rebuild from disk.
+      this.needsFullResync = true;
+      this.scheduleBatch();
+      return;
+    }
+    // Usually relative to projectRoot (String() also covers a Buffer if the
+    // platform yields one) — but Windows also delivers the ABSOLUTE watched
+    // root for events on the directory itself, so re-derive rather than trust
+    // it.
+    const raw = String(filename);
+    const rel = (isAbsolute(raw) ? relative(this.projectRoot, raw) : raw)
+      .replace(/\\/g, "/");
+    // `ignore` THROWS on a path that isn't root-relative instead of answering,
+    // and this runs on a libuv event with no caller to catch it — an unhandled
+    // RangeError that takes the watcher down (the chokidar path guards the
+    // same way for the same reason). The root itself and anything above it are
+    // honestly "not ignored", but there is also nothing under them to report.
+    if (!rel || rel === "." || rel === ".." || rel.startsWith("../")) return;
+    // The recursive stream sees the whole tree (the OS can't prune at the
+    // subscription level); apply the same ignore rules chokidar's `ignored`
+    // would, so node_modules/build/etc. churn is dropped here.
+    if (this.ig.ignores(rel)) return;
+    this.onNativeChange(join(this.projectRoot, rel));
   }
 
   // Route a raw recursive-watch hit through the existing pending-change maps.
@@ -218,6 +244,48 @@ export class FileWatcher {
         encoding: result.encoding ?? "utf8",
         mimeType: result.mimeType,
         error: result.error,
+      }),
+    );
+  }
+
+  /** Resolves a path a terminal program printed (an OSC 8 `file://` hyperlink
+   *  target, absolute or already checkout-relative) against this checkout's
+   *  root, and replies with the checkout-relative form the app's file tree
+   *  understands. The app never learns the checkout's absolute root (see
+   *  `docs/architecture.md` — the checkout path never crosses the session
+   *  wire), so it cannot make this relative on its own; a null `relPath`
+   *  covers both a path from outside this checkout and one that fails to
+   *  resolve at all. Mirrors [readFile]'s own traversal guard. */
+  handleResolvePathRequest(requestId: string, rawPath: string): void {
+    const absPath = resolve(this.projectRoot, rawPath);
+    const normalizedRoot = resolve(this.projectRoot);
+    // Case-folded on Windows, where the comparison is between two strings that
+    // came from different places: the root as the host spelled it, and a drive
+    // letter as a terminal program printed it. `path.resolve` preserves the
+    // case of both, so a `file:///c:/...` hyperlink against a `C:\...` root
+    // reads as outside the checkout and the Files tab silently ignores it.
+    // `relative()` one method away already folds, so only this test dissents.
+    const cmpPath = process.platform === "win32" ? absPath.toLowerCase() : absPath;
+    const cmpRoot =
+      process.platform === "win32" ? normalizedRoot.toLowerCase() : normalizedRoot;
+    const insideRoot = cmpPath === cmpRoot || cmpPath.startsWith(cmpRoot + sep);
+    let relPath: string | null = null;
+    let isDirectory = false;
+    if (insideRoot) {
+      relPath =
+        absPath === normalizedRoot ? "" : this.toRelPath(absPath);
+      try {
+        isDirectory = statSync(absPath).isDirectory();
+      } catch {
+        // Doesn't exist (yet) — still a valid path to point the Files tab at.
+      }
+    }
+    this.sendMessage(
+      createMessage("file:resolve-path-result", {
+        projectId: this.projectId,
+        requestId,
+        relPath,
+        isDirectory,
       }),
     );
   }
@@ -301,6 +369,9 @@ export class FileWatcher {
   private flushBatch(): void {
     this.debounceTimer = null;
 
+    const fullResync = this.needsFullResync;
+    this.needsFullResync = false;
+
     const added = Array.from(this.pending.added.values());
     const modified = Array.from(this.pending.modified.values());
     const removed = Array.from(this.pending.removed);
@@ -310,7 +381,7 @@ export class FileWatcher {
     this.pending.modified.clear();
     this.pending.removed.clear();
 
-    if (added.length === 0 && modified.length === 0 && removed.length === 0) return;
+    if (!fullResync && added.length === 0 && modified.length === 0 && removed.length === 0) return;
 
     // Ahead of the suppression gate below, and not gated by it: git status is
     // not a heavy-stream frame, and its cache is what a reconnecting app is
@@ -321,6 +392,22 @@ export class FileWatcher {
     const seq = this.connState.bumpFileSeq();
     if (this.connState.suppressed) {
       // Drop the update; the next tree-snapshot reply will reflect the current tree.
+      // A pending RESYNC is deferred rather than dropped: the flag was consumed
+      // above, and the delta stream it exists to correct is exactly what
+      // survives a suppression window — clearing it here would leave the app's
+      // base missing every add and remove from the overflow with nothing able
+      // to notice.
+      this.needsFullResync ||= fullResync;
+      return;
+    }
+
+    if (fullResync) {
+      // The watcher lost track of what actually changed (see the null-filename
+      // branch above) — whatever named add/modify/remove this same tick also
+      // captured is incomplete at best, so send the real thing instead: the
+      // same full tree a manual pull-to-refresh would rebuild.
+      this.sendFullTree({ force: true });
+      log.debug("tree resync for project %s — watcher reported an unnamed change", this.projectId);
       return;
     }
 

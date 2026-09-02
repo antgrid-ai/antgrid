@@ -2,7 +2,8 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../services/app_settings_service.dart' show defaultRelayUrlProvider;
+import '../services/app_settings_service.dart'
+    show defaultRelayUrlProvider, telemetryEnabledProvider;
 import '../services/auth_service.dart' show CurrentUser;
 import '../services/keychain_device_store.dart' show DeviceRecord;
 import '../util/ab_log.dart';
@@ -60,6 +61,10 @@ final localHostWarmupProvider = Provider<void>((ref) {
         licenseApiUrl: device != null ? ref.read(licenseApiUrlProvider) : null,
         relayUrl: device != null ? ref.read(defaultRelayUrlProvider) : null,
         forceRespawn: forceRespawn,
+        // Read here rather than carried down from main(): this warm-up runs
+        // BEFORE main()'s own initCrashReporting, so there is no decision to
+        // inherit yet — only the setting both of them read.
+        telemetryEnabled: ref.read(telemetryEnabledProvider),
       );
       spawnedClientId = device?.clientId;
       warmedOnce = true;

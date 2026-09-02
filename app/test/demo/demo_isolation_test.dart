@@ -27,7 +27,6 @@ import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/drawer_collapsed_store.dart';
 import 'package:antgrid/storage/project_store.dart';
-import 'package:antgrid/storage/recent_ports_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -113,28 +112,6 @@ void main() {
       final rows = container.read(recentSessionsProvider);
       expect(rows, isNotEmpty);
       expect(rows.map((r) => r.origin.projectName).toSet(), {kDemoDisplayName});
-    });
-  });
-
-  group('recent ports', () {
-    test('the demo dev server is never remembered', () async {
-      useInMemoryPrefs();
-      final store = await RecentPortsStore.open();
-      addTearDown(store.close);
-
-      await store.add(kDemoProjectId, 5173, 'http');
-
-      expect(store.list(kDemoProjectId), isEmpty);
-    });
-
-    test('a real project still remembers its ports', () async {
-      useInMemoryPrefs();
-      final store = await RecentPortsStore.open();
-      addTearDown(store.close);
-
-      await store.add('real-project', 5173, 'http');
-
-      expect(store.list('real-project'), hasLength(1));
     });
   });
 
