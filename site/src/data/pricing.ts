@@ -36,13 +36,23 @@ export const OFFER_ACTIVE = true;
 
 const seatPriceUsd = OFFER_ACTIVE ? YEARLY_OFFER_USD : YEARLY_LIST_USD;
 
+/** Which surface a founding-pricing address came from — sent as `source` to
+ *  web's /api/waitlist, which bounds it to `/^[a-z0-9][a-z0-9_-]*$/`. A closed
+ *  union rather than `string` so a surface added with a space or a capital fails
+ *  `astro check` instead of 400ing at every reader with copy that blames their
+ *  email address. Adding a member needs no web deploy — the endpoint takes any
+ *  slug of that shape — but it must not collide with a source web sends itself
+ *  (`app_pricing`), or the two surfaces become one row. */
+export type WaitlistSource = "pricing";
+
 export type PlanCardData = {
   id: "free" | "trial" | "pro_yearly";
   // checkoutId overrides the planId sent to the checkout URL (e.g. yearly trial uses sku "trial").
   checkoutId?: string;
   // ctaHref bypasses checkout entirely — for CTAs that are just sign-in links.
   ctaHref?: string;
-  // Renders a disabled "Coming soon" button in place of the checkout CTA.
+  // Renders the founding-price capture (WaitlistCta.astro) in place of the
+  // checkout CTA.
   comingSoon?: boolean;
   name: string;
   priceUsd: number;
@@ -149,7 +159,7 @@ export const faq: { q: string; a: string }[] = [
   {
     q: BETA_FREE ? "What happens when the beta ends?" : "Is there a free trial?",
     a: BETA_FREE
-      ? `Nothing switches off without warning. Paid plans activate, the prices on this page are the launch prices, and Pro starts with a ${TRIAL_DAYS}-day free trial. The free plan stays free.`
+      ? `Nothing switches off without warning. Paid plans activate${OFFER_ACTIVE ? ` at the founding prices on this page — below the $${YEARLY_LIST_USD} list price at launch` : " at the prices on this page"}, and Pro starts with a ${TRIAL_DAYS}-day free trial. The free plan stays free.`
       : `Yes — Pro starts with a ${TRIAL_DAYS}-day free trial on one seat. Your card is not charged until the trial ends, and cancelling before then costs nothing.`,
   },
   {

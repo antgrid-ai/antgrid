@@ -1,4 +1,4 @@
-import { Layout, PageHead } from "./layout.js";
+import { Layout } from "./layout.js";
 import { asset } from "./asset.js";
 import { FREE_WORKER_LIMIT } from "../billing/plans.js";
 import type { PlanRow } from "../models/plan.js";
@@ -11,9 +11,10 @@ export type PricingPageProps = {
 /** The public waitlist endpoint (web/src/routes/waitlist.ts), which the
  *  marketing site posts to as well — same origin as this page, so a relative
  *  action reaches it. `source` is the bounded slug its schema expects, naming
- *  the surface that captured the signup. */
+ *  the surface that captured the signup; the marketing site's own card sends
+ *  "pricing", so this one has to differ or the two surfaces are one row. */
 const WAITLIST_ACTION = "/api/waitlist";
-const WAITLIST_SOURCE = "pricing";
+const WAITLIST_SOURCE = "app_pricing";
 
 /** Sales address for the contract-only plan. */
 const ENTERPRISE_MAILTO = "mailto:contact@radhaai.com";
@@ -107,19 +108,28 @@ function FeatureList({
 
 /** The founding-price capture, in the slot a plan's buy button will take back.
  *
- *  One per page: entries/waitlist.ts binds by id, and a second copy would
- *  collide on every one of them. */
-function WaitlistCta({ email }: { email?: string | null }) {
+ *  Every element the script touches is found by data attribute from the form
+ *  outwards, so a second copy of this card binds its own controls rather than
+ *  driving the first one's. */
+function WaitlistCta({ email, id }: { email?: string | null; id: string }) {
+  // Ids are per instance for the same reason the script's lookups are scoped to
+  // the form: a second card on the page would otherwise duplicate them, and a
+  // duplicate `for` focuses the FIRST card's input from the second card's label.
+  const inputId = `${id}-email`;
+  const statusId = `${id}-status`;
   return (
-    <div class="mt-auto pt-6">
+    <div class="mt-auto pt-6" data-waitlist-card>
+      {/* `action` names the real endpoint, but the submit button ships DISABLED
+          and the script enables it. Without that, a page whose script failed to
+          load would do a native urlencoded POST, and the endpoint reads JSON —
+          so the reader would be navigated off /pricing onto a raw error body. */}
       <form
-        id="waitlist-form"
         method="post"
         action={WAITLIST_ACTION}
-        data-waitlist-source={WAITLIST_SOURCE}
+        data-waitlist={WAITLIST_SOURCE}
         class="space-y-2"
       >
-        <label class="sr-only" for="waitlist-email">
+        <label class="sr-only" for={inputId}>
           Email
         </label>
         {/* Prefilled with the signed-in address: /pricing is behind the session
@@ -128,23 +138,40 @@ function WaitlistCta({ email }: { email?: string | null }) {
             address is a fair answer to "tell me when this launches". */}
         <input
           type="email"
-          id="waitlist-email"
+          id={inputId}
           name="email"
           required
           autocomplete="email"
+          aria-describedby={statusId}
           value={email ?? ""}
           placeholder="you@example.com"
           class="input input-bordered font-mono w-full"
         />
-        <button type="submit" id="waitlist-submit" class="btn btn-primary w-full">
+        <button
+          type="submit"
+          data-waitlist-submit
+          disabled
+          class="btn btn-primary w-full"
+        >
           Join the waitlist
         </button>
       </form>
       {/* Idle note, error and confirmation all land here, on the `min-h-10` the
           plan footers already reserve — so none of the three resizes the card. */}
-      <p id="waitlist-status" class="text-xs text-center mt-3 min-h-10 text-faint" role="status">
+      <p
+        id={statusId}
+        data-waitlist-status
+        class="text-xs text-center mt-3 min-h-10 text-faint"
+        role="status"
+      >
         Founding pricing at launch.
       </p>
+      <noscript>
+        <p class="text-xs text-center text-faint">
+          Joining needs JavaScript. Turn it on, or email contact@radhaai.com with the
+          subject “Founding pricing” and we will add you.
+        </p>
+      </noscript>
     </div>
   );
 }
@@ -232,7 +259,7 @@ function ProYearlyCard({ plan, email }: { plan: PlanRow; email?: string | null }
           maxSeats={plan.maxSeats}
         />
 
-        <WaitlistCta email={email} />
+        <WaitlistCta email={email} id="waitlist-pro" />
       </div>
     </div>
   );

@@ -74,6 +74,10 @@ export function buildApp(deps: AppDeps) {
       credentials: true,
       allowHeaders: ["content-type", "authorization"],
       allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+      // Without this the fetch spec caches a preflight for 5 seconds, so every
+      // retry on a cross-origin JSON POST (the marketing site's waitlist form)
+      // pays a second round trip before the one that carries the body.
+      maxAge: 86400,
     })
   );
 

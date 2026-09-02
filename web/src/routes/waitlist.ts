@@ -12,13 +12,14 @@ import { tokenBucket } from "../util/rate-limit.js";
 const Signup = z.object({
   // Normalise before validating, not after: the unique index is what makes a
   // repeat submit a no-op, and "A@x.com" vs "a@x.com" would otherwise be two
-  // rows for one person. Trim runs first so a mobile keyboard's trailing space
-  // is a signup, not a 400.
+  // rows for one person. The 254 bound is applied to the TRIMMED value, so a
+  // mobile keyboard's trailing space is a signup and not a 400; the outer bound
+  // only exists to stop an unbounded string reaching `toLowerCase`.
   email: z
     .string()
-    .max(254)
+    .max(1024)
     .transform((s) => s.trim().toLowerCase())
-    .pipe(z.email()),
+    .pipe(z.email().max(254)),
   source: z.string().min(1).max(40).regex(/^[a-z0-9][a-z0-9_-]*$/),
 });
 
@@ -37,10 +38,11 @@ export function waitlistRoutes(deps: { db: DB; clientIp: ClientIpResolver }) {
     const ip = deps.clientIp(c) ?? "unknown";
     if (!signupLimiter(ip)) return c.json({ ok: false, error: "RATE_LIMITED" }, 429);
 
+    // A bare code, no `issues`: this endpoint answers any origin anonymously and
+    // neither client reads the detail — both pick their wording from the status —
+    // so echoing Zod's paths and received values back is reach with no caller.
     const parsed = Signup.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      return c.json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
-    }
+    if (!parsed.success) return c.json({ ok: false, error: "BAD_REQUEST" }, 400);
 
     // createMany + skipDuplicates emits INSERT ... ON CONFLICT DO NOTHING, so
     // two concurrent submits of the same address cannot race into a unique

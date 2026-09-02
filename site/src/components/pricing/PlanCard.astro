@@ -3,8 +3,8 @@ import { Icon } from "astro-icon/components";
 import Button from "../ui/Button.astro";
 import WaitlistCta from "./WaitlistCta.astro";
 import { links } from "../../config";
-import { type PlanCardData } from "../../data/pricing";
-interface Props { plan: PlanCardData; waitlistSource?: string }
+import { type PlanCardData, type WaitlistSource } from "../../data/pricing";
+interface Props { plan: PlanCardData; waitlistSource?: WaitlistSource }
 const { plan, waitlistSource = "pricing" } = Astro.props;
 ---
 <div class={`flex flex-col rounded-lg border bg-panel p-5.5 ${plan.recommended ? "border-signalbtn" : "border-edge"}`}>
