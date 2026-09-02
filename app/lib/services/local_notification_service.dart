@@ -77,9 +77,9 @@ class LocalNotificationService {
   ///
   /// Carries no `payload:`/`actions:` and [init] registers no response
   /// callback, because a tapped action here has nothing to deliver and nowhere
-  /// to deliver it: `bridge/src/push/push-dispatcher.ts` seals only
-  /// `{title, body, kind, projectId, sourceMessageId}`, so an escalation's
-  /// quick choices never reach this layer; and an answer must be sealed on a
+  /// to deliver it: the payload `bridge/src/push/push-dispatcher.ts` seals
+  /// carries routing ids only, so an escalation's quick choices never reach
+  /// this layer; and an answer must be sealed on a
   /// live E2E session (`HandlerService.reply` → `ProjectSession.send`), which
   /// a background/headless isolate does not have and no offline queue holds.
   /// On iOS the escalation notification is not ours at all — the NSE in

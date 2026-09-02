@@ -1812,6 +1812,9 @@ export class HostServer {
       },
       currentPeerPubkey: () => client.currentPeerPubkey(),
       currentPeerSupportsCheckoutRouting: () => client.peerSupportsCheckoutRouting,
+      // client.deviceId, NOT the one from identityFor(): a local core is handed a fresh
+      // randomUUID(), which addresses no machine the phone knows.
+      machineDeviceId: () => client.deviceId,
       sendPushDeliver: (m) => client.sendPushDeliver(m),
     };
   }

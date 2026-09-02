@@ -13,6 +13,7 @@ function harness(overrides: Partial<Parameters<typeof createPushDispatcher>[0]> 
     projectId: "p1",
     shouldFallback: () => true,
     resolveTargets: () => [target],
+    machineUuid: () => "machine-uuid-1",
     seal: (json, pubkey) => { sealed.push(json); sealKeys.push(pubkey); return { epk: "E", box: "B" }; },
     deliver: (t, prov, blob) => delivered.push({ t, prov, blob }),
     ...overrides,
@@ -22,28 +23,28 @@ function harness(overrides: Partial<Parameters<typeof createPushDispatcher>[0]> 
 
 test("composePush mirrors the app strings", () => {
   expect(composePush(createMessage("notification:push", { notificationType: "task_complete", message: "built", projectId: "p1" })))
-    .toEqual({ title: "Task complete", body: "built", kind: "agent" });
+    .toEqual({ title: "Task complete", body: "built", kind: "agent", sourceMessageId: expect.any(String) });
   expect(composePush(createMessage("handler:escalation", {
     projectId: "p1", escalationId: "e1", terminalId: "t", question: "Deploy?", reasoning: "", draftReply: "", urgency: "high", at: 1,
-  }))).toEqual({ title: "Handler — urgent", body: "Deploy?", kind: "handler" });
+  }))).toEqual({ title: "Handler — urgent", body: "Deploy?", kind: "handler", sourceMessageId: "e1", terminalId: "t" });
 });
 
 test("composePush: sessionTitle becomes the title, message the body", () => {
   expect(composePush(createMessage("notification:push", {
     notificationType: "task_complete", message: "Added a regression test", sessionTitle: "Fix auth bug", projectId: "p1",
-  }))).toEqual({ title: "Fix auth bug", body: "Added a regression test", kind: "agent" });
+  }))).toEqual({ title: "Fix auth bug", body: "Added a regression test", kind: "agent", sourceMessageId: expect.any(String) });
 });
 
 test("composePush: sessionTitle without a message keeps the label as the body", () => {
   expect(composePush(createMessage("notification:push", {
     notificationType: "task_complete", sessionTitle: "Fix auth bug", projectId: "p1",
-  }))).toEqual({ title: "Fix auth bug", body: "Task complete", kind: "agent" });
+  }))).toEqual({ title: "Fix auth bug", body: "Task complete", kind: "agent", sourceMessageId: expect.any(String) });
 });
 
 test("composePush: neither field degrades to today's exact strings", () => {
   expect(composePush(createMessage("notification:push", {
     notificationType: "task_complete", projectId: "p1",
-  }))).toEqual({ title: "Task complete", body: "Task complete", kind: "agent" });
+  }))).toEqual({ title: "Task complete", body: "Task complete", kind: "agent", sourceMessageId: expect.any(String) });
 });
 
 test("composePush: body never falls back to sessionTitle", () => {
@@ -57,13 +58,13 @@ test("composePush: body never falls back to sessionTitle", () => {
 test("composePush: empty strings are treated as absent", () => {
   expect(composePush(createMessage("notification:push", {
     notificationType: "error", message: "", sessionTitle: "", projectId: "p1",
-  }))).toEqual({ title: "Agent error", body: "Agent error", kind: "agent" });
+  }))).toEqual({ title: "Agent error", body: "Agent error", kind: "agent", sourceMessageId: expect.any(String) });
 });
 
 test("composePush: sessionTitle titles a permission request too", () => {
   expect(composePush(createMessage("notification:push", {
     notificationType: "permission_request", message: "Run rm -rf build?", sessionTitle: "Fix auth bug", projectId: "p1",
-  }))).toEqual({ title: "Fix auth bug", body: "Run rm -rf build?", kind: "agent" });
+  }))).toEqual({ title: "Fix auth bug", body: "Run rm -rf build?", kind: "agent", sourceMessageId: expect.any(String) });
 });
 
 test("suppressed peer → seals payload and delivers", () => {
@@ -74,7 +75,39 @@ test("suppressed peer → seals payload and delivers", () => {
   expect(delivered).toHaveLength(1);
   expect(delivered[0].t).toBe("tok");
   const payload = JSON.parse(sealed[0]);
-  expect(payload).toEqual({ title: "Handler needs you", body: "Deploy?", kind: "handler", projectId: "p1", sourceMessageId: "e1" });
+  expect(payload).toEqual({
+    title: "Handler needs you", body: "Deploy?", kind: "handler",
+    projectId: "p1", machineUuid: "machine-uuid-1", terminalId: "t", sourceMessageId: "e1",
+  });
+});
+
+test("a notification that names no session seals no terminalId key at all", () => {
+  // An empty string would read to the phone as a session it should resolve and
+  // fail to find; the hook path's sessionId is legitimately optional.
+  const { d, sealed } = harness();
+  d.onOutbound(createMessage("notification:push", { notificationType: "idle", projectId: "p1" }));
+  expect(Object.keys(JSON.parse(sealed[0]))).not.toContain("terminalId");
+});
+
+test("a notification that names a session seals it as the terminalId", () => {
+  // The hook path is the primary producer, and the phone resolves this id back
+  // to a cached session uuid to pick the terminal to open — a neighbouring
+  // field (msg.id, the checkoutId) type-checks here and lands on nothing.
+  const { d, sealed } = harness();
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "task_complete", sessionId: "sess-1", projectId: "p1",
+  }));
+  expect(JSON.parse(sealed[0]).terminalId).toBe("sess-1");
+});
+
+test("an unbounded session title is capped before sealing", () => {
+  // The relay rejects an oversized box outright and answers no push:result, so
+  // an uncapped title loses the whole notification rather than truncating it.
+  const { d, sealed } = harness();
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "task_complete", sessionTitle: "x".repeat(300), projectId: "p1",
+  }));
+  expect(JSON.parse(sealed[0]).title.length).toBe(120);
 });
 
 test("not suppressed (in-band available) → no delivery", () => {
