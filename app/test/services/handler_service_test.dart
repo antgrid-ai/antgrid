@@ -21,7 +21,6 @@ Map<String, dynamic> _sessionJson({
   required String terminalId,
   required int pendingEscalations,
   String state = 'watching',
-  bool notifyOnly = false,
   String goal = 'summary',
   List<Map<String, dynamic>> backlog = const [],
   List<Map<String, dynamic>> escalations = const [],
@@ -29,7 +28,6 @@ Map<String, dynamic> _sessionJson({
   String? judgeModel,
 }) => {
   'terminalId': terminalId,
-  'notifyOnly': notifyOnly,
   'state': state,
   'pendingEscalations': pendingEscalations,
   'armedAt': 0,
@@ -65,17 +63,35 @@ Map<String, dynamic> _snapshotJson({
   'state': state,
 };
 
+Map<String, dynamic> _wrapUpJson({String wrapUpId = 'w1', int at = 9}) => {
+  'wrapUpId': wrapUpId,
+  'terminalId': 't1',
+  'at': at,
+  'goal': 'ship the parser',
+  'outcomes': [
+    {
+      'status': 'done',
+      'total': 2,
+      'items': ['item a', 'item b'],
+    },
+  ],
+  'blockedTotal': 0,
+  'blockedReasons': <String>[],
+};
+
 Map<String, dynamic> _escalationJson(
   String escalationId, {
   String? kind,
   List<Map<String, dynamic>>? choices,
+  String urgency = 'normal',
+  int at = 1,
 }) => {
   'escalationId': escalationId,
   'question': 'q',
   'reasoning': 'r',
   'draftReply': 'd',
-  'urgency': 'normal',
-  'at': 1,
+  'urgency': urgency,
+  'at': at,
   'kind': ?kind,
   'choices': ?choices,
 };
@@ -90,6 +106,87 @@ const _choicesJson = [
 ];
 
 void main() {
+  test('a live urgent escalation outranks the ones already listed', () async {
+    // The push is what raises the toast, and the status frame that re-sorts
+    // arrives milliseconds later — but the user taps in between, and an
+    // appended row sat at the bottom of the very list the toast sent them to.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(
+          terminalId: 't1',
+          pendingEscalations: 2,
+          state: 'needs_you',
+          escalations: [
+            _escalationJson('waiting-1', at: 1),
+            _escalationJson('waiting-2', at: 2),
+          ],
+        ),
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    t.emit('handler:escalation', {
+      'projectId': 'p',
+      'escalationId': 'blocking',
+      'terminalId': 't1',
+      'question': 'q',
+      'reasoning': 'r',
+      'draftReply': 'd',
+      'urgency': 'high',
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.escalations.map((e) => e.escalationId), [
+      'blocking',
+      'waiting-1',
+      'waiting-2',
+    ]);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a replayed set comes back banded, not merely in age order', () async {
+    // Reconnect replays every unanswered escalation at once. Age order alone
+    // put the blocking one last on a list the user opened to unblock it.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(
+          terminalId: 't1',
+          pendingEscalations: 3,
+          state: 'needs_you',
+          escalations: [
+            _escalationJson('waiting', at: 1),
+            _escalationJson('blocking', at: 3, urgency: 'high'),
+            _escalationJson('waiting-later', at: 2),
+          ],
+        ),
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.escalations.map((e) => e.escalationId), [
+      'blocking',
+      'waiting',
+      'waiting-later',
+    ]);
+
+    await svc.dispose();
+    await session.close();
+  });
+
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {
@@ -187,7 +284,6 @@ void main() {
 
       svc.arm(
         terminalId: 't1',
-        notifyOnly: false,
         judgeTool: 'opencode',
         judgeModel: 'm1',
       );
@@ -198,7 +294,7 @@ void main() {
       // Arming without touching the judge controls omits the override keys, so
       // the bridge leaves the session's stored judge record alone (no
       // clobber-to-default).
-      svc.arm(terminalId: 't1', notifyOnly: false);
+      svc.arm(terminalId: 't1');
       final plain = t.sent.lastWhere((m) => m['type'] == 'handler:configure');
       expect(plain.containsKey('judgeTool'), isFalse);
       expect(plain.containsKey('judgeModel'), isFalse);
@@ -337,7 +433,6 @@ void main() {
     // a touched arm would silently revert the choice.
     svc.arm(
       terminalId: 't1',
-      notifyOnly: false,
       judgeTool: 'opencode',
       judgeModel: '',
     );
@@ -747,9 +842,73 @@ void main() {
 
       expect(svc.currentState.sessions.keys, ['t1']);
       expect(svc.currentState.snapshots, isEmpty);
+      expect(svc.currentState.wrapUps, isEmpty);
 
       await svc.dispose();
       await session.close();
     },
   );
+
+  test('the wrap-up replay survives a status frame with nothing armed', () async {
+    // The morning-after case, and the only delivery there is: the bridge emits
+    // no per-wrap-up advert, so an app that restarted after the disarm sees the
+    // report on this frame or never.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': <Map<String, dynamic>>[],
+      'wrapUps': [_wrapUpJson(at: 9), _wrapUpJson(wrapUpId: 'w0', at: 2)],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.anyArmed, isFalse);
+    // Oldest first, like the offers beside them — the section renders reversed.
+    expect(
+      svc.currentState.wrapUps.map((w) => w.wrapUpId),
+      ['w0', 'w1'],
+    );
+    expect(svc.currentState.wrapUps.last.outcomes.single.total, 2);
+
+    // Wholesale replace, not append: the replay is the bridge's full current
+    // set, so an aged-out record leaves rather than accumulating a duplicate.
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': <Map<String, dynamic>>[],
+      'wrapUps': [_wrapUpJson(at: 9)],
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.wrapUps.map((w) => w.wrapUpId), ['w1']);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a malformed wrap-up drops itself, not the frame', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [_sessionJson(terminalId: 't1', pendingEscalations: 0)],
+      'wrapUps': [
+        {'wrapUpId': 'broken'},
+        _wrapUpJson(),
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.sessions.keys, ['t1']);
+    expect(svc.currentState.wrapUps.single.wrapUpId, 'w1');
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
 }

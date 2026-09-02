@@ -32,7 +32,9 @@ function resolveCmd(cmd: string[], prompt: string): string[] {
 // only the time the first attempt left unspent. This keeps worst-case wall time at
 // ~timeoutMs, which is what lets a caller racing this against its own deadline
 // bound it; a per-spawn budget would let a slow-but-malformed first attempt push
-// the real total to ~2×timeoutMs and lose that race.
+// the real total to ~2×timeoutMs and lose that race. No caller races it today, so
+// that shape is a kept invariant rather than a description of live behaviour —
+// which is what means adding such a caller needs no change here.
 async function runWithRetry<T>(opts: {
   tool: string; model?: string; cwd: string; timeoutMs: number;
   spawn?: typeof Bun.spawn; transcriptPath?: string;
@@ -44,6 +46,11 @@ async function runWithRetry<T>(opts: {
   // safety verdicts live above this function and must stay unreachable from
   // the retry — a retry loop around a safety verdict is a bypass.
   retryIf?: (value: T) => string | null;
+  // The null this function returns reads upstream as one undifferentiated judge
+  // outage — a failed spawn, an unparseable answer and a hung judge are the same
+  // value there. The timeout is the one leg that can be named, and naming it is
+  // what would let the budget below be set from measurement rather than guessed at.
+  onTimeout?: () => void;
 }): Promise<T | null> {
   const spawn = opts.spawn ?? Bun.spawn;
   // Reach first: a transcript-reach judge has no Read tool, so a transcript-path
@@ -77,17 +84,24 @@ async function runWithRetry<T>(opts: {
   // would silently swallow a decision its own guards would have escalated with
   // the text attached. Null still comes back where it always did — a first
   // attempt whose output would not parse at all.
-  if (out1.timedOut) return r1.value; // hung judge with unusable output: no retry
+  if (out1.timedOut) { opts.onTimeout?.(); return r1.value; } // hung judge with unusable output: no retry
 
   // Budget spent by the first attempt is gone; the retry runs only within what
   // remains. If none is left, fail closed rather than start a full second timeout.
+  //
+  // Both legs below report the timeout for the same reason the first attempt
+  // does: the hook exists so a null reaches the caller NAMED rather than as an
+  // undifferentiated outage, and a first attempt that ate the whole budget or a
+  // retry that hung are timeouts however the individual spawns exited. A spawn
+  // that FAILED (`out2 === null`) is not one and keeps its silence.
   const remaining = opts.timeoutMs - (Date.now() - started);
-  if (remaining <= 0) return r1.value;
+  if (remaining <= 0) { opts.onTimeout?.(); return r1.value; }
   const retryPrompt = shapeError
     ? buildShapeRetryPrompt(prompt, shapeError)
     : buildRetryPrompt(prompt, r1.error ?? "invalid output");
   const out2 = await run(retryPrompt, remaining);
   if (out2 === null) return r1.value;
+  if (out2.timedOut) opts.onTimeout?.();
   // Exactly one retry: the second answer is final even if it breaks the same
   // rule, and the caller's own gate escalates it from there.
   return opts.parse(out2.stdout).value ?? r1.value;
@@ -104,11 +118,12 @@ export async function runDecision(opts: {
   agentTool?: string;
   commands?: CapCommand[];
   retryIfShape?: (decision: HandlerDecision) => string | null;
+  onTimeout?: () => void;
 }): Promise<HandlerDecision | null> {
   return runWithRetry<HandlerDecision>({
     tool: opts.tool, model: opts.model, cwd: opts.cwd,
     timeoutMs: opts.timeoutMs ?? 45_000, spawn: opts.spawn, transcriptPath: opts.transcriptPath,
-    retryIf: opts.retryIfShape,
+    retryIf: opts.retryIfShape, onTimeout: opts.onTimeout,
     makePrompt: (path) => buildDecidePrompt({
       goal: opts.goal, backlogText: opts.backlogText, context: opts.context, transcriptPath: path,
       floorWarnings: opts.floorWarnings, evidenceRejections: opts.evidenceRejections,
@@ -122,13 +137,13 @@ export async function runDecision(opts: {
 }
 
 // Deliberately no transcriptPath and no context parameter: extraction reads the
-// user's instruction and the list it is already keeping for them, and nothing else
-// (spec §3.1) — no transcript, no working tree — so there is no context tier to
+// user's instruction and the list it is already keeping for them, and nothing
+// else — no transcript, no working tree — so there is no context tier to
 // assemble. `backlog` is what lets one sentence take back an earlier one; it is
 // rendered under the extractor's own bound (renderAmendable), never whole. The
 // budget is well under decide's 45s because this prompt carries no transcript
-// excerpt and the arm it feeds is non-blocking (§3.2) — a slower one only widens
-// the window in which the backlog is still empty.
+// excerpt and the arm it feeds is non-blocking — a slower one only widens the
+// window in which the backlog is still empty.
 export async function runExtraction(opts: {
   tool: string; model?: string; text: string; cwd: string;
   backlog?: InstructionItem[];

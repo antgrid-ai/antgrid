@@ -12,7 +12,7 @@ enum HandlerInstructResult { sent, empty, duplicate }
 
 /// Per-project mirror of the bridge Handler subsystem. Reduces `handler:*`
 /// inbound messages into a [HandlerState]; never persists (the bridge owns
-/// `handler-config.json` / `handler-activity.jsonl`).
+/// `handler-activity.jsonl`).
 class HandlerService {
   final ProjectSession session;
 
@@ -38,13 +38,22 @@ class HandlerService {
   // a status frame, and every survivor is re-baselined against the same one).
   final Map<String, ({int backlog, int armedAt})> _instructBaselines = {};
 
-  // Terminals whose next status frame is already spent. An amendment is the one
-  // bridge outcome that BOTH records an activity row and emits a snapshot, and
-  // the snapshot carries a backlog its own drop has already shortened — so read
-  // as a survivor's evidence it would retire a second sentence whose extraction
-  // has not started. Marked when the row retires off it, and spent by
-  // [_retirePending] re-baselining that terminal instead of retiring off it.
+  // Terminals whose next status frame is already spent. Every bridge outcome
+  // that records an instruction row emits a snapshot straight after it, and for
+  // the two that also moved the backlog — an amendment, and a cap hit that still
+  // had room for part of the batch — that snapshot carries a change the retired
+  // sentence itself made. Read as a survivor's evidence it would retire a second
+  // sentence whose extraction has not started. Marked when the row retires off
+  // its activity record, and spent by [_retirePending] re-baselining that
+  // terminal instead of retiring off it.
   final Set<String> _creditedStatus = {};
+
+  // Terminals whose arm seeded a goal the bridge will extract behind the
+  // handoff. That pass runs on the SAME per-terminal chain instructions
+  // queue on, and ahead of them — so its append moves backlogTotal exactly the
+  // way a sentence's does, with nothing on the wire saying which of the two
+  // moved it. Held so [_retirePending] can spend that one frame on the goal.
+  final Set<String> _armGoalExtractions = {};
 
   // Judge picks, keyed by terminalId. `sessions` in [HandlerState] only holds
   // currently-armed sessions, so a disarmed terminal's judge pick would
@@ -156,10 +165,17 @@ class HandlerService {
   /// against what was just observed, so the next sentence in the queue waits
   /// for a change of its own rather than inheriting this one's.
   ///
-  /// The cap path appends nothing and emits no status at all, so it is not
-  /// reachable from here — [_onHeavyJson] retires that one off its own activity
-  /// record. An amendment does emit one, and [_creditedStatus] is how that frame
-  /// re-baselines the survivors instead of answering for them too.
+  /// A backlog already AT the cap appends nothing and emits no status at all,
+  /// so it is not reachable from here — [_onHeavyJson] retires that one off its
+  /// own activity record. The two outcomes that record a row AND emit a frame —
+  /// an amendment, and a cap hit that still had room for part of the batch —
+  /// are why [_creditedStatus] exists: that frame re-baselines the survivors
+  /// instead of answering for them too.
+  ///
+  /// [_armGoalExtractions] covers the one append that is nobody's sentence: a
+  /// goal seeded at arm time is extracted on this same chain and lands FIRST,
+  /// so a preset tapped while it was still running was retired by the goal's
+  /// own items — with the preset's extraction not yet started.
   Map<String, List<String>> _retirePending(
     Map<String, HandlerSessionState> sessions,
   ) {
@@ -169,12 +185,17 @@ class HandlerService {
       final session = sessions[terminalId];
       final baseline = _instructBaselines[terminalId];
       final credited = _creditedStatus.remove(terminalId);
-      final answered =
+      final moved =
           session == null ||
-          (!credited &&
-              (baseline == null ||
-                  session.backlogTotal != baseline.backlog ||
-                  session.armedAt != baseline.armedAt));
+          baseline == null ||
+          session.backlogTotal != baseline.backlog ||
+          session.armedAt != baseline.armedAt;
+      // Spent only on a frame that actually moved: an unchanged one retires
+      // nothing, so letting it consume the goal pass would hand the goal's real
+      // append to the sentence behind it after all.
+      final goalPass =
+          moved && session != null && _armGoalExtractions.remove(terminalId);
+      final answered = session == null || (!credited && !goalPass && moved);
       final kept = session == null
           ? const <String>[]
           : (answered ? entry.value.sublist(1) : entry.value);
@@ -195,15 +216,20 @@ class HandlerService {
   /// arrive outside a status snapshot. The baseline is left where it is: the
   /// session it was taken against has not moved.
   ///
-  /// [spendsNextStatus] is whether the bridge emits a snapshot alongside this
-  /// record. It does for an amendment, and that snapshot's backlog is one item
-  /// shorter — which [_retirePending] would otherwise read as the NEXT sentence
-  /// having landed, taking its "sending" row away while its extraction is still
-  /// running and lifting the edit lock inside the window it exists to cover.
-  Map<String, List<String>> _withOldestPendingRetired(
-    String terminalId, {
-    required bool spendsNextStatus,
-  }) {
+  /// A survivor is always credited the next status frame. The blanket rule rests
+  /// on a bridge invariant: every path that records an instruction row emits a
+  /// snapshot immediately after it, so the record and its frame arrive as a
+  /// pair. Two of those records ride with a snapshot whose backlog this same
+  /// sentence already moved — an amendment, and a cap hit that still had room
+  /// for some of the batch — and [_retirePending] would read either as the NEXT
+  /// sentence having landed, taking its "sending" row away while its extraction
+  /// is still running and lifting the edit lock inside the window it exists to
+  /// cover. The rest emit an unchanged snapshot, which spends the credit for
+  /// nothing. Break that invariant on the bridge (a `record` with no
+  /// `emitStatus` behind it, see `extractAndAppend` and `appendItems` in
+  /// bridge/src/handler/engine.ts) and the credit lands on the survivor's own
+  /// append instead, stranding its row for good.
+  Map<String, List<String>> _withOldestPendingRetired(String terminalId) {
     final outstanding = _state.pendingInstructionsFor(terminalId);
     if (outstanding.isEmpty) return _state.pendingInstructions;
     final next = Map<String, List<String>>.from(_state.pendingInstructions);
@@ -213,7 +239,7 @@ class HandlerService {
       _creditedStatus.remove(terminalId);
     } else {
       next[terminalId] = outstanding.sublist(1);
-      if (spendsNextStatus) _creditedStatus.add(terminalId);
+      _creditedStatus.add(terminalId);
     }
     return next;
   }
@@ -236,7 +262,7 @@ class HandlerService {
     // it too. This is what lets the "needs you" rows survive an app restart
     // or reconnect instead of leaving a badge that points at nothing.
     final escalations = [for (final s in sessions.values) ...s.escalations]
-      ..sort((a, b) => a.at.compareTo(b.at));
+      ..sort(compareEscalations);
     // An id the bridge no longer replays has been retired there, so nothing is
     // left to suppress and the set cannot grow with the session's history.
     _answeredEscalations.retainWhere(
@@ -251,6 +277,15 @@ class HandlerService {
       if (s != null) snapshots.add(s);
     }
     snapshots.sort((a, b) => a.at.compareTo(b.at));
+    // Wholesale again, and this is the only delivery there is: no per-wrap-up
+    // advert exists, the status emit inside the bridge's own disarm carries the
+    // record, and a reconnect long after that disarm has nothing else to read.
+    final wrapUps = <HandlerWrapUp>[];
+    for (final raw in msg.wrapUps) {
+      final w = HandlerWrapUp.fromWire(raw);
+      if (w != null) wrapUps.add(w);
+    }
+    wrapUps.sort((a, b) => a.at.compareTo(b.at));
     // A status frame is authoritative about which entries EXIST and what the
     // bridge last decided about them, but it says nothing about an undo still
     // running: an in-flight one is still 'available' until its own
@@ -265,12 +300,22 @@ class HandlerService {
     // Read before the state moves: [_retirePending] compares the snapshot
     // against the session each sentence was sent against.
     final pendingInstructions = _retirePending(sessions);
+    // After it, never before: the frame carrying the goal's own items is the one
+    // [_retirePending] needs the mark for. The bridge extracts a goal only into
+    // an EMPTY backlog, so a session that now has items has either run that pass
+    // or skipped it for good — and a terminal that is gone runs nothing. Left
+    // standing, the mark would wait for the user's first sentence and swallow
+    // the frame that sentence's own append raised.
+    _armGoalExtractions.removeWhere((t) {
+      final s = sessions[t];
+      return s == null || s.backlogTotal > 0;
+    });
     final next = _state.copyWith(
       sessions: sessions,
-      defaultNotifyOnly: msg.defaultNotifyOnly,
       escalations: escalations,
       defaultTool: msg.defaultTool,
       snapshots: snapshots,
+      wrapUps: wrapUps,
       pendingUndo: pendingUndo,
       pendingInstructions: pendingInstructions,
     );
@@ -299,7 +344,14 @@ class HandlerService {
           choices: msg.choices,
         );
         _emit(
-          _state.copyWith(escalations: [..._state.escalations, escalation]),
+          _state.copyWith(
+            // Sorted on the way in, not appended: a status frame re-sorts
+            // within milliseconds, but the push is what raises the toast, and
+            // between the two the row the user came to answer would be sitting
+            // at the bottom of the list.
+            escalations: [..._state.escalations, escalation]
+              ..sort(compareEscalations),
+          ),
         );
         // Read back out of the state rather than forwarded: the floors in
         // [_withChoiceFloors] may have withdrawn the card on the way in, and a
@@ -332,20 +384,18 @@ class HandlerService {
       case 'handler:activity':
         final msg = parseAbMessage(json);
         if (msg is! HandlerActivityMessage) return;
-        // The two outcomes an instruction can reach that [_retirePending] cannot
-        // read off the item count: a backlog already at the bridge's cap appends
-        // nothing and emits nothing, and an amendment moves the count for a
-        // reason that is this sentence's own answer rather than the next one's.
-        // Left unretired, the "sending" row stands forever and the edit lock it
-        // raises holds Delete — which under a full backlog is the only thing that
-        // frees room — until an unrelated handler event, a re-arm or a reconnect.
-        final amended = msg.decision == 'instruction_amended';
+        // The outcomes an instruction can reach that [_retirePending] cannot read
+        // off the item count: a backlog at the bridge's cap appends nothing at
+        // all (and emits nothing) or appends only part of the batch, and an
+        // amendment moves the count for a reason that is this sentence's own
+        // answer rather than the next one's. Left unretired, the "sending" row
+        // stands forever and the edit lock it raises holds Delete — which under a
+        // full backlog is the only thing that frees room — until an unrelated
+        // handler event, a re-arm or a reconnect.
         final pendingInstructions =
-            amended || msg.decision == 'instruction_dropped'
-            ? _withOldestPendingRetired(
-                msg.terminalId,
-                spendsNextStatus: amended,
-              )
+            msg.decision == 'instruction_amended' ||
+                msg.decision == 'instruction_dropped'
+            ? _withOldestPendingRetired(msg.terminalId)
             : _state.pendingInstructions;
         final next = <HandlerActivityRecord>[
           HandlerActivityRecord(
@@ -370,11 +420,11 @@ class HandlerService {
     }
   }
 
-  /// Arm [terminalId]. Spec §4.1: arming takes one tap and requires no payload,
-  /// so [goal] and [backlog] are both optional and an omitted one leaves the
-  /// bridge's stored value untouched — absent is not empty. Pass `backlog: []`
-  /// to clear it explicitly. The bridge's backlog is authoritative once
-  /// extraction appends to it, so never round-trip a stale copy back.
+  /// Arm [terminalId]. Arming takes one tap and requires no payload, so [goal]
+  /// and [backlog] are both optional and an omitted one leaves the bridge's
+  /// stored value untouched — absent is not empty. Pass `backlog: []` to clear
+  /// it explicitly. The bridge's backlog is authoritative once extraction
+  /// appends to it, so never round-trip a stale copy back.
   ///
   /// [judgeTool]/[judgeModel] are this session's judge choice; `''` clears back
   /// to default and a name sets it. Pass null (the default) to leave the
@@ -386,7 +436,6 @@ class HandlerService {
     required String terminalId,
     String? goal,
     List<HandlerInstructionItem>? backlog,
-    required bool notifyOnly,
     String? judgeTool,
     String? judgeModel,
   }) {
@@ -406,6 +455,27 @@ class HandlerService {
             : prev?.model,
       );
     }
+    // Mirrors the condition the bridge queues an arm-time extraction on: a goal
+    // with words in it, no backlog carried alongside it (an app-supplied list is
+    // already the user's own, and extracting the goal beside it would double
+    // every item), and — for a session that is ALREADY armed — a goal that
+    // actually moved. Restating the same goal is a no-op there (`goalChanged` in
+    // bridge/src/handler/engine.ts), and a mark nothing will satisfy waits for
+    // the user's first sentence and swallows the frame that sentence's own
+    // append raised. `updateBacklog` sends a backlog and no goal, so an edit
+    // never sets this.
+    //
+    // A prediction, not a fact: the bridge also extracts a goal REHYDRATED off
+    // its own disk record, which arrives on a one-tap arm carrying no goal at
+    // all and cannot be mirrored from here. That append still answers for a
+    // sentence that did not cause it.
+    final armedGoal = _state.sessions[terminalId]?.goal.trim();
+    if (goal != null &&
+        goal.trim().isNotEmpty &&
+        backlog == null &&
+        armedGoal != goal.trim()) {
+      _armGoalExtractions.add(terminalId);
+    }
     session.send(
       createAbMessage('handler:configure', {
         'projectId': session.projectId,
@@ -413,7 +483,6 @@ class HandlerService {
         'armed': true,
         'goal': ?goal,
         'backlog': ?backlog?.map((i) => i.toWire()).toList(),
-        'notifyOnly': notifyOnly,
         'judgeTool': ?judgeTool,
         'judgeModel': ?judgeModel,
       }),
@@ -430,7 +499,6 @@ class HandlerService {
         'projectId': session.projectId,
         'terminalId': terminalId,
         'armed': false,
-        'notifyOnly': false,
       }),
     );
   }
@@ -445,10 +513,6 @@ class HandlerService {
   /// edit and never carry an edited copy across an async gap: extraction
   /// appends to the bridge's list behind the handoff, and a full replace built
   /// from a pre-extraction snapshot deletes whatever landed in between.
-  ///
-  /// [notifyOnly] must be the session's CURRENT value — the field is required
-  /// on the wire, so a guessed one silently flips the session between notifying
-  /// and acting.
   ///
   /// The goal is deliberately not a parameter: a changed goal arriving without
   /// a backlog re-extracts into the session, so the two edits stay separate
@@ -471,11 +535,10 @@ class HandlerService {
   bool updateBacklog({
     required String terminalId,
     required List<HandlerInstructionItem> backlog,
-    required bool notifyOnly,
   }) {
     if (_disposed) return false;
     if (_state.pendingInstructionsFor(terminalId).isNotEmpty) return false;
-    arm(terminalId: terminalId, backlog: backlog, notifyOnly: notifyOnly);
+    arm(terminalId: terminalId, backlog: backlog);
     return true;
   }
 
@@ -529,9 +592,9 @@ class HandlerService {
     return HandlerInstructResult.sent;
   }
 
-  /// Undo [snapshot] — the one tap spec §5.2 trades prevention for. The bridge
-  /// owns the result: it re-states the entry as `undone` or as `failed` with a
-  /// reason, so nothing is assumed here beyond marking the id in flight.
+  /// Undo [snapshot] — the one tap the snapshot traded prevention for. The
+  /// bridge owns the result: it re-states the entry as `undone` or as `failed`
+  /// with a reason, so nothing is assumed here beyond marking the id in flight.
   ///
   /// A spent or unrecognised entry sends nothing rather than firing a message
   /// the bridge would discard — the row that renders it offers no tap either,
@@ -753,23 +816,24 @@ class HandlerService {
     );
   }
 
-  /// Answer [escalation] by tapping one of its own quick choices (spec §4.6).
+  /// Answer [escalation] by tapping one of its own quick choices.
   /// [choiceId] is resolved against the offered set and the choice's `text` is
   /// what goes on the wire, so a caller holding only an id — an OS notification
   /// action — can never put text of its own into the session, and an id that no
   /// longer matches sends nothing rather than something else.
   ///
   /// Routes through [reply] and deliberately NOT through [instruct]: a tap
-  /// grants no §5.4 authorization lift. `handler:instruct` is the sole feed
-  /// point for instruction-scoped authorization and §5.4 derives that only from
-  /// the user's own instruction text — chip text is Assistant output (the judge
-  /// composed the draft `[Approve]` sends), so minting a lift from it is the
-  /// laundering path §5.4 exists to close. It would also stack an extraction
-  /// item no terminal status can resolve, leaving the session unable to wrap
-  /// up. The costs are asymmetric: under-lifting costs one advisory
-  /// `floor_warning` row per repeat, since the floor records rather than
-  /// blocks, while over-lifting costs a session-wide grant nobody read. The
-  /// real lift stays one control away, in the user's own words, via the PA bar.
+  /// grants no authorization lift. `handler:instruct` is the sole feed point
+  /// for instruction-scoped authorization, and it derives that only from the
+  /// user's own instruction text — chip text is Assistant output (the judge
+  /// composed the draft `[Approve]` sends), so minting a lift from it would
+  /// launder the judge's own words into a grant the user never gave. It would
+  /// also stack an extraction item no terminal status can resolve, leaving the
+  /// session unable to wrap up. The costs are asymmetric: under-lifting costs
+  /// one advisory `floor_warning` row per repeat, since the floor records
+  /// rather than blocks, while over-lifting costs a session-wide grant nobody
+  /// read. The real lift stays one control away, in the user's own words, via
+  /// the PA bar.
   ///
   /// Returns whether the answer reached the wire, so a card can only show a
   /// send as in-flight when one actually is.

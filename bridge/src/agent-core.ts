@@ -7,6 +7,12 @@ import { logger } from "./logger";
 const log = logger.child({ component: "agent-core" });
 import { TerminalManager } from "./terminal-manager";
 import { createKeyedLock } from "./keyed-lock";
+import {
+  hasTypedContent,
+  isInterruptKeystroke,
+  isSubmitKeystroke,
+  submittedLine,
+} from "./keystrokes";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
 import { FileWatcher } from "./file-watcher";
@@ -152,53 +158,6 @@ export function buildChatSpawnAugment(
       ...(apiPort != null ? { ANTGRID_API_PORT: String(apiPort) } : {}),
     },
   };
-}
-
-/**
- * Whether a `terminal:input` payload submitted a prompt, for the work-status
- * turn inference agents without a pre-turn hook depend on (see work-status.ts).
- *
- * A TUI submits on CR, so that's the signal — but only as the FINAL byte, and
- * never behind ESC: `\x1b\r` is alt+enter, which inserts a newline into a
- * multi-line prompt rather than sending it. Treating that as a submit would open
- * a turn nothing is going to close, which is exactly the stale "working" dot the
- * turn model exists to avoid. Shift+enter under the kitty protocol
- * (`\x1b[13;2u`) carries no CR at all and needs no special case.
- */
-export function isSubmitKeystroke(data: string): boolean {
-  return data.endsWith("\r") && !data.endsWith("\x1b\r");
-}
-
-/**
- * Whether a `terminal:input` payload carried anything BESIDES the submitting CR.
- *
- * A PTY delivers one keystroke per frame, so the CR that submits a prompt almost
- * always arrives alone — which makes {@link isSubmitKeystroke} on its own unable
- * to tell "the user sent a prompt" from "the user pressed enter on an empty
- * prompt, or to dismiss a TUI menu". The latter starts no turn, so nothing will
- * ever close the one it opens. work-status.ts pairs the two: a keystroke-inferred
- * turn needs typed content since the last one (see `typedSessions`).
- *
- * Escape sequences count as content on purpose — arrow-key history recall then
- * enter IS a submit, and the alternative (dropping it) loses a real turn.
- */
-export function hasTypedContent(data: string): boolean {
-  return data.replace(/\r$/, "").length > 0;
-}
-
-/**
- * Whether a `terminal:input` payload was a bare Escape keypress — the
- * interactive interrupt shortcut every agent CLI honors, and the only signal
- * a hook-based session gets that the user meant to abort a running turn.
- *
- * Exactly `\x1b` and nothing else: any longer sequence starting with ESC
- * (arrow keys, function keys, alt+key, kitty-protocol chunks, alt+enter's
- * `\x1b\r`) is content, not an interrupt, and must not be misread as one — a
- * PTY assembles a full escape sequence before writing it, so a lone ESC byte
- * in one frame unambiguously means the user pressed just that key.
- */
-export function isInterruptKeystroke(data: string): boolean {
-  return data === "\x1b";
 }
 
 export interface AgentCore {
@@ -813,13 +772,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (!manager) return;
     const runtime = runtimeFor(msg);
     switch (msg.type) {
-      case "terminal:input":
-        manager.write(internalTerminalId(runtime, msg.terminalId), msg.data);
+      case "terminal:input": {
+        // The app sends a handler reply, an escalation chip and a composer send
+        // as one `line + CR` frame, so the split has to happen here: two
+        // relay-routed frames arrive back to back and the bridge writes them as
+        // they arrive, which gives the phone no way to time the gap itself.
+        const id = internalTerminalId(runtime, msg.terminalId);
+        const line = submittedLine(msg.data);
+        if (line === null) manager.write(id, msg.data);
+        else manager.submit(id, line);
         // Typing into a session counts as activity — float it up the drawer.
         // No-ops for non-session terminals (service PTYs).
         sessions?.touch(msg.terminalId);
-        // A user reply resets the handler's runaway guard; a submitted line
-        // (data carrying CR/LF) also clears the pending escalations.
+        // A submitted line — isSubmitKeystroke, so a trailing CR but never
+        // alt+enter's `\x1b\r` nor a paste's embedded ones — resets the
+        // handler's runaway guard and clears the pending escalations; a bare
+        // keystroke reaches it and returns early.
         handlerEngine.onUserReply(msg.terminalId, msg.data);
         // ...and answers whatever the hook reported this session as blocked on.
         // A terminal-mode session has no resolve frame — the keystroke IS the
@@ -832,24 +800,24 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         });
         if (isInterruptKeystroke(msg.data)) opts.onInterrupt?.(msg.terminalId);
         break;
+      }
       case "handler:configure": {
         // parseMessageFast (the encrypted/local hot path) validates only the
-        // message type — every field below is still untrusted, so every field
-        // arming acts on has to be re-parsed, not just the ones the sender
-        // happened to fill in: a `notifyOnly` that arrives absent or non-bool
-        // reads as falsy and would arm an auto-injecting session the user asked
-        // to be notify-only.
+        // message type — every field below is still untrusted. Re-parsed as a
+        // whole rather than field by field because BacklogWire's duplicate-id
+        // refine has to run before arm() assigns the list wholesale: a shadowed
+        // item is unreachable by every transition, leaving a session that can
+        // never wrap up.
         const parsed = HandlerConfigureWire.safeParse(msg);
         if (parsed.success && parsed.data.armed) {
-          const { terminalId, goal, backlog, notifyOnly, judgeTool, judgeModel } = parsed.data;
-          handlerEngine.arm({ terminalId, goal, backlog, notifyOnly, judgeTool, judgeModel });
+          const { terminalId, goal, backlog, judgeTool, judgeModel } = parsed.data;
+          handlerEngine.arm({ terminalId, goal, backlog, judgeTool, judgeModel });
         } else if (parsed.success) {
           handlerEngine.disarm(parsed.data.terminalId);
         } else {
           // Reject WITHOUT disarming: a malformed arm/edit must not tear down
-          // the live armed session it failed to replace, and refusing to arm
-          // already closes the notifyOnly hole. Re-emit status so the sender's
-          // UI resyncs to the state that actually holds.
+          // the live armed session it failed to replace. Re-emit status so the
+          // sender's UI resyncs to the state that actually holds.
           logger.warn("handler:configure rejected: malformed payload");
           handlerEngine.emitStatus();
         }
@@ -1551,7 +1519,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     adapter: createDispatchAdapter({
       isChat: (id) => sessions?.get(id)?.mode === "chat",
       pty: createPtyAdapter({
-        write: (terminalId, data) => manager?.write(terminalId, data),
+        submit: (terminalId, line) => manager?.submit(terminalId, line),
         getRecentOutput: (terminalId) => manager?.getScrollback(terminalId)?.text ?? "",
         getTranscriptPath: (terminalId) => sessions?.getAgentTranscriptPath(terminalId),
       }),
@@ -2639,9 +2607,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         });
       },
       cancelCheckoutSetup: (checkoutId) => setupRunner.cancel(checkoutId),
-      checkoutDeclaresSetup: (checkout) => {
-        // A config that will not parse cannot say there is nothing to run, so
-        // the doubt is reported as "declares" and the user gets the banner.
+      checkoutSetupPolicy: (checkout) => {
+        // A config that will not parse cannot say there is nothing to run, nor
+        // that the agent may skip the wait: the doubt is reported as "declares"
+        // so the user gets the banner, and as the gating default so it does not
+        // also launch an agent into a tree nothing can vouch for.
         try {
           const setup = setupRunner.resolveSetup(checkout);
           // An EMPTY `steps` list is a declaration of nothing, and the same
@@ -2649,8 +2619,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // a project it cannot fingerprint (`buildStarterWorktreeSetup`), so
           // reading it as "declares" would defer services for a run that only
           // ever reports `done`, and stamp that durably.
-          return !!setup && setup.steps.length > 0;
-        } catch { return true; }
+          if (!setup || setup.steps.length === 0) {
+            return { declares: false, startAgent: "afterSetup" as const };
+          }
+          return { declares: true, startAgent: setup.startAgent };
+        } catch { return { declares: true, startAgent: "afterSetup" as const }; }
       },
       announceCheckoutRuntime: (checkoutId) => {
         const runtime = checkoutRuntimes.runtime(checkoutId);
@@ -2989,7 +2962,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb(buildAgentHello(config, VERSION));
     // Re-sync the config-error dot on every connect (see emitConfigState).
     emitConfigState();
-    // Seed the app's Handler defaults (judge overrides, notify-only) even when
+    // Seed the app's Handler defaults (judge overrides) even when
     // nothing is armed — arming is one tap and carries no payload, so it arms
     // with whatever this snapshot seeded.
     handlerEngine.emitStatus();

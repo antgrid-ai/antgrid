@@ -95,6 +95,7 @@ worktree:
           CI: "1"
     timeoutMs: 600000      # the whole run, not per step (default 10 min)
     onFailure: warn        # the only value v1 accepts
+    startAgent: afterSetup # or `immediate` — default afterSetup
 ```
 
 - A step carries **either** `copy` **or** `run`, never both, and `name` is
@@ -114,6 +115,24 @@ worktree:
 - `onFailure: warn` is the only accepted value; the enum reserves `block` for a
   version whose UI has an escape hatch from a session wedged behind setup. A
   failed run never blocks the agent — it leaves a persistent banner.
+- `startAgent` decides whether this session's agent WAITS for the run.
+  `afterSetup` (the default) queues the `session:start` and fires it when the
+  run settles; the entry reports `running: false` with `setup.pendingStart` for
+  the whole run, which is what the app's provisioning pane and its auto-start
+  guards read. `immediate` launches the agent alongside the first step.
+  **Nothing orders the two PTYs**: the agent can beat a `copy:` step, so a
+  project whose first step carries `.env` in should expect it to be absent for
+  the agent's first seconds — which is why the wait is the default rather than
+  something inferred from how fast a given project's steps happen to be. The
+  `services:` deferral is a SEPARATE axis and is not lifted by `immediate`:
+  `bun run dev` against an unprovisioned `node_modules` fails with nobody
+  watching, unlike an agent. Per-run, the banner's `Start agent now` releases a
+  waiting agent by hand (the `skip` verb), so `immediate` is that choice made
+  once in config rather than a new capability.
+- Like the rest of the block, `startAgent` is branch-supplied. It decides only
+  whether the agent waits, never what it runs — the `agent:` block already
+  supplied that, and `run:` steps are already the same trust class as
+  `services` — so it crosses no boundary the block did not already cross.
 - The block is honoured **only** from an `antgrid.yaml` that physically lives in
   the checkout. `findConfigFile` falls back to `<ANTGRID_DIR>/antgrid.yaml`, and
   a machine-global setup block would otherwise run for every project's

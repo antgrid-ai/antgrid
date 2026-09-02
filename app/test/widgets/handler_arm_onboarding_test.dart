@@ -84,6 +84,55 @@ void main() {
       );
     });
 
+    test('a watched session with no headless judge says so before arming', () {
+      // The bridge already knows this the moment the session arms and shows it
+      // as ESCALATE ONLY on the card — a chip you find by walking away and
+      // coming back to a session that woke you for everything.
+      final body = handlerArmExplainerBody(
+        agentObservable: true,
+        judgeCapable: false,
+      );
+      expect(body, startsWith(base));
+      expect(body, endsWith(escalateOnlyNotice));
+    });
+
+    test('a headless judge adds nothing', () {
+      expect(
+        handlerArmExplainerBody(agentObservable: true, judgeCapable: true),
+        base,
+      );
+    });
+
+    test('the judge caveat reads after the seeded goal', () {
+      final body = handlerArmExplainerBody(
+        agentObservable: true,
+        judgeCapable: false,
+        hasOpeningPrompt: true,
+      );
+      expect(body, contains('queues that as your backlog'));
+      expect(body, endsWith(escalateOnlyNotice));
+    });
+
+    test('an unwatchable agent does not stack a second caveat', () {
+      // It reports nothing Handler can act on, so what its judge could have
+      // done is moot — and a hedge under the stronger fact only dilutes it.
+      final body = handlerArmExplainerBody(
+        agentObservable: false,
+        agentLabel: 'Claude Code',
+        judgeCapable: false,
+      );
+      expect(body, isNot(contains(escalateOnlyNotice)));
+      expect(body, endsWith(unwatchableNotice('Claude Code')));
+    });
+
+    test('unknown coverage claims nothing about the judge either', () {
+      final body = handlerArmExplainerBody(
+        agentObservable: null,
+        judgeCapable: null,
+      );
+      expect(body, isNot(contains(escalateOnlyNotice)));
+    });
+
     test('the coverage warning still reads last', () {
       final body = handlerArmExplainerBody(
         agentObservable: false,
@@ -91,6 +140,64 @@ void main() {
         hasOpeningPrompt: true,
       );
       expect(body, endsWith(unwatchableNotice('Claude Code')));
+    });
+  });
+
+  group('handlerShieldTooltip', () {
+    // The explainer's copy matrix has its own group above. This is the surface
+    // that answers every time, and the two must agree about precedence.
+    test('an armed session offers only the way out', () {
+      expect(
+        handlerShieldTooltip(armed: true, observable: false, judgeCapable: false),
+        'Disarm Handler',
+      );
+    });
+
+    test('an escalate-only agent is named before the arm, not after', () {
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: true,
+          judgeCapable: false,
+        ),
+        escalateOnlyNotice,
+      );
+    });
+
+    test('unwatchable outranks escalate-only', () {
+      // Both true of the same agent says one thing: it reports nothing. What
+      // its judge could have done never comes up.
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: false,
+          judgeCapable: false,
+          agentLabel: 'Claude Code',
+        ),
+        unwatchableNotice('Claude Code'),
+      );
+    });
+
+    test('a fully covered agent gets the plain label', () {
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: true,
+          judgeCapable: true,
+        ),
+        'Arm Handler',
+      );
+    });
+
+    test('an undescribed agent claims neither fault', () {
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: null,
+          judgeCapable: null,
+        ),
+        'Arm Handler',
+      );
     });
   });
 
@@ -206,7 +313,6 @@ void main() {
         'sessions': [
           {
             'terminalId': 't1',
-            'notifyOnly': false,
             'state': 'watching',
             'pendingEscalations': 0,
             'armedAt': 1,
@@ -231,7 +337,6 @@ void main() {
         context: context,
         container: container,
         terminalId: 't1',
-        notifyOnly: false,
         agentObservable: true,
       );
 
@@ -255,7 +360,6 @@ void main() {
         context: context,
         container: container,
         terminalId: 't1',
-        notifyOnly: false,
         agentObservable: true,
       );
 
@@ -280,7 +384,6 @@ void main() {
         context: context,
         container: container,
         terminalId: 't1',
-        notifyOnly: false,
         agentObservable: true,
       );
       await confirmArmed(tester, transport);
@@ -293,7 +396,6 @@ void main() {
         context: context,
         container: container,
         terminalId: 't1',
-        notifyOnly: false,
         agentObservable: true,
       );
       expect(armFrame(transport).containsKey('goal'), isFalse);
@@ -316,7 +418,6 @@ void main() {
           context: context,
           container: container,
           terminalId: 't1',
-          notifyOnly: false,
           agentObservable: true,
         ),
       );
@@ -347,7 +448,6 @@ void main() {
           context: context,
           container: container,
           terminalId: 't1',
-          notifyOnly: false,
           agentObservable: true,
         ),
       );

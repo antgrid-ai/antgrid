@@ -423,10 +423,10 @@ class HandlerHeaderControl extends ConsumerWidget {
       return pill ?? const SizedBox.shrink();
     }
 
-    // Spec §4.1: arming is one tap and this control composes no payload — no
-    // backlog, no judge override. Everything the session needs is either
-    // already stored on the bridge or extracted behind the handoff, so sending
-    // any of those keys here would overwrite state this control never showed.
+    // Arming is one tap and this control composes no payload — no backlog, no
+    // judge override. Everything the session needs is either already stored on
+    // the bridge or extracted behind the handoff, so sending any of those keys
+    // here would overwrite state this control never showed.
     // The goal is the exception and is not composed here either:
     // armWithFirstRunExplainer carries the session's own opening prompt.
     void toggleArm() {
@@ -442,21 +442,19 @@ class HandlerHeaderControl extends ConsumerWidget {
           context: context,
           container: ref.container,
           terminalId: activeId,
-          notifyOnly: state.defaultNotifyOnly,
           agentObservable: coverage.observable,
           agentLabel: coverage.agentLabel,
+          judgeCapable: coverage.judgeCapable,
         ),
       );
     }
 
-    // Arming is one tap, so this tooltip is the only place the pre-arm
-    // coverage answer can reach the user — an agent that reports nothing
-    // arms just as silently as one that is merely quiet.
-    final shieldTooltip = session != null
-        ? 'Disarm Handler'
-        : coverage.observable == false
-        ? unwatchableNotice(coverage.agentLabel)
-        : 'Arm Handler';
+    final shieldTooltip = handlerShieldTooltip(
+      armed: session != null,
+      observable: coverage.observable,
+      judgeCapable: coverage.judgeCapable,
+      agentLabel: coverage.agentLabel,
+    );
 
     return Row(
       mainAxisSize: MainAxisSize.min,

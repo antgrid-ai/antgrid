@@ -130,6 +130,30 @@ String unwatchableNotice(String? agentLabel) =>
 const escalateOnlyNotice =
     "This judge can't run headless, so every pause comes to you.";
 
+/// What the shield says before it is pressed.
+///
+/// Top-level so the precedence is unit-testable without pumping the panel, the
+/// same reason [handlerArmExplainerBody] is. Arming is one tap, so this tooltip
+/// is the only pre-arm surface that answers EVERY time: the explainer carries
+/// the same facts but sits behind FirstRunState.handlerArmedOnce, a once-ever
+/// latch, while coverage is per-agent — so a user whose first arm was a capable
+/// agent would meet an escalate-only one with no warning at all.
+///
+/// [observable] false outranks [judgeCapable] false: a session that reports
+/// nothing cannot be watched, which makes what its judge could have done moot.
+/// Either being null claims nothing, exactly as the catalog requires.
+String handlerShieldTooltip({
+  required bool armed,
+  required bool? observable,
+  required bool? judgeCapable,
+  String? agentLabel,
+}) {
+  if (armed) return 'Disarm Handler';
+  if (observable == false) return unwatchableNotice(agentLabel);
+  if (judgeCapable == false) return escalateOnlyNotice;
+  return 'Arm Handler';
+}
+
 /// Statuses an item never leaves, so they are the ones that don't count as
 /// remaining work.
 const _terminalItemStatuses = {'done', 'skipped', 'failed'};
@@ -138,7 +162,7 @@ const _terminalItemStatuses = {'done', 'skipped', 'failed'};
 ///
 /// Only `done` counts towards the numerator, never the other terminal states: a
 /// skipped or failed item ends without being achieved, and folding it into
-/// progress is the summary inflation spec §4.3 guards against. `left` is
+/// progress is the summary inflation this guards against. `left` is
 /// everything still open — queued, active and blocked alike — because from the
 /// outside they are all work that has not happened yet.
 String handlerProgressLabel(HandlerSessionState session) {

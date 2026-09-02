@@ -9,7 +9,6 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_inline_banner.dart';
-import '../../models/handler_state.dart';
 import '../../providers/first_run.dart';
 import '../../providers/handler_discovery.dart';
 import '../../providers/providers.dart';
@@ -31,8 +30,6 @@ class HandlerAwayHint extends ConsumerWidget {
     if (!ref.watch(handlerAwayHintProvider)) return const SizedBox.shrink();
     final activeId = ref.watch(activeSessionIdProvider);
     final service = serviceWhenReady(ref, handlerServiceProvider);
-    final handlerState =
-        ref.watch(handlerStateProvider).value ?? const HandlerState.initial();
     final coverage = ref.watch(focusedSessionCoverageProvider);
     return AbInlineBanner(
       text:
@@ -57,9 +54,9 @@ class HandlerAwayHint extends ConsumerWidget {
                         context: context,
                         container: ref.container,
                         terminalId: activeId,
-                        notifyOnly: handlerState.defaultNotifyOnly,
                         agentObservable: coverage.observable,
                         agentLabel: coverage.agentLabel,
+                        judgeCapable: coverage.judgeCapable,
                       ),
                     );
                   },

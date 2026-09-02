@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:antgrid/design/widgets/ab_icon.dart';
 import 'package:antgrid/design/widgets/ab_list_row.dart';
 import 'package:antgrid/models/handler_state.dart';
@@ -26,7 +28,6 @@ HandlerSessionState sessionState(
   HandlerObservability? observability,
 }) => HandlerSessionState(
   terminalId: terminalId,
-  notifyOnly: false,
   runState: HandlerRunState.watching,
   pendingEscalations: 0,
   armedAt: 1,
@@ -50,14 +51,17 @@ Map<String, dynamic> snapshotJson({
   String snapshotId = 's1',
   String state = 'available',
   String? detail,
+  String action = 'force_push',
+  String trigger = 'git push --force origin feat/x',
+  String summary = 'pre-push SHA abc1234 recorded',
 }) => {
   'projectId': 'p',
   'snapshotId': snapshotId,
   'terminalId': 't1',
   'at': 1,
-  'action': 'force_push',
-  'trigger': 'git push --force origin feat/x',
-  'summary': 'pre-push SHA abc1234 recorded',
+  'action': action,
+  'trigger': trigger,
+  'summary': summary,
   'state': state,
   'detail': ?detail,
 };
@@ -71,14 +75,17 @@ List<Map<String, dynamic>> choicesJson() => [
 ];
 
 /// The one-shot `handler:escalation` push.
-Map<String, dynamic> escalationJson({List<Map<String, dynamic>>? choices}) => {
+Map<String, dynamic> escalationJson({
+  List<Map<String, dynamic>>? choices,
+  String urgency = 'high',
+}) => {
   'projectId': 'p',
   'escalationId': 'e1',
   'terminalId': 't1',
   'question': 'bun or vitest?',
   'reasoning': 'Affects CI wiring.',
   'draftReply': 'use bun',
-  'urgency': 'high',
+  'urgency': urgency,
   'choices': ?choices,
 };
 
@@ -92,7 +99,6 @@ Map<String, dynamic> armedStatusJson({
   'sessions': [
     {
       'terminalId': 't1',
-      'notifyOnly': false,
       'state': escalations.isEmpty ? 'watching' : 'needs_you',
       'pendingEscalations': escalations.length,
       'armedAt': 1,
@@ -208,7 +214,6 @@ void main() {
     );
     const session = HandlerSessionState(
       terminalId: 't1',
-      notifyOnly: false,
       runState: HandlerRunState.needsYou,
       pendingEscalations: 1,
       armedAt: 1,
@@ -287,7 +292,6 @@ void main() {
         sessions: {
           't1': HandlerSessionState(
             terminalId: 't1',
-            notifyOnly: false,
             runState: HandlerRunState.watching,
             pendingEscalations: 0,
             armedAt: 1,
@@ -381,9 +385,10 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  // The §5.4 lift an instruction takes is the half of it the user cannot read
-  // off their own sentence, so the row has to be legible without opening
-  // anything: the scope and the totals in the title, the literals below it.
+  // The authorization lift an instruction takes is the half of it the user
+  // cannot read off their own sentence, so the row has to be legible without
+  // opening anything: the scope and the totals in the title, the literals
+  // below it.
   testWidgets('a grant row names its scope and lists what it allowed', (
     tester,
   ) async {
@@ -575,7 +580,45 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('a snapshot advert becomes a one-tap undo on the wire', (
+  testWidgets('an urgent escalation is marked on a plain row', (tester) async {
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit('handler:status', armedStatusJson());
+    await pumpDelivery(tester);
+    t.emit('handler:escalation', escalationJson());
+    await pumpDelivery(tester);
+
+    expect(find.text('bun or vitest?'), findsOneWidget);
+    expect(find.text('URGENT'), findsOneWidget);
+  });
+
+  testWidgets('and on a decision card, from the same meta column', (
+    tester,
+  ) async {
+    // The payoff of hanging the marker off the shared trailing widget: three
+    // unrelated row shapes render an escalation, and none of them can be the
+    // one that forgot.
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit('handler:status', armedStatusJson());
+    await pumpDelivery(tester);
+    t.emit('handler:escalation', escalationJson(choices: choicesJson()));
+    await pumpDelivery(tester);
+
+    expect(find.byType(HandlerDecisionCard), findsOneWidget);
+    expect(find.text('URGENT'), findsOneWidget);
+  });
+
+  testWidgets('a normal escalation is not marked', (tester) async {
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit('handler:status', armedStatusJson());
+    await pumpDelivery(tester);
+    t.emit('handler:escalation', escalationJson(urgency: 'normal'));
+    await pumpDelivery(tester);
+
+    expect(find.text('bun or vitest?'), findsOneWidget);
+    expect(find.text('URGENT'), findsNothing);
+  });
+
+  testWidgets('a force push undo asks before it writes to the remote', (
     tester,
   ) async {
     final t = await pumpLiveHandlerScreen(tester);
@@ -586,12 +629,62 @@ void main() {
     expect(find.text('git push --force origin feat/x'), findsOneWidget);
 
     await tester.tap(find.text('Undo'));
-    await tester.pump();
+    await tester.pumpAndSettle();
+
+    // Nothing on the wire yet — the tap opened a question, not a push.
+    expect(t.sent.where((m) => m['type'] == 'handler:undo'), isEmpty);
+    // The dialog names the entry, so the ref being overwritten is on screen
+    // rather than left to the row behind it.
+    expect(find.text('pre-push SHA abc1234 recorded'), findsWidgets);
+
+    await tester.tap(find.text('Undo force push'));
+    await tester.pumpAndSettle();
 
     final sent = t.sent.where((m) => m['type'] == 'handler:undo').toList();
     expect(sent, hasLength(1));
     expect(sent.single['projectId'], 'p');
     expect(sent.single['snapshotId'], 's1');
+  });
+
+  testWidgets('cancelling the force push confirm sends nothing', (
+    tester,
+  ) async {
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit('handler:snapshot', snapshotJson());
+    await pumpDelivery(tester);
+
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(t.sent.where((m) => m['type'] == 'handler:undo'), isEmpty);
+    // And the offer survives the refusal: a cancelled undo is not a spent one.
+    expect(find.text('Undo'), findsOneWidget);
+  });
+
+  testWidgets('an undo that stays on this machine is still one tap', (
+    tester,
+  ) async {
+    // The confirm is bought by the blast radius, not by the word "undo". A
+    // hard reset restores this checkout and nobody else's, so the one-tap undo
+    // stands where it was always right.
+    final t = await pumpLiveHandlerScreen(tester);
+    t.emit(
+      'handler:snapshot',
+      snapshotJson(
+        action: 'reset_hard',
+        trigger: 'git reset --hard HEAD~1',
+        summary: 'stashed 3 files',
+      ),
+    );
+    await pumpDelivery(tester);
+
+    expect(find.text('Hard reset'), findsOneWidget);
+    await tester.tap(find.text('Undo'));
+    await tester.pump();
+
+    expect(t.sent.where((m) => m['type'] == 'handler:undo'), hasLength(1));
   });
 
   testWidgets('a spent undo offers no tap, and a re-advert replaces its row', (
@@ -625,7 +718,10 @@ void main() {
 
     expect(find.text('remote rejected the push'), findsOneWidget);
     await tester.tap(find.text('Retry undo'));
-    await tester.pump();
+    await tester.pumpAndSettle();
+    // A retry is the same push as the first attempt, so it asks the same way.
+    await tester.tap(find.text('Undo force push'));
+    await tester.pumpAndSettle();
     expect(t.sent.where((m) => m['type'] == 'handler:undo'), hasLength(1));
   });
 
@@ -960,7 +1056,6 @@ void main() {
         sessions: {
           't1': HandlerSessionState(
             terminalId: 't1',
-            notifyOnly: false,
             runState: HandlerRunState.watching,
             pendingEscalations: 0,
             armedAt: 1,
@@ -1044,7 +1139,6 @@ void main() {
         sessions: {
           't1': HandlerSessionState(
             terminalId: 't1',
-            notifyOnly: false,
             runState: HandlerRunState.parked,
             pendingEscalations: 0,
             armedAt: 1,
@@ -1064,31 +1158,6 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  // A notify-only session never acts on the user's behalf. Nothing else on the
-  // screen distinguishes it from one that does.
-  testWidgets('a notify-only session says so', (tester) async {
-    await pumpHandlerScreen(
-      tester,
-      stateWith(
-        sessions: {
-          't1': HandlerSessionState(
-            terminalId: 't1',
-            notifyOnly: true,
-            runState: HandlerRunState.watching,
-            pendingEscalations: 0,
-            armedAt: 1,
-            goal: 'ship it',
-            backlog: const [],
-            escalations: const [],
-          ),
-        },
-      ),
-    );
-
-    expect(find.text('NOTIFY ONLY'), findsOneWidget);
-    debugDefaultTargetPlatformOverride = null;
-  });
-
   // `queued` is the status of every item on a fresh backlog, so printing it
   // fills the column with one repeated value and leaves the states that DID
   // change nothing to stand out against.
@@ -1099,7 +1168,6 @@ void main() {
         sessions: {
           't1': HandlerSessionState(
             terminalId: 't1',
-            notifyOnly: false,
             runState: HandlerRunState.watching,
             pendingEscalations: 0,
             armedAt: 1,
@@ -1171,9 +1239,9 @@ void main() {
           for (final id in ['t1', 't2'])
             id: HandlerSessionState(
               terminalId: id,
-              // Notify-only and needsYou together: the longest run-state word
-              // and the one extra marker, on the same line.
-              notifyOnly: true,
+              // The longest run-state word. It and the Armed chip are the
+              // status row's two fixed ends, so this is the widest that row is
+              // ever asked to be.
               runState: HandlerRunState.needsYou,
               pendingEscalations: 1,
               armedAt: 1,
@@ -1195,7 +1263,6 @@ void main() {
   test('a park note past its deadline promises a resume, not a time', () {
     final session = HandlerSessionState(
       terminalId: 't1',
-      notifyOnly: false,
       runState: HandlerRunState.parked,
       pendingEscalations: 0,
       armedAt: 1,
@@ -1308,4 +1375,184 @@ void main() {
       expect(sent.single['escalationId'], 'b1');
     },
   );
+
+  group('the wrap-up card', () {
+    HandlerWrapUp wrapUp({
+      String terminalId = 't1',
+      String goal = 'ship the parser',
+      int blockedTotal = 0,
+      List<String> blockedReasons = const [],
+      List<HandlerWrapUpOutcome> outcomes = const [
+        HandlerWrapUpOutcome(
+          status: 'done',
+          total: 4,
+          items: ['wire the codec', 'add the fixture'],
+        ),
+        HandlerWrapUpOutcome(
+          status: 'failed',
+          total: 1,
+          items: ['flush the cache'],
+        ),
+      ],
+    }) => HandlerWrapUp(
+      wrapUpId: 'w1',
+      terminalId: terminalId,
+      at: 9,
+      goal: goal,
+      outcomes: outcomes,
+      blockedTotal: blockedTotal,
+      blockedReasons: blockedReasons,
+    );
+
+    HandlerSnapshot snapshot(String id, {String state = 'available'}) =>
+        HandlerSnapshot(
+          snapshotId: id,
+          terminalId: 't1',
+          at: 1,
+          action: 'reset_hard',
+          trigger: 'git reset --hard HEAD~1',
+          summary: 'stashed 3 files',
+          state: state,
+        );
+
+    testWidgets('outlives the last armed session, goal and outcomes intact', (
+      tester,
+    ) async {
+      // The morning-after read. An empty state here would hide the only
+      // account of a night's work at exactly the moment it is wanted.
+      await pumpHandlerScreen(
+        tester,
+        const HandlerState.initial().copyWith(
+          wrapUps: [wrapUp(blockedTotal: 2, blockedReasons: const ['no /fix'])],
+        ),
+      );
+      expect(find.textContaining('Handler is off'), findsNothing);
+      expect(find.text('WRAP-UP'), findsOneWidget);
+      expect(find.text('Wrapped up'), findsOneWidget);
+      expect(find.text('ship the parser'), findsOneWidget);
+      // The true total rides the record, so the suffix names what the sample
+      // left out rather than restating its length.
+      expect(
+        find.text('Done: wire the codec, add the fixture +2 more'),
+        findsOneWidget,
+      );
+      expect(find.text('Failed: flush the cache'), findsOneWidget);
+      // Frozen on the record: the bridge drops the session's escalations on
+      // disarm, so nothing app-side could re-derive this line.
+      expect(
+        find.text('2 action(s) Handler could not take: no /fix'),
+        findsOneWidget,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('counts the open undos live, never off the record', (
+      tester,
+    ) async {
+      // One mounted card, two states — the point is that the SAME report
+      // answers differently once an offer is spent, which is what a stored
+      // count could never do.
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      final states = StreamController<HandlerState>();
+      addTearDown(states.close);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            handlerStateProvider.overrideWith((ref) => states.stream),
+          ],
+          child: const MaterialApp(home: Scaffold(body: HandlerScreen())),
+        ),
+      );
+      states.add(
+        const HandlerState.initial().copyWith(
+          wrapUps: [wrapUp()],
+          snapshots: [snapshot('s1'), snapshot('s2')],
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(
+        find.text('2 flagged action(s) can still be undone'),
+        findsOneWidget,
+      );
+
+      states.add(
+        const HandlerState.initial().copyWith(
+          wrapUps: [wrapUp()],
+          snapshots: [snapshot('s1', state: 'undone'), snapshot('s2')],
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(
+        find.text('2 flagged action(s) can still be undone'),
+        findsNothing,
+      );
+      expect(
+        find.text('1 flagged action(s) can still be undone'),
+        findsOneWidget,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('says nothing about undo when nothing is undoable', (
+      tester,
+    ) async {
+      // Including offers that belong to ANOTHER session: the count is scoped
+      // to the terminal the report names.
+      await pumpHandlerScreen(
+        tester,
+        const HandlerState.initial().copyWith(
+          wrapUps: [wrapUp(terminalId: 't2')],
+          snapshots: [snapshot('s1')],
+        ),
+      );
+      expect(find.textContaining('can still be undone'), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('sits between Sessions and Undo', (tester) async {
+      await pumpHandlerScreen(
+        tester,
+        stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+          wrapUps: [wrapUp()],
+          snapshots: [snapshot('s1')],
+        ),
+      );
+      final sessions = tester.getTopLeft(find.text('SESSIONS')).dy;
+      final wrapUps = tester.getTopLeft(find.text('WRAP-UP')).dy;
+      final undo = tester.getTopLeft(find.text('UNDO')).dy;
+      expect(sessions, lessThan(wrapUps));
+      expect(wrapUps, lessThan(undo));
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('a wrapped_up feed row now says what the summary said', (
+      tester,
+    ) async {
+      // The row is the live surface and the card the durable one; before this
+      // arm the row rendered nothing at all below its title.
+      await pumpHandlerScreen(
+        tester,
+        stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+          activity: const [
+            HandlerActivityRecord(
+              recordId: 'r1',
+              at: 1,
+              terminalId: 't1',
+              decision: 'wrapped_up',
+              reason: 'every backlog item resolved',
+              detail: 'Done: wire the codec. Failed: flush the cache',
+            ),
+          ],
+        ),
+      );
+      expect(find.text('Wrapped up'), findsOneWidget);
+      expect(
+        find.text('Done: wire the codec. Failed: flush the cache'),
+        findsOneWidget,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    });
+  });
 }

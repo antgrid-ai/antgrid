@@ -4,7 +4,6 @@ import 'package:flutter_test/flutter_test.dart';
 HandlerSessionState _session(String terminalId, {required int pending}) {
   return HandlerSessionState(
     terminalId: terminalId,
-    notifyOnly: false,
     runState: HandlerRunState.watching,
     pendingEscalations: pending,
     armedAt: 1,
@@ -14,7 +13,59 @@ HandlerSessionState _session(String terminalId, {required int pending}) {
   );
 }
 
+HandlerEscalation _esc(String id, {required String urgency, required int at}) =>
+    HandlerEscalation(
+      escalationId: id,
+      terminalId: 't1',
+      question: 'q',
+      reasoning: 'r',
+      draftReply: 'd',
+      urgency: urgency,
+      at: at,
+    );
+
 void main() {
+  group('compareEscalations', () {
+    test('urgent first, and oldest first inside each band', () {
+      final ordered =
+          [
+            _esc('normal-old', urgency: 'normal', at: 1),
+            _esc('urgent-new', urgency: 'high', at: 9),
+            _esc('normal-new', urgency: 'normal', at: 7),
+            _esc('urgent-old', urgency: 'high', at: 5),
+          ]..sort(compareEscalations);
+      expect(ordered.map((e) => e.escalationId), [
+        'urgent-old',
+        'urgent-new',
+        'normal-old',
+        'normal-new',
+      ]);
+    });
+
+    test('age never crosses the band', () {
+      // The oldest row on the list still sorts under a `high` that arrived a
+      // moment ago: one has been waiting, the other is holding the agent up.
+      final ordered =
+          [
+            _esc('ancient', urgency: 'normal', at: 1),
+            _esc('fresh', urgency: 'high', at: 9999),
+          ]..sort(compareEscalations);
+      expect(ordered.first.escalationId, 'fresh');
+    });
+
+    test('an urgency a newer bridge invents ranks as normal', () {
+      // The unknown band is the safe one. Reading an unrecognised word as
+      // urgent would let a bridge outrank the one value the app knows means
+      // the agent is stopped.
+      final ordered =
+          [
+            _esc('invented', urgency: 'critical', at: 1),
+            _esc('known', urgency: 'high', at: 9),
+          ]..sort(compareEscalations);
+      expect(ordered.first.escalationId, 'known');
+    });
+  });
+
   const backlogWire = [
     {'id': 'i1', 'text': 'run the tests', 'status': 'done', 'createdAt': 1},
     {
@@ -38,7 +89,6 @@ void main() {
   test('HandlerSessionState counts only done items as progress', () {
     final s = HandlerSessionState.fromWire({
       'terminalId': 't1',
-      'notifyOnly': false,
       'state': 'watching',
       'pendingEscalations': 0,
       'armedAt': 1,
@@ -53,7 +103,6 @@ void main() {
   test('a malformed backlog item drops itself, not the session', () {
     final s = HandlerSessionState.fromWire({
       'terminalId': 't1',
-      'notifyOnly': false,
       'state': 'watching',
       'pendingEscalations': 0,
       'armedAt': 1,
@@ -77,7 +126,6 @@ void main() {
     // unmapped "parked" would make parked sessions vanish from the app.
     final s = HandlerSessionState.fromWire({
       'terminalId': 't1',
-      'notifyOnly': false,
       'state': 'parked',
       'pendingEscalations': 0,
       'armedAt': 1,
@@ -97,7 +145,6 @@ void main() {
   test('park fields are absent on an unparked session', () {
     final s = HandlerSessionState.fromWire({
       'terminalId': 't1',
-      'notifyOnly': false,
       'state': 'watching',
       'pendingEscalations': 0,
       'armedAt': 1,
@@ -112,7 +159,6 @@ void main() {
 
   Map<String, dynamic> wire(Object? observability) => {
     'terminalId': 't1',
-    'notifyOnly': false,
     'state': 'watching',
     'pendingEscalations': 0,
     'armedAt': 1,
@@ -162,7 +208,7 @@ void main() {
     expect(state.anyArmed, isTrue);
   });
 
-  group('quick choices (§4.6)', () {
+  group('quick choices', () {
     const approve = {
       'choiceId': 'approve',
       'label': 'Approve',
@@ -288,6 +334,75 @@ void main() {
       // Still answerable in the user's own words — the draft is what the reply
       // sheet opens on.
       expect(e.draftReply, isNotEmpty);
+    });
+  });
+
+  group('HandlerWrapUp.fromWire', () {
+    Map<String, dynamic> wire({
+      Object? outcomes,
+      Object? blockedTotal = 1,
+      Object? goal = 'ship the parser',
+    }) => {
+      'wrapUpId': 'w1',
+      'terminalId': 't1',
+      'at': 9,
+      'goal': goal,
+      'outcomes':
+          outcomes ??
+          [
+            {
+              'status': 'done',
+              'total': 5,
+              'items': ['item a', 'item b'],
+            },
+          ],
+      'blockedTotal': blockedTotal,
+      'blockedReasons': ['refused the force push'],
+    };
+
+    test('a full record round-trips and derives its +N more', () {
+      final w = HandlerWrapUp.fromWire(wire())!;
+      expect(w.wrapUpId, 'w1');
+      expect(w.terminalId, 't1');
+      expect(w.at, 9);
+      expect(w.goal, 'ship the parser');
+      expect(w.blockedTotal, 1);
+      expect(w.blockedReasons, ['refused the force push']);
+      final o = w.outcomes.single;
+      expect(o.status, 'done');
+      expect(o.total, 5);
+      expect(o.items, ['item a', 'item b']);
+      // The record stores the true total and never a second `more` field, so
+      // the suffix is arithmetic here rather than something that can disagree.
+      expect(o.more, 3);
+    });
+
+    test('a mistyped required field drops the whole record', () {
+      expect(HandlerWrapUp.fromWire({...wire(), 'wrapUpId': 7}), isNull);
+      expect(HandlerWrapUp.fromWire(wire(blockedTotal: 'two')), isNull);
+      expect(HandlerWrapUp.fromWire(wire(goal: null)), isNull);
+      expect(HandlerWrapUp.fromWire(wire(outcomes: 'done: a, b')), isNull);
+      expect(HandlerWrapUp.fromWire('wrapped up'), isNull);
+    });
+
+    test('an outcome this build has no status for costs one group, not the '
+        'report', () {
+      // A bridge ahead of the app. Losing the whole card would hide the
+      // blocked-report line too, which is the part nothing else can re-derive.
+      final w = HandlerWrapUp.fromWire(
+        wire(
+          outcomes: [
+            {'status': 'invented', 'total': 1, 'items': <String>[]},
+            {
+              'status': 'failed',
+              'total': 1,
+              'items': ['item c'],
+            },
+          ],
+        ),
+      )!;
+      expect(w.outcomes.single.status, 'failed');
+      expect(w.blockedTotal, 1);
     });
   });
 }

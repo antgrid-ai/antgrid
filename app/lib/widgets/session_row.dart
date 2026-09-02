@@ -45,12 +45,6 @@ import 'session_rename_dialog.dart';
 import 'session_shared_workspace_badge.dart';
 import 'session_start_refusal.dart';
 
-/// One row in the sessions sub-tree of [ProjectsDrawer]. Tapping focuses the
-/// session: if its parent project is not currently active, switches projects
-/// first (carrying the desired session id via [pendingActiveSessionIdProvider]
-/// for `_bootstrapSessions` to honour). If the session is stopped, sends
-/// `session:start` — overrides multi-session spec §3's "no auto-start on
-/// select" rule per the collapsible-drawer spec.
 /// Fraction (-1..1) by which the status dot is shifted down within its leading
 /// box to sit on the title's optical centre rather than its line-box centre.
 /// ~0.45 of the 3px free half-space ≈ a 1.3px nudge — the measured gap for a
@@ -64,6 +58,15 @@ const String _startNoAnswerMessage =
     "The agent didn't answer. If the session doesn't come up in a moment, try "
     'again.';
 
+/// One row in the sessions sub-tree of [ProjectsDrawer]. Tapping focuses the
+/// session: if its parent project is not currently active, switches projects
+/// first (carrying the desired session id via [pendingActiveSessionIdProvider]
+/// for `_bootstrapSessions` to honour). A stopped session is started by that
+/// same tap: the kebab's explicit Start is the same intent and must not answer
+/// differently, so a tap that only focused would split one intent across two
+/// controls. The exception is a start already queued behind an isolated
+/// checkout's setup run: that one belongs to the create flow, and re-issuing it
+/// here is a second start nobody asked for.
 class SessionRow extends ConsumerStatefulWidget {
   final String entryId;
   final SessionEntry session;

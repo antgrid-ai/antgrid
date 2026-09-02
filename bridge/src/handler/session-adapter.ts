@@ -1,9 +1,9 @@
 import type { CapCommand } from "../structured/chat-session";
 
-// Transport seam (spec §Session adapter seam): everything above this interface —
-// goal + backlog, judge, floors, runaway guard — is transport-agnostic. The PTY
-// adapter writes to a live terminal; the structured (chat) adapter lives in
-// structured-adapter.ts and rides the driver's prompt path.
+// Transport seam: everything above this interface — goal + backlog, judge,
+// floors, runaway guard — is transport-agnostic. The PTY adapter writes to a
+// live terminal; the structured (chat) adapter lives in structured-adapter.ts
+// and rides the driver's prompt path.
 
 /** A catalog hit the engine already resolved: the chat transport routes on
  *  `id` and sends `args` as its text, while a PTY ignores it — the verb is
@@ -29,14 +29,17 @@ export interface SessionAdapter {
 }
 
 export function createPtyAdapter(deps: {
-  write: (terminalId: string, data: string) => void;
+  submit: (terminalId: string, line: string) => void;
   getRecentOutput: (terminalId: string) => string;
   getTranscriptPath: (terminalId: string) => string | undefined;
 }): SessionAdapter {
   return {
-    // The trailing CR submits the line; the engine has already floor/cap-checked
-    // the text (which is why control chars in `text` itself are rejected there).
-    injectReply: (id, text) => deps.write(id, `${text}\r`),
+    // The seam hands over the line and the terminal layer submits it as a
+    // separate write: a CR sharing a read with 64+ characters of text is
+    // absorbed into it and inserted as literal text (see pty-submit.ts). The
+    // engine has already floor/cap-checked the text, which is why control chars
+    // in `text` itself are rejected there.
+    injectReply: (id, text) => deps.submit(id, text),
     recentOutput: (id) => deps.getRecentOutput(id),
     outputKind: () => "pty",
     transcriptPath: (id) => deps.getTranscriptPath(id),

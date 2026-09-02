@@ -13,7 +13,7 @@ describe("handler wire", () => {
 
   test("configure carries the goal and the backlog", () => {
     const msg = createMessage("handler:configure", {
-      projectId: "p", terminalId: "t1", armed: true, notifyOnly: false,
+      projectId: "p", terminalId: "t1", armed: true,
       goal: "migrate auth", backlog,
     });
     const parsed = parseMessage(JSON.stringify(msg)) as any;
@@ -26,22 +26,22 @@ describe("handler wire", () => {
   // filled-in field would put a form back in front of that tap.
   test("arming carries no required payload", () => {
     const msg = createMessage("handler:configure", {
-      projectId: "p", terminalId: "t1", armed: true, notifyOnly: false,
+      projectId: "p", terminalId: "t1", armed: true,
     });
     expect(parseMessage(JSON.stringify(msg))).toBeTruthy();
   });
 
   test("configure and status carry the judge override fields", () => {
     const cfg = createMessage("handler:configure", {
-      projectId: "p", terminalId: "t1", armed: true, notifyOnly: false,
+      projectId: "p", terminalId: "t1", armed: true,
       goal: "g", backlog, judgeTool: "codex", judgeModel: "",
     });
     expect(parseMessage(JSON.stringify(cfg))).toBeTruthy();
     const status = createMessage("handler:status", {
       snapshots: [],
-      projectId: "p", defaultTool: "claude-code", defaultNotifyOnly: false,
+      projectId: "p", defaultTool: "claude-code",
       sessions: [{
-        terminalId: "t1", notifyOnly: false, state: "watching", pendingEscalations: 0,
+        terminalId: "t1", state: "watching", pendingEscalations: 0,
         armedAt: 1, goal: "g", backlog,
         escalations: [], judgeTool: "codex", judgeModel: "m",
       }],
@@ -55,8 +55,8 @@ describe("handler wire", () => {
   test("status carries per-session snapshots with open escalations", () => {
     const msg = createMessage("handler:status", {
       snapshots: [],
-      projectId: "p", defaultNotifyOnly: false, sessions: [{
-        terminalId: "t1", notifyOnly: false, state: "watching", pendingEscalations: 1,
+      projectId: "p", sessions: [{
+        terminalId: "t1", state: "watching", pendingEscalations: 1,
         armedAt: 1, goal: "g", backlog,
         escalations: [{
           escalationId: "e1", question: "q", reasoning: "r", draftReply: "",
@@ -71,12 +71,12 @@ describe("handler wire", () => {
   // field there would read app-side as an empty backlog and blank the item list.
   test("status requires goal and backlog on every snapshot", () => {
     const snapshot = {
-      terminalId: "t1", notifyOnly: false, state: "watching" as const, pendingEscalations: 0,
+      terminalId: "t1", state: "watching" as const, pendingEscalations: 0,
       armedAt: 1, goal: "g", backlog, escalations: [],
     };
     const send = (s: object) => parseMessage(JSON.stringify(createMessage("handler:status", {
       snapshots: [],
-      projectId: "p", defaultNotifyOnly: false, sessions: [s] as never,
+      projectId: "p", sessions: [s] as never,
     })));
     const { goal: _g, ...noGoal } = snapshot;
     const { backlog: _b, ...noBacklog } = snapshot;
@@ -139,7 +139,8 @@ describe("handler wire", () => {
     const send = (choices: unknown) => parseMessage(JSON.stringify({
       ...createMessage("handler:escalation", base), choices,
     }));
-    // Absent = free-text reply, exactly as `kind` is absent — the pre-§4.6 shape.
+    // Absent = free-text reply, exactly as `kind` is absent — the shape that
+    // predates quick choices.
     expect(parseMessage(JSON.stringify(createMessage("handler:escalation", base)))).toBeTruthy();
     expect(send([choice(), other])).toBeTruthy();
     // One chip is a card with no alternative; four is past what a lock-screen
@@ -165,8 +166,8 @@ describe("handler wire", () => {
   test("status snapshot escalations carry kind and choices through the replay", () => {
     const msg = createMessage("handler:status", {
       snapshots: [],
-      projectId: "p", defaultNotifyOnly: false, sessions: [{
-        terminalId: "t1", notifyOnly: true, state: "needs_you", pendingEscalations: 1,
+      projectId: "p", sessions: [{
+        terminalId: "t1", state: "needs_you", pendingEscalations: 1,
         armedAt: 1, goal: "g", backlog,
         escalations: [{
           escalationId: "e1", question: "q", reasoning: "r", draftReply: "",
@@ -195,8 +196,8 @@ describe("handler wire", () => {
   test("status carries a parked session with its park fields", () => {
     const msg = createMessage("handler:status", {
       snapshots: [],
-      projectId: "p", defaultNotifyOnly: false, sessions: [{
-        terminalId: "t1", notifyOnly: false, state: "parked", pendingEscalations: 0,
+      projectId: "p", sessions: [{
+        terminalId: "t1", state: "parked", pendingEscalations: 0,
         armedAt: 1, goal: "g", backlog: [], escalations: [],
         parkKind: "limit", parkedUntil: 1770000000000,
       }],
@@ -209,13 +210,13 @@ describe("handler wire", () => {
 
   test("status carries per-session observability, and survives its absence", () => {
     const session = {
-      terminalId: "t1", notifyOnly: false, state: "watching" as const, pendingEscalations: 0,
+      terminalId: "t1", state: "watching" as const, pendingEscalations: 0,
       armedAt: 1, goal: "g", backlog, escalations: [],
     };
     for (const observability of ["full", "escalate_only", "unsupported"] as const) {
       const msg = createMessage("handler:status", {
         snapshots: [],
-        projectId: "p", defaultNotifyOnly: false,
+        projectId: "p",
         sessions: [{ ...session, observability }],
       });
       const parsed = parseMessage(JSON.stringify(msg)) as any;
@@ -224,13 +225,13 @@ describe("handler wire", () => {
     // Absent is what an older bridge sends; it must parse rather than read as a
     // capability verdict.
     const bare = parseMessage(JSON.stringify(createMessage("handler:status", {
-      snapshots: [], projectId: "p", defaultNotifyOnly: false, sessions: [session],
+      snapshots: [], projectId: "p", sessions: [session],
     }))) as any;
     expect(bare).toBeTruthy();
     expect(bare.sessions[0].observability).toBeUndefined();
     // A value outside the enum is a bug on the sender, not a field to widen.
     expect(parseMessage(JSON.stringify(createMessage("handler:status", {
-      snapshots: [], projectId: "p", defaultNotifyOnly: false,
+      snapshots: [], projectId: "p",
       sessions: [{ ...session, observability: "partly" }],
     } as never)))).toBeNull();
   });
@@ -240,8 +241,8 @@ describe("handler wire", () => {
     // was tested against — a new field ahead of the others would reorder it.
     const msg = createMessage("handler:status", {
       snapshots: [],
-      projectId: "p", defaultNotifyOnly: false, sessions: [{
-        terminalId: "t1", notifyOnly: false, state: "watching", pendingEscalations: 0,
+      projectId: "p", sessions: [{
+        terminalId: "t1", state: "watching", pendingEscalations: 0,
         armedAt: 1, goal: "g", backlog, escalations: [],
         judgeTool: "codex", observability: "full",
       }],
@@ -250,6 +251,44 @@ describe("handler wire", () => {
     expect(keys.at(-1)).toBe("observability");
   });
 
+  // The record the app reads hours later, when the session that produced it is
+  // gone from `sessions` and nothing else on the frame names it.
+  const wrapUp = {
+    wrapUpId: "w1", terminalId: "t1", at: 5, goal: "migrate auth",
+    outcomes: [{ status: "done" as const, total: 4, items: ["land it", "backfill"] }],
+    blockedTotal: 1, blockedReasons: ["reply contains control characters"],
+  };
+
+  test("status carries the wrap-up records, and survives their absence", () => {
+    const msg = createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [], wrapUps: [wrapUp],
+    });
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.wrapUps).toEqual([wrapUp]);
+    // The true total is what makes "+N more" derivable from a sampled list.
+    expect(parsed.wrapUps[0].outcomes[0].total).toBe(4);
+    // Absent is what a bridge predating the field sends, and what a project with
+    // nothing to report sends today — both must still deliver the frame.
+    const bare = parseMessage(JSON.stringify(createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [],
+    }))) as any;
+    expect(bare).toBeTruthy();
+    expect(bare.wrapUps).toBeUndefined();
+  });
+
+  test("wrapUps is appended last, so no existing key moved", () => {
+    const msg = createMessage("handler:status", {
+      snapshots: [], projectId: "p", defaultTool: "claude-code", sessions: [], wrapUps: [wrapUp],
+    });
+    expect(Object.keys(parseMessage(JSON.stringify(msg)) as any).at(-1)).toBe("wrapUps");
+  });
+
+  test("an outcome status outside the four item outcomes is rejected", () => {
+    expect(parseMessage(JSON.stringify(createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [],
+      wrapUps: [{ ...wrapUp, outcomes: [{ status: "queued", total: 1, items: [] }] }],
+    } as never)))).toBeNull();
+  });
   test("activity accepts the lifecycle kinds", () => {
     for (const decision of ["parked", "resumed"] as const) {
       const act = createMessage("handler:activity", {
@@ -270,9 +309,9 @@ describe("handler wire", () => {
   test("handler:status carries judge per session, not at top level", () => {
     const msg = createMessage("handler:status", {
       snapshots: [],
-      projectId: "p", defaultTool: "claude-code", defaultNotifyOnly: false,
+      projectId: "p", defaultTool: "claude-code",
       sessions: [{
-        terminalId: "t", notifyOnly: false, state: "watching", pendingEscalations: 0,
+        terminalId: "t", state: "watching", pendingEscalations: 0,
         armedAt: 1, goal: "g", backlog: [],
         escalations: [], judgeTool: "codex", judgeModel: "gpt-5.3-codex",
       }],
@@ -285,47 +324,43 @@ describe("handler wire", () => {
 });
 
 // parseMessageFast validates ONLY the message type, so agent-core re-parses the
-// configure payload with HandlerConfigureWire before arming. notifyOnly is the
-// reason it re-parses everything rather than the one field it acts on: arriving
-// absent it reads as falsy and would arm an auto-injecting session for a user who
-// asked for notify-only.
+// configure payload with HandlerConfigureWire before arming. It re-parses the
+// payload wholesale rather than the fields it acts on because BacklogWire's
+// duplicate-id refine has to run over the list before it is stored — a shadowed
+// item is unreachable by any transition, leaving a session that can never wrap up.
 describe("HandlerConfigureWire (hot-path re-validation)", () => {
   it("accepts a well-formed arm payload", () => {
     const r = HandlerConfigureWire.safeParse({
-      terminalId: "t1", armed: true, notifyOnly: true,
+      terminalId: "t1", armed: true,
       goal: "migrate auth", backlog: [item("i1")],
     });
     expect(r.success).toBe(true);
-    if (r.success) expect(r.data.notifyOnly).toBe(true);
+    if (r.success) expect(r.data.goal).toBe("migrate auth");
   });
 
-  it("rejects a missing notifyOnly instead of letting it read as false", () => {
-    expect(HandlerConfigureWire.safeParse({ terminalId: "t1", armed: true }).success).toBe(false);
-  });
-
-  it("rejects a non-boolean notifyOnly", () => {
-    expect(
-      HandlerConfigureWire.safeParse({ terminalId: "t1", armed: true, notifyOnly: "false" }).success,
-    ).toBe(false);
+  // `armed` is the branch agent-core switches on, so one arriving absent would
+  // read as falsy and disarm the live session the sender meant to edit.
+  it("rejects a missing armed instead of letting it read as a disarm", () => {
+    expect(HandlerConfigureWire.safeParse({ terminalId: "t1" }).success).toBe(false);
   });
 
   it("rejects a non-string terminalId and a non-boolean armed", () => {
-    expect(HandlerConfigureWire.safeParse({ terminalId: 7, armed: false, notifyOnly: false }).success).toBe(false);
-    expect(HandlerConfigureWire.safeParse({ terminalId: "t1", armed: "yes", notifyOnly: false }).success).toBe(false);
+    expect(HandlerConfigureWire.safeParse({ terminalId: 7, armed: false }).success).toBe(false);
+    expect(HandlerConfigureWire.safeParse({ terminalId: "t1", armed: "yes" }).success).toBe(false);
   });
 
-  // Absent is not empty: a re-arm or a notify-only toggle ships neither field and
-  // must leave the bridge's copy — which holds the statuses this session banked —
+  // Absent is not empty: a re-arm or a judge pick ships neither field and must
+  // leave the bridge's copy — which holds the statuses this session banked —
   // exactly as it was. `[]` is the explicit clear.
   it("accepts goal and backlog absent, and an explicitly empty backlog", () => {
-    const bare = HandlerConfigureWire.safeParse({ terminalId: "t1", armed: true, notifyOnly: false });
+    const bare = HandlerConfigureWire.safeParse({ terminalId: "t1", armed: true });
     expect(bare.success).toBe(true);
     if (bare.success) {
       expect(bare.data.goal).toBeUndefined();
       expect(bare.data.backlog).toBeUndefined();
     }
     expect(HandlerConfigureWire.safeParse({
-      terminalId: "t1", armed: true, notifyOnly: false, backlog: [],
+      terminalId: "t1", armed: true, backlog: [],
     }).success).toBe(true);
   });
 });
@@ -337,36 +372,35 @@ describe("HandlerConfigureWire (hot-path re-validation)", () => {
 // each is right on its own.
 describe("HandlerConfigureWire and HandlerConfigureMessage stay in lockstep", () => {
   const cases: Array<{ name: string; payload: Record<string, unknown>; valid: boolean }> = [
-    { name: "1-tap arm", payload: { terminalId: "t1", armed: true, notifyOnly: false }, valid: true },
-    { name: "disarm", payload: { terminalId: "t1", armed: false, notifyOnly: false }, valid: true },
+    { name: "1-tap arm", payload: { terminalId: "t1", armed: true }, valid: true },
+    { name: "disarm", payload: { terminalId: "t1", armed: false }, valid: true },
     {
       name: "full payload",
       payload: {
-        terminalId: "t1", armed: true, notifyOnly: true, goal: "g",
+        terminalId: "t1", armed: true, goal: "g",
         backlog: [item("i1"), item("i2", { dependsOn: ["i1"] })],
         judgeTool: "codex", judgeModel: "gpt-5.3-codex",
       },
       valid: true,
     },
-    { name: "explicit backlog clear", payload: { terminalId: "t1", armed: true, notifyOnly: false, backlog: [] }, valid: true },
-    { name: "missing notifyOnly", payload: { terminalId: "t1", armed: true }, valid: false },
-    { name: "non-boolean notifyOnly", payload: { terminalId: "t1", armed: true, notifyOnly: "false" }, valid: false },
-    { name: "non-string terminalId", payload: { terminalId: 7, armed: true, notifyOnly: false }, valid: false },
-    { name: "non-boolean armed", payload: { terminalId: "t1", armed: "yes", notifyOnly: false }, valid: false },
-    { name: "non-string goal", payload: { terminalId: "t1", armed: true, notifyOnly: false, goal: 7 }, valid: false },
+    { name: "explicit backlog clear", payload: { terminalId: "t1", armed: true, backlog: [] }, valid: true },
+    { name: "missing armed", payload: { terminalId: "t1" }, valid: false },
+    { name: "non-string terminalId", payload: { terminalId: 7, armed: true }, valid: false },
+    { name: "non-boolean armed", payload: { terminalId: "t1", armed: "yes" }, valid: false },
+    { name: "non-string goal", payload: { terminalId: "t1", armed: true, goal: 7 }, valid: false },
     {
       name: "duplicate backlog id",
-      payload: { terminalId: "t1", armed: true, notifyOnly: false, backlog: [item("i1"), item("i1")] },
+      payload: { terminalId: "t1", armed: true, backlog: [item("i1"), item("i1")] },
       valid: false,
     },
     {
       name: "item with an unknown status",
-      payload: { terminalId: "t1", armed: true, notifyOnly: false, backlog: [{ ...item("i1"), status: "in_progress" }] },
+      payload: { terminalId: "t1", armed: true, backlog: [{ ...item("i1"), status: "in_progress" }] },
       valid: false,
     },
     {
       name: "item missing createdAt",
-      payload: { terminalId: "t1", armed: true, notifyOnly: false, backlog: [{ id: "i1", text: "t", status: "queued" }] },
+      payload: { terminalId: "t1", armed: true, backlog: [{ id: "i1", text: "t", status: "queued" }] },
       valid: false,
     },
   ];
@@ -415,7 +449,7 @@ describe("handler:instruct", () => {
   }
 });
 
-describe("handler:snapshot / handler:undo (§5.2)", () => {
+describe("handler:snapshot / handler:undo", () => {
   const snapshot = {
     snapshotId: "s1", terminalId: "t1", at: 5, action: "reset_hard" as const,
     trigger: "git reset --hard HEAD~1", summary: "saved HEAD abc1234", state: "available" as const,
@@ -432,7 +466,7 @@ describe("handler:snapshot / handler:undo (§5.2)", () => {
 
   test("status replays undo offers at the project level", () => {
     const msg = createMessage("handler:status", {
-      projectId: "p", defaultNotifyOnly: false, sessions: [],
+      projectId: "p", sessions: [],
       snapshots: [{ ...snapshot, state: "failed", detail: "backup ref is gone" }],
     });
     const parsed = parseMessage(JSON.stringify(msg)) as any;

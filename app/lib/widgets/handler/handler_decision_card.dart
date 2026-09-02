@@ -13,9 +13,9 @@ const handlerChoiceSendingLabel = 'Sending…';
 /// The card's own way out to the free-text reply sheet.
 const handlerCustomReplyLabel = 'Custom reply…';
 
-/// Inline decision card for an escalation that carries quick choices
-/// (spec §4.6). Rendered exactly when [HandlerEscalation.choices] is non-null;
-/// an escalation without them keeps the free-text row it has always had.
+/// Inline decision card for an escalation that carries quick choices. Rendered
+/// exactly when [HandlerEscalation.choices] is non-null; an escalation without
+/// them keeps the free-text row it has always had.
 ///
 /// Every choice renders the `text` it would send beside its label rather than
 /// behind it: the label is the judge's summary of a reply the judge also
@@ -45,8 +45,8 @@ class HandlerDecisionCard extends StatefulWidget {
 
   /// Opens the free-text reply sheet. Offered alongside the choices because
   /// two or three drafted options are not proof that one of them is the answer,
-  /// and never disabled: §4.6's escape hatch is worth least in exactly the
-  /// states where something else on the card has gone wrong.
+  /// and never disabled: the custom-reply escape hatch is worth least in
+  /// exactly the states where something else on the card has gone wrong.
   final VoidCallback? onCustomReply;
 
   /// Session/time metadata, supplied by the caller so it matches the free-text

@@ -20,6 +20,10 @@ class FileViewerRouter extends StatelessWidget {
   final int? searchLine;
   final String? searchQuery;
 
+  /// Opens a project-relative path, for links followed out of a rendered
+  /// markdown document. Null where the viewer has no selection to move.
+  final ValueChanged<String>? onOpenFile;
+
   const FileViewerRouter({
     super.key,
     this.fileContent,
@@ -30,6 +34,7 @@ class FileViewerRouter extends StatelessWidget {
     this.onClose,
     this.searchLine,
     this.searchQuery,
+    this.onOpenFile,
   });
 
   Widget _source() => FileContentViewer(
@@ -58,6 +63,7 @@ class FileViewerRouter extends StatelessWidget {
           fileWasModified: fileWasModified,
           searchLine: searchLine,
           searchQuery: searchQuery,
+          onOpenFile: onOpenFile,
         );
       case FileViewerKind.svg:
         return SvgPreview(

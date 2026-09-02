@@ -6,11 +6,13 @@ import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_icon_button.dart';
+import '../markdown_document_config.dart';
 import '../markdown_heading_configs.dart';
 
 /// Markdown for assistant messages: MarkdownBlock (non-scrollable — the
 /// transcript ListView scrolls), AbTokens-themed, code fences get a copy
-/// button. Mirrors markdown_preview.dart's config so the two stay consistent.
+/// button. Mirrors `markdown_document_config.dart` — the file viewer's own
+/// config — so a document and a message render the same markdown alike.
 class TranscriptMarkdown extends StatelessWidget {
   final String data;
   const TranscriptMarkdown({super.key, required this.data});
@@ -21,6 +23,7 @@ class TranscriptMarkdown extends StatelessWidget {
     return MarkdownBlock(
       data: data,
       selectable: false,
+      generator: markdownAntgridGenerator,
       config: MarkdownConfig(
         configs: [
           PConfig(

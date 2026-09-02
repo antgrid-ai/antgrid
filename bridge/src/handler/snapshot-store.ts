@@ -1,6 +1,6 @@
 // bridge/src/handler/snapshot-store.ts
 //
-// Where a §5.2 snapshot lives between being taken and being undone.
+// Where a snapshot lives between being taken and being undone.
 //
 // Deliberately NOT the session record: a wrap-up disarms the session, and the
 // undo offer the wrap-up summary hands the user has to outlive that — the push

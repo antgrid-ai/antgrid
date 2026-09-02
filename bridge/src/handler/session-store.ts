@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, chmodSy
 import { join } from "node:path";
 import { BacklogSchema } from "./backlog";
 
-// One tap-to-answer option on a quick-choice escalation (§4.6). `text` is sent as
+// One tap-to-answer option on a quick-choice escalation. `text` is sent as
 // the USER's own reply through the ordinary reply transport, so it must be
 // something a session can actually receive: whitespace alone is dropped by every
 // consumer, which turns the chip into a button that silently does nothing.
@@ -67,7 +67,7 @@ export const OpenEscalationSchema = z.object({
   // OpenEscalationWire: the app resolves prompts from the transcript's own
   // frames, so mirroring it would publish an id no client has a use for.
   promptId: z.string().optional(),
-  // §4.6 quick choices, optional exactly the way `kind` is: absent means "free-text
+  // Quick choices, optional exactly the way `kind` is: absent means "free-text
   // reply", so an app that predates this renders its reply sheet unchanged. Two is
   // the floor because one chip is a card with no alternative, and the free-text
   // escape hatch is app-authored — never an entry here — so no bridge can ship a
@@ -81,9 +81,12 @@ export type OpenEscalation = z.infer<typeof OpenEscalationSchema>;
 export const HandlerSessionRecordSchema = z.object({
   // Version 2 rejects every record version 1 wrote, and loadHandlerSession turns
   // a failed parse into null — so a session armed across the upgrade comes back
-  // disarmed. Accepted knowingly pre-release: the alternative is a brief→backlog
-  // migration, i.e. the compatibility layer the clean-slate spec rules out. A
-  // later bump inherits the same trade and has to re-decide it.
+  // disarmed. Accepted knowingly pre-release: `z.literal(2)` keeps exactly one
+  // readable shape, where a brief→backlog migration would owe a second schema
+  // plus a translation that has to stay correct for the life of the field. The
+  // cost is paid once, by every session armed at the moment of the upgrade, and
+  // re-arming cannot recover the backlog v1 wrote. A later bump inherits the
+  // same trade and has to re-decide it.
   version: z.literal(2),
   terminalId: z.string(),
   armed: z.boolean(),
@@ -100,7 +103,6 @@ export const HandlerSessionRecordSchema = z.object({
   // carrying one is better refused than rehydrated.
   goal: z.string(),
   backlog: BacklogSchema,
-  notifyOnly: z.boolean(),
   armedAt: z.number(),
   escalations: z.array(OpenEscalationSchema),
   // Per-session judge choice (absent = the session's own tool / CLI default

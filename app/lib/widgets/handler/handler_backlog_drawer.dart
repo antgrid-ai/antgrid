@@ -23,10 +23,10 @@ import '../../services/handler_service.dart';
 import '../../util/detached.dart';
 import 'handler_item_status.dart';
 
-/// The 1-tap presets (spec §4.2). Each label is verbatim the instruction the
-/// chip sends: a chip is exactly the sentence the user would have typed, which
-/// is what keeps it on the same authorization path as typed text. Keeping label
-/// and payload one string is what stops the two drifting apart.
+/// The 1-tap presets. Each label is verbatim the instruction the chip sends: a
+/// chip is exactly the sentence the user would have typed, which is what keeps
+/// it on the same authorization path as typed text. Keeping label and payload
+/// one string is what stops the two drifting apart.
 const handlerPresetInstructions = <String>[
   'Run Tests',
   'Commit',
@@ -41,7 +41,10 @@ const handlerPresetInstructions = <String>[
 String _backlogTitle(String? sessionName) =>
     sessionName == null ? 'Backlog' : 'Backlog · $sessionName';
 
-/// Verbatim from spec §5.5 — the wording is the spec's, not a paraphrase.
+/// The one copy of this sentence the UI renders. The wording is pinned, not a
+/// paraphrase to be tidied: `handler_backlog_drawer_test.dart` spells the same
+/// string out literally instead of comparing against this constant, so a
+/// reword here fails there rather than shipping unnoticed.
 const handlerDisclaimerText =
     "Handler acts on your behalf while you're away and can make mistakes. "
     'Flagged actions are listed in the activity log and can be undone.';
@@ -59,9 +62,9 @@ Future<void> showHandlerBacklogDrawer(
 /// user is allowed to make: reorder, drop an item, drop a dependency, and
 /// requeue a stalled one.
 ///
-/// Deliberately offers no way to CREATE a dependency (spec §3.3): the bridge
-/// derives `dependsOn` from the user's own ordering words, and a hand-authored
-/// one silently blocks work they asked for.
+/// Deliberately offers no way to CREATE a dependency: the bridge derives
+/// `dependsOn` from the user's own ordering words, and a hand-authored one
+/// silently blocks work they asked for.
 class HandlerBacklogDrawer extends ConsumerWidget {
   const HandlerBacklogDrawer({super.key, required this.terminalId});
 
@@ -73,6 +76,10 @@ class HandlerBacklogDrawer extends ConsumerWidget {
     final state = ref.watch(handlerStateProvider).value;
     final session = state?.sessions[terminalId];
     final backlog = session?.backlog ?? const <HandlerInstructionItem>[];
+    // Indexed once per rebuild rather than searched per link: every waits-on
+    // line resolves against this same list, so a backlog near the bridge's cap
+    // otherwise walks it again for each one.
+    final byId = {for (final i in backlog) i.id: i};
     // Keyed by terminal, so a rebuild for a different terminalId cannot draw
     // one session's outstanding instruction under another's backlog.
     final pending =
@@ -127,7 +134,6 @@ class HandlerBacklogDrawer extends ConsumerWidget {
                   ),
                   child: _NothingQueued(
                     armed: session != null,
-                    notifyOnly: session?.notifyOnly ?? false,
                     hasGoal: session?.goal.trim().isNotEmpty ?? false,
                   ),
                 )
@@ -144,7 +150,7 @@ class HandlerBacklogDrawer extends ConsumerWidget {
                           item: backlog[index],
                           canMoveUp: index > 0,
                           canMoveDown: index < backlog.length - 1,
-                          labelFor: (id) => _dependencyLabel(backlog, id),
+                          labelFor: (id) => _dependencyLabel(byId, id),
                           lockReason: editLock,
                         ),
                 ),
@@ -199,18 +205,12 @@ String? _sessionName(WidgetRef ref, String terminalId) {
 class _NothingQueued extends StatelessWidget {
   const _NothingQueued({
     required this.armed,
-    required this.notifyOnly,
     required this.hasGoal,
   });
 
   /// False for a terminal Handler was never armed on — a state with no
   /// invitation to make, since nothing here would receive it.
   final bool armed;
-
-  /// A notify-only session escalates every pause and injects nothing, so this
-  /// list is one the user works through themselves. Saying otherwise is the
-  /// single biggest thing this surface can be wrong about.
-  final bool notifyOnly;
 
   /// Whether a goal is stated above this list.
   final bool hasGoal;
@@ -221,11 +221,9 @@ class _NothingQueued extends StatelessWidget {
           title: hasGoal
               ? 'Nothing queued beyond the goal above.'
               : "Add what you want done while you're away.",
-          subtitle: notifyOnly
-              ? 'Notify only on this session — every pause comes to you, and '
-                    'nothing here is acted on while you are away.'
-              : 'Handler already answers what the agent pauses on. A backlog '
-                    'is the work it takes on by itself.',
+          subtitle:
+              'Handler already answers what the agent pauses on. A backlog '
+              'is the work it takes on by itself.',
         )
       // The Handler tab's own direction, verbatim: one instruction worded one
       // way wherever the user meets it.
@@ -334,8 +332,7 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
   }
 
   /// Preset chips and typed text land here alike: one path, one message type,
-  /// so a rule that later applies to instructions cannot miss the chips
-  /// (spec §5.4).
+  /// so a rule that later applies to instructions cannot miss the chips.
   ///
   /// Resolved through the container for the same reason [_sendEdit] is: this
   /// fires from a tap inside a sheet, which the send itself may pop.
@@ -499,11 +496,11 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
   }
 }
 
-/// What the sentence just sent ALSO did (spec §5.4). An instruction reads as a
-/// chore — "clear out the build dir with rm -rf build" — and the lift it takes
-/// stands for the rest of the session: Handler runs that shape from here on
-/// without the advisory row that would otherwise name it. That is the one
-/// consequence of this field a user cannot read off their own sentence.
+/// What the sentence just sent ALSO did. An instruction reads as a chore —
+/// "clear out the build dir with rm -rf build" — and the lift it takes stands
+/// for the rest of the session: Handler runs that shape from here on without
+/// the advisory row that would otherwise name it. That is the one consequence
+/// of this field a user cannot read off their own sentence.
 ///
 /// Deliberately not behind the disclaimer's dismissal. That flag retires one
 /// notice once it has been read; this line carries different words every time it
@@ -570,9 +567,9 @@ String _grantLiterals(HandlerActivityRecord r) {
 }
 
 /// Handler acts first and is read hours later, so there is no review step in
-/// which the undo path (spec §5.2) could be stumbled upon at the moment it is
-/// wanted — this puts it in front of the user beforehand. It makes undo
-/// discoverable; it does not make a bad outcome less likely.
+/// which the undo path could be stumbled upon at the moment it is wanted —
+/// this puts it in front of the user beforehand. It makes undo discoverable;
+/// it does not make a bad outcome less likely.
 ///
 /// Closable, and nothing stands where it was. Two lines under the composer on
 /// every open is a standing tax for a sentence that stops being news after the
@@ -658,13 +655,13 @@ Widget? _itemSubtitle(HandlerInstructionItem item) {
 /// along because whether this item can move is a fact about the item it waits
 /// on, and the row is the only place holding both.
 ({String text, bool resolved, String? status}) _dependencyLabel(
-  List<HandlerInstructionItem> backlog,
+  Map<String, HandlerInstructionItem> byId,
   String id,
 ) {
-  for (final i in backlog) {
-    if (i.id == id) return (text: i.text, resolved: true, status: i.status);
-  }
-  return (text: id, resolved: false, status: null);
+  final item = byId[id];
+  return item == null
+      ? (text: id, resolved: false, status: null)
+      : (text: item.text, resolved: true, status: item.status);
 }
 
 /// How much of the user's own sentence the lock reason quotes back. It has to
@@ -762,10 +759,6 @@ class _EditLockNotice extends StatelessWidget {
 /// only way any of them reaches the wire. What is owed here is the reason —
 /// [handlerEditLockReason], on every affordance and standing above the list.
 ///
-/// [HandlerSessionState.notifyOnly] rides along from that same snapshot: it is
-/// required on the wire, and a guessed value flips the session between
-/// notifying and acting without saying so.
-///
 /// Takes the container rather than a `WidgetRef` because a menu entry fires
 /// after its route pops, by which time a status update may have taken this row
 /// out of the tree.
@@ -795,7 +788,6 @@ _EditSend _sendEdit(
   return service.updateBacklog(
         terminalId: terminalId,
         backlog: next,
-        notifyOnly: session.notifyOnly,
       )
       ? _EditSend.sent
       : _EditSend.held;

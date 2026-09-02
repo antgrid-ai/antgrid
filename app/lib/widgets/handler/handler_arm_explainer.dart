@@ -28,10 +28,21 @@ import 'handler_item_status.dart';
 /// notice saying arming would stay silent — and this is the one screen whose
 /// whole job is to set the expectation before the user walks away. A session
 /// that will say nothing has nothing to say about what it starts from.
+///
+/// [judgeCapable] is the second, independent half of the same coverage answer
+/// — the session IS watched, but its judge cannot run headless, so every pause
+/// reaches the user. The bridge already reports it post-arm as
+/// `escalate_only`, on a chip found only after walking away and coming back.
+///
+/// On the `true` arm only, and only when the catalog said so outright. The
+/// `false` arm already carries the stronger fact and stacking a second caveat
+/// under it just dilutes the one that matters; the `null` arm has claimed
+/// nothing about coverage and must not start here.
 String handlerArmExplainerBody({
   required bool? agentObservable,
   String? agentLabel,
   bool hasOpeningPrompt = false,
+  bool? judgeCapable,
 }) {
   const base =
       "Handler watches this session while you're away. When the agent pauses "
@@ -42,7 +53,7 @@ String handlerArmExplainerBody({
             'session, and queues that as your backlog.'
       : base;
   return switch (agentObservable) {
-    true => head,
+    true => judgeCapable == false ? '$head\n\n$escalateOnlyNotice' : head,
     false => '$base\n\n${unwatchableNotice(agentLabel)}',
     null =>
       "$head\n\nThis agent hasn't reported what Handler can see here, so it "
@@ -57,6 +68,7 @@ Future<bool> showHandlerArmExplainer(
   required bool? agentObservable,
   String? agentLabel,
   bool hasOpeningPrompt = false,
+  bool? judgeCapable,
 }) => AbConfirmDialog.show(
   context: context,
   title: 'Arm Handler',
@@ -64,6 +76,7 @@ Future<bool> showHandlerArmExplainer(
     agentObservable: agentObservable,
     agentLabel: agentLabel,
     hasOpeningPrompt: hasOpeningPrompt,
+    judgeCapable: judgeCapable,
   ),
   confirmLabel: 'Arm Handler',
   cancelLabel: 'Not now',
@@ -95,9 +108,9 @@ Future<void> armWithFirstRunExplainer({
   required BuildContext context,
   required ProviderContainer container,
   required String terminalId,
-  required bool notifyOnly,
   required bool? agentObservable,
   String? agentLabel,
+  bool? judgeCapable,
 }) async {
   final goal = container.read(sessionOpeningPromptsProvider)[terminalId];
   if (!container.read(firstRunProvider).handlerArmedOnce) {
@@ -106,13 +119,14 @@ Future<void> armWithFirstRunExplainer({
       agentObservable: agentObservable,
       agentLabel: agentLabel,
       hasOpeningPrompt: goal != null,
+      judgeCapable: judgeCapable,
     );
     if (!ok) return;
   }
   focusedServiceOrNull(
     container,
     (s) => s.handlerService,
-  )?.arm(terminalId: terminalId, goal: goal, notifyOnly: notifyOnly);
+  )?.arm(terminalId: terminalId, goal: goal);
   latchHandlerArmedOnConfirmation(container, terminalId);
 }
 

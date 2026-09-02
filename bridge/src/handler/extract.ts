@@ -1,14 +1,14 @@
 // bridge/src/handler/extract.ts
 
-// One user sentence → the items Handler will track (spec §3). This pass reads the
-// user's own words and the list already kept from them, and nothing else — no
-// transcript, no working tree — which is what keeps it extraction rather than the
-// decomposition §3.1 leaves to the agent. The list is there so one sentence can
-// take an earlier one back; every id it names is checked against the live backlog
-// by the engine afterwards, never trusted from here.
+// One user sentence → the items Handler will track. This pass reads the user's
+// own words and the list already kept from them, and nothing else — no
+// transcript, no working tree — which is what keeps it extraction rather than
+// the decomposition this pass leaves to the agent. The list is there so one
+// sentence can take an earlier one back; every id it names is checked against
+// the live backlog by the engine afterwards, never trusted from here.
 
 import { z } from "zod";
-import { isTerminalStatus, oneLine, type InstructionItem } from "./backlog";
+import { clip, isTerminalStatus, oneLine, type InstructionItem } from "./backlog";
 import { extractJsonObject } from "./json-extract";
 
 // An item is one thing the user asked for, in their own words — a line, not a
@@ -111,13 +111,9 @@ export function renderAmendable(backlog: InstructionItem[]): string | null {
   const open = backlog.filter((i) => !isTerminalStatus(i.status));
   if (open.length === 0) return null;
   const shown = amendableItems(backlog);
-  const lines = shown.map((i) => {
-    const text = oneLine(i.text);
-    const clipped = text.length > MAX_AMENDABLE_LINE_CHARS
-      ? `${text.slice(0, MAX_AMENDABLE_LINE_CHARS)}...`
-      : text;
-    return `- id=${oneLine(i.id)} [${i.status}] ${clipped}`;
-  });
+  const lines = shown.map(
+    (i) => `- id=${oneLine(i.id)} [${i.status}] ${clip(oneLine(i.text), MAX_AMENDABLE_LINE_CHARS, "...")}`,
+  );
   const hidden = open.length - shown.length;
   // Said rather than left silent: an extractor that reads the list as complete
   // answers "there is no commit item" by inventing one.

@@ -1,5 +1,6 @@
 // bridge/src/handler/reply-shape.ts
 import type { CapCommand } from "../structured/chat-session";
+import { oneLine } from "./backlog";
 import type { HandlerDecision } from "./decision";
 
 // Harness guards on the gate-bypassing inject channel (alongside the destructive
@@ -10,15 +11,18 @@ export const MAX_REPLY_CHARS = 4096;
 const VERB = /^\/[^\s/\\]+$/;
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
 
-// Exported because the engine flattens the same way for its push bodies, where a
-// stray newline renders as a broken multi-line notification.
-export function oneLine(s: string): string {
-  return s.replace(/\s+/g, " ").trim();
-}
+// Re-exported because the engine flattens the same way for its push bodies, where
+// a stray newline renders as a broken multi-line notification. It is DEFINED in
+// backlog.ts because that module sits below every consumer of the rule and can
+// be reached from any of them: the prompt renderers there and this module
+// enforce one flattening rule, and a second copy is a second place to keep it.
+export { oneLine };
 
-/** Split a slash_command value on its FIRST run of whitespace. The tail keeps its
- *  internal spacing: it is typed at the agent verbatim, and a control character
- *  hiding in it must still reach the guard below rather than be normalized away. */
+/** Split a slash_command value on its FIRST run of whitespace. The tail is passed
+ *  through as given: `replyShape` has already flattened the value, so there is no
+ *  interior spacing left to normalize, and a control character that survives that
+ *  flatten — ESC, Ctrl-C, EOF — must still reach the guard below rather than be
+ *  laundered away here. */
 export function splitSlashCommand(value: string): { verb: string; args: string } {
   const v = value.trim();
   const i = v.search(/\s/);
@@ -38,7 +42,8 @@ export function findCommand(catalog: CapCommand[] | undefined, verb: string): Ca
 export interface ReplyShape {
   /** The free-text reply, flattened to the one line injectReply will submit. */
   reply: string;
-  /** The whole trimmed slash_command value, verb and args together. */
+  /** The whole slash_command value, verb and args together, flattened to the one
+   *  line injectReply will submit. */
   actionText: string;
   verb: string;
   args: string;
@@ -56,14 +61,20 @@ export interface ShapeRejection {
 }
 
 export function replyShape(decision: HandlerDecision): ReplyShape {
-  // Flattened here, before anything reads it: injectReply submits with a trailing
-  // CR, so a line break INSIDE the reply submits early and turns one decision into
-  // several commands. Judges write ordinary paragraphs, so collapse to the single
-  // line that will actually be typed rather than refusing the reply. Only
+  // Both fields are flattened here, before anything reads them: injectReply submits
+  // with a trailing CR, so a line break INSIDE either one submits early and turns one
+  // decision into several commands. Judges write ordinary paragraphs, so collapse to
+  // the single line that will actually be typed rather than refusing the text. Only
   // whitespace collapses — Ctrl-C, EOF and escape have no formatting reading and
-  // still fail the control-char rule below.
+  // still fail the control-char rule below, so the command value is normalized
+  // without any keystroke being laundered into an unsupervised inject.
+  //
+  // The command value flattens BEFORE the split, not only into `written`: the split is
+  // a wire path of its own — the chat driver is handed `args` while the destructive
+  // floor scans `written` — so a rule applied to one and not the other has the floor
+  // scanning a string the driver never receives.
   const reply = oneLine(decision.reply ?? "");
-  const actionText = (decision.action?.kind === "slash_command" ? decision.action.value : "").trim();
+  const actionText = oneLine(decision.action?.kind === "slash_command" ? decision.action.value : "");
   const { verb, args } = actionText ? splitSlashCommand(actionText) : { verb: "", args: "" };
   return { reply, actionText, verb, args, written: actionText || reply };
 }
@@ -81,17 +92,25 @@ export function checkReplyShape(shape: ReplyShape, catalog: CapCommand[] | undef
   if (shape.reply && shape.actionText) {
     return { reason: "set either reply or action, not both", retryable: true };
   }
+  // Named, because the reason is fed back to the judge verbatim by
+  // buildShapeRetryPrompt: one that says `reply` for a value the judge put in
+  // `action` teaches it to edit the field it got right. The XOR above is what makes
+  // this a lookup rather than a guess — `written` is one field or the other, never both.
+  const field = shape.actionText ? "action.value" : "reply";
   if (shape.written.length > MAX_REPLY_CHARS) {
-    return { reason: `reply too long (${shape.written.length} > ${MAX_REPLY_CHARS})`, retryable: true };
+    return { reason: `${field} too long (${shape.written.length} > ${MAX_REPLY_CHARS})`, retryable: true };
   }
   if (CONTROL_CHARS.test(shape.written)) {
-    return { reason: "reply contains control characters", retryable: true };
+    return { reason: `${field} contains control characters`, retryable: true };
   }
   if (!shape.actionText) return null;
   // The VERB alone carries the shape rule; the argument tail is free text the
   // destructive floor inspects instead.
   if (!VERB.test(shape.verb)) {
-    return { reason: "slash command value is not a simple verb", retryable: true };
+    return {
+      reason: "slash command value is not a simple verb: it must start with \"/verb\" — put any explanation in `reason`, never in `value`",
+      retryable: true,
+    };
   }
   // Membership is conditional on a catalog being NON-EMPTY, matching the branch
   // buildDecidePrompt renders on (`opts.commands?.length`): an empty array is told

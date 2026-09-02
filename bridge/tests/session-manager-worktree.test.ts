@@ -431,7 +431,14 @@ describe("isolated session worktree.setup", () => {
   /** A setup runner the test drives by hand. The real one reports from a PTY on
    *  its own schedule; every case here is about what the manager does at a
    *  transition, so the transition has to be the test's to place. */
-  function harness(dir: string, opts: { removeCheckout?: () => void; declaresSetup?: boolean } = {}) {
+  function harness(
+    dir: string,
+    opts: {
+      removeCheckout?: () => void;
+      declaresSetup?: boolean;
+      startAgent?: "afterSetup" | "immediate";
+    } = {},
+  ) {
     const worktree = join(dir, "wt");
     // startCheckout stats the checkout before spawning — a record says nothing
     // about the disk.
@@ -468,7 +475,10 @@ describe("isolated session worktree.setup", () => {
         runs.push({ checkoutId: checkout.id, sessionId, report: onProgress });
       },
       cancelCheckoutSetup: async (checkoutId) => { order.push("cancel-setup"); cancelled.push(checkoutId); },
-      checkoutDeclaresSetup: () => opts.declaresSetup ?? true,
+      checkoutSetupPolicy: () => ({
+        declares: opts.declaresSetup ?? true,
+        startAgent: opts.startAgent ?? "afterSetup",
+      }),
       resolveCheckout: async () => ({ ...record(dir), sessionId: "s" }),
       resolveAgentSpec: async () => ({ command: "claude", name: "claude-code" }),
     });
@@ -519,6 +529,72 @@ describe("isolated session worktree.setup", () => {
       // app tells "queued" from "started" behind an ok reply.
       expect(sm.get(created.id)?.setup?.pendingStart).toBe(true);
       expect(terminal.has(created.id)).toBe(false);
+    });
+  });
+
+  it("keeps the step ledger a later report leaves out", async () => {
+    await withDir(async (dir) => {
+      const { sm, runs } = harness(dir);
+      const created = await sm.create("Isolated", { isolation: "worktree" });
+      const report = runs[0]!.report;
+
+      report({
+        state: "running", stepIndex: 0, stepCount: 2, stepName: "Copy env files",
+        stepNames: ["Copy env files", "Install dependencies"], terminalId: "t",
+      });
+      expect(sm.get(created.id)?.setup?.stepNames).toEqual([
+        "Copy env files", "Install dependencies",
+      ]);
+
+      // A report that omits the ledger must not blank one already on screen —
+      // same retention `terminalId` gets, and for the same reason: the app has
+      // no second source for either.
+      report({ state: "running", stepIndex: 1, stepCount: 2, stepName: "Install dependencies" });
+      expect(sm.get(created.id)?.setup?.stepNames).toEqual([
+        "Copy env files", "Install dependencies",
+      ]);
+      expect(sm.get(created.id)?.setup?.terminalId).toBe("t");
+    });
+  });
+
+  it("an immediate policy launches the agent alongside the run", async () => {
+    await withDir(async (dir) => {
+      const { sm, terminal, runs, deferred } = harness(dir, { startAgent: "immediate" });
+      const created = await sm.create("Isolated", { isolation: "worktree" });
+      // The services block is NOT released with the agent: `bun run dev` needs
+      // the node_modules the run is still installing, and unlike an agent
+      // nobody is reading its output when it fails for that.
+      expect(deferred).toEqual([true]);
+      expect(runs).toHaveLength(1);
+
+      await sm.start(created.id, "fix the flaky test");
+      await waitForTerminal(terminal, created.id);
+      // Never queued, so there is nothing for the settle to fire later — the
+      // start reply and the entry agree that the agent is up.
+      expect(sm.get(created.id)?.setup?.pendingStart).toBe(false);
+      // And the run is still the run: the banner keeps reporting a tree the
+      // agent is already working in, which is the whole reason it must.
+      expect(sm.get(created.id)?.setup?.state).toBe("running");
+    });
+  });
+
+  it("skip against an already-open gate leaves the agent alone", async () => {
+    await withDir(async (dir) => {
+      // The app can only send this from a view that may be a frame behind, so
+      // a skip aimed at a gate `immediate` already opened must be a no-op —
+      // never a second spawn over the agent that is running.
+      const { sm, terminal, runs, cancelled } = harness(dir, { startAgent: "immediate" });
+      const created = await sm.create("Isolated", { isolation: "worktree" });
+      await sm.start(created.id);
+      await waitForTerminal(terminal, created.id);
+      const spawns = terminal.spawns.length;
+
+      await sm.applySetupAction(created.id, "skip");
+      expect(terminal.spawns.length).toBe(spawns);
+      expect(cancelled).toEqual([]);
+      expect(sm.get(created.id)?.setup?.state).toBe("running");
+      runs[0]!.report({ state: "done", stepIndex: 1, stepCount: 2 });
+      expect(sm.get(created.id)?.setup?.state).toBe("done");
     });
   });
 
@@ -657,6 +733,61 @@ describe("isolated session worktree.setup", () => {
       runs[1]!.report({ state: "done", stepIndex: 0, stepCount: 1 });
       await waitForTerminal(terminal, created.id);
       expect(sm.get(created.id)?.setup?.pendingStart).toBe(false);
+    });
+  });
+
+  it("PROBE running+pendingStart simultaneously", async () => {
+    await withDir(async (dir) => {
+      await seedCheckout(dir);
+      const opts: { startAgent?: "afterSetup" | "immediate" } = { startAgent: "afterSetup" };
+      const { sm, terminal, runs } = harness(dir, opts);
+      const created = await sm.create("Isolated", { isolation: "worktree" });
+      await sm.start(created.id, "fix the flaky test");
+      runs[0]!.report({ state: "failed", stepIndex: 0, stepCount: 1, exitCode: 1 });
+      await waitForTerminal(terminal, created.id);
+      sm.stop(created.id);
+      opts.startAgent = "immediate";
+      await sm.applySetupAction(created.id, "rerun");
+      await sm.start(created.id);
+      await waitForTerminal(terminal, created.id);
+      const e = sm.get(created.id);
+      console.error("PROBE X running=", e?.running, "pendingStart=", e?.setup?.pendingStart,
+        "state=", e?.setup?.state);
+    });
+  });
+
+  it("a rerun re-reads a policy that changed since create", async () => {
+    await withDir(async (dir) => {
+      await seedCheckout(dir);
+      // The config lives on the checkout's own branch and a rerun is exactly
+      // when it has been edited since — answering from the create-time reading
+      // would gate a run the user has just told not to.
+      const opts: { startAgent?: "afterSetup" | "immediate" } = { startAgent: "afterSetup" };
+      const { sm, terminal, runs } = harness(dir, opts);
+      const created = await sm.create("Isolated", { isolation: "worktree" });
+      await sm.start(created.id, "fix the flaky test");
+      expect(sm.get(created.id)?.setup?.pendingStart).toBe(true);
+
+      runs[0]!.report({ state: "failed", stepIndex: 0, stepCount: 1, exitCode: 1 });
+      // The failure fires the queued start (`onFailure: warn`), and that is
+      // what banks the prompt in `lastQueuedPrompt` for the rerun to re-arm.
+      // AWAITED rather than assumed: the settle releases deferred services
+      // first, so a synchronous stop here would clear `pendingStart` before
+      // `firePendingStart` ever ran — and the rerun would then take the
+      // no-requeue path, which is not the one this test is about.
+      await waitForTerminal(terminal, created.id);
+      // A rerun re-arms the prompt only for a session that is not already
+      // running, which is the case that queues a start behind the new run.
+      sm.stop(created.id);
+      opts.startAgent = "immediate";
+      await sm.applySetupAction(created.id, "rerun");
+
+      // No second `start()`: the rerun re-armed the prompt itself, and an
+      // `immediate` policy owes that start the agent straight away rather than
+      // at the end of the run it is not supposed to wait for.
+      await waitForTerminal(terminal, created.id);
+      expect(sm.get(created.id)?.setup?.pendingStart).toBe(false);
+      expect(sm.get(created.id)?.setup?.state).toBe("running");
     });
   });
 

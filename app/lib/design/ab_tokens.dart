@@ -239,6 +239,16 @@ abstract final class AbTokens {
   /// out by scrolling internally rather than widening this measure.
   static const transcriptMaxWidth = 680.0;
 
+  /// Max measure for a rendered markdown document in the file viewer. Wider
+  /// than [transcriptMaxWidth] because document body is [fontBody] where the
+  /// transcript's is [fontMd] — the same ~70ch, one step up the scale. Code
+  /// fences and tables opt out by scrolling internally.
+  static const documentMaxWidth = 720.0;
+
+  /// Width of the heading-outline rail beside a markdown document. Sized to
+  /// hold a nested `h3` label at [fontXs] without ellipsizing every entry.
+  static const documentOutlineWidth = 208.0;
+
   static const sidebarWidth = 48.0;
   static const commandTrayHeight = 44.0;
   static const bottomNavHeight = 56.0;
