@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as Sentry from "@sentry/bun";
 import type { ErrorEvent } from "@sentry/bun";
 import {
+  EXCLUDED_INTEGRATIONS,
   __resetCrashReportingForTest,
   captureBridgeError,
   flushCrashReports,
@@ -148,17 +149,10 @@ describe("scrubCrashEvent", () => {
 // only exercises the scrubber — it would just quietly re-enable the integration
 // that reads hook request bodies. So assert the names still exist.
 test("every excluded integration name still exists in the SDK defaults", () => {
-  const expected = [
-    "Console",
-    "ContextLines",
-    "RequestData",
-    "Http",
-    "NodeFetch",
-    "BunServer",
-    "ProcessSession",
-  ];
   const actual = new Set(Sentry.getDefaultIntegrations({}).map((i) => i.name));
-  for (const name of expected) expect([name, actual.has(name)]).toEqual([name, true]);
+  for (const name of EXCLUDED_INTEGRATIONS) {
+    expect([name, actual.has(name)]).toEqual([name, true]);
+  }
 });
 
 // The gate is the part with a wrong answer that matters: reporting on a user
@@ -169,6 +163,10 @@ describe("initCrashReporting gate", () => {
   afterEach(async () => {
     __resetCrashReportingForTest();
     await Sentry.close(0);
+    // `close()` disables the client but leaves it ON THE SCOPE, so a later case
+    // that never calls `Sentry.init` still reads the previous case's client —
+    // and its DSN — instead of the "no client" it is asserting about.
+    Sentry.getCurrentScope().setClient(undefined);
   });
 
   test("stays off without consent, even with a DSN", () => {
@@ -200,12 +198,21 @@ describe("initCrashReporting gate", () => {
   // healthy. The app is unaffected: sentry-dart takes the last path segment as
   // an opaque String.
   test("refuses a slug project id instead of reporting success", () => {
+    const beforeUncaught = process.listeners("uncaughtException").length;
+    const beforeRejection = process.listeners("unhandledRejection").length;
+
     expect(
       initCrashReporting({ enabled: true, dsn: "https://abc123@example.invalid/antgrid-app" }),
     ).toBe(false);
-    // The SDK still built a client; it is the DSN-less, transport-less kind,
-    // which is exactly why the client alone cannot be the health check.
-    expect(Sentry.getClient()?.getDsn()).toBeUndefined();
+
+    // Refused BEFORE `Sentry.init` runs, so there is no client and no listener.
+    // The ordering is the point: init installs both top-level handlers before it
+    // ever looks at the DSN and nothing takes them off again, so a check made
+    // afterwards would leave a client that can never transmit owning every fatal
+    // path in the process.
+    expect(Sentry.getClient()).toBeUndefined();
+    expect(process.listeners("uncaughtException").length).toBe(beforeUncaught);
+    expect(process.listeners("unhandledRejection").length).toBe(beforeRejection);
   });
 
   test("a refused DSN leaves capture and flush inert", async () => {

@@ -18,14 +18,19 @@ const log = logger.child({ component: "crash-reporting" });
  *    the list; the URLs alone carry project ids.
  *  - `ProcessSession` posts a release-health session on exit, adding a network
  *    round-trip to a shutdown path that races a Store destage on Windows.
+ *  - `Modules` walks up from `process.cwd()` for a `package.json` and ships its
+ *    dependency map as `event.modules`. The host does not choose its own cwd —
+ *    it inherits the spawning app's — so what that finds is not knowable from
+ *    here, and it is disk I/O on the crash path for a field nothing reads.
  *
  *  The two top-level handler integrations are NOT here. They are re-added below
  *  with their options pinned — see `TOP_LEVEL_HANDLER_INTEGRATIONS`.
  *
  *  Names are matched against the SDK's own integration `name`s, so a rename
- *  upstream silently stops filtering. `crash-scrubber.test.ts` pins this list
- *  against the live defaults for exactly that reason. */
-const EXCLUDED_INTEGRATIONS = new Set([
+ *  upstream silently stops filtering. Exported so `crash-scrubber.test.ts` pins
+ *  THIS set against the live defaults, rather than a copy of it that a new entry
+ *  here would not reach. */
+export const EXCLUDED_INTEGRATIONS = new Set([
   "Console",
   "ContextLines",
   "RequestData",
@@ -33,6 +38,7 @@ const EXCLUDED_INTEGRATIONS = new Set([
   "NodeFetch",
   "BunServer",
   "ProcessSession",
+  "Modules",
 ]);
 
 /**
@@ -76,16 +82,25 @@ const TOP_LEVEL_HANDLER_INTEGRATIONS = [
 const PATH_LIKE = /([a-zA-Z]:)?[\\/][^\s"]+/g;
 const REDACTED_PATH = "<redacted-path>";
 
-/** How long a shutdown may wait on the transport. Bounded hard: the drain that
- *  follows is what kills every PTY, and on Windows it races a Store destage. */
+/** How long a shutdown may wait on the transport. Bounded hard because this is
+ *  appended to the END of teardown, after the drain that kills every PTY:
+ *  nothing follows it but the exit, so the ceiling is the whole remaining
+ *  budget and not a slice of a larger one. The app force-kills the host tree 3s
+ *  into its own graceful ask, and on Windows that stretch races a Store
+ *  destage. */
 const FLUSH_TIMEOUT_MS = 2_000;
 
 function redact(input: string): string {
   return input.replace(PATH_LIKE, REDACTED_PATH);
 }
 
+/** Nullable-preserving: a null/undefined field stays as it was. Guards on
+ *  falsiness rather than `=== undefined` because these fields are typed
+ *  optional but arrive off the wire — a `null` reaching `String.replace` throws,
+ *  and `beforeSend` swallowing that throw drops the whole event. Mirrors
+ *  `_redactNullable` in the app's scrubber, which gets this from `?.`. */
 function redactNullable<T extends string | undefined>(input: T): T {
-  return (input === undefined ? undefined : redact(input)) as T;
+  return (input ? redact(input) : input) as T;
 }
 
 /** Recursively redact strings inside arbitrary breadcrumb/extra data — nested
@@ -96,11 +111,12 @@ function redactDeep(value: unknown): unknown {
   if (typeof value === "string") return redact(value);
   if (Array.isArray(value)) return value.map(redactDeep);
   if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[redact(k)] = redactDeep(v);
-    }
-    return out;
+    // `fromEntries` rather than assignment into a literal: assigning a key
+    // named `__proto__` runs Object.prototype's setter instead of creating the
+    // property, so that entry — and only that one — would vanish silently.
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [redact(k), redactDeep(v)]),
+    );
   }
   return value;
 }
@@ -138,9 +154,11 @@ function scrubBreadcrumb(crumb: Breadcrumb): void {
  * (`crash-scrubber.test.ts` records that probe): message/logentry, exception
  * values and their frames, thread stacks, breadcrumbs, extra, transaction, and
  * `server_name`, which arrives as the bare hostname — `logger.ts` drops pino's
- * `hostname` binding for the same reason. `user` and `request` are not populated
- * at all with `sendDefaultPii: false` and the server integrations excluded, and
- * are cleared anyway so re-enabling one cannot quietly start shipping them.
+ * `hostname` binding for the same reason. `user`, `request` and `modules` are
+ * not populated at all with `sendDefaultPii: false` and the server and
+ * `Modules` integrations excluded, and are cleared anyway so re-enabling one
+ * cannot quietly start shipping them. `debug_meta` images keep their ids and
+ * addresses but lose `code_file`.
  * `contexts` is deliberately NOT scrubbed: it is os/runtime/device-HARDWARE
  * metadata with no name or path in it, and it is most of why a cross-platform
  * bridge reports at all. Re-run the probe and revisit this list on an SDK major.
@@ -166,8 +184,14 @@ export function scrubCrashEvent(event: ErrorEvent): ErrorEvent {
   event.transaction = redactNullable(event.transaction);
   if (event.extra) event.extra = redactDeep(event.extra) as Record<string, unknown>;
   if (event.server_name !== undefined) event.server_name = "<redacted-host>";
+  // `code_file` is an absolute on-disk path to the binary/sourcemap; the rest of
+  // a debug image is addresses and ids.
+  for (const image of event.debug_meta?.images ?? []) {
+    if ("code_file" in image) image.code_file = redactNullable(image.code_file);
+  }
   delete event.user;
   delete event.request;
+  delete event.modules;
 
   return event;
 }
@@ -181,9 +205,10 @@ export interface CrashReportingOptions {
    *  bootstrap payload sent by the CLI or a test, which is why the caller
    *  resolves that absence to `false` rather than this defaulting it. */
   enabled: boolean;
-  /** A build-time constant in a shipped bridge (`--define`), ambient env
-   *  otherwise — which is what keeps a dev host silent unless deliberately
-   *  configured. Same shape as `LICENSE_API_URL`. */
+  /** A build-time constant in a shipped bridge (`--define`, from CI's
+   *  `SENTRY_DSN_BRIDGE`), ambient env otherwise — which is what keeps a dev
+   *  host silent unless deliberately configured. Same shape as
+   *  `LICENSE_API_URL`, but NOT the app's DSN: see `hasNumericProjectId`. */
   dsn: string;
   /** The spawning app's `ownerBuild`, used verbatim — never parsed, per the
    *  contract in `credentials.ts`. It is the only per-build identifier the host
@@ -192,15 +217,53 @@ export interface CrashReportingOptions {
   release?: string;
 }
 
+/** The JS SDKs accept a DSN only when its project id is NUMERIC, and errex
+ *  issues SLUGS (`antgrid-app`) — so the DSN that works for the app is refused
+ *  here, and the bridge needs its own.
+ *
+ *  Checked BEFORE `Sentry.init` rather than after, because init installs the two
+ *  top-level process handlers before it ever looks at the DSN, and nothing takes
+ *  them off again: `Sentry.close()` disables the client but leaves the
+ *  listeners. A client that can never transmit would therefore keep owning both
+ *  fatal paths — the `warn`-mode rejection handler prints the raw reason, paths
+ *  and all, to a stderr that is teed into `~/.antgrid/host.log`, and takes the
+ *  rejection away from the runtime's own reporting. Install nothing instead.
+ *
+ *  The SDK's own `validateDsn` is not the backstop it looks like: it opens with
+ *  `if (!DEBUG_BUILD) return true`, and `DEBUG_BUILD` is only
+ *  `typeof __SENTRY_DEBUG__ === "undefined" || __SENTRY_DEBUG__`. Defining that
+ *  false at build time — a routine bundle-size flag — would make the SDK accept
+ *  a slug id and post envelopes to a URL built from it. */
+function hasNumericProjectId(dsn: string): boolean {
+  const projectId = dsn.split(/[?#]/)[0]?.split("/").pop() ?? "";
+  return /^\d+$/.test(projectId);
+}
+
 /** Returns whether reporting actually came up — callers log it, nothing branches. */
 export function initCrashReporting(opts: CrashReportingOptions): boolean {
   if (active) return true;
   if (!opts.enabled || !opts.dsn) return false;
+  if (!hasNumericProjectId(opts.dsn)) {
+    log.error("crash reporting DISABLED: SENTRY_DSN carries a non-numeric project id, which the JS SDK refuses");
+    return false;
+  }
 
   Sentry.init({
     dsn: opts.dsn,
     ...(opts.release ? { release: opts.release } : {}),
     sendDefaultPii: false,
+    // Pinned, not left to default, because `getClientOptions` fills each of
+    // these from the AMBIENT ENVIRONMENT when the option is undefined — and the
+    // host inherits its environment from whatever spawned it, which on a
+    // developer's machine is a shell nobody audited. `SENTRY_TRACES_SAMPLE_RATE`
+    // would start emitting transactions, which `beforeSend` does not see at all
+    // (that is `beforeSendTransaction`, a callback this file never sets);
+    // `SENTRY_SPOTLIGHT` would fan every envelope out to a second destination on
+    // loopback; `SENTRY_DEBUG` would narrate the SDK into a stderr that is teed
+    // into `~/.antgrid/host.log`.
+    tracesSampleRate: 0,
+    spotlight: false,
+    debug: false,
     integrations: (defaults) => [
       ...defaults.filter((i) => !EXCLUDED_INTEGRATIONS.has(i.name)),
       ...TOP_LEVEL_HANDLER_INTEGRATIONS,
@@ -211,15 +274,11 @@ export function initCrashReporting(opts: CrashReportingOptions): boolean {
   // `Sentry.init` NEVER throws and NEVER returns a status: a DSN it refuses
   // leaves a client with no transport, and every later `captureException` and
   // `flush` then succeeds silently — `flush` resolves TRUE with nothing sent.
-  // The refusal that matters here is measured, not hypothetical: the JS SDKs
-  // require a NUMERIC project id, while errex issues slugs (`antgrid-app`), so
-  // the DSN CI bakes in is rejected outright and the whole feature ships inert.
-  // A missing DSN here is therefore never "reporting is off" — it is reporting
-  // that believes it is on. Fail loudly and stay off.
+  // So a refusal is never "reporting is off"; it is reporting that believes it
+  // is on. `hasNumericProjectId` above catches the one refusal we know of by
+  // name; this catches whatever the next one turns out to be.
   if (!Sentry.getClient()?.getDsn()) {
-    log.error(
-      "crash reporting DISABLED: the SDK refused the DSN (JS SDKs require a numeric project id)",
-    );
+    log.error("crash reporting DISABLED: the SDK refused the DSN");
     return false;
   }
 
@@ -241,12 +300,15 @@ export function captureBridgeError(err: unknown, context: string): void {
 }
 
 /** Drain the transport before exit, bounded so a dead network cannot hold up the
- *  teardown that sweeps the PTYs.
+ *  exit. Called AFTER the sweep, so what a hung transport costs is a lost report
+ *  and a later exit — never an unswept PTY.
  *
  *  Unconditional while reporting is on, deliberately: most captures now happen
  *  inside the SDK's own top-level handlers, so nothing on this side can know
  *  whether the queue is empty — and it need not, since a flush with nothing to
- *  send measures ~15ms, well under the 5s graceful ask that follows it. */
+ *  send measures ~15ms. Against a black-holed host it runs the full timeout:
+ *  `_isClientDoneProcessing` counts 1ms TICKS rather than elapsed time, so the
+ *  ceiling holds only as long as timers are not being coarsened. */
 export async function flushCrashReports(timeoutMs: number = FLUSH_TIMEOUT_MS): Promise<void> {
   if (!active) return;
   try {
