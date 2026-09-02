@@ -10,12 +10,15 @@ import Privacy from "../components/sections/Privacy.astro";
 import CrossAgent from "../components/sections/CrossAgent.astro";
 import ClosingCta from "../components/sections/ClosingCta.astro";
 
-// NOT "remote dev": that names the cloud-workspace category (Codespaces, Gitpod,
-// devcontainers) and claims the opposite of what this is — the agents run on
-// hardware you own. "Remote control" is accurate and is the phrase people search
-// when they want a machine of their own driven from somewhere else. Under 60
+// "Control plane", after two rejected shelves. NOT "remote dev" — that is the
+// cloud-workspace category (Codespaces, Gitpod, devcontainers), it is judged on
+// workspace provisioning and browser IDEs, and it centres a human at a keyboard.
+// NOT "remote control" either: that is 1:1, one phone to one laptop, it is a
+// feature every agent vendor is shipping, and nobody buys it for a team. A
+// control plane is 1:many — N machines by M agents on one screen — which is the
+// only one of the three a company recognises as its own problem. Under 60
 // characters so a result page shows it whole rather than cutting the agents off.
-const TITLE = "antgrid — remote control for Claude Code, Codex and Cursor";
+const TITLE = "antgrid — control plane for Claude Code, Codex and Cursor";
 
 // Under ~125 characters so a mobile link preview shows it whole — Google's
 // ~155 is the looser bound, and this is the page people actually share. It has
@@ -25,11 +28,11 @@ const TITLE = "antgrid — remote control for Claude Code, Codex and Cursor";
 // It names the agents, because "Claude Code" is what a person types into a
 // search box and "coding agent" is not, and it leads with WHERE they run: the
 // thing a reader is likeliest to get wrong here is assuming the work happens in
-// our cloud. The wedge is carried in the hero's own words rather than
-// paraphrased — a description promising a different sentence than the one the
-// page opens with is why people bounce off a result they chose.
+// our cloud. It promises only what an unarmed, unpaid install actually does —
+// the evidence gate is the reason to pay, but it is opt-in and it lives on Pro,
+// so a headline built on it would be false for every free machine on day one.
 const DESCRIPTION =
-  "Claude Code and Codex on your own machines, steered from your phone. Done means proven, not claimed. End-to-end encrypted.";
+  "Claude Code, Codex and Cursor on every machine you own, in one control plane. Nothing rented from us. End-to-end encrypted.";
 ---
 <Base
   title={TITLE}

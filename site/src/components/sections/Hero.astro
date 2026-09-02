@@ -74,15 +74,17 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
         <span class="inline-block">Claude Code on your laptop, Codex on your workstation, another on a cloud box.</span>{" "}
         <span class="inline-block">One's been stuck since 2am.</span>
       </span>
-      {/* The kicker carries scope — every agent, every machine — so the headline
-          is free to carry the wedge, and the ProofCard below is its evidence. It
-          used to claim the overview ("One screen."), which is a watching claim
-          for a product that acts, and left the argument the card was making
-          unstated in anything larger than body copy. Fleet.astro still owns the
-          overview claim; it is the section that proves it. */}
+      {/* This deliberately takes the overview claim BACK from Fleet.astro, which
+          was handed it while the headline carried the evidence gate. The gate is
+          not entitled to a headline: Handler is opt-in and it is on Pro, so "make
+          it prove it" was false on every free machine until someone armed it —
+          the one promise a stranger is asked to believe has to be true on a bare
+          install. This one is. Fleet.astro keeps the PROOF; the hero takes back
+          the CLAIM, and the ProofCard below still shows the gate doing its job. */}
       <span class="block font-display text-display font-semibold text-ink">
-        <span class="inline-block">Your agent says it's done.</span>{" "}
-        <span class="inline-block">Make it prove it.</span>
+        <span class="inline-block">Your machines.</span>{" "}
+        <span class="inline-block">Your agents.</span>{" "}
+        <span class="inline-block">One control plane.</span>
       </span>
     </h1>
 
@@ -90,13 +92,23 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
         rather than pinned to the shell's edges — pushed apart, the buttons read
         as stranded rather than as a deliberate second column. */}
     <div class="grid gap-x-12 gap-y-7 md:grid-cols-[minmax(0,35rem)_minmax(0,21rem)]">
-      {/* Carries the mechanism behind the headline's claim — the headline asserts
-          the gate, this says how it closes. Names "your agents" rather than
-          opening on "They": the nearest noun above is now the singular "your
-          agent" in the headline, so the pronoun read as a reference to it. */}
-      <p class="text-lede text-muted">
-        Your agents run on your own machines — your repos, your branches, your existing subscriptions. Hand antgrid the sequence in plain text: it reads every result, refuses a "done" that arrives with no test output, exit code or diff, and moves to the next phase.
-      </p>
+      {/* Two beats, and their order is the argument. The first is true on a free
+          install with nothing configured, which is what earns it the space next
+          to the headline. The second names the paid feature with a VERB — you arm
+          it — because a reader who takes the gate for a default will find it
+          missing and conclude we lied. It links rather than explains: Phases.astro
+          is two sections down and makes the whole case there. */}
+      {/* One grid child, not two paragraphs: the grid has exactly two columns and
+          a loose second <p> becomes a third item, which pushes the CTA column out
+          of row one and strands the buttons under the copy. */}
+      <div>
+        <p class="text-lede text-muted">
+          Every agent you're running, on every machine you own — your repos, your branches, your existing subscriptions. Nothing rented from us, nothing to provision.
+        </p>
+        <p class="mt-4 text-lede text-muted">
+          Arm <a href={links.features} class="text-signal2 hover:text-signal">Handler</a> when you want a phase held until the evidence is there.
+        </p>
+      </div>
       <div>
         <div class="flex flex-wrap items-center gap-3">
           <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
