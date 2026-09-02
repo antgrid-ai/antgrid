@@ -44,6 +44,13 @@ class AbBranchPill extends StatelessWidget {
               maxLines: 1,
               softWrap: false,
               overflow: TextOverflow.ellipsis,
+              // Default TextWidthBasis.parent reports the FULL Flexible share
+              // as this Text's width regardless of how short `branch` is, so
+              // a one-word branch still claims the whole cap and leaves a
+              // sibling with nothing to shrink into. longestLine reports the
+              // actual ink width instead — unchanged once ellipsis is
+              // actually clipping (that already fills the share).
+              textWidthBasis: TextWidthBasis.longestLine,
               style: AbTokens.monoStyle(
                 fontSize: AbTokens.fontXs,
                 color: palette.textMuted,

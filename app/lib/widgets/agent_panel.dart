@@ -249,11 +249,10 @@ class _HandlerMenuItem extends ConsumerWidget {
         armWithFirstRunExplainer(
           context: context,
           container: ref.container,
-          service: service,
           terminalId: activeId,
-          notifyOnly: state.defaultNotifyOnly,
           agentObservable: coverage.observable,
           agentLabel: coverage.agentLabel,
+          judgeCapable: coverage.judgeCapable,
         ),
       );
     }

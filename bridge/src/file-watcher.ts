@@ -44,6 +44,10 @@ export class FileWatcher {
     removed: new Set(),
   };
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Set when the native recursive watcher reports a change with no path —
+   *  see [startNativeRecursiveWatch] — so [flushBatch] falls back to a full
+   *  resync instead of sending an incremental batch it knows is incomplete. */
+  private needsFullResync = false;
 
   constructor(
     project: ProjectInfo,
@@ -150,7 +154,21 @@ export class FileWatcher {
         this.projectRoot,
         { recursive: true, persistent: true },
         (_event, filename) => {
-          if (filename == null) return;
+          if (filename == null) {
+            // Windows' (and reportedly macOS's) recursive fs.watch reports
+            // exactly this — a change with no path — when its internal
+            // notification buffer overflows: a burst of filesystem activity
+            // (a new directory landing with many files in one go is enough,
+            // measured on Windows) drops the per-file events instead of
+            // queuing them, rather than raising an error. There is no path to
+            // diff here, so treat it as "something changed, scope unknown"
+            // and let flushBatch fall back to a full resync — otherwise some
+            // of the affected files never appear until the app's own
+            // pull-to-refresh forces a rebuild from disk.
+            this.needsFullResync = true;
+            this.scheduleBatch();
+            return;
+          }
           // Usually relative to projectRoot (String() also covers a Buffer if
           // the platform yields one) — but Windows also delivers the ABSOLUTE
           // watched root for events on the directory itself, so re-derive
@@ -335,6 +353,9 @@ export class FileWatcher {
   private flushBatch(): void {
     this.debounceTimer = null;
 
+    const fullResync = this.needsFullResync;
+    this.needsFullResync = false;
+
     const added = Array.from(this.pending.added.values());
     const modified = Array.from(this.pending.modified.values());
     const removed = Array.from(this.pending.removed);
@@ -344,7 +365,7 @@ export class FileWatcher {
     this.pending.modified.clear();
     this.pending.removed.clear();
 
-    if (added.length === 0 && modified.length === 0 && removed.length === 0) return;
+    if (!fullResync && added.length === 0 && modified.length === 0 && removed.length === 0) return;
 
     // Ahead of the suppression gate below, and not gated by it: git status is
     // not a heavy-stream frame, and its cache is what a reconnecting app is
@@ -355,6 +376,16 @@ export class FileWatcher {
     const seq = this.connState.bumpFileSeq();
     if (this.connState.suppressed) {
       // Drop the update; the next tree-snapshot reply will reflect the current tree.
+      return;
+    }
+
+    if (fullResync) {
+      // The watcher lost track of what actually changed (see the null-filename
+      // branch above) — whatever named add/modify/remove this same tick also
+      // captured is incomplete at best, so send the real thing instead: the
+      // same full tree a manual pull-to-refresh would rebuild.
+      this.sendFullTree({ force: true });
+      log.debug("tree resync for project %s — watcher reported an unnamed change", this.projectId);
       return;
     }
 

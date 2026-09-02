@@ -75,6 +75,31 @@ describe("FileWatcher", () => {
     watcher.stop();
   });
 
+  // Windows' (and reportedly macOS's) recursive fs.watch reports a `change`
+  // event with filename === null when its internal notification buffer
+  // overflows — measured: a burst of ~40 file creations under one new
+  // directory was enough to drop every per-file event and report only this.
+  // `flushBatch` must treat that as "something changed, scope unknown" and
+  // resync the whole tree rather than silently doing nothing.
+  it("falls back to a full tree resync when the watcher reports an unnamed change", async () => {
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+
+    (watcher as unknown as { needsFullResync: boolean }).needsFullResync = true;
+    (watcher as unknown as { scheduleBatch: () => void }).scheduleBatch();
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(messages.some((m) => m.type === "tree:full")).toBe(true);
+    expect(messages.some((m) => m.type === "tree:update")).toBe(false);
+
+    watcher.stop();
+  });
+
   it("detects file modifications", async () => {
     const messages: AbMessage[] = [];
     const watcher = new FileWatcher(

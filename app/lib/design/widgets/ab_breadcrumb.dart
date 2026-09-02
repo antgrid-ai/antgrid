@@ -51,6 +51,14 @@ class AbBreadcrumb extends StatelessWidget {
               segments[i],
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
+              // Default TextWidthBasis.parent reports the full incoming
+              // constraint as this Text's width regardless of content length —
+              // for the CAPPED leading segment below that means a short
+              // project name still claims the entire 140px ConstrainedBox,
+              // leaving the leaf nothing to grow into. longestLine reports the
+              // actual ink width instead (unchanged once ellipsis is actually
+              // clipping, since that already fills the available width).
+              textWidthBasis: TextWidthBasis.longestLine,
               style: style,
             );
       // Only the LAST segment (the leaf — a session or file name, the thing

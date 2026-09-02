@@ -1397,19 +1397,29 @@ class _ChangesHistorySwitcherState extends State<_ChangesHistorySwitcher> {
             horizontal: AbTokens.space12,
             vertical: AbTokens.space8,
           ),
-          child: AbSegmented<_GitMobileTab>(
-            segments: [
-              AbSegment(
-                value: _GitMobileTab.changes,
-                label: 'Changes · ${widget.changedCount}',
-              ),
-              AbSegment(
-                value: _GitMobileTab.history,
-                label: 'History · ${widget.commitCount}',
-              ),
-            ],
-            selected: _tab,
-            onSelect: (value) => setState(() => _tab = value),
+          // Scrollable, not a bare AbSegmented: the enclosing Column stretches
+          // this to the full row width, and AbSegmented hugs its own content
+          // (mainAxisSize.min) rather than sharing that width between cells —
+          // on the narrowest phones, a double-digit changed/commit count can
+          // need more than the row has, and a SingleChildScrollView absorbs
+          // that the same way the Changes header's own action row does,
+          // rather than a hard RenderFlex overflow.
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: AbSegmented<_GitMobileTab>(
+              segments: [
+                AbSegment(
+                  value: _GitMobileTab.changes,
+                  label: 'Changes · ${widget.changedCount}',
+                ),
+                AbSegment(
+                  value: _GitMobileTab.history,
+                  label: 'History · ${widget.commitCount}',
+                ),
+              ],
+              selected: _tab,
+              onSelect: (value) => setState(() => _tab = value),
+            ),
           ),
         ),
         const AbSeparator.horizontal(),

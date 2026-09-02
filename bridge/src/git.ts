@@ -410,7 +410,12 @@ async function readPorcelain(
   cwd: string,
 ): Promise<ReturnType<typeof parsePorcelain> | null> {
   const [status, prefix] = await Promise.all([
-    runGit(cwd, ["status", "--porcelain=v1", "-z"]),
+    // `--untracked-files=all`: git's default collapses a wholly-untracked
+    // directory into ONE entry with a trailing slash instead of walking into
+    // it, so a brand-new folder's files never got their own status/diff/line
+    // count — clicking one in the tree opened nothing, and staging the
+    // collapsed entry was the only way to make the individual files appear.
+    runGit(cwd, ["status", "--porcelain=v1", "--untracked-files=all", "-z"]),
     runGit(cwd, ["rev-parse", "--show-prefix"]),
   ]);
   if (status.exitCode !== 0) return null;

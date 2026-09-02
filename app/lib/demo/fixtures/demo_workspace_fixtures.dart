@@ -12,7 +12,7 @@ library;
 
 import '../demo_identity.dart';
 
-const String kDemoBranch = 'feature/checkout-validation';
+const String kDemoBranch = 'checkout';
 
 /// Shared by the wire frame below and the New Session picker's branch catalog,
 /// which cannot go to a bridge for the sample project's branches.
