@@ -523,8 +523,29 @@ class PreviewService {
     Map<String, String> headers,
   ) {
     final tunnelId = const Uuid().v4();
+    final outbound = _WsOutboundQueue(
+      session.transport,
+      onAbort: (reason) {
+        AbLog.warn(
+          'preview',
+          'ws tunnel aborted',
+          fields: {'tunnelId': tunnelId, 'port': port, 'reason': reason},
+        );
+        // Close the local socket only. The `onDone` below is what removes the
+        // tunnel and tells the bridge, and closing here is what triggers it —
+        // the previewed page then sees a real close event and reconnects,
+        // instead of holding an open socket nothing will ever answer.
+        final tunnel = _activeWsTunnels[tunnelId];
+        if (tunnel == null) return;
+        detached(
+          'preview',
+          'ws tunnel abort close',
+          () => tunnel.channel.sink.close(),
+        );
+      },
+    );
 
-    session.transport.send(
+    outbound.send(
       createAbMessage('tunnel:ws-open', {
         'tunnelId': tunnelId,
         'port': port,
@@ -533,31 +554,28 @@ class PreviewService {
         'headers': headers,
         'checkoutId': checkoutId,
       }),
-      channel: 'preview',
     );
 
     final sub = channel.stream.listen(
       (data) {
         if (data is String) {
-          session.transport.send(
+          outbound.send(
             createAbMessage('tunnel:ws-data', {
               'tunnelId': tunnelId,
               'data': data,
               'checkoutId': checkoutId,
             }),
-            channel: 'preview',
           );
           return;
         }
 
-        session.transport.send(
+        outbound.send(
           createAbMessage('tunnel:ws-data', {
             'tunnelId': tunnelId,
             'data': base64Encode(data as List<int>),
             'binary': true,
             'checkoutId': checkoutId,
           }),
-          channel: 'preview',
         );
       },
       onDone: () {
@@ -565,12 +583,11 @@ class PreviewService {
         // (the bridge/upstream side closed first) — that path already told
         // the bridge, so closing our own sink here must not tell it again.
         if (_activeWsTunnels.remove(tunnelId) == null) return;
-        session.transport.send(
+        outbound.sendClose(
           createAbMessage('tunnel:ws-close', {
             'tunnelId': tunnelId,
             'checkoutId': checkoutId,
           }),
-          channel: 'preview',
         );
       },
     );
@@ -663,4 +680,92 @@ class _WsTunnel {
   final StreamSubscription sub;
 
   _WsTunnel(this.channel, this.sub);
+}
+
+/// One FIFO for every app-to-bridge frame belonging to a browser WebSocket.
+///
+/// Transport sealing is asynchronous. Independent fire-and-forget sends can
+/// otherwise put the browser's first SignalR frame ahead of `tunnel:ws-open`,
+/// or reorder later binary frames. WebSocket application protocols require the
+/// byte stream to retain its original order.
+///
+/// Ordering is only half the job: the frames must also arrive. A send with no
+/// session keys installed completes SUCCESSFULLY and delivers nothing, so a
+/// lost `tunnel:ws-open` would otherwise leave the browser's socket waiting
+/// forever on a tunnel the bridge never heard of. [onAbort] fires on any frame
+/// this queue cannot vouch for, and the tunnel is closed rather than left open
+/// and mute.
+class _WsOutboundQueue {
+  _WsOutboundQueue(this._transport, {required this.onAbort});
+
+  final AgentTransport _transport;
+  final void Function(String reason) onAbort;
+
+  Future<void> _tail = Future<void>.value();
+  int _queuedFrames = 0;
+  int _queuedBytes = 0;
+  bool _aborted = false;
+
+  /// Same ceilings the bridge applies to its own pre-open buffer. Serializing
+  /// on the transport means a slow link builds the backlog HERE, and a browser
+  /// streaming into a wedged tunnel would otherwise grow it without limit.
+  static const _maxQueuedFrames = 64;
+  static const _maxQueuedBytes = 1024 * 1024;
+  static const _sendTimeout = Duration(seconds: 10);
+
+  /// How long the close frame waits its turn. Ordering matters least here:
+  /// a queue that has not drained has already lost the data the close would
+  /// follow, and the bridge's upstream dev-server socket stays open until it
+  /// arrives.
+  static const _closeGrace = Duration(seconds: 2);
+
+  void send(Map<String, dynamic> message) {
+    if (_aborted) return;
+    final bytes = (message['data'] as String?)?.length ?? 0;
+    if (_queuedFrames >= _maxQueuedFrames ||
+        _queuedBytes + bytes > _maxQueuedBytes) {
+      _abort('outbound queue limit reached');
+      return;
+    }
+    _queuedFrames++;
+    _queuedBytes += bytes;
+    _tail = _tail.then((_) => _sendOne(message, bytes));
+  }
+
+  /// Enqueue the tunnel's close, bounded by [_closeGrace] rather than by the
+  /// backlog ahead of it. Ignores [_aborted]: the bridge is owed this frame
+  /// precisely when the tunnel died badly.
+  void sendClose(Map<String, dynamic> message) {
+    final ahead = _tail;
+    detached('preview', 'ws tunnel close', () async {
+      await ahead.timeout(_closeGrace, onTimeout: () {}).catchError((_) {});
+      await _transport.send(message, channel: 'preview').timeout(_sendTimeout);
+    });
+  }
+
+  /// Never throws — the chain in [send] carries no error handler of its own,
+  /// and one rejection there would strand every frame behind it.
+  Future<void> _sendOne(Map<String, dynamic> message, int bytes) async {
+    try {
+      if (_aborted) return;
+      // Not `currentState == connected`: a relay stream stays connected across
+      // a session-down window where the send returns normally and drops.
+      if (!_transport.isEstablished) {
+        _abort('transport not established');
+        return;
+      }
+      await _transport.send(message, channel: 'preview').timeout(_sendTimeout);
+    } catch (err) {
+      _abort('$err');
+    } finally {
+      _queuedFrames--;
+      _queuedBytes -= bytes;
+    }
+  }
+
+  void _abort(String reason) {
+    if (_aborted) return;
+    _aborted = true;
+    onAbort(reason);
+  }
 }
