@@ -1,0 +1,77 @@
+---
+import { Icon } from "astro-icon/components";
+import AppWindow from "./AppWindow.astro";
+import SessionRail from "./SessionRail.astro";
+import AgentPane from "./AgentPane.astro";
+import CtxTabs from "./CtxTabs.astro";
+
+// The session, with its evidence open beside it. Three columns, which is all
+// the app ever has: drawer, agent, and ONE context tab — here Git.
+//
+// The diff is the sample project's real one (`src/checkout.ts`, +24 -3 inside a
+// +71 -4 changeset), rendered the way the app renders it: hunk header, both
+// gutters, whole-row tint. The earlier version of this scene printed bare +/-
+// lines with no numbers, which is what a diff looks like in a marketing mockup
+// and not what it looks like here.
+interface Props {
+  class?: string;
+}
+const { class: cls = "" } = Astro.props;
+
+type Line = { old?: number; new?: number; sign?: "+" | "-"; code: string };
+const diff: Line[] = [
+  { old: 1, sign: "-", code: "import { Cart } from './cart';" },
+  { new: 1, sign: "+", code: "import { Cart, cartTotal } from './cart';" },
+  { old: 2, new: 2, code: "" },
+  { old: 3, new: 3, code: "export type CheckoutInput = {" },
+  { old: 4, new: 4, code: "  cart: Cart;" },
+  { old: 5, new: 5, code: "  email: string;" },
+  { new: 6, sign: "+", code: "  couponCode?: string;" },
+  { old: 6, new: 7, code: "};" },
+  { new: 9, sign: "+", code: "export class CheckoutError extends Error {" },
+  { new: 10, sign: "+", code: "  constructor(readonly field: string, message: string) {" },
+];
+
+const rowTone = (s?: "+" | "-") =>
+  s === "+" ? "bg-ab-ok/10 text-ab-ok" : s === "-" ? "bg-ab-err/10 text-ab-err" : "text-ab-mute";
+---
+<AppWindow panes={3} class={cls}>
+  <SessionRail slot="rail" />
+
+  <AgentPane />
+
+  <div slot="ctx" class="appwin-ctx min-w-0 border-l border-ab-line">
+    <CtxTabs active="Git" gitCount={3} />
+
+    <div class="flex h-8 items-center gap-2 border-b border-ab-line px-2.5">
+      <Icon name="tabler:arrow-left" class="shrink-0 text-ab-dim" width="12" height="12" aria-hidden="true" />
+      <span class="text-meta text-ab-text2">Changes</span>
+      <span class="font-mono text-pip text-ab-ok">+71</span>
+      <span class="font-mono text-pip text-ab-err">-4</span>
+      <span class="flex-1"></span>
+      <span class="flex shrink-0 items-center gap-1 rounded border border-ab-line-strong bg-ab-elevated px-1.5 py-0.5 text-pip text-ab-text2">
+        <Icon name="tabler:git-commit" width="10" height="10" aria-hidden="true" />
+        Commit (1)
+      </span>
+    </div>
+
+    <div class="flex items-center gap-2 px-2.5 py-2">
+      <span class="shrink-0 font-mono text-pip text-ab-attn">M</span>
+      <span class="min-w-0 truncate font-mono text-marker text-ab-text">src/checkout.ts</span>
+      <span class="ml-auto shrink-0 font-mono text-pip text-ab-ok">+24</span>
+      <span class="shrink-0 font-mono text-pip text-ab-err">-3</span>
+    </div>
+
+    <div class="overflow-x-auto border-t border-ab-line bg-ab-deepest font-mono text-pip leading-[1.75]">
+      <div class="px-2.5 py-1 text-ab-dim">@@ -1,10 +1,24 @@</div>
+      {diff.map((l) => (
+        <div class={`flex whitespace-pre px-1 ${rowTone(l.sign)}`}>
+          <span class="w-6 shrink-0 text-right text-ab-dim">{l.old ?? ""}</span>
+          <span class="w-6 shrink-0 text-right text-ab-dim">{l.new ?? ""}</span>
+          <span class="w-3 shrink-0 text-center">{l.sign ?? ""}</span>
+          <span>{l.code}</span>
+        </div>
+      ))}
+    </div>
+  </div>
+</AppWindow>

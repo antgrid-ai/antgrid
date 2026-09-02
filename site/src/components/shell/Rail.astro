@@ -1,0 +1,112 @@
+---
+import { Icon } from "astro-icon/components";
+
+// The app's drawer, shared by every scene so the window keeps one left edge
+// whatever pane is beside it.
+//
+// Structure is the app's: a `PROJECTS` label, then a BAND per machine with a
+// hairline above it, then that machine's projects at the SAME indent a local
+// project sits at (a machine is a container, not a third level of tree —
+// drawer_entry_row.dart), then its sessions. The local band carries no chevron
+// because there is nothing to disclose; a remote band does, because expanding
+// it is what opens that machine's control-plane socket.
+//
+// What is NOT here matters as much as what is. The real drawer carries no
+// per-row status colours, no counts and no branch sub-labels: a project is a
+// folder glyph and a name, a session is a hollow ring and a title. The only
+// colour in the column is on the bands — the liveness dot every machine has,
+// and the aggregate status dot a COLLAPSED machine shows when a session under
+// it needs a human. Session state otherwise belongs in the list and the panes,
+// where the app puts it.
+interface Entry {
+  /** A machine band, its projects, and the sessions under them, in that order. */
+  kind: "machine" | "project" | "session";
+  label: string;
+  active?: boolean;
+  /** Machine only: this machine. No chevron — its projects are already listed. */
+  local?: boolean;
+  /** Machine only: its projects are not listed below it. */
+  collapsed?: boolean;
+  /** Machine only, and only while collapsed: a session under it needs a human. */
+  attention?: boolean;
+}
+interface Props {
+  entries: Entry[];
+  /** The account row pinned to the drawer's foot. Omit where it would contradict
+      the scene — a fleet spanning machines is signed in by definition. */
+  footer?: boolean;
+  class?: string;
+}
+
+const { entries, footer = true, class: cls = "" } = Astro.props;
+---
+<div class={`appwin-rail min-w-0 border-r border-ab-line bg-ab-deep py-2.5 ${cls}`}>
+  <div class="px-2.5">
+    <div class="flex items-center justify-center gap-1.5 rounded-md border border-ab-line-strong py-1.5 text-row text-ab-text2">
+      <Icon name="tabler:plus" class="shrink-0" width="13" height="13" aria-hidden="true" />
+      New Session
+    </div>
+  </div>
+
+  <div class="flex items-center gap-2 px-3 pb-1 pt-3.5">
+    <span class="text-marker font-semibold uppercase tracking-[0.13em] text-ab-mute">Projects</span>
+    <span class="flex-1"></span>
+    <Icon name="tabler:refresh" class="text-ab-dim" width="11" height="11" aria-hidden="true" />
+  </div>
+
+  {entries.map((e, i) => (
+    e.kind === "machine" ? (
+      <div class="px-3">
+        {/* No rule on the first band — the PROJECTS label above it is the
+            separator the app relies on there. */}
+        {i > 0 && <div class="mb-1 mt-2 h-px bg-ab-line"></div>}
+        <div class="flex items-center gap-1 py-0.5">
+          <span class="min-w-0 truncate text-marker font-semibold tracking-[0.02em] text-ab-mute">{e.label}</span>
+          {!e.local && (
+            <Icon
+              name={e.collapsed ? "tabler:chevron-right" : "tabler:chevron-down"}
+              class="shrink-0 text-ab-dim"
+              width="11"
+              height="11"
+              aria-hidden="true"
+            />
+          )}
+          <span class="flex-1"></span>
+          {e.collapsed && e.attention && <span class="size-1.5 shrink-0 rounded-full bg-ab-attn"></span>}
+          <span class="size-1.5 shrink-0 rounded-full bg-ab-run"></span>
+        </div>
+      </div>
+    ) : e.kind === "project" ? (
+      <div class="flex items-center gap-2 px-3 py-1 text-row text-ab-text2">
+        <Icon name="tabler:folder" class="shrink-0 text-ab-dim" width="12" height="12" aria-hidden="true" />
+        <span class="min-w-0 flex-1 truncate">{e.label}</span>
+      </div>
+    ) : (
+      <div class="px-2">
+        <div
+          class={`flex items-center gap-2 rounded-md py-1 pl-3.5 pr-2 ${
+            e.active ? "bg-ab-selected font-medium text-ab-text" : "text-ab-text2"
+          }`}
+        >
+          <span class="size-1.5 shrink-0 rounded-full border border-ab-mute"></span>
+          <span class="min-w-0 flex-1 truncate text-row">{e.label}</span>
+        </div>
+      </div>
+    )
+  ))}
+
+  <slot />
+
+  {/* The account slot pins to the bottom of the real drawer. Here the window is
+      content-height, so it simply follows the list — pinning it would open the
+      dead column this scene has no rows to fill. */}
+  {footer && (
+  <div class="mt-3.5 border-t border-ab-line pt-2.5">
+    <div class="flex items-center gap-2 px-3 py-0.5 text-row text-ab-mute">
+      <Icon name="tabler:login" class="shrink-0 text-ab-dim" width="12" height="12" aria-hidden="true" />
+      <span class="min-w-0 flex-1 truncate">Sign in</span>
+      <Icon name="tabler:chevron-right" class="shrink-0 text-ab-dim" width="12" height="12" aria-hidden="true" />
+    </div>
+  </div>
+  )}
+</div>

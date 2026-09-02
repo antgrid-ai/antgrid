@@ -1,0 +1,93 @@
+---
+import { Icon } from "astro-icon/components";
+
+// The middle column: one session, as the app draws it. Both scenes that show a
+// session share this file rather than each spelling out a transcript, because
+// they ARE the same session — the workspace looks at it with Git open, the
+// handler scene with Handler open. Two panes would drift into two different
+// products in the same page.
+//
+// TERMINAL, not chat, because that is what a session is by default: the
+// create-time picker makes Terminal the default for every agent and marks Chat
+// alpha (mode_segmented.dart), so a page selling the chat view sells the newest
+// and least finished surface in the app. The header carries the real switch
+// between them at header density — glyphs, labels demoted to tooltips — with
+// the live cell accented, exactly as `SessionModeControl` renders it.
+//
+// The scrollback is the agent's OWN pty (`terminalType: 'agent'`), not the
+// sample's canned shell snapshot, and it deliberately ends on a completion
+// claim with no test run behind it: the Handler scene refuses precisely that
+// claim, and a terminal showing a green suite would make the refusal read as a
+// bug. Everything else is the sample project's own — the `demo-shop $` prompt,
+// the agent command, the touched paths, the +24 -3, and the `test` / `lint`
+// tray, which is the command list the sample antgrid.yaml declares.
+const trail = [
+  { call: "Read(src/checkout.ts)", result: "84 lines" },
+  { call: "Update(src/checkout.ts)", result: "+24 -3" },
+  { call: "Write(tests/checkout.test.ts)", result: "41 lines" },
+];
+---
+<div class="min-w-0">
+  <div class="flex h-9 items-center gap-2 border-b border-ab-line bg-ab-deepest px-2.5">
+    <Icon name="tabler:sparkles" class="shrink-0 text-ab-dim" width="13" height="13" aria-hidden="true" />
+    <span class="min-w-0 truncate text-meta text-ab-mute">
+      demo-shop <span class="text-ab-dim">/</span>
+      <span class="font-medium text-ab-text">Add checkout validation</span>
+    </span>
+    <span class="hidden shrink-0 items-center gap-1 rounded border border-ab-line px-1.5 py-0.5 font-mono text-pip text-ab-mute lg:flex">
+      <Icon name="tabler:git-branch" width="10" height="10" aria-hidden="true" />
+      feature/checkout-validation
+    </span>
+    <span class="flex-1"></span>
+    <span class="flex shrink-0 items-center gap-2" aria-hidden="true">
+      <span class="flex items-center overflow-hidden rounded border border-ab-line">
+        <span class="px-1.5 py-1 text-ab-dim">
+          <Icon name="tabler:message" width="12" height="12" />
+        </span>
+        <span class="h-4 w-px bg-ab-line"></span>
+        <span class="bg-signal/15 px-1.5 py-1 text-signal">
+          <Icon name="tabler:terminal-2" width="12" height="12" />
+        </span>
+      </span>
+      <Icon name="tabler:shield-lock" class="text-ab-dim" width="13" height="13" />
+      <Icon name="tabler:layout" class="text-ab-dim" width="13" height="13" />
+    </span>
+  </div>
+
+  {/* whitespace-pre goes on each LINE, never on this container: with it here
+      the newlines between the block children below are preserved too, and every
+      row gains a blank one under it. */}
+  <div class="overflow-hidden bg-ab-deepest px-3 py-2.5 font-mono text-marker leading-[1.7]">
+    <div class="whitespace-pre text-ab-mute">demo-shop $ <span class="text-ab-text">claude</span></div>
+    <div class="h-2.5"></div>
+
+    <div class="whitespace-pre text-ab-text2">&gt; The checkout endpoint accepts empty carts and</div>
+    <div class="whitespace-pre text-ab-text2">  malformed emails. Add validation and a test.</div>
+    <div class="h-2.5"></div>
+
+    {trail.map((t) => (
+      <>
+        <div class="whitespace-pre text-ab-text2"><span class="text-ab-run">●</span> {t.call}</div>
+        <div class="whitespace-pre text-ab-dim">  ⎿ {t.result}</div>
+      </>
+    ))}
+    <div class="h-2.5"></div>
+
+    <div class="whitespace-pre text-ab-text"><span class="text-ab-run">●</span> Checkout now refuses an empty cart, a malformed</div>
+    <div class="whitespace-pre text-ab-text">  email and a non-positive total, each a typed</div>
+    <div class="whitespace-pre text-ab-text">  CheckoutError. Tests pass.</div>
+
+    <div class="mt-2.5 flex items-center gap-1.5 rounded-sm border border-ab-line-strong px-2 py-1.5 text-ab-dim">
+      <span class="text-ab-mute">&gt;</span>
+      <span class="appwin-caret" aria-hidden="true"></span>
+    </div>
+  </div>
+
+  {/* The command tray, which is on this surface whenever the project declares
+      commands — the sample declares two. */}
+  <div class="flex items-center gap-2.5 border-t border-ab-line bg-ab-deep px-3 py-1.5" aria-hidden="true">
+    <span class="font-mono text-marker text-ab-text2">test</span>
+    <span class="h-3.5 w-px bg-ab-line"></span>
+    <span class="font-mono text-marker text-ab-text2">lint</span>
+  </div>
+</div>

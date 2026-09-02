@@ -2,7 +2,7 @@
 import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Button from "../ui/Button.astro";
-import ProofCard from "./ProofCard.astro";
+import WorkspaceScene from "../shell/WorkspaceScene.astro";
 import { links } from "../../config";
 import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../../data/pricing";
 ---
@@ -134,10 +134,16 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
     </div>
   </div>
 
-  <div class="relative mx-auto max-w-shell px-6 pb-16 pt-10 md:pt-12">
-    {/* min-w-0 for the same reason as the Worktrees card — see the comment there. */}
-    <div class="pc-animate min-w-0">
-      <ProofCard />
+  {/* The window runs off the bottom of the hero rather than ending inside it:
+      the reader should feel the app continue past the fold. The fade is a
+      SIBLING of the window, never a child — as a child it sits under the
+      window's own border and leaves a bright hairline across the exact point
+      the page is trying to dissolve. */}
+  <div class="relative mx-auto max-w-shell px-6 pt-10 md:pt-12">
+    <div class="appwin-bleed -mb-16 min-w-0 md:-mb-20">
+      <WorkspaceScene />
     </div>
+    <div class="relative z-10 h-16 bg-gradient-to-b from-transparent to-page md:h-20" aria-hidden="true"></div>
   </div>
 </section>
+

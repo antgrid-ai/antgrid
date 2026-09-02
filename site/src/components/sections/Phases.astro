@@ -1,7 +1,6 @@
 ---
-import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
-import Readout from "../ui/Readout.astro";
+import HandlerScene from "../shell/HandlerScene.astro";
 import UseCase from "../ui/UseCase.astro";
 
 // The phase-gated workflow (research → validate → plan → implement, a human
@@ -20,12 +19,6 @@ const stats = [
   { value: "0", label: "phases advanced on the agent's say-so", accent: true },
 ];
 
-const phases = [
-  { n: "01", name: "research", time: "00:36", state: "done", note: "pushed back — shallow. second pass closed it" },
-  { n: "02", name: "validate", time: "02:34", state: "done", note: "no red flags — advanced" },
-  { n: "03", name: "plan", time: "03:21", state: "needs", note: "woke you — two viable approaches, your pick" },
-  { n: "04", name: "implement", time: "", state: "queued", note: "starts when you pick" },
-];
 ---
 <section id="handler" class="reveal mx-auto max-w-shell px-6 py-24">
   <Eyebrow class="mb-5">Hand over the follow-ups</Eyebrow>
@@ -48,33 +41,7 @@ const phases = [
     ))}
   </div>
 
-  <Readout source="studio-workstation · api · handler armed" state="attention" label="needs you">
-    <div class="p-4 md:p-5">
-      <div class="mb-4 flex items-start gap-2 rounded border border-edge-inner bg-chrome px-2.5 py-1.5 font-mono text-marker leading-relaxed">
-        <Icon name="tabler:message-2" class="mt-0.5 shrink-0 text-signal" width="13" height="13" />
-        <span class="shrink-0 text-muted2">you · armed · 23:47</span>
-        <span class="text-ink2">research the provider swap; validate it against our rate limits; plan it — give me options before implementing</span>
-      </div>
-
-      <div class="grid gap-2.5 md:grid-cols-4">
-        {phases.map((p) => (
-          <div class={`rounded border px-3.5 py-3 ${p.state === "needs" ? "border-amberbg2 bg-amberbg/40" : "border-edge-inner bg-chrome"}`}>
-            <div class="mb-2 flex items-center justify-between">
-              <span class="font-mono text-marker text-faint">{p.n}</span>
-              {p.state === "done" && <Icon name="tabler:circle-check" class="text-ok" width="14" height="14" />}
-              {p.state === "needs" && <Icon name="tabler:alert-triangle" class="text-amber" width="14" height="14" />}
-              {p.state === "queued" && <Icon name="tabler:circle-dashed" class="text-faint" width="14" height="14" />}
-            </div>
-            <div class="mb-1.5 flex items-baseline justify-between gap-2">
-              <span class="font-mono text-row text-ink">{p.name}</span>
-              {p.time && <span class="font-mono text-marker text-faint">{p.time}</span>}
-            </div>
-            <div class={`text-meta leading-relaxed ${p.state === "needs" ? "text-amber2" : "text-muted2"}`}>{p.note}</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  </Readout>
+  <HandlerScene />
 
   <UseCase class="mt-7 max-w-2xl">Type the sequence once, before you leave. You get woken for the call that's actually yours.</UseCase>
 
