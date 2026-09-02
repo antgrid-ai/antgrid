@@ -92,8 +92,8 @@ class FirstRunController extends Notifier<FirstRunState> {
   }
 
   /// Called on every bridge-CONFIRMED arm (idempotent; see
-  /// latchHandlerArmedOnConfirmation): the flag retires the first-arm
-  /// explainer, the labeled shield, and the away-moment hint in one write.
+  /// latchHandlerArmedOnConfirmation): the flag retires the labeled shield, the
+  /// away-moment hint, and the arm sheet's explanatory paragraph in one write.
   void markHandlerArmed() {
     if (state.handlerArmedOnce) return;
     _commit(state.copyWith(handlerArmedOnce: true));

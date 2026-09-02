@@ -59,19 +59,38 @@ export interface TierClaim {
 export type TierClaimSource = () => TierClaim;
 
 /**
+ * The two ways a capability is withheld — and the half of the verdict that is
+ * spoken to the user, so it crosses the wire (`handler:status.entitlement` in
+ * protocol.ts) and is mirrored by hand app-side. Widening it is a copy edit on
+ * three surfaces, which is the point: every reason here owes the reader a
+ * sentence saying what to do about it.
+ */
+export type EntitlementRefusal = "not_entitled" | "unreadable";
+
+/**
  * Why a capability was allowed or refused. `allowed` is the only thing a call
  * site branches on; `reason` exists so a log line can tell the two allowed
  * cases and the two refused cases apart. The split is load-bearing in one
  * direction especially: "nobody wired this" (`unwired`) and "the server said
  * no" (`not_entitled`) land on OPPOSITE sides of `allowed`, so they cannot be
  * confused the way an absent value and a negative one otherwise would be.
+ *
+ * A union rather than one flat shape so `allowed: false` NARROWS `reason` to
+ * the refusals: what the bridge tells the app is derived from a verdict, and a
+ * flat type would let `unwired` — the allowed case — be reported as one.
  */
-export interface EntitlementVerdict {
-  readonly allowed: boolean;
-  readonly reason: "entitled" | "unwired" | "not_entitled" | "unreadable";
-  /** The tier the claim carried, when it carried a recognised one. */
-  readonly tier?: Tier;
-}
+export type EntitlementVerdict =
+  | {
+      readonly allowed: true;
+      readonly reason: "entitled" | "unwired";
+      /** The tier the claim carried, when it carried a recognised one. */
+      readonly tier?: Tier;
+    }
+  | {
+      readonly allowed: false;
+      readonly reason: EntitlementRefusal;
+      readonly tier?: Tier;
+    };
 
 export type EntitlementReader = (capability: Capability) => EntitlementVerdict;
 

@@ -125,7 +125,20 @@ void showAbToastOverlay(
 }) {
   final overlay = Overlay.maybeOf(context);
   if (overlay == null) return;
+  showAbToastOn(overlay, toast: toast, duration: duration);
+}
 
+/// [showAbToastOverlay] for a caller holding the [OverlayState] itself.
+///
+/// `Overlay.maybeOf` resolves through an inherited marker that each overlay
+/// ENTRY plants, so it answers only from inside a mounted route — a caller
+/// working from a navigator key (no widget of its own, firing long after the
+/// screen that started it) has no such context and would silently show nothing.
+void showAbToastOn(
+  OverlayState overlay, {
+  required AbToast toast,
+  Duration duration = const Duration(seconds: 4),
+}) {
   late final OverlayEntry entry;
   var removed = false;
   void remove() {

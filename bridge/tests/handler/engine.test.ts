@@ -260,6 +260,65 @@ test("decision runs on the session judge, falling back to the session's own tool
   expect(calls[1]).toEqual({ tool: "claude-code", model: undefined });
 });
 
+test("arm persists the posture and reports it on the snapshot", () => {
+  const saved: HandlerSessionRecord[] = [];
+  const sent: AbMessage[] = [];
+  const { engine } = makeEngine({ saveSessionFn: (r: HandlerSessionRecord) => saved.push(r), sendAb: (m: AbMessage) => sent.push(m) });
+  engine.arm({ terminalId: "t1", goal: GOAL, personality: "autopilot" });
+  expect(saved.at(-1)?.personality).toBe("autopilot");
+  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+    sessions: Array<{ personality?: string }>;
+  };
+  expect(status.sessions[0].personality).toBe("autopilot");
+});
+
+// The app renders its picker straight off this field, so a session that has
+// never been given a posture must still report the one it judges under — an
+// absent value would leave the picker blank over a judge already running.
+test("a session that never picked a posture still reports the default", () => {
+  const sent: AbMessage[] = [];
+  const { engine } = makeEngine({ sendAb: (m: AbMessage) => sent.push(m) });
+  engine.arm({ terminalId: "t1", goal: GOAL });
+  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+    sessions: Array<{ personality?: string }>;
+  };
+  expect(status.sessions[0].personality).toBe("watchdog");
+});
+
+// Absent-keeps, the same rule the judge fields follow: a backlog edit and a
+// goal edit both re-arm carrying no posture, and neither may reset one.
+test("a re-arm carrying no posture keeps the stored one", () => {
+  const saved: HandlerSessionRecord[] = [];
+  const { engine } = makeEngine({ saveSessionFn: (r: HandlerSessionRecord) => saved.push(r) });
+  engine.arm({ terminalId: "t1", goal: GOAL, personality: "closer" });
+  engine.arm({ terminalId: "t1", goal: GOAL });
+  expect(saved.at(-1)?.personality).toBe("closer");
+});
+
+test("bridge-restart re-arm keeps the persisted posture", () => {
+  const saved: HandlerSessionRecord[] = [];
+  const { engine } = makeEngine({
+    saveSessionFn: (r: HandlerSessionRecord) => saved.push(r),
+    loadSessionFn: () => sessionRecord({ personality: "autopilot" }),
+  });
+  engine.arm({ terminalId: "t1", goal: GOAL });
+  expect(saved.at(-1)?.personality).toBe("autopilot");
+});
+
+test("the judge is never asked to decide without a posture", async () => {
+  const calls: { personality?: string }[] = [];
+  const { engine } = makeEngine({
+    runDecisionFn: async (o: { personality?: string }) => { calls.push({ personality: o.personality }); return continueDecision; },
+  });
+  engine.arm({ terminalId: "t1", goal: GOAL, personality: "closer" });
+  await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+  expect(calls[0]?.personality).toBe("closer");
+
+  engine.arm({ terminalId: "t2", goal: GOAL });
+  await engine.handleEvent({ terminalId: "t2", event: "turn_end" });
+  expect(calls[1]?.personality).toBe("watchdog");
+});
+
 test("bridge-restart re-arm keeps the persisted judge when the arm carries none", () => {
   const saved: HandlerSessionRecord[] = [];
   const { engine } = makeEngine({

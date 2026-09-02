@@ -828,8 +828,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // never wrap up.
         const parsed = HandlerConfigureWire.safeParse(msg);
         if (parsed.success && parsed.data.armed) {
-          const { terminalId, goal, backlog, judgeTool, judgeModel } = parsed.data;
-          handlerEngine.arm({ terminalId, goal, backlog, judgeTool, judgeModel });
+          const { terminalId, goal, backlog, judgeTool, judgeModel, personality } = parsed.data;
+          handlerEngine.arm({ terminalId, goal, backlog, judgeTool, judgeModel, personality });
         } else if (parsed.success) {
           handlerEngine.disarm(parsed.data.terminalId);
         } else {

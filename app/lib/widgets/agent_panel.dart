@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -19,6 +20,7 @@ import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
+import '../models/workspace_view.dart';
 import '../providers/account_agents.dart';
 import '../providers/agent_coordinates.dart';
 import '../providers/agent_transport.dart';
@@ -31,6 +33,7 @@ import '../providers/providers.dart';
 import '../providers/recent_agents.dart';
 import '../providers/session_mode.dart';
 import '../providers/sessions.dart';
+import '../providers/visible_surface.dart';
 import '../screens/terminal_screen.dart';
 import '../util/ab_log.dart';
 import '../util/device_id.dart';
@@ -255,7 +258,7 @@ class _HandlerMenuItem extends ConsumerWidget {
       // container, never this widget's ref — same contract as
       // HandlerHeaderControl.toggleArm.
       unawaited(
-        armWithFirstRunExplainer(
+        armWithSheet(
           context: host,
           container: container,
           terminalId: activeId,
@@ -266,14 +269,25 @@ class _HandlerMenuItem extends ConsumerWidget {
       );
     }
 
+    // A refusal outranks the coverage notice, the order the header shield's
+    // tooltip already uses: coverage describes what an arm would get, and a
+    // refusal decides whether one can happen at all.
+    String? tooltip() {
+      if (armed) return null;
+      final entitlement = state.entitlement;
+      if (entitlement != null) return handlerEntitlementNotice(entitlement);
+      // Arming an unwatchable agent still works (it just never leaves
+      // WATCHING) — the tooltip explains why rather than blocking the tap.
+      if (coverage.observable == false) {
+        return unwatchableNotice(coverage.agentLabel);
+      }
+      return null;
+    }
+
     return AbLiveMenuRow(
       label: armed ? 'Disarm Handler' : 'Arm Handler',
       icon: AbIcons.shield,
-      // Arming an unwatchable agent still works (it just never leaves
-      // WATCHING) — the tooltip explains why rather than blocking the tap.
-      tooltip: !armed && coverage.observable == false
-          ? unwatchableNotice(coverage.agentLabel)
-          : null,
+      tooltip: tooltip(),
       onTap: toggleArm,
     );
   }
@@ -530,15 +544,64 @@ class HandlerHeaderControl extends ConsumerWidget {
     }
     // Surface escalations on OTHER sessions even when the focused session is
     // armed — an unanswered question must never hide behind this session's
-    // WATCHING/HANDLING pill. When the focused session itself needs the user its
-    // own count already shows; when it's unarmed, otherPending is the full
+    // WATCHING/HANDLING pill. When it's unarmed, otherPending is the full
     // project-wide count (session-null case).
+    //
+    // Yields to the focused session when that session is itself waiting: this
+    // pill is one label and cannot name two sessions, and the tab it opens
+    // renders only the focused one, so a merged count would send the user
+    // somewhere that cannot account for it. What the siblings get instead is a
+    // count on their own drawer rows (`SessionHandlerBadge`) — the surface
+    // that survives whatever is in focus.
     final otherPending =
         state.pendingEscalations - (session?.pendingEscalations ?? 0);
     if (session?.runState != HandlerRunState.needsYou && otherPending > 0) {
       pillLabel = 'NEEDS YOU $otherPending';
       pillColor = p.accent;
       pillNavigates = true;
+    }
+
+    // The Handler tab shows the FOCUSED session only, so a pill counting
+    // another session has to move focus there or it reveals an empty tab — the
+    // one navigation this pill exists to make.
+    //
+    // The target comes from the SAME branch that wrote the label. A pill
+    // carrying the focused session's own count must never move focus at all;
+    // `state.escalations` is banded by urgency across the whole project, so its
+    // head belongs to whichever session escalated most urgently — take it and a
+    // tap on "your session needs you" switches the user's entire workspace to
+    // someone else's.
+    //
+    // A focus change cannot reveal the tab by calling: moving focus arms
+    // WorkspaceShell's per-session UI restore, which re-applies the TARGET
+    // session's own saved workspace tab from a post-frame callback, and any tab
+    // selected before that lands is silently undone by it. So the destination
+    // is handed over as pending state instead — the same handover a deep link
+    // naming a view uses, drained by the shell after the restore.
+    void openHandler() {
+      final waiting = session?.runState == HandlerRunState.needsYou
+          ? null
+          : state.escalations
+                .firstWhereOrNull((e) => e.terminalId != activeId)
+                ?.terminalId;
+      if (waiting == null) {
+        ref.read(revealHandlerTabProvider)?.call();
+        return;
+      }
+      ref.read(activeSessionIdProvider.notifier).set(waiting);
+      // Read back rather than assumed: `ActiveSessionId.set` REFUSES a session
+      // the bridge is already deleting, and such a session keeps its replayed
+      // escalations for the seconds before its row goes. Focus then stays put,
+      // and the handover below would stamp the session still in focus with a
+      // destination picked for a different one.
+      if (ref.read(activeSessionIdProvider) != waiting) {
+        ref.read(revealHandlerTabProvider)?.call();
+        return;
+      }
+      ref.read(pendingWorkspaceViewProvider.notifier).set((
+        target: ref.read(selectedTargetProvider),
+        value: WorkspaceView.handler,
+      ));
     }
 
     // A NEEDS YOU pill is a call to action, so it navigates to the Handler
@@ -551,7 +614,7 @@ class HandlerHeaderControl extends ConsumerWidget {
             cursor: SystemMouseCursors.click,
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: () => ref.read(revealHandlerTabProvider)?.call(),
+              onTap: openHandler,
               child: AbChip.system(label: pillLabel, color: pillColor),
             ),
           )
@@ -563,22 +626,23 @@ class HandlerHeaderControl extends ConsumerWidget {
       return pill ?? const SizedBox.shrink();
     }
 
-    // Arming is one tap and this control composes no payload — no backlog, no
-    // judge override. Everything the session needs is either already stored on
-    // the bridge or extracted behind the handoff, so sending any of those keys
-    // here would overwrite state this control never showed.
-    // The goal is the exception and is not composed here either:
-    // armWithFirstRunExplainer carries the session's own opening prompt.
+    // This control composes no payload of its own — no backlog, no judge
+    // override, no posture. Everything the session needs is either already
+    // stored on the bridge or extracted behind the handoff, so sending any of
+    // those keys here would overwrite state this control never showed. The arm
+    // sheet is where a payload can come from, and it sends only what the user
+    // moved on it. The goal is not composed here either:
+    // armWithSheet carries the session's own opening prompt.
     void toggleArm() {
       if (service == null) return;
       if (session != null) {
         service.disarm(activeId);
         return;
       }
-      // Fire-and-forget: past the explainer await everything runs on the
+      // Fire-and-forget: past the sheet await everything runs on the
       // container, never this widget's ref, and nothing in the flow can throw.
       unawaited(
-        armWithFirstRunExplainer(
+        armWithSheet(
           context: context,
           container: ref.container,
           terminalId: activeId,
@@ -594,6 +658,10 @@ class HandlerHeaderControl extends ConsumerWidget {
       observable: coverage.observable,
       judgeCapable: coverage.judgeCapable,
       agentLabel: coverage.agentLabel,
+      // The refusal is answerable before the press, and this is the only
+      // surface that answers before one: the sheet says the same thing, but
+      // only once the user has committed far enough to open it.
+      entitlement: state.entitlement,
     );
 
     return Row(

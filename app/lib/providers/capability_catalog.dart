@@ -2,10 +2,12 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/agent_event.dart';
 import '../models/capability_catalog.dart';
 import '../models/session_target.dart';
 import '../services/capability_catalog_cache.dart';
 import '../util/device_id.dart';
+import 'agent_transport.dart';
 
 /// Cache-key source segment for a focused target. Catalogs differ per machine
 /// (installed model set / auth), so remote targets key by bare deviceUuid; a
@@ -57,6 +59,13 @@ class CapabilityCatalogNotifier
       // the read genuinely completed — mark it done so an absent file isn't
       // re-read on every rebuild.
       _read.add(key);
+    } catch (_) {
+      // A backstop, not the mechanism: read() holds the "never throws" contract
+      // itself, and this only catches a `state =` write failing on a notifier
+      // disposed mid-read. Every caller starts this from a build method and
+      // discards the future, so anything escaping here surfaces as an unhandled
+      // async failure in the zone rather than anywhere a user could see.
+      // Deliberately NOT latched into _read: a later build gets to try again.
     } finally {
       _hydrating.remove(key);
     }
@@ -74,3 +83,21 @@ final capabilityCatalogProvider =
     NotifierProvider<CapabilityCatalogNotifier, Map<String, CapabilityCatalog>>(
       CapabilityCatalogNotifier.new,
     );
+
+/// The models [tool] is known to offer on the focused target, or empty when
+/// nobody has heard that CLI list them.
+///
+/// Hydration is kicked off from build the way every other reader of this cache
+/// does it — the notifier is idempotent and no-ops once a key has been read.
+/// Empty is a real answer, not a loading state: a machine that has only ever
+/// run this agent in a terminal has no catalog, which is why every caller owes
+/// a free-text way to name a model.
+List<AgentCapabilityModel> cachedModelsFor(WidgetRef ref, String tool) {
+  final key = capabilityCacheKey(
+    capabilitySourceKey(ref.watch(selectedTargetProvider)),
+    tool,
+  );
+  ref.read(capabilityCatalogProvider.notifier).ensureHydrated(key);
+  return ref.watch(capabilityCatalogProvider)[key]?.models ??
+      const <AgentCapabilityModel>[];
+}

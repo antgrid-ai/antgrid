@@ -3,6 +3,7 @@ import { z } from "zod";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { BacklogSchema } from "./backlog";
+import { HandlerPersonalitySchema } from "../protocol";
 
 // One tap-to-answer option on a quick-choice escalation. `text` is sent as
 // the USER's own reply through the ordinary reply transport, so it must be
@@ -109,6 +110,10 @@ export const HandlerSessionRecordSchema = z.object({
   // model).
   judgeTool: z.string().optional(),
   judgeModel: z.string().optional(),
+  // Per-session posture. Optional rather than defaulted so a record written
+  // before this field parses as itself — `version` stays 2, and the engine
+  // resolves the absent case to the preset a fresh session gets.
+  personality: HandlerPersonalitySchema.optional(),
   // Park state, so a bridge restart mid-park strands nothing. Optional because
   // an unparked session genuinely has none.
   parkKind: z.enum(["limit", "outage"]).optional(),

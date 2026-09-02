@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AbConfigSchema } from "./config";
+import { KNOWN_TIERS } from "./entitlement";
 
 const BaseMessage = z.object({
   id: z.string().uuid(),
@@ -1016,6 +1017,17 @@ const BacklogWire = z.array(InstructionItemWire).refine(
 // stay in lockstep, or the hot path admits what the union rejects. Field-level
 // rules (BacklogWire) ride along through `.shape`; a whole-payload `.refine`
 // would have to be written on both.
+// How far Handler leans toward answering on the user's behalf: it moves where
+// the line between `handle` and `escalate` sits, and the tone of `notify`.
+// Nothing else — the evidence a transition must cite is the anti-inflation
+// guard, and a posture able to relax it would let a confident preset report
+// progress that never happened.
+//
+// A bounded preset, deliberately not a free-text guidance field: the value is
+// interpolated into the judge prompt, and a fixed set carries no injection.
+export const HandlerPersonalitySchema = z.enum(["watchdog", "closer", "autopilot"]);
+export type HandlerPersonality = z.infer<typeof HandlerPersonalitySchema>;
+
 export const HandlerConfigureWire = z.object({
   terminalId: z.string(),
   armed: z.boolean(),
@@ -1031,6 +1043,11 @@ export const HandlerConfigureWire = z.object({
   // tool / CLI default model); absent = leave the stored choice untouched.
   judgeTool: z.string().optional(),
   judgeModel: z.string().optional(),
+  // Absent = leave the session's stored posture untouched, the same
+  // absent-keeps rule judgeTool follows. There is no "clear to default": every
+  // preset is a real choice, and the default is only what a session that has
+  // never been given one judges as.
+  personality: HandlerPersonalitySchema.optional(),
 });
 
 const HandlerConfigureMessage = BaseMessage.extend({
@@ -1045,8 +1062,7 @@ const HandlerConfigureMessage = BaseMessage.extend({
 // envelope below rides on `.shape` so the two cannot drift apart.
 //
 // Keep whole-payload rules off this schema too: stacking is one line typed on a
-// phone (or one preset chip), and a cross-field precondition would put a form in
-// front of it.
+// phone, and a cross-field precondition would put a form in front of it.
 export const HandlerInstructWire = z.object({
   terminalId: z.string(),
   // Untrusted remote text that ends up interpolated into the extraction prompt.
@@ -1247,6 +1263,33 @@ const HandlerSessionSnapshot = z.object({
   // handler/engine.ts). Optional and appended LAST: an older app still parses
   // the snapshot, and every key it reads keeps its position.
   observability: z.enum(["full", "escalate_only", "unsupported"]).optional(),
+  // The posture this session actually judges under, resolved by the bridge and
+  // so always present on a status frame — an app reading it never has to know
+  // what an absent value would have meant. Optional and appended LAST for the
+  // same reason `observability` is: an older app still parses the snapshot.
+  personality: HandlerPersonalitySchema.optional(),
+});
+
+// Why this machine will not run the Handler, in the words the app has to answer
+// with. Mirrors `EntitlementRefusal` (./entitlement.ts) — the REFUSED half of
+// the verdict only, which is what makes presence on a status frame mean
+// "refused" with no second boolean to disagree with.
+//
+// A refusal is otherwise invisible: it leaves the slot in the ordinary
+// not-armed state, which is exactly what a tap that never registered looks
+// like, and the engine's warn line is on a machine the reader may not be
+// sitting at. This is the one thing the bridge knows and the app cannot derive.
+//
+// The two reasons are two different sentences, and collapsing them would send
+// half the users to the wrong fix: `not_entitled` is the paywall and the app
+// offers the upgrade, `unreadable` is a machine whose credentials stopped
+// answering and the app says to sign in again.
+export const HandlerEntitlementWire = z.object({
+  reason: z.enum(["not_entitled", "unreadable"]),
+  // The tier the claim carried, when it carried a recognised one — so the
+  // upgrade copy can name the plan the machine is actually on. Absent for
+  // `unreadable`, which is the case of having no readable tier at all.
+  tier: z.enum(KNOWN_TIERS).optional(),
 });
 
 const HandlerStatusMessage = BaseMessage.extend({
@@ -1269,6 +1312,16 @@ const HandlerStatusMessage = BaseMessage.extend({
   // and [] mean the same thing — unlike `observability`, presence here is not a
   // capability signal, so a bridge with nothing to report simply omits it.
   wrapUps: z.array(HandlerWrapUpWire).optional(),
+  // Present ONLY while this machine refuses Handler; absent is the ordinary
+  // entitled machine AND every bridge predating the field, which want the same
+  // rendering. Appended LAST for the reason `wrapUps` is — an older app still
+  // parses the frame and every key it already reads keeps its position.
+  //
+  // Project-scoped rather than per session, because entitlement is neither: it
+  // is a fact about the account behind the machine, and a session-shaped copy
+  // would have nowhere to live on the surface that needs it most — the shield
+  // over a session that is not armed and, while this is set, cannot become so.
+  entitlement: HandlerEntitlementWire.optional(),
 });
 
 const HandlerEscalationMessage = BaseMessage.extend({
@@ -2287,6 +2340,7 @@ export type HandlerConfigureMsg = z.infer<typeof HandlerConfigureMessage>;
 export type HandlerInstructMsg = z.infer<typeof HandlerInstructMessage>;
 export type HandlerSessionSnapshot = z.infer<typeof HandlerSessionSnapshot>;
 export type HandlerStatusMsg = z.infer<typeof HandlerStatusMessage>;
+export type HandlerEntitlement = z.infer<typeof HandlerEntitlementWire>;
 export type HandlerEscalationMsg = z.infer<typeof HandlerEscalationMessage>;
 export type HandlerActivityMsg = z.infer<typeof HandlerActivityMessage>;
 export type HandlerSnapshotMsg = z.infer<typeof HandlerSnapshotMessage>;

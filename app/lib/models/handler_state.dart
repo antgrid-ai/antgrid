@@ -29,6 +29,69 @@ String handlerRunStateToWire(HandlerRunState s) {
   }
 }
 
+/// How far Handler leans toward answering on the user's behalf. Mirrors the
+/// bridge's `HandlerPersonalitySchema` (`bridge/src/protocol.ts`) and is carried
+/// on every session snapshot.
+///
+/// It moves one line only — where `handle` gives way to `escalate` — plus the
+/// tone of the notification. It has no bearing on what a backlog item must cite
+/// to close, which is why no surface may present it as a speed or quality dial.
+enum HandlerPersonality {
+  /// Escalate freely; handle only the unambiguous. What a session judges under
+  /// until someone picks otherwise.
+  watchdog,
+
+  /// Handle what the session itself settles; escalate genuine ambiguity.
+  closer,
+
+  /// Handle wherever it can; escalate only where it must.
+  autopilot,
+}
+
+/// The bridge resolves the default before sending, so a snapshot always names
+/// one. Null here means a bridge too old to have the field — rendered as
+/// "not reported", never as [HandlerPersonality.watchdog]: a picker showing a
+/// preset the far end has never heard of is a control over nothing.
+HandlerPersonality? handlerPersonalityFromWire(dynamic s) {
+  switch (s) {
+    case 'watchdog':
+      return HandlerPersonality.watchdog;
+    case 'closer':
+      return HandlerPersonality.closer;
+    case 'autopilot':
+      return HandlerPersonality.autopilot;
+    default:
+      return null;
+  }
+}
+
+/// The wire spelling, the one place the enum is turned back into the string
+/// `handler:configure` carries.
+String handlerPersonalityToWire(HandlerPersonality p) => switch (p) {
+  HandlerPersonality.watchdog => 'watchdog',
+  HandlerPersonality.closer => 'closer',
+  HandlerPersonality.autopilot => 'autopilot',
+};
+
+/// Picker label. Sentence case, matching every other control in the app.
+String handlerPersonalityLabel(HandlerPersonality p) => switch (p) {
+  HandlerPersonality.watchdog => 'Watchdog',
+  HandlerPersonality.closer => 'Closer',
+  HandlerPersonality.autopilot => 'Autopilot',
+};
+
+/// One line of what the preset actually does, shown under the picker. Phrased
+/// as policy rather than personality: the user is choosing where a threshold
+/// sits, and "cautious"/"bold" would describe a mood instead of a rule.
+String handlerPersonalityBlurb(HandlerPersonality p) => switch (p) {
+  HandlerPersonality.watchdog =>
+    'Answers only what is unambiguous. Anything with two reasonable readings comes to you.',
+  HandlerPersonality.closer =>
+    'Answers what the session itself settles. Genuine ambiguity still comes to you.',
+  HandlerPersonality.autopilot =>
+    'Answers wherever it can, treating your goal as standing authority. It still escalates whatever it is unsure of.',
+};
+
 /// How much of the Handler an armed session can actually get. Mirrors the
 /// bridge's `HandlerObservability` (`bridge/src/handler/engine.ts`), carried on
 /// each session snapshot.
@@ -188,6 +251,10 @@ class HandlerSessionState {
   /// an agent, this describes a session (its live mode and its judge pick).
   final HandlerObservability? observability;
 
+  /// The posture this session judges under, as the bridge resolved it. Null
+  /// only from a bridge predating the field.
+  final HandlerPersonality? personality;
+
   const HandlerSessionState({
     required this.terminalId,
     required this.runState,
@@ -201,6 +268,7 @@ class HandlerSessionState {
     this.parkKind,
     this.parkedUntil,
     this.observability,
+    this.personality,
   });
 
   int get backlogTotal => backlog.length;
@@ -227,6 +295,7 @@ class HandlerSessionState {
     parkKind: parkKind,
     parkedUntil: parkedUntil,
     observability: observability,
+    personality: personality,
   );
 
   static HandlerSessionState? fromWire(dynamic json) {
@@ -285,6 +354,7 @@ class HandlerSessionState {
       parkKind: parkKind is String ? parkKind : null,
       parkedUntil: parkedUntil is num ? parkedUntil.toInt() : null,
       observability: handlerObservabilityFromWire(json['observability']),
+      personality: handlerPersonalityFromWire(json['personality']),
     );
   }
 }
@@ -746,6 +816,63 @@ class HandlerActivityRecord {
   });
 }
 
+/// Why this machine will not run Handler. Mirrors the bridge's
+/// `HandlerEntitlementWire` (`bridge/src/protocol.ts`), which carries only the
+/// REFUSED half of its verdict — so an instance of this EXISTING is the
+/// refusal, and there is no allowed case for a reader to check.
+enum HandlerEntitlementReason {
+  /// The plan this machine is signed in on does not include Handler. The one
+  /// refusal the user can lift from inside the app, and so the only one that
+  /// carries an upgrade offer.
+  notEntitled,
+
+  /// The machine holds credentials whose tier it cannot read — expired,
+  /// missing, or a label this bridge does not recognise. Not a paywall: an
+  /// upgrade buys nothing here, and offering one would sell a plan the user may
+  /// already have.
+  unreadable,
+}
+
+/// Null for a reason this app has no sentence for, which a newer bridge can
+/// send. Deliberately NOT folded into [HandlerEntitlementReason.unreadable]:
+/// the two refusals prescribe opposite fixes, so a guess is worse than the
+/// generic copy — and worse still is dropping the refusal, which is the silence
+/// this whole field exists to end.
+HandlerEntitlementReason? handlerEntitlementReasonFromWire(dynamic s) =>
+    switch (s) {
+      'not_entitled' => HandlerEntitlementReason.notEntitled,
+      'unreadable' => HandlerEntitlementReason.unreadable,
+      _ => null,
+    };
+
+/// The bridge's answer to "can this machine arm Handler at all", present only
+/// when the answer is no.
+class HandlerEntitlement {
+  const HandlerEntitlement({this.reason, this.tier});
+
+  /// Null when the bridge named a reason this app cannot speak to — see
+  /// [handlerEntitlementReasonFromWire].
+  final HandlerEntitlementReason? reason;
+
+  /// The plan the machine is actually on, when the bridge could read one, so
+  /// the upgrade copy can name it instead of talking around it. Absent
+  /// alongside [HandlerEntitlementReason.unreadable] by construction: that IS
+  /// the case of having no readable tier.
+  final String? tier;
+
+  /// Null unless the payload is a refusal object — a `reason` that is not even
+  /// a string is malformed, and inventing a gate out of it would block arming
+  /// with nothing to say about why.
+  static HandlerEntitlement? fromWire(dynamic json) {
+    if (json is! Map || json['reason'] is! String) return null;
+    final tier = json['tier'];
+    return HandlerEntitlement(
+      reason: handlerEntitlementReasonFromWire(json['reason']),
+      tier: tier is String ? tier : null,
+    );
+  }
+}
+
 /// Immutable app-side view of the bridge's Handler subsystem for one project.
 /// The bridge is the source of truth; this is rebuilt from `handler:*`
 /// messages and never persisted locally.
@@ -778,6 +905,12 @@ class HandlerState {
   /// — so nothing that comes back can be matched to what went out.
   final Map<String, List<String>> pendingInstructions;
 
+  /// Why this machine refuses Handler, or null when it does not. Project-scoped
+  /// because entitlement is an account fact rather than a session one, and the
+  /// surface that most needs it — the shield over a session that is not armed —
+  /// exists precisely where no session state does.
+  final HandlerEntitlement? entitlement;
+
   const HandlerState({
     this.defaultTool,
     required this.sessions,
@@ -787,6 +920,7 @@ class HandlerState {
     this.wrapUps = const [],
     this.pendingUndo = const {},
     this.pendingInstructions = const {},
+    this.entitlement,
   });
 
   const HandlerState.initial()
@@ -797,7 +931,8 @@ class HandlerState {
       snapshots = const [],
       wrapUps = const [],
       pendingUndo = const {},
-      pendingInstructions = const {};
+      pendingInstructions = const {},
+      entitlement = null;
 
   // Absence of any session is the wire's implicit 'off' — there is no
   // standalone off/on flag now that arming is per-terminal.
@@ -805,6 +940,20 @@ class HandlerState {
 
   int get pendingEscalations =>
       sessions.values.fold(0, (n, s) => n + s.pendingEscalations);
+
+  /// What a badge over the Handler tab counts.
+  ///
+  /// The larger of the sessions' own tally and the escalation rows actually
+  /// held, because the two fill from DIFFERENT frames: a `handler:escalation`
+  /// push appends a row without touching any session's `pendingEscalations`
+  /// (that only moves on the next `handler:status`), so folding the sessions
+  /// alone badges zero over a tab already rendering a NEEDS YOU card. A badge
+  /// and the surface it points at must never be able to answer differently
+  /// about what is waiting.
+  int get escalationBadgeCount =>
+      pendingEscalations > escalations.length
+      ? pendingEscalations
+      : escalations.length;
 
   // Folded on `at` rather than read off the tail: [escalations] is banded by
   // [compareEscalations], so `.last` is the newest NORMAL one and an urgent row
@@ -823,6 +972,74 @@ class HandlerState {
   List<String> pendingInstructionsFor(String terminalId) =>
       pendingInstructions[terminalId] ?? const [];
 
+  /// This project's state narrowed to the one terminal the Handler tab shows.
+  ///
+  /// Only the tab narrows. The service and the bridge engine stay project-wide
+  /// — one HandlerService per project, one engine keyed by terminalId — because
+  /// escalations, undo offers and wrap-ups all have to keep arriving for
+  /// sessions nobody is looking at, and the agent bar's NEEDS YOU pill reads
+  /// the unnarrowed state to say so.
+  ///
+  /// [defaultTool] rides through unfiltered: it is the project's judge
+  /// fallback, and the session card resolves its judge label against it.
+  ///
+  /// A null [terminalId] narrows the per-session fields to nothing rather than
+  /// to everything: an unresolved focus names no session, and answering it with
+  /// the project's whole state would undo the narrowing at exactly that moment.
+  ///
+  /// [snapshots] and [wrapUps] are the exception, and are narrowed by OWNERSHIP
+  /// rather than by focus: both are project-scoped precisely because they
+  /// outlive the session that produced them (see their own docs), so filtering
+  /// them on terminalId alone hides an undo offer the moment its session
+  /// disarms — which for a wrap-up is always, since a wrap-up disarms the
+  /// session it reports on. What is kept is this terminal's own plus every
+  /// ORPHAN no live session can claim: the narrowing still holds for sessions
+  /// that exist, and the account of finished work stays reachable.
+  ///
+  /// Built through [copyWith] rather than the constructor so a field added to
+  /// this class later is CARRIED, not silently reset to its default on the one
+  /// surface that reads a narrowed state. Whether it then needs narrowing of
+  /// its own is a question a reader gets to see; a blank section is not.
+  HandlerState forTerminal(String? terminalId) {
+    bool ownedOrOrphaned(String owner) =>
+        owner == terminalId || !sessions.containsKey(owner);
+    final mine = snapshots.where((s) => ownedOrOrphaned(s.terminalId)).toList();
+    final mineIds = {for (final s in mine) s.snapshotId};
+    // Filtered against the narrowed offers, not carried whole: a pending id
+    // naming a snapshot this state no longer holds marks a row that is not on
+    // screen.
+    final undo = pendingUndo.where(mineIds.contains).toSet();
+    final orphanedWrapUps = wrapUps
+        .where((w) => ownedOrOrphaned(w.terminalId))
+        .toList();
+    if (terminalId == null) {
+      return HandlerState.initial().copyWith(
+        defaultTool: defaultTool,
+        // Carried for the same reason [defaultTool] is: it describes the
+        // project, not the session this narrowing failed to name.
+        entitlement: entitlement,
+        snapshots: mine,
+        wrapUps: orphanedWrapUps,
+        pendingUndo: undo,
+      );
+    }
+    final session = sessions[terminalId];
+    final instructions = pendingInstructions[terminalId];
+    return copyWith(
+      sessions: session == null ? const {} : {terminalId: session},
+      escalations: escalations
+          .where((e) => e.terminalId == terminalId)
+          .toList(),
+      activity: activity.where((a) => a.terminalId == terminalId).toList(),
+      snapshots: mine,
+      wrapUps: orphanedWrapUps,
+      pendingUndo: undo,
+      pendingInstructions: instructions == null
+          ? const {}
+          : {terminalId: instructions},
+    );
+  }
+
   HandlerState copyWith({
     String? defaultTool,
     Map<String, HandlerSessionState>? sessions,
@@ -832,6 +1049,8 @@ class HandlerState {
     List<HandlerWrapUp>? wrapUps,
     Set<String>? pendingUndo,
     Map<String, List<String>>? pendingInstructions,
+    HandlerEntitlement? entitlement,
+    bool clearEntitlement = false,
   }) {
     return HandlerState(
       defaultTool: defaultTool ?? this.defaultTool,
@@ -842,6 +1061,10 @@ class HandlerState {
       wrapUps: wrapUps ?? this.wrapUps,
       pendingUndo: pendingUndo ?? this.pendingUndo,
       pendingInstructions: pendingInstructions ?? this.pendingInstructions,
+      // The one field here that has to be CLEARABLE: a refusal is lifted by an
+      // upgrade or a fresh sign-in, and a gate that only ever latches on would
+      // outlive the thing it describes with no frame able to correct it.
+      entitlement: clearEntitlement ? null : (entitlement ?? this.entitlement),
     );
   }
 }

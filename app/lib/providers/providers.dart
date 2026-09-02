@@ -290,6 +290,22 @@ final handlerStateProvider = StreamProvider<HandlerState>((ref) {
   return seededStream(() => service.currentState, service.stateStream);
 });
 
+/// [handlerStateProvider] narrowed to the focused session — what the Handler
+/// tab renders.
+///
+/// Session-scoped for the reason the files, git and terminals tabs are
+/// checkout-scoped: the workspace panel answers for the session in focus, and a
+/// tab mixing two sessions' rows makes the reader do the routing.
+///
+/// The unnarrowed [handlerStateProvider] stays the source for every surface
+/// that genuinely spans sessions — above all the agent bar's NEEDS YOU pill,
+/// which is what says another session is waiting and so must never narrow.
+final focusedSessionHandlerStateProvider = Provider<HandlerState>((ref) {
+  final state = ref.watch(handlerStateProvider).value;
+  if (state == null) return const HandlerState.initial();
+  return state.forTerminal(ref.watch(activeSessionIdProvider));
+});
+
 /// Per-project SessionsService façade.
 final sessionsServiceProvider = _focusedService<SessionsService>(
   (s) => s.sessionsService,
