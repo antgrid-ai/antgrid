@@ -793,6 +793,17 @@ const BacklogWire = z.array(InstructionItemWire).refine(
 // stay in lockstep, or the hot path admits what the union rejects. Field-level
 // rules (BacklogWire) ride along through `.shape`; a whole-payload `.refine`
 // would have to be written on both.
+// How far Handler leans toward answering on the user's behalf: it moves where
+// the line between `handle` and `escalate` sits, and the tone of `notify`.
+// Nothing else — the evidence a transition must cite is the anti-inflation
+// guard, and a posture able to relax it would let a confident preset report
+// progress that never happened.
+//
+// A bounded preset, deliberately not a free-text guidance field: the value is
+// interpolated into the judge prompt, and a fixed set carries no injection.
+export const HandlerPersonalitySchema = z.enum(["watchdog", "closer", "autopilot"]);
+export type HandlerPersonality = z.infer<typeof HandlerPersonalitySchema>;
+
 export const HandlerConfigureWire = z.object({
   terminalId: z.string(),
   armed: z.boolean(),
@@ -808,6 +819,11 @@ export const HandlerConfigureWire = z.object({
   // tool / CLI default model); absent = leave the stored choice untouched.
   judgeTool: z.string().optional(),
   judgeModel: z.string().optional(),
+  // Absent = leave the session's stored posture untouched, the same
+  // absent-keeps rule judgeTool follows. There is no "clear to default": every
+  // preset is a real choice, and the default is only what a session that has
+  // never been given one judges as.
+  personality: HandlerPersonalitySchema.optional(),
 });
 
 const HandlerConfigureMessage = BaseMessage.extend({
@@ -1024,6 +1040,11 @@ const HandlerSessionSnapshot = z.object({
   // handler/engine.ts). Optional and appended LAST: an older app still parses
   // the snapshot, and every key it reads keeps its position.
   observability: z.enum(["full", "escalate_only", "unsupported"]).optional(),
+  // The posture this session actually judges under, resolved by the bridge and
+  // so always present on a status frame — an app reading it never has to know
+  // what an absent value would have meant. Optional and appended LAST for the
+  // same reason `observability` is: an older app still parses the snapshot.
+  personality: HandlerPersonalitySchema.optional(),
 });
 
 const HandlerStatusMessage = BaseMessage.extend({

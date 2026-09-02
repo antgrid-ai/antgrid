@@ -3,12 +3,17 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/widgets/ab_confirm_dialog.dart';
+import '../../design/ab_colors.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_adaptive_sheet.dart';
+import '../../design/widgets/ab_button.dart';
+import '../../design/widgets/ab_dialog.dart';
 import '../../models/handler_state.dart';
 import '../../providers/first_run.dart';
 import '../../providers/providers.dart';
 import '../../providers/session_opening_prompt.dart';
 import 'handler_item_status.dart';
+import 'handler_session_settings.dart';
 
 /// Body copy for the first-arm explainer. Top-level so the copy matrix is
 /// unit-testable without pumping a dialog.
@@ -61,26 +66,117 @@ String handlerArmExplainerBody({
   };
 }
 
-/// Shows the one-time "what is Handler" explainer. Returns true when the user
-/// confirmed arming.
-Future<bool> showHandlerArmExplainer(
+/// Shows the one-time "what is Handler" explainer, with the session's judge and
+/// posture on it. Returns the edit to send with the arm, or null if the user
+/// backed out.
+///
+/// A sheet rather than the confirm dialog it replaces, for one reason: this
+/// screen already tells a user their judge cannot run headless, and until now it
+/// offered nothing to do about it. The picker that fixes it belongs beside the
+/// warning, and a title/body/two-buttons dialog has nowhere to put a control.
+///
+/// Still first-arm only — every later arm stays one tap, and the same controls
+/// stay one tap away on the PA bar for the whole time a session is armed.
+Future<HandlerSessionSettingsEdit?> showHandlerArmSheet(
   BuildContext context, {
+  required String terminalId,
+  required HandlerSessionSettingsValue initial,
   required bool? agentObservable,
   String? agentLabel,
   bool hasOpeningPrompt = false,
   bool? judgeCapable,
-}) => AbConfirmDialog.show(
-  context: context,
-  title: 'Arm Handler',
-  body: handlerArmExplainerBody(
-    agentObservable: agentObservable,
-    agentLabel: agentLabel,
-    hasOpeningPrompt: hasOpeningPrompt,
-    judgeCapable: judgeCapable,
+}) => showAbAdaptiveSheet<HandlerSessionSettingsEdit>(
+  context,
+  child: _ArmSheet(
+    terminalId: terminalId,
+    initial: initial,
+    body: handlerArmExplainerBody(
+      agentObservable: agentObservable,
+      agentLabel: agentLabel,
+      hasOpeningPrompt: hasOpeningPrompt,
+      judgeCapable: judgeCapable,
+    ),
   ),
-  confirmLabel: 'Arm Handler',
-  cancelLabel: 'Not now',
 );
+
+class _ArmSheet extends StatefulWidget {
+  const _ArmSheet({
+    required this.terminalId,
+    required this.initial,
+    required this.body,
+  });
+
+  final String terminalId;
+  final HandlerSessionSettingsValue initial;
+  final String body;
+
+  @override
+  State<_ArmSheet> createState() => _ArmSheetState();
+}
+
+class _ArmSheetState extends State<_ArmSheet> {
+  late HandlerSessionSettingsValue _value = widget.initial;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: abDialogTitlePadding,
+            child: abDialogTitle(
+              'Arm Handler',
+              onClose: () => Navigator.of(context).maybePop(),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AbTokens.space16,
+              0,
+              AbTokens.space16,
+              AbTokens.space16,
+            ),
+            child: Text(
+              widget.body,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontSm,
+                color: p.textSecondary,
+              ),
+            ),
+          ),
+          HandlerSessionSettings(
+            terminalId: widget.terminalId,
+            value: _value,
+            onChanged: (next) => setState(() => _value = next),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(AbTokens.space16),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                AbButton(
+                  label: 'Not now',
+                  onTap: () => Navigator.of(context).maybePop(),
+                ),
+                const SizedBox(width: AbTokens.space8),
+                AbButton(
+                  label: 'Arm Handler',
+                  variant: AbButtonVariant.primary,
+                  onTap: () => Navigator.of(context).maybePop(
+                    handlerSessionSettingsEdit(widget.initial, _value),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 /// The single first-arm flow, shared by the header shield and the away-moment
 /// hint so the two can never drift: explainer while [FirstRunState.handlerArmedOnce]
@@ -99,11 +195,17 @@ Future<bool> showHandlerArmExplainer(
 /// an omitted goal leaves the bridge's stored one untouched, so the payload-free
 /// arm is still exactly what those sessions get.
 ///
-/// The service is resolved AFTER the explainer, never captured before it: the
-/// dialog stays open for as long as the user reads it, and a transport
-/// reconnect in that window disposes the build-time instance, whose `arm` then
-/// returns having sent nothing. The user tapped "Arm Handler", the dialog
-/// closed, and they walk away believing the session is watched.
+/// The service is resolved AFTER the sheet, never captured before it: the sheet
+/// stays open for as long as the user reads it, and a transport reconnect in
+/// that window disposes the build-time instance, whose `arm` then returns having
+/// sent nothing. The user tapped "Arm Handler", the sheet closed, and they walk
+/// away believing the session is watched.
+///
+/// Every arm past the first sends no settings at all — the keys are omitted, the
+/// bridge keeps what it has, and the tap stays a tap. The sheet's own edit is
+/// likewise a DELTA: a control the user never touched sends nothing, so a first
+/// arm cannot clear a judge pick the bridge holds and this app has not yet been
+/// told about.
 Future<void> armWithFirstRunExplainer({
   required BuildContext context,
   required ProviderContainer container,
@@ -113,20 +215,29 @@ Future<void> armWithFirstRunExplainer({
   bool? judgeCapable,
 }) async {
   final goal = container.read(sessionOpeningPromptsProvider)[terminalId];
+  HandlerSessionSettingsEdit? edit;
   if (!container.read(firstRunProvider).handlerArmedOnce) {
-    final ok = await showHandlerArmExplainer(
+    edit = await showHandlerArmSheet(
       context,
+      terminalId: terminalId,
+      initial: handlerSessionSettingsFor(
+        focusedServiceOrNull(container, (s) => s.handlerService),
+        terminalId,
+      ),
       agentObservable: agentObservable,
       agentLabel: agentLabel,
       hasOpeningPrompt: goal != null,
       judgeCapable: judgeCapable,
     );
-    if (!ok) return;
+    if (edit == null) return;
   }
-  focusedServiceOrNull(
-    container,
-    (s) => s.handlerService,
-  )?.arm(terminalId: terminalId, goal: goal);
+  focusedServiceOrNull(container, (s) => s.handlerService)?.arm(
+    terminalId: terminalId,
+    goal: goal,
+    judgeTool: edit?.judgeTool,
+    judgeModel: edit?.judgeModel,
+    personality: edit?.personality,
+  );
   latchHandlerArmedOnConfirmation(container, terminalId);
 }
 

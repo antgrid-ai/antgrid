@@ -510,4 +510,37 @@ void main() {
       expect(mixed.forTerminal('t1').pendingEscalations, 1);
     });
   });
+
+  group('personality on the wire', () {
+    Map<String, dynamic> wire({String? personality}) => {
+      'terminalId': 't1',
+      'state': 'watching',
+      'pendingEscalations': 0,
+      'armedAt': 1,
+      'goal': 'ship it',
+      'backlog': const [],
+      'personality': ?personality,
+    };
+
+    test('a reported posture round-trips', () {
+      for (final preset in HandlerPersonality.values) {
+        final s = HandlerSessionState.fromWire(
+          wire(personality: handlerPersonalityToWire(preset)),
+        )!;
+        expect(s.personality, preset);
+      }
+    });
+
+    test('a bridge that says nothing leaves it null', () {
+      // Never defaulted to watchdog here: the sheet supplies the default it
+      // shows, and a model that invents one cannot tell "not reported" from
+      // "reported as the default".
+      expect(HandlerSessionState.fromWire(wire())!.personality, isNull);
+    });
+
+    test('an unrecognised posture is null, not a confident guess', () {
+      expect(handlerPersonalityFromWire('yolo'), isNull);
+      expect(handlerPersonalityFromWire(42), isNull);
+    });
+  });
 }

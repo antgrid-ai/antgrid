@@ -397,7 +397,7 @@ void main() {
     t.emit('handler:status', {'projectId': 'p', 'sessions': []});
     await Future<void>.delayed(Duration.zero);
 
-    final judge = svc.lastKnownJudge('t1');
+    final judge = svc.lastKnownSettings('t1');
     expect(judge?.tool, 'codex');
     expect(judge?.model, 'm');
 
@@ -426,7 +426,7 @@ void main() {
       ],
     });
     await Future<void>.delayed(Duration.zero);
-    expect(svc.lastKnownJudge('t1')?.tool, 'codex');
+    expect(svc.lastKnownSettings('t1')?.tool, 'codex');
 
     // …then a re-arm switching to 'opencode'. No new snapshot yet: reopening a
     // picker in this window must seed the NEW pick — a stale seed committed by
@@ -437,7 +437,7 @@ void main() {
       judgeModel: '',
     );
 
-    final judge = svc.lastKnownJudge('t1');
+    final judge = svc.lastKnownSettings('t1');
     expect(judge?.tool, 'opencode');
     // Explicit '' clears the model, mirroring the bridge's applyJudgeChoice.
     expect(judge?.model, isNull);
@@ -467,7 +467,7 @@ void main() {
       ],
     });
     await Future<void>.delayed(Duration.zero);
-    expect(svc.lastKnownJudge('t1')?.tool, 'codex');
+    expect(svc.lastKnownSettings('t1')?.tool, 'codex');
 
     // …then re-armed with the judge cleared back to default. The session
     // stays armed (still present in the snapshot) with null judge fields —
@@ -479,7 +479,7 @@ void main() {
     });
     await Future<void>.delayed(Duration.zero);
 
-    final judge = svc.lastKnownJudge('t1');
+    final judge = svc.lastKnownSettings('t1');
     expect(judge?.tool, isNull);
     expect(judge?.model, isNull);
 

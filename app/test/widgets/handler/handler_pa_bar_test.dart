@@ -2,6 +2,8 @@
 // field and the presets moved into the backlog drawer, because a second field
 // with its own send button, pinned under the composer, read as a rival place to
 // type with nothing on either saying who receives it.
+import 'package:antgrid/design/ab_colors.dart';
+import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/providers/first_run.dart';
@@ -28,6 +30,8 @@ HandlerSessionState _armed({
   int? pendingEscalations,
   String? parkKind,
   int? parkedUntil,
+  HandlerPersonality? personality,
+  HandlerObservability? observability,
 }) => HandlerSessionState(
   terminalId: 't1',
   runState: runState,
@@ -38,7 +42,15 @@ HandlerSessionState _armed({
   escalations: escalations,
   parkKind: parkKind,
   parkedUntil: parkedUntil,
+  personality: personality,
+  observability: observability,
 );
+
+/// The chip's colour is the whole assertion, and the harness below mounts no
+/// palette extension — so read the one the bar itself resolved rather than
+/// guessing which fallback is in force.
+AbChip _chip(WidgetTester tester, String label) =>
+    tester.widget<AbChip>(find.widgetWithText(AbChip, label));
 
 HandlerInstructionItem _item(String id, String text, String status) =>
     HandlerInstructionItem(id: id, text: text, status: status, createdAt: 1);
@@ -105,6 +117,49 @@ Future<void> _pump(
 }
 
 void main() {
+  testWidgets('the bar names the posture even when nobody has picked one', (
+    tester,
+  ) async {
+    // The bar is on screen for the whole time a session is armed and is the
+    // only place the posture is visible at all, so "no chip" would be a state
+    // the user has to be taught to read.
+    await _pump(tester, sessions: {'t1': _armed()});
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
+    expect(_chip(tester, 'WATCHDOG').color, p.textMuted);
+  });
+
+  testWidgets('the posture chip is tinted where nothing is being judged', (
+    tester,
+  ) async {
+    // Escalate-only means no decide pass runs at all, so a bar naming a
+    // posture in ordinary chrome would say the opposite of what is happening.
+    await _pump(
+      tester,
+      sessions: {
+        't1': _armed(
+          personality: HandlerPersonality.closer,
+          observability: HandlerObservability.escalateOnly,
+        ),
+      },
+    );
+    final p = tester.element(find.byType(HandlerPaBar)).antgrid;
+    expect(_chip(tester, 'CLOSER').color, p.warning);
+  });
+
+  testWidgets('tapping the posture chip does not open the backlog', (
+    tester,
+  ) async {
+    String? opened;
+    await _pump(
+      tester,
+      sessions: {'t1': _armed()},
+      opener: (terminalId) => opened = terminalId,
+    );
+    await tester.tap(find.text('WATCHDOG'));
+    await tester.pump();
+    expect(opened, isNull);
+  });
+
   testWidgets('the bar offers no place to type of its own', (tester) async {
     // The whole point of the collapse: the composer above it is the one field.
     await _pump(tester, sessions: {'t1': _armed()});

@@ -27,6 +27,7 @@ import 'handler_decision_card.dart';
 import 'handler_item_status.dart';
 import 'handler_layout.dart';
 import 'handler_reply_sheet.dart';
+import 'handler_session_settings.dart';
 
 /// Day-aware, not a bare clock: this feed is written while the user is away and
 /// read afterwards, so it routinely spans midnight.
@@ -274,6 +275,9 @@ class HandlerScreen extends ConsumerWidget {
                     container,
                     (s) => s.handlerService,
                   )?.disarm(s.terminalId),
+                  onOpenSettings: () => unawaited(
+                    showHandlerSessionSettingsSheet(context, s.terminalId),
+                  ),
                   onOpenBacklog: () => unawaited(
                     showHandlerBacklogDrawer(context, s.terminalId),
                   ),
@@ -450,6 +454,7 @@ class _SessionCard extends StatelessWidget {
     required this.session,
     required this.judgeLabel,
     required this.onDisarm,
+    required this.onOpenSettings,
     required this.onOpenBacklog,
   });
   final HandlerSessionState session;
@@ -458,6 +463,7 @@ class _SessionCard extends StatelessWidget {
   /// the session's default). This never mutates it.
   final String judgeLabel;
   final VoidCallback onDisarm;
+  final VoidCallback onOpenSettings;
   final VoidCallback onOpenBacklog;
 
   // Only the first few items render inline — a stacking session can hold dozens
@@ -476,6 +482,11 @@ class _SessionCard extends StatelessWidget {
       context: context,
       anchorRect: anchor,
       entries: [
+        AbMenuItem(
+          label: 'Handler settings',
+          icon: AbIcons.settings,
+          onTap: onOpenSettings,
+        ),
         AbMenuItem(
           label: 'Disarm Handler',
           icon: AbIcons.shield,

@@ -99,9 +99,11 @@ class HandlerAwayAttentionSinceNotifier extends Notifier<DateTime?> {
 /// thunk (an absent per-session tool means the project default). ONE provider
 /// so the header shield, the away hint, and the explainer can never answer the
 /// coverage question differently for the same session.
-/// [judgeCapable] is null under exactly the same condition [observable] is —
-/// both are read off one descriptor, so an agent the catalog has never
-/// described answers neither question rather than half of one.
+/// [judgeCapable] is null when the catalog has never described the tool that
+/// would judge — which is [agent] until the session's own judge pick names
+/// another. [observable] is null under the same condition for [agent] itself,
+/// so a session whose judge is picked and whose agent is undescribed can answer
+/// one and not the other.
 typedef FocusedSessionCoverage = ({
   String? agent,
   String? agentLabel,
@@ -116,6 +118,19 @@ final focusedSessionCoverageProvider =
           ref.watch(handlerStateProvider).value ?? const HandlerState.initial();
       final agent = entry?.tool ?? handlerState.defaultTool;
       final catalog = ref.watch(agentCatalogProvider);
+      // The judge the bridge would actually run, not the session's agent: once
+      // a pick exists, warning about the agent's own headless reach describes a
+      // judge that is not going to be used.
+      // Sourced through focusedSessionOrNull, never the handlerService facade:
+      // this provider is watched, and the facade throws in the windows where a
+      // project session is still resolving.
+      final judge = entry == null
+          ? agent
+          : focusedSessionOrNull(ref)
+                    ?.handlerService
+                    .lastKnownSettings(entry.id)
+                    ?.tool ??
+                agent;
       return (
         agent: agent,
         agentLabel: catalog[agent]?.label,
@@ -124,13 +139,13 @@ final focusedSessionCoverageProvider =
           agent,
           chat: entry?.mode == 'chat',
         ),
-        // The bridge's own second question, asked the same way: an armed
-        // session resolves its judge as `storedJudge ?? the session's own tool`
-        // (observabilityFor, bridge/src/handler/engine.ts). Nothing writes a
-        // stored judge today, so the fallback IS the answer and the catalog
-        // already holds it — this predicts, it does not approximate. Whatever
-        // lands a judge picker owns keeping that true.
-        judgeCapable: catalog[agent]?.judgeCapable,
+        // The bridge's own second question, asked the same way: a session
+        // resolves its judge as `storedJudge ?? the session's own tool`
+        // (observabilityFor, bridge/src/handler/engine.ts). Both halves are
+        // mirrored above, so this predicts rather than approximates — and an
+        // armed session reports its own answer regardless, which is what this
+        // one has to agree with before the arm.
+        judgeCapable: catalog[judge]?.judgeCapable,
       );
     });
 

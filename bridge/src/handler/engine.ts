@@ -1,6 +1,6 @@
 // bridge/src/handler/engine.ts
 import { createHash } from "node:crypto";
-import { createMessage, type AbMessage } from "../protocol";
+import { createMessage, type AbMessage, type HandlerPersonality } from "../protocol";
 import { classifyDestructive, describeWarning, type FloorWarning } from "./destructive-floor";
 import {
   authorizeInstruction, createAuthorization, partitionWarnings,
@@ -35,7 +35,7 @@ import type { CapCommand } from "../structured/chat-session";
 import type { SessionAdapter } from "./session-adapter";
 import { handlerObservable, judgeCapable } from "../agents/registry";
 import { createEntitlementReader, type EntitlementReader } from "../entitlement";
-import { type HandlerDecision } from "./decision";
+import { type HandlerDecision, DEFAULT_PERSONALITY } from "./decision";
 import {
   LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS, TRANSIENT_CEILING, transientBackoffMs,
   defaultSchedule, TimerRegistry, type LifecycleDeps,
@@ -506,6 +506,11 @@ interface ArmedSession {
   escalations: OpenEscalation[];
   judgeTool?: string;
   judgeModel?: string;
+  // Absent until the user picks one. Resolved to DEFAULT_PERSONALITY at the two
+  // points that consume it — the status emit and the decide prompt — rather than
+  // defaulted here, so "never chosen" stays distinguishable on disk from a
+  // session the user deliberately set back to the default preset.
+  personality?: HandlerPersonality;
   parkKind?: "limit" | "outage";
   parkedUntil?: number;
   selfResuming?: boolean;
@@ -698,6 +703,16 @@ export class HandlerEngine {
     if (p.judgeModel !== undefined) s.judgeModel = p.judgeModel.trim() || undefined;
   }
 
+  // Absent leaves the stored posture alone, the same rule applyJudgeChoice
+  // follows. Zod has already bounded the value to the three presets, so unlike
+  // judgeTool there is nothing further to validate here.
+  private applyPersonality(
+    s: { personality?: HandlerPersonality },
+    p: { personality?: HandlerPersonality },
+  ): void {
+    if (p.personality !== undefined) s.personality = p.personality;
+  }
+
   // The session's stored judge: the live armed session if one exists, else the
   // on-disk record (a disarmed session keeps its pick for the next arm).
   // Callers that already loaded the record pass it as `rec` (null = "loaded,
@@ -776,7 +791,7 @@ export class HandlerEngine {
     this.saveSession({
       version: 2, terminalId, armed, suspended, goal: s.goal, backlog: s.backlog,
       armedAt: s.armedAt, escalations: s.escalations,
-      judgeTool: s.judgeTool, judgeModel: s.judgeModel,
+      judgeTool: s.judgeTool, judgeModel: s.judgeModel, personality: s.personality,
       parkKind: s.parkKind, parkedUntil: s.parkedUntil, transientFailures: s.transientFailures,
       parkAwaitingJudge: s.parkAwaitingJudge,
     });
@@ -784,7 +799,7 @@ export class HandlerEngine {
 
   arm(p: {
     terminalId: string; goal?: string; backlog?: InstructionItem[];
-    judgeTool?: string; judgeModel?: string;
+    judgeTool?: string; judgeModel?: string; personality?: HandlerPersonality;
   }): void {
     // Entitlement first, ahead of every side effect below — the backlog clamp
     // records an activity row, and a refused arm must leave nothing behind.
@@ -838,6 +853,7 @@ export class HandlerEngine {
       // judged even if the agent has not moved.
       existing.lastJudgedContextHash = undefined;
       this.applyJudgeChoice(existing, p);
+      this.applyPersonality(existing, p);
       this.persist(p.terminalId, existing, true);
       // Only when the goal actually moved: `handler:configure` is also the
       // backlog-edit and judge-pick path (see updateBacklog in the app), and a
@@ -889,6 +905,9 @@ export class HandlerEngine {
       // pick), then let an explicit choice on this arm override it.
       judgeTool: stored.tool,
       judgeModel: stored.model,
+      // Off the RECORD, not off `resumed`: a deliberate disarm keeps the pick
+      // for the next arm, exactly as the judge fields above do.
+      personality: rec?.personality,
       transientFailures: resumed?.transientFailures ?? 0,
       limitParks: 0,
       floorWarnings: [],
@@ -898,6 +917,7 @@ export class HandlerEngine {
       auth: createAuthorization(),
     };
     this.applyJudgeChoice(s, p);
+    this.applyPersonality(s, p);
     this.sessions.set(p.terminalId, s);
     this.persist(p.terminalId, s, true);
     // "armed" either way: nothing is edited on this path — the goal is whatever the
@@ -1691,6 +1711,7 @@ export class HandlerEngine {
       const runDecisionFn = this.deps.runDecisionFn ?? defaultRunDecision;
       decision = await runDecisionFn({
         tool: s.judgeTool ?? tool, model: s.judgeModel, goal: s.goal,
+        personality: s.personality ?? DEFAULT_PERSONALITY,
         backlogText: renderBacklog(s.backlog),
         context: ctx.text, transcriptPath: ctx.transcriptPath ?? transcriptPath,
         cwd: this.deps.projectPath(evt.terminalId),
@@ -2521,6 +2542,10 @@ export class HandlerEngine {
       // Re-derived on every emit rather than frozen at arm time: a slot's mode
       // and its judge pick both change under a live arm.
       observability: this.observabilityFor(terminalId),
+      // Resolved, never the raw field: the app renders the picker off this, and
+      // an absent value would leave it showing nothing while the judge runs
+      // under a posture all the same.
+      personality: s.personality ?? DEFAULT_PERSONALITY,
     }));
     const wrapUps = this.wrapUps();
     this.deps.sendAb(createMessage("handler:status", {
