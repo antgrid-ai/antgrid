@@ -1,3 +1,8 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart' show kReleaseMode, visibleForTesting;
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
 final _pathLike = RegExp(r'([a-zA-Z]:)?[\\/][^\s"]+');
@@ -136,6 +141,43 @@ SentryEvent? scrubCrashEvent(SentryEvent event) {
   return event;
 }
 
+/// Whether this platform's native Sentry SDK is the sentry-native C library.
+/// Only that one reads [SentryFlutterOptions.nativeDatabasePath]; the Apple and
+/// Android SDKs pick their own location and ignore it.
+@visibleForTesting
+bool get usesNativeCrashDatabase => Platform.isWindows || Platform.isLinux;
+
+/// Where sentry-native keeps its crash database, given the app's per-user
+/// support directory.
+@visibleForTesting
+String nativeCrashDatabasePath(String supportDir) =>
+    p.join(supportDir, '.sentry-native');
+
+/// Resolves a WRITABLE crash-database directory, or null to leave the SDK on
+/// its own default.
+///
+/// `sentry_flutter` never assigns `nativeDatabasePath` itself, and sentry-native
+/// then falls back to `.sentry-native` relative to the CURRENT WORKING
+/// DIRECTORY. That is unwritable in exactly the configuration we ship on
+/// Windows: a Store-launched MSIX gets `C:\Windows\System32` as its cwd, and
+/// its own install dir under `WindowsApps` is read-only. `sentry_init` then
+/// fails and native crash capture is absent with NO symptom to notice it by —
+/// no handler process, no database, and (because auto-session-tracking is a
+/// native option) no release-health sessions either, which is what would
+/// otherwise have shown the pipeline was dead. Anchoring the path to the
+/// support directory is what makes native capture work in a packaged build.
+Future<String?> _resolveNativeDatabasePath() async {
+  if (!usesNativeCrashDatabase) return null;
+  try {
+    final dir = await getApplicationSupportDirectory();
+    return nativeCrashDatabasePath(dir.path);
+  } catch (_) {
+    // Crash reporting must never be the reason the app fails to start; the SDK
+    // falls back to the cwd-relative default, which is today's behaviour.
+    return null;
+  }
+}
+
 Future<void> initCrashReporting({
   required bool enabled,
   required String dsn,
@@ -145,10 +187,19 @@ Future<void> initCrashReporting({
     await runApp();
     return;
   }
+  final nativeDatabasePath = await _resolveNativeDatabasePath();
   await SentryFlutter.init((options) {
     options.dsn = dsn;
     options.sendDefaultPii = false;
     options.attachScreenshot = false;
+    // The SDK reports its OWN failures at debug level and nowhere else, so a
+    // release build that cannot initialise its native layer looks exactly like
+    // one that simply never crashed. Costly to leave on in production (every
+    // envelope is logged), so it is on everywhere else instead.
+    options.debug = !kReleaseMode;
+    if (nativeDatabasePath != null) {
+      options.nativeDatabasePath = nativeDatabasePath;
+    }
     // attachViewHierarchy is @experimental and defaults to false; no explicit
     // set needed.
     options.beforeSend = (event, hint) => scrubCrashEvent(event);
