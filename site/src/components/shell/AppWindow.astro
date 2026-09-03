@@ -6,13 +6,19 @@ import Mark from "../ui/Mark.astro";
 // their own frame. Two spellings of the frame is how two scenes end up reading
 // as two different products.
 //
-// This bar is the app's own, not a generic window: Antgrid draws its own title
-// bar (no OS one exists), so the mac traffic lights this used to carry were a
-// stock "screenshot" signal for a product that has never looked like that. The
-// order below — mark, sidebar toggle, history, centred session search, the
-// Remote pill, the panel toggle, then hand-drawn window controls — is the order
-// the app ships. Changing it here without changing it there sells a window the
+// This bar is the app's own, not a generic window: Antgrid hides the OS title
+// bar and draws its own. The order below — mark, sidebar toggle, history,
+// centred session search, the Remote pill, the panel toggle — is the order the
+// app ships. Changing it here without changing it there sells a window the
 // reader will not find.
+//
+// What flanks that row is the one part that is NOT the same everywhere, so both
+// spellings ship and `data-os` (set in Base.astro) picks one: Windows paints its
+// own minus/square/x at the right, macOS keeps the real NSWindow traffic lights
+// at the left and paints nothing at the right. That is not a stylistic choice
+// here — it mirrors `paintsWindowControls` in app/lib/window/
+// window_capabilities.dart, and a reader on either OS should recognise the
+// window they are about to download.
 //
 // Everything inside a scene is painted from the `ab-` tokens (global.css),
 // which mirror app/lib/design/ab_colors.dart. A scene that reaches for
@@ -33,6 +39,15 @@ const { panes = 2, remote = true, class: cls = "" } = Astro.props;
       so it is hidden from assistive tech rather than announced as a toolbar of
       dead buttons. The scenes below it carry the readable content. */}
   <div class="flex h-9 items-center gap-1.5 border-b border-ab-line bg-ab-deepest px-2" aria-hidden="true">
+    {/* AppKit's own colours, deliberately not `ab-` tokens: these dots belong to
+        macOS, not to the design system, and a token-shifted traffic light reads
+        as a drawing of one. The trailing gap is the site-scale stand-in for
+        `titleBarLeftInset`, which keeps app content clear of them. */}
+    <span class="appwin-mac-lights shrink-0 items-center gap-2 pr-1.5 pl-0.5">
+      <span class="size-2.5 rounded-full bg-[#ff5f57]"></span>
+      <span class="size-2.5 rounded-full bg-[#febc2e]"></span>
+      <span class="size-2.5 rounded-full bg-[#28c840]"></span>
+    </span>
     <Mark class="size-3.5 shrink-0 text-ab-text2" />
     <Icon name="tabler:layout-sidebar" class="shrink-0 text-ab-dim" width="14" height="14" />
     <span class="hidden shrink-0 items-center gap-0.5 pl-1 sm:flex">
@@ -54,7 +69,7 @@ const { panes = 2, remote = true, class: cls = "" } = Astro.props;
       </span>
     )}
     <Icon name="tabler:layout-sidebar-right" class="ml-1 shrink-0 text-ab-dim" width="14" height="14" />
-    <span class="ml-1 flex shrink-0 items-center gap-2.5 pl-1">
+    <span class="appwin-win-controls ml-1 shrink-0 items-center gap-2.5 pl-1">
       <Icon name="tabler:minus" class="text-ab-mute" width="12" height="12" />
       <Icon name="tabler:square" class="text-ab-mute" width="10" height="10" />
       <Icon name="tabler:x" class="text-ab-mute" width="12" height="12" />

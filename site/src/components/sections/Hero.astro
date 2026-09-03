@@ -3,8 +3,20 @@ import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Button from "../ui/Button.astro";
 import WorkspaceScene from "../shell/WorkspaceScene.astro";
-import { links } from "../../config";
+import { links, PLATFORMS, downloadUrlFor } from "../../config";
 import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../../data/pricing";
+
+// One button per desktop build. All three ship and `data-os` (Base.astro)
+// reveals the one the reader can actually install — the same attribute the
+// window chrome follows, and revealed the same way in global.css rather than by
+// rewriting a label after load, which would flicker on the primary CTA. Windows
+// leads because it is also what the reveal rules fall through to.
+//
+// Each aims at the confirmation page rather than at the artifact, and that page
+// starts the download itself (downloadUrlFor). Straight at the artifact, the
+// click leaves the page looking like nothing happened and answers none of "it
+// downloaded, now what". #download still keeps the raw artifact links a click
+// away for anyone who only wants the binary.
 ---
 {/* The proof loop is the argument, so it gets the stage rather than a column:
     full shell width under the headline, which also puts it just below the fold
@@ -71,64 +83,67 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
       )}
     </div>
 
-    <h1 class="mb-8">
-      {/* inline-block per sentence, here and in the headline below, so a line can
-          only ever break BETWEEN sentences. Both are short-sentence copy at large
-          type, where the default wrap strands a two-word tail ("stuck since 2am.",
-          "machine.") on its own line at some widths and not others. A hard <br />
-          fixes the one width you tested and makes narrow viewports worse. */}
-      <span class="mb-3 block max-w-4xl text-kicker text-muted">
-        <span class="inline-block">Claude Code on your laptop, Codex on your workstation, another on a cloud box.</span>{" "}
-        <span class="inline-block">One's been stuck since 2am.</span>
-      </span>
-      {/* This deliberately takes the overview claim BACK from Fleet.astro, which
-          was handed it while the headline carried the evidence gate. The gate is
-          not entitled to a headline: Handler is opt-in and it is on Pro, so "make
-          it prove it" was false on every free machine until someone armed it —
-          the one promise a stranger is asked to believe has to be true on a bare
-          install. This one is. Fleet.astro keeps the PROOF; the hero takes back
-          the CLAIM, and the ProofCard below still shows the gate doing its job. */}
-      <span class="block font-display text-display font-semibold text-ink">
-        <span class="inline-block">Your machines.</span>{" "}
-        <span class="inline-block">Your agents.</span>{" "}
-        <span class="inline-block">One control plane.</span>
-      </span>
+    {/* inline-block per sentence so a line can only ever break BETWEEN
+        sentences. This is short-sentence copy at display size, where the default
+        wrap strands a two-word tail ("machine.") on its own line at some widths
+        and not others. A hard <br /> fixes the one width you tested and makes
+        narrow viewports worse. */}
+    {/* This deliberately takes the overview claim BACK from Fleet.astro, which
+        was handed it while the headline carried the evidence gate. The gate is
+        not entitled to a headline: Handler is opt-in and it is on Pro, so "make
+        it prove it" was false on every free machine until someone armed it —
+        the one promise a stranger is asked to believe has to be true on a bare
+        install. This one is. Fleet.astro keeps the PROOF; the hero takes back
+        the CLAIM, and the ProofCard below still shows the gate doing its job. */}
+    <h1 class="mb-8 font-display text-display font-semibold text-ink">
+      <span class="inline-block">Your machines.</span>{" "}
+      <span class="inline-block">Your agents.</span>{" "}
+      <span class="inline-block">One control plane.</span>
     </h1>
 
     {/* Argument left, action right. The two columns are sized to sit adjacent
         rather than pinned to the shell's edges — pushed apart, the buttons read
         as stranded rather than as a deliberate second column. */}
     <div class="grid gap-x-12 gap-y-7 md:grid-cols-[minmax(0,35rem)_minmax(0,21rem)]">
-      {/* Two beats, and their order is the argument. The first is true on a free
-          install with nothing configured, which is what earns it the space next
-          to the headline. The second names the paid feature with a VERB — you arm
-          it — because a reader who takes the gate for a default will find it
-          missing and conclude we lied. It links rather than explains: Phases.astro
-          is two sections down and makes the whole case there. */}
+      {/* Two beats, and their order is the argument. The first opens on the
+          reader's own week before it claims anything, which is what lets a
+          stranger agree before being sold to; it closes on ownership because
+          this is the only place the site says the agents run on your accounts,
+          not ours. It resolves in different words than the headline on purpose
+          — "control everything from one app" there would be the h1 restated in
+          a weaker voice. The second names the paid feature with a VERB — you
+          arm it — because a reader who takes the gate for a default will find
+          it missing and conclude we lied. It links rather than explains:
+          Phases.astro is two sections down and makes the whole case there. */}
+      {/* No inline-block on the sentences here, unlike the headline: at lede
+          size in a 35rem column they run three lines anyway, and forbidding a
+          mid-sentence break only strands a short second line. */}
       {/* One grid child, not two paragraphs: the grid has exactly two columns and
           a loose second <p> becomes a third item, which pushes the CTA column out
           of row one and strands the buttons under the copy. */}
       <div>
         <p class="text-lede text-muted">
-          Every agent you're running, on every machine you own — your repos, your branches, your existing subscriptions. Nothing rented from us, nothing to provision.
+          Claude Code on your laptop, Codex on your workstation, another on a cloud box. One's been stuck since 2am. All of them in one app — your repos, your subscriptions, nothing rented from us.
         </p>
         <p class="mt-4 text-lede text-muted">
-          Arm <a href={links.features} class="text-signal2 hover:text-signal">Handler</a> when you want a phase held until the evidence is there.
+          Arm <a href={links.features} class="text-signal2 hover:text-signal">Handler</a> to hand off a session on your instructions — it wakes you only when the call is truly yours.
         </p>
       </div>
       <div>
         <div class="flex flex-wrap items-center gap-3">
-          <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
-          <Button href={links.getStarted} variant="outline">Setup guide</Button>
+          {PLATFORMS.map((p) => (
+            <Button href={downloadUrlFor(p.id)} variant="primary" class={`dl-os dl-${p.os}`}>
+              <Icon name={p.icon} width="16" height="16" />Download for {p.name}
+            </Button>
+          ))}
         </div>
-        {/* Two lines because there are two jobs here: the guarantees are a
-            dot-separated list of properties, availability is a sentence. Run
-            together they made a four-clause line that wrapped to three in this
-            21rem column and split "iOS &" from "Android" across rows. */}
-        <p class="mt-4.5 text-meta leading-relaxed text-muted2">No VPN or port forwarding · End-to-end encrypted</p>
-        <p class="mt-1.5 text-meta leading-relaxed text-muted2">
-          <span class="inline-block">Desktop out now on Windows, macOS &amp; Linux.</span>{" "}
-          <span class="inline-block">iOS &amp; Android in private beta — <a href={links.mobileInvite} class="text-signal2 hover:text-signal">request an invite</a>.</span>
+        {/* The escape hatch for the button above, and it lives here rather than
+            as a second button beside it: the OS match is right for nearly
+            everyone, so a peer-weight "All platforms" button spent the hero's
+            one strong action on the minority case. This is already where a
+            reader looks to ask whether their OS is covered. */}
+        <p class="mt-4.5 text-meta leading-relaxed text-muted2">
+          End-to-end encrypted · See all <a href={links.download} class="text-signal2 hover:text-signal">builds</a>
         </p>
       </div>
     </div>

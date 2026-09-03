@@ -1,11 +1,31 @@
 ---
 // Deliberately colourless. These sat in signal on all eight sections, which made
 // the accent read as "a heading starts here" and left nothing to distinguish the
-// places signal means "the system is live". The leading rule does the wayfinding
-// colour used to do, and it reads as a label struck onto an instrument.
+// places signal means "the system is live".
+//
+// The mark is a resting terminal cursor — the same block .appwin-caret and
+// .pc-caret draw (global.css), so it is the page's own vocabulary rather than an
+// imported glyph, and a vertical stroke reads as structure rather than as
+// punctuation attached to the words. Neutral for the reason above, and it
+// blinks only on arrival (.eb-caret, global.css) rather than forever — the
+// looping carets are what say a session is live.
+//
+// 0.5em x 1.05em is .appwin-caret's box exactly — one mono cell, which is what
+// makes it read as a cursor rather than as a bar drawn beside the words. A cell
+// overhangs the letters at both ends; clipped to cap height it reads as a tick
+// mark instead. The overhang is anchored to the baseline rather than centred on
+// the line box, because centring splits it by the font's ascent/descent ratio
+// and JetBrains' puts nearly all of it below the caps. An empty flex item
+// baselines on its bottom edge, so the translate is the drop past the baseline
+// and the height minus cap height minus that drop is the rise above the caps:
+// both ends are stated, so neither moves if the face or line-height changes.
+//
+// Tracking is held well under the 0.2em that usually marks a mono eyebrow:
+// JetBrains is monospaced before any letter-spacing lands, so past ~0.15em the
+// word comes apart faster than the wide setting helps anyone scan it.
 const { class: cls = "" } = Astro.props;
 ---
-<p class={`flex items-center gap-2.5 font-mono text-marker uppercase tracking-[0.2em] text-muted2 ${cls}`}>
-  <span class="h-px w-6 shrink-0 bg-edge-emph" aria-hidden="true"></span>
+<p class={`flex items-baseline gap-2 font-mono text-marker uppercase tracking-[0.14em] text-muted ${cls}`}>
+  <span class="eb-caret h-[1.05em] w-[0.5em] shrink-0 translate-y-[0.16em] bg-faint" aria-hidden="true"></span>
   <slot />
 </p>

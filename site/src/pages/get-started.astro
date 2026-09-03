@@ -35,7 +35,12 @@ import { links, RELEASES_URL } from "../config";
     </li>
   </ul>
 
-  <h2>Step 1 — Install the desktop app</h2>
+  {/* The three step ids are the landing targets for the confirmation page's
+      cards (pages/download/started.astro), which is the first thing a reader
+      sees after a download and holds no instructions of its own. Renaming one
+      drops them at the top of this page instead of at their step;
+      contracts.spec.ts pins the cards to these ids for that reason. */}
+  <h2 id="install">Step 1 — Install the desktop app</h2>
 
   <p>
     Everything runs inside one desktop app — your agents' terminals, files, git
@@ -43,19 +48,24 @@ import { links, RELEASES_URL } from "../config";
     install.
   </p>
 
-  <h3>Windows</h3>
+  {/* These link straight at the artifacts, unlike the hero's buttons, which
+      route through the confirmation page. A reader who has scrolled to their
+      platform inside the guide is already looking at the instructions that page
+      exists to deliver — sending them out to be told what they are reading
+      would be a lap for nothing. */}
+  <h3 id="windows">Windows</h3>
   <p>
     <a href={links.downloadWindows}>Download for Windows</a> fetches the
     Microsoft Store installer. Run it, then launch antgrid from the Start menu.
   </p>
 
-  <h3>macOS</h3>
+  <h3 id="macos">macOS</h3>
   <p>
     <a href={links.downloadMacos}>Download the .dmg</a>, open it, drag antgrid
     into Applications, then launch it.
   </p>
 
-  <h3>Linux</h3>
+  <h3 id="linux">Linux</h3>
   <p>
     <a href={links.downloadLinux}>Download the AppImage</a>, make it executable,
     then run it:
@@ -73,7 +83,7 @@ import { links, RELEASES_URL } from "../config";
     Google. That account is what links your devices together.
   </p>
 
-  <h2>Step 2 — Open your first project</h2>
+  <h2 id="project">Step 2 — Open your first project</h2>
 
   <ol>
     <li>In the desktop app, open the folder of a project you're working on.</li>
@@ -89,7 +99,7 @@ import { links, RELEASES_URL } from "../config";
     </li>
   </ol>
 
-  <h2>Step 3 — Connect your phone</h2>
+  <h2 id="phone">Step 3 — Connect your phone</h2>
 
   <p>
     The mobile apps are in beta — iOS via TestFlight, Android via Google Play
