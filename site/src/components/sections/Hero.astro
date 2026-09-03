@@ -126,7 +126,7 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
           Claude Code on your laptop, Codex on your workstation, another on a cloud box. One's been stuck since 2am. All of them in one app — your repos, your subscriptions, nothing rented from us.
         </p>
         <p class="mt-4 text-lede text-muted">
-          Arm <a href={links.features} class="text-signal2 hover:text-signal">Handler</a> when you want a phase held until the evidence is there.
+          Arm <a href={links.features} class="text-signal2 hover:text-signal">Handler</a> to hand off a session on your instructions — it wakes you only when the call is truly yours.
         </p>
       </div>
       <div>
@@ -137,21 +137,13 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
             </Button>
           ))}
         </div>
-        {/* Two lines because there are two jobs here: the guarantees are a
-            dot-separated list of properties, availability is a sentence. Run
-            together they made a four-clause line that wrapped to three in this
-            21rem column and split "iOS &" from "Android" across rows. */}
-        <p class="mt-4.5 text-meta leading-relaxed text-muted2">No VPN or port forwarding · End-to-end encrypted</p>
         {/* The escape hatch for the button above, and it lives here rather than
             as a second button beside it: the OS match is right for nearly
             everyone, so a peer-weight "All platforms" button spent the hero's
-            one strong action on the minority case — and the two together
-            wrapped the 21rem column onto a second row. This line is already
-            where a reader looks to ask whether their OS is covered, so the
-            list of platforms is the link. */}
-        <p class="mt-1.5 text-meta leading-relaxed text-muted2">
-          <span class="inline-block">Desktop out now on <a href={links.download} class="text-signal2 hover:text-signal">Windows, macOS &amp; Linux</a>.</span>{" "}
-          <span class="inline-block">iOS &amp; Android in private beta — <a href={links.mobileInvite} class="text-signal2 hover:text-signal">request an invite</a>.</span>
+            one strong action on the minority case. This is already where a
+            reader looks to ask whether their OS is covered. */}
+        <p class="mt-4.5 text-meta leading-relaxed text-muted2">
+          End-to-end encrypted · See all <a href={links.download} class="text-signal2 hover:text-signal">builds</a>
         </p>
       </div>
     </div>
