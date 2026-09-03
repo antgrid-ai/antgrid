@@ -3,72 +3,39 @@ import { Icon } from "astro-icon/components";
 import Chip from "../ui/Chip.astro";
 import Eyebrow from "../ui/Eyebrow.astro";
 
-// Keep in lockstep with bridge/src/agents/registry.ts. `handler: true` is what
-// `handlerObservable` answers true for — a terminal session needs the agent's
-// integration to POST /handler-event, a chat session needs a driver, and only
-// these three clear either bar.
-//
-// They are also the only three that get signal. In this palette the accent means
-// the system is doing something (see .live-cells in global.css, and the note in
-// Eyebrow.astro on why section labels gave the colour up), so a row where all
-// ten marks glow would promise the paid feature to six agents that cannot run
-// it. The sentence below names the three in words too: colour reinforces here,
-// it never carries alone.
 const agents = [
-  { name: "Claude Code", icon: "simple-icons:claudecode", handler: true },
-  { name: "Codex", icon: "simple-icons:openai", handler: true },
-  { name: "opencode", icon: "simple-icons:opencode", handler: true },
+  { name: "Claude Code", icon: "claudecode", color: "#D97757", w: 22 },
+  { name: "Codex", icon: "simple-icons:openai" },
+  { name: "opencode", icon: "simple-icons:opencode" },
   { name: "Cursor", icon: "simple-icons:cursor" },
   { name: "GitHub Copilot", icon: "simple-icons:githubcopilot" },
-  { name: "Antigravity" },
-  { name: "Kilo" },
+  { name: "Antigravity", icon: "antigravity-color" },
+  { name: "Kilo", icon: "kilocode" },
   { name: "Kimi", icon: "simple-icons:kimi" },
-  { name: "Mistral Vibe", icon: "simple-icons:mistralai" },
+  { name: "Mistral Vibe", icon: "mistralai", color: "#FA520F", w: 20 },
 ];
-
-// Two rows rather than one that wraps: the chips are ~100px wider than the shell
-// at every desktop width, so a single flex row breaks 9 + 1 and strands the
-// dashed chip alone on the second line. Splitting on the distinction the row
-// already encodes costs no words and fixes the orphan.
-const supervised = agents.filter((a) => a.handler);
-const unsupervised = agents.filter((a) => !a.handler);
-
-// Built from the same array the chips are, so the sentence cannot go on naming
-// three while a fourth chip lights up.
-const supervisedNames = supervised.map((a) => a.name);
 ---
 <section id="agents" class="border-b border-edge-inner bg-well">
   <div class="mx-auto max-w-shell px-6 py-8">
     <Eyebrow class="mb-4">The agent you already run</Eyebrow>
 
-    <div class="flex flex-col gap-2">
-      <div class="flex flex-wrap items-center gap-2">
-        {supervised.map((a) => (
-          <Chip class="px-3 py-1.5 text-meta text-ink2">
-            {a.icon
-              ? <Icon name={a.icon} class="shrink-0 text-signal" width="14" height="14" />
-              : <span class="flex size-3.5 shrink-0 items-center justify-center rounded-[3px] border border-edge-emph font-mono text-pip text-muted2" aria-hidden="true">{a.name[0]}</span>}
-            {a.name}
-          </Chip>
-        ))}
-      </div>
-      <div class="flex flex-wrap items-center gap-2">
-        {unsupervised.map((a) => (
-          <Chip class="px-3 py-1.5 text-meta text-ink2">
-            {a.icon
-              ? <Icon name={a.icon} class="shrink-0 text-muted2" width="14" height="14" />
-              : <span class="flex size-3.5 shrink-0 items-center justify-center rounded-[3px] border border-edge-emph font-mono text-pip text-muted2" aria-hidden="true">{a.name[0]}</span>}
-            {a.name}
-          </Chip>
-        ))}
-        <Chip variant="dashed" class="px-3 py-1.5 text-meta"><Icon name="tabler:plus" width="13" height="13" />any terminal agent</Chip>
-      </div>
+    <div class="flex flex-wrap items-center gap-2">
+      {agents.map((a) => (
+        <Chip class="px-3 py-1.5 text-meta text-ink2">
+          {a.icon
+            ? /* w overrides the default square slot for marks whose real
+                 aspect ratio is landscape (Claude Code, Mistral) — forcing
+                 those into 14x14 just letterboxes them small again. */
+              <Icon name={a.icon} class="shrink-0 text-ink2" width={a.w ?? 14} height="14" style={a.color ? `color:${a.color}` : undefined} />
+            : <span class="flex size-3.5 shrink-0 items-center justify-center rounded-[3px] border border-edge-emph font-mono text-pip text-muted2" aria-hidden="true">{a.name[0]}</span>}
+          {a.name}
+        </Chip>
+      ))}
+      <Chip variant="dashed" class="px-3 py-1.5 text-meta"><Icon name="tabler:plus" width="13" height="13" />any terminal agent</Chip>
     </div>
 
     <p class="mt-4 text-meta leading-relaxed text-muted2">
-      Handler supervises {supervisedNames.map((name, i) => (
-        <>{i === 0 ? "" : i === supervisedNames.length - 1 ? " and " : ", "}<span class="text-ink2">{name}</span></>
-      ))} today. Every other agent runs as a named session — terminal, files, git and alerts.
+      Run any of them through antgrid — terminal, files, git and alerts, no workflow change.
     </p>
   </div>
 </section>

@@ -27,8 +27,8 @@ const trail = [
   { call: "Write(tests/checkout.test.ts)", result: "41 lines" },
 ];
 ---
-<div class="min-w-0">
-  <div class="flex h-9 items-center gap-2 border-b border-ab-line bg-ab-deepest px-2.5">
+<div class="flex h-full min-w-0 flex-col">
+  <div class="flex h-9 shrink-0 items-center gap-2 border-b border-ab-line bg-ab-deepest px-2.5">
     <Icon name="tabler:sparkles" class="shrink-0 text-ab-dim" width="13" height="13" aria-hidden="true" />
     <span class="min-w-0 truncate text-meta text-ab-mute">
       demo-shop <span class="text-ab-dim">/</span>
@@ -57,7 +57,7 @@ const trail = [
   {/* whitespace-pre goes on each LINE, never on this container: with it here
       the newlines between the block children below are preserved too, and every
       row gains a blank one under it. */}
-  <div class="overflow-hidden bg-ab-deepest px-3 py-2.5 font-mono text-marker leading-[1.7]">
+  <div class="flex-1 overflow-hidden bg-ab-deepest px-3 py-2.5 font-mono text-marker leading-[1.7]">
     <div class="whitespace-pre text-ab-mute">demo-shop $ <span class="text-ab-text">claude</span></div>
     <div class="h-2.5"></div>
 
@@ -85,7 +85,7 @@ const trail = [
 
   {/* The command tray, which is on this surface whenever the project declares
       commands — the sample declares two. */}
-  <div class="flex items-center gap-2.5 border-t border-ab-line bg-ab-deep px-3 py-1.5" aria-hidden="true">
+  <div class="flex shrink-0 items-center gap-2.5 border-t border-ab-line bg-ab-deep px-3 py-1.5" aria-hidden="true">
     <span class="font-mono text-marker text-ab-text2">test</span>
     <span class="h-3.5 w-px bg-ab-line"></span>
     <span class="font-mono text-marker text-ab-text2">lint</span>
