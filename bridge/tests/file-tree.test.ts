@@ -148,6 +148,19 @@ describe("file-tree", () => {
       expect(Buffer.from(r.content!, "base64").length).toBe(png.length);
     });
 
+    it("reads a JFIF as base64 with the jpeg mimeType", () => {
+      // Reuses the 1x1 PNG bytes — only the extension→mime mapping is under test.
+      const bytes = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      writeFileSync(join(tempDir, "a.jfif"), bytes);
+      const r = readFile(tempDir, "a.jfif");
+      expect(r.error).toBeUndefined();
+      expect(r.encoding).toBe("base64");
+      expect(r.mimeType).toBe("image/jpeg");
+    });
+
     it("text file stays utf8", () => {
       writeFileSync(join(tempDir, "a.txt"), "hello");
       const r = readFile(tempDir, "a.txt");

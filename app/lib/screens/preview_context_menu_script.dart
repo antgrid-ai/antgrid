@@ -84,6 +84,12 @@ String buildContextMenuPasteScript(String text) {
 /// selected text.
 const String kContextMenuDeleteSelectionScript = "document.execCommand('delete');";
 
+/// Selects the whole page's content — the context menu's "Select all", same
+/// mechanism a real browser uses. Works whether or not the click landed in an
+/// editable field: `execCommand('selectAll')` selects that field's own text
+/// when focus is inside one, and the document body otherwise.
+const String kContextMenuSelectAllScript = "document.execCommand('selectAll');";
+
 /// One right-click's worth of DOM context, decoded from the
 /// `AntgridContextMenu` channel's `contextmenu` message. `href`/`imgSrc` are
 /// normalized to `null` rather than an empty string so callers can test

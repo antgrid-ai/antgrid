@@ -15,6 +15,7 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
+import '../design/widgets/ab_progress_rule.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_url_field.dart';
@@ -85,6 +86,12 @@ class _TabWebViewState {
   String currentUrl = '';
   bool canGoBack = false;
   bool canGoForward = false;
+  // True from onPageStarted until onPageFinished — drives the load progress
+  // rule in [_PreviewScreenState._buildTabWebView]. webview_all's Windows
+  // backend only ever reports 0/100 (see its onProgress doc), so this tracks
+  // start/finish rather than a real percentage — indeterminate is honest
+  // about what's actually known on every platform.
+  bool loading = false;
 }
 
 /// One in-flight viewport capture request — see
@@ -271,6 +278,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       )
       ..setNavigationDelegate(
         NavigationDelegate(
+          onPageStarted: (_) {
+            final tabState = _tabStates[port];
+            if (tabState != null && !tabState.loading && mounted) {
+              setState(() => tabState.loading = true);
+            }
+          },
           onPageFinished: (_) {
             _clearPickerIfArmedOn(port);
             _refreshHistoryFlags(port);
@@ -282,8 +295,14 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                 _tabStates[port]?.controller?.runJavaScript(kContextMenuScript),
               );
             }
-            if (_refreshingPort == port && mounted) {
-              setState(() => _refreshingPort = null);
+            final tabState = _tabStates[port];
+            final shouldClearRefresh = _refreshingPort == port;
+            final shouldClearLoading = tabState?.loading ?? false;
+            if (mounted && (shouldClearRefresh || shouldClearLoading)) {
+              setState(() {
+                if (shouldClearRefresh) _refreshingPort = null;
+                if (shouldClearLoading) tabState!.loading = false;
+              });
             }
           },
           onUrlChange: (change) {
@@ -1506,6 +1525,13 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     if (entries.isNotEmpty) entries.add(const AbMenuDivider());
     entries.add(
       AbMenuItem(
+        label: 'Select all',
+        enabled: controller != null,
+        onTap: () => controller?.runJavaScript(kContextMenuSelectAllScript),
+      ),
+    );
+    entries.add(
+      AbMenuItem(
         label: 'Reload',
         icon: AbIcons.refresh,
         enabled: controller != null,
@@ -1545,7 +1571,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   }
 
   Widget _buildTabWebView(PreviewTab tab) {
-    final controller = _tabStates[tab.port]?.controller;
+    final tabState = _tabStates[tab.port];
+    final controller = tabState?.controller;
     if (controller == null) return const SizedBox.shrink();
     final webview = ColoredBox(
       // Dark underlay so the beat before the platform view first paints (and
@@ -1564,44 +1591,59 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         },
       ),
     );
+    Widget content;
     if (!isMobilePlatform) {
       // Same reasoning as the mobile Listener below — sees the raw
       // right-click regardless of what the EagerGestureRecognizer above does
       // with it, without taking the click away from the page.
-      return Listener(
+      content = Listener(
         onPointerDown: (e) => _onSecondaryPointerDown(tab.port, e),
         child: webview,
       );
-    }
-    // A Listener sees every raw pointer regardless of which gesture recognizer
-    // wins the arena, so this coexists with the EagerGestureRecognizer above
-    // (which still owns the drag for the page's own scrolling) without
-    // fighting it — Listener never participates in arena disambiguation.
-    return Stack(
-      children: [
-        Listener(
-          onPointerDown: (e) => _onPullDown(tab.port, controller, e),
-          onPointerMove: _onPullMove,
-          onPointerUp: (_) => _onPullUp(tab.port, controller),
-          onPointerCancel: (_) => _cancelPull(),
-          child: webview,
-        ),
-        if (_pullDistance > 0 || _refreshingPort == tab.port)
-          Positioned(
-            top: AbTokens.space12,
-            left: 0,
-            right: 0,
-            child: IgnorePointer(
-              child: Center(
-                child: AnimatedOpacity(
-                  duration: const Duration(milliseconds: 120),
-                  opacity: _refreshingPort == tab.port
-                      ? 1
-                      : (_pullDistance / _kPullRefreshThreshold).clamp(0, 1),
-                  child: const AbLoadingDot(size: 16),
+    } else {
+      // A Listener sees every raw pointer regardless of which gesture
+      // recognizer wins the arena, so this coexists with the
+      // EagerGestureRecognizer above (which still owns the drag for the
+      // page's own scrolling) without fighting it — Listener never
+      // participates in arena disambiguation.
+      content = Stack(
+        children: [
+          Listener(
+            onPointerDown: (e) => _onPullDown(tab.port, controller, e),
+            onPointerMove: _onPullMove,
+            onPointerUp: (_) => _onPullUp(tab.port, controller),
+            onPointerCancel: (_) => _cancelPull(),
+            child: webview,
+          ),
+          if (_pullDistance > 0 || _refreshingPort == tab.port)
+            Positioned(
+              top: AbTokens.space12,
+              left: 0,
+              right: 0,
+              child: IgnorePointer(
+                child: Center(
+                  child: AnimatedOpacity(
+                    duration: const Duration(milliseconds: 120),
+                    opacity: _refreshingPort == tab.port
+                        ? 1
+                        : (_pullDistance / _kPullRefreshThreshold).clamp(0, 1),
+                    child: const AbLoadingDot(size: 16),
+                  ),
                 ),
               ),
             ),
+        ],
+      );
+    }
+    return Stack(
+      children: [
+        content,
+        if (tabState?.loading ?? false)
+          const Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(child: AbProgressRule(fraction: null)),
           ),
       ],
     );

@@ -574,7 +574,7 @@ export class HostServer {
     const ids = new Set<string>([...this.seenProjects.keys(), ...warm]);
     return [...ids].map((id) => {
       const seen = this.seenProjects.get(id);
-      return { projectId: id, label: seen?.label, path: seen?.path, running: warm.has(id) };
+      return { projectId: id, label: seen?.label, path: seen?.path, running: warm.has(id), lastActiveAt: seen?.lastActiveAt };
     });
   }
 

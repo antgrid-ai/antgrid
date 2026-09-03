@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/widgets/preview_draw_overlay.dart';
@@ -155,6 +156,30 @@ void main() {
       expect(reported.sent, isNot(equals(_kTinyPng)));
     });
 
+    testWidgets(
+      'dragging past the canvas edge is clamped rather than left to run off it',
+      (tester) async {
+        final reported = await _pumpOverlay(tester);
+
+        // A pan keeps reporting positions for as long as the drag is held,
+        // however far the pointer strays past the widget's own bounds — the
+        // canvas here is 400x600 (see _pumpOverlay), so this drag runs the
+        // "pointer" thousands of logical pixels past its edge, roughly where
+        // a neighbouring agent panel would sit in the real layout. It must
+        // resolve to a normal, finite mark rather than throwing or painting
+        // outside the preview.
+        await tester.drag(_canvas, const Offset(5000, 5000));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+
+        await tester.tap(find.bySemanticsLabel('Close'));
+        await tester.pumpAndSettle();
+        expect(find.text('Discard drawing?'), findsOneWidget);
+
+        expect(reported.closed, isFalse);
+      },
+    );
+
     testWidgets('a shape tool that never dragged leaves no mark behind', (
       tester,
     ) async {
@@ -174,12 +199,12 @@ void main() {
       expect(reported.closed, isTrue);
     });
 
-    testWidgets('the text tool places a note where it was tapped', (
+    testWidgets('the note tool places a note where it was tapped', (
       tester,
     ) async {
       final reported = await _pumpOverlay(tester);
 
-      await tester.tap(find.bySemanticsLabel('Text'));
+      await tester.tap(find.bySemanticsLabel('Note'));
       await tester.pumpAndSettle();
       await tester.tapAt(tester.getCenter(_canvas));
       await tester.pumpAndSettle();
@@ -202,7 +227,7 @@ void main() {
     ) async {
       final reported = await _pumpOverlay(tester);
 
-      await tester.tap(find.bySemanticsLabel('Text'));
+      await tester.tap(find.bySemanticsLabel('Note'));
       await tester.pumpAndSettle();
       await tester.tapAt(tester.getCenter(_canvas));
       await tester.pumpAndSettle();
@@ -212,6 +237,48 @@ void main() {
       await tester.tap(find.bySemanticsLabel('Close'));
       await tester.pumpAndSettle();
 
+      expect(find.text('Discard drawing?'), findsNothing);
+      expect(reported.closed, isTrue);
+    });
+
+    testWidgets('canceling a note via its close button discards typed text', (
+      tester,
+    ) async {
+      final reported = await _pumpOverlay(tester);
+
+      await tester.tap(find.bySemanticsLabel('Note'));
+      await tester.pumpAndSettle();
+      await tester.tapAt(tester.getCenter(_canvas));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'never mind');
+
+      await tester.tap(find.byTooltip('Cancel note'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TextField), findsNothing);
+      await tester.tap(find.bySemanticsLabel('Close'));
+      await tester.pumpAndSettle();
+      expect(find.text('Discard drawing?'), findsNothing);
+      expect(reported.closed, isTrue);
+    });
+
+    testWidgets('pressing Escape while typing a note cancels it', (
+      tester,
+    ) async {
+      final reported = await _pumpOverlay(tester);
+
+      await tester.tap(find.bySemanticsLabel('Note'));
+      await tester.pumpAndSettle();
+      await tester.tapAt(tester.getCenter(_canvas));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'never mind');
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TextField), findsNothing);
+      await tester.tap(find.bySemanticsLabel('Close'));
+      await tester.pumpAndSettle();
       expect(find.text('Discard drawing?'), findsNothing);
       expect(reported.closed, isTrue);
     });

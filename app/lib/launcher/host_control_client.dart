@@ -132,11 +132,13 @@ class KnownProject {
   final String? label;
   final String? path;
   final bool running;
+  final String? lastActiveAt;
   const KnownProject({
     required this.projectId,
     this.label,
     this.path,
     required this.running,
+    this.lastActiveAt,
   });
 
   factory KnownProject.fromJson(Map<String, dynamic> json) {
@@ -152,6 +154,7 @@ class KnownProject {
       label: json['label'] as String?,
       path: json['path'] as String?,
       running: json['running'] == true,
+      lastActiveAt: json['lastActiveAt'] as String?,
     );
   }
 }

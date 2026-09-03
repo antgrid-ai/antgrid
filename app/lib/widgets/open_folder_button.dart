@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -13,6 +11,7 @@ import '../models/ab_project.dart';
 import '../providers/agent_transport.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/projects.dart';
+import '../util/path_basename.dart';
 
 bool _isDesktopPlatform() =>
     defaultTargetPlatform == TargetPlatform.windows ||
@@ -98,7 +97,7 @@ Future<String?> registerPickedFolder(
   final project = AbProject(
     projectId: id,
     folder: folder,
-    displayName: _basename(folder),
+    displayName: pathBasename(folder),
     hostDeviceUuid: hostUuid,
     hostMachineName: '',
     lastOpenedAt: DateTime.now(),
@@ -120,13 +119,4 @@ class OpenFolderButton extends ConsumerWidget {
       onTap: () => openFolderPicker(ref.container),
     );
   }
-}
-
-/// Last non-empty path segment. Avoids pulling in `package:path` for one call.
-String _basename(String folder) {
-  final parts = folder
-      .split(Platform.pathSeparator)
-      .where((s) => s.isNotEmpty)
-      .toList();
-  return parts.isEmpty ? folder : parts.last;
 }

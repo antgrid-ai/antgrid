@@ -587,6 +587,39 @@ void main() {
     await session.close();
   });
 
+  test('selectFile expands every ancestor so the tree reveals the file', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.selectFile('src/widgets/deep/nested_file.dart');
+
+    expect(
+      svc.currentState.expandedPaths,
+      containsAll(<String>['src', 'src/widgets', 'src/widgets/deep']),
+    );
+    expect(
+      svc.currentState.expandedPaths,
+      isNot(contains('src/widgets/deep/nested_file.dart')),
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('selectFile on a top-level file expands nothing', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.selectFile('README.md');
+
+    expect(svc.currentState.expandedPaths, isEmpty);
+
+    await svc.dispose();
+    await session.close();
+  });
+
   group('attachment preview', () {
     // The preview is a THIRD file:content consumer beside the Files and Git
     // panes. It shares the verb and the viewers, but not the slot — routing it

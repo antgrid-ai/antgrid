@@ -18,6 +18,8 @@ import '../providers/control_plane.dart';
 import '../providers/device_revocation.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/connection_identity.dart';
+import '../providers/device_provisioning.dart';
+import '../providers/projects.dart';
 import '../providers/relay_connection.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
@@ -356,6 +358,14 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   // newer binary with new agents, and its port is the cheapest proxy for "a
   // different process" available on the poll path.
   int? _catalogSyncedPort;
+
+  // Throttle for the local project-catalog backfill below — unlike the
+  // per-tick work-status poll, a new local project (e.g. one opened by a
+  // remote-control session on THIS machine, which lands in the bridge's
+  // seen-catalog with no local "Open folder…" ever running) is rare enough
+  // that a full phones:list round-trip every 2s buys nothing.
+  static const _kProjectBackfillInterval = Duration(seconds: 15);
+  DateTime? _lastProjectBackfillAt;
 
   // Last-seen per-project advert running-session count, keyed by entryId. A
   // count change is the bridge's "the session list actually changed" signal —
@@ -760,6 +770,21 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
               .setLocalSessionStatuses(sessionStatuses);
         } catch (_) {
           // Host went away between peek and list — ignore; next tick retries.
+        }
+        final now = DateTime.now();
+        final last = _lastProjectBackfillAt;
+        if (last == null || now.difference(last) >= _kProjectBackfillInterval) {
+          _lastProjectBackfillAt = now;
+          try {
+            final hostUuid = await ref.read(localDeviceUuidProvider.future);
+            final known = await client.phonesList();
+            if (!mounted || hostUuid == null) return;
+            await ref
+                .read(projectsProvider.notifier)
+                .backfillFromHost(known.knownProjects, hostUuid: hostUuid);
+          } catch (_) {
+            // Best-effort — retried on the next eligible tick.
+          }
         }
       } finally {
         client.close();

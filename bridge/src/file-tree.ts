@@ -19,12 +19,15 @@ const MAX_BINARY_FILE_SIZE = 10_485_760; // 10MB
 // still rejected (the app has no viewer for it).
 const RENDERABLE_BINARY_MIME: Record<string, string> = {
   ".png": "image/png",
+  ".apng": "image/apng",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
+  ".jfif": "image/jpeg",
   ".gif": "image/gif",
   ".webp": "image/webp",
   ".bmp": "image/bmp",
   ".ico": "image/x-icon",
+  ".avif": "image/avif",
   ".pdf": "application/pdf",
 };
 

@@ -741,12 +741,31 @@ class FileService {
           clearSearchLine: searchLine == null,
           clearSearchQuery: searchQuery == null,
         ),
+        expandedPaths: _expandedWithAncestorsOf(path),
       ),
     );
     // Register (fires now if established) rather than sending inline — see
     // [_hydrateSelectedFile]. Re-registering under the same key supersedes, so
     // opening a new file replaces the prior file's hydrator.
     session.hydrateCheckout(checkoutId, 'file:selected', _hydrateSelectedFile);
+  }
+
+  /// Ancestor directories of [path], folded into the current expanded set —
+  /// mirrors [revealDirectory] but for a FILE selection (a terminal link, a
+  /// search result, git's "view file", …), none of which otherwise touches
+  /// [FileTreeState.expandedPaths]. Without this the tree can select a file
+  /// deep inside collapsed folders and show nothing, since [FileTreeView]
+  /// only walks into a directory that is in the expanded set.
+  Set<String> _expandedWithAncestorsOf(String path) {
+    final segments = path.split('/').where((s) => s.isNotEmpty).toList();
+    if (segments.length <= 1) return _state.expandedPaths;
+    final expanded = Set<String>.from(_state.expandedPaths);
+    var acc = '';
+    for (final segment in segments.sublist(0, segments.length - 1)) {
+      acc = acc.isEmpty ? segment : '$acc/$segment';
+      expanded.add(acc);
+    }
+    return expanded;
   }
 
   void requestFileContent(String path) {

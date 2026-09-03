@@ -27,6 +27,7 @@ import '../design/widgets/ab_snack_bar.dart';
 import '../models/agent_event.dart';
 import '../models/capability_catalog.dart';
 import '../models/file_tree_models.dart';
+import '../models/workspace_view.dart';
 import '../providers/agent_transport.dart';
 import '../providers/capability_catalog.dart';
 import '../providers/chat_composer_drafts.dart';
@@ -34,6 +35,7 @@ import '../providers/composer_handoff.dart';
 import '../providers/demo_mode.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
+import '../providers/visible_surface.dart';
 import '../services/agent_session_service.dart';
 import '../services/attach_hydration.dart';
 import '../services/clipboard_image_reader.dart';
@@ -496,6 +498,21 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
 
   AgentSessionService? _service() =>
       serviceWhenReady(ref, agentSessionServiceProvider);
+
+  // A diff block's path is already checkout-relative (git --relative / the
+  // agent's own edit args), so this opens it the same way FileExplorerScreen
+  // does — no terminalFilePath-style resolve step needed. The file viewer
+  // routes by the bridge's reported mimeType, so this works for any file type
+  // the viewer already renders, images included.
+  void _openToolPath(String path) {
+    final fileService = focusedCheckoutServiceOrNull(
+      ref.container,
+      (s) => s.fileService,
+    );
+    if (fileService == null) return;
+    ref.read(workspaceMenuControlProvider)?.reveal(WorkspaceView.files);
+    fileService.selectFile(path);
+  }
 
   void _retryHydration() {
     final svc = _service();
@@ -1223,6 +1240,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       onToggle: () => _toggleWithScrollStability(
         () => _toggle(_expandedItemIds, r.item.itemId),
       ),
+      onOpenPath: _openToolPath,
     ),
     PlanRowData r => PlanChecklist(data: r, rowIndex: rowIndex),
     SubtaskRowData r => SubtaskRow(data: r),

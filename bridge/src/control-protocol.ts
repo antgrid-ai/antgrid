@@ -88,6 +88,8 @@ export interface KnownProject {
   label?: string;
   path?: string;
   running: boolean;
+  /** Seen-catalog recency, absent for a warm core with no catalog hint yet. */
+  lastActiveAt?: string;
 }
 
 /** One installed tool as reported by the loopback control plane. PATH-scoped:

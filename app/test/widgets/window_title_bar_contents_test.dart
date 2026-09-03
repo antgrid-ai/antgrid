@@ -424,4 +424,42 @@ void main() {
       }
     },
   );
+
+  testWidgets(
+    'an expanded context panel swaps the icon-only toggle for a labeled button',
+    (tester) async {
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        var toggled = 0;
+        await pumpAt(
+          tester,
+          1400,
+          extraOverrides: [
+            contextPanelControlProvider.overrideWith(
+              () => ValueController((hidden: false, toggle: () => toggled++)),
+            ),
+          ],
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(WindowTitleBarContents.contextPanelSlotKey),
+            matching: find.byType(AbIconButton),
+          ),
+          findsNothing,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(WindowTitleBarContents.contextPanelSlotKey),
+            matching: find.text('Collapse'),
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(find.text('Collapse'));
+        await tester.pump();
+        expect(toggled, 1);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
 }

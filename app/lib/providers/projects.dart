@@ -4,6 +4,7 @@ import '../launcher/host_control_client.dart';
 import '../models/ab_project.dart';
 import '../project/project_session_registry.dart';
 import '../storage/project_store.dart';
+import '../util/path_basename.dart';
 import 'agent_transport.dart';
 import 'control_plane.dart';
 import 'entry_cleanup.dart';
@@ -51,6 +52,28 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
       changed = await _store.upsert(p) || changed;
     }
     if (changed) state = _store.list();
+  }
+
+  /// Registers every project the local bridge knows about but this store
+  /// doesn't — the gap that opens when a session is started from another
+  /// device's remote-control view of THIS machine: the bridge's seen-catalog
+  /// picks it up (so a phone controlling this desktop lists it), but nothing
+  /// ever ran the local "Open folder…" upsert that would land it here, so the
+  /// desktop app's own drawer never showed it. [known] is this machine's full
+  /// catalog (`HostControlClient.phonesList().knownProjects`, warm cores ∪
+  /// seen-catalog hints); [hostUuid] is this device's own host identity
+  /// ([localDeviceUuidProvider]).
+  Future<void> backfillFromHost(
+    List<KnownProject> known, {
+    required String hostUuid,
+  }) async {
+    for (final p in missingLocalProjects(
+      locals: _store.list(),
+      known: known,
+      hostUuid: hostUuid,
+    )) {
+      await upsert(p);
+    }
   }
 
   Future<void> remove(String id) async {
@@ -158,3 +181,26 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
 final projectsProvider = NotifierProvider<ProjectsNotifier, List<AbProject>>(
   ProjectsNotifier.new,
 );
+
+/// Pure helper behind [ProjectsNotifier.backfillFromHost]: [known] entries
+/// whose id isn't already in [locals], turned into rows ready to [upsert].
+/// A hint with no `path` is skipped — nothing to open it with.
+List<AbProject> missingLocalProjects({
+  required List<AbProject> locals,
+  required List<KnownProject> known,
+  required String hostUuid,
+}) {
+  final existing = {for (final p in locals) p.projectId};
+  return [
+    for (final p in known)
+      if (!existing.contains(p.projectId) && p.path != null)
+        AbProject(
+          projectId: p.projectId,
+          folder: p.path!,
+          displayName: p.label ?? pathBasename(p.path!),
+          hostDeviceUuid: hostUuid,
+          hostMachineName: '',
+          lastOpenedAt: DateTime.tryParse(p.lastActiveAt ?? '') ?? DateTime.now(),
+        ),
+  ];
+}
