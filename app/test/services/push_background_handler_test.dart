@@ -228,7 +228,7 @@ void main() {
     });
   });
 
-  // Blank and whitespace collapse to absent the way `_named` does on the route
+  // Blank and whitespace collapse to absent the way `namedOrNull` does on the route
   // side: an id only one of the two predicates accepts survives decoding and
   // then addresses nothing.
   test('decodePush drops a whitespace-only routing id', () async {

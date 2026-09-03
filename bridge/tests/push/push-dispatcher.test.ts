@@ -22,8 +22,13 @@ function harness(overrides: Partial<Parameters<typeof createPushDispatcher>[0]> 
 }
 
 test("composePush mirrors the app strings", () => {
-  expect(composePush(createMessage("notification:push", { notificationType: "task_complete", message: "built", projectId: "p1" })))
-    .toEqual({ title: "Task complete", body: "built", kind: "agent", sourceMessageId: expect.any(String) });
+  // The agent path's sourceMessageId is pinned to msg.id, not just to "a
+  // string": the app dedups the live toast against the FCM one on that exact
+  // equality (`_markNotified(msg.id)` vs `pushDedupKey`), so any other id here
+  // surfaces one notification twice and leaves the push tap undeduped.
+  const agent = createMessage("notification:push", { notificationType: "task_complete", message: "built", projectId: "p1" });
+  expect(composePush(agent))
+    .toEqual({ title: "Task complete", body: "built", kind: "agent", sourceMessageId: agent.id });
   expect(composePush(createMessage("handler:escalation", {
     projectId: "p1", escalationId: "e1", terminalId: "t", question: "Deploy?", reasoning: "", draftReply: "", urgency: "high", at: 1,
   }))).toEqual({ title: "Handler — urgent", body: "Deploy?", kind: "handler", sourceMessageId: "e1", terminalId: "t" });

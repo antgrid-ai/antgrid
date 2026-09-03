@@ -536,29 +536,31 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     required String body,
     NotificationRoute? route,
   }) {
-    // Gated on the route actually RESOLVING, not on one having been built: an
-    // offer that opens nothing is worse than none, and the two conditions part
-    // company on any id that names no place (a blank one among them). Resolved
-    // synchronously against what is already loaded, which is exact for the
-    // in-app producers — they carry a registrationId, and neither that rule nor
-    // the terminalId one consults the device uuid.
-    //
-    // This answer gates the CHIP only, never the OS notification's payload
-    // below: a chip lives 8s, so "resolves now" is as good as "resolves when
-    // pressed", while an OS notification sits in the shade indefinitely and the
-    // applier re-resolves at tap time against freshly awaited state. Gating the
-    // payload here would bake a cold-cache miss into a notification that would
-    // have resolved fine an hour later.
-    final destination = route == null
-        ? null
-        : resolveNotificationRoute(
-            route,
-            known: ref.read(recentSessionsProvider),
-            localDeviceUuid: ref.read(localDeviceUuidProvider).value,
-          );
-    final tappable = destination == null ? null : route;
     if (shouldShowInAppToast(_lifecycle)) {
-      if (tappable == null) {
+      // Gated on the route actually RESOLVING, not on one having been built: an
+      // offer that opens nothing is worse than none, and the two conditions part
+      // company on any id that names no place (a blank one among them). Resolved
+      // synchronously against what is already loaded, which is exact for the
+      // in-app producers — they carry a registrationId, and neither that rule
+      // nor the terminalId one consults the device uuid.
+      //
+      // Inside this branch, because it gates the CHIP and nothing else: the OS
+      // notification below carries `route` verbatim and never reads this
+      // answer, so resolving it there would scan the whole cached-session
+      // universe — on the backgrounded path, which is the common one — to
+      // discard the result. A chip lives 8s, so "resolves now" is as good as
+      // "resolves when pressed", while an OS notification sits in the shade
+      // indefinitely and the applier re-resolves at tap time against freshly
+      // awaited state; gating the payload here would bake a cold-cache miss
+      // into a notification that would have resolved fine an hour later.
+      final destination = route == null
+          ? null
+          : resolveNotificationRoute(
+              route,
+              known: ref.read(recentSessionsProvider),
+              localDeviceUuid: ref.read(localDeviceUuidProvider).value,
+            );
+      if (destination == null) {
         showAbToastOverlay(
           context,
           toast: AbToast(icon: AbIcons.bell, title: title, description: body),
@@ -582,7 +584,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           onAction: () => detached(
             'WorkspaceShell',
             'notification route failed',
-            () => applyNotificationRoute(toastContext, container, tappable),
+            () => applyNotificationRoute(toastContext, container, route!),
           ),
         ),
         // The action cannot dismiss its own toast (`showAbToastOn`'s remove is
@@ -1192,6 +1194,14 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // own write would never rebuild this route.
     final pendingView = ref.watch(pendingWorkspaceViewProvider);
     final pendingAgentPage = ref.watch(pendingAgentPageProvider);
+    // The third input to both drains, watched for the same reason even though
+    // nothing here reads it: they hold a stamp back while a queued session id
+    // is unresolved, so the write that CLEARS it is the retry. Without this
+    // dependency the retry rides on an incidental rebuild, and there is a real
+    // case with none — `reconcileActiveSession` selects the queued id off the
+    // persisted cache, so `_bootstrapSessions` later re-sets the same value and
+    // notifies nobody, stranding the stamp and the tab it named.
+    ref.watch(pendingActiveSessionIdProvider);
     if (pendingView != null || pendingAgentPage != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
@@ -1730,7 +1740,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// merely narrow split — only the modes where the transcript is not on
   /// screen at all.
   void _revealAgentPanel() {
-    if (_isMobileLayout) return;
     if (isMobilePlatform) {
       // Expanded is the whole of it: a normally-open pane takes a quarter of
       // the width and leaves the transcript the other three, which is why

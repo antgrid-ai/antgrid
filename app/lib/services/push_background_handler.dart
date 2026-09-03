@@ -100,30 +100,33 @@ Future<DecodedPush?> decodePush(
   if (json == null) return null;
   try {
     final m = jsonDecode(json) as Map<String, dynamic>;
+    // [namedOrNull], not a cast: a throw anywhere in this `try` drops the WHOLE
+    // notification, so a newer bridge sending one id in an unexpected shape
+    // must cost that id, never the alert. Shared with the route decoder rather
+    // than restated, because the route this feeds is re-tested by that same
+    // predicate — an id only one of them accepts is an id that survives
+    // decoding to address nothing.
     return (
-      title: (m['title'] as String?) ?? 'Agent',
-      body: (m['body'] as String?) ?? '',
-      kind: m['kind'] as String?,
-      projectId: _presentOrNull(m['projectId']),
-      machineUuid: _presentOrNull(m['machineUuid']),
-      terminalId: _presentOrNull(m['terminalId']),
-      sourceMessageId: _presentOrNull(m['sourceMessageId']),
+      // The strings go through it too, and that is the point of the rule above
+      // rather than an extension of it: the cast these two used to be is the
+      // only thing in this `try` that can throw on the payload's own content,
+      // and a throw here costs the WHOLE alert instead of one field. Blank
+      // collapses into the fallback for the same reason an id does —
+      // `composePush` never sends an empty title, so one could only come from a
+      // bridge that meant nothing by it, and a blank heading is not an
+      // improvement on 'Agent'.
+      title: namedOrNull(m['title']) ?? 'Agent',
+      body: namedOrNull(m['body']) ?? '',
+      kind: namedOrNull(m['kind']),
+      projectId: namedOrNull(m['projectId']),
+      machineUuid: namedOrNull(m['machineUuid']),
+      terminalId: namedOrNull(m['terminalId']),
+      sourceMessageId: namedOrNull(m['sourceMessageId']),
     );
   } catch (_) {
     return null;
   }
 }
-
-/// The value of a routing field that actually names something, or null.
-///
-/// Type-tests rather than casts, because a throw anywhere in [decodePush]'s
-/// `try` drops the WHOLE notification: a newer bridge sending one id in an
-/// unexpected shape must cost that id, never the alert. Blank collapses to
-/// absent exactly as `_named` does in `notification_route.dart` — whitespace
-/// included, since the route this feeds is re-tested by that same predicate and
-/// an id only one of them accepts is an id that survives to address nothing.
-String? _presentOrNull(Object? value) =>
-    (value is String && value.trim().isNotEmpty) ? value : null;
 
 /// Narrow a pigeon-typed data payload to the plain map [decodePush] takes.
 /// `push` types it `Map<String?, Object?>?` because that is pigeon's lowest

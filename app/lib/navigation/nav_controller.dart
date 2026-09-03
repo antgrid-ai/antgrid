@@ -142,6 +142,11 @@ class NavController extends Notifier<NavState> {
       // clears any stale pending from an earlier switch, so the new project's
       // bootstrap can't consume a session id meant for a different project.
       ref.read(pendingActiveSessionIdProvider.notifier).set(loc.sessionId);
+      // Cleared with the id it qualifies, never left behind: back()/forward()
+      // and a deep link all mean "resume this", and a suppressor outliving the
+      // queue it was written for would silently re-pair with a later
+      // Recent-list tap on the same session and eat the start that tap IS.
+      ref.read(pendingSessionStartSuppressedIdProvider.notifier).set(null);
     } else if (loc.target == currentTarget && loc.sessionId != null) {
       // Same project: bootstrap won't re-run, so select directly.
       ref.read(activeSessionIdProvider.notifier).set(loc.sessionId);

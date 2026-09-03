@@ -107,14 +107,20 @@ NotificationRoute? decodeNotificationRoute(String? payload) {
     return null;
   }
   if (decoded is! Map) return null;
-  return NotificationRoute(
-    registrationId: _named(decoded['registrationId']),
-    machineUuid: _named(decoded['machineUuid']),
-    projectId: _named(decoded['projectId']),
-    terminalId: _named(decoded['terminalId']),
-    sourceMessageId: _named(decoded['sourceMessageId']),
-    kind: _named(decoded['kind']),
+  final route = NotificationRoute(
+    registrationId: namedOrNull(decoded['registrationId']),
+    machineUuid: namedOrNull(decoded['machineUuid']),
+    projectId: namedOrNull(decoded['projectId']),
+    terminalId: namedOrNull(decoded['terminalId']),
+    sourceMessageId: namedOrNull(decoded['sourceMessageId']),
+    kind: namedOrNull(decoded['kind']),
   );
+  // A payload naming NOTHING is the same answer as no payload, and must reach
+  // the applier as one: `{}` is a valid JSON object, so without this it would
+  // arrive as a non-null route and spend the applier's unconditional
+  // side effects — leaving the demo, above all — on a tap that then resolves
+  // to no destination at all.
+  return route == const NotificationRoute() ? null : route;
 }
 
 /// The value of a field that actually names something, or null.
@@ -122,9 +128,18 @@ NotificationRoute? decodeNotificationRoute(String? payload) {
 /// Blank and absent collapse deliberately: `LocalProject('')` is a target the
 /// app would try to focus, so an empty id must not survive far enough to be
 /// tested for null.
-String? _named(Object? value) {
+///
+/// Public because the sealed-push decoder (`services/push_background_handler.
+/// dart`) has to answer identically: an id only one of them accepts is an id
+/// that survives decoding to address nothing. One definition is what makes that
+/// structural rather than a comment.
+String? namedOrNull(Object? value) {
   if (value is! String) return null;
-  return value.trim().isEmpty ? null : value;
+  final trimmed = value.trim();
+  // The TRIMMED value, not the original: testing `trim()` and returning the
+  // padding would let " <uuid>" pass as naming something and then be used
+  // verbatim as a machine id, matching no drawer entry and no cached origin.
+  return trimmed.isEmpty ? null : trimmed;
 }
 
 /// Resolves [route] to a place, or null when nothing can be addressed without
@@ -150,8 +165,8 @@ NavLocation? resolveNotificationRoute(
     surface: WorkbenchSurface.workspace,
     // Carried whenever the route names a session; whether that session is still
     // open is the applier's question, not this one's.
-    sessionId: _named(route.terminalId),
-    view: _named(route.kind) == 'handler' ? WorkspaceView.handler : null,
+    sessionId: namedOrNull(route.terminalId),
+    view: namedOrNull(route.kind) == 'handler' ? WorkspaceView.handler : null,
   );
 }
 
@@ -160,7 +175,7 @@ SessionTarget? _resolveTarget(
   required List<RecentSessionRow> known,
   required String? localDeviceUuid,
 }) {
-  final registrationId = _named(route.registrationId);
+  final registrationId = namedOrNull(route.registrationId);
   if (registrationId != null) {
     // A cached row is preferred over splitting the id ourselves because the row
     // was classified against the real project list: a bare id belonging to no
@@ -172,14 +187,14 @@ SessionTarget? _resolveTarget(
     return _splitRegistrationId(registrationId);
   }
 
-  final machineUuid = _named(route.machineUuid);
-  final projectId = _named(route.projectId);
+  final machineUuid = namedOrNull(route.machineUuid);
+  final projectId = namedOrNull(route.projectId);
   if (machineUuid != null && projectId != null) {
     if (machineUuid == localDeviceUuid) return LocalProject(projectId);
     return RemoteProject(machineUuid: machineUuid, projectId: projectId);
   }
 
-  final terminalId = _named(route.terminalId);
+  final terminalId = namedOrNull(route.terminalId);
   if (terminalId != null) {
     // Session ids are uuids minted per session, so a hit names exactly one
     // project — but only if there IS one hit. Distinct registration ids, not

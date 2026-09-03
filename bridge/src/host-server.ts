@@ -512,7 +512,13 @@ export class HostServer {
       attachStream: (bus, opts) => client.attachStream(bus, opts),
       currentPeerPubkey: () => client.currentPeerPubkey(),
       sendPushDeliver: (m) => client.sendPushDeliver(m),
-      agentDeviceId: auth.deviceUuid,
+      // The LIVE socket's id, like every member beside it — not the inbound
+      // auth's. The credential swap above is gated on nothing being live, so a
+      // re-enable over an already-running socket leaves `client` registered
+      // under the previous deviceUuid; `auth.deviceUuid` would then name a
+      // machine the relay does not have this host on, and every push a
+      // wizard-promoted core seals would be unopenable on the phone.
+      agentDeviceId: client.deviceId,
     };
   }
 

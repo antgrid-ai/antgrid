@@ -13,6 +13,7 @@ import '../widgets/drawer_entry_row.dart' show activateDrawerEntryById;
 import 'agent_transport.dart';
 import 'demo_mode.dart';
 import 'device_provisioning.dart';
+import 'providers.dart' show focusedServiceOrNull;
 import 'recent_sessions.dart';
 import 'sessions.dart';
 import 'ui_attention_providers.dart';
@@ -224,10 +225,19 @@ Future<bool> _applyAcrossProjects(
     ok = false;
   }
   if (!ok) {
-    ref.read(pendingActiveSessionIdProvider.notifier).set(priorPendingId);
-    ref
-        .read(pendingSessionStartSuppressedIdProvider.notifier)
-        .set(priorSuppressedId);
+    // Only OUR write is taken back. A bootstrap that landed for another
+    // project while this activation ran has already consumed the value we
+    // snapshotted, and writing it back would re-arm an id nothing will ever
+    // resolve — which holds `reconcileActiveSession` off its fallback and, via
+    // the same guard, leaves both surface drains permanently unspendable.
+    if (ref.read(pendingActiveSessionIdProvider) == sessionId) {
+      ref.read(pendingActiveSessionIdProvider.notifier).set(priorPendingId);
+    }
+    if (ref.read(pendingSessionStartSuppressedIdProvider) == sessionId) {
+      ref
+          .read(pendingSessionStartSuppressedIdProvider.notifier)
+          .set(priorSuppressedId);
+    }
     // The machine was asleep or the open was refused; the toast is still up and
     // its retry has to be able to reach here again.
     ref.read(_appliedRoutesProvider).release(route);
@@ -264,6 +274,20 @@ bool _applyInFocusedProject(ProviderContainer ref, NavLocation loc) {
     // them. A session deleted while the toast was up is corrected by
     // [reconcileActiveSession] on the next list change.
     sessionRefused = ref.read(activeSessionIdProvider) != sessionId;
+    if (!sessionRefused) {
+      // Announcing the pick is what CLEARS the unread dot, and this path is the
+      // only route to a session that would otherwise skip it: the cross-project
+      // path gets it from `_bootstrapSessions`, and every manual tap from
+      // `session_row`'s own focused-project branch. Without it the bridge still
+      // believes this client is on the previously selected session — so the
+      // session now on screen keeps its dot, and the one the user left is
+      // exempted from earning another.
+      //
+      // `focusedServiceOrNull`, not the façade: this runs from a tap handler
+      // past an await, where the focused project's `ProjectSession` may be
+      // unresolved and reading the provider directly THROWS.
+      focusedServiceOrNull(ref, (s) => s.sessionsService)?.focus(sessionId);
+    }
   }
   // Even a route that lost its session still moves the user to the workspace:
   // the project is a real destination, and reporting success from the settings
