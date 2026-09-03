@@ -380,8 +380,12 @@ html.js .reveal.in {
   .appwin-panes {
     grid-template-columns: 12.5rem minmax(0, 1fr);
   }
+  /* flex, not block: Rail.astro's own `flex flex-col` utility class lives in
+     Tailwind's (layered) utilities layer, so this unlayered rule would win the
+     cascade and silently flatten it back to block, taking the footer's
+     `mt-auto` bottom-pin with it. */
   .appwin-rail {
-    display: block;
+    display: flex;
   }
 }
 /* Only the three-pane variant ever gets the context column back, and only once
