@@ -1,0 +1,205 @@
+---
+import { Icon } from "astro-icon/components";
+import Base from "../../layouts/Base.astro";
+import Button from "../../components/ui/Button.astro";
+import Mark from "../../components/ui/Mark.astro";
+import { links, PLATFORMS, downloadUrlFor } from "../../config";
+
+const DOWNLOAD_BY_PLATFORM = Object.fromEntries(PLATFORMS.map((p) => [p.id, p.url]));
+
+// The one instruction that cannot wait behind a click. Everything else on this
+// page routes into the guide; this does not, because the reader is holding the
+// file right now and a .dmg or an AppImage does not install itself. Windows is
+// the short one on purpose — it is a Store installer, so there is nothing to do
+// but run it, and padding it out to match its siblings would invent a step.
+const INSTALL = {
+  windows: { file: "the Microsoft Store installer", step: "Run it, then launch antgrid from the Start menu." },
+  macos: { file: "antgrid-macos.dmg", step: "Open it and drag antgrid into Applications." },
+  linux: { file: "antgrid-linux.AppImage", step: "Make it executable, then run it:" },
+};
+const BUILDS = PLATFORMS.map((p) => ({ ...p, ...INSTALL[p.id as keyof typeof INSTALL] }));
+
+// Numbered because this genuinely is a sequence — you cannot connect a phone to
+// a machine with no project open — and because each card is the guide's own
+// step, in the guide's own order. They carry NO instructions, only a one-line
+// description and a link: the guide stays the single place any of this is
+// written down, so the two cannot drift into disagreeing with each other.
+const STEPS = [
+  {
+    n: "01",
+    title: "Install and sign in",
+    body: "Email magic link, GitHub or Google. That account is what links your devices together — there is nothing else to set up.",
+    href: `${links.getStarted}#install`,
+  },
+  {
+    n: "02",
+    title: "Open a project, start your agent",
+    body: "Claude Code, Codex, Cursor — whatever you already run. antgrid wraps the real terminal, so nothing about your workflow changes.",
+    href: `${links.getStarted}#project`,
+  },
+  {
+    n: "03",
+    title: "Connect your phone",
+    body: "Sign in on mobile with the same account and your computer appears on its own. No pairing step, no QR code.",
+    href: `${links.getStarted}#phone`,
+  },
+];
+---
+<Base
+  title="Your download has started — antgrid"
+  description="Your antgrid download has started. Install the desktop app, open a project, and connect your phone."
+  path="/download/started"
+  robots="noindex"
+>
+  {/* The hero's buttons carry ?platform=<id> (downloadUrlFor), so one click gets
+      a reader both their installer and the steps that follow it. ONLY an
+      explicit, known platform fires: every other way onto this page — a shared
+      link, a stray crawl, someone trimming the query off — must never hand a
+      stranger an unrequested .exe, and lands on the pick-a-build state instead.
+
+      In the head (Base.astro's `head` slot) because it decides which half of
+      this page exists: run a frame later and the reader sees "Download antgrid"
+      swap under them into "Your download has started". */}
+  <script slot="head" is:inline set:html={`(function () {
+  var urls = ${JSON.stringify(DOWNLOAD_BY_PLATFORM)};
+  var url = new URL(location.href);
+  var platform = url.searchParams.get("platform");
+  if (!platform || !urls[platform]) return;
+  document.documentElement.dataset.dl = platform;
+
+  // Spend the parameter before firing rather than after: a reload, or a Back
+  // onto this history entry, must not fetch a second installer.
+  url.searchParams.delete("platform");
+  history.replaceState(null, "", url.pathname + url.search + url.hash);
+
+  // On load rather than during parse — a navigation issued mid-parse can cancel
+  // the very page it was meant to decorate. All three URLs answer with
+  // Content-Disposition: attachment, which is the whole reason this downloads
+  // instead of throwing the reader off the page; a build served inline would
+  // navigate away instead, and nothing here would look wrong.
+  addEventListener("load", function () {
+    setTimeout(function () { location.href = urls[platform]; }, 600);
+  });
+})();`}></script>
+
+  <main class="relative mx-auto max-w-shell px-6 pt-16 pb-24 md:pt-24">
+    {/* The same glow the closing CTA uses, and the only decoration on the page:
+        this is a moment, not a section, so it gets one warm centre and nothing
+        else competing with it. */}
+    <div class="pointer-events-none absolute -top-32 left-1/2 h-[420px] w-[640px] -translate-x-1/2 glow-signal" aria-hidden="true"></div>
+
+    <div class="relative mx-auto max-w-xl text-center">
+      <Mark class="mx-auto mb-7 h-10 w-auto text-signal" />
+
+      {/* Two headlines ship and the script reveals one, the same unlayered CSS
+          swap as the hero's download buttons. The idle one is the default, so a
+          reader with no script — or no platform — gets the working page rather
+          than a thank-you for a download that never happened. */}
+      <h1 class="dl-fired font-display text-title font-semibold tracking-tight text-ink">
+        Your download has started.
+      </h1>
+      <h1 class="dl-idle font-display text-title font-semibold tracking-tight text-ink">
+        Download antgrid.
+      </h1>
+
+      {BUILDS.map((b) => (
+        <div class={`dl-note dl-note-${b.id} mt-6 rounded-lg border border-signaldeep2 bg-signaldeep/25 px-5 py-4 text-left`}>
+          <p class="flex items-center gap-2 font-mono text-marker text-signal2">
+            <Icon name={b.icon} width="13" height="13" />{b.file}
+          </p>
+          <p class="mt-2 text-note text-ink2">{b.step}</p>
+          {b.id === "linux" && (
+            <pre class="mt-2.5 overflow-x-auto rounded border border-edge-inner bg-well px-3 py-2 font-mono text-meta text-muted"><code>chmod +x antgrid-linux.AppImage
+./antgrid-linux.AppImage</code></pre>
+          )}
+          {/* The reason this box exists. The download failing is the one outcome
+              that never announces itself — a browser blocks it, an extension
+              eats it — and the reader is left on a page insisting it worked. */}
+          <p class="mt-3 text-meta text-muted2">
+            Nothing happened? <a href={b.url} class="text-signal2 hover:text-signal">Start the download manually</a>.
+          </p>
+        </div>
+      ))}
+
+      <div class="dl-idle">
+        <p class="mx-auto mt-5 max-w-md text-lede text-muted">
+          Pick your build — the download starts as soon as you do. Free while in beta, no card required.
+        </p>
+        {/* All three, not the OS-matched one the hero shows: a reader only ever
+            reaches this state by arriving without a platform, so guessing one
+            for them is exactly the thing that already failed. */}
+        <div class="mt-7 flex flex-wrap items-center justify-center gap-3">
+          {PLATFORMS.map((p) => (
+            <Button href={downloadUrlFor(p.id)} variant="outline">
+              <Icon name={p.icon} width="16" height="16" />{p.name}
+            </Button>
+          ))}
+        </div>
+      </div>
+    </div>
+
+    <section class="relative mx-auto mt-16 max-w-4xl md:mt-20">
+      <p class="mb-5 text-center font-mono text-marker uppercase tracking-[0.16em] text-faint">
+        What happens next
+      </p>
+      {/* An <ol> because the order is the content, not the styling — and the
+          markers are drawn rather than left to the list, since they carry the
+          card's accent and a list-item marker cannot. */}
+      <ol class="grid gap-3 md:grid-cols-3">
+        {STEPS.map((s) => (
+          <li>
+            <a
+              href={s.href}
+              class="group flex h-full flex-col rounded-lg border border-edge bg-panel/50 p-5 transition-colors duration-200 motion-reduce:transition-none hover:border-edge-emph hover:bg-panel"
+            >
+              <span class="font-mono text-marker tracking-[0.14em] text-signal2">{s.n}</span>
+              <h2 class="mt-3 text-note font-medium text-ink">{s.title}</h2>
+              <p class="mt-2 text-meta leading-relaxed text-muted">{s.body}</p>
+              {/* mt-auto, so the three arrows line up across cards whose copy
+                  runs to different depths. */}
+              <span class="mt-auto inline-flex items-center gap-1.5 pt-4 text-meta text-muted2 transition-colors duration-200 motion-reduce:transition-none group-hover:text-signal2">
+                Read this step<Icon name="tabler:arrow-right" width="12" height="12" />
+              </span>
+            </a>
+          </li>
+        ))}
+      </ol>
+
+      {/* Deliberately not a fourth card and not numbered 04: the three above are
+          a sequence the reader has to walk, this is an aside they are free to
+          ignore, and shaping it like a step would claim otherwise. It sits on
+          this page and nowhere else — before the download, an ask is asking to
+          be paid before delivering.
+
+          "Source-available", not "open source". Most of the tree is ELv2 (see
+          LICENSING.md); only the wire and relay-client packages are Apache. A
+          reader who clicks through expecting MIT is a reader we misled, and this
+          is the page where we are asking them for something. */}
+      <a
+        href={links.repo}
+        class="group mt-3 flex items-center gap-4 rounded-lg border border-edge bg-panel/50 p-5 transition-colors duration-200 motion-reduce:transition-none hover:border-edge-emph hover:bg-panel"
+      >
+        <Icon
+          name="tabler:brand-github"
+          class="shrink-0 text-muted2 transition-colors duration-200 motion-reduce:transition-none group-hover:text-ink"
+          width="20"
+          height="20"
+        />
+        <span class="min-w-0 flex-1">
+          <span class="block text-note font-medium text-ink">Star antgrid on GitHub</span>
+          <span class="mt-1 block text-meta leading-relaxed text-muted">
+            The bridge, the relay and both apps are source-available — protocol, crypto client and all. Stars are how the next person finds it.
+          </span>
+        </span>
+        <span class="hidden shrink-0 items-center gap-1.5 text-meta text-muted2 transition-colors duration-200 motion-reduce:transition-none group-hover:text-signal2 sm:inline-flex">
+          Star<Icon name="tabler:star" width="12" height="12" />
+        </span>
+      </a>
+
+      <p class="mt-8 text-center text-meta text-muted2">
+        The <a href={links.getStarted} class="text-signal2 hover:text-signal">setup guide</a> covers all three end to end ·
+        Stuck? <a href={links.support} class="text-signal2 hover:text-signal">Support</a>
+      </p>
+    </section>
+  </main>
+</Base>

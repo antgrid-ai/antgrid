@@ -49,6 +49,15 @@ const { frontmatter } = Astro.props;
     margin-top: 1.5rem;
     margin-bottom: 0.5rem;
   }
+  /* Anything with an id is a link target, and the header is sticky — without
+     this the browser scrolls the heading to y=0 and parks it under the nav, so
+     the reader arrives looking at the paragraph below the one they asked for.
+     The clearance is deliberately more than the header's height: landing with
+     the previous section just visible above is what tells them where they are. */
+  .legal-prose h2[id],
+  .legal-prose h3[id] {
+    scroll-margin-top: 7rem;
+  }
   .legal-prose p {
     margin-bottom: 1rem;
   }

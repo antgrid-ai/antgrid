@@ -25,6 +25,11 @@ export const links = {
   features: "/#handler",
   download: "/#download",
   getStarted: "/get-started",
+  // The download confirmation page. Never linked bare — it is only meaningful
+  // with a ?platform= (see downloadUrlFor), and it is noindex for the same
+  // reason: a reader arriving from search would land on a page whose whole job
+  // has already happened.
+  downloadStarted: "/download/started",
   downloadMacos: `${RELEASES_URL}/releases/latest/download/antgrid-macos.dmg`,
   // Microsoft Store deep link (product 9N0P7ZRL4D9W); version-stable like the
   // GitHub release URLs above, so a new build never needs a site deploy.
@@ -61,3 +66,27 @@ export const links = {
   waitlist: `${WEB_URL}/api/waitlist`,
   checkout: (planId: string) => `${APP_URL}/checkout?planId=${planId}`,
 };
+
+// The three desktop builds as one list, because three separate things have to
+// agree on the same ids: the hero's OS-matched button, the confirmation page's
+// per-platform panels, and that page's script, which maps ?platform= back to a
+// URL. An id that agrees in two of the three is the worst case — the reader is
+// thanked for a download that never started. contracts.spec.ts pins all three
+// together for that reason.
+//
+// `os` is the OTHER axis and is deliberately not the id: it is the value
+// Base.astro writes to data-os from the reader's machine, and the two answer
+// different questions — which build this is, versus which build this reader can
+// run. The confirmation page needs them apart, because what it fires is what
+// the URL ASKED for, not what the visitor happens to be sitting at.
+export const PLATFORMS = [
+  { id: "windows", os: "win", name: "Windows", icon: "tabler:brand-windows", url: links.downloadWindows },
+  { id: "macos", os: "mac", name: "macOS", icon: "tabler:brand-apple", url: links.downloadMacos },
+  { id: "linux", os: "linux", name: "Linux", icon: "tabler:brand-open-source", url: links.downloadLinux },
+];
+
+// One link that both downloads and orients: the query is what the confirmation
+// page fires on, and the page it lands on is the answer to "it downloaded, now
+// what". Split across two clicks — download here, instructions there — one of
+// them is always the one that gets skipped.
+export const downloadUrlFor = (id: string) => `${links.downloadStarted}?platform=${id}`;

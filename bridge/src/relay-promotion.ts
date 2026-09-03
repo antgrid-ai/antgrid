@@ -124,6 +124,7 @@ export function createRelayPromotion(deps: RelayPromotionDeps): RelayPromotionCo
       const remote: ProjectCoreRemoteDeps = {
         attachStream: (b, opts) => ensured.attachStream(b, opts),
         currentPeerPubkey: () => ensured.currentPeerPubkey(),
+        machineDeviceId: () => ensured.agentDeviceId,
         sendPushDeliver: (m) => ensured.sendPushDeliver(m),
       };
       attachment = deps.attach(remote);

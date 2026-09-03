@@ -27,6 +27,41 @@ const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
     <Font cssVariable="--font-inter" preload />
     <Font cssVariable="--font-jetbrains" preload />
     <Seo title={title} description={description} ogImage={ogImage} ogImageAlt={ogImageAlt} path={path} robots={robots} />
+    {/* Two things follow the reader's own OS off this one attribute: the
+        mockup's window chrome, because the app's does (Windows paints its own
+        caption buttons, macOS keeps the real NSWindow traffic lights —
+        app/lib/window/window_capabilities.dart), and the hero's download
+        button, which offers the build the reader can actually install.
+        `is:inline` is load-bearing — Astro would otherwise bundle this as a
+        deferred module and both swaps would land a frame after paint, as a
+        visible flicker in the hero. Windows is the no-JS default, so a bot, an
+        OG screenshot or a blocked script still gets a coherent window and a
+        working CTA rather than a bare one and none. */}
+    <script is:inline>
+      (function () {
+        var d = document.documentElement;
+        // High-entropy client hints need an async request, so the low-entropy
+        // `platform` plus the UA string is the whole budget here. Order matters,
+        // not breadth: an iPad asking for the desktop site carries "Macintosh",
+        // and every Android UA carries "Linux". So Apple is matched first, and
+        // Android is ruled out before the Linux test — which leaves phones on
+        // the Windows default they already had, and is the right answer for a
+        // desktop-only download anyway.
+        var p = (navigator.userAgentData && navigator.userAgentData.platform) || "";
+        var s = p + " " + navigator.userAgent;
+        d.dataset.os = /mac|iphone|ipad|ipod/i.test(s)
+          ? "mac"
+          : /linux/i.test(s) && !/android/i.test(s)
+            ? "linux"
+            : "win";
+      })();
+    </script>
+    {/* For a page that needs its own pre-paint work, on the same terms as the
+        OS script above — anything that decides what the first frame LOOKS like
+        has to run before there is one. In the head rather than at the top of
+        the page body because a body script only wins that race by luck: the
+        browser is free to paint the markup it has already parsed above it. */}
+    <slot name="head" />
   </head>
   <body class="bg-page text-ink font-sans">
     <Nav />

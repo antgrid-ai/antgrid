@@ -11,6 +11,7 @@ import { expect, test } from "bun:test";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { createRelayPromotion, type MachineRelaySession, type LocalStreamAttachment } from "../src/relay-promotion";
+import type { ProjectCoreRemoteDeps } from "../src/project-core";
 import type { StreamHandle } from "../src/stream-mux";
 
 const ENABLE = createMessage("agent:enableRelay", {
@@ -38,6 +39,7 @@ function makeMachineSession(overrides: Partial<MachineRelaySession> = {}): Machi
  *  bring-up, exactly one attach per promotion) did not. */
 function makeDeps(session: MachineRelaySession) {
   const calls = { ensureMachineRelay: 0, attach: 0, detach: 0 };
+  let attached: ProjectCoreRemoteDeps | null = null;
   const handle: StreamHandle = { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
   return {
     calls,
@@ -45,10 +47,12 @@ function makeDeps(session: MachineRelaySession) {
       calls.ensureMachineRelay++;
       return session;
     },
-    attach: (): LocalStreamAttachment => {
+    attach: (remote: ProjectCoreRemoteDeps): LocalStreamAttachment => {
       calls.attach++;
+      attached = remote;
       return { handle, detach: () => { calls.detach++; } };
     },
+    get attached() { return attached; },
   };
 }
 
@@ -70,6 +74,9 @@ test("enableRelay attaches the core as a stream and emits relayReady from the ma
   expect(ready).toBeDefined();
   // @ts-expect-error narrowed at runtime
   expect(ready.agentDeviceId).toBe(session.agentDeviceId);
+  // The promoted core seals pushes addressed to the machine the wizard just
+  // brought up; tsc alone would accept any string here.
+  expect(deps.attached?.machineDeviceId()).toBe(session.agentDeviceId);
 
   ctrl.stop();
   expect(deps.calls.detach).toBe(1);
