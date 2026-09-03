@@ -84,18 +84,19 @@ export default defineConfig({
   integrations: [
     // simple-icons is named explicitly because astro-icon otherwise assigns an
     // installed collection `["*"]` and inlines the whole pack into the build's
-    // virtual module — 3,700 icons and ~4.7MB of source, to draw seven brand
-    // marks in Compat.astro. Collections left unnamed (tabler) keep `*`.
+    // virtual module — 3,700 icons and ~4.7MB of source, to draw five brand
+    // marks in Compat.astro. (Claude Code and Mistral AI moved to src/icons/
+    // with a tightened viewBox — the simple-icons originals letterbox short of
+    // the full 24x24, so they render smaller than their siblings.) Collections
+    // left unnamed (tabler) keep `*`.
     icon({
       include: {
         "simple-icons": [
-          "claudecode",
           "openai",
           "opencode",
           "cursor",
           "githubcopilot",
           "kimi",
-          "mistralai",
         ],
       },
     }),
