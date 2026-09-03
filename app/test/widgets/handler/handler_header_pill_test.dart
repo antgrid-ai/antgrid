@@ -242,6 +242,40 @@ void main() {
       expect(revealed, isFalse);
     });
 
+    // The control lands on the handler tab by handover or by call, and the
+    // agent-page drain runs LAST — so a stamp a notification route left
+    // pending would override the tab on the very frame this opens it.
+    testWidgets('drops an agent-page stamp an earlier route left pending', (
+      tester,
+    ) async {
+      final container = await pumpWithContainer(
+        tester,
+        {
+          't1': _session('t1', runState: HandlerRunState.watching),
+          't2': _session(
+            't2',
+            runState: HandlerRunState.needsYou,
+            pendingEscalations: 1,
+          ),
+        },
+        focused: 't1',
+        onReveal: () {},
+      );
+      container.read(pendingAgentPageProvider.notifier).set((
+        target: null,
+        value: true,
+      ));
+
+      await tester.tap(find.text('NEEDS YOU 1'));
+      await tester.pump();
+
+      expect(container.read(pendingAgentPageProvider), isNull);
+      expect(
+        container.read(pendingWorkspaceViewProvider)?.value,
+        WorkspaceView.handler,
+      );
+    });
+
     testWidgets('leaves focus alone when the focused session is the one '
         'waiting', (tester) async {
       var revealed = false;

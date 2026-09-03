@@ -28,6 +28,7 @@ function fakeRemoteDeps(): { deps: ProjectCoreRemoteDeps; calls: Array<{ bus: Me
       return handle;
     },
     currentPeerPubkey: () => null,
+    machineDeviceId: () => "machine-uuid",
     sendPushDeliver: () => {},
   };
   return { deps, calls };

@@ -142,6 +142,11 @@ class NavController extends Notifier<NavState> {
       // clears any stale pending from an earlier switch, so the new project's
       // bootstrap can't consume a session id meant for a different project.
       ref.read(pendingActiveSessionIdProvider.notifier).set(loc.sessionId);
+      // Cleared with the id it qualifies, never left behind: back()/forward()
+      // and a deep link all mean "resume this", and a suppressor outliving the
+      // queue it was written for would silently re-pair with a later
+      // Recent-list tap on the same session and eat the start that tap IS.
+      ref.read(pendingSessionStartSuppressedIdProvider.notifier).set(null);
     } else if (loc.target == currentTarget && loc.sessionId != null) {
       // Same project: bootstrap won't re-run, so select directly.
       ref.read(activeSessionIdProvider.notifier).set(loc.sessionId);
@@ -183,6 +188,12 @@ class NavController extends Notifier<NavState> {
         .set(
           loc.file == null ? null : (target: pendingTarget, value: loc.file!),
         );
+    // A [NavLocation] can never ASK for the agent transcript — there is no
+    // WorkspaceView for it — so this is only ever the null half. It belongs
+    // here all the same: the drains run in one post-frame callback with this
+    // one last, so a stamp an earlier location left would otherwise override
+    // the tab a back()/forward()/deep link just named.
+    ref.read(pendingAgentPageProvider.notifier).set(null);
   }
 }
 

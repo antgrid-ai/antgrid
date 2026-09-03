@@ -51,6 +51,21 @@ final pendingWorkspaceViewProvider =
       PendingNav<WorkspaceView>?
     >(() => ValueController(null));
 
+/// The agent transcript a navigation named, waiting for WorkspaceShell to show
+/// it.
+///
+/// [WorkspaceView] has no agent member — the transcript is not a workspace tab
+/// — so a route that wants it cannot go through [pendingWorkspaceViewProvider],
+/// and `switchToAgentProvider` is null whenever the shell is between mounts.
+/// Same handover, same [PendingNav] stamp, drained beside the view.
+///
+/// The value is always true: what is carried is the REQUEST, and the stamp is
+/// what makes it self-invalidating, exactly as for the pending view.
+final pendingAgentPageProvider =
+    NotifierProvider<ValueController<PendingNav<bool>?>, PendingNav<bool>?>(
+      () => ValueController(null),
+    );
+
 /// A file a navigation named, waiting for the file explorer to open it.
 ///
 /// Grouped with [pendingWorkspaceViewProvider] because a file is only reachable
