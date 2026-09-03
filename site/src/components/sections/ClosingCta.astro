@@ -2,13 +2,13 @@
 import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Button from "../ui/Button.astro";
-import { links } from "../../config";
+import { links, PLATFORMS, downloadUrlFor } from "../../config";
 import { BETA_FREE, FREE_WORKERS, PRO_WORKERS, YEARLY_OFFER_USD } from "../../data/pricing";
 
-const stores = [
-  { icon: "tabler:brand-apple", label: "App Store" },
-  { icon: "tabler:brand-google-play", label: "Google Play" },
-];
+// The same OS-matched button the hero leads with, through the same confirmation
+// page — a closing CTA that ends on a doc link is a page that never asks for the
+// thing it spent nine sections arguing for. The setup guide keeps its place in
+// the line below, which is where a reader who wants to read first looks anyway.
 ---
 <section id="download" class="reveal mx-auto max-w-shell px-6 py-20">
   <div class="card-lit relative overflow-hidden rounded-xl border border-signaldeep2 bg-[#17171e] px-9 py-14 text-center">
@@ -26,29 +26,38 @@ const stores = [
       )}
     </p>
     <div class="mb-3.5 flex flex-wrap items-center justify-center gap-3">
-      <Button href={links.getStarted} variant="primary">Setup guide<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
-      <Button href={links.pricing} variant="outline">See pricing</Button>
-    </div>
-    <p class="mb-8 text-meta text-muted2">No card required · remote control on the free plan</p>
-
-    <div class="mx-auto mb-6 h-px max-w-sm bg-edge"></div>
-    <p class="mb-4 font-mono text-marker uppercase tracking-[0.16em] text-faint">Download the desktop app</p>
-    <div class="mb-3.5 flex flex-wrap items-center justify-center gap-3">
-      <Button href={links.downloadMacos} variant="outline"><Icon name="tabler:brand-apple" width="16" height="16" />Download for macOS</Button>
-      <Button href={links.downloadWindows} variant="outline"><Icon name="tabler:brand-windows" width="16" height="16" />Download for Windows</Button>
-      <Button href={links.downloadLinux} variant="outline"><Icon name="tabler:brand-open-source" width="16" height="16" />Download for Linux</Button>
-    </div>
-    <p class="mb-8 text-meta text-muted2">First time? The <a href={links.getStarted} class="text-signal2 hover:text-signal">setup guide</a> walks you from install to your phone.</p>
-
-    <p class="mb-4 font-mono text-marker uppercase tracking-[0.16em] text-faint">App stores coming soon</p>
-    <div class="flex flex-wrap justify-center gap-2">
-      {stores.map((s) => (
-        <span class="inline-flex items-center gap-1.5 rounded-md border border-edge bg-panel px-3 py-2 text-meta text-muted">
-          <Icon name={s.icon} class="text-muted2" width="16" height="16" />{s.label}
-          <span class="rounded border border-edge px-1.5 py-px font-mono text-pip text-faint">soon</span>
-        </span>
+      {PLATFORMS.map((p) => (
+        <Button href={downloadUrlFor(p.id)} variant="primary" class={`dl-os dl-${p.os}`}>
+          <Icon name={p.icon} width="16" height="16" />Download for {p.name}
+        </Button>
       ))}
     </div>
+    <p class="mb-2 text-meta text-muted2">No card required · remote control on the free plan</p>
+    {/* The escape hatch for the OS match, and the reason the three-button row
+        could go: the hero's "Windows, macOS & Linux" link lands here, so this
+        band is where a reader on the wrong machine — or downloading for one they
+        are not sitting at — has to be able to name their own build. Each goes
+        through the confirmation page like every other download on the site; the
+        raw artifacts stay one layer down, in the guide. */}
+    {/* Its own line rather than trailing the build list: the same middot cannot
+        separate three peers AND then a different sentence — run together, "Linux ·
+        First time?" reads as a fourth build for one beat, and the whole thing
+        clumps into three wrapped lines on a phone. */}
+    <p class="mb-1.5 text-meta text-muted2">
+      All builds: {PLATFORMS.map((p, i) => (
+        <>{i > 0 && <span class="text-faint"> · </span>}<a href={downloadUrlFor(p.id)} class="text-signal2 hover:text-signal">{p.name}</a></>
+      ))}
+    </p>
+    <p class="mb-8 text-meta text-muted2">
+      First time? The <a href={links.getStarted} class="text-signal2 hover:text-signal">setup guide</a> walks you from install to your phone.
+    </p>
+
+    {/* A sentence, not two dead store chips. Invites are open today — a page that
+        closes on "App Store — soon" tells a reader the phone half is unavailable,
+        which is both wrong and the half the product is for. */}
+    <p class="text-meta text-muted2">
+      iOS &amp; Android are in private beta — <a href={links.mobileInvite} class="text-signal2 hover:text-signal">request an invite</a>.
+    </p>
     </div>
   </div>
 </section>

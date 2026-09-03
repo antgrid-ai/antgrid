@@ -3,8 +3,20 @@ import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Button from "../ui/Button.astro";
 import WorkspaceScene from "../shell/WorkspaceScene.astro";
-import { links } from "../../config";
+import { links, PLATFORMS, downloadUrlFor } from "../../config";
 import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../../data/pricing";
+
+// One button per desktop build. All three ship and `data-os` (Base.astro)
+// reveals the one the reader can actually install — the same attribute the
+// window chrome follows, and revealed the same way in global.css rather than by
+// rewriting a label after load, which would flicker on the primary CTA. Windows
+// leads because it is also what the reveal rules fall through to.
+//
+// Each aims at the confirmation page rather than at the artifact, and that page
+// starts the download itself (downloadUrlFor). Straight at the artifact, the
+// click leaves the page looking like nothing happened and answers none of "it
+// downloaded, now what". #download still keeps the raw artifact links a click
+// away for anyone who only wants the binary.
 ---
 {/* The proof loop is the argument, so it gets the stage rather than a column:
     full shell width under the headline, which also puts it just below the fold
@@ -119,16 +131,26 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
       </div>
       <div>
         <div class="flex flex-wrap items-center gap-3">
-          <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
-          <Button href={links.getStarted} variant="outline">Setup guide</Button>
+          {PLATFORMS.map((p) => (
+            <Button href={downloadUrlFor(p.id)} variant="primary" class={`dl-os dl-${p.os}`}>
+              <Icon name={p.icon} width="16" height="16" />Download for {p.name}
+            </Button>
+          ))}
         </div>
         {/* Two lines because there are two jobs here: the guarantees are a
             dot-separated list of properties, availability is a sentence. Run
             together they made a four-clause line that wrapped to three in this
             21rem column and split "iOS &" from "Android" across rows. */}
         <p class="mt-4.5 text-meta leading-relaxed text-muted2">No VPN or port forwarding · End-to-end encrypted</p>
+        {/* The escape hatch for the button above, and it lives here rather than
+            as a second button beside it: the OS match is right for nearly
+            everyone, so a peer-weight "All platforms" button spent the hero's
+            one strong action on the minority case — and the two together
+            wrapped the 21rem column onto a second row. This line is already
+            where a reader looks to ask whether their OS is covered, so the
+            list of platforms is the link. */}
         <p class="mt-1.5 text-meta leading-relaxed text-muted2">
-          <span class="inline-block">Desktop out now on Windows, macOS &amp; Linux.</span>{" "}
+          <span class="inline-block">Desktop out now on <a href={links.download} class="text-signal2 hover:text-signal">Windows, macOS &amp; Linux</a>.</span>{" "}
           <span class="inline-block">iOS &amp; Android in private beta — <a href={links.mobileInvite} class="text-signal2 hover:text-signal">request an invite</a>.</span>
         </p>
       </div>

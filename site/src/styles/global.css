@@ -313,6 +313,26 @@ html.js .reveal.in {
   animation: caret-blink 0.9s step-end infinite;
 }
 
+/* Section eyebrow caret (Eyebrow.astro): two blinks, then it rests. The
+   looping carets above mean "a session is live"; eighteen of these blinking
+   forever would spend that meaning, so this one only animates on arrival —
+   a cursor landing on the line, not a cursor waiting for input. Sections
+   outside .reveal (the hero, page openers) run it at load, which is when the
+   reader arrives at them anyway. */
+@keyframes eb-land {
+  0%, 30%, 60% { opacity: 1; }
+  15%, 45% { opacity: 0.16; }
+  100% { opacity: 1; }
+}
+.eb-caret {
+  animation: eb-land 1.2s step-end 0.25s 1 both;
+}
+/* Suppressed until the section is in view, so the one landing it gets is not
+   spent below the fold: dropping this rule as .in lands is what starts it. */
+html.js .reveal:not(.in) .eb-caret {
+  animation: none;
+}
+
 /* Live status dot. */
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
@@ -343,6 +363,7 @@ html.js .reveal.in {
   }
   .animate-pulse-dot,
   .cipher-scroll,
+  .eb-caret,
   .pc-caret::after {
     animation: none;
   }
@@ -368,7 +389,9 @@ html.js .reveal.in {
    one. Display lives here rather than on Tailwind `hidden`/`flex` utilities on
    purpose: these rules are unlayered, so they outrank the utilities layer and
    there is no pair of classes that can half-win. Windows is the default, which
-   is what a reader with no JS — or a bot rendering the OG image — gets. */
+   is what a reader with no JS — or a bot rendering the OG image — gets, and
+   what data-os="linux" falls through to on purpose: the Linux build paints its
+   own caption buttons exactly as the Windows one does. */
 .appwin-mac-lights {
   display: none;
 }
@@ -379,6 +402,48 @@ html.js .reveal.in {
   display: flex;
 }
 [data-os="mac"] .appwin-win-controls {
+  display: none;
+}
+
+/* Hero download CTA: all three platform buttons ship and `data-os` reveals the
+   one the reader can install — same mechanism and same unlayered reasoning as
+   the chrome above. Done in CSS rather than by rewriting a button after load
+   because the alternative is a label that changes a frame into the page, on the
+   primary CTA. The fallback is spelled as "no OS we have a button for" rather
+   than as [data-os="win"], so a scriptless reader — who gets no attribute at
+   all — still lands on a real download instead of an empty row. */
+.dl-os {
+  display: none;
+}
+:root:not([data-os="mac"]):not([data-os="linux"]) .dl-win,
+[data-os="mac"] .dl-mac,
+[data-os="linux"] .dl-linux {
+  display: inline-flex;
+}
+
+/* The download confirmation page (/download/started), revealed the same
+   unlayered way off `data-dl` — which that page's own head script sets, and
+   only ever when the URL named a platform it has a build for.
+
+   Two switches on one attribute. The per-platform panel is keyed on the
+   platform rather than on `data-os` on purpose: what fires is what the reader
+   ASKED for, so someone who opened the macOS link a colleague sent them from a
+   Windows box is told the truth about the file that just landed. The idle/fired
+   pair is keyed on `data-dl` merely EXISTING, which is what makes the
+   pick-a-build state the default — a reader with no script, or no platform,
+   gets the working page instead of a thank-you for a download that never
+   started. */
+.dl-note,
+.dl-fired {
+  display: none;
+}
+[data-dl="windows"] .dl-note-windows,
+[data-dl="macos"] .dl-note-macos,
+[data-dl="linux"] .dl-note-linux,
+[data-dl] .dl-fired {
+  display: block;
+}
+[data-dl] .dl-idle {
   display: none;
 }
 

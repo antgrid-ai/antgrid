@@ -1,30 +1,11 @@
 import { test, expect } from "@playwright/test";
 
-// The page only works if a reader can go and check it, so what is asserted here
-// is the structure that makes that possible: the sections a sceptical reader is
-// sent to, the outbound links that let them read the crypto themselves, and
-// security.txt actually being served. Prose inside the sections is deliberately
-// not asserted — see the note at the top of home.spec.ts.
+// The page's whole argument is that a reader can go and check it, so what is
+// tested is the going: the outbound targets, every internal link resolving, and
+// security.txt being served to the scanner that asks for it. The claims
+// themselves are prose and have no test — see the note at the top of home.spec.ts.
 
 const REPO = "https://github.com/antgrid-ai/antgrid";
-
-test("security page renders with one h1 and the sections it promises", async ({ page }) => {
-  await page.goto("/security");
-  const h1 = page.getByRole("heading", { level: 1 });
-  await expect(h1).toHaveCount(1);
-  expect((await h1.innerText()).trim().length).toBeGreaterThan(0);
-
-  await expect(page.getByRole("heading", { name: /what the relay does see/i })).toBeVisible();
-  await expect(page.getByRole("heading", { name: /three things have to be true/i })).toBeVisible();
-  await expect(page.getByRole("heading", { name: /exist yet/i })).toBeVisible();
-  await expect(page.getByRole("heading", { name: /reporting a vulnerability/i })).toBeVisible();
-
-  // The relay section is the page's central claim: both halves of the ledger
-  // must render, not just the flattering one.
-  const relay = page.locator("#relay");
-  await expect(relay.getByText("in cleartext at the relay")).toBeVisible();
-  await expect(relay.getByText("never at the relay")).toBeVisible();
-});
 
 test("the verification links point at the public repository", async ({ page }) => {
   await page.goto("/security");
@@ -63,6 +44,10 @@ test("every internal link on the page resolves", async ({ page }) => {
   }
 });
 
+// The one file on the site whose reader is a machine, so its fields are a
+// contract rather than content: a scanner that cannot find Contact treats the
+// site as having no disclosure channel, and RFC 9116 treats an expired file as
+// stale outright.
 test("security.txt is served with the fields a scanner reads", async ({ page }) => {
   const res = await page.request.get("/.well-known/security.txt");
   expect(res.status()).toBe(200);

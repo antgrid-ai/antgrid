@@ -100,6 +100,12 @@ export default defineConfig({
         ],
       },
     }),
-    sitemap({ filter: (page) => !page.includes("/og-card") }),
+    // Both exclusions are pages that carry robots=noindex, and a sitemap that
+    // submits a noindex URL is a conflict Search Console reports rather than
+    // ignores. og-card is the screenshot source for the social card;
+    // download/started only means anything with a ?platform= the sitemap
+    // cannot carry, so an indexed copy would rank as a thank-you for a
+    // download the visitor never started.
+    sitemap({ filter: (page) => !page.includes("/og-card") && !page.includes("/download/started") }),
   ],
 });
