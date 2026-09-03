@@ -101,10 +101,13 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
       <span class="inline-block">One control plane.</span>
     </h1>
 
-    {/* Argument left, action right. The two columns are sized to sit adjacent
-        rather than pinned to the shell's edges — pushed apart, the buttons read
-        as stranded rather than as a deliberate second column. */}
-    <div class="grid gap-x-12 gap-y-7 md:grid-cols-[minmax(0,35rem)_minmax(0,21rem)]">
+    {/* Argument left, action right. The text column's cap grew from 35rem to
+        45rem so the two columns' widths plus the gap add up to the shell's
+        full content width at rest — the CTA column then lands flush against
+        the shell's right edge (matching the nav's own CTA) without either a
+        dead gap trailing past it or an inflated gap pushing it away from the
+        text. 45rem still holds the copy to two lines instead of three. */}
+    <div class="grid gap-x-12 gap-y-7 md:grid-cols-[minmax(0,45rem)_minmax(0,21rem)]">
       {/* Two beats, and their order is the argument. The first opens on the
           reader's own week before it claims anything, which is what lets a
           stranger agree before being sold to; it closes on ownership because
@@ -116,8 +119,8 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
           it missing and conclude we lied. It links rather than explains:
           Phases.astro is two sections down and makes the whole case there. */}
       {/* No inline-block on the sentences here, unlike the headline: at lede
-          size in a 35rem column they run three lines anyway, and forbidding a
-          mid-sentence break only strands a short second line. */}
+          size in a 45rem column they still wrap mid-sentence, and forbidding
+          a mid-sentence break only strands a short second line. */}
       {/* One grid child, not two paragraphs: the grid has exactly two columns and
           a loose second <p> becomes a third item, which pushes the CTA column out
           of row one and strands the buttons under the copy. */}
@@ -129,7 +132,11 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
           Arm <a href={links.features} class="text-signal2 hover:text-signal">Handler</a> to hand off a session on your instructions — it wakes you only when the call is truly yours.
         </p>
       </div>
-      <div>
+      {/* self-center rather than top-aligned: the left column runs two
+          paragraphs tall and the button+subtext stack is short, so top
+          alignment left a bare gap above the app window below. Centering
+          on the row's height closes it without inventing filler content. */}
+      <div class="md:self-center">
         <div class="flex flex-wrap items-center gap-3">
           {PLATFORMS.map((p) => (
             <Button href={downloadUrlFor(p.id)} variant="primary" class={`dl-os dl-${p.os}`}>
