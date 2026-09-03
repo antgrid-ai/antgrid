@@ -27,6 +27,26 @@ const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
     <Font cssVariable="--font-inter" preload />
     <Font cssVariable="--font-jetbrains" preload />
     <Seo title={title} description={description} ogImage={ogImage} ogImageAlt={ogImageAlt} path={path} robots={robots} />
+    {/* The mockup's window chrome follows the reader's own OS, because the app's
+        does: Windows gets hand-drawn caption buttons on the right, macOS keeps
+        the real NSWindow traffic lights on the left (app/lib/window/
+        window_capabilities.dart). `is:inline` is load-bearing — Astro would
+        otherwise bundle this as a deferred module and the swap would land a
+        frame after paint, as a visible flicker in the hero. Windows is the
+        no-JS default, so a bot, an OG screenshot or a blocked script still
+        gets a coherent window rather than a bare one. */}
+    <script is:inline>
+      (function () {
+        var d = document.documentElement;
+        // High-entropy client hints need an async request, so the low-entropy
+        // `platform` plus the UA string is the whole budget here. Order matters,
+        // not breadth: an Android UA carries "Linux", and an iPad asking for the
+        // desktop site carries "Macintosh" — matching Apple first and defaulting
+        // everything else to Windows gets both right.
+        var p = (navigator.userAgentData && navigator.userAgentData.platform) || "";
+        d.dataset.os = /mac|iphone|ipad|ipod/i.test(p + " " + navigator.userAgent) ? "mac" : "win";
+      })();
+    </script>
   </head>
   <body class="bg-page text-ink font-sans">
     <Nav />

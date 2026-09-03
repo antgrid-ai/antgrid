@@ -364,6 +364,24 @@ html.js .reveal.in {
 
 /* ---- App shell --------------------------------------------------------- */
 
+/* Both window chromes ship in the markup and `data-os` (Base.astro) reveals
+   one. Display lives here rather than on Tailwind `hidden`/`flex` utilities on
+   purpose: these rules are unlayered, so they outrank the utilities layer and
+   there is no pair of classes that can half-win. Windows is the default, which
+   is what a reader with no JS — or a bot rendering the OG image — gets. */
+.appwin-mac-lights {
+  display: none;
+}
+.appwin-win-controls {
+  display: flex;
+}
+[data-os="mac"] .appwin-mac-lights {
+  display: flex;
+}
+[data-os="mac"] .appwin-win-controls {
+  display: none;
+}
+
 /* The window's pane geometry. In CSS rather than utilities because the three
    columns collapse in a specific ORDER as width runs out — the context pane
    first, then the rail — and that sequence is one decision that belongs in one
