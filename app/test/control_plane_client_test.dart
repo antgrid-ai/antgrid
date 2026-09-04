@@ -542,4 +542,116 @@ void main() {
       },
     );
   });
+
+  group('capabilityCard', () {
+    Map<String, dynamic> card() => {
+      'os': {'name': 'Windows', 'version': '10.0.26200', 'arch': 'x64'},
+      'projects': {
+        'p1': {
+          'label': 'antgrid',
+          'remote': 'github.com/owner/repo',
+          'branch': 'development',
+        },
+        'p2': {'label': 'scratch', 'remote': null, 'branch': null},
+      },
+    };
+
+    test('asks about the whole catalog when no ids are given', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.requestHandler = (method, params) => card();
+
+      final result = await client.capabilityCard();
+
+      expect(t.requests.single.method, 'machine.capability-card');
+      // Omitted, not sent as null: the absent field is what asks for every
+      // project the machine has seen.
+      expect(t.requests.single.params, isEmpty);
+      expect(result.os.name, 'Windows');
+      expect(result.os.version, '10.0.26200');
+      expect(result.os.arch, 'x64');
+      expect(result.projects['p1']!.remote, 'github.com/owner/repo');
+      expect(result.projects['p1']!.branch, 'development');
+      expect(result.projects['p1']!.label, 'antgrid');
+    });
+
+    test('a project with no origin and no branch parses as nulls', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.requestHandler = (method, params) => card();
+
+      final result = await client.capabilityCard(projectIds: ['p1', 'p2']);
+
+      expect(t.requests.single.params, {
+        'projectIds': ['p1', 'p2'],
+      });
+      expect(result.projects['p2']!.remote, isNull);
+      expect(result.projects['p2']!.branch, isNull);
+      expect(result.projects['p2']!.label, 'scratch');
+    });
+
+    // A newer bridge widening the card must not cost the caller the fields it
+    // does understand, and an id the machine does not know is simply absent.
+    test('unknown keys are ignored and omitted projects stay omitted', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.requestHandler = (method, params) => {
+        'os': {
+          'name': 'macOS',
+          'version': '15.0',
+          'arch': 'arm64',
+          'kernel': 'Darwin',
+        },
+        'projects': {
+          'p1': {'remote': 'github.com/owner/repo', 'dirty': true},
+        },
+        'agents': ['claude'],
+      };
+
+      final result = await client.capabilityCard(projectIds: ['p1', 'gone']);
+      expect(result.os.name, 'macOS');
+      expect(result.projects.keys, ['p1']);
+      expect(result.projects['p1']!.remote, 'github.com/owner/repo');
+      expect(result.projects['p1']!.label, isNull);
+    });
+
+    test('a response with no OS is a BAD_RESPONSE, not a half card', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.requestHandler = (method, params) => {'projects': {}};
+
+      await expectLater(
+        client.capabilityCard(),
+        throwsA(
+          isA<RpcException>().having((e) => e.code, 'code', 'BAD_RESPONSE'),
+        ),
+      );
+    });
+
+    // The case every caller has to degrade around: a bridge predating the card
+    // answers UNKNOWN_VERB, and the dialog above this shows no card rather than
+    // refusing to open.
+    test('propagates UNKNOWN_VERB from a bridge predating the card', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.requestHandler = (_, _) => throw RpcException('UNKNOWN_VERB', 'no');
+
+      await expectLater(
+        client.capabilityCard(),
+        throwsA(
+          isA<RpcException>().having((e) => e.code, 'code', 'UNKNOWN_VERB'),
+        ),
+      );
+    });
+  });
 }

@@ -36,6 +36,11 @@ import { SessionManager } from "./session-manager";
 import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
 import type { BranchRemoteStatus } from "./git-branches";
+import {
+  MAX_CAPABILITY_CARD_PROJECTS,
+  readCapabilityCard,
+  type CapabilityCardTarget,
+} from "./capability-card";
 import { resolveProject } from "./worktrees/project-resolver";
 import { WorktreeError, WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -73,6 +78,15 @@ function logRemoteStateDetail(projectPath: string, status: BranchRemoteStatus): 
   if (!status.detail) return;
   log.debug("git remote-state %s for %s#%s: %s", status.state, projectPath, status.branch, status.detail);
 }
+
+/** Omitted `projectIds` means the most recently active projects in this
+ *  machine's catalog — the add-machine dialog fills one dropdown from all of
+ *  them (§7.5), so asking per project would be N round trips for one card. Both
+ *  paths are held to the same bound: the catalog never shrinks, so "all of them"
+ *  has to cost the same as an explicit list. */
+const CapabilityCardParams = z.object({
+  projectIds: z.array(z.string()).max(MAX_CAPABILITY_CARD_PROJECTS).optional(),
+});
 
 const GitCheckoutParams = z.object({
   projectId: z.string(),
@@ -692,6 +706,12 @@ export class HostServer {
           .catch((err) => log.warn("git.remote-state handler threw: %s", err));
         return;
       }
+      if (msg.method === "machine.capability-card") {
+        void this.handleCapabilityCardRpc(msg)
+          .then((res) => bus.publish(res, channel))
+          .catch((err) => log.warn("machine.capability-card handler threw: %s", err));
+        return;
+      }
       if (msg.method === "git.checkout") {
         void this.handleGitCheckoutRpc(msg)
           .then((res) => bus.publish(res, channel))
@@ -894,6 +914,49 @@ export class HostServer {
       });
     }
     return createMessage("response", { requestId: req.requestId, ok: true, result: { deleted } });
+  }
+
+  /** The Capability Card (§3.3): OS plus one repo entry per project. It reads
+   *  the seen-projects catalog rather than a warm core, so it answers for COLD
+   *  projects — which is what "the card exists before any agent runs" means. An
+   *  id the catalog does not hold is OMITTED from `projects` rather than failing
+   *  the request: the dialog asks about a catalog it was advertised, and one
+   *  stale id must not blank the card for every other project. */
+  async handleCapabilityCardRpc(req: RpcRequest): Promise<AbMessage> {
+    const parsed = CapabilityCardParams.safeParse(req.params ?? {});
+    if (!parsed.success) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "E_BAD_PARAMS", message: parsed.error.issues.map((i) => i.message).join("; ") },
+      });
+    }
+    const { projectIds } = parsed.data;
+    if (projectIds?.some((id) => !isSafeProjectId(id))) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "E_BAD_PARAMS", message: "invalid projectId" },
+      });
+    }
+    if (!this.remoteAccessPolicy.isEnabled()) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" },
+      });
+    }
+    const targets: CapabilityCardTarget[] = [];
+    for (const projectId of projectIds ?? this.recentSeenProjectIds()) {
+      const seen = this.seenProjects.get(projectId);
+      if (!seen?.path) continue;
+      targets.push({ projectId, path: seen.path, label: seen.label });
+    }
+    return createMessage("response", {
+      requestId: req.requestId,
+      ok: true,
+      result: await readCapabilityCard(targets),
+    });
   }
 
   async handleGitBranchesRpc(req: RpcRequest): Promise<AbMessage> {
@@ -1982,6 +2045,18 @@ export class HostServer {
   }
 
   private tick(): number { return ++this.nowCounter; }
+
+  /** The catalog ids one whole-machine card answers for: most recently active
+   *  first, capped. `seenProjects` is insertion-ordered and only ever grows (a
+   *  prune drops an id only once its path is gone), so taking it raw would spend
+   *  a bounded probe budget on the projects touched longest ago — and would
+   *  spend one probe per project the install has ever opened. */
+  private recentSeenProjectIds(): string[] {
+    return [...this.seenProjects.entries()]
+      .sort((a, b) => (b[1].lastActiveAt ?? "").localeCompare(a[1].lastActiveAt ?? ""))
+      .slice(0, MAX_CAPABILITY_CARD_PROJECTS)
+      .map(([id]) => id);
+  }
 
   /** Stamp `lastActiveAt` for an already-seen project and persist. Called by
    *  BOTH the warm-reopen branch of open() and (via the set+flush in) startCore,

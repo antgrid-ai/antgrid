@@ -7,6 +7,7 @@ import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./stream-m
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
 import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnStart, userReply, type WorkStatusState } from "./work-status";
+import { renderBrief } from "./session-bus/delivery";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
@@ -350,6 +351,10 @@ export class ProjectCore {
       // Handler never pays a context assemble plus a judge spawn for a nudge on
       // a turn that already finished.
       isStaleIdleNudge: (id) => isStaleIdleNudge(this._work, id),
+      // The core holds a peer's brief until something can wrap it (spec 5.2);
+      // this is that something, and every production core gets it so a held
+      // brief is never a missing dependency.
+      renderBriefInstruction: renderBrief,
       relayUrl: this.deps.relayUrl,
     });
     this.core = core;

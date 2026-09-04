@@ -1010,7 +1010,14 @@ export class HandlerEngine {
    * from their own words — "clear out the build dir" reads as a chore and is also
    * a session-long permission — so it is recorded here rather than left implicit.
    */
-  instruct(p: { terminalId: string; text: string }): GrantSummary | null {
+  /** Whether this terminal has an armed Handler. `instruct` answers `null` both
+   *  for "no armed session" and for "nothing was granted", so a caller that must
+   *  know its instruction actually landed asks first. */
+  isArmed(terminalId: string): boolean {
+    return this.sessions.has(terminalId);
+  }
+
+  instruct(p: { terminalId: string; text: string; fallbackText?: string }): GrantSummary | null {
     const s = this.sessions.get(p.terminalId);
     if (!s) {
       log.warn("handler instruct ignored: no armed session for %s", p.terminalId);
@@ -1026,19 +1033,26 @@ export class HandlerEngine {
     if (described) {
       this.record(p.terminalId, "instruction_authorized", described.reason, described.detail);
     }
-    this.queueExtraction(p.terminalId, text);
+    // The authorization scan above reads the whole instruction; the fallback is
+    // only what a failed extraction files as the backlog item, so passing one
+    // widens nothing.
+    this.queueExtraction(p.terminalId, text, { fallbackText: p.fallbackText?.trim() || undefined });
     return granted;
   }
 
   // `onlyIfEmpty` is for the arm-time pass: the goal is extracted once,
   // and the check has to happen at DEQUEUE time, or a goal edited twice while the
   // first spawn was still running would append the sentence in both forms.
-  private queueExtraction(terminalId: string, text: string, opts: { onlyIfEmpty?: boolean } = {}): void {
+  private queueExtraction(
+    terminalId: string,
+    text: string,
+    opts: { onlyIfEmpty?: boolean; fallbackText?: string } = {},
+  ): void {
     void this.enqueue(terminalId, () => this.extractAndAppend(terminalId, text, opts));
   }
 
   private async extractAndAppend(
-    terminalId: string, text: string, opts: { onlyIfEmpty?: boolean },
+    terminalId: string, text: string, opts: { onlyIfEmpty?: boolean; fallbackText?: string },
   ): Promise<void> {
     // Resolved here rather than where the work was queued: the session may have
     // been disarmed, or its judge re-picked, while this waited its turn.
@@ -1053,7 +1067,15 @@ export class HandlerEngine {
     // Held to the bound the extractor's own items are held to. The fallback is
     // the EXPECTED path on a rate-limited account, so an unbounded one would put
     // a whole pasted instruction into every decide prompt from here on.
-    const raw: ExtractedItem[] = [{ ref: "raw", text: text.slice(0, MAX_ITEM_CHARS) }];
+    //
+    // `fallbackText` exists because that slice is a PREFIX: a caller whose text
+    // is a bridge-authored wrapper around the human's words (session-bus
+    // deliveries) would file 400 characters of preamble and none of the mandate.
+    // It names what the item should carry when the judge produced nothing; the
+    // extractor and the authorizer still see the full text.
+    const raw: ExtractedItem[] = [
+      { ref: "raw", text: (opts.fallbackText ?? text).slice(0, MAX_ITEM_CHARS) },
+    ];
 
     let result: ExtractionResult | null = null;
     if (judgeCapable(tool)) {

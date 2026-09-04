@@ -389,4 +389,174 @@ void main() {
     expect(e.forkedFromSessionId, isNull);
     expect(e.toJson().containsKey('forkedFromSessionId'), isFalse);
   });
+
+  group('membership', () {
+    Map<String, dynamic> base() => {
+      'id': 'a',
+      'name': 'n',
+      'createdAt': 1,
+      'lastUsedAt': 1,
+      'archived': false,
+      'running': false,
+    };
+
+    Map<String, dynamic> ref() => {
+      'machineId': 'machine-1',
+      'projectId': 'proj-1',
+      'sessionId': 'sess-1',
+      'machineLabel': 'Studio',
+      'projectLabel': 'antgrid',
+      'sessionName': 'Trace the leak',
+    };
+
+    // The absent case carries the whole compatibility claim: an ordinary
+    // session, every bridge predating the feature and every disk-only source
+    // say nothing about membership, and all three must decode to the entry this
+    // build already produced.
+    test('a session that is nobody\'s member parses exactly as before', () {
+      final e = SessionEntry.fromJson(base());
+      expect(e.members, isEmpty);
+      expect(e.memberOf, isNull);
+      expect(e.toJson().containsKey('members'), isFalse);
+      expect(e.toJson().containsKey('memberOf'), isFalse);
+    });
+
+    test('a lead row parses its members and round-trips them', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'members': [
+          {...ref(), 'role': 'peer', 'joinedAt': 100, 'state': 'active'},
+          {
+            ...ref(),
+            'sessionId': 'sess-2',
+            'role': 'peer',
+            'joinedAt': 200,
+            'state': 'released-delete-refused',
+            'releasedAt': 300,
+            'releaseReason': 'WORKTREE_DIRTY',
+          },
+        ],
+      });
+      expect(e.members, hasLength(2));
+      expect(e.members.first.ref.key, 'machine-1/proj-1/sess-1');
+      expect(e.members.first.ref.machineLabel, 'Studio');
+      expect(e.members.first.isActive, isTrue);
+      expect(e.members.last.isActive, isFalse);
+      expect(e.members.last.releaseReason, 'WORKTREE_DIRTY');
+      expect(SessionEntry.fromJson(e.toJson()), e);
+    });
+
+    test('a peer row parses its lead and round-trips it', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'memberOf': {
+          ...ref(),
+          'role': 'lead',
+          'joinedAt': 100,
+          'state': 'active',
+        },
+      });
+      expect(e.memberOf!.ref.sessionName, 'Trace the leak');
+      expect(e.memberOf!.role, 'lead');
+      expect(e.memberOf!.isOrphaned, isFalse);
+      expect(e.members, isEmpty);
+      expect(SessionEntry.fromJson(e.toJson()), e);
+    });
+
+    test('an orphaned lead is carried, not dropped', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'memberOf': {
+          ...ref(),
+          'joinedAt': 100,
+          'state': 'orphaned',
+          'orphanedAt': 400,
+        },
+      });
+      expect(e.memberOf!.isOrphaned, isTrue);
+      expect(e.memberOf!.orphanedAt, 400);
+      expect(SessionEntry.fromJson(e.toJson()), e);
+    });
+
+    // One member the app cannot address must cost its own entry and nothing
+    // else — the row is a machine the user is working on.
+    test('a malformed member is skipped and the rest of the row survives', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'name': 'kept',
+        'members': [
+          'not a map',
+          {'projectId': 'proj-1', 'sessionId': 'sess-1', 'joinedAt': 1},
+          {...ref(), 'joinedAt': 100},
+        ],
+      });
+      expect(e.name, 'kept');
+      expect(e.members, hasLength(1));
+      expect(e.members.single.ref.sessionId, 'sess-1');
+    });
+
+    test('a memberOf with no addressable ref decodes as no membership', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'memberOf': {'machineId': 'machine-1', 'joinedAt': 1},
+      });
+      expect(e.memberOf, isNull);
+    });
+
+    // The bridge owns both vocabularies and may widen them; a member in a state
+    // this build cannot name is still a member.
+    test('an unrecognised role or state falls back to the default', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'members': [
+          {...ref(), 'role': 'captain', 'joinedAt': 1, 'state': 'suspended'},
+        ],
+        'memberOf': {...ref(), 'joinedAt': 1, 'state': 'estranged'},
+      });
+      expect(e.members.single.role, 'peer');
+      expect(e.members.single.state, 'active');
+      expect(e.memberOf!.state, 'active');
+      expect(e.memberOf!.isOrphaned, isFalse);
+    });
+
+    // This is what makes a membership change observable through SessionsState's
+    // equality and the no-op dedup in _handleUpdated — without it the push is
+    // dropped and the row never gains its member.
+    test('two rows differing only in membership are not equal', () {
+      final plain = SessionEntry.fromJson(base());
+      final led = SessionEntry.fromJson({
+        ...base(),
+        'members': [
+          {...ref(), 'joinedAt': 1},
+        ],
+      });
+      final peer = SessionEntry.fromJson({
+        ...base(),
+        'memberOf': {...ref(), 'joinedAt': 1},
+      });
+      expect(led, isNot(plain));
+      expect(led.hashCode, isNot(plain.hashCode));
+      expect(peer, isNot(plain));
+      expect(peer.hashCode, isNot(plain.hashCode));
+    });
+
+    test('copyWith carries both halves forward and replaces them', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'members': [
+          {...ref(), 'joinedAt': 1},
+        ],
+      });
+      expect(e.copyWith(running: true).members, e.members);
+      const other = SessionMemberOf(
+        ref: SessionMemberRef(
+          machineId: 'machine-2',
+          projectId: 'proj-2',
+          sessionId: 'sess-9',
+        ),
+        joinedAt: 5,
+      );
+      expect(e.copyWith(memberOf: other).memberOf, other);
+    });
+  });
 }

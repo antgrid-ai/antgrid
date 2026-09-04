@@ -29,7 +29,7 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, SessionMemberOrphanWire, SessionMemberRecordWire, SessionMemberReleaseWire, SessionMembershipCreateWire, type AbMessage, type RpcRequest, type SessionEntry, type SessionMemberOf, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, clientKeyOf, type ClientKey, type InboundSource } from "./message-bus";
@@ -38,7 +38,7 @@ import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
 import { detectInstalledTools } from "./tool-detector";
-import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
+import { SessionError, SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -353,6 +353,17 @@ export interface BuildAgentCoreOptions {
    *  antgrid.yaml can learn it from config, so without this a host-spawned
    *  remote core has no relay coordinate to report. */
   relayUrl?: string;
+  /** Render the Handler instruction that carries a peer session's brief. The
+   *  brief is human text from another machine, and spec 5.2 requires every
+   *  delivered line to be a bridge-authored wrapper with the other side's
+   *  content fenced as data — so the core never builds that instruction itself
+   *  and never injects the brief raw. Supplied by the session-bus delivery
+   *  module, which owns the template and its per-kind tests.
+   *
+   *  A core without one HOLDS the brief on disk indefinitely: an undelivered
+   *  brief is a peer waiting for instructions, an unwrapped one is a mandate
+   *  set by unreviewed text. */
+  renderBriefInstruction?: (delivery: { lead: SessionMemberOf; brief: string }) => string;
   /** Test-only release-gate override. Production callers omit this and use the
    * central capability constant. */
   worktreeSessionsSupported?: boolean;
@@ -914,6 +925,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (parsed.success && parsed.data.armed) {
           const { terminalId, goal, backlog, judgeTool, judgeModel, personality } = parsed.data;
           handlerEngine.arm({ terminalId, goal, backlog, judgeTool, judgeModel, personality });
+          // The one moment a held brief can land: a peer session is created
+          // before its agent runs, and instruct() drops silently until the
+          // Handler for that session is armed.
+          flushPendingBrief(terminalId);
         } else if (parsed.success) {
           handlerEngine.disarm(parsed.data.terminalId);
         } else {
@@ -1363,8 +1378,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           break;
         }
         void (async () => {
+          let sessionId: string | undefined;
           try {
-            const s = await sessions.create(msg.name, {
+            // Re-parsed for the same reason handler:configure is: parseMessageFast
+            // validated the discriminator only, so the schema's bounds and its
+            // memberOf/isolation pairing rules have not run — and this brief ends
+            // up inside a Handler instruction on another machine's session.
+            const membership = SessionMembershipCreateWire.safeParse(msg);
+            if (!membership.success) throw new Error("Malformed membership payload.");
+            const created = await sessions.create(msg.name, {
               tool: msg.tool,
               command: msg.command,
               args: msg.args,
@@ -1372,18 +1394,29 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               approvalPolicy: msg.approvalPolicy ?? "default",
               isolation: msg.isolation ?? "shared",
               baseBranch: msg.baseBranch,
+              memberOf: membership.data.memberOf,
+              brief: membership.data.brief,
             });
             sendAb(createMessage("session:result", {
-              requestId: msg.requestId, ok: true, session: s, checkoutId: s.checkoutId,
+              requestId: msg.requestId, ok: true, session: created, checkoutId: created.checkoutId,
             }));
+            sessionId = created.id;
           } catch (err) {
             sendAb(createMessage("session:result", {
               requestId: msg.requestId,
               ok: false,
               error: err instanceof Error ? err.message : "Could not create the session.",
-              ...(err instanceof WorktreeError ? { errorCode: err.code } : {}),
+              ...(err instanceof WorktreeError || err instanceof SessionError ? { errorCode: err.code } : {}),
             }));
           }
+          // Strictly outside the try: this session is created, persisted and
+          // already acknowledged, so a failure in the delivery below must not
+          // author a second session:result for a requestId the app has answered
+          // — a carrier reading that as a failed create retries and ends up with
+          // two peer sessions. The brief only reaches an armed Handler anyway,
+          // which a session whose agent has not started does not have, so this
+          // is usually a no-op that keeps the ordering honest when it is not.
+          if (sessionId) flushPendingBrief(sessionId);
         })();
         break;
       }
@@ -1417,6 +1450,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "session:unarchive":
       case "session:delete":
       case "session:set-mode":
+      case "session:member-record":
+      case "session:member-release":
+      case "session:member-orphan":
       case "session:setup": {
         // Bound to consts so the switch's narrowing and the not-null check below
         // survive into the async closure.
@@ -1448,6 +1484,29 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             });
             else if (verb.type === "session:set-mode") await s.setMode(verb.sessionId, verb.mode);
             else if (verb.type === "session:setup") await s.applySetupAction(verb.sessionId, verb.action);
+            // The three membership verbs re-parse before they touch the store:
+            // parseMessageFast checked the discriminator only, and these carry
+            // another machine's labels straight onto a persisted row and into a
+            // rendered card. A rejection is an ordinary failed result — there is
+            // no live state here for a malformed frame to tear down.
+            else if (verb.type === "session:member-record") {
+              const parsed = SessionMemberRecordWire.safeParse(verb);
+              if (!parsed.success) throw new Error("Malformed member payload.");
+              await s.recordMember(parsed.data.sessionId, parsed.data.member, parsed.data.role);
+            }
+            else if (verb.type === "session:member-release") {
+              const parsed = SessionMemberReleaseWire.safeParse(verb);
+              if (!parsed.success) throw new Error("Malformed member payload.");
+              await s.releaseMember(parsed.data.sessionId, parsed.data.member, {
+                deleteRefused: parsed.data.deleteRefused,
+                reason: parsed.data.reason,
+              });
+            }
+            else if (verb.type === "session:member-orphan") {
+              const parsed = SessionMemberOrphanWire.safeParse(verb);
+              if (!parsed.success) throw new Error("Malformed member payload.");
+              await s.setMemberOfOrphaned(parsed.data.sessionId, parsed.data.orphaned);
+            }
             const entry = s.get(verb.sessionId);
             sendAb(createMessage("session:result", {
               requestId: verb.requestId, ok: true, session: entry, checkoutId,
@@ -1457,7 +1516,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               requestId: verb.requestId,
               ok: false,
               error: err instanceof Error ? err.message : "Session operation failed.",
-              ...(err instanceof WorktreeError ? { errorCode: err.code } : {}),
+              ...(err instanceof WorktreeError || err instanceof SessionError ? { errorCode: err.code } : {}),
               checkoutId,
             }));
           }
@@ -1729,6 +1788,50 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       notificationType: "task_complete", message, sessionId: terminalId, projectId: project.id,
     })),
   });
+
+  /** Deliver a peer session's held brief, if one is held AND its Handler is
+   *  armed to receive it. Called at the two moments either can become true; a
+   *  no-op every other time, and safe to call again after a crash because the
+   *  brief is cleared only once it has been handed over.
+   *
+   *  Deliberately fire-and-forget past the instruct: nothing on the wire is
+   *  waiting, and the create reply has already gone. */
+  function flushPendingBrief(sessionId: string): void {
+    const s = sessions;
+    if (!s) return;
+    const brief = s.pendingBriefFor(sessionId);
+    if (!brief) return;
+    const lead = s.memberOfFor(sessionId);
+    if (!lead) return;
+    // Held, not dropped, when either is missing: an unarmed Handler is the
+    // normal state between create and start, and a core with no renderer is a
+    // build whose delivery module was never wired — neither is a reason to
+    // discard the only instruction this peer was given.
+    if (!handlerEngine.isArmed(sessionId)) return;
+    const render = opts.renderBriefInstruction;
+    if (!render) {
+      log.warn("brief held for session %s: no delivery renderer wired", sessionId);
+      return;
+    }
+    try {
+      // `fallbackText` is the human's brief unwrapped. When extraction produces
+      // nothing — no judge-capable tool, or a rate-limited spawn — the Handler
+      // files the instruction as one raw item truncated to its first few hundred
+      // characters, which for a wrapped delivery is all preamble and no mandate.
+      // Authorization still reads the rendered text, so this widens nothing.
+      handlerEngine.instruct({ terminalId: sessionId, text: render({ lead, brief }), fallbackText: brief });
+    } catch (err) {
+      // Held rather than lost: the brief is still on disk, so the next arm
+      // retries it.
+      log.warn("could not deliver brief for session %s: %s", sessionId, err);
+      return;
+    }
+    // Strictly after: a crash here costs a repeated instruction with identical
+    // text, which the peer can absorb. Clearing first costs the brief outright.
+    void s.clearPendingBrief(sessionId).catch((err) => {
+      log.warn("could not clear delivered brief for session %s: %s", sessionId, err);
+    });
+  }
 
   /** Provisions a freshly cut worktree — copies the untracked files a `git
    *  worktree add` cannot bring and runs the project's install steps — before

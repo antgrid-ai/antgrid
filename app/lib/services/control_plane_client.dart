@@ -108,6 +108,96 @@ List<AgentDescriptor> parseAgentDescriptors(Object? raw) {
   return out;
 }
 
+/// What a machine can host, as it describes itself — the OS it runs and one
+/// repo entry per project in its catalog.
+///
+/// Read over the `machine.capability-card` RPC rather than off the
+/// `agent:projects` advert: the repo half costs two git spawns per project, and
+/// the advert is a broadcast rebuilt on every catalog change for every attached
+/// app. One request answers for the whole catalog, which is what matching a
+/// repo across machines needs — a per-project verb would be N round trips to
+/// fill one dropdown.
+///
+/// A bridge predating the verb answers `UNKNOWN_VERB`, so every caller must
+/// render "no card" rather than refusing to continue without one.
+class CapabilityCard {
+  final OsCard os;
+
+  /// Keyed by `projectId`. A project the machine does not advertise is omitted
+  /// rather than reported empty, so one stale id cannot blank the rest.
+  final Map<String, RepoCard> projects;
+
+  const CapabilityCard({required this.os, this.projects = const {}});
+
+  static CapabilityCard? fromJson(Map<String, dynamic> json) {
+    final os = json['os'];
+    if (os is! Map) return null;
+    final card = OsCard.fromJson(os.cast<String, dynamic>());
+    if (card == null) return null;
+    final projects = <String, RepoCard>{};
+    final raw = json['projects'];
+    if (raw is Map) {
+      for (final e in raw.entries) {
+        final id = e.key;
+        final value = e.value;
+        if (id is! String || value is! Map) continue;
+        projects[id] = RepoCard.fromJson(value.cast<String, dynamic>());
+      }
+    }
+    return CapabilityCard(os: card, projects: projects);
+  }
+}
+
+/// The machine's operating system, as `node:os` reports it on the bridge.
+/// [version] is the OS build where the platform exposes one and the kernel
+/// release otherwise, so it is a string to show, never one to compare across
+/// platforms.
+class OsCard {
+  final String name;
+  final String version;
+  final String arch;
+
+  const OsCard({required this.name, required this.version, required this.arch});
+
+  static OsCard? fromJson(Map<String, dynamic> json) {
+    final name = json['name'];
+    final version = json['version'];
+    final arch = json['arch'];
+    if (name is! String || version is! String || arch is! String) return null;
+    return OsCard(name: name, version: version, arch: arch);
+  }
+}
+
+/// One project's repository, as the card reports it.
+///
+/// [remote] is the bridge's NORMALISED `origin` — scheme-less, credential-free
+/// `host/path`. It is a matching key for "the same repo on another machine" and
+/// nothing else: never an authorization input, and never a URL to dial. Null
+/// when the project has no `origin`, is not a repo, or has only a filesystem
+/// remote, which cannot identify a repo on a different machine.
+///
+/// [branch] is read fresh on every card, so it is current as of the answer;
+/// null on a detached HEAD or a non-repo.
+class RepoCard {
+  final String? label;
+  final String? remote;
+  final String? branch;
+
+  const RepoCard({this.label, this.remote, this.branch});
+
+  /// Every field is optional and every non-string degrades to null: a card is
+  /// display metadata, so a field this build cannot read costs that field and
+  /// never the project entry.
+  static RepoCard fromJson(Map<String, dynamic> json) {
+    String? str(Object? v) => v is String ? v : null;
+    return RepoCard(
+      label: str(json['label']),
+      remote: str(json['remote']),
+      branch: str(json['branch']),
+    );
+  }
+}
+
 /// An installed tool advertised by the agent over the control plane. Mirrors the
 /// bridge `agent:tools` entry (`{ tool, path, chatCapable?, label? }`). Both
 /// optional fields are null when talking to an older bridge that predates them —
@@ -453,6 +543,30 @@ class ControlPlaneClient {
       timeout: kSessionDeleteAckTimeout,
     );
     return res['deleted'] == true;
+  }
+
+  /// Read the machine's Capability Card — its OS plus one repo entry per
+  /// project. Omitting [projectIds] asks about every project the machine has
+  /// seen; ids it does not know are left out of the answer rather than
+  /// refused.
+  ///
+  /// Answers for COLD projects, which is the whole point: the card has to exist
+  /// before any agent runs on the machine. Lets an [RpcException] propagate —
+  /// `UNKNOWN_VERB` from a bridge predating the card is the case a caller must
+  /// degrade around rather than treat as a failure.
+  Future<CapabilityCard> capabilityCard({List<String>? projectIds}) async {
+    final res = await transport.request(
+      'machine.capability-card',
+      params: {'projectIds': ?projectIds},
+    );
+    final card = CapabilityCard.fromJson(res);
+    if (card == null) {
+      throw RpcException(
+        'BAD_RESPONSE',
+        'malformed machine.capability-card response',
+      );
+    }
+    return card;
   }
 
   Future<GitBranchCatalog> gitBranches({required String projectId}) async {

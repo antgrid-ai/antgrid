@@ -3370,6 +3370,34 @@ describe("instruct (extraction)", () => {
     expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["ship it"]);
   });
 
+  it("the fallback files fallbackText, not the head of the instruction", async () => {
+    const { engine, sent } = makeEngine({ runExtractionFn: async () => null });
+    engine.arm({ terminalId: "t1" });
+    // A session-bus delivery is a bridge-authored wrapper around the human's
+    // words, and its preamble alone is longer than the fallback's cut — so the
+    // cut, which is a prefix, would file boilerplate and none of the mandate.
+    const wrapper = "[antgrid session bus] provenance and instructions. ".repeat(12);
+    expect(wrapper.length).toBeGreaterThan(MAX_ITEM_CHARS);
+    engine.instruct({
+      terminalId: "t1",
+      text: `${wrapper}"own the backend"`,
+      fallbackText: "own the backend",
+    });
+    await settle();
+    expect(statusOf(sent).backlog.map((i) => i.text)).toEqual(["own the backend"]);
+  });
+
+  it("the full instruction, not fallbackText, is what extraction and the lift scan read", async () => {
+    const seen: string[] = [];
+    const { engine } = makeEngine({
+      runExtractionFn: async (o: { text: string }) => { seen.push(o.text); return { items: [], amend: [] }; },
+    });
+    engine.arm({ terminalId: "t1" });
+    engine.instruct({ terminalId: "t1", text: "wrapper says: ship it", fallbackText: "ship it" });
+    await settle();
+    expect(seen).toEqual(["wrapper says: ship it"]);
+  });
+
   it("extraction returning nothing at all falls back rather than appending an empty batch", async () => {
     // An empty backlog is never terminal, so an instruct that appended nothing
     // would leave the user's sentence with no trace anywhere.
