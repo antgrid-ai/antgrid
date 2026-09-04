@@ -2025,9 +2025,13 @@ export class SessionManager {
       base = resolved.bin;
       baseArgs = resolved.args;
       launchEnv = resolveAgentEnv(entry.tool, this.opts.storeDir);
-      // Per-spawn integration that lets the agent report its conversation title
-      // for auto-naming. Additive flags/env only; fail-open inside the augmenter.
-      const aug = augmentAgentLaunch(entry.tool, this.opts.storeDir, this.opts.cursorDir);
+      // Per-spawn integration: the callback channel the agent reports its
+      // conversation title over, and the Antgrid MCP server it gets its tools
+      // from. Additive flags/env only; fail-open inside the augmenter.
+      const aug = augmentAgentLaunch(entry.tool, {
+        abDir: this.opts.storeDir,
+        cursorDir: this.opts.cursorDir,
+      });
       baseArgs = [...baseArgs, ...aug.args];
       baseArgs = [...baseArgs, ...resolveApprovalPolicy(entry.tool, "terminal", entry.approvalPolicy)];
       launchEnv = { ...launchEnv, ...aug.env };
@@ -2049,7 +2053,10 @@ export class SessionManager {
       // The antgrid.yaml default spec gets per-spawn hooks + resume only for
       // agents whose augmenter needs it; other default agents launch bare.
       if (agentSpec(sessionAgentSpec.name)?.augmentsDefaultSpec) {
-        const aug = augmentAgentLaunch(sessionAgentSpec.name, this.opts.storeDir, this.opts.cursorDir);
+        const aug = augmentAgentLaunch(sessionAgentSpec.name, {
+          abDir: this.opts.storeDir,
+          cursorDir: this.opts.cursorDir,
+        });
         baseArgs = [...baseArgs, ...aug.args];
         launchEnv = { ...launchEnv, ...aug.env };
         notificationsInjected = aug.notificationsInjected;

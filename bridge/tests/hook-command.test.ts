@@ -11,6 +11,8 @@ import { join } from "node:path";
 import {
   hookArgv,
   hookShellCommand,
+  mcpArgv,
+  resolveBridgeCommand,
   resolveHookCommand,
 } from "../src/hook-command";
 
@@ -40,6 +42,41 @@ describe("resolveHookCommand", () => {
       preargs: ["C:\\repo path\\bridge\\src\\index.ts", "hook"],
     });
   });
+});
+
+describe("resolveBridgeCommand for the mcp subcommand", () => {
+  test("packaged bridge invokes its own mcp subcommand", () => {
+    expect(
+      resolveBridgeCommand("mcp", {
+        compiled: true,
+        binary: "/Applications/Antgrid App/antgrid-bridge",
+        entrypoint: "/repo/bridge/src/index.ts",
+      }),
+    ).toEqual({
+      binary: "/Applications/Antgrid App/antgrid-bridge",
+      preargs: ["mcp"],
+    });
+  });
+
+  test("development bridge re-enters the source entrypoint through Bun", () => {
+    expect(
+      resolveBridgeCommand("mcp", {
+        compiled: false,
+        binary: "C:\\Users\\O'Brien\\.bun\\bin\\bun.exe",
+        entrypoint: "C:\\repo path\\bridge\\src\\index.ts",
+      }),
+    ).toEqual({
+      binary: "C:\\Users\\O'Brien\\.bun\\bin\\bun.exe",
+      preargs: ["C:\\repo path\\bridge\\src\\index.ts", "mcp"],
+    });
+  });
+});
+
+test("mcpArgv adds nothing to the resolved command", () => {
+  expect(mcpArgv({ binary: "/opt/antgrid bridge", preargs: ["mcp"] })).toEqual([
+    "/opt/antgrid bridge",
+    "mcp",
+  ]);
 });
 
 test("hookArgv appends the agent and event", () => {

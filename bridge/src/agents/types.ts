@@ -3,7 +3,7 @@
 // import cycles through `tool-detector` back into this directory and leaves
 // the spec table below reading a constant still in its temporal dead zone.
 
-import type { HookCommand } from "../hook-command";
+import type { BridgeCommand, HookCommand } from "../hook-command";
 import type { HookInvocation, HookPath, HookPost } from "./hook-posts";
 import type { AbMessage } from "../protocol";
 import type { StructuredDriver } from "../structured/structured-manager";
@@ -110,6 +110,30 @@ export interface HookInjectCtx {
    *  writes into. Test seam, same role as `cursorDir`. */
   geminiConfigDir?: string;
   hookCommand: HookCommand;
+}
+
+/** Inputs to an MCP profile's `inject`, one per spawn. `mcpCommand` is the
+ *  rendered `bridge mcp` invocation to bake into the agent's own MCP config; it
+ *  is passed in for the same reason `HookInjectCtx.hookCommand` is — one spawn
+ *  must not be able to mix a compiled and a dev-mode self-invocation, and the
+ *  augmenter derives both from a single decision.
+ *
+ *  Deliberately carries no `apiPort` or `terminalId`: the server resolves its
+ *  own session from `ANTGRID_API_PORT`/`ANTGRID_TERMINAL_ID` in the environment
+ *  it is spawned with, which every PTY already stamps and the agent passes down
+ *  — so one injected entry serves every terminal on the machine, and the
+ *  augmenter needs values it does not have at injection time. */
+export interface McpInjectCtx {
+  abDir: string;
+  mcpCommand: BridgeCommand;
+}
+
+export interface McpProfile {
+  /** Points this agent at the bridge's own MCP server for one spawn: the argv
+   *  it needs plus whatever config file has to exist on disk first. Same
+   *  fail-open contract as `HookProfile.inject` — a throw costs the tools, never
+   *  the spawn. */
+  inject: (ctx: McpInjectCtx) => LaunchAugmentation;
 }
 
 /**
@@ -494,6 +518,23 @@ export interface AgentSpec {
    *  Absent = the agent ships no self-updater (github-copilot is IDE-bound). */
   update?: AgentUpdate;
   hooks?: HookProfile;
+  /**
+   * Points this agent at the Antgrid MCP server for every spawn the bridge
+   * starts, so a bridge-started session has the tools with no `antgrid setup`
+   * ever run on the machine.
+   *
+   * Absent = this agent gets no MCP server, and that is the honest answer
+   * rather than a default. The mechanism is per-agent (claude takes
+   * `--mcp-config`, codex takes `-c mcp_servers.*`), and for the agents that
+   * expose no per-spawn flag the only carrier is a MACHINE-GLOBAL config — a
+   * far heavier reach than the equivalent hook, because an unrelated run of
+   * that agent would then hold a live `antgrid_run_command` against whichever
+   * core started last, with no missing-env no-op to defuse it the way an absent
+   * `HookProfile.portFileFallback` defuses cursor-agent's global hooks. Add an
+   * entry only after measuring the agent's own MCP config against a real
+   * binary.
+   */
+  mcp?: McpProfile;
   /**
    * Reads the notification body for this agent's `/notify` posts out of the
    * transcript path the post carried. Absent = the agent carries its final

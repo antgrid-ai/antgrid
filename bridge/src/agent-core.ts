@@ -161,7 +161,7 @@ export function buildChatSpawnAugment(
   apiPort: number | null,
   abDir?: string,
 ): { args: string[]; env: Record<string, string> } {
-  const aug = augmentAgentLaunch(tool, abDir);
+  const aug = augmentAgentLaunch(tool, { abDir });
   return {
     args: aug.args,
     env: {
@@ -3474,6 +3474,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     manager: () => manager,
     config: () => config,
     project: () => project,
+    // Checkout-scoped routing for the loopback callers: the MCP server names
+    // the slot it was spawned in, and `terminalOwner` is the same lookup the
+    // message plane routes terminal frames by, so a tool call resolves against
+    // the session's own tree rather than main's.
+    checkoutFor: (terminalId) => {
+      const runtime = terminalId ? terminalOwner(terminalId).runtime : mainRuntime;
+      return { id: runtime.checkout.id, path: runtime.checkout.path, config: runtime.config };
+    },
     sendAb: (msg) => sendNotifying(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
     onHandlerEvent: (body) => {

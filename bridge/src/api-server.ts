@@ -11,11 +11,27 @@ import type { TerminalManager } from "./terminal-manager";
 import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
 
+/** The tree one caller of this API works in: its own `antgrid.yaml`, and the
+ *  filesystem root a command it names must run against. */
+export interface CallerCheckout {
+  id: string;
+  path: string;
+  config: AbConfig;
+}
+
 export interface AgentContext {
   manager: () => TerminalManager | null;
   config: () => AbConfig;
   project: () => ProjectInfo;
   sendAb: (msg: AbMessage) => void;
+  /** Which checkout a caller's terminal actually runs in. This API is per CORE,
+   *  so an isolated session's agent reaches it on the same port main's does and
+   *  the slot it was spawned with (`ANTGRID_TERMINAL_ID`, forwarded into the MCP
+   *  server's environment) is the only thing that says which tree is its own —
+   *  checkout-scoped routing one level below the message plane. Wired in
+   *  buildAgentCore; absent, or an id no terminal claims, is the project's own
+   *  checkout, which is also what a terminal-less caller gets. */
+  checkoutFor?: (terminalId?: string) => CallerCheckout;
   /** Current session name for a slot id, for the notification title. Wired in
    *  buildAgentCore to SessionManager.get(); undefined for service PTYs. */
   sessionName?: (terminalId: string) => string | undefined;
@@ -129,6 +145,16 @@ const NOTIFY_DEDUP_WINDOW_MS = 5_000;
 
 export function startApiServer(ctx: AgentContext): ApiServerHandle {
   const recentNotifies = new Map<string, number>();
+
+  /** The checkout the caller of this request works in. A caller names itself
+   *  with `?terminalId=`; anything else is answered out of the project's own
+   *  checkout, which is what every pre-checkout caller already got. */
+  function callerCheckout(url: URL): CallerCheckout {
+    const terminalId = url.searchParams.get("terminalId") ?? undefined;
+    return ctx.checkoutFor?.(terminalId)
+      ?? { id: "main", path: ctx.project().path, config: ctx.config() };
+  }
+
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -141,7 +167,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
       }
 
       if (req.method === "GET" && path === "/config") {
-        const config = ctx.config();
+        const config = callerCheckout(url).config;
         return json({
           commands: config.commands ?? [],
           services: config.services ?? [],
@@ -154,9 +180,17 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (!mgr) return json({ error: "Agent not ready" }, 503);
 
         const all = url.searchParams.get("all") === "true";
+        const caller = callerCheckout(url);
         let terminals = mgr.getStatus();
         if (!all) {
           terminals = terminals.filter((t) => t.type !== "agent");
+        }
+        // A core runs the terminals of every checkout under it, so a caller
+        // inside an isolated session must see its own and no one else's — the
+        // scrollback of another session's agent is not context, it is someone
+        // else's conversation.
+        if (ctx.checkoutFor) {
+          terminals = terminals.filter((t) => ctx.checkoutFor!(t.terminalId).id === caller.id);
         }
         return json(terminals);
       }
@@ -168,6 +202,11 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (!mgr) return json({ error: "Agent not ready" }, 503);
 
         const terminalId = decodeURIComponent(scrollbackMatch[1]);
+        // Same answer as a terminal that does not exist, deliberately: a caller
+        // in another checkout must not learn this one is there.
+        if (ctx.checkoutFor && ctx.checkoutFor(terminalId).id !== callerCheckout(url).id) {
+          return json({ error: "Terminal not found" }, 404);
+        }
         const snap = mgr.getScrollback(terminalId);
         if (snap === null) {
           return json({ error: "Terminal not found" }, 404);
@@ -179,10 +218,14 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         const cmdMatch = path.match(/^\/commands\/([^/]+)\/run$/);
         if (!cmdMatch) return json({ error: "Not found" }, 404);
         const commandName = decodeURIComponent(cmdMatch[1]);
-        const config = ctx.config();
+        // Both the definition and the tree it runs in come from the CALLER's
+        // checkout: an isolated session's agent running `build` against main's
+        // working tree builds another session's uncommitted work and reads the
+        // result as its own.
+        const caller = callerCheckout(url);
         const project = ctx.project();
 
-        const cmdConfig = config.commands?.find((c) => c.name === commandName);
+        const cmdConfig = caller.config.commands?.find((c) => c.name === commandName);
         if (!cmdConfig) {
           return json({ error: `Unknown command: ${commandName}` }, 404);
         }
@@ -200,7 +243,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
 
         const args = cmdConfig.args ?? [];
-        const cwd = cmdConfig.workingDir ?? project.path;
+        const cwd = cmdConfig.workingDir ?? caller.path;
         const env = cmdConfig.env ? { ...process.env, ...cmdConfig.env } : undefined;
 
         try {
@@ -224,6 +267,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
               }
               ctx.sendAb(createMessage("command:output", {
                 projectId: project.id,
+                checkoutId: caller.id,
                 commandName,
                 data: text,
               }));
@@ -243,6 +287,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
 
           ctx.sendAb(createMessage("command:done", {
             projectId: project.id,
+            checkoutId: caller.id,
             commandName,
             exitCode,
           }));
