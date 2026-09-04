@@ -1979,7 +1979,7 @@ const AgentUpdateAvailableMessage = BaseMessage.extend({
 // App -> agent: run the agent CLI's in-app self-update (codex/claude `update`,
 // opencode `upgrade` — see each agent's `update` in agents/registry.ts). A project verb
 // — gated by the same pairing + allowlist chokepoint as every other inbound
-// message (see currentPhoneAllowed() in agent-core). The update is machine-
+// message (see remoteFrameAllowed() in agent-core). The update is machine-
 // global, so the bridge quiesces every live chat session of that tool, updates
 // once, then restarts them. `sessionId` is the chat session that raised the
 // notice (routing context for the result). A `tool` with no known self-updater

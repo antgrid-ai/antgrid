@@ -33,12 +33,18 @@ describe("RelayClient rate-limit diagnostics", () => {
       getLicenseToken: () => "token",
       onError: (code, message) => surfaced.push({ code, message }),
     });
-    (c as any)._peerId = "phone-1";
-    (c as any).established = {
+    (c as any).sessions.set("phone-1", {
       attemptId: "a1",
       transport: { seal: (plaintext: string) => Buffer.from(plaintext, "utf8") },
       sessionKeys: { a2p: Buffer.alloc(32), p2a: Buffer.alloc(32), confirm: Buffer.alloc(32) },
-    };
+      peerId: "phone-1",
+      checkoutRouting: false,
+      reachable: true,
+      unreachableSince: 0,
+      lastSealedRecvAt: Date.now(),
+      missedPongs: 0,
+      frag: { accept: () => false, dispose: () => {} },
+    });
     (c as any).ws = {
       readyState: WebSocket.OPEN,
       send: () => {},
@@ -104,7 +110,7 @@ describe("RelayClient rate-limit diagnostics", () => {
 
     const log = logLines()[0];
     expect(log).toContain("device=dev-1");
-    expect(log).toContain("peer=phone-1");
+    expect(log).toContain("peers=phone-1");
     expect(log).toContain("total=4 frame(s)");
     expect(log).toContain("agent:item-added/control=3 frame(s)");
     expect(log).toContain("agent:turn-start/control=1 frame(s)");

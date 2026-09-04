@@ -320,21 +320,29 @@ live socket) on any of: missed sealed pongs (§8.5), a run of consecutive RPC
 timeouts while established, or peer-online following a peer-offline. Owned by
 `MachineSession`.
 
-### 8.4 Cross-device takeover (break-then-make)
+### 8.4 Rekey and capacity
 
-A signature-verified `client-hello` from a **different** peer is not a rekey —
-it displaces the live session outright (one active phone per machine). The
-signature is proof of the new phone's identity, so the agent does not wait for
-liveness to discover the old session is obsolete: it sends a sealed
-`session-takeover` to the displaced phone *on that phone's still-live keys*,
-then tears the session down and proceeds with the new attempt.
+An agent holds **one session per app device**, keyed by the route address, over
+the one socket. A signature-verified `client-hello` from a peer that already
+holds a session is the make-before-break rekey of §8.3. A `client-hello` from a
+**different** peer is admitted **alongside** it: a phone and a desktop app drive
+the same machine at once, and neither displaces the other.
 
-The notice is best-effort (the displaced device may already be gone) but not
-optional: without it the loser only learns via liveness timeout and rekeys
-straight back, producing a two-device ping-pong. On the phone, `session-takeover`
-is **report-only** — `MachineSession` tears down and emits on `takeoverEvents`,
-and nothing re-establishes automatically, because two devices each reclaiming on
-takeover would evict each other forever. Re-establishing is a user action.
+Sessions are bounded (`MAX_APP_SESSIONS`), and a session whose device the relay
+reports offline keeps its keys — push and a returning device both need them —
+until an unreachable TTL reaps it (`UNREACHABLE_SESSION_TTL_MS`). Admitting a
+device at capacity therefore evicts: half-open attempts first, then the
+reachable session silent longest.
+
+`session-takeover` stays on the wire and is sent on exactly that eviction, and
+only to a **reachable** evictee — sealed on that device's still-live keys,
+before its teardown. A notice to a device the relay says is offline would be
+opened on its reconnect and read as a demand to rekey straight back into the
+same eviction. The notice is best-effort but not optional: without it the
+evictee learns only via liveness timeout and rekeys back, producing a ping-pong.
+On the phone it is **report-only** — `MachineSession` tears down and emits on
+`takeoverEvents`, and nothing re-establishes automatically. Re-establishing is a
+user action.
 
 ### 8.5 Sealed liveness
 
@@ -361,16 +369,17 @@ persisted to disk, logs, or closures. `ss` is zeroized immediately after
 
 | Trigger | Path |
 |---|---|
-| Socket loss / client teardown | `resetE2eState` |
+| Socket loss / client teardown | `resetE2eState` — every session and attempt |
 | Rekey confirmed | swap, then zeroize the superseded set |
-| Cross-device takeover | `tearDownEstablished` after the notice |
+| Capacity eviction | `dropSession` after the notice; `tearDownPending` for a half-open evictee |
 | Half-open attempt expiry | `tearDownPending` — candidate keys only |
-| E2E declared dead (missed pongs) | `tearDownEstablished` |
+| E2E declared dead (missed pongs) | `dropSession` |
+| Unreachable past the TTL | `dropSession` (swept) |
 
 All of these live in `bridge/src/relay-client.ts`; it is the only owner of E2E
 key material on the agent side. Note what is **not** on this list: evicting a
-warm project core detaches a stream, it does not touch session keys — there is
-one key set per machine socket, not one per project.
+warm project core detaches a stream, it does not touch session keys — key sets
+are per attached DEVICE on the one machine socket, never per project.
 
 Zeroization is best-effort in GC languages; the explicit `fill(0)` /
 `fillRange(0, …, 0)` calls prevent the values from lingering in reachable memory

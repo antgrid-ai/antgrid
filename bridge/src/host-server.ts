@@ -280,8 +280,8 @@ export class HostServer {
     const client = this.controlPlaneRelay;
     const bus = this.controlPlaneBus;
     if (!client || !bus) return;
-    // No authenticated peer → nothing to tell; the next handshake advertises.
-    if (!client.currentPeerPubkey()) return;
+    // No established session → nobody to tell; the next handshake advertises.
+    if (!client.hasEstablishedSession()) return;
     this.sendProjectsAdvertisement(bus);
     this.sendToolsAdvertisement(bus);
   }
@@ -290,10 +290,11 @@ export class HostServer {
    *  the exact re-advertise the file-watch callback runs. Lets the
    *  policy/catalog-change → re-advertise path be verified without standing up a
    *  live relay (the fake relay URL never connects, so no real peer exists). */
-  readvertiseForTest(bus: MessageBus, peerPubkey: string): void {
+  readvertiseForTest(bus: MessageBus): void {
     this.controlPlaneBus = bus;
     this.controlPlaneRelay = {
-      currentPeerPubkey: () => peerPubkey,
+      hasEstablishedSession: () => true,
+      anySessionSupportsCheckoutRouting: () => false,
       close: () => {},
     } as unknown as RelayClient;
     this.readvertiseToControlPlane();
@@ -399,16 +400,16 @@ export class HostServer {
         this.sendToolsAdvertisement(bus);
       },
       // A bridge-side reconnect to the RELAY (heartbeat lapse, network blip on
-      // this machine — NOT the phone dropping) clears `_peerId` for the gap and
-      // restores it here on `peer-online`, with NO fresh E2E handshake in
+      // this machine — NOT the phone dropping) marks the sessions unreachable
+      // for the gap; `peer-online` revives them with NO fresh E2E handshake in
       // between (the phone never saw a disconnect, so it never re-sends
       // client-hello — see relay-client.ts's post-establishment lockout). Any
       // `readvertiseToControlPlane()` call that raced that gap (e.g. a desktop
-      // mobile-access toggle) silently no-opped on the then-null peer id with no
-      // retry. Re-advertising here — right after `_peerId` is restored, before
-      // this callback runs — closes that window instead of leaving the phone
-      // stuck on a stale catalog until an unrelated project:start forces a
-      // full recompute.
+      // mobile-access toggle) silently no-opped on the then-empty session set
+      // with no retry. Re-advertising here — after the revival, before this
+      // callback runs — closes that window instead of leaving the phone stuck
+      // on a stale catalog until an unrelated project:start forces a full
+      // recompute.
       onPeerOnline: () => this.readvertiseToControlPlane(),
       // No peer-disconnect hook is wired on purpose. A transient disconnect is
       // NOT a revocation, and multiple phones share this one control-plane
@@ -419,12 +420,13 @@ export class HostServer {
       // idle outbound socket meanwhile; it reconnects with the core.
     });
 
-    bus.setInboundHandler((msg, channel) => {
-      // Admission is "an account-trusted phone completed the E2E handshake";
-      // WHICH phone no longer changes any answer, so the pubkey is only checked
-      // for presence here. Authorization is the machine switch, applied per verb.
-      if (!client.currentPeerPubkey()) return;
-      this.dispatchControlPlaneInbound(msg, channel, bus);
+    bus.setInboundHandler((msg, channel, _source, peerId) => {
+      // Admission is "an account-trusted app completed the E2E handshake", so
+      // only presence is checked here. Authorization is the machine switch,
+      // applied per verb — and the asking session names itself, which is what
+      // lets `project:start` answer from THAT device's capabilities.
+      if (!client.hasEstablishedSession()) return;
+      this.dispatchControlPlaneInbound(msg, channel, bus, peerId);
     });
     client.setBus(bus);
 
@@ -510,7 +512,8 @@ export class HostServer {
     const client = this.controlPlaneRelay!;
     return {
       attachStream: (bus, opts) => client.attachStream(bus, opts),
-      currentPeerPubkey: () => client.currentPeerPubkey(),
+      establishedPeers: () => client.establishedPeers(),
+      peerSession: (peerId) => client.peerSession(peerId),
       sendPushDeliver: (m) => client.sendPushDeliver(m),
       // The LIVE socket's id, like every member beside it — not the inbound
       // auth's. The credential swap above is gated on nothing being live, so a
@@ -548,7 +551,15 @@ export class HostServer {
         const seen = this.seenProjects.get(id);
         const entry = this.cores.get(id);
         const needsCheckoutRouting = entry?.core.hasIsolatedSessions() ?? false;
-        const peerCanRoute = this.controlPlaneRelay?.peerSupportsCheckoutRouting === true;
+        // Optimistic across the fleet, because the advert is ONE broadcast frame
+        // (a replay-cached type sealed below any place that could vary it per
+        // receiver). Both refusals behind it are per-device, and BOTH are
+        // needed: project:start refuses the asking device by its own capability,
+        // and the stream's own `mayAcceptFrom` refuses it on the bind path below
+        // — which a reconnecting app takes WITHOUT a project:start, so the verb
+        // alone would leave a stale device on a mixed fleet bound to a stream
+        // that silently drops everything it sends.
+        const peerCanRoute = this.controlPlaneRelay?.anySessionSupportsCheckoutRouting() === true;
         const dialable = (entry?.core.isRelayRegistered() ?? false)
           && (!needsCheckoutRouting || peerCanRoute);
         // A reconnecting phone binds its ProjectSession to this streamId without a
@@ -630,6 +641,7 @@ export class HostServer {
     msg: AbMessage,
     channel: Channel,
     bus: MessageBus,
+    peerId?: string,
   ): void {
     // The app's RelayTransport.connect() fires a `state.snapshot` request to
     // seed its replay cache with the durable frames (agent:projects /
@@ -693,7 +705,7 @@ export class HostServer {
     // control:result so a rejected start (NOT_ALLOWED/UNKNOWN_PROJECT/OPEN_FAILED)
     // isn't silently dropped. Success re-advertises agent:projects inside the
     // handler, so we only publish on !ok. `.catch` guards an unexpected throw.
-    void this.handleControlPlaneVerb(msg, bus)
+    void this.handleControlPlaneVerb(msg, bus, peerId)
       .then((res) => {
         if (!res.ok) {
           // projectId lets the phone fail the exact pending bind (MachineSession
@@ -1074,6 +1086,7 @@ export class HostServer {
   async handleControlPlaneVerb(
     verb: AbMessage,
     bus: MessageBus,
+    peerId?: string,
   ): Promise<{ ok: true } | { ok: false; error: { code: string; message: string } }> {
     if (verb.type === "project:start") {
       // SECURITY: checked BEFORE open() — open() runs the project's `terminals:`
@@ -1087,8 +1100,14 @@ export class HostServer {
       // record is rejected, never opened with a guessed path.
       const seen = this.seenProjects.get(verb.projectId);
       if (!seen) return { ok: false, error: { code: "UNKNOWN_PROJECT", message: "no path on record; open from desktop first" } };
-      if (await this.projectRequiresCheckoutRouting(verb.projectId)
-        && this.controlPlaneRelay?.peerSupportsCheckoutRouting !== true) {
+      // The ASKING device's own capability, not the machine's best: the advert
+      // is deliberately optimistic (any attached app can route), so this is where
+      // a stale device on a mixed fleet gets a precise refusal instead of a
+      // silent dial into a project it would render as the main worktree.
+      const askerCanRoute = peerId
+        ? this.controlPlaneRelay?.peerSession(peerId)?.checkoutRouting === true
+        : false;
+      if (await this.projectRequiresCheckoutRouting(verb.projectId) && !askerCanRoute) {
         return {
           ok: false,
           error: { code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions" },
@@ -1809,15 +1828,15 @@ export class HostServer {
         this.streamIds.set(projectId, handle.streamId);
         return {
           streamId: handle.streamId,
-          sendTunnel: (data) => handle.sendTunnel(data),
+          sendTunnel: (data, target) => handle.sendTunnel(data, target),
           detach: () => {
             if (this.streamIds.get(projectId) === handle.streamId) this.streamIds.delete(projectId);
             handle.detach();
           },
         };
       },
-      currentPeerPubkey: () => client.currentPeerPubkey(),
-      currentPeerSupportsCheckoutRouting: () => client.peerSupportsCheckoutRouting,
+      establishedPeers: () => client.establishedPeers(),
+      peerSession: (peerId) => client.peerSession(peerId),
       // client.deviceId, NOT the one from identityFor(): a local core is handed a fresh
       // randomUUID(), which addresses no machine the phone knows.
       machineDeviceId: () => client.deviceId,

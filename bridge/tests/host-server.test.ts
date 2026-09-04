@@ -28,7 +28,10 @@ function fakeRuntime(): RemoteRuntime {
 function stubRelayClient(): RelayClient {
   return {
     deviceId: "control-plane-dev",
-    currentPeerPubkey: () => null,
+    hasEstablishedSession: () => false,
+    anySessionSupportsCheckoutRouting: () => false,
+    establishedPeers: () => [],
+    peerSession: () => null,
     setBus: () => {},
     connect: () => {},
     close: () => {},

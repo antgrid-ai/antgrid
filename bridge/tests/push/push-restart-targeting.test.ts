@@ -47,7 +47,7 @@ function openPush(blob: { epk: string; box: string }, privateKey: Buffer): any {
 }
 
 /** A relay slot whose phone has NEVER connected during this agent lifetime —
- *  `currentPeerPubkey()` is null exactly as after a host restart. */
+ *  it holds no established session, exactly as after a host restart. */
 async function startRestartedAgent(opts: { mobileAccess: boolean }) {
   const folder = mkdtempSync(join(tmpdir(), "antgrid-push-proj-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
@@ -84,7 +84,8 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
         bus = b;
         return { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
       },
-      currentPeerPubkey: () => null,
+      establishedPeers: () => [],
+      peerSession: () => null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
     },
@@ -104,8 +105,8 @@ test("push targets the persisted phone when no peer has connected this agent lif
   // Regression: after a host restart the phone may never reconnect (machine
   // rebooted, long task, phone in pocket). Targeting used to bind to LIVE peer
   // state — `connState.peerOnline` defaults TRUE, so the fallback gate read
-  // "phone can receive in-band" with no phone at all, and `currentPeerPubkey()`
-  // was null so no target resolved. Result: zero pushes, forever.
+  // "phone can receive in-band" with no phone at all, and no session named a
+  // device so no target resolved. Result: zero pushes, forever.
   const { notify, delivered } = await startRestartedAgent({ mobileAccess: true });
 
   notify();

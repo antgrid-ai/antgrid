@@ -259,10 +259,8 @@ test("relay restart, no re-pair: pair-free session re-establishes and the contro
  * admitting, so the forged identity's continued absence afterward can only be
  * refusal, not a slow agent. The control session is torn down before the
  * forged attempt starts (rather than left open) so there is no question of
- * the bridge's single-active-phone takeover (relay-client.ts's
- * `handleClientHello`, ~line 1123) confusing which identity's admission the
- * final assertions are about — the two attempts are sequenced, not
- * concurrent.
+ * which identity's admission the final assertions are about — the two
+ * attempts are sequenced, not concurrent.
  *
  * The structural proof this is REJECTION rather than "the retry budget was
  * merely too short": the bridge creates a `paired-phones.json` row for a
@@ -320,8 +318,7 @@ test("app whose device id is absent from the account inventory cannot establish 
     await handshakeWithoutPairing(controlApp, deviceUuid, auth.ed25519Pub);
     expect(loadPairedPhones(abDir).has(controlIdentity.publicKeyBase64)).toBe(true);
     // Sequence, don't coexist: tear the control session down before the
-    // forged attempt starts (see file-header note on single-active-phone
-    // takeover).
+    // forged attempt starts (see the file-header note on why).
     await controlApp.disconnect();
     controlApp = undefined;
 

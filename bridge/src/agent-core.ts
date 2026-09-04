@@ -16,6 +16,7 @@ import {
 } from "./keystrokes";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
+import type { PeerSessionView, SendTarget } from "./stream-mux";
 import { FileWatcher } from "./file-watcher";
 import { FileUploadManager } from "./file-upload";
 import { FileSearcher } from "./file-search";
@@ -31,7 +32,7 @@ import { augmentAgentLaunch } from "./agent-launch-augmenter";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
-import { MessageBus, type InboundSource } from "./message-bus";
+import { MessageBus, clientKeyOf, type ClientKey, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
@@ -75,6 +76,11 @@ import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
  *  to back those walks outlast the app's 2s `project:list` liveness ping, which
  *  reaps a healthy host mid-open (see file-watcher.ts's startWatching note). */
 const yieldToEventLoop = () => new Promise<void>((r) => setImmediate(r));
+
+/** How long a tunnel exchange's origin session stays resolvable, so a response
+ *  can be addressed back to the device that asked. Comfortably past the app's
+ *  own preview timeouts; an expired entry costs a broadcast, never a body. */
+const TUNNEL_ORIGIN_TTL_MS = 120_000;
 
 type CheckoutAgentSpec = {
   command: string;
@@ -197,25 +203,29 @@ export interface AgentCore {
   /** Host-level checkouts bypass the inbound Git handler, so callers use this
    *  to keep the core's branch and file snapshots coherent immediately. */
   refreshGitState(): Promise<void>;
-  /** Lifecycle hooks the transport invokes. */
-  handleTunnelMessage(raw: unknown): void;
+  /** Lifecycle hooks the transport invokes. [peerId] names the app session the
+   *  tunnel request arrived on, so its response can be addressed back to the
+   *  device that asked instead of every attached one. */
+  handleTunnelMessage(raw: unknown, peerId?: string): void;
   onHandshakeComplete(): void;
   /** Wire the transport's plaintext (tunnel) sender. The MessageBus only
    *  carries strict AbMessages; tunnel-protocol messages bypass the bus
    *  and are sent through this hook directly. Pass `null` to clear it (the
    *  promotion controller does this on teardown so a dead relay closure
    *  isn't retained). */
-  setPlainHook(fn: ((data: object) => void) | null): void;
-  /** Wire a provider that returns the Ed25519 pubkey (standard base64) of the
-   *  phone currently paired on the transport, or null when there is no relay
-   *  peer (e.g. local/loopback transport, or pre-handshake). The mobile-access
-   *  gate consults this only to tell a remote peer from the local owner — it
-   *  authorizes nothing per phone. The remote transport wires it to
-   *  `RelayClient.currentPeerPubkey()`; local mode never sets it (so it stays
-   *  null and the gate is skipped). Pass `null` to clear it. */
-  setPeerPubkeyProvider(fn: (() => string | null) | null): void;
-  /** Current remote app capability; cleared when that transport detaches. */
-  setPeerCheckoutRoutingProvider(fn: (() => boolean) | null): void;
+  setPlainHook(fn: ((data: object, target?: SendTarget) => void) | null): void;
+  /** Wire a lookup from an app session's route id to what this core may know
+   *  about it: the verified pubkey behind it (the push registry's key) and the
+   *  capabilities it declared. A machine holds one session per attached device,
+   *  so every question that used to be asked of "the" phone is asked of the
+   *  device the frame came from.
+   *
+   *  Its PRESENCE is also the remote-vs-local signal the mobile-access gate
+   *  reads: a wired provider means this core has a relay transport at all, so a
+   *  relay-origin frame rides the machine switch. Local mode never sets it and
+   *  the gate is skipped — the loopback socket + token is that trust boundary.
+   *  Pass `null` to clear it when the transport detaches. */
+  setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null): void;
   /** Stream-gating state. The transport's peer-online/offline callbacks flip
    *  `peerOnline` to suppress the heavy stream while the paired phone is gone. */
   readonly connState: ConnState;
@@ -241,7 +251,14 @@ export interface AgentCore {
    *  screen. Mirrors the work reduction's own `clientGone`: without it a
    *  desktop that quit, or a phone that dropped off the relay, would keep one
    *  session permanently "on screen" and mute its setup push forever. */
-  noteClientGone(client: InboundSource): void;
+  noteClientGone(client: ClientKey): void;
+  /** Whether [client] has declared it can render nothing here
+   *  (`client:focus-state`); `undefined` when it has declared nothing at all.
+   *  Per-client, unlike {@link ConnState.appFocusPaused}, which is the
+   *  conjunction across every client: push targeting has to ask about ONE
+   *  device, because a backgrounded phone is a push target no matter what a
+   *  foregrounded desktop on the same machine is doing. */
+  clientFocusPaused(client: ClientKey): boolean | undefined;
 }
 
 export interface BuildAgentCoreOptions {
@@ -308,17 +325,17 @@ export interface BuildAgentCoreOptions {
   onInterrupt?: (sessionId: string) => void;
   /** Fired when a client says [sessionId] is on screen (`session:focus`), so the
    *  owning ProjectCore can clear its unread mark and record where that client
-   *  is looking. [client] is the inbound source — the desktop over loopback vs
-   *  the phone over the relay — and the read state is per-client, so the two
-   *  never take each other's dots down. Bridge-internal — never surfaces to the
+   *  is looking. [client] is the client key — the desktop over loopback vs each
+   *  attached app device over its own relay session — and the read state is
+   *  per-client, so no two ever take each other's dots down. Bridge-internal — never surfaces to the
    *  app. */
-  onSessionFocus?: (sessionId: string, client: InboundSource) => void;
+  onSessionFocus?: (sessionId: string, client: ClientKey) => void;
   /** Fired when a client declares whether it can render this project at all
    *  (`client:focus-state`), so the owning ProjectCore knows THAT client is
    *  looking at nothing here and a turn ending now is unseen by it. Separate
    *  from {@link ConnectionState.appFocusPaused}, which gates the heavy stream
    *  and the fallback push: this one only feeds the work-status read state. */
-  onClientFocusState?: (paused: boolean, client: InboundSource) => void;
+  onClientFocusState?: (paused: boolean, client: ClientKey) => void;
   /** This session's status in the owner's work reduction, stamped onto each
    *  `session:updated` entry so the app has a per-session status on the LIVE
    *  session stream rather than only on the advert. The owner must call
@@ -560,7 +577,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // banner the user is watching must not also buzz their phone. The work-status
   // read state keeps its own copy in ProjectCore; this one exists because a
   // core has no way back into that reduction.
-  const focusedSessionByClient = new Map<InboundSource, string>();
+  const focusedSessionByClient = new Map<ClientKey, string>();
+  // Whether each client has declared it can render nothing here
+  // (`client:focus-state`). connState.appFocusPaused is DERIVED from this rather
+  // than last-writer-wins: with two apps attached, one of them backgrounding
+  // would otherwise freeze the terminal stream of the device still in the
+  // user's hand. An empty map reads unpaused — nobody has declared anything.
+  const focusPausedByClient = new Map<ClientKey, boolean>();
+  function recomputeFocusPaused(): void {
+    let any = false;
+    for (const paused of focusPausedByClient.values()) {
+      if (!paused) { connState.appFocusPaused = false; return; }
+      any = true;
+    }
+    connState.appFocusPaused = any;
+  }
 
   function createCheckoutRuntime(
     checkout: CheckoutRecord,
@@ -662,43 +693,95 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return generateEphemeralKeypair();
   }
 
-  // "Is this a REMOTE peer?" signal, not an authorization input. Wired by the
-  // remote/promotion transports to RelayClient.currentPeerPubkey(); unset (null)
-  // in local mode, where there is no relay peer.
-  let peerPubkeyProvider: (() => string | null) | null = null;
-  let peerCheckoutRoutingProvider: (() => boolean) | null = null;
-  function setPeerPubkeyProvider(fn: (() => string | null) | null) {
-    peerPubkeyProvider = fn;
-  }
-  function setPeerCheckoutRoutingProvider(fn: (() => boolean) | null) {
-    peerCheckoutRoutingProvider = fn;
+  // Per-device view of the app sessions attached to this core's transport.
+  // Wired by the remote/promotion transports; unset (null) in local mode, where
+  // there is no relay transport at all.
+  let peerSessionProvider: ((peerId: string) => PeerSessionView | null) | null = null;
+  function setPeerSessionProvider(fn: ((peerId: string) => PeerSessionView | null) | null) {
+    peerSessionProvider = fn;
   }
 
   // Mobile-access gate, shared by every inbound path (bus verbs AND the
-  // tunnel/HTTP-proxy path, which bypasses the bus). An account-trusted phone
-  // may drive this project only while the machine is mobile-reachable. When no
-  // phone pubkey is present (local/loopback transport has no relay peer) the
-  // gate is skipped — local control's trust boundary is the loopback socket +
-  // token, and the desktop must keep driving its own machine with mobile access
-  // off. Fail-closed otherwise: an unwired provider defaults to disabled.
-  function currentPhoneAllowed(): boolean {
-    const phonePubkey = peerPubkeyProvider?.() ?? null;
-    if (!phonePubkey) return true;
+  // tunnel/HTTP-proxy path, which bypasses the bus). An account-trusted app may
+  // drive this project only while the machine is mobile-reachable. A LOOPBACK
+  // frame is never gated: local control's trust boundary is the loopback socket
+  // + token, and the desktop must keep driving its own machine with mobile
+  // access off. The skip for a core with NO relay transport wired is the same
+  // carve-out one step out — a local/bare/test core answers to no switch — and
+  // is what the old "no phone pubkey right now" test always meant. Fail-closed
+  // otherwise: an unwired host provider reads as disabled.
+  function remoteFrameAllowed(source: InboundSource): boolean {
+    if (source === "loopback") return true;
+    if (!peerSessionProvider) return true;
     return remoteAccessEnabled();
   }
 
-  function currentPeerCanRouteCheckouts(): boolean {
-    return peerCheckoutRoutingProvider?.() === true;
+  // Fail-closed per device: a frame whose session has not declared the
+  // capability is refused while a sibling that has declared it is served. A
+  // brand-new device mid-handshake resolves to no session and so reads false,
+  // which is the direction this guard has to fail in.
+  function peerCanRouteCheckouts(peerId: string | undefined): boolean {
+    if (!peerId) return false;
+    return peerSessionProvider?.(peerId)?.checkoutRouting === true;
   }
 
-  function handleTunnelMessage(raw: unknown) {
+  // Which app session a tunnel request came in on, keyed by the id its response
+  // carries back (requestId for HTTP, tunnelId for a websocket). A preview body
+  // answers exactly one request, so fanning it out both wastes the link and
+  // hands one device another device's page. Entries are released on the
+  // terminal frame of the exchange and swept by TTL; a miss falls back to
+  // broadcast — today's behaviour — so a lost entry never costs a response.
+  const tunnelOriginByRef = new Map<string, { peerId: string; at: number }>();
+
+  function tunnelRefOf(data: object): string | null {
+    const d = data as { requestId?: unknown; tunnelId?: unknown };
+    if (typeof d.requestId === "string") return d.requestId;
+    if (typeof d.tunnelId === "string") return d.tunnelId;
+    return null;
+  }
+
+  function noteTunnelOrigin(data: object, peerId: string | undefined): void {
+    if (!peerId) return;
+    const ref = tunnelRefOf(data);
+    if (!ref) return;
+    const now = Date.now();
+    for (const [key, origin] of tunnelOriginByRef) {
+      if (now - origin.at >= TUNNEL_ORIGIN_TTL_MS) tunnelOriginByRef.delete(key);
+    }
+    tunnelOriginByRef.set(ref, { peerId, at: now });
+  }
+
+  function tunnelTargetFor(data: object): SendTarget | undefined {
+    const ref = tunnelRefOf(data);
+    if (!ref) return undefined;
+    const origin = tunnelOriginByRef.get(ref);
+    const type = (data as { type?: unknown }).type;
+    // The frame that ends the exchange releases the entry; a websocket's data
+    // frames keep theirs until the close.
+    if (type === "tunnel:http-response" || type === "tunnel:ws-close") {
+      tunnelOriginByRef.delete(ref);
+    }
+    if (!origin || Date.now() - origin.at >= TUNNEL_ORIGIN_TTL_MS) return undefined;
+    return { kind: "peer", peerId: origin.peerId };
+  }
+
+  function handleTunnelMessage(raw: unknown, peerId?: string) {
     const msg = parseTunnelMessage(raw as string | object);
     if (!msg) { log.warn("Invalid tunnel message, dropping"); return; }
     // Tunnel verbs proxy arbitrary HTTP to localhost:<port> and return the body,
     // so a phone could otherwise read a project's dev-server/preview data
-    // without ever touching the bus dispatch gate. Gate here too.
-    if (!currentPhoneAllowed()) {
+    // without ever touching the bus dispatch gate. Gate here too. Only relay
+    // traffic reaches this path — the loopback owner speaks the bus.
+    if (!remoteFrameAllowed("relay")) {
       log.warn("Dropping tunnel %s: mobile access is disabled (project %s)", msg.type, project.id);
+      return;
+    }
+    // Same per-device capability gate the bus dispatch applies, restated here
+    // because this path bypasses the bus entirely: a tunnel proxies arbitrary
+    // HTTP out of a checkout's dev server, so a session that may not address a
+    // checkout must not be answered with one's page either.
+    if (sessions?.hasIsolatedSessions() && !peerCanRouteCheckouts(peerId)) {
+      log.warn("Dropping tunnel %s: remote app lacks checkout routing (project %s)", msg.type, project.id);
       return;
     }
     const runtime = checkoutRuntimes.runtime(msg.checkoutId);
@@ -707,6 +790,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       return;
     }
     if (!runtime.tunnelManager) return;
+    noteTunnelOrigin(msg, peerId);
     switch (msg.type) {
       case "tunnel:http-request":
         runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
@@ -728,7 +812,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // [client] is who sent this frame — needed only by the work-status read state,
   // which tracks what each client has on screen separately. Everything else in
   // here is authorized at the bus handler and does not care.
-  function handleAbMessage(msg: AbMessage, client: InboundSource) {
+  function handleAbMessage(msg: AbMessage, client: ClientKey, peerId?: string) {
     switch (msg.type) {
       case "agent:prompt":
       case "agent:permission-resolve":
@@ -1392,7 +1476,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "client:focus-state": {
-        connState.appFocusPaused = msg.paused;
+        focusPausedByClient.set(client, msg.paused);
+        recomputeFocusPaused();
         if (msg.paused) focusedSessionByClient.delete(client);
         opts.onClientFocusState?.(msg.paused, client);
         log.info("focus-state: paused=%s", msg.paused);
@@ -1482,9 +1567,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "push:register": {
-        const peerPubkey = peerPubkeyProvider?.() ?? null;
-        if (!peerPubkey) { log.warn("push:register with no peer pubkey; ignoring"); break; }
-        const phone = pairedPhones.get(peerPubkey);
+        // The ASKING device's own row, never "the" connected phone: with two
+        // apps attached, resolving anything else has them overwrite each
+        // other's push token. A loopback register resolves nothing and is
+        // ignored — a desktop owner has no push row.
+        const peer = peerId ? peerSessionProvider?.(peerId) ?? null : null;
+        if (!peer?.peerPubkey) { log.warn("push:register with no relay session; ignoring"); break; }
+        const phone = pairedPhones.get(peer.peerPubkey);
         if (!phone) { log.warn("push:register from unknown phone; ignoring"); break; }
         if (msg.pushToken === "") {
           // Clear signal (sign-out): stop pushing to this phone.
@@ -3572,7 +3661,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // sessions.delete's own special-casing — because it needs `structured`
   // (StructuredAgentManager) in closure scope, which rpc/methods.ts's registry
   // doesn't have access to. Runs through the SAME mobile-access gate as every
-  // other inbound verb (see the currentPhoneAllowed() check in attachTransport);
+  // other inbound verb (see the remoteFrameAllowed() check in attachTransport);
   // no separate authz here.
   async function handleTranscriptSnapshotRequest(msg: RpcRequest): Promise<AbMessage> {
     const parsed = TranscriptSnapshotParams.safeParse(msg.params ?? {});
@@ -3596,16 +3685,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     dropSessionReplay = (sessionId) => bus.dropSessionReplay(sessionId);
     dropCheckoutReplay = (checkoutId) => bus.dropCheckoutReplay(checkoutId);
     // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.
-    sendPlain = (data) => busPlainHook?.(data);
-    bus.setInboundHandler((msg, channel, source) => {
+    sendPlain = (data) => busPlainHook?.(data, tunnelTargetFor(data));
+    bus.setInboundHandler((msg, channel, source, peerId) => {
       // Mobile-access gate: the single chokepoint through which both RPC
       // requests and plain Ab messages enter the core dispatch. Drops EVERY
       // inbound verb while the machine is not mobile-reachable, so an
       // account-trusted phone sees nothing. This sits at the VERB layer by
       // design (not the pairing/handshake layer): the phone connects and
       // completes the handshake, but the data plane is inert until the machine
-      // switch is on. See currentPhoneAllowed() for the local-mode / no-peer
-      // skip rationale. The tunnel/HTTP-proxy path is gated separately in
+      // switch is on. See remoteFrameAllowed() for the local-mode skip
+      // rationale. The tunnel/HTTP-proxy path is gated separately in
       // handleTunnelMessage (it bypasses this bus).
       //
       // Only RELAY-origin frames are gated. Loopback frames are the desktop
@@ -3613,7 +3702,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // loopback session and the relay slot share this one handler, so without
       // the source check a promoted core would gate the desktop's own input on
       // the machine switch and silently drop the user's local typing.
-      if (source !== "loopback" && !currentPhoneAllowed()) {
+      if (!remoteFrameAllowed(source)) {
         log.warn(
           "Dropping inbound %s: mobile access is disabled (project %s)",
           msg.type,
@@ -3621,7 +3710,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         return;
       }
-      if (source !== "loopback" && sessions?.hasIsolatedSessions() && !currentPeerCanRouteCheckouts()) {
+      if (source !== "loopback" && sessions?.hasIsolatedSessions() && !peerCanRouteCheckouts(peerId)) {
         log.warn("Dropping inbound %s: remote app lacks checkout routing (project %s)", msg.type, project.id);
         return;
       }
@@ -3691,17 +3780,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // await would otherwise have its checkout re-prepared right here.
           if (refuseDeleting()) return;
           if (checkoutId !== "main") await prepareCheckoutRuntime(checkout);
-          handleAbMessage({ ...msg, checkoutId } as AbMessage, source);
+          handleAbMessage({ ...msg, checkoutId } as AbMessage, clientKeyOf(source, peerId), peerId);
         }).catch((error) => log.warn("Checkout lookup failed for %s: %s", checkoutId, error));
         return;
       }
-      handleAbMessage(msg, source);
+      handleAbMessage(msg, clientKeyOf(source, peerId), peerId);
     });
   }
 
   // Plaintext (tunnel) sender wired by the caller after transport construction.
-  let busPlainHook: ((data: object) => void) | null = null;
-  function setPlainHook(fn: ((data: object) => void) | null) {
+  let busPlainHook: ((data: object, target?: SendTarget) => void) | null = null;
+  function setPlainHook(fn: ((data: object, target?: SendTarget) => void) | null) {
     busPlainHook = fn;
   }
 
@@ -3750,8 +3839,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     handleTunnelMessage,
     onHandshakeComplete,
     setPlainHook,
-    setPeerPubkeyProvider,
-    setPeerCheckoutRoutingProvider,
+    setPeerSessionProvider,
     connState,
     deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean> {
       if (!sessions) return false;
@@ -3766,8 +3854,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     isMainCheckoutSession(id: string): boolean {
       return sessions?.isMainCheckoutSession(id) ?? true;
     },
-    noteClientGone(client: InboundSource): void {
+    noteClientGone(client: ClientKey): void {
       focusedSessionByClient.delete(client);
+      // A departed device declares nothing. Leaving its "paused" behind would
+      // hold the core paused for good once the last unpaused sibling leaves.
+      if (focusPausedByClient.delete(client)) recomputeFocusPaused();
+    },
+    clientFocusPaused(client: ClientKey): boolean | undefined {
+      return focusPausedByClient.get(client);
     },
   };
 }

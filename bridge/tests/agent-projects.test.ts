@@ -147,7 +147,7 @@ test("mobile-access:set re-advertises to the connected control-plane phone", asy
   // With the machine switch off, a re-advertise yields an empty project list,
   // and the machine-level flag says WHY — false, not merely absent (a fresh
   // machine defaults off).
-  host.readvertiseForTest(bus, "pk1");
+  host.readvertiseForTest(bus);
   const first = seen.filter((m) => m.type === "agent:projects").at(-1) as any;
   expect(first?.projects).toEqual([]);
   expect(first?.remoteAccessEnabled).toBe(false);

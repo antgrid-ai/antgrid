@@ -146,16 +146,14 @@ test("mobile-access:set immediately pushes a heartbeat reflecting the new state"
   }
 });
 
-test("onPeerOnline re-advertises to the recovered peer (bridge-side reconnect, phone never dropped)", async () => {
-  // Regression test: a bridge-side reconnect to the RELAY (heartbeat lapse,
-  // network blip on THIS machine) clears RelayClient's internal peerId for the
-  // gap, with no visible disconnect on the phone's side (it never resends
-  // client-hello, so onHandshakeComplete doesn't re-fire either). Any
-  // readvertiseToControlPlane() call that raced that gap (e.g. a desktop
-  // mobile-access toggle) used to silently no-op on the then-null peer id,
-  // with nothing to correct it until an unrelated project:start forced a full
-  // recompute. onPeerOnline now re-advertises the moment the peer id is
-  // restored, closing that window.
+test("onPeerOnline re-advertises to a revived session (no fresh handshake fires)", async () => {
+  // Regression test: a peer that goes away and comes back keeps its session —
+  // it is marked unreachable and revived on `peer-online`, so it never resends
+  // client-hello and onHandshakeComplete doesn't re-fire. Any
+  // readvertiseToControlPlane() call that raced the unreachable window used to
+  // silently no-op, with nothing to correct it until an unrelated project:start
+  // forced a full recompute. onPeerOnline re-advertises the moment the session
+  // is reachable again, closing that window.
   host = new HostServer({
     remote: fakeRemoteConfig(),
     remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
@@ -176,10 +174,20 @@ test("onPeerOnline re-advertises to the recovered peer (bridge-side reconnect, p
   const delivered: any[] = [];
   bus.subscribe({ deliver: (msg) => delivered.push(msg) });
 
-  // Simulate what relay-client.ts's `peer-online` handler does before invoking
-  // the callback: restore _peerId (→ phonePubkey via phoneEd25519ByDeviceId),
-  // THEN fire onPeerOnline — mirrors relay-client.ts:557-571.
-  (client as any)._peerId = "phone-1";
+  // Mirrors relay-client.ts's `peer-online` handler: the session is reachable
+  // again (→ phonePubkey via phoneEd25519ByDeviceId) before the callback fires.
+  (client as any).sessions.set("phone-1", {
+    peerId: "phone-1",
+    reachable: true,
+    attemptId: "a1",
+    transport: { seal: (plaintext: string) => Buffer.from(plaintext, "utf8") },
+    sessionKeys: { a2p: Buffer.alloc(32), p2a: Buffer.alloc(32), confirm: Buffer.alloc(32) },
+    checkoutRouting: false,
+    unreachableSince: 0,
+    lastSealedRecvAt: Date.now(),
+    missedPongs: 0,
+    frag: { accept: () => false, dispose: () => {} },
+  });
   (client as any).phoneEd25519ByDeviceId.set("phone-1", "pub-1");
   client.opts.onPeerOnline?.("phone-1");
 

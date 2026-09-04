@@ -64,7 +64,7 @@ describe("MessageBus", () => {
     const m = createMessage("terminal:input", { terminalId: "s", data: "x" });
     bus.dispatchInbound(m, "control");
     // source defaults to "relay" (fail-closed) when a caller omits it.
-    expect(handler).toHaveBeenCalledWith(m, "control", "relay");
+    expect(handler).toHaveBeenCalledWith(m, "control", "relay", undefined);
   });
 
   test("inbound forwards an explicit loopback source", () => {
@@ -73,7 +73,7 @@ describe("MessageBus", () => {
     bus.setInboundHandler(handler);
     const m = createMessage("terminal:input", { terminalId: "s", data: "x" });
     bus.dispatchInbound(m, "control", "loopback");
-    expect(handler).toHaveBeenCalledWith(m, "control", "loopback");
+    expect(handler).toHaveBeenCalledWith(m, "control", "loopback", undefined);
   });
 
   test("publish is safe with zero subscribers", () => {

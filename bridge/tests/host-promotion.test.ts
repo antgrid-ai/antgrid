@@ -46,7 +46,10 @@ function makeSessionLimitedRelayFactory(code = "SESSION_LIMIT_EXCEEDED") {
   return (_opts: RelayClientOptions): RelayClient =>
     ({
       deviceId: "control-plane-dev",
-      currentPeerPubkey: () => null,
+      hasEstablishedSession: () => false,
+      anySessionSupportsCheckoutRouting: () => false,
+      establishedPeers: () => [],
+      peerSession: () => null,
       setBus: () => {},
       connect: () => {},
       close: () => {},
@@ -66,7 +69,10 @@ function makeAuthenticatingRelayFactory() {
   return (_opts: RelayClientOptions): RelayClient =>
     ({
       deviceId: "control-plane-dev",
-      currentPeerPubkey: () => null,
+      hasEstablishedSession: () => false,
+      anySessionSupportsCheckoutRouting: () => false,
+      establishedPeers: () => [],
+      peerSession: () => null,
       setBus: () => {},
       connect: () => {},
       close: () => {},

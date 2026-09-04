@@ -8,7 +8,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { buildFragments, encodeRouteFrame, FrameKind } from "antgrid-wire";
 import {
   StreamMux, CONTROL_STREAM_ID, INVALID_NOTICE_COOLDOWN_MS,
-  type StreamMuxTransport,
+  type StreamMuxTransport, type PeerSessionView, type SendTarget,
 } from "../src/stream-mux";
 import { MessageBus, type Channel } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
@@ -19,16 +19,27 @@ import {
   E2eTransport, signTranscript,
 } from "../src/e2e";
 
-function makeTransport() {
+function makeTransport(peers: Map<string, PeerSessionView> = new Map()) {
   const opened: string[] = [];
   const closed: string[] = [];
   const sent: Array<{ streamId: string; msg: unknown; channel: Channel }> = [];
+  // Kept beside `sent` rather than in it so the existing exact-shape assertions
+  // stay readable; index-aligned with it.
+  const targets: Array<SendTarget | undefined> = [];
   const transport: StreamMuxTransport = {
     openStream: (id) => opened.push(id),
     closeStream: (id) => closed.push(id),
-    sendEnvelope: (id, msg, channel) => sent.push({ streamId: id, msg, channel }),
+    sendEnvelope: (id, msg, channel, target) => {
+      targets.push(target);
+      return sent.push({ streamId: id, msg, channel });
+    },
+    peerSession: (peerId) => peers.get(peerId) ?? null,
   };
-  return { transport, opened, closed, sent };
+  return { transport, opened, closed, sent, targets, peers };
+}
+
+function peerView(peerId: string, checkoutRouting: boolean): PeerSessionView {
+  return { peerId, peerPubkey: `pub-${peerId}`, checkoutRouting, reachable: true };
 }
 
 describe("StreamMux (unit, stub transport)", () => {
@@ -84,6 +95,42 @@ describe("StreamMux (unit, stub transport)", () => {
     ]);
   });
 
+  test("mayDeliverTo mutes a PEER-ADDRESSED send too, and a broadcast keeps the caller's own filter under it", () => {
+    // A tunnel answer names the session that asked, and asking was never an
+    // admission: a device that cannot address a checkout would read an isolated
+    // session's preview as the main worktree's whether it requested it or not.
+    const { transport, sent, targets, peers } = makeTransport();
+    const mux = new StreamMux(transport);
+    peers.set("stale", peerView("stale", false));
+    peers.set("modern", peerView("modern", true));
+    const handle = mux.attach(new MessageBus(), { mayDeliverTo: (peer) => peer.checkoutRouting });
+
+    handle.sendTunnel({ t: "tunnel:http-response" }, { kind: "peer", peerId: "stale" });
+    expect(sent).toEqual([]);
+
+    handle.sendTunnel({ t: "tunnel:http-response" }, { kind: "peer", peerId: "modern" });
+    expect(targets).toEqual([{ kind: "peer", peerId: "modern" }]);
+
+    handle.sendTunnel({ t: "tunnel:http-response" }, {
+      kind: "broadcast", where: (peer) => peer.peerId !== "modern",
+    });
+    const target = targets[1];
+    if (target?.kind !== "broadcast" || !target.where) throw new Error("broadcast filter dropped");
+    expect(target.where(peerView("modern", true))).toBe(false);
+    expect(target.where(peerView("stale", false))).toBe(false);
+    expect(target.where(peerView("other", true))).toBe(true);
+  });
+
+  test("a peer target naming a session this machine no longer holds is dropped, never widened to a broadcast", () => {
+    // Falling back to a fan-out is the loud failure: one device's HTTP response
+    // handed to every other device attached to the same project.
+    const { transport, sent } = makeTransport();
+    const mux = new StreamMux(transport);
+    const handle = mux.attach(new MessageBus(), { mayDeliverTo: () => true });
+    handle.sendTunnel({ t: "tunnel:http-response" }, { kind: "peer", peerId: "evicted" });
+    expect(sent).toEqual([]);
+  });
+
   test("a stream attached without mayDeliver delivers (local/wizard callers answer to no switch)", () => {
     const { transport, sent } = makeTransport();
     const mux = new StreamMux(transport);
@@ -101,7 +148,7 @@ describe("StreamMux (unit, stub transport)", () => {
     bus.setInboundHandler((msg) => received.push(msg));
     const handle = mux.attach(bus, {});
     const msg = createMessage("pong", {});
-    const ok = mux.dispatchInbound(handle.streamId, JSON.stringify(msg), "control");
+    const ok = mux.dispatchInbound(handle.streamId, JSON.stringify(msg), "control", "phone-1");
     expect(ok).toBe(true);
     expect(received).toEqual([msg]);
   });
@@ -109,7 +156,7 @@ describe("StreamMux (unit, stub transport)", () => {
   test("dispatchInbound for an unknown streamId returns false so the caller drops + logs, and answers stream-invalid", () => {
     const { transport, sent } = makeTransport();
     const mux = new StreamMux(transport);
-    const ok = mux.dispatchInbound("deadbeefdeadbeef", JSON.stringify(createMessage("pong", {})), "control");
+    const ok = mux.dispatchInbound("deadbeefdeadbeef", JSON.stringify(createMessage("pong", {})), "control", "phone-1");
     expect(ok).toBe(false);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.streamId).toBe(CONTROL_STREAM_ID);
@@ -130,7 +177,7 @@ describe("StreamMux (unit, stub transport)", () => {
     expect(deadId).not.toBe(live.streamId);
     sent.length = 0;
 
-    expect(restarted.dispatchInbound(deadId, JSON.stringify(createMessage("file:read", { projectId: "p1", path: "a.txt" })), "control")).toBe(false);
+    expect(restarted.dispatchInbound(deadId, JSON.stringify(createMessage("file:read", { projectId: "p1", path: "a.txt" })), "control", "phone-1")).toBe(false);
 
     expect(sent).toEqual([{
       streamId: CONTROL_STREAM_ID,
@@ -139,7 +186,7 @@ describe("StreamMux (unit, stub transport)", () => {
     }]);
     // The live stream is untouched — stream-scoped, like the relay's error{ref}.
     const msg = createMessage("pong", {});
-    expect(restarted.dispatchInbound(live.streamId, JSON.stringify(msg), "control")).toBe(true);
+    expect(restarted.dispatchInbound(live.streamId, JSON.stringify(msg), "control", "phone-1")).toBe(true);
   });
 
   test("stream-invalid is rate-limited per dead id — a burst of replays yields one notice, each dead id its own", () => {
@@ -148,18 +195,100 @@ describe("StreamMux (unit, stub transport)", () => {
     const mux = new StreamMux(transport, () => now);
     const body = JSON.stringify(createMessage("pong", {}));
 
-    for (let i = 0; i < 5; i++) mux.dispatchInbound("deadbeefdeadbeef", body, "control");
+    for (let i = 0; i < 5; i++) mux.dispatchInbound("deadbeefdeadbeef", body, "control", "phone-1");
     expect(sent).toHaveLength(1);
 
     // A second dead id is a distinct binding to renegotiate, not a repeat.
-    mux.dispatchInbound("beefdeadbeefdead", body, "control");
+    mux.dispatchInbound("beefdeadbeefdead", body, "control", "phone-1");
     expect(sent).toHaveLength(2);
 
     // Still stranded past the cooldown → say it again rather than go quiet.
     now += INVALID_NOTICE_COOLDOWN_MS + 1;
-    mux.dispatchInbound("deadbeefdeadbeef", body, "control");
+    mux.dispatchInbound("deadbeefdeadbeef", body, "control", "phone-1");
     expect(sent).toHaveLength(3);
     expect(sent[2]!.msg).toMatchObject({ type: "stream-invalid", streamId: "deadbeefdeadbeef" });
+  });
+
+  const refuseIncapable = (peer: PeerSessionView | null) =>
+    peer?.checkoutRouting === true
+      ? null
+      : { code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions" };
+
+  test("mayAcceptFrom refuses an incapable session's frames and answers that session alone", () => {
+    // The bind path takes a streamId straight off the `agent:projects` advert
+    // with no `project:start`, so the verb's own refusal is never reached and a
+    // stale device on a mixed fleet would otherwise wait on silence forever.
+    const { transport, sent, targets, peers } = makeTransport();
+    const mux = new StreamMux(transport);
+    peers.set("stale", peerView("stale", false));
+    peers.set("modern", peerView("modern", true));
+    const bus = new MessageBus();
+    const received: unknown[] = [];
+    bus.setInboundHandler((msg) => received.push(msg));
+    const handle = mux.attach(bus, { projectId: "p1", mayAcceptFrom: refuseIncapable });
+    const body = JSON.stringify(createMessage("file:read", { projectId: "p1", path: "a.txt" }));
+
+    // Handled, not dropped: falling through to the unknown-stream path would
+    // tell a device holding a LIVE stream to renegotiate it.
+    expect(mux.dispatchInbound(handle.streamId, body, "control", "stale")).toBe(true);
+    expect(received).toEqual([]);
+    expect(sent).toEqual([{
+      streamId: CONTROL_STREAM_ID,
+      channel: "control",
+      msg: expect.objectContaining({
+        type: "control:result",
+        ok: false,
+        projectId: "p1",
+        error: { code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions" },
+      }),
+    }]);
+    expect(targets).toEqual([{ kind: "peer", peerId: "stale" }]);
+
+    // The capable sibling on the same stream keeps its frame and never sees the
+    // other device's banner.
+    expect(mux.dispatchInbound(handle.streamId, body, "control", "modern")).toBe(true);
+    expect(received).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+  });
+
+  test("a refused session's tunnel frames never reach onTunnel", () => {
+    // The tunnel route bypasses the bus entirely, which is why the per-device
+    // gate had to sit ahead of both routes rather than inside the dispatch.
+    const { transport, peers } = makeTransport();
+    const mux = new StreamMux(transport);
+    peers.set("stale", peerView("stale", false));
+    const tunnels: unknown[] = [];
+    const handle = mux.attach(new MessageBus(), {
+      projectId: "p1", onTunnel: (raw) => tunnels.push(raw), mayAcceptFrom: refuseIncapable,
+    });
+    const request = JSON.stringify({
+      type: "tunnel:http-request", requestId: "r1", port: 5173, method: "GET", path: "/",
+    });
+
+    expect(mux.dispatchInbound(handle.streamId, request, "preview", "stale")).toBe(true);
+    expect(tunnels).toEqual([]);
+  });
+
+  test("the refusal is rate-limited per (session, stream) — a retry loop cannot flood the control plane", () => {
+    let now = 1_000_000;
+    const { transport, sent, peers } = makeTransport();
+    const mux = new StreamMux(transport, () => now);
+    peers.set("stale", peerView("stale", false));
+    peers.set("older", peerView("older", false));
+    const handle = mux.attach(new MessageBus(), { projectId: "p1", mayAcceptFrom: refuseIncapable });
+    const body = JSON.stringify(createMessage("pong", {}));
+
+    for (let i = 0; i < 5; i++) mux.dispatchInbound(handle.streamId, body, "control", "stale");
+    expect(sent).toHaveLength(1);
+
+    // A second stale device is its own device to inform, not a repeat.
+    mux.dispatchInbound(handle.streamId, body, "control", "older");
+    expect(sent).toHaveLength(2);
+
+    // Still refused past the cooldown → say it again rather than go quiet.
+    now += INVALID_NOTICE_COOLDOWN_MS + 1;
+    mux.dispatchInbound(handle.streamId, body, "control", "stale");
+    expect(sent).toHaveLength(3);
   });
 
   test("a stream-open rejection (SESSION_LIMIT_EXCEEDED) settles onRejected for that stream only — the transport and every other stream stay live", () => {
@@ -275,7 +404,6 @@ function establish(): { client: RelayClient; sent: Array<string | Buffer>; phone
     getLicenseToken: () => "tok",
   });
   clients.push(client);
-  (client as any)._peerId = PHONE_ID;
   (client as any).phoneEd25519ByDeviceId.set(PHONE_ID, phoneEd.pubB64);
   (client as any).sendPayload = (p: string | Buffer) => sent.push(p);
   (client as any).ws = { readyState: WebSocket.OPEN, send: (d: string) => sent.push(d), close: () => {} };

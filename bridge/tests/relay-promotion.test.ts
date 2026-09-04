@@ -27,7 +27,8 @@ const ENABLE = createMessage("agent:enableRelay", {
 function makeMachineSession(overrides: Partial<MachineRelaySession> = {}): MachineRelaySession {
   return {
     attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {} }),
-    currentPeerPubkey: () => null,
+    establishedPeers: () => [],
+    peerSession: () => null,
     sendPushDeliver: () => {},
     agentDeviceId: "0bbd1111-2222-3333-4444-555566667777",
     ...overrides,

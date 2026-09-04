@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { buildAgentCore, type AgentCore, type BuildAgentCoreOptions } from "./agent-core";
-import { MessageBus, type InboundSource } from "./message-bus";
+import { MessageBus, type ClientKey } from "./message-bus";
 import { LocalListener } from "./local-listener";
 import { createRelayPromotion, type RelayPromotionController, type RelayPromotionDeps } from "./relay-promotion";
-import type { AttachStreamOpts, StreamHandle } from "./stream-mux";
+import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./stream-mux";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
 import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnStart, userReply, type WorkStatusState } from "./work-status";
@@ -20,16 +20,19 @@ export interface ProjectCoreRemoteDeps {
   /** Attach this core's bus as a stream on the machine socket, allocating a
    *  streamId and driving stream-open admission. */
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle;
-  /** The machine's currently-connected phone pubkey (the mobile-access gate's
-   *  remote-vs-local signal, and the push dispatcher's live-device hint). */
-  currentPeerPubkey(): string | null;
-  /** E2E app capability, established only after authenticated app:ready. */
-  currentPeerSupportsCheckoutRouting?(): boolean;
+  /** Every app device that currently holds an E2E session with this machine —
+   *  the push dispatcher's live-device list, and the fan-out this stream feeds.
+   *  A session outlives its relay presence (see {@link PeerSessionView.reachable}),
+   *  which is what keeps push aimed at the device that just walked away. */
+  establishedPeers(): PeerSessionView[];
+  /** One device's session by route address, or null when it holds none. The
+   *  core asks this of the device a frame ARRIVED on, so every per-device answer
+   *  (capabilities, push identity) is that device's own. */
+  peerSession(peerId: string): PeerSessionView | null;
   /** The bare machine deviceUuid this host registers under. The phone addresses
    *  a project as `<machineUuid>.<projectId>`, so a push sealed without it is a
-   *  push the phone cannot open. Required, unlike currentPeerSupportsCheckoutRouting:
-   *  optional would let the wizard-promotion supplier ship unroutable pushes and
-   *  still compile. */
+   *  push the phone cannot open. Required, not optional: optional would let the
+   *  wizard-promotion supplier ship unroutable pushes and still compile. */
   machineDeviceId(): string;
   /** Blind FCM push forward over the machine socket (fallback delivery). */
   sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
@@ -250,7 +253,7 @@ export class ProjectCore {
   /** [client] is looking at [sessionId] (`session:focus`) — clear its unread
    *  mark and record it as on screen, so an answer that lands while the user
    *  sits here is never called unseen. See {@link sessionFocus}. */
-  noteSessionFocus(sessionId: string, client: InboundSource): void {
+  noteSessionFocus(sessionId: string, client: ClientKey): void {
     this.commitWork(sessionFocus(this._work, sessionId, client));
   }
 
@@ -258,7 +261,7 @@ export class ProjectCore {
    *  Paused releases what that client had on screen, which is what makes a turn
    *  finishing while the app is backgrounded come back unread. See
    *  {@link clientFocusState}. */
-  noteClientFocusState(paused: boolean, client: InboundSource): void {
+  noteClientFocusState(paused: boolean, client: ClientKey): void {
     this.commitWork(clientFocusState(this._work, paused, client));
   }
 
@@ -266,7 +269,7 @@ export class ProjectCore {
    *  Without this a desktop that quit, or a phone that dropped off the relay,
    *  would keep one session permanently exempt from unread. See
    *  {@link clientGone}. */
-  noteClientGone(client: InboundSource): void {
+  noteClientGone(client: ClientKey): void {
     this.commitWork(clientGone(this._work, client));
     // The core keeps its own copy of what each client has on screen (the setup
     // push reads it); a stale entry there mutes that push for good.
@@ -477,13 +480,28 @@ export class ProjectCore {
 
     const handle = remote.attachStream(bus, {
       // Outbound half of the mobile-access gate. The inbound half (agent-core's
-      // currentPhoneAllowed) only stops the phone DRIVING this project; without
+      // remoteFrameAllowed) only stops the phone DRIVING this project; without
       // this one a core the phone cold-started keeps streaming its terminal, file
       // tree and git status to that phone after the machine switch is turned off,
       // because a remote-mode core holds no PromotionHandle for demoteAllPromoted
       // to tear down. Fail-closed, same as the inbound side.
-      mayDeliver: () => (this.deps.remoteAccessEnabled?.() ?? false)
-        && (!core.hasIsolatedSessions() || remote.currentPeerSupportsCheckoutRouting?.() === true),
+      mayDeliver: () => this.deps.remoteAccessEnabled?.() ?? false,
+      projectId: core.projectId,
+      // Per-receiver half: a stale app that cannot address a checkout would read
+      // an isolated session's output as the main worktree's, so it is muted —
+      // but only it. A modern device on the same machine keeps its stream.
+      mayDeliverTo: (peer) => !core.hasIsolatedSessions() || peer.checkoutRouting,
+      // Per-sender mirror, and the one that has to ANSWER. The advert is
+      // deliberately optimistic across a mixed fleet, and an app binds the
+      // streamId it carries without a fresh project:start — so this is the only
+      // place a stale device on a project with isolated sessions can be told
+      // why, and the refusal it would have got from that verb is the one to
+      // give it. Fail-closed on an unresolvable session, exactly as the core's
+      // own gate does.
+      mayAcceptFrom: (peer) =>
+        !core.hasIsolatedSessions() || peer?.checkoutRouting === true
+          ? null
+          : { code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions" },
       onAdmitted: () => { this.relayRegistered = true; settleOnce({ ok: true }); },
       onRejected: (code, message) => { this.relayRegistered = false; settleOnce({ ok: false, code, message }); },
       // Suppress the heavy stream while the phone is gone; it rebuilds from
@@ -496,22 +514,25 @@ export class ProjectCore {
         // keeps the DESKTOP's stream live, it doesn't make the phone reachable
         // in-band. Leaving this set would mute push on every promoted core.
         peerConnected = false;
-        // Unlike the stream gate, the read state is per-client: the phone has
-        // left whether or not a desktop owner is still here, so it must stop
+        // Unlike the stream gate, the read state is per-client: the last phone
+        // has left whether or not a desktop owner is still here, so it must stop
         // vouching for the session it had on screen before the early return.
+        // Named devices are cleared one at a time by onPeerSessionGone; this
+        // clears the unnamed key a transport that threads no peerId writes under.
         this.noteClientGone("relay");
         if (this.listener?.hasOwner) return;
         core.connState.peerOnline = false;
       },
-      onTunnel: (raw) => core.handleTunnelMessage(raw),
+      onPeerSessionGone: (peerId) => this.noteClientGone(peerId),
+      onTunnel: (raw, peerId) => core.handleTunnelMessage(raw, peerId),
     });
 
-    core.setPlainHook((d) => handle.sendTunnel(d));
-    // Mark this connection as REMOTE for the core's mobile-access gate (and name
-    // the live device for push). Local mode never wires this, so loopback
-    // control stays ungated.
-    core.setPeerPubkeyProvider(() => remote.currentPeerPubkey());
-    core.setPeerCheckoutRoutingProvider(() => remote.currentPeerSupportsCheckoutRouting?.() === true);
+    core.setPlainHook((d, target) => handle.sendTunnel(d, target));
+    // Mark this connection as REMOTE for the core's mobile-access gate, and let
+    // every per-device question (capabilities, push identity) resolve against the
+    // device that asked. Local mode never wires this, so loopback control stays
+    // ungated.
+    core.setPeerSessionProvider((peerId) => remote.peerSession(peerId));
 
     // Fallback push path: while the paired phone can't receive in-band (no live
     // peer on this stream OR the app is backgrounded), seal a notification to its
@@ -522,28 +543,39 @@ export class ProjectCore {
     const dispatcher = createPushDispatcher({
       projectId: core.projectId,
       machineUuid: () => remote.machineDeviceId(),
-      // Fire when the phone can't receive in-band: no live peer OR backgrounded
-      // (`client:focus-state`). NOT connState.suppressed — that's the heavy-stream
-      // gate, whose `peerOnline` defaults true, so it reads "can receive in-band"
-      // for a phone that has never connected and mutes push after a host restart.
+      // Fire when NO attached client can receive in-band: no reachable session
+      // at all, OR every client that has declared a focus state is backgrounded
+      // (`appFocusPaused` is that conjunction, so one device in the user's hand
+      // keeps push quiet while its backgrounded sibling would not). NOT
+      // connState.suppressed — that's the heavy-stream gate, whose `peerOnline`
+      // defaults true, so it reads "can receive in-band" for a phone that has
+      // never connected and mutes push after a host restart.
       shouldFallback: () => !peerConnected || core.connState.appFocusPaused,
-      // A live peer names the exact device in session, so target only it. With no
-      // live peer, fall back to the persisted phone registry: delivery never needs
-      // the socket (the relay forwards to FCM/APNs blindly), and `currentPeerPubkey()`
-      // stays null after a host restart until the phone dials in — which it may
-      // never do while the user is away. Every registered phone is targeted then;
-      // picking one by `lastSeenAt` would guess which device the user holds and
-      // drop the notification when wrong, and `lastSeenAt` is stale in exactly
-      // this window.
+      // Target every registered phone that CANNOT receive this in band right
+      // now, which is the question push actually answers. A device is in band
+      // only while it holds a reachable session AND that session's client has
+      // not backgrounded itself; anything else — no session, an unreachable one,
+      // a reaped one, a backgrounded one — is a push target. Asking it per
+      // device is what keeps a sibling from suppressing the fallback: a desktop
+      // app establishes a session exactly like a phone but registers no push
+      // token, so "some session exists" would silence the phone in the user's
+      // pocket. Delivery never needs the socket (the relay forwards to FCM/APNs
+      // blindly), which is also why a host restart — no sessions at all — still
+      // targets every registered phone rather than guessing by `lastSeenAt`,
+      // stale in exactly that window.
       resolveTargets: () => {
         // Push carries project activity off this machine, so it rides the same
         // machine switch as every inbound verb — a token+pubkey alone must not
         // leak notifications from a machine that isn't mobile-reachable.
         // Fail-closed: an unwired host provider means no push.
         if (!(this.deps.remoteAccessEnabled?.() ?? false)) return [];
-        const peerPubkey = remote.currentPeerPubkey();
+        const inBand = new Set(
+          remote.establishedPeers()
+            .filter((p) => p.reachable && core.clientFocusPaused(p.peerId) !== true)
+            .map((p) => p.peerPubkey),
+        );
         const paired = core.pairedPhones.list();
-        const candidates = peerPubkey ? paired.filter((p) => p.phonePubkey === peerPubkey) : paired;
+        const candidates = paired.filter((p) => !inBand.has(p.phonePubkey));
         const targets = candidates.flatMap((p) =>
           p.pushToken && p.pushPubkey
             ? [{ pushToken: p.pushToken, provider: p.pushProvider ?? "fcm", pushPubkey: p.pushPubkey }]
@@ -554,9 +586,9 @@ export class ProjectCore {
           // pruned token and no phone at all are indistinguishable in host.log
           // without this.
           log.warn(
-            "push: no eligible phone for project %s (live peer: %s, paired: %d) — need a registered phone with a push token",
+            "push: no eligible phone for project %s (in band: %d, paired: %d) — need a registered phone with a push token",
             core.projectId,
-            peerPubkey ? "yes" : "none since agent start",
+            inBand.size,
             paired.length,
           );
         }
@@ -604,8 +636,7 @@ export class ProjectCore {
         try { unsubscribePush(); } catch { /* best-effort */ }
         try { handle.detach(); } catch { /* best-effort */ }
         try { core.setPlainHook(null); } catch { /* best-effort */ }
-        try { core.setPeerPubkeyProvider(null); } catch { /* best-effort */ }
-        try { core.setPeerCheckoutRoutingProvider(null); } catch { /* best-effort */ }
+        try { core.setPeerSessionProvider(null); } catch { /* best-effort */ }
       },
     };
   }
@@ -619,7 +650,7 @@ export class ProjectCore {
   promote(remoteDeps: ProjectCoreRemoteDeps): PromotionHandle {
     // A remote-mode core's relay slot IS its primary session; promoting it would
     // wire a SECOND client whose PromotionHandle.stop() nulls setPlainHook/
-    // setPeerPubkeyProvider, tearing down the live primary session's hooks. Only
+    // setPeerSessionProvider, tearing down the live primary session's hooks. Only
     // a local-mode core (whose loopback session owns no relay hooks) is promotable.
     if (this.deps.mode === "remote") {
       throw new Error("ProjectCore.promote: cannot promote a remote-mode core (its relay slot is the primary session)");
@@ -644,8 +675,7 @@ export class ProjectCore {
         try { unsubscribePush(); } catch {}
         try { handle.detach(); } catch {}
         try { core.setPlainHook(null); } catch {}
-        try { core.setPeerPubkeyProvider(null); } catch {}
-        try { core.setPeerCheckoutRoutingProvider(null); } catch {}
+        try { core.setPeerSessionProvider(null); } catch {}
       },
     };
   }
@@ -658,8 +688,7 @@ export class ProjectCore {
       try { this.bus?.publish(createMessage("agent:disconnecting", { reason }), "control"); } catch {}
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    try { this.core?.setPeerPubkeyProvider(null); } catch {}
-    try { this.core?.setPeerCheckoutRoutingProvider(null); } catch {}
+    try { this.core?.setPeerSessionProvider(null); } catch {}
     // Remove the primary stream's push dispatcher (additive bus subscriber) before
     // detaching — deliver() would otherwise hand a frame to a torn-down stream.
     try { this.relayPushUnsub?.(); } catch {}
