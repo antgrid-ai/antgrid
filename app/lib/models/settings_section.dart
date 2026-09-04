@@ -9,7 +9,6 @@
 /// link — so renaming one silently breaks links already written down.
 enum SettingsSection {
   billing,
-  connection,
   appearance,
   uiSize,
   accessibility,

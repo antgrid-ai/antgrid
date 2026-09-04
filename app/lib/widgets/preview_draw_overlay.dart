@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-import 'package:flutter/services.dart' show KeyDownEvent, LogicalKeyboardKey;
+import 'package:flutter/services.dart'
+    show HardwareKeyboard, KeyDownEvent, LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 
 import '../design/ab_colors.dart';
@@ -12,6 +13,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_text_field.dart';
 import '../utils/platform_utils.dart';
@@ -130,7 +132,10 @@ void paintPreviewMarks(
         );
         final cardRadius = Radius.circular(AbTokens.radius5 * scale);
         final card = RRect.fromRectAndRadius(cardRect, cardRadius);
-        canvas.drawRRect(card, Paint()..color = mark.color.withValues(alpha: 0.16));
+        canvas.drawRRect(
+          card,
+          Paint()..color = mark.color.withValues(alpha: 0.16),
+        );
         canvas.drawRRect(
           card,
           Paint()
@@ -166,8 +171,7 @@ Future<Uint8List?> compositePreviewMarks({
   try {
     codec = await ui.instantiateImageCodec(screenshot);
     image = (await codec.getNextFrame()).image;
-    final scale =
-        overlaySize.width > 0 ? image.width / overlaySize.width : 1.0;
+    final scale = overlaySize.width > 0 ? image.width / overlaySize.width : 1.0;
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     canvas.drawImage(image, Offset.zero, Paint());
@@ -228,6 +232,13 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
   final TextEditingController _noteController = TextEditingController();
   final FocusNode _noteFocus = FocusNode();
 
+  /// Holds primary focus for the overlay so Ctrl+Z (Cmd+Z on macOS) reaches
+  /// [_undo] the same way the toolbar button does. Autofocused rather than
+  /// requested explicitly: nothing else on this surface wants first focus,
+  /// and the note editor's own [FocusNode] takes it over the moment a note
+  /// is opened, same as any other descendant focus.
+  final FocusNode _overlayFocus = FocusNode(debugLabel: 'PreviewDrawOverlay');
+
   PreviewDrawTool _tool = PreviewDrawTool.pen;
   Color? _color;
   bool _sending = false;
@@ -252,7 +263,24 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
   void dispose() {
     _noteController.dispose();
     _noteFocus.dispose();
+    _overlayFocus.dispose();
     super.dispose();
+  }
+
+  /// Ctrl+Z (Cmd+Z on macOS) undoes the last mark, mirroring the toolbar
+  /// button. Shift is excluded so a future redo shortcut (Ctrl+Shift+Z) has
+  /// somewhere to land without this swallowing it first.
+  KeyEventResult _onOverlayKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (event.logicalKey != LogicalKeyboardKey.keyZ) {
+      return KeyEventResult.ignored;
+    }
+    final keys = HardwareKeyboard.instance;
+    if (keys.isShiftPressed) return KeyEventResult.ignored;
+    final isUndoModifier = keys.isControlPressed || keys.isMetaPressed;
+    if (!isUndoModifier) return KeyEventResult.ignored;
+    _undo();
+    return KeyEventResult.handled;
   }
 
   Color _penColor(BuildContext context) => _color ?? context.antgrid.error;
@@ -440,57 +468,64 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
   @override
   Widget build(BuildContext context) {
     final color = _penColor(context);
-    return Stack(
-      key: _canvasKey,
-      children: [
-        Positioned.fill(
-          child: GestureDetector(
-            key: const ValueKey('preview-draw-canvas'),
-            behavior: HitTestBehavior.opaque,
-            onTapUp: (d) => _onTapUp(d, color),
-            onPanStart: _tool == PreviewDrawTool.note
-                ? null
-                : (d) => _startMark(d.localPosition, color),
-            onPanUpdate: _tool == PreviewDrawTool.note
-                ? null
-                : (d) => _extendMark(d.localPosition),
-            onPanEnd: _tool == PreviewDrawTool.note ? null : (_) => _endMark(),
-            // Belt-and-suspenders alongside the point clamping above: a
-            // `CustomPaint` doesn't clip its own canvas by default, so
-            // without this any point that slipped through un-clamped would
-            // still paint over whatever sits outside the preview.
-            child: ClipRect(
-              child: CustomPaint(
-                painter: _MarksPainter(_marks),
-                child: const SizedBox.expand(),
+    return Focus(
+      focusNode: _overlayFocus,
+      autofocus: true,
+      onKeyEvent: _onOverlayKey,
+      child: Stack(
+        key: _canvasKey,
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              key: const ValueKey('preview-draw-canvas'),
+              behavior: HitTestBehavior.opaque,
+              onTapUp: (d) => _onTapUp(d, color),
+              onPanStart: _tool == PreviewDrawTool.note
+                  ? null
+                  : (d) => _startMark(d.localPosition, color),
+              onPanUpdate: _tool == PreviewDrawTool.note
+                  ? null
+                  : (d) => _extendMark(d.localPosition),
+              onPanEnd: _tool == PreviewDrawTool.note
+                  ? null
+                  : (_) => _endMark(),
+              // Belt-and-suspenders alongside the point clamping above: a
+              // `CustomPaint` doesn't clip its own canvas by default, so
+              // without this any point that slipped through un-clamped would
+              // still paint over whatever sits outside the preview.
+              child: ClipRect(
+                child: CustomPaint(
+                  painter: _MarksPainter(_marks),
+                  child: const SizedBox.expand(),
+                ),
               ),
             ),
           ),
-        ),
-        if (_editing != null) _buildNoteEditor(color),
-        Positioned(
-          left: AbTokens.space8,
-          right: AbTokens.space8,
-          bottom: AbTokens.space12,
-          child: Center(
-            child: _DrawToolBar(
-              tool: _tool,
-              color: color,
-              busy: _sending,
-              hasMarks: _marks.isNotEmpty,
-              onTool: (t) {
-                _commitNote();
-                setState(() => _tool = t);
-              },
-              onColor: (c) => setState(() => _color = c),
-              onUndo: _undo,
-              onClear: _clear,
-              onClose: () => unawaited(requestClose()),
-              onSend: () => unawaited(_send()),
+          if (_editing != null) _buildNoteEditor(color),
+          Positioned(
+            left: AbTokens.space8,
+            right: AbTokens.space8,
+            bottom: AbTokens.space12,
+            child: Center(
+              child: _DrawToolBar(
+                tool: _tool,
+                color: color,
+                busy: _sending,
+                hasMarks: _marks.isNotEmpty,
+                onTool: (t) {
+                  _commitNote();
+                  setState(() => _tool = t);
+                },
+                onColor: (c) => setState(() => _color = c),
+                onUndo: _undo,
+                onClear: _clear,
+                onClose: () => unawaited(requestClose()),
+                onSend: () => unawaited(_send()),
+              ),
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -619,10 +654,13 @@ class _DrawToolBar extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Only the tool cluster scrolls, and the two ways out are pinned
-          // outside it: a dozen cells cannot fit a phone-width panel, and the
-          // one control that must never be scrolled off is the one that gets
-          // you out of a mode covering the whole page.
+          // Only the tool/color cluster scrolls. Undo, Clear and the two ways
+          // out are all pinned outside it: a dozen cells cannot fit a
+          // phone-width panel, and a control someone needs to reach every
+          // time they overdraw must never be the one that scrolls out of
+          // view — that used to include Undo/Clear, which is exactly the bug
+          // this pinning fixes (they were reachable only by swiping the
+          // toolbar itself, and read as simply missing).
           Flexible(
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
@@ -643,50 +681,38 @@ class _DrawToolBar extends StatelessWidget {
                       ),
                     ),
                   const _BarDivider(),
-                  for (final swatch in palette)
-                    _BarCell(
-                      tooltip: 'Pen color',
-                      selected: swatch == color,
-                      onTap: () => onColor(swatch),
-                      child: Container(
-                        width: AbTokens.space16,
-                        height: AbTokens.space16,
-                        decoration: BoxDecoration(
-                          color: swatch,
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: context.antgrid.borderStrong,
-                          ),
-                        ),
-                      ),
-                    ),
-                  const _BarDivider(),
-                  _BarCell(
-                    tooltip: 'Undo',
-                    selected: false,
-                    onTap: hasMarks ? onUndo : null,
-                    child: AbIcon(
-                      AbIcons.undo,
-                      size: AbTokens.iconButtonGlyph,
-                      color: hasMarks
-                          ? context.antgrid.textSecondary
-                          : context.antgrid.textDisabled,
-                    ),
-                  ),
-                  _BarCell(
-                    tooltip: 'Clear',
-                    selected: false,
-                    onTap: hasMarks ? onClear : null,
-                    child: AbIcon(
-                      AbIcons.trash,
-                      size: AbTokens.iconButtonGlyph,
-                      color: hasMarks
-                          ? context.antgrid.textSecondary
-                          : context.antgrid.textDisabled,
-                    ),
+                  _ColorPickerCell(
+                    color: color,
+                    palette: palette,
+                    onColor: onColor,
                   ),
                 ],
               ),
+            ),
+          ),
+          const _BarDivider(),
+          _BarCell(
+            tooltip: 'Undo',
+            selected: false,
+            onTap: hasMarks ? onUndo : null,
+            child: AbIcon(
+              AbIcons.undo,
+              size: AbTokens.iconButtonGlyph,
+              color: hasMarks
+                  ? context.antgrid.textSecondary
+                  : context.antgrid.textDisabled,
+            ),
+          ),
+          _BarCell(
+            tooltip: 'Clear',
+            selected: false,
+            onTap: hasMarks ? onClear : null,
+            child: AbIcon(
+              AbIcons.trash,
+              size: AbTokens.iconButtonGlyph,
+              color: hasMarks
+                  ? context.antgrid.textSecondary
+                  : context.antgrid.textDisabled,
             ),
           ),
           const _BarDivider(),
@@ -723,6 +749,85 @@ class _BarDivider extends StatelessWidget {
       child: AbSeparator.vertical(weight: AbSeparatorWeight.strong),
     ),
   );
+}
+
+/// Current pen color as a single swatch cell that opens the palette in a
+/// popup, rather than laying all five swatches inline in the toolbar row.
+///
+/// The inline row used to sit inside the same scrollable cluster as the
+/// tools, so on a narrow preview panel it was squeezed out of the visible
+/// width entirely — reachable only by swiping the toolbar itself, which read
+/// as the palette simply being gone. One fixed-width trigger has nothing left
+/// to squeeze out.
+class _ColorPickerCell extends StatelessWidget {
+  const _ColorPickerCell({
+    required this.color,
+    required this.palette,
+    required this.onColor,
+  });
+
+  final Color color;
+  final List<Color> palette;
+  final ValueChanged<Color> onColor;
+
+  Future<void> _open(BuildContext context) async {
+    final anchor = abMenuAnchorRect(context);
+    if (anchor == null) return;
+    final picked = await showAbPanel<Color>(
+      context: context,
+      anchorRect: anchor,
+      width: 156,
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(AbTokens.space4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final swatch in palette)
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AbTokens.space2,
+                ),
+                child: GestureDetector(
+                  onTap: () => Navigator.of(ctx).pop(swatch),
+                  child: Container(
+                    width: AbTokens.space16,
+                    height: AbTokens.space16,
+                    decoration: BoxDecoration(
+                      color: swatch,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: swatch == color
+                            ? ctx.antgrid.textPrimary
+                            : ctx.antgrid.borderStrong,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (picked != null) onColor(picked);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _BarCell(
+      tooltip: 'Pen color',
+      selected: false,
+      onTap: () => unawaited(_open(context)),
+      child: Container(
+        width: AbTokens.space16,
+        height: AbTokens.space16,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(color: context.antgrid.borderStrong),
+        ),
+      ),
+    );
+  }
 }
 
 /// A bar cell: a fixed square target around whatever glyph or swatch it

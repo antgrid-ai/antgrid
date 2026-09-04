@@ -15,7 +15,6 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_panel_header.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_tap_target.dart';
-import '../design/widgets/ab_text_field.dart';
 import '../models/pending_nav.dart';
 import '../models/settings_section.dart';
 import '../providers/agent_transport.dart';
@@ -61,7 +60,6 @@ extension SettingsSectionUI on SettingsSection {
   /// addresses it cannot drift apart.
   String get title => switch (this) {
     SettingsSection.billing => 'BILLING',
-    SettingsSection.connection => 'CONNECTION',
     SettingsSection.appearance => 'APPEARANCE',
     SettingsSection.uiSize => 'UI SIZE',
     SettingsSection.accessibility => 'ACCESSIBILITY',
@@ -82,13 +80,9 @@ class AppSettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
-  late final TextEditingController _relayCtrl;
-
   @override
   void initState() {
     super.initState();
-    final initial = ref.read(appSettingsServiceProvider).defaultRelayUrl ?? '';
-    _relayCtrl = TextEditingController(text: initial);
     // A link naming a section writes it before this screen exists — the surface
     // it also names is what mounts us — so the first frame is the first chance
     // to honour it. Post-frame: the sections need to be laid out before one can
@@ -110,9 +104,9 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
     if (pending == null) return;
     ref.read(pendingSettingsSectionProvider.notifier).set(null);
     if (pending.target != ref.read(selectedTargetProvider)) return;
-    // Silently does nothing for a section this build omits — BILLING,
-    // CONNECTION and DESIGN are all conditional — which is the codec's
-    // degrade-rather-than-reject contract carried through to the destination.
+    // Silently does nothing for a section this build omits — BILLING and
+    // DESIGN are both conditional — which is the codec's degrade-rather-than-
+    // reject contract carried through to the destination.
     final ctx = settingsSectionKey(pending.value).currentContext;
     if (ctx == null) return;
     unawaited(
@@ -123,22 +117,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
         // on its first row reads as "here it is" where centring it does not.
         alignment: 0,
       ),
-    );
-  }
-
-  @override
-  void dispose() {
-    _relayCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _saveRelayUrl(AppSettingsService service, String value) async {
-    final error = await service.setDefaultRelayUrl(value);
-    if (!mounted) return;
-    showAbSnackBar(
-      context,
-      error ?? 'Saved default relay URL.',
-      clearPrevious: true,
     );
   }
 
@@ -178,7 +156,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
     final antgrid = context.antgrid;
     final settings = ref.watch(appSettingsServiceProvider);
     final service = ref.read(appSettingsServiceProvider.notifier);
-    final isNarrow = MediaQuery.sizeOf(context).width < 600;
 
     // Links that land while this screen is already up (and back/forward over
     // them) drain here; the initState post-frame callback covers the mount.
@@ -250,38 +227,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                                 ),
                               ],
                             ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: AbTokens.space12),
-                  ],
-                  if (!isNarrow) ...[
-                    _Section(
-                      section: SettingsSection.connection,
-                      body: [
-                        const SizedBox(height: AbTokens.space8),
-                        Text(
-                          'Relay every connection from this device uses. Leave '
-                          'empty for the one this build ships with.',
-                          style: AbTokens.sansStyle(
-                            fontSize: AbTokens.fontXxs,
-                            color: antgrid.textMuted,
-                          ),
-                        ),
-                        const SizedBox(height: AbTokens.space8),
-                        AbTextField(
-                          controller: _relayCtrl,
-                          hintText: 'wss://relay.example.com',
-                          onSubmitted: (v) => _saveRelayUrl(service, v),
-                        ),
-                        const SizedBox(height: AbTokens.space8),
-                        Align(
-                          alignment: Alignment.centerRight,
-                          child: AbButton(
-                            label: 'SAVE URL',
-                            onTap: () =>
-                                _saveRelayUrl(service, _relayCtrl.text),
                           ),
                         ),
                       ],
@@ -382,11 +327,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                     alignment: Alignment.centerRight,
                     child: AbButton(
                       label: 'RESET TO DEFAULTS',
-                      onTap: () async {
-                        await service.reset();
-                        if (!mounted) return;
-                        _relayCtrl.text = '';
-                      },
+                      onTap: () => service.reset(),
                     ),
                   ),
                   const SizedBox(height: AbTokens.space12),
@@ -592,7 +533,7 @@ class _PresetTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final antgrid = context.antgrid;
     final p = _peek(context);
-    final name = preset.name.toUpperCase();
+    final name = preset.label;
     return InkWell(
       onTap: onTap,
       borderRadius: AbTokens.borderRadius8,

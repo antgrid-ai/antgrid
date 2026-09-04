@@ -1114,15 +1114,21 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         : null;
     final captureInFlight = _screenshotCapture != null;
 
-    // Desktop-only, and only while driving THIS device's own dev server —
-    // opening the tunnel proxy's URL in the controller's own system browser
-    // while remote-controlling a different machine isn't the address the
-    // user typed, so hide it there rather than open something confusing.
-    final showOpenExternal =
-        !isMobilePlatform && (preview?.session.transport.isLocal ?? false);
+    // Desktop-only — a phone/tablet has no "system browser" affordance worth
+    // surfacing here. Not gated on transport.isLocal: remote-controlling
+    // another machine FROM a desktop still has a real system browser to open
+    // into, and _openInSystemBrowser already resolves the right address for
+    // that case (the local tunnel proxy, not the address the user typed).
+    final showOpenExternal = !isMobilePlatform;
 
     return Column(
       children: [
+        // Every other AbToolbar in the app stacks flush against whatever's
+        // above it (see ab_toolbar.dart) — but this one sits directly under
+        // the workspace tab strip's own hairline border, and the two
+        // hairlines back to back read as a single cramped seam. A small gap
+        // just for this toolbar, not the design-system default.
+        const SizedBox(height: AbTokens.space8),
         AbToolbar.actions(
           // Back/Forward stay inline on every platform, always visible and
           // DISABLED (not hidden) until the active tab can actually go that
