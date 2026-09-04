@@ -1,6 +1,6 @@
 # Multi-Machine Session — Build Plan
 
-**Spec:** `docs/multi-machine-session.md` (Draft v0.14). Every wave below cites the spec section it implements; nothing here re-decides anything the decision log (spec §12) has closed.
+**Spec:** `docs/multi-machine-session.md` (Draft v0.15). Every wave below cites the spec section it implements; nothing here re-decides anything the decision log (spec §12) has closed.
 **Status:** Draft, 2026-09-04
 
 ## How the waves are cut
@@ -61,7 +61,7 @@ W0, W1 and W2 are independent of each other and can run in parallel.
 - `SessionEntrySchema` (`bridge/src/protocol.ts`) gains optional `members[]` and `memberOf`. `session:create` gains `memberOf` plus the brief; the peer bridge persists its half in its own `sessions.json`. Mirror in `app/lib/models/session_entry.dart`.
 - **Capability Card** as a bridge-observed OS + repo record, available before any agent runs. The project catalog advert (`agent:projects`) gains the git remote, which the dialog's auto-match needs (§7.5).
 - **Deletion rules** (§5.4) in the session manager: cascade, confirm-then-delete, self-delete on disown, orphan marking. One consequence of D7 to write into the spec while doing this: **the lead bridge cannot reach the peer bridge**, so the cascade is issued by the lead's app, one delete per member, and the lead bridge records each outcome ("released" or "released, delete refused"). The existing `WORKTREE_DIRTY` / `WORKTREE_UNPUSHED` refusals apply unchanged.
-- Brief delivery: on create, the peer bridge feeds the brief to that session's Handler as `handler:instruct` (§7.2). Lifts remain per member by construction, since the instruction is text on that engine.
+- Brief delivery: on create, the peer bridge feeds the brief to that session's Handler as `handler:instruct` (§7.2), wrapped by the brief template of §5.2 (the template module lands here and W3 extends it). Lifts remain per member by construction, since the instruction is text on that engine.
 
 **Gates:** bridge tests for persistence and every row of the §5.4 table; `flutter test` for the model mirror.
 
@@ -77,9 +77,9 @@ The largest wave, and the only one that touches every layer of the bridge. Cut i
 
 **3b — Wire and forwarding.** Message types for task transitions, acks, messages and artifact references, addressed per member. The lead bridge hands outbound frames to the loopback owner **only** (`local-listener.ts`, §4.1 first invariant), never to the bus; the app forwards them over its connection to the peer bridge and relays the peer's frames back. Retry until acked.
 
-**3c — Tools and the wake.** The MCP subcommand from W0 exposes the lead and peer tool tables of §4.5, role derived from the calling terminal. Delivery into an agent is a line submitted at the **next turn boundary**: `work-status.ts` already observes turn open and close, and `SessionAdapter.injectReply` (`PtySubmitQueue` or the chat driver) is the submit path. Never mid-turn (§5.2). The runaway guard (§8) caps tasks per session and per hour.
+**3c — Tools, delivery templates and the wake.** The MCP subcommand from W0 exposes the lead and peer tool tables of §4.5, role derived from the calling terminal. Every line delivered into an agent is rendered by one template module (`bridge/src/session-bus/delivery.ts`, one function per delivery kind: brief, task, wake, answer) per §5.2: provenance, expected action and answering tool, the other agent's content fenced as data, scope restated. Written and reviewed as prompts, with a snapshot test per kind. Delivery into an agent is a line submitted at the **next turn boundary**: `work-status.ts` already observes turn open and close, and `SessionAdapter.injectReply` (`PtySubmitQueue` or the chat driver) is the submit path. Never mid-turn (§5.2). The runaway guard (§8) caps tasks per session and per hour.
 
-**Gates:** unit tests for 3a idempotency (duplicate `seq`, out-of-order ack, retry after drop); bridge tests for 3b addressing (a bus subscriber must never see task traffic); an eval for 3c with one real agent calling `assign-task` and observing the wake land after the current turn, not inside it.
+**Gates:** unit tests for 3a idempotency (duplicate `seq`, out-of-order ack, retry after drop); bridge tests for 3b addressing (a bus subscriber must never see task traffic); an eval for 3c with one real agent calling `assign-task` and observing the wake land after the current turn, not inside it; snapshot tests for every delivery template, plus one that feeds a finding containing instruction-shaped text and asserts it arrives fenced.
 
 **Done when** a lead agent on machine A assigns a task, a test client playing the carrier forwards it, and the peer agent on machine B receives it as a Handler-delivered line and reports back with an acked transition.
 
