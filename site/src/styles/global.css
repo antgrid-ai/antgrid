@@ -421,16 +421,15 @@ html.js .reveal:not(.in) .eb-caret {
   display: inline-flex;
 }
 
-/* The download confirmation page (/download/started), revealed the same
-   unlayered way off `data-dl` — which that page's own head script sets, and
-   only ever when the URL named a platform it has a build for.
+/* The download page (/download), revealed the same unlayered way off `data-dl`
+   — which that page's own head script sets, and only ever when the URL named a
+   build this reader's machine can run.
 
    Two switches on one attribute. The per-platform panel is keyed on the
-   platform rather than on `data-os` on purpose: what fires is what the reader
-   ASKED for, so someone who opened the macOS link a colleague sent them from a
-   Windows box is told the truth about the file that just landed. The idle/fired
-   pair is keyed on `data-dl` merely EXISTING, which is what makes the
-   pick-a-build state the default — a reader with no script, or no platform,
+   platform rather than on `data-os` on purpose: the two answer different
+   questions, and this one has to name the file that just landed. The
+   idle/fired pair is keyed on `data-dl` merely EXISTING, which is what makes
+   the pick-a-build state the default — a reader with no script, or no platform,
    gets the working page instead of a thank-you for a download that never
    started. */
 .dl-note,
@@ -445,6 +444,42 @@ html.js .reveal:not(.in) .eb-caret {
 }
 [data-dl] .dl-idle {
   display: none;
+}
+
+/* The other outcome of that same script: the URL named a build this machine
+   cannot run, so nothing fired and the page stayed idle. `data-ask` reveals the
+   one line that says which build was asked for and links straight to it. A
+   separate attribute from `data-dl` rather than a value of it, because the two
+   are opposites — one means a download is happening, the other means one
+   deliberately is not — and collapsing them would put the fired headline over a
+   page where nothing was fetched. */
+.dl-ask {
+  display: none;
+}
+[data-ask="windows"] .dl-ask-windows,
+[data-ask="macos"] .dl-ask-macos,
+[data-ask="linux"] .dl-ask-linux {
+  display: block;
+}
+
+/* The one row on the site whose buttons aim at a raw artifact instead of at
+   ?platform= (/download's own OS match), and the swap that keeps that safe on a
+   handheld. Everywhere else a dl-os button routes through the download page,
+   where the head script re-checks the machine and refuses; this row has no
+   second check, and data-os cannot stand in for one — it answers which build to
+   OFFER, so it files Android under "win" and iPhone under "mac" and falls
+   through to Windows when no script ran. Left revealed, the page's single
+   primary action hands an iPhone a 94MB .dmg and an Android phone a Windows
+   .exe. `data-form` is the axis that knows the difference, so it is the axis
+   that switches them. */
+.dl-handheld {
+  display: none;
+}
+[data-form="mobile"] .dl-direct {
+  display: none;
+}
+[data-form="mobile"] .dl-handheld {
+  display: block;
 }
 
 /* The window's pane geometry. In CSS rather than utilities because the three

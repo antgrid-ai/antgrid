@@ -5,10 +5,10 @@ import Button from "../ui/Button.astro";
 import { links, PLATFORMS, downloadUrlFor } from "../../config";
 import { BETA_FREE, FREE_WORKERS, PRO_WORKERS, YEARLY_OFFER_USD } from "../../data/pricing";
 
-// The same OS-matched button the hero leads with, through the same confirmation
-// page — a closing CTA that ends on a doc link is a page that never asks for the
-// thing it spent nine sections arguing for. The setup guide keeps its place in
-// the line below, which is where a reader who wants to read first looks anyway.
+// The same OS-matched button the hero leads with, through the same /download —
+// a closing CTA that ends on a doc link is a page that never asks for the thing
+// it spent nine sections arguing for. The setup guide keeps its place in the
+// line below, which is where a reader who wants to read first looks anyway.
 ---
 <section id="download" class="reveal mx-auto max-w-shell px-6 py-20">
   <div class="card-lit relative overflow-hidden rounded-xl border border-signaldeep2 bg-[#17171e] px-9 py-14 text-center">
@@ -33,12 +33,12 @@ import { BETA_FREE, FREE_WORKERS, PRO_WORKERS, YEARLY_OFFER_USD } from "../../da
       ))}
     </div>
     <p class="mb-2 text-meta text-muted2">No card required · remote control on the free plan</p>
-    {/* The escape hatch for the OS match, and the reason the three-button row
-        could go: the hero's "Windows, macOS & Linux" link lands here, so this
-        band is where a reader on the wrong machine — or downloading for one they
-        are not sitting at — has to be able to name their own build. Each goes
-        through the confirmation page like every other download on the site; the
-        raw artifacts stay one layer down, in the guide. */}
+    {/* The escape hatch for the OS match: this band is where a reader on the
+        wrong machine — or downloading for one they are not sitting at — has to
+        be able to name their own build. Each goes through /download like every
+        other download on the site, so a build the reader's machine cannot run is
+        offered there rather than fired; the raw artifacts stay one layer down,
+        in the guide. */}
     {/* Its own line rather than trailing the build list: the same middot cannot
         separate three peers AND then a different sentence — run together, "Linux ·
         First time?" reads as a fourth build for one beat, and the whole thing

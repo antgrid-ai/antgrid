@@ -1,6 +1,6 @@
 // The marketing site is a separate deploy; these public URLs are the contract.
 // Keep in lockstep with site/src/config.ts links.download / links.getStarted.
-const SITE_DOWNLOAD_URL = "https://antgrid.ai/#download";
+const SITE_DOWNLOAD_URL = "https://antgrid.ai/download";
 const SITE_GET_STARTED_URL = "https://antgrid.ai/get-started";
 
 export function DownloadCard() {
