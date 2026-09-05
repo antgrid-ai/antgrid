@@ -399,8 +399,20 @@ first for every project on the machine, Git-backed or not.
   every PTY tree with no shutdown handler involved, which is what covers a
   force-killed bridge. It narrows the failure rather than removing it — a
   `ShellExecute`-created child joins its creator's job, not ours — so
-  `listProcessesWithCwdUnder` stays the way to name whoever still holds a
-  directory when a delete fails anyway. None of it applies off Windows.
+  `listProcessesWithCwdUnder` names whoever still holds a directory when a
+  delete fails anyway, and `evictHolders` (`worktree-manager.ts`) then KILLS
+  that set and retries the reclaim once. Naming alone left the session
+  undeletable, because the user is typically on a phone and cannot reach a pid.
+  Four things make the kill defensible and every one is load-bearing: the path
+  must be under our own worktree root (never `record.managed`, which a
+  hand-edited store can lie about, and this is a kill); each holder is
+  re-verified through `survivingProcesses` in the instant before its handle
+  opens, since a pid alone may have been reissued to a stranger;
+  `terminateProcesses` refuses this process and every ancestor of it, because a
+  checkout with a dev stack in it is held by DOZENS of processes (measured) and
+  the app that spawned the bridge can be among them; and it is wired only into
+  the explicit delete, never the reconcile sweep, which rides on a create by a
+  user who asked for nothing to be removed. None of it applies off Windows.
   Mind the asymmetry in what a survivor costs
   — on Windows it blocks the delete outright, while POSIX unlinks the directory
   out from under it and leaves only a process nobody will reap.
