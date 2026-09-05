@@ -326,7 +326,12 @@ export class WorktreeManager {
     if (!exists) return { exists: false, registered, dirty: false, unpushedCommits: unpushed, locked: false };
     const entry = list.exitCode === 0 ? parseWorktreeList(list.stdout)
       .find((item) => canonical(item.path) === canonical(record.path)) : undefined;
-    const status = await this.git(["status", "--porcelain=v1", "--untracked-files=all"], record.path);
+    // `normal`, not `all`: this reduces to a boolean, and collapsing a wholly
+    // untracked directory to one entry is the same verdict for a fraction of
+    // the walk on a checkout with tens of thousands of files — which is on the
+    // critical path of a delete. Never `no`: this gates a WORKTREE_DIRTY
+    // refusal, and reading an untracked-only worktree as clean is data loss.
+    const status = await this.git(["status", "--porcelain=v1", "--untracked-files=normal"], record.path);
     // An unreadable status is not a clean one. `removeNow` now deletes the
     // directory itself whenever Git will not, so reading a failed `git status`
     // as "no local changes" is what would destroy them — a corrupt index or a
@@ -812,7 +817,10 @@ export class WorktreeManager {
    * over a tree still full of the user's work; the `.git` link is what separates
    * that from the wreckage this sweep exists to reclaim, which has none. */
   private async hasLocalChanges(dir: string): Promise<boolean> {
-    const status = await this.git(["status", "--porcelain=v1", "--untracked-files=all"], dir)
+    // `normal` for the reason [inspect] gives, and `no` is forbidden here for
+    // the same one: this is the more reluctant of the two refusals, not the
+    // more permissive.
+    const status = await this.git(["status", "--porcelain=v1", "--untracked-files=normal"], dir)
       .catch(() => undefined);
     if (!status || status.exitCode !== 0) return existsSync(join(dir, ".git"));
     return status.stdout.trim().length > 0;

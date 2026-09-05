@@ -128,6 +128,64 @@ describe("readSyncState", () => {
     expect(state.branch).toBeNull();
     expect(state.hasRemote).toBe(true);
   });
+
+  // `readSyncState` skips the `rev-list --left-right --count` entirely when no
+  // `branch.<n>.remote` is configured — the shape it produces has to stay the
+  // one that arm's exit-128 produced, and the skip must not swallow the
+  // legitimate failure path or a `.` remote's real counts.
+  it("a branch with no tracking config at all reports the same shape the upstream read did", async () => {
+    const { work } = await makeRepoWithRemote(dir);
+    await run(work, ["checkout", "-b", "antgrid/isolated"]);
+    await commit(work, "isolated-one");
+    expect(await capture(work, ["config", "--get", "branch.antgrid/isolated.remote"])).toBe("");
+
+    const state = await readSyncState(work);
+    expect(state).toMatchObject({
+      branch: "antgrid/isolated",
+      hasUpstream: false,
+      hasRemote: true,
+      ahead: 0,
+      behind: 0,
+    });
+  });
+
+  it("a branch WITH tracking config but a missing remote ref still runs the upstream read", async () => {
+    const { work } = await makeRepoWithRemote(dir);
+    await run(work, ["checkout", "-b", "ghost"]);
+    await commit(work, "ghost-one");
+    // Tracking config pointing at a ref that was never pushed: `@{upstream}`
+    // fails, and that failure — not a skip — is what reports hasUpstream.
+    await run(work, ["config", "branch.ghost.remote", "origin"]);
+    await run(work, ["config", "branch.ghost.merge", "refs/heads/ghost"]);
+
+    const state = await readSyncState(work);
+    expect(state).toMatchObject({
+      branch: "ghost",
+      remote: "origin",
+      remoteBranch: "ghost",
+      hasUpstream: false,
+      ahead: 0,
+      behind: 0,
+    });
+  });
+
+  it("a branch tracking a LOCAL branch still resolves @{upstream} with real counts", async () => {
+    const { work } = await makeRepoWithRemote(dir);
+    await run(work, ["checkout", "-b", "local-base"]);
+    await commit(work, "base-two");
+    await run(work, ["checkout", "-b", "on-top"]);
+    // `.` is the remote git itself writes for a branch that tracks a local one
+    // — `resolvePushTarget` reports `tracked: false` for it while `@{upstream}`
+    // genuinely resolves, which is why the skip keys on the CONFIG.
+    await run(work, ["config", "branch.on-top.remote", "."]);
+    await run(work, ["config", "branch.on-top.merge", "refs/heads/local-base"]);
+    await commit(work, "on-top-one");
+
+    const state = await readSyncState(work);
+    expect(state.hasUpstream).toBe(true);
+    expect(state.ahead).toBe(1);
+    expect(state.behind).toBe(0);
+  });
 });
 
 describe("gitPush", () => {
