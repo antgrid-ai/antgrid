@@ -24,6 +24,13 @@ export interface StreamHandle {
    *  one request, so fanning it out to every attached device both wastes the
    *  link and hands one device another's response. Absent = every session. */
   sendTunnel(data: object, target?: SendTarget): void;
+  /** Send one frame on a named channel to a single app session, bypassing the
+   *  bus. The bus has no addressing, so a published frame reaches every
+   *  established session — including the human's phone, which is attached here
+   *  too and must never see another agent's task traffic (spec 4.1). Returns
+   *  false when the gates dropped it, so a caller with an outbox can hold the
+   *  frame rather than assume it left. */
+  sendTo(msg: unknown, channel: Channel, target: SendTarget): boolean;
 }
 
 /** What one app session looks like to everything outside the relay client. No
@@ -178,6 +185,13 @@ export class StreamMux {
       const peer = this.transport.peerSession(target.peerId);
       return peer && opts.mayDeliverTo(peer) ? target : null;
     };
+    const sendTo = (msg: unknown, channel: Channel, target?: SendTarget): boolean => {
+      if (!mayDeliver()) return false;
+      const to = gated(target);
+      if (!to) return false;
+      this.transport.sendEnvelope(streamId, msg, channel, to);
+      return true;
+    };
     const unsub = bus.subscribe({
       deliver: (msg, channel) => {
         if (!mayDeliver()) return;
@@ -196,10 +210,9 @@ export class StreamMux {
       // Gated too: tunnel frames bypass the bus (see setPlainHook), so the
       // subscriber check above never sees them.
       sendTunnel: (data, target) => {
-        if (!mayDeliver()) return;
-        const to = gated(target);
-        if (to) this.transport.sendEnvelope(streamId, data, "preview", to);
+        sendTo(data, "preview", target);
       },
+      sendTo: (msg, channel, target) => sendTo(msg, channel, target),
     };
   }
 

@@ -34,6 +34,7 @@ import type {
   SessionMemberRef,
 } from "./protocol";
 import { MAX_SESSION_MEMBERS, SessionMemberOfSchema, SessionMemberSchema } from "./protocol";
+import { sameAddress } from "./session-bus/address";
 import {
   CHECKOUT_KINDS,
   CHECKOUT_STATES,
@@ -105,13 +106,6 @@ export interface DeleteSessionOptions {
   removeCheckout?: boolean;
   /** Explicit opt-in; managed branches are preserved by default. */
   deleteBranch?: boolean;
-}
-
-/** Membership identity: machine + project + session, and nothing else. The
- *  labels beside them are display text that changes under a rename, so folding
- *  them in would make the same machine record twice. */
-function sameMember(a: SessionMemberKey, b: SessionMemberKey): boolean {
-  return a.machineId === b.machineId && a.projectId === b.projectId && a.sessionId === b.sessionId;
 }
 
 /// Quote a single token (executable path or flag) for the shell that
@@ -849,7 +843,7 @@ export class SessionManager {
       throw new SessionError("SESSION_MEMBER_CONFLICT", "A member session cannot lead another.");
     }
     const list = entry.members ? [...entry.members] : [];
-    const at = list.findIndex((m) => sameMember(m, member));
+    const at = list.findIndex((m) => sameAddress(m, member));
     const existing = at >= 0 ? list[at] : undefined;
     if (existing) {
       // Re-recording revives a released member and refreshes its labels, but
@@ -888,7 +882,7 @@ export class SessionManager {
     opts?: { deleteRefused?: boolean; reason?: string },
   ): Promise<SessionEntry> {
     const entry = this.requireEntry(sessionId);
-    const at = entry.members?.findIndex((m) => sameMember(m, member)) ?? -1;
+    const at = entry.members?.findIndex((m) => sameAddress(m, member)) ?? -1;
     if (!entry.members || at < 0) return this.toWire(entry);
     const prev = entry.members[at]!;
     const next = [...entry.members];

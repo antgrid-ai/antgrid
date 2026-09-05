@@ -79,7 +79,7 @@ async function startCore(peers: PeerSessionView[], register: (store: PairedPhone
     remote: {
       attachStream: (b) => {
         bus = b;
-        return { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
+        return { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendTo: () => true };
       },
       establishedPeers: () => peers,
       peerSession: (peerId) => peers.find((p) => p.peerId === peerId) ?? null,

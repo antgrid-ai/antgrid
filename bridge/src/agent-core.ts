@@ -29,6 +29,13 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
+import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
+import { saveBrief } from "./session-bus/brief-store";
+import { TASK_EXPIRY_MS } from "./session-bus/constants";
+import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
+import { lineForEvent } from "./session-bus/deliver-event";
+import { neutralizeFenced } from "./session-bus/delivery";
+import type { QueuedLine } from "./session-bus/delivery-queue";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, SessionMemberOrphanWire, SessionMemberRecordWire, SessionMemberReleaseWire, SessionMembershipCreateWire, type AbMessage, type RpcRequest, type SessionEntry, type SessionMemberOf, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
@@ -81,6 +88,19 @@ const yieldToEventLoop = () => new Promise<void>((r) => setImmediate(r));
  *  can be addressed back to the device that asked. Comfortably past the app's
  *  own preview timeouts; an expired entry costs a broadcast, never a body. */
 const TUNNEL_ORIGIN_TTL_MS = 120_000;
+
+/** How long the app session that delivered a bus frame stays the way back for
+ *  its context. Never shorter than a task's own life: a task is a unit of work,
+ *  not a request/response, and the peer's answer may be the first frame it sends
+ *  after a long stretch of silence — a route that lapsed while its task was still
+ *  live would strand every report the peer had left to make. A successful send
+ *  refreshes it too, so a route in continuous use never ages out at all. An
+ *  expired entry costs nothing but a held frame, which the next inbound frame on
+ *  the context releases. It is NEVER a fallback to broadcast: the bus has no
+ *  addressing, so a broadcast would put task traffic on the human's phone
+ *  (spec 4.1).
+ */
+const BUS_ORIGIN_TTL_MS = TASK_EXPIRY_MS;
 
 type CheckoutAgentSpec = {
   command: string;
@@ -195,6 +215,20 @@ export interface AgentCore {
   /** Machine-level phone registry (identity, label, push routing), shared across
    *  projects. Not an authorization store — see remote-access-policy.ts. */
   readonly pairedPhones: PairedPhonesStore;
+  /** The multi-machine task bus for this project: task stores, sequencing and
+   *  the retry outbox. Its frames leave through the carrier this core was wired
+   *  with and NEVER through the MessageBus (see {@link
+   *  BuildAgentCoreOptions.sendToOwner}). */
+  readonly sessionBus: SessionBusCoordinator;
+  /** Wire the one consumer that turns a bus event into a line an agent reads.
+   *  A core with none still folds, acks and retries — it just delivers nothing,
+   *  which is the honest state for a build whose delivery layer is absent. */
+  setSessionBusListener(fn: ((event: SessionBusEvent) => void) | null): void;
+  /** Submit one rendered session-bus line into a live session, through the same
+   *  adapter a Handler auto-reply uses. False means it did not go in — the
+   *  session has no live agent — so the caller's queue keeps the line for the
+   *  next boundary rather than reporting a delivery that never happened. */
+  injectBusLine(sessionId: string, text: string): boolean;
   /** The owner's work reduction moved: re-emit `session:updated` so the
    *  `workStatus` stamped on each entry (from
    *  {@link BuildAgentCoreOptions.sessionWorkStatusFor}) is current. No-op
@@ -364,6 +398,31 @@ export interface BuildAgentCoreOptions {
    *  brief is a peer waiting for instructions, an unwrapped one is a mandate
    *  set by unreviewed text. */
   renderBriefInstruction?: (delivery: { lead: SessionMemberOf; brief: string }) => string;
+  /** Hand one session-bus frame to the loopback owner — this machine's own
+   *  desktop app — and to nothing else. The lead bridge can never reach the peer
+   *  bridge (D7), so the owner is its only carrier; and the MessageBus has no
+   *  addressing, so publishing instead would put task traffic on the human's
+   *  phone (spec 4.1). False when there is no owner, or the owner did not
+   *  declare itself a carrier: the frame stays in the outbox. */
+  sendToOwner?: (msg: AbMessage) => boolean;
+  /** Hand one session-bus frame to ONE attached app session — the peer bridge
+   *  answering the carrier that delivered to it, which is the only route it has
+   *  back to a machine it cannot reach. */
+  sendToAppSession?: (peerId: string, msg: AbMessage) => boolean;
+  /** This machine's relay device id: its half of every session-bus address.
+   *  Null in local mode, where no frame can leave the machine to need one, and a
+   *  session with no address is refused `NOT_MEMBER` rather than given a
+   *  synthesized one. */
+  machineId?: () => string | null;
+  /** Whether this core's carrier is attached right now. A lead reads it to say
+   *  whether a peer is reachable at all; absent means no carrier, which is the
+   *  honest answer for a core nothing has connected to. */
+  carrierPresent?: () => boolean;
+  /** Hand one rendered line to the turn-boundary queue that owns delivery
+   *  (spec 5.2). Absent means there is no queue to hold it: the turn-open set
+   *  lives in the reduction ABOVE this core, so a core built without one has
+   *  nothing to wait on and submits immediately instead. */
+  queueBusLine?: (line: Omit<QueuedLine, "queuedAt">) => void;
   /** Test-only release-gate override. Production callers omit this and use the
    * central capability constant. */
   worktreeSessionsSupported?: boolean;
@@ -776,6 +835,167 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return { kind: "peer", peerId: origin.peerId };
   }
 
+  // Which app session carried a bus frame in, keyed by its context. A peer
+  // bridge cannot reach the lead's machine (D7), so the carrier that delivered
+  // to it is its only way back; unlike a tunnel there is no broadcast fallback,
+  // because the bus fans out to every established session including the human's
+  // phone (spec 4.1). A miss holds the frame in the outbox instead, which the
+  // next inbound frame on the context clears.
+  const busOriginByContext = new Map<string, { peerId: string; at: number }>();
+
+  function noteBusOrigin(contextId: string, peerId: string | undefined): void {
+    // No peerId is the loopback owner, which is the lead's carrier and is
+    // already reachable without a route.
+    if (!peerId) return;
+    const now = Date.now();
+    for (const [key, origin] of busOriginByContext) {
+      if (now - origin.at >= BUS_ORIGIN_TTL_MS) busOriginByContext.delete(key);
+    }
+    busOriginByContext.set(contextId, { peerId, at: now });
+  }
+
+  /** The live route entry, or null. Returned by reference so a caller that
+   *  actually gets a frame out can stamp it — see the coordinator's `send`. */
+  function busTargetFor(contextId: string): { peerId: string; at: number } | null {
+    const origin = busOriginByContext.get(contextId);
+    if (!origin) return null;
+    if (Date.now() - origin.at >= BUS_ORIGIN_TTL_MS) {
+      busOriginByContext.delete(contextId);
+      return null;
+    }
+    return origin;
+  }
+
+  // A session this bridge may address on the bus. Membership is the gate: a
+  // carrier naming a session no human ever joined to a bus gets NOT_MEMBER
+  // rather than a synthesized identity, and a machine with no relay device id
+  // (local mode) has no address at all.
+  function sessionBusSelf(sessionId: string): SessionBusSelf | null {
+    const machineId = opts.machineId?.() ?? null;
+    if (!machineId) return null;
+    const entry = sessions?.get(sessionId);
+    if (!entry) return null;
+    if (!entry.memberOf && !(entry.members && entry.members.length > 0)) return null;
+    return {
+      key: { machineId, projectId: project.id, sessionId },
+      ref: {
+        machineId,
+        projectId: project.id,
+        sessionId,
+        projectLabel: project.name,
+        sessionName: entry.name,
+      },
+    };
+  }
+
+  let busEventListener: ((event: SessionBusEvent) => void) | null = null;
+
+  const sessionBus = new SessionBusCoordinator({
+    abDir,
+    projectId: project.id,
+    self: sessionBusSelf,
+    // The lead hands every frame to its own desktop app; a peer answers on the
+    // session that carried the task in. Neither path is the MessageBus.
+    send: (frame, ctx) => {
+      if (ctx.role === "peer") {
+        // A peer has exactly one way home and it is the carrier that brought the
+        // task in (D7). Falling through to the loopback owner would hand the
+        // lead's result to THIS machine's own desktop app, which accepts it and
+        // returns true — booking a delivery that never happened and retiring the
+        // outbox entry that was the only thing left to retry it.
+        const origin = busTargetFor(ctx.contextId);
+        if (!origin) return false;
+        const sent = opts.sendToAppSession?.(origin.peerId, frame) ?? false;
+        if (sent) origin.at = Date.now();
+        return sent;
+      }
+      return opts.sendToOwner?.(frame) ?? false;
+    },
+    onEvent: (event) => {
+      deliverBusEvent(event);
+      busEventListener?.(event);
+    },
+  });
+  // Hydrate whatever a previous process left in flight. Without it a cold
+  // coordinator holds no sessions, so nothing re-arms the retries a killed bridge
+  // queued and a finished task's report never goes.
+  sessionBus.resume();
+
+  /** Turn one inbound bus event into the line its session reads, and hand that
+   *  line to whoever owns delivery. The mapping lives in `deliver-event.ts`, so
+   *  the core decides nothing about WHAT an arrival says — only where the
+   *  rendered line goes. */
+  function deliverBusEvent(event: SessionBusEvent): void {
+    let line: Omit<QueuedLine, "queuedAt"> | null = null;
+    try {
+      line = lineForEvent(event, {
+        abDir,
+        projectId: project.id,
+        memberOf: (id) => sessions?.memberOfFor(id),
+        now: Date.now,
+      });
+    } catch (err) {
+      // The coordinator has already folded and acked by the time it announces,
+      // so throwing back into it would fail a settled fold over a rendering
+      // problem that costs one delivery.
+      log.warn("could not render a session-bus delivery: %s", err);
+      return;
+    }
+    if (!line) return;
+    if (opts.queueBusLine) { opts.queueBusLine(line); return; }
+    injectBusLine(line.sessionId, line.text);
+  }
+
+  /** Submit one line into a session, or report that it did not land.
+   *
+   *  `injectReply` returns nothing, so "delivered" has to be decided here: a
+   *  session with no live agent swallows the submit, and a queue told the line
+   *  went in would drop the only wake its lead is ever getting (D11). */
+  function injectBusLine(sessionId: string, text: string): boolean {
+    if (!sessions?.get(sessionId)?.running) return false;
+    // The last boundary before another machine's words become keystrokes. The
+    // renderer already neutralized them, so a difference here is an upstream bug
+    // rather than an expected input — hence the warn.
+    //
+    // Reduced and NOT refused, deliberately: `drain` leaves an undelivered line
+    // at the head of its session's queue, so refusing here would make one bad
+    // line a poison pill that blocks every later delivery to that session for
+    // good. The characters are gone either way; only the queue survives.
+    const safe = neutralizeFenced(text);
+    if (safe !== text) {
+      log.warn("stripped control characters from a session-bus line to %s", sessionId);
+    }
+    try {
+      busAdapter.injectReply(sessionId, safe);
+      return true;
+    } catch (err) {
+      log.warn("could not submit a session-bus line to %s: %s", sessionId, err);
+      return false;
+    }
+  }
+
+  const sessionBusApi: SessionBusApi = createSessionBusApi({
+    coordinator: sessionBus,
+    abDir,
+    projectId: project.id,
+    projectName: project.name,
+    machineId: () => opts.machineId?.() ?? null,
+    // The terminal id IS the session id for every agent session, so a tool
+    // caller's slot resolves its own membership; a service PTY names no session
+    // and is answered as a non-member.
+    membership: (terminalId) => {
+      const entry = sessions?.get(terminalId);
+      if (!entry) return null;
+      return {
+        sessionId: entry.id,
+        ...(entry.name ? { sessionName: entry.name } : {}),
+        members: entry.members ?? [],
+        ...(entry.memberOf ? { memberOf: entry.memberOf } : {}),
+      };
+    },
+    carrierPresent: () => opts.carrierPresent?.() ?? false,
+  });
+
   function handleTunnelMessage(raw: unknown, peerId?: string) {
     const msg = parseTunnelMessage(raw as string | object);
     if (!msg) { log.warn("Invalid tunnel message, dropping"); return; }
@@ -825,6 +1045,24 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // here is authorized at the bus handler and does not care.
   function handleAbMessage(msg: AbMessage, client: ClientKey, peerId?: string) {
     switch (msg.type) {
+      // Bus frames are relayed by an app session between two bridges that
+      // cannot reach each other, so this bridge is an endpoint, never a hop:
+      // the coordinator applies only frames addressed to a session it holds and
+      // acks every one it applies, including the duplicates a retry produces.
+      case "session-bus:assign":
+      case "session-bus:transition":
+      case "session-bus:cancel":
+      case "session-bus:message":
+      case "session-bus:fetch":
+      case "session-bus:fetch:result":
+      case "session-bus:ack":
+        // Noted only for a frame the coordinator ACCEPTED. Its address check is
+        // what proves the sender is talking about a session this bridge actually
+        // holds, and this map is a peer's only route home — noting first would let
+        // any app session rebind it with one syntactically valid frame carrying
+        // someone else's contextId, and take the next transition for itself.
+        if (sessionBus.handleInbound(msg) === "applied") noteBusOrigin(msg.contextId, peerId);
+        break;
       case "agent:prompt":
       case "agent:permission-resolve":
       case "agent:question-resolve":
@@ -846,6 +1084,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             ? msg.permissionId
             : msg.type === "agent:question-resolve" ? msg.questionId : undefined,
         });
+        sessionBus.clearHalt(msg.sessionId);
         // A RESOLVE additionally unblocks the session: the block is gone and the
         // agent resumes on THIS session, so report it now rather than waiting for
         // the driver's next outbound frame — that is what flips the session's dot
@@ -911,6 +1150,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           submitted: isSubmitKeystroke(msg.data),
           typed: hasTypedContent(msg.data),
         });
+        // ...and lifts a session-bus no-progress halt. The halt waits on a human
+        // looking (spec 8); a human submitting into that session is the only such
+        // signal a bridge can observe, and an agent cannot forge it because
+        // nothing an agent submits arrives as terminal input.
+        if (isSubmitKeystroke(msg.data)) sessionBus.clearHalt(msg.terminalId);
         if (isInterruptKeystroke(msg.data)) opts.onInterrupt?.(msg.terminalId);
         break;
       }
@@ -1401,6 +1645,29 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               requestId: msg.requestId, ok: true, session: created, checkoutId: created.checkoutId,
             }));
             sessionId = created.id;
+            // Stored the moment the session exists, and NOT where the Handler
+            // takes the instruction: this copy is what every later task and
+            // answer restates its scope from (spec 5.2), and nothing in the bus
+            // arms a peer's Handler — so keying the write to arming would leave
+            // every delivery rendering an empty scope block, widening the
+            // mandate by silence instead of refusing.
+            // Read back rather than taken from the request: the manager stamps
+            // the role, join time and state the store's schema requires, and the
+            // wire's `memberOf` carries none of them.
+            const createdLead = sessions?.memberOfFor(created.id);
+            if (createdLead && membership.data.brief) {
+              try {
+                saveBrief(abDir, project.id, created.id, {
+                  lead: createdLead,
+                  brief: membership.data.brief,
+                  now: Date.now(),
+                });
+              } catch (err) {
+                // Costs the scope restatement on later deliveries, never the
+                // session the app is waiting on.
+                log.warn("could not store the brief for session %s: %s", created.id, err);
+              }
+            }
           } catch (err) {
             sendAb(createMessage("session:result", {
               requestId: msg.requestId,
@@ -1744,6 +2011,36 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // binary we cannot identify is the "armed and quiet" lie observability exists
   // to end, so it answers from the real key and unknown reads as unsupported.
   const toolFor = (terminalId?: string): string => agentKeyFor(terminalId) ?? "claude-code";
+  // Named rather than inline in the engine's options because session-bus
+  // delivery submits through the SAME adapter: one path into a session for
+  // both, so a chat session never has a line written into a PTY it does not
+  // have.
+  const busAdapter = createDispatchAdapter({
+    isChat: (id) => sessions?.get(id)?.mode === "chat",
+    pty: createPtyAdapter({
+      submit: (terminalId, line) => manager?.submit(terminalId, line),
+      getRecentOutput: (terminalId) => manager?.getScrollback(terminalId)?.text ?? "",
+      getTranscriptPath: (terminalId) => sessions?.getAgentTranscriptPath(terminalId),
+    }),
+    chat: createStructuredAdapter({
+      // Through handleAgentMessage, not driver.prompt directly: a dead or
+      // missing driver then surfaces as agent:error instead of a silent
+      // throw. This path never re-enters handleAbMessage, so an auto-reply
+      // cannot reset the runaway guard that counts it.
+      prompt: (id, text, commandId) => {
+        // requestId is required by AgentPromptMessage; drivers use it only
+        // for send-correlation, so a fresh UUID is sufficient.
+        void structured?.handleAgentMessage(createMessage("agent:prompt", {
+          sessionId: id, requestId: crypto.randomUUID(), text,
+          ...(commandId ? { commandId } : {}),
+        }), { injected: true });
+      },
+      getTranscriptPath: (id) => sessions?.getAgentTranscriptPath(id),
+      getSnapshot: (id) => structured?.getTranscriptSnapshot(id) ?? Promise.resolve([]),
+      commandCatalog: (id) => structured?.commandCatalog(id),
+    }),
+  });
+
   const handlerEngine = new HandlerEngine({
     projectId: project.id,
     projectPath: (terminalId) => checkoutPathFor(terminalId),
@@ -1758,31 +2055,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     ),
     agentSessionId: (terminalId) => sessions?.get(terminalId)?.agentSessionId,
     abDir,
-    adapter: createDispatchAdapter({
-      isChat: (id) => sessions?.get(id)?.mode === "chat",
-      pty: createPtyAdapter({
-        submit: (terminalId, line) => manager?.submit(terminalId, line),
-        getRecentOutput: (terminalId) => manager?.getScrollback(terminalId)?.text ?? "",
-        getTranscriptPath: (terminalId) => sessions?.getAgentTranscriptPath(terminalId),
-      }),
-      chat: createStructuredAdapter({
-        // Through handleAgentMessage, not driver.prompt directly: a dead or
-        // missing driver then surfaces as agent:error instead of a silent
-        // throw. This path never re-enters handleAbMessage, so an auto-reply
-        // cannot reset the runaway guard that counts it.
-        prompt: (id, text, commandId) => {
-          // requestId is required by AgentPromptMessage; drivers use it only
-          // for send-correlation, so a fresh UUID is sufficient.
-          void structured?.handleAgentMessage(createMessage("agent:prompt", {
-            sessionId: id, requestId: crypto.randomUUID(), text,
-            ...(commandId ? { commandId } : {}),
-          }), { injected: true });
-        },
-        getTranscriptPath: (id) => sessions?.getAgentTranscriptPath(id),
-        getSnapshot: (id) => structured?.getTranscriptSnapshot(id) ?? Promise.resolve([]),
-        commandCatalog: (id) => structured?.commandCatalog(id),
-      }),
-    }),
+    adapter: busAdapter,
     sendAb: (msg) => sendAb(msg),
     sendPush: (message, terminalId) => sendNotifying(createMessage("notification:push", {
       notificationType: "task_complete", message, sessionId: terminalId, projectId: project.id,
@@ -1793,6 +2066,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  armed to receive it. Called at the two moments either can become true; a
    *  no-op every other time, and safe to call again after a crash because the
    *  brief is cleared only once it has been handed over.
+   *
+   *  The Handler instruction only. The durable copy the scope block is rendered
+   *  from is written at create (`session:create`), because a peer whose Handler
+   *  never arms still receives tasks and still has a mandate.
    *
    *  Deliberately fire-and-forget past the instruct: nothing on the wire is
    *  waiting, and the create reply has already gone. */
@@ -3548,6 +3825,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb(buildAgentHello(config, VERSION));
     // Re-sync the config-error dot on every connect (see emitConfigState).
     emitConfigState();
+    // A carrier just arrived: anything the outbox held for want of one goes now
+    // rather than waiting out the backoff it accrued while unreachable. Resumed
+    // first, because a session created before this process started is on disk and
+    // nowhere else until something reads it.
+    sessionBus.resume();
+    sessionBus.pump();
     // Seed the app's Handler defaults (judge overrides) even when
     // nothing is armed — arming is one tap and carries no payload, so it arms
     // with whatever this snapshot seeded.
@@ -3676,6 +3959,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     sendAb: (msg) => sendNotifying(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
+    sessionBus: sessionBusApi,
     onHandlerEvent: (body) => {
       // Chat slots are fed by the in-process driver tap (observeChatFrameForHandler);
       // the reused title plugin's hooks still POST here for claude/codex chat
@@ -3904,6 +4188,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       isShuttingDown = true;
 
       apiServer?.stop();
+      // Stops the retry timer only. Outbox state is on disk, so a frame this
+      // process never got out is retried by the next one rather than lost.
+      sessionBus.stop();
       // Before teardownServices, which force-kills through `killAll()` and then
       // nulls `manager` — sequenced after it this could only ever see an empty
       // map, so no session was ever asked to exit on its own and the line below
@@ -3931,6 +4218,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     abDir,
     nextKeypair,
     pairedPhones,
+    sessionBus,
+    setSessionBusListener(fn: ((event: SessionBusEvent) => void) | null): void {
+      busEventListener = fn;
+    },
+    injectBusLine,
     refreshSessionWork(): void {
       sessions?.refreshWorkStatus();
     },

@@ -5,6 +5,14 @@ import { KNOWN_TIERS } from "./entitlement";
 // delivery can carry whole (spec 5.2). Type-only in the other direction, so
 // there is no runtime cycle.
 import { MAX_BRIEF_CHARS } from "./session-bus/delivery";
+import {
+  ARTIFACT_CHUNK_B64_MAX,
+  ARTIFACT_CHUNK_BYTES,
+  MAX_PARTS,
+  MAX_PART_CHARS,
+  MAX_SUMMARY_CHARS,
+  MAX_UNEXPECTED_CHARS,
+} from "./session-bus/constants";
 
 const BaseMessage = z.object({
   id: z.string().uuid(),
@@ -1512,7 +1520,7 @@ export const MAX_SESSION_MEMBERS = 16;
 // uuid — the value the app already addresses a machine by. Opaque to both
 // bridges: neither derives it, the app supplies both halves, because the lead
 // bridge can never reach the peer machine (D7).
-const SessionMemberKeySchema = z.object({
+export const SessionMemberKeySchema = z.object({
   machineId: z.string().min(1).max(200),
   projectId: z.string().min(1).max(200),
   sessionId: z.string().min(1).max(200),
@@ -2282,6 +2290,178 @@ const AgentQuestionResolveMessage = BaseMessage.extend({
   answer: z.union([z.string(), z.array(z.string())]),
 });
 
+// ---------------------------------------------------------------------------
+// Session bus (spec 3.2, 6.1) — the cross-machine task family.
+//
+// The envelope and the task-state enums live HERE rather than in
+// bridge/src/session-bus/, which is where the rest of the bus lives: they are
+// wire schemas, the stores under session-bus/ import `SessionMemberRefSchema`
+// from this file, and a schema module importing back would put this file's
+// top-level `z.object` calls behind a TDZ binding. Those modules re-export
+// these names so a bus caller still has one import site.
+// ---------------------------------------------------------------------------
+
+/** One unit of content. `artifact` carries the HANDLE only — spec 6.3's
+ *  reference-over-value: the bytes stay on the machine that made them and are
+ *  pulled with `session-bus:fetch` when the other side decides it wants them. */
+export const BusPartSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("text"), text: z.string().max(MAX_PART_CHARS) }),
+  z.object({ kind: z.literal("data"), data: z.record(z.string(), z.unknown()) }),
+  z.object({
+    kind: z.literal("artifact"),
+    artifactId: z.string().min(1).max(200),
+    name: z.string().min(1).max(200),
+    mediaType: z.string().min(1).max(120),
+    bytes: z.number().int().nonnegative(),
+    sha256: z.string().length(64),
+    summary: z.string().min(1).max(MAX_SUMMARY_CHARS),
+  }),
+]);
+export type BusPart = z.infer<typeof BusPartSchema>;
+
+export const BusEnvelopeSchema = z.object({
+  messageId: z.string().min(1).max(200),
+  /** The task this belongs to, or null for something nobody asked for. */
+  taskId: z.string().min(1).max(200).nullable(),
+  contextId: z.string().min(1).max(200),
+  parts: z.array(BusPartSchema).min(1).max(MAX_PARTS),
+  metadata: z.object({
+    /** Stamped from the connection by the receiving bridge, never a tool
+     *  parameter: an agent must not be able to author its own provenance. */
+    peer: SessionMemberRefSchema,
+    /** The one agent-authored envelope field (spec 3.4). MANDATORY, and never
+     *  defaulted — it is what the human and the other agent read first, so
+     *  inventing one would hide the omission instead of reporting it. */
+    summary: z.string().min(1).max(MAX_SUMMARY_CHARS),
+    timestamp: z.number().int().nonnegative(),
+    /** Spec 6.2's first-class channel for "here is what you asked for, and
+     *  separately, here is something you did not ask about". First-class so it
+     *  is not a smuggled instruction inside a text part. */
+    unexpected: z.string().max(MAX_UNEXPECTED_CHARS).optional(),
+  }),
+});
+export type BusEnvelope = z.infer<typeof BusEnvelopeSchema>;
+
+export const TaskStateSchema = z.enum([
+  "submitted",
+  "working",
+  "input-required",
+  "completed",
+  "failed",
+  "canceled",
+]);
+export type TaskState = z.infer<typeof TaskStateSchema>;
+
+/** Who owes the answer that unblocks an `input-required` task. Set by the bridge
+ *  FROM THE CAUSE of the transition (spec 3.4), never from a body field and
+ *  never by an agent: a peer requests the block, it does not declare who is
+ *  holding it. */
+export const WaitingOnSchema = z.enum(["lead", "human"]);
+export type WaitingOn = z.infer<typeof WaitingOnSchema>;
+
+/** Both endpoints on every frame. Nothing shorter is an address: a machine holds
+ *  several projects and a project several sessions, and the carrier picks the
+ *  relay session to forward on out of `to`. */
+const SessionBusBaseWire = {
+  from: SessionMemberKeySchema,
+  to: SessionMemberKeySchema,
+  contextId: z.string().min(1).max(200),
+};
+
+export const SessionBusAssignWire = z.object({
+  ...SessionBusBaseWire,
+  taskId: z.string().min(1).max(200),
+  seq: z.number().int().nonnegative(),
+  expiresAt: z.number().int().nonnegative(),
+  envelope: BusEnvelopeSchema,
+});
+
+export const SessionBusTransitionWire = z.object({
+  ...SessionBusBaseWire,
+  taskId: z.string().min(1).max(200),
+  seq: z.number().int().nonnegative(),
+  state: TaskStateSchema,
+  waitingOn: WaitingOnSchema.optional(),
+  envelope: BusEnvelopeSchema,
+});
+
+export const SessionBusCancelWire = z.object({
+  ...SessionBusBaseWire,
+  taskId: z.string().min(1).max(200),
+  seq: z.number().int().nonnegative(),
+  reason: z.string().max(500),
+});
+
+/** No `seq`, and never acked: spec 6 makes messages lossy on purpose. Reliable
+ *  delivery behind text that changes no state would be unbounded retry buying
+ *  nothing. */
+export const SessionBusMessageWire = z.object({
+  ...SessionBusBaseWire,
+  taskId: z.string().min(1).max(200).nullable(),
+  envelope: BusEnvelopeSchema,
+});
+
+export const SessionBusFetchWire = z.object({
+  ...SessionBusBaseWire,
+  requestId: z.string().min(1).max(200),
+  artifactId: z.string().min(1).max(200),
+  offset: z.number().int().nonnegative(),
+  length: z.number().int().positive().max(ARTIFACT_CHUNK_BYTES),
+});
+
+export const SessionBusFetchResultWire = z.object({
+  ...SessionBusBaseWire,
+  requestId: z.string().min(1).max(200),
+  ok: z.boolean(),
+  error: z.string().max(500).optional(),
+  errorCode: z.string().max(80).optional(),
+  artifactId: z.string().min(1).max(200),
+  offset: z.number().int().nonnegative(),
+  eof: z.boolean(),
+  dataBase64: z.string().max(ARTIFACT_CHUNK_B64_MAX),
+});
+
+/** Its own type rather than a flag on a result, because what is acked is a
+ *  TRANSITION and transitions ride on three different types. `ok: false` still
+ *  retires the seq — the ack means "this seq will never change my state again",
+ *  not "I liked it". */
+export const SessionBusAckWire = z.object({
+  ...SessionBusBaseWire,
+  taskId: z.string().min(1).max(200),
+  seq: z.number().int().nonnegative(),
+  ok: z.boolean(),
+  error: z.string().max(500).optional(),
+});
+
+const SessionBusAssignMessage = BaseMessage.extend({
+  type: z.literal("session-bus:assign"),
+}).extend(SessionBusAssignWire.shape);
+
+const SessionBusTransitionMessage = BaseMessage.extend({
+  type: z.literal("session-bus:transition"),
+}).extend(SessionBusTransitionWire.shape);
+
+const SessionBusCancelMessage = BaseMessage.extend({
+  type: z.literal("session-bus:cancel"),
+}).extend(SessionBusCancelWire.shape);
+
+const SessionBusMessageMessage = BaseMessage.extend({
+  type: z.literal("session-bus:message"),
+}).extend(SessionBusMessageWire.shape);
+
+const SessionBusFetchMessage = BaseMessage.extend({
+  type: z.literal("session-bus:fetch"),
+}).extend(SessionBusFetchWire.shape);
+
+const SessionBusFetchResultMessage = BaseMessage.extend({
+  type: z.literal("session-bus:fetch:result"),
+}).extend(SessionBusFetchResultWire.shape);
+
+const SessionBusAckMessage = BaseMessage.extend({
+  type: z.literal("session-bus:ack"),
+}).extend(SessionBusAckWire.shape);
+
+
 export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentHelloMessage,
   PortDetectedMessage,
@@ -2434,6 +2614,13 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentPermissionResolveMessage,
   AgentQuestionResolveMessage,
   AgentTaskStopMessage,
+  SessionBusAssignMessage,
+  SessionBusTransitionMessage,
+  SessionBusCancelMessage,
+  SessionBusMessageMessage,
+  SessionBusFetchMessage,
+  SessionBusFetchResultMessage,
+  SessionBusAckMessage,
 ]);
 
 export type AbMessage = z.infer<typeof AbMessageSchema>;
@@ -2609,6 +2796,13 @@ export type AgentSetConfig = z.infer<typeof AgentSetConfigMessage>;
 export type AgentSessionAction = z.infer<typeof AgentSessionActionMessage>;
 export type AgentPermissionResolve = z.infer<typeof AgentPermissionResolveMessage>;
 export type AgentQuestionResolve = z.infer<typeof AgentQuestionResolveMessage>;
+export type SessionBusAssign = z.infer<typeof SessionBusAssignMessage>;
+export type SessionBusTransition = z.infer<typeof SessionBusTransitionMessage>;
+export type SessionBusCancel = z.infer<typeof SessionBusCancelMessage>;
+export type SessionBusMessage = z.infer<typeof SessionBusMessageMessage>;
+export type SessionBusFetch = z.infer<typeof SessionBusFetchMessage>;
+export type SessionBusFetchResult = z.infer<typeof SessionBusFetchResultMessage>;
+export type SessionBusAck = z.infer<typeof SessionBusAckMessage>;
 
 /** The exhaustive checkout-variable protocol set. Any new filesystem-facing
  * type belongs here (and gets an explicit schema decision + contract test). */
@@ -2737,6 +2931,8 @@ const KNOWN_TYPES = new Set<string>([
   "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
+  "session-bus:assign", "session-bus:transition", "session-bus:cancel", "session-bus:message",
+  "session-bus:fetch", "session-bus:fetch:result", "session-bus:ack",
 ]);
 
 export function parseMessageFast(raw: string): AbMessage | null {

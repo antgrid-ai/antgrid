@@ -400,7 +400,7 @@ test("promotion wires (and clears) the gate's session provider", async () => {
   // wired provider — mirrors what HostServer.ensureMachineRelay() returns.
   const promoted = session("promoted-phone-pk", "promoted-phone#machine-dev");
   const machineSession: MachineRelaySession = {
-    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {} }),
+    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendTo: () => true }),
     establishedPeers: () => [promoted],
     peerSession: (peerId) => (peerId === promoted.peerId ? promoted : null),
     sendPushDeliver: () => {},
@@ -415,7 +415,7 @@ test("promotion wires (and clears) the gate's session provider", async () => {
     attach: (remote) => {
       setPeerSessionProvider((peerId) => remote.peerSession(peerId));
       return {
-        handle: { streamId: "s1", detach: () => {}, sendTunnel: () => {} },
+        handle: { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendTo: () => true },
         detach: () => { setPeerSessionProvider(null); },
       };
     },
