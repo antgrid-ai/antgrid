@@ -107,7 +107,7 @@ The largest wave, and the only one that touches every layer of the bridge. Cut i
 - A SIBLING helper, `evals/helpers/two-bridge.ts`, composes two `setupTestEnv()` bridges onto one in-process relay (`harness.ts` is a shared surface and stays untouched) and plays the desktop carrier as a two-legged test object: the lead's loopback owner socket and a `RelayClient` on the peer's project stream. `evals/tests/gate-multi-machine.test.ts` covers: expand, brief delivery, assign → ack → report, cancel, delete cascade with one refused member, and orphan on lead loss.
 - Docs: `docs/architecture.md` message flow, `bridge/CLAUDE.md` (session bus, MCP subcommand), `app/CLAUDE.md` (carrier, member tabs), and the CLAUDE.md conventions list for the new mirrored constant if W2 adds one.
 
-**Done when** `bun run --filter antgrid-evals test:evals` runs the suite green on Windows. The POSIX container run is a separate step: it needs an image carrying git and a copied (not bind-mounted) tree, which is a harness question rather than a claim about this wave's code.
+**Done when** `bun run --filter antgrid-evals test:evals` runs the suite green on Windows. The POSIX container run is a separate step, and it passed: the suite is green under Linux in an `oven/bun` image carrying git and node with the tree copied in (bind mounts are not usable from this host), so nothing in the harness or the bus is Windows-shaped.
 
 ---
 
