@@ -117,6 +117,26 @@ export class FileWatcher {
     this.startChokidarWatch();
   }
 
+  /**
+   * Re-read the tree state once the watch is actually armed.
+   *
+   * A file written between the core booting and this point is seen by NEITHER
+   * mechanism: the startup `git status` ran before the file existed, and no
+   * watch existed to report it appearing. chokidar widens that window rather
+   * than closing it — it reads each directory BEFORE attaching that
+   * directory's fs.watch, so a file landing in between is missed by the read
+   * (too late) and by the watch (not yet attached), permanently, until
+   * something else in that directory moves. What is left is a change the Git
+   * view cannot show until the 10s backstop poll comes round — the exact
+   * staleness this hook exists to prevent.
+   *
+   * The refresh behind it reads the DISK, not the watcher's own state, so it
+   * recovers whatever the watch never learned about.
+   */
+  private onWatchArmed(): void {
+    this.onFilesChanged?.();
+  }
+
   private startChokidarWatch(): void {
     const ignoredFn = (path: string): boolean => {
       const rel = relative(this.projectRoot, path).replace(/\\/g, "/");
@@ -143,7 +163,11 @@ export class FileWatcher {
       .on("unlink", (filePath) => this.onFileRemoved(filePath))
       .on("addDir", (dirPath) => this.onDirAdded(dirPath))
       .on("unlinkDir", (dirPath) => this.onFileRemoved(dirPath))
-      .on("error", (err) => log.error("File watcher error: %s", err));
+      .on("error", (err) => log.error("File watcher error: %s", err))
+      // On `ready`, not on the constructor's return: that is the first moment
+      // every directory's watch is attached, and so the first moment nothing
+      // more can be silently missed.
+      .on("ready", () => this.onWatchArmed());
 
     log.info("File watcher started for %s", this.projectRoot);
   }
@@ -162,6 +186,7 @@ export class FileWatcher {
         "File watcher started (native recursive) for %s",
         this.projectRoot,
       );
+      this.onWatchArmed();
     } catch (err) {
       log.error(
         "native recursive watch failed (%s); falling back to chokidar",
