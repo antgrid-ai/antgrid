@@ -314,6 +314,23 @@ does it too.
 background, that counts — close it or wait before running an analyze from the
 terminal.
 
+**The MCP alternative, and what it costs.** A *call* to `analyze_files` sidesteps
+this trap — it talks to an already-running analyzer rather than the launcher, so
+it takes no lock. **Starting** the server does not: `.mcp.json` runs `dart
+mcp-server`, `dart` resolves to `flutter/bin/dart.bat`, and that `CALL`s the same
+`shared.bat`. A session coming up while an analyze is running can hang on the
+lock exactly as a second CLI invocation would, so the MCP path is only exempt
+once its server is up.
+
+It is also not free and not shared. The `stdio` declaration means each agent
+session spawns its own server process pair, and — lazily, on its FIRST
+`analyze_files` call — its own analysis server, held for the rest of that
+session. A session that never analyzes pays only the idle pair. One that does
+pays an analyzer that keeps growing with how much of the tree it has seen;
+`flutter analyze` is in the same class while it runs but exits. Measure both on
+the machine in front of you before deciding: several sessions each holding an
+analyzer can beat, or lose to, one gated CLI run.
+
 ### Trap 3: never run a bare `bun test` from the repo root
 
 **Symptom.** A run that takes minutes, fails differently every time, and tells
@@ -672,7 +689,7 @@ bun run --filter antgrid-bridge test
 bun run --filter antgrid-web test
 
 # Flutter and Dart — subshells, so each line leaves you back at the repo root
-(cd app && flutter test)
+(cd app && flutter test)            # add -j 2 if other agent sessions are live
 (cd packages/antgrid_relay_client && dart pub get && dart test)
 
 # Static checks
@@ -755,6 +772,15 @@ treat the numbers as orders of magnitude, not targets.
 
 The bridge suite binding ports and spawning processes is expected, and it logs
 warnings while passing. It needs no network access and nothing to sign into.
+
+`flutter test` is also the memory-heaviest of these. With no `-j` it runs
+`max(1, cores/2)` concurrent testers — 6 on the 12-core machine these numbers
+come from — each a separate Dart VM that loads the whole app suite, roughly 3 GB
+for the run. That is fine on an idle machine and is not fine alongside several
+agent sessions, any of which may also be holding its own Dart analysis server
+(see [Trap 2](#trap-2-never-run-flutter-analyze-or-dart-analyze-concurrently)).
+`-j 2` is the sane default for concurrent-session work; the flag is ignored for
+integration tests.
 
 ### The `evals/` suite
 

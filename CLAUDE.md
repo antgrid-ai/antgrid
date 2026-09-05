@@ -29,7 +29,7 @@ Shared packages in `packages/`: **`antgrid_relay_client`** (pure Dart relay/cryp
 - **Environment is Windows + PowerShell.** Prefer the Bash tool for documented commands; in PS 5.1 `&&` fails (use `;`), paths are backslashed.
 - **Git commits via the Bash tool: use `-m` flags (repeat per paragraph), never PowerShell `@'...'@` here-strings** — the Bash tool is bash, so `@'...'@` leaves a stray `@` in the subject (has shipped to remote more than once).
 - **Bun workspace filter names ≠ directory names**: `antgrid-bridge`/`-relay`/`-web`/`-wire`/`-evals`, not `bridge`/`relay`/etc. `bridge/plugin` breaks even that pattern — it is `@antgrid/plugin`. One root `bun install` covers every workspace — but **not** `site/` or `aspire/`, which are separate Bun projects with their own lockfiles and need their own install.
-- **NEVER run `flutter analyze` (or `dart analyze`) concurrently — it deadlocks silently.** `flutter/bin/internal/shared.bat` takes a startup lock in a sleepless `GOTO` retry loop with stderr sent to `NUL`, so the second invocation spins forever emitting nothing and never times out; `dart.bat` calls the same script. Two agents analyzing at once is enough. Use the MCP `analyze_files` while iterating (see Test, typecheck, lint).
+- **NEVER run `flutter analyze` (or `dart analyze`) concurrently — it deadlocks silently.** `flutter/bin/internal/shared.bat` takes a startup lock in a sleepless `GOTO` retry loop with stderr sent to `NUL`, so the second invocation spins forever emitting nothing and never times out; `dart.bat` calls the same script. Two agents analyzing at once is enough, and **starting a `dart mcp-server` counts**: `.mcp.json` resolves `dart` to `flutter/bin/dart.bat`, which `CALL`s the same `shared.bat`, so a session coming up while an analyze runs can hang on that lock. Only calls into an already-running server are exempt — its analyzer is also per-session and retained, not shared (see Test, typecheck, lint).
 - **No Material visual artifacts in the app.** Use the Antgrid design system (`app/lib/design/`) exclusively — see Design Rules.
 - **`copyWith`: never combine `clearX: true` with an explicit value for the same field.** It's ambiguous and bug-prone.
 - **Run tests via `bun run test` / `npm run test` (per-workspace), NEVER bare `bun test` from repo root** — root recurses stale worktree copies + the E2E `evals/` (real agents/relays/PTYs) into one port space → flaky, minutes-long runs. Evals run explicitly: `bun run --filter antgrid-evals test:evals`.
@@ -81,14 +81,27 @@ The full gate set, per workspace (never bare `bun test` from root — see Gotcha
 ```bash
 bun run --filter antgrid-bridge test     # also: antgrid-relay, antgrid-web
 bun run --filter antgrid-evals test:evals   # E2E; explicit only, never in a sweep
-cd app && flutter test
+cd app && flutter test                   # -j 2 when other sessions are live — see below
 cd packages/antgrid_relay_client && dart test
 npm run check:font-tokens                # Fails on raw `fontSize:` literals in app/lib (see Design Rules)
 ```
+**`flutter test` sizes its own parallelism, and it is not session-aware.** With
+no `-j`, `package:test` runs `max(1, cores/2)` testers, each a separate Dart VM
+loading the whole app suite — several GB on a many-core box, per invocation.
+When other agent sessions share the machine, run `cd app && flutter test -j 2`.
+(`-j` is accepted but ignored for integration tests.)
+
 **Dart analysis — MCP tool while iterating, CLI to gate.** The Dart MCP server
-(`.mcp.json`) keeps ONE warm analysis server, so `analyze_files` is ~instant on
-repeat calls and many agents can share it. `flutter analyze` boots a fresh ~1GB
-server per run and cannot be run concurrently (see the startup-lock gotcha) —
+(`.mcp.json`) is `stdio`, so there is **no shared analyzer**: each session
+spawns its own on its FIRST `analyze_files` call and then retains it for that
+session's life, while `flutter analyze` is transient and exits. Sessions that
+never analyze cost only the idle server pair; ones that do carry an analyzer
+that keeps growing with how much of the tree it has seen — measure it before
+budgeting, and do not assume the two options trade evenly. `analyze_files` is
+~instant on repeat calls within a session, so it stays the right tool while
+iterating — but with several sessions live on a memory-constrained machine it
+is not automatically the cheaper choice. `flutter analyze` cannot be
+run concurrently (see the startup-lock gotcha) —
 run it once, from the controller, as the CI-equivalent gate. Same split as the
 test-gating rule: implementers iterate, the controller gates. `analyze_files`
 reports ERRORS ONLY, so its "No errors" does not mean the gate is clean —
