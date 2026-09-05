@@ -117,9 +117,7 @@ class AgentPanel extends ConsumerWidget {
               // Branch pill folded into the overflow menu below: it lives
               // inside the breadcrumb on desktop, but on a phone-width row it
               // competes with the title for the one flexible slot.
-              const Expanded(
-                child: TitleBarBreadcrumb(showBranchPill: false),
-              ),
+              const Expanded(child: TitleBarBreadcrumb(showBranchPill: false)),
               const SizedBox(width: AbTokens.space6),
               const _SessionOverflowButton(compact: true),
             ],
@@ -150,30 +148,27 @@ class AgentPanel extends ConsumerWidget {
   }
 }
 
-/// Overflow trigger for everything about the session that has no inline home.
-///
-/// On a phone (see the comment above its call site in [AgentPanel.build]) that
-/// is the branch pill, the terminal/chat switch and the Handler shield: fitting
-/// all three inline left too little width for the session title itself, and
-/// folding them behind one kebab is what gives the title (and its rename tap
-/// target) its room back. [AgentBar] keeps all three inline — the context panel
-/// there is wide enough — and opens the same kebab for the membership section
-/// alone, which has no inline form on either breakpoint.
+/// Overflow trigger for everything about the session that has no inline home:
+/// the terminal/chat mode switch, the Handler arm/disarm row, and (whenever a
+/// multi-machine session has members to act on) the membership section. On a
+/// phone (see the comment above its call site in [AgentPanel.build]) it also
+/// takes the branch pill, which competes with the session title for the one
+/// flexible slot at that width; [AgentBar] has room to keep the pill inside
+/// [TitleBarBreadcrumb] instead, so the same kebab there opens a shorter menu.
+/// Mounted unconditionally on both breakpoints — the mode switch and Handler
+/// row are always present, so a session working alone still has a kebab.
 class _SessionOverflowButton extends ConsumerWidget {
   const _SessionOverflowButton({required this.compact});
 
-  /// True for the phone header, which folds the branch pill, the mode switch
-  /// and the Handler row in behind the same kebab. False for [AgentBar], where
-  /// all three stay inline and only the membership section is left to fold —
-  /// so the button hides itself whenever that section is empty, which is every
-  /// session that works alone.
+  /// True for the phone header. Both breakpoints open the same menu with the
+  /// same mode switch, Handler row and membership section; this only decides
+  /// whether the branch also renders there as a header label — on [AgentBar]
+  /// the branch stays inline in [TitleBarBreadcrumb], so restating it in the
+  /// menu would give it two homes.
   final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (!compact && ref.watch(sessionMembershipActionsProvider).isEmpty) {
-      return const SizedBox.shrink();
-    }
     final button = Builder(
       // AbCompactTapTargets: the toolbar row already owns its height, so the
       // button's mobile tap-target inflation (24px visual -> 44px hit box)
@@ -194,8 +189,9 @@ class _SessionOverflowButton extends ConsumerWidget {
       ),
     );
     // The leading gap belongs to this button rather than to the bar: on
-    // desktop it is absent for every session that works alone, and a spacer
-    // emitted at the call site would end the bar with a gap leading nowhere.
+    // desktop it sits directly after WorkspaceMenuButton with no bar-level
+    // spacer between them, and the button — not the bar — is the one that
+    // knows it needs its own.
     return compact
         ? button
         : Padding(
@@ -220,19 +216,21 @@ class _SessionOverflowButton extends ConsumerWidget {
   }
 }
 
-/// The overflow popup's content: the branch as a menu header (Chrome's own
-/// tab-context-menu convention — the thing the menu is ABOUT, named once at
-/// the top) over two plain text rows, rather than the header's own
-/// button/segmented-control chrome. [AbLiveMenuRow] is what a menu row that
-/// has to watch a provider renders as — see its doc for why a static
-/// [AbMenuItem] can't do this.
+/// The overflow popup's content: the mode switch and the Handler arm/disarm
+/// row (rather than the header's own button/segmented-control chrome), over
+/// the membership section. On a phone this is preceded by the branch as a
+/// menu header (Chrome's own tab-context-menu convention — the thing the menu
+/// is ABOUT, named once at the top); on [AgentBar] the branch stays inline in
+/// [TitleBarBreadcrumb] instead, so this menu opens straight into the mode
+/// switch. [AbLiveMenuRow] is what a menu row that has to watch a provider
+/// renders as — see its doc for why a static [AbMenuItem] can't do this.
 class _SessionOverflowMenu extends ConsumerWidget {
   const _SessionOverflowMenu({required this.compact});
 
-  /// See [_SessionOverflowButton.compact]. The membership rows are the only
-  /// ones both forms carry: everything above them has an inline home on the
-  /// desktop bar, and restating it here would give the same session two live
-  /// controls for one setting.
+  /// See [_SessionOverflowButton.compact]. Gates only the branch header label
+  /// — the mode switch, Handler row and membership section below it render on
+  /// both breakpoints, since neither has an inline home on [AgentBar] any
+  /// more than on the phone header.
   final bool compact;
 
   @override
@@ -242,11 +240,9 @@ class _SessionOverflowMenu extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (compact) ...[
-          if (branch != null) AbMenuHeaderLabel(branch),
-          const SessionModeMenuItem(),
-          const _HandlerMenuItem(),
-        ],
+        if (compact && branch != null) AbMenuHeaderLabel(branch),
+        const SessionModeMenuItem(),
+        const _HandlerMenuItem(),
         const SessionMembershipMenuItems(),
       ],
     );
@@ -334,7 +330,9 @@ class _HandlerMenuItem extends ConsumerWidget {
 /// Where the workspace side puts tabs, this side puts the session's identity —
 /// the breadcrumb and branch pill the window title bar used to carry. Moving
 /// them here is what makes them sit above the transcript they describe rather
-/// than above the whole window.
+/// than above the whole window. The mode switch and the Handler arm/disarm
+/// row live one tap away, in [_SessionOverflowButton]'s kebab — the same menu
+/// the phone header opens, so both breakpoints reach them identically.
 ///
 /// Carries none of the pane-resizing controls, unlike the workspace side: the
 /// agent is the PRIMARY view, so every panel mode either shows it or shows
@@ -394,10 +392,6 @@ class AgentBar extends ConsumerWidget {
         // mobile header above.
         const SizedBox(width: AbTokens.space12),
         const Expanded(child: TitleBarBreadcrumb()),
-        const SizedBox(width: AbTokens.space6),
-        const SessionModeControl(),
-        const SizedBox(width: AbTokens.space8),
-        const HandlerHeaderControl(),
         const SizedBox(width: AbTokens.space6),
         const WorkspaceMenuButton(),
         const _SessionOverflowButton(compact: false),

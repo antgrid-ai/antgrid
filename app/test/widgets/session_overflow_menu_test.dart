@@ -1,8 +1,9 @@
 // The session kebab's membership section, on both breakpoints.
 //
-// Pumped through the real [AgentPanel] rather than the menu widget alone: which
-// header mounts the kebab is half of what these assert, and the desktop bar
-// hides the button entirely for a session with nothing to offer.
+// Pumped through the real [AgentPanel] rather than the menu widget alone:
+// which header mounts the kebab is half of what these assert, and the kebab
+// itself is unconditional on both — it always offers mode and Handler, with
+// membership actions layered in only when the session has any to offer.
 import 'package:antgrid/design/widgets/ab_menu.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/models/session_target.dart';
@@ -137,40 +138,54 @@ void main() {
       expect(find.text('Remove from session'), findsNothing);
     });
 
-    testWidgets('the desktop kebab carries membership only', (tester) async {
-      // The mode switch and the Handler shield are inline on this bar; the
-      // menu restating them would give one setting two live controls.
-      await _pump(
-        tester,
-        session: _lead(),
-        target: const LocalProject(_leadProjectId),
-        size: const Size(1000, 800),
-        platform: TargetPlatform.macOS,
-      );
-      await _openKebab(tester);
+    testWidgets(
+      'the desktop kebab carries mode and Handler alongside membership',
+      (tester) async {
+        // Both breakpoints now open the same menu — the mode switch and the
+        // Handler row are no longer inline on this bar, so the kebab is the
+        // one place a mouse session reaches them, same as on a phone.
+        await _pump(
+          tester,
+          session: _lead(),
+          target: const LocalProject(_leadProjectId),
+          size: const Size(1000, 800),
+          platform: TargetPlatform.macOS,
+        );
+        await _openKebab(tester);
 
-      expect(find.text('Arm Handler'), findsNothing);
-      expect(find.text('Disarm Handler'), findsNothing);
-    });
+        expect(find.text('Switch to Terminal'), findsOneWidget);
+        expect(find.text('Arm Handler'), findsOneWidget);
+        expect(find.text('Add machine'), findsOneWidget);
+      },
+    );
 
-    testWidgets('a session on another machine offers no kebab at all', (
-      tester,
-    ) async {
-      // The carrier is the app on the lead's own machine (D7), so a lead the
-      // user is only watching from here has nothing to add a machine to.
-      await _pump(
-        tester,
-        session: _lead(),
-        target: const RemoteProject(
-          machineUuid: _peerUuid,
-          projectId: 'watched-proj',
-        ),
-        size: const Size(1000, 800),
-        platform: TargetPlatform.macOS,
-      );
+    testWidgets(
+      'a session on another machine still offers mode and Handler, without membership',
+      (tester) async {
+        // The carrier is the app on the lead's own machine (D7), so a lead
+        // the user is only watching from here has nothing to add a machine
+        // to — but the kebab itself is unconditional, so mode and Handler
+        // stay reachable regardless.
+        await _pump(
+          tester,
+          session: _lead(),
+          target: const RemoteProject(
+            machineUuid: _peerUuid,
+            projectId: 'watched-proj',
+          ),
+          size: const Size(1000, 800),
+          platform: TargetPlatform.macOS,
+        );
 
-      expect(find.byTooltip('Session options'), findsNothing);
-    });
+        expect(find.byTooltip('Session options'), findsOneWidget);
+        await _openKebab(tester);
+
+        expect(find.text('Switch to Terminal'), findsOneWidget);
+        expect(find.text('Arm Handler'), findsOneWidget);
+        expect(find.text('Add machine'), findsNothing);
+        expect(find.text('Remove from session'), findsNothing);
+      },
+    );
 
     testWidgets('a full session keeps Add machine, disabled', (tester) async {
       await _pump(

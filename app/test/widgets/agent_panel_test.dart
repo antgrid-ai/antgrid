@@ -22,6 +22,7 @@ import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/agent_transcript_view.dart';
 import 'package:antgrid/widgets/remote_host_chip.dart';
 import 'package:antgrid/widgets/session_member_tabs.dart';
+import 'package:antgrid/widgets/session_mode_control.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -435,10 +436,32 @@ void main() {
     }
   });
 
+  // The mode switch and the Handler control moved off the bar and into its
+  // kebab, which now mounts on both breakpoints — a session working alone,
+  // with nothing to offer session_membership_menu.dart, still gets one.
+  testWidgets(
+    'AgentBar folds the mode switch and Handler into an always-present kebab',
+    (tester) async {
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        await pumpWide(tester);
+
+        expect(find.byType(SessionModeControl), findsNothing);
+        expect(find.byType(HandlerHeaderControl), findsNothing);
+        expect(find.byTooltip('Session options'), findsOneWidget);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
   /// Pumps the desktop AgentPanel over a chat session that is (or is not) a
   /// multi-machine one, so the strip's position is measured against the real
   /// header and the real transcript rather than a stand-in column.
-  Future<void> pumpSession(WidgetTester tester, {required bool withMember}) async {
+  Future<void> pumpSession(
+    WidgetTester tester, {
+    required bool withMember,
+  }) async {
     tester.view.physicalSize = const Size(1000, 800);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -485,7 +508,10 @@ void main() {
 
       expect(find.byType(SessionMemberTabs), findsOneWidget);
       final strip = tester.getTopLeft(find.byType(SessionMemberTabs)).dy;
-      expect(strip, greaterThanOrEqualTo(tester.getBottomLeft(find.byType(AgentBar)).dy));
+      expect(
+        strip,
+        greaterThanOrEqualTo(tester.getBottomLeft(find.byType(AgentBar)).dy),
+      );
       expect(
         strip,
         lessThan(tester.getTopLeft(find.byType(AgentTranscriptView)).dy),
