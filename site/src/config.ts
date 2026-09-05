@@ -79,7 +79,7 @@ export const links = {
 };
 
 // The three desktop builds as one list, because three separate things have to
-// agree on the same ids: the hero's OS-matched button, the confirmation page's
+// agree on the same ids: the hero's OS-matched button, the download page's
 // per-platform panels, and that page's script, which maps ?platform= back to a
 // URL. An id that agrees in two of the three is the worst case — the reader is
 // thanked for a download that never started. contracts.spec.ts pins all three
@@ -88,18 +88,28 @@ export const links = {
 // `os` is the OTHER axis and is deliberately not the id: it is the value
 // Base.astro writes to data-os from the reader's machine, and the two answer
 // different questions — which build this is, versus which build this reader can
-// run. The confirmation page needs them apart, because what it fires is what
-// the URL ASKED for, not what the visitor happens to be sitting at.
+// run. /download needs them apart, because what it fires is what the URL ASKED
+// for, not what the visitor happens to be sitting at.
+//
+// Both are literal unions rather than `string`: the ids key the per-platform
+// install copy on /download and the `os` values key the reveal rules in
+// global.css, so a typo or a fourth build with nothing written for it is a
+// compile error here instead of a blank card or a button that never appears.
+export type PlatformId = "windows" | "macos" | "linux";
+
 export type Platform = {
-  id: string;
-  os: string;
+  id: PlatformId;
+  os: "win" | "mac" | "linux";
   name: string;
   icon: string;
+  /** The artifact itself. Safe to aim at a reader only once their machine is
+   *  known to BE this OS — see `awayUrl`. */
   url: string;
   /** Where to send a reader who is NOT on this OS, when it cannot be the same
    *  place. Only Windows needs one: a .dmg or an AppImage fetched from another
    *  machine is still the real artifact, but the Windows URL is a stub installer
-   *  that hands every caller a .exe regardless of what asked for it. */
+   *  that hands every caller a .exe regardless of what asked for it. Read it
+   *  through `offerUrlFor`, never as `p.awayUrl ?? p.url` at the call site. */
   awayUrl?: string;
 };
 
@@ -109,8 +119,14 @@ export const PLATFORMS: Platform[] = [
   { id: "linux", os: "linux", name: "Linux", icon: "tabler:brand-open-source", url: links.downloadLinux },
 ];
 
-// One link that both downloads and orients: the query is what the confirmation
-// page fires on, and the page it lands on is the answer to "it downloaded, now
-// what". Split across two clicks — download here, instructions there — one of
-// them is always the one that gets skipped.
-export const downloadUrlFor = (id: string) => `${links.download}?platform=${id}`;
+// One link that both downloads and orients: the query is what /download fires
+// on, and the page it lands on is the answer to "it downloaded, now what".
+// Split across two clicks — download here, instructions there — one of them is
+// always the one that gets skipped.
+export const downloadUrlFor = (id: PlatformId) => `${links.download}?platform=${id}`;
+
+// The one safe way to name a build to a reader who may not be on it. Every
+// "here are all three" surface owes this rather than `p.url`, and it lives here
+// because the alternative — remembering `?? p.awayUrl` at each call site — is a
+// rule that only has to be forgotten once to hand a Mac an 815KB .exe.
+export const offerUrlFor = (p: Platform) => p.awayUrl ?? p.url;

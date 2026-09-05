@@ -462,6 +462,26 @@ html.js .reveal:not(.in) .eb-caret {
   display: block;
 }
 
+/* The one row on the site whose buttons aim at a raw artifact instead of at
+   ?platform= (/download's own OS match), and the swap that keeps that safe on a
+   handheld. Everywhere else a dl-os button routes through the download page,
+   where the head script re-checks the machine and refuses; this row has no
+   second check, and data-os cannot stand in for one — it answers which build to
+   OFFER, so it files Android under "win" and iPhone under "mac" and falls
+   through to Windows when no script ran. Left revealed, the page's single
+   primary action hands an iPhone a 94MB .dmg and an Android phone a Windows
+   .exe. `data-form` is the axis that knows the difference, so it is the axis
+   that switches them. */
+.dl-handheld {
+  display: none;
+}
+[data-form="mobile"] .dl-direct {
+  display: none;
+}
+[data-form="mobile"] .dl-handheld {
+  display: block;
+}
+
 /* The window's pane geometry. In CSS rather than utilities because the three
    columns collapse in a specific ORDER as width runs out — the context pane
    first, then the rail — and that sequence is one decision that belongs in one

@@ -61,9 +61,10 @@ const isPhone = (page: Page) => page.evaluate(() => document.documentElement.dat
 
 // Every URL the download page could possibly send a reader to, stubbed so a run
 // never pulls a real installer — or a real Store page — over the network. The
-// handler records what was asked for, which is how "downloaded nothing" is
-// proved rather than assumed.
-const watchDownloads = async (page: Page, fired: string[]) => {
+// returned array records what was asked for, which is how "downloaded nothing"
+// is proved rather than assumed.
+const watchDownloads = async (page: Page): Promise<string[]> => {
+  const fired: string[] = [];
   for (const url of [...Object.values(DOWNLOADS), STORE_LISTING]) {
     await page.route(
       (u) => u.href === url,
@@ -77,7 +78,28 @@ const watchDownloads = async (page: Page, fired: string[]) => {
       }
     );
   }
+  return fired;
 };
+
+// The download page asks GitHub for the latest release from the BROWSER, so
+// every visit here is a live third-party call from CI — 60 an hour per IP
+// unauthenticated, shared by every runner behind the same egress address. Left
+// unstubbed the suite is one busy afternoon away from a rate-limited flake in a
+// test that has nothing to do with releases. Answered rather than aborted so the
+// success path stays the one being exercised.
+test.beforeEach(async ({ page }) => {
+  await page.route("https://api.github.com/**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        tag_name: "v0.0.0-test",
+        html_url: "https://github.com/antgrid-ai/antgrid/releases/tag/v0.0.0-test",
+        published_at: "2026-01-01T00:00:00Z",
+      }),
+    })
+  );
+});
 
 // The band routes through the download page like the hero, so what it must
 // guarantee is that every build is still REACHABLE from it and every route names
@@ -105,22 +127,22 @@ test("the download band still reaches every build, by a route that downloads", a
   await expect(band.locator("a.dl-os:visible")).toHaveCount(1);
 });
 
-// The home hero leads with the OS-matched download now, not this label, so the
-// count requirement is pinned to /pricing rather than to every page: that is
-// where a reader decides, and the free plan's CTA is the one live exit from the
-// closed paid path. Requiring one on "/" as well is what this asserted before,
-// and it was satisfied only by the nav — which is display:none at mobile width,
-// so the guarantee was already narrower than it read.
+// The count requirement is pinned to /pricing rather than to every page: the
+// home hero leads with the OS-matched download rather than this label, and
+// /pricing is where a reader decides — the free plan's CTA is the one live exit
+// from the closed paid path. Requiring one on "/" too is satisfied by the nav
+// alone, which is display:none at mobile width, so that guarantee reads wider
+// than it is.
 //
 // Both labels, because the nav says "Download free" and the free plan's card says
 // "Start free" — deliberately different wording for the same destination, so a
 // sweep that knows only one of them silently stops covering the other.
 //
-// The destination is a PATH now, not the home page's #download band. A fragment
-// never reaches a server (RFC 9112 §3.2.1), so as /#download neither of these
-// CTAs was addressable, loggable or indexable; they are the site's two loudest
-// download controls and both were pointing at something no analytics tool could
-// see. The band still exists — this is where it stopped being the address.
+// The destination must be a PATH, never the home page's #download band: a
+// fragment never reaches a server (RFC 9112 §3.2.1), so as /#download the site's
+// two loudest download controls are neither addressable, loggable nor indexable
+// — no analytics tool can see a click on either. The band still exists; it is
+// just not the address.
 test("the free CTAs route to the download page wherever they appear", async ({ page }) => {
   for (const path of ["/", "/pricing"]) {
     await page.goto(path);
@@ -174,15 +196,14 @@ test("the hero offers exactly one download button, matched to the reader's OS", 
 });
 
 // /download is the site's one addressable download URL: the nav CTA, the free
-// plan's CTA, the footer and every ?platform= link resolve to it. It used to be
-// /download/started, a noindex thank-you page nobody could link to; a page that
-// 404s or that quietly keeps the old noindex costs every download the site has
-// plus the "antgrid download" search that should land on it.
+// plan's CTA, the footer and every ?platform= link resolve to it. A page that
+// 404s, or that carries a noindex, costs every download the site has plus the
+// "antgrid download" search that should land on it.
 //
 // The page-specific assertion comes FIRST, and that ordering is the point. The
 // 404 template answers every unknown path and carries its own noindex, so a
 // robots assertion made against a moved page passes green while the reader gets
-// nothing — which is exactly how this test survived the move it was written for.
+// nothing — which is how a suite survives the move it was written to catch.
 // `a.dl-os` exists on this page, the home page and nowhere else; a 404 has none.
 test("/download resolves at its own address and is indexable", async ({ page }) => {
   const res = await page.goto("/download");
@@ -219,18 +240,29 @@ test("the download page offers every build, and Windows as a listing not a stub"
   // wants before it will trust a cross-origin attachment, and what the script's
   // automatic fire does not have. Pointed back at ?platform= it would also be a
   // link from this page to this page, which is a reload, not a download.
+  //
+  // A handheld gets none of them, and that is the point rather than an exception:
+  // data-os answers which build to OFFER, so it files Android under "win" and
+  // iPhone under "mac" — a one-tap button aimed straight at the artifact would
+  // therefore hand a phone a desktop installer it cannot open, with a real
+  // gesture behind it that no auto-fire guard is ever consulted about. The
+  // handheld note replaces the row, so the reader still leaves with the builds
+  // below rather than with a hidden row and no explanation.
   const shown = page.locator("a.dl-os:visible");
-  await expect(shown).toHaveCount(1);
-  await expect(shown).toHaveAttribute("href", DOWNLOADS[await readerPlatform(page)]);
+  if (await isPhone(page)) {
+    await expect(shown, "a phone was handed a one-tap desktop installer").toHaveCount(0);
+    await expect(page.locator(".dl-handheld")).toBeVisible();
+  } else {
+    await expect(shown).toHaveCount(1);
+    await expect(shown).toHaveAttribute("href", DOWNLOADS[await readerPlatform(page)]);
+  }
 
-  // Everything that is not the OS-matched button and not inside a per-platform
-  // note panel — i.e. the all-builds list, which is the only place a reader who
-  // is not on this OS can name their own build. Filtered by href rather than by
-  // container so a re-layout of the page cannot quietly empty this out.
-  const offered = await page.locator("a[href]").evaluateAll((els) =>
-    els
-      .filter((e) => !e.classList.contains("dl-os") && !e.closest(".dl-note"))
-      .map((e) => (e as HTMLAnchorElement).getAttribute("href")!)
+  // The all-builds list, which is the only place a reader who is not on this OS
+  // can name their own build. Scoped to that row by id: filtered by href across
+  // the whole page, this passed with the row deleted, because the hidden
+  // per-platform offer links carry the same three URLs and fed an identical set.
+  const offered = await page.locator("#allBuilds a[href]").evaluateAll((els) =>
+    els.map((e) => (e as HTMLAnchorElement).getAttribute("href")!)
   );
   const builds = [...new Set(offered.filter((h) => h.includes("microsoft.com") || h.includes("/releases/latest/")))];
   expect(builds.sort(), "the all-builds list no longer offers exactly the three builds").toEqual(
@@ -263,8 +295,7 @@ test("arriving at /download with the reader's own build starts that download", a
   const platform = await readerPlatform(page);
   const url = DOWNLOADS[platform];
 
-  const fired: string[] = [];
-  await watchDownloads(page, fired);
+  const fired = await watchDownloads(page);
   const started = page.waitForEvent("download");
 
   await page.goto(`/download?platform=${platform}`);
@@ -293,8 +324,7 @@ test("a phone is offered its own build, never fired one", async ({ page }) => {
   test.skip(!(await isPhone(page)), "the desktop half of this contract is the test above");
   const platform = await readerPlatform(page);
 
-  const fired: string[] = [];
-  await watchDownloads(page, fired);
+  const fired = await watchDownloads(page);
   await page.goto(`/download?platform=${platform}`);
   // Long enough to outlast the page's own fire delay, so this proves nothing
   // started rather than racing it.
@@ -324,8 +354,7 @@ test("a build the reader is not on is offered, never fired", async ({ page }) =>
   const away = (Object.keys(DOWNLOADS) as Array<keyof typeof DOWNLOADS>).filter((p) => p !== mine);
   expect(away.length, "there is no other platform to test against").toBe(2);
 
-  const fired: string[] = [];
-  await watchDownloads(page, fired);
+  const fired = await watchDownloads(page);
 
   for (const platform of away) {
     await page.goto(`/download?platform=${platform}`);
@@ -350,13 +379,18 @@ test("a build the reader is not on is offered, never fired", async ({ page }) =>
   expect(fired, "a build was fired at a reader who cannot run it").toEqual([]);
 });
 
-// Both Playwright projects resolve to data-os="win" — Desktop Chrome by being
-// Windows, Pixel 7 because its UA carries "Linux" AND "Android", which
-// Base.astro deliberately files under win. So the case awayUrl exists for — a
-// reader who is NOT on Windows meeting the Windows build — is the one case the
-// suite could not otherwise reach, and it is the case the whole distinction was
-// built for. Overriding the UA is cheaper than a third project: nothing else
-// here is OS-dependent, and a project would run all 30 tests to cover one.
+// Neither Playwright project can reach this case on its own. The Pixel 7's UA
+// carries "Linux" AND "Android", which Base.astro deliberately files under win
+// but which also sets data-form=mobile, so it is never fired anything; Desktop
+// Chrome inherits the runner's own UA, which is Linux on CI and Windows on a
+// developer's machine — so which own-build path gets exercised depends on who
+// ran the suite, and the Windows one is never the CI answer. Overriding the UA
+// is cheaper than a third project: nothing else here is OS-dependent, and a
+// project would run every test in the file to cover one.
+//
+// The case awayUrl exists for — a reader who is NOT on Windows meeting the
+// Windows build — is therefore unreachable without this override, and it is the
+// case the whole distinction was built for.
 test.describe("a reader on macOS", () => {
   test.use({
     userAgent:
@@ -364,8 +398,7 @@ test.describe("a reader on macOS", () => {
   });
 
   test("meeting the Windows build gets the Store listing, never the stub", async ({ page }) => {
-    const fired: string[] = [];
-    await watchDownloads(page, fired);
+    const fired = await watchDownloads(page);
     await page.goto("/download?platform=windows");
     await page.waitForTimeout(1500);
 
@@ -394,8 +427,7 @@ test.describe("a reader on macOS", () => {
 // domain flagged. An unknown platform must be as inert as no platform, and both
 // must leave a reader something that works: the pick-a-build state.
 test("the download page downloads nothing it was not asked for", async ({ page }) => {
-  const fired: string[] = [];
-  await watchDownloads(page, fired);
+  const fired = await watchDownloads(page);
 
   for (const path of ["/download", "/download?platform=solaris"]) {
     await page.goto(path);

@@ -3,14 +3,22 @@ import { Icon } from "astro-icon/components";
 import Base from "../../layouts/Base.astro";
 import Button from "../../components/ui/Button.astro";
 import Mark from "../../components/ui/Mark.astro";
-import { links, PLATFORMS } from "../../config";
+import { links, offerUrlFor, PLATFORMS } from "../../config";
 
 // Both axes of PLATFORMS, serialised as one table for the head script: `os` is
 // what the reader's own machine reports and `url` is what firing means, and the
 // script needs the pair together to answer "did this URL ask for a build this
 // reader can actually run". Derived rather than written out, so an id still
 // only ever exists in config.ts.
-const SCRIPT_BUILDS = Object.fromEntries(PLATFORMS.map((p) => [p.id, { os: p.os, url: p.url }]));
+//
+// `<` is escaped on the way out because JSON.stringify does not escape it and
+// set:html inserts this verbatim: the HTML tokenizer ends a <script> at the
+// first `</script` in its raw text no matter what quoting it sits inside, so a
+// URL that ever contained one would close the tag and parse the rest of the
+// page's head as markup. < is the same character to a JS parser.
+const SCRIPT_BUILDS = JSON.stringify(
+  Object.fromEntries(PLATFORMS.map((p) => [p.id, { os: p.os, url: p.url }]))
+).replace(/</g, "\\u003c");
 
 // The one instruction that cannot wait behind a click. Everything else on this
 // page routes into the guide; this does not, because the reader is holding the
@@ -71,7 +79,7 @@ const STEPS = [
       the layout's own head script, which is a few lines above it for the same
       reason. */}
   <script slot="head" is:inline set:html={`(function () {
-  var builds = ${JSON.stringify(SCRIPT_BUILDS)};
+  var builds = ${SCRIPT_BUILDS};
   var url = new URL(location.href);
   var platform = url.searchParams.get("platform");
   // hasOwnProperty rather than a truthy lookup: "?platform=constructor" finds a
@@ -109,8 +117,15 @@ const STEPS = [
   // Content-Disposition: attachment, which is the whole reason this downloads
   // instead of throwing the reader off the page; a build served inline would
   // navigate away instead, and nothing here would look wrong.
+  //
+  // pagehide cancels the pending timer, and that is not tidiness: a reader who
+  // hits Back inside the 600ms leaves a FROZEN timer behind, and bfcache
+  // resumes it on the Forward — firing a download minutes later with no gesture
+  // anywhere near it. Cancelling on the way out is what bounds the fire to the
+  // visit it belongs to.
   addEventListener("load", function () {
-    setTimeout(function () { location.href = build.url; }, 600);
+    var t = setTimeout(function () { location.href = build.url; }, 600);
+    addEventListener("pagehide", function () { clearTimeout(t); }, { once: true });
   });
 })();`}></script>
 
@@ -126,10 +141,17 @@ const STEPS = [
       {/* Two headlines ship and the script reveals one, the same unlayered CSS
           swap as the hero's download buttons. The idle one is the default, so a
           reader with no script — or no platform — gets the working page rather
-          than a thank-you for a download that never happened. */}
-      <h1 class="dl-fired font-display text-title font-semibold tracking-tight text-ink">
+          than a thank-you for a download that never happened.
+
+          Only ONE of them is the <h1>, and it is the idle one. Both were h1s
+          while this page was noindex and it cost nothing; on an indexable page
+          the raw HTML would carry two, with "Your download has started" first —
+          the exact string this page must never be found by. The fired line is a
+          status message about a transient client-side state, not the document's
+          heading, so a <p> at heading size is what it actually is. */}
+      <p class="dl-fired font-display text-title font-semibold tracking-tight text-ink">
         Your download has started.
-      </h1>
+      </p>
       <h1 class="dl-idle font-display text-title font-semibold tracking-tight text-ink">
         Download antgrid.
       </h1>
@@ -140,9 +162,12 @@ const STEPS = [
             <Icon name={b.icon} width="13" height="13" />{b.file}
           </p>
           <p class="mt-2 text-note text-ink2">{b.step}</p>
+          {/* The filename comes from `b.file`, not retyped: a command the reader
+              pastes has to name the file that actually landed, and the two
+              agreeing is otherwise nothing but memory. */}
           {b.id === "linux" && (
-            <pre class="mt-2.5 overflow-x-auto rounded border border-edge-inner bg-well px-3 py-2 font-mono text-meta text-muted"><code>chmod +x antgrid-linux.AppImage
-./antgrid-linux.AppImage</code></pre>
+            <pre class="mt-2.5 overflow-x-auto rounded border border-edge-inner bg-well px-3 py-2 font-mono text-meta text-muted"><code>chmod +x {b.file}
+./{b.file}</code></pre>
           )}
           {/* The reason this box exists. The download failing is the one outcome
               that never announces itself — a browser blocks it, an extension
@@ -163,20 +188,17 @@ const STEPS = [
         {PLATFORMS.map((p) => (
           <p class={`dl-ask dl-ask-${p.id} mx-auto mt-6 max-w-md rounded-lg border border-edge bg-panel/50 px-5 py-3.5 text-note text-ink2`}>
             That link asked for the {p.name} build —{" "}
-            <a href={p.awayUrl ?? p.url} class="text-signal2 hover:text-signal">get it here</a>, or take yours below.
+            <a href={offerUrlFor(p)} class="text-signal2 hover:text-signal">get it here</a>, or take yours below.
           </p>
         ))}
 
         <p class="mx-auto mt-5 max-w-md text-lede text-muted">
           One app for every agent on every machine you own. Free while in beta, no card required.
         </p>
-        {/* One OS-matched button, not three equal ones. This page was previously
-            reachable only by arriving WITH a platform, so a reader in this state
-            had already failed to be matched and guessing again was the one move
-            that could not help. /download is now a linked destination, so
-            arriving with nothing is the ordinary case and the match is right for
-            nearly everyone; the row under it covers the rest. Same reveal as the
-            hero's buttons — all three ship, global.css shows the one this
+        {/* One OS-matched button, not three equal ones: arriving with nothing is
+            the ordinary case for a linked destination, the match is right for
+            nearly everyone, and the row under it covers the rest. Same reveal as
+            the hero's buttons — all three ship, global.css shows the one this
             machine can install, Windows with no script at all.
 
             Aimed at the artifact, never at ?platform=. Chrome's download
@@ -185,31 +207,56 @@ const STEPS = [
             load handler carries none — so routing this button through the query
             would make Safe Browsing warn on our own installer MORE often than a
             plain click does. There is also nothing left to orient the reader to:
-            they are already on the download page. And because the button is only
-            ever visible to a reader on that OS, p.url is always the artifact
-            that machine can run — the stub-installer trap below never applies. */}
-        <div class="mt-7 flex flex-wrap items-center justify-center gap-3">
+            they are already on the download page.
+
+            `dl-direct` is what makes aiming at the raw artifact safe, and it is
+            the only place on the site that needs it. Everywhere else a dl-os
+            button goes through ?platform=, where the head script re-checks the
+            machine; here there is no second check, and data-os alone would not
+            survive one — it answers "which build to OFFER", so it files Android
+            under win and iPhone under mac and falls through to Windows when no
+            script ran at all. Unqualified, the page's one primary action would
+            hand an iPhone a 94MB .dmg and an Android phone the Store's Windows
+            stub, which serves a .exe to every caller that asks. */}
+        <div class="dl-direct mt-7 flex flex-wrap items-center justify-center gap-3">
           {PLATFORMS.map((p) => (
             <Button href={p.url} variant="primary" class={`dl-os dl-${p.os}`}>
               <Icon name={p.icon} width="16" height="16" />Download for {p.name}
             </Button>
           ))}
         </div>
+
+        {/* What a phone gets in that row's place. It carries no invite link of
+            its own — the one below is visible in every state and a second copy
+            two paragraphs apart reads as a page that lost its place. This says
+            only the thing the missing button would otherwise have implied
+            wrongly: the builds are for another machine. */}
+        <p class="dl-handheld mx-auto mt-7 max-w-md rounded-lg border border-edge bg-panel/50 px-5 py-3.5 text-note text-ink2">
+          antgrid runs on the computer your agents run on, so there is nothing to
+          install on this device — take a build below for the machine you work
+          on.
+        </p>
       </div>
 
       {/* Visible in both states, not folded into .dl-idle: idle it is the escape
           hatch for the OS match, and after a download has fired it is where a
           reader collecting the build for the OTHER machine on their desk looks.
 
-          awayUrl ?? url, so Windows resolves to the Store LISTING rather than
-          the stub installer — that installer hands a .exe to every caller that
-          asks, which is exactly what a list offered to all three OSes must not
-          do. The listing is an ordinary page everywhere and still opens the
-          Store app on Windows, so one anchor serves both readers and this row
-          needs no OS reveal of its own. */}
-      <p class="mt-7 text-meta text-muted2">
+          offerUrlFor, so Windows resolves to the Store LISTING rather than the
+          stub installer — that installer hands a .exe to every caller that asks,
+          which is exactly what a list offered to all three OSes must not do. The
+          listing is an ordinary page everywhere and still opens the Store app on
+          Windows, so one anchor serves both readers and this row needs no OS
+          reveal of its own.
+
+          The id is a test hook: contracts.spec.ts pins what this row offers, and
+          without it the only way to find the row was to sweep every anchor and
+          subtract the ones that were not it — which the hidden dl-ask links, who
+          carry these same three hrefs, quietly satisfied whether this row
+          existed or not. */}
+      <p id="allBuilds" class="mt-7 text-meta text-muted2">
         All builds: {PLATFORMS.map((p, i) => (
-          <>{i > 0 && <span class="text-faint"> · </span>}<a href={p.awayUrl ?? p.url} class="text-signal2 hover:text-signal">{p.name}</a></>
+          <>{i > 0 && <span class="text-faint"> · </span>}<a href={offerUrlFor(p)} class="text-signal2 hover:text-signal">{p.name}</a></>
         ))}
       </p>
 
@@ -313,10 +360,13 @@ const STEPS = [
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((rel) => {
         if (!rel?.tag_name || !rel?.html_url) return;
-        const at = new Date(rel.published_at);
+        // Falsiness first, then NaN: `new Date(undefined)` is Invalid Date and
+        // guarded, but `new Date(null)` is the epoch, so a release with a null
+        // published_at would date itself 1 Jan 1970 rather than say nothing.
+        const at = rel.published_at ? new Date(rel.published_at) : null;
         // The reader's locale, not ours: this is a date on a page about their
         // machine, and Intl already knows the order their country writes it in.
-        const when = Number.isNaN(at.getTime())
+        const when = !at || Number.isNaN(at.getTime())
           ? ""
           : at.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
         // Composed as nodes rather than innerHTML — the strings are GitHub's,

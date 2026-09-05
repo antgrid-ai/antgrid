@@ -12,11 +12,12 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
 // rewriting a label after load, which would flicker on the primary CTA. Windows
 // leads because it is also what the reveal rules fall through to.
 //
-// Each aims at the confirmation page rather than at the artifact, and that page
-// starts the download itself (downloadUrlFor). Straight at the artifact, the
-// click leaves the page looking like nothing happened and answers none of "it
-// downloaded, now what". #download still keeps the raw artifact links a click
-// away for anyone who only wants the binary.
+// Each aims at /download rather than at the artifact, and that page starts the
+// download itself (downloadUrlFor) — and re-checks the machine before it does,
+// which is the only reason a link that has travelled cannot land a build on a
+// device that cannot run it. Straight at the artifact, the click leaves the page
+// looking like nothing happened and answers none of "it downloaded, now what".
+// The raw artifacts stay one layer down, in the setup guide.
 ---
 {/* The proof loop is the argument, so it gets the stage rather than a column:
     full shell width under the headline, which also puts it just below the fold
@@ -148,20 +149,33 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
             minority case. A text link sits at the moment of decision without
             competing for it.
 
-            It ships as a plain anchor to the download band and is UPGRADED to a
+            It ships as a plain anchor to /download and is UPGRADED to a
             disclosure by the script below — so a reader with no JS still gets
-            the whole build list, one scroll away, instead of a dead control.
+            the whole build list, one page away, instead of a dead control.
             That is also why the chevron is in the markup rather than swapped in
             on upgrade: pointing down is true of both states, the menu that
-            opens under it and the band further down the page. A disclosure and
+            opens under it and the page it otherwise goes to. A disclosure and
             not `aria-haspopup="menu"` — the panel is three links and a guide,
             and claiming menu semantics would owe arrow-key roving that a list
-            this size gains nothing from. */}
+            this size gains nothing from.
+
+            Opted out of prefetch: hover-prefetching is aimed at links a reader
+            is travelling towards, and once the script has run — which is a
+            precondition for prefetch existing at all — this one never navigates.
+            Prefetching it spends a document fetch on the one anchor in the hero
+            whose click is guaranteed to be swallowed.
+
+            aria-controls is set by the script, not shipped: paired with the
+            aria-expanded the script also sets, it describes a disclosure — on
+            its own, in the window before the module runs and forever for a
+            reader with no JS, it announces a relationship to a panel that will
+            never open, over a link that in fact navigates. The two belong to the
+            upgraded state, so both are applied by the thing that upgrades. */}
         <div class="relative">
           <a
             id="buildsBtn"
             href={links.download}
-            aria-controls="buildsMenu"
+            data-astro-prefetch="false"
             class="group inline-flex items-center gap-2 text-note font-medium text-signal2 underline decoration-signaldeep2 underline-offset-4 transition-colors hover:text-signal hover:decoration-signal"
           >
             See all builds
@@ -175,8 +189,10 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
           {/* Every platform, including the one already on the button — a reader
               who opens this wants the list, and hiding their own build from it
               only raises the question of whether it is there at all. Each entry
-              routes through the confirmation page like every other download on
-              the site (downloadUrlFor), never straight at the artifact.
+              routes through /download like every other download on the site
+              (downloadUrlFor), never straight at the artifact — which is what
+              stops a reader picking a build their machine cannot run from being
+              handed it.
 
               No `dl-os` class on these: that class is the OS reveal, and
               contracts.spec.ts counts exactly three of them in the hero with one
@@ -253,12 +269,14 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
   const btn = document.getElementById("buildsBtn");
   const menu = document.getElementById("buildsMenu");
 
-  // Setting aria-expanded is what UPGRADES the link into a disclosure: until
-  // this runs the anchor is a plain jump to the download band, which is the
-  // scriptless reader's whole experience and has to stay honest. It is also the
-  // hook the chevron's rotation reads (group-aria-expanded), so state lives in
-  // exactly one place.
+  // Setting aria-controls + aria-expanded is what UPGRADES the link into a
+  // disclosure: until this runs the anchor is a plain jump to /download, which
+  // is the scriptless reader's whole experience and has to stay honest — so
+  // neither attribute ships in the markup. aria-expanded is also the hook the
+  // chevron's rotation reads (group-aria-expanded), so state lives in exactly
+  // one place.
   if (btn && menu) {
+    btn.setAttribute("aria-controls", "buildsMenu");
     // Keeps the panel on screen wherever the trigger ended up. Measured after
     // unhiding rather than derived from a breakpoint: what moves the trigger is
     // the CTA row WRAPPING, which depends on the button's rendered label, so a
@@ -267,8 +285,13 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
     const place = () => {
       menu.style.transform = "";
       const box = menu.getBoundingClientRect();
+      // clientWidth, not innerWidth: innerWidth counts a classic scrollbar as
+      // usable width, and this page always has one on a desktop browser — so
+      // clamping against it leaves the panel up to a scrollbar's width past the
+      // edge it is being pulled back from.
+      const edge = document.documentElement.clientWidth;
       let dx = 0;
-      if (box.right > innerWidth - GUTTER) dx = innerWidth - GUTTER - box.right;
+      if (box.right > edge - GUTTER) dx = edge - GUTTER - box.right;
       if (box.left + dx < GUTTER) dx = GUTTER - box.left;
       if (dx) menu.style.transform = `translateX(${Math.round(dx)}px)`;
     };
@@ -280,13 +303,31 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
     };
     setOpen(false);
 
+    // Coalesced to one frame: place() clears the transform, measures, then
+    // writes it back, which forces a synchronous layout each call — and a
+    // drag-resize fires this event faster than the page can paint.
+    let queued = 0;
     addEventListener("resize", () => {
-      if (!menu.classList.contains("hidden")) place();
+      if (menu.classList.contains("hidden") || queued) return;
+      queued = requestAnimationFrame(() => {
+        queued = 0;
+        if (!menu.classList.contains("hidden")) place();
+      });
     });
 
     btn.addEventListener("click", (e) => {
+      // A modified click is a request for a new tab or window, and this control
+      // is a real link to /download — swallowing it would make the one gesture
+      // that opens the full list in a new tab do nothing but toggle a panel.
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
       e.preventDefault();
-      setOpen(menu.classList.contains("hidden"));
+      const open = menu.classList.contains("hidden");
+      setOpen(open);
+      // Safari does not focus an anchor on click, so without this a mouse user
+      // pressing Tab next moves on from wherever focus happened to be rather
+      // than into the panel — and Tab is the only keyboard way in, since this
+      // is a disclosure rather than a role="menu" with arrow-key roving.
+      if (open) btn.focus();
     });
 
     // pointerdown, not click: a reader dismissing the panel to reach the primary

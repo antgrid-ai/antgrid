@@ -94,16 +94,13 @@ test("the nav marks the page the reader is on, and never more than one", async (
   // again.
   await expect(nav.locator("[aria-current='page']")).toHaveCount(1);
 
-  // /download is a location the reader can now BE at — Nav.astro's isCurrent
-  // skips any href containing "#", which is what excluded the CTA for as long as
-  // it was /#download, and links.startFree is a plain path now. It still comes
-  // out unmarked, because Nav.astro passes aria-current to the navItems loop and
-  // never to the <Button>. That is a gap rather than a contract, so it is not
-  // asserted as correct here — what IS asserted is the invariant that survives
-  // either answer: this page must never end up claiming two current locations.
+  // /download is a location the reader can BE at, which is what makes this
+  // assertable at all: Nav.astro's isCurrent skips any href containing "#", so
+  // for as long as the CTA was /#download there was no page for it to be current
+  // on. It is a plain path, so the mark has to reach it — and reaching it means
+  // Button.astro forwarding aria-current, which is the part that silently does
+  // nothing if a future edit tightens its Props back down.
   await page.goto("/download");
-  expect(
-    await nav.locator("[aria-current='page']").count(),
-    "the nav marks more than one current page on /download"
-  ).toBeLessThanOrEqual(1);
+  await expect(nav.getByRole("link", { name: "Download free" })).toHaveAttribute("aria-current", "page");
+  await expect(nav.locator("[aria-current='page']")).toHaveCount(1);
 });

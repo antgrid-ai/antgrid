@@ -49,7 +49,8 @@ const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
         // desktop-only download anyway.
         var p = (navigator.userAgentData && navigator.userAgentData.platform) || "";
         var s = p + " " + navigator.userAgent;
-        d.dataset.os = /mac|iphone|ipad|ipod/i.test(s)
+        var apple = /mac|iphone|ipad|ipod/i.test(s);
+        d.dataset.os = apple
           ? "mac"
           : /linux/i.test(s) && !/android/i.test(s)
             ? "linux"
@@ -61,7 +62,18 @@ const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
         // for a machine they will sit at later — and catastrophic for FIRING
         // one, because it makes every phone look like a desktop that matched.
         // Nothing may auto-download while this is set.
-        if (/iphone|ipad|ipod|android|mobile/i.test(s)) d.dataset.form = "mobile";
+        //
+        // maxTouchPoints, not another UA token, is what catches an iPad: since
+        // iPadOS 13 "Request Desktop Website" is the DEFAULT, and in it Safari
+        // sends a UA byte-identical to a real Mac's — no "iPad", no "Mobile" —
+        // while userAgentData is unimplemented in WebKit, so the string budget
+        // above is exhausted. A Mac reports 0 touch points and an iPad reports
+        // several, which is the only signal that separates them. Gated on the
+        // apple branch so a Windows touchscreen laptop, which reports plenty,
+        // stays the desktop it is.
+        if (/iphone|ipad|ipod|android|mobile/i.test(s) || (apple && navigator.maxTouchPoints > 1)) {
+          d.dataset.form = "mobile";
+        }
       })();
     </script>
     {/* For a page that needs its own pre-paint work, on the same terms as the
