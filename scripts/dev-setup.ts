@@ -20,6 +20,7 @@ import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { ensureDartMcp } from "./ensure-dart-mcp";
+import { formatPreflightSummary, runPreflight } from "./preflight";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const LICENSE_ENV = resolve(ROOT, "web/.env");
@@ -184,6 +185,29 @@ async function main() {
       ].join("\n"),
     );
     console.log("  relay/.env.example: created");
+  }
+
+  // --- Preflight ---
+  console.log("");
+  const preflight = await runPreflight(licenseEnv.PG_DATABASE_URL);
+  for (const line of formatPreflightSummary(preflight, licenseEnv.PG_DATABASE_URL)) {
+    console.log(line);
+  }
+  if (!preflight.postgresReachable) {
+    console.error("\nPostgres isn't reachable yet, so migration below would fail anyway.");
+    if (preflight.containerRuntime) {
+      console.error(`Start it with ${preflight.containerRuntime}, e.g.:`);
+      console.error(
+        "  docker run -d --name antgrid-pg -p 5432:5432 \\\n" +
+          "    -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=antgrid \\\n" +
+          "    postgres:16-alpine",
+      );
+    } else {
+      console.error(
+        "No container runtime found — start a system Postgres, or install Docker/Podman and re-run.",
+      );
+    }
+    process.exit(1);
   }
 
   // --- DB migrate ---
