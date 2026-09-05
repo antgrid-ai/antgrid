@@ -10,7 +10,6 @@ import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
-import 'package:antgrid/providers/session_members.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/account_agents_api.dart';
