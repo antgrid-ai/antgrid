@@ -855,10 +855,18 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
 
       // Split the tally by endpoint or by transport only when both are in play
       // — otherwise every line would carry the same prefix.
+      //
+      // The type is the one peer-chosen half of this key and so goes through
+      // `field` like every rendered cell: `ingestRemote` validates `dir` and
+      // stamps `origin` itself, but it admits any string as `kind` and never
+      // looks at `msgType` at all. The summary prints AFTER the rows have
+      // scrolled past, which is exactly when an escape sequence smuggled here
+      // has a clean terminal to repaint. Truncating also keeps one peer from
+      // filling the ranked list with near-identical long keys.
       const key =
         `${opts.remote ? `${event.origin ?? "brg"} ` : ""}` +
         `${opts.local || opts.relay ? "" : `${transportOf(event)} `}` +
-        `${event.dir} ${event.msgType ?? event.kind}`;
+        `${event.dir} ${field(event.msgType ?? event.kind, 40)}`;
       counts.set(key, (counts.get(key) ?? 0) + 1);
       if (event.kind === "drop") drops++;
 

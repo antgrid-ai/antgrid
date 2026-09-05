@@ -1,9 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { encodeRouteFrame, FrameKind } from "antgrid-wire";
 import { Netwatch, netwatch, frameIdFor, __resetNetwatchForTest, type NetwatchEvent } from "../src/netwatch";
 import { ControlListener } from "../src/control-listener";
 import { RelayClient } from "../src/relay-client";
 import { createMessage } from "../src/protocol";
+import { runNetwatchCli } from "../src/cli/netwatch";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 describe("Netwatch ring", () => {
   it("keeps the newest events, oldest first, and reports what it evicted", () => {
@@ -269,5 +273,69 @@ describe("control plane /netwatch", () => {
     }
     expect(live).toContain("phone-1");
     await reader.cancel();
+  });
+});
+
+describe("antgrid watch summary", () => {
+  let listener: ControlListener | null = null;
+
+  beforeEach(() => __resetNetwatchForTest());
+  afterEach(async () => {
+    await listener?.stop();
+    listener = null;
+    __resetNetwatchForTest();
+  });
+
+  it("strips escapes out of the type it tallies, and caps its length", async () => {
+    const token = "summary-token";
+    listener = new ControlListener({ token, handler: async () => ({ id: "x", ok: true, result: {} }) as any });
+    await listener.start();
+
+    const dir = mkdtempSync(join(tmpdir(), "netwatch-summary-"));
+    writeFileSync(
+      join(dir, "host.json"),
+      JSON.stringify({
+        version: 1,
+        pid: process.pid,
+        controlPort: listener.port,
+        token,
+        startedAt: new Date().toISOString(),
+        agentVersion: "0.0.0-test",
+      }),
+    );
+
+    // Built from char codes rather than written literally: a control character
+    // pasted into a source file is invisible in every diff that would review it.
+    const ESC = String.fromCharCode(27);
+    const BEL = String.fromCharCode(7);
+    netwatch.record({
+      dir: "rx",
+      kind: "sealed",
+      transport: "relay",
+      msgType: `terminal:${ESC}]0;pwned${BEL}${ESC}[2Kinput`,
+    });
+    netwatch.record({ dir: "tx", kind: "sealed", transport: "relay", msgType: "z".repeat(200) });
+
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    const out = spyOn(console, "log").mockImplementation(() => {});
+    let printed = "";
+    try {
+      expect(await runNetwatchCli({ dir, follow: false })).toBe(0);
+      printed = err.mock.calls.flat().join("\n");
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+
+    // The summary prints AFTER the rows have scrolled by, onto a terminal the
+    // operator is reading — an OSC here retitles their window, a CSI repaints it.
+    expect(printed).not.toContain(`${ESC}]`);
+    expect(printed).not.toContain(`${ESC}[2K`);
+    // Still counted, and still legible as the frame it was.
+    expect(printed).toContain("rx terminal:]0;pwned[2Kinput 1");
+    // One peer must not be able to push the other eleven rows off a ranked list
+    // that only shows twelve.
+    expect(printed).toContain(`tx ${"z".repeat(40)} 1`);
+    expect(printed).not.toContain("z".repeat(41));
   });
 });
