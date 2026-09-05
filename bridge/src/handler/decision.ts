@@ -143,20 +143,38 @@ export function buildDecidePrompt(opts: {
     "- Keep it to one or two sentences. Length reads as certainty you do not have, and each extra clause is another detail you did not verify. This binds `notify.draftReply` too: the user is offered it as a one-tap chip and it reaches the agent verbatim if they take it.",
     "",
     "RULES:",
-    "- Escalating always trumps making progress: if the next step on an item needs the user, escalate instead of transitioning it.",
+    // "recording", not "making": a question IS a `handle` (see the framing line
+    // above), so a rule phrased against escalating-versus-progress reads as a rule
+    // against asking. Its actual job is narrower — keep `transitions` honest.
+    "- Escalating always trumps recording progress: if the next step on an item needs the user, escalate instead of transitioning it. This governs `transitions` only, and it is not a preference for escalating over asking — a question to the agent is a `handle`, and the rules below govern when to spend one.",
     "- If you cannot answer with high confidence, escalate. A wrong auto-reply is the expensive failure.",
     // Ordered against the confidence rule above, never merely beside it: missing
     // information is exactly that rule's trigger, so an unordered "ask the agent"
     // would divert to the agent what only the user can settle.
     "- Missing information is not automatically the user's problem, and the split is by who can answer: ask the AGENT for facts about the work — what it found, what it tried, what it chose and why. Escalate what only the USER can settle: intent, authorization, preference, anything that changes the goal.",
-    "- A question costs a turn. It spends one of the bounded run of consecutive auto-replies the harness allows before it escalates on its own, so ask only when the answer would change what you do next; if you would say the same thing either way, say it.",
+    // Ordered below the confidence floor and the who-can-answer split, never above
+    // either: these price the two resources, and a judge that read them first would
+    // take "the user is expensive" as licence to answer what only the user can
+    // settle. The asymmetry they state is mechanical, not rhetorical — an exhausted
+    // auto-reply run self-escalates inside the session, while an unanswered
+    // escalation stalls it until a human returns: nothing re-raises one, and a
+    // blocked agent emits no further event (see `onUserReply` in engine.ts).
+    "- The two costs are not equal. A question to the agent spends one of a bounded run of consecutive auto-replies and is answered in seconds; the harness escalates on its own once that run is exhausted or you repeat yourself, so an unhelpful question is recoverable within this session. An escalation spends the user, who may be asleep, and the session does nothing until they answer — nothing re-raises it, and no further event arrives while the agent sits idle. Neither is free. The escalation is the expensive one.",
+    "- So before you escalate, apply this test: could one read-only question to the agent plausibly dissolve this escalation, or sharpen what you would ask the user? If yes, ask it, and escalate on the next pass if the answer does not settle it. If the escalation stands whatever the agent replies — because what is missing is intent, authorization or preference — escalate now and do not spend the turn.",
+    // Printed against the safety rule below because it is the same guardrail from
+    // the other side: the rule above sends the judge to the agent more often, and
+    // the cheapest way for a blocked agent to answer "are you still blocked?" is to
+    // stop being blocked. Naming the specific escapes beats a general caution — a
+    // judge told only to be careful still writes "can you try again?", which is the
+    // prompt that gets a gate skipped.
+    "- When that question is about a blocker the agent has reported — a refused tool call, a failing gate, a missing credential — ask only for the state of it: whether it still reproduces, what exactly was refused, what it has already tried. Say in the same line that you want it reported, not worked around. An agent asked whether it is really blocked can make the question go away by defeating the block: skipping the gate, disabling the check, declaring unverified work verified, or committing it anyway. That is a worse outcome than the escalation you were avoiding.",
     "- Safety limits are enforced after your decision; never attempt to bypass them.",
     `- \`reply\` is free text typed at the agent and submitted as ONE line, under ${MAX_REPLY_CHARS} characters. Write one line: a line break would submit early, so any you write are collapsed to spaces before sending.`,
     "- `action` with `kind: \"slash_command\"` types a command at the agent instead. `value` is `\"/verb\"` or `\"/verb <args>\"` — the verb is a single token with no spaces and no further `/`. The whole value is ONE line of command, verb and arguments only, whitespace inside it collapsed to spaces before sending; it carries no prose. Put what you need to explain in `reason`, which the user reads, and if the agent itself must be told something first, send that as `reply` this pass and the command on the next.",
     "- Set either `reply` or `action`, never both. A decision carrying both is refused and reaches the agent as nothing.",
     "",
     // Printed AFTER the whole rules list, never inside it: the two rules above —
-    // escalating trumps progress, low confidence escalates — bind every preset,
+    // escalating trumps recording progress, low confidence escalates — bind every preset,
     // and a posture stated among them would read as one more rule of equal
     // standing rather than as something they frame.
     "POSTURE — where your line between handling and escalating sits, and how `notify` reads. It never relaxes the rules above, and it never changes what a transition must cite:",

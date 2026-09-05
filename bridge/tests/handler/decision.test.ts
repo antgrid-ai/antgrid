@@ -366,8 +366,30 @@ describe("posture in the decide prompt", () => {
   // they read as exceptions to it.
   it("prints the posture below the rules it is subordinate to", () => {
     const p = build("autopilot");
-    expect(p.indexOf("Escalating always trumps making progress")).toBeLessThan(p.indexOf("POSTURE"));
+    expect(p.indexOf("Escalating always trumps recording progress")).toBeLessThan(p.indexOf("POSTURE"));
     expect(p.indexOf("If you cannot answer with high confidence, escalate")).toBeLessThan(p.indexOf("POSTURE"));
+  });
+
+  // The cost rules must never outrank the two that bound them: a judge reading
+  // "the user is expensive" before the confidence floor or the who-can-answer
+  // split has been handed a reason to answer what only the user can settle.
+  it("prints the escalation-cost rules below the rules that bound them", () => {
+    const p = build("autopilot");
+    expect(p.indexOf("If you cannot answer with high confidence, escalate"))
+      .toBeLessThan(p.indexOf("The two costs are not equal"));
+    expect(p.indexOf("the split is by who can answer"))
+      .toBeLessThan(p.indexOf("The two costs are not equal"));
+    expect(p.indexOf("The two costs are not equal"))
+      .toBeLessThan(p.indexOf("could one read-only question"));
+  });
+
+  // Sending the judge to the agent more often is only safe while the same list
+  // says what a blocker question may not become.
+  it("pairs the ask-first rule with the do-not-work-around clause", () => {
+    const p = build("autopilot");
+    expect(p).toContain("reported, not worked around");
+    expect(p.indexOf("could one read-only question"))
+      .toBeLessThan(p.indexOf("reported, not worked around"));
   });
 
   // The widest preset is the one that could plausibly be written as a licence to
