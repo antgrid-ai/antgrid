@@ -142,10 +142,10 @@ late List<String> warmed;
 /// The flow itself is covered in `providers/add_machine_action_test.dart`; what
 /// is asserted here is what the DIALOG resolved before handing over — the mode
 /// above all, which is derived from a provider the dialog must have watched.
-typedef _AddCall =
+typedef AddCall =
     ({String tool, String? mode, String brief, SessionMemberCard? card});
 
-late List<_AddCall> added;
+late List<AddCall> added;
 
 Future<void> _openDialog(
   WidgetTester tester, {
@@ -154,7 +154,7 @@ Future<void> _openDialog(
 }) async {
   useInMemoryPrefs();
   warmed = <String>[];
-  added = <_AddCall>[];
+  added = <AddCall>[];
   tester.view.physicalSize = const Size(900, 1000);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.reset);
