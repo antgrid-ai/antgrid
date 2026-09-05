@@ -329,7 +329,10 @@ session. A session that never analyzes pays only the idle pair. One that does
 pays an analyzer that keeps growing with how much of the tree it has seen;
 `flutter analyze` is in the same class while it runs but exits. Measure both on
 the machine in front of you before deciding: several sessions each holding an
-analyzer can beat, or lose to, one gated CLI run.
+analyzer can beat, or lose to, one gated CLI run. Measure the right process:
+the analyzer is a GRANDCHILD, `dart language-server --protocol lsp` under
+`dart_mcp_server`, so totalling the `mcp-server` processes by name misses it
+entirely — the idle pair and the analyzer differ by orders of magnitude.
 
 ### Trap 3: never run a bare `bun test` from the repo root
 
