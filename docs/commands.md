@@ -135,6 +135,18 @@ is one the app sent. No second half, no `--join`, no app-side arming — the rel
 case needs all three only because a router sits between the endpoints and can
 swallow a frame neither of them ever hears about.
 
+The one thing the listener structurally cannot see is a frame the app **never
+put** on the wire. `LocalTransport` (`packages/antgrid_relay_client`) records
+those into the same `ANTGRID_NETWATCH` file its relay half writes: a send into a
+torn-down channel, a reply this app could not decode, a port that accepted the
+socket and never upgraded it, and the handshake refusals — including the close
+code the listener answered with, which is what makes "won't connect" legible
+from both ends rather than as an absence of traffic. Drops only, never a
+successful frame (the listener already recorded those; a merged capture would
+otherwise carry every row twice) and never a body — the app's mirror of the
+schema has no body field at all, and the hello this side sends carries the
+core's shared token.
+
 ```bash
 antgrid watch --local     # loopback only
 antgrid watch --relay     # relay only — omit both to see every transport

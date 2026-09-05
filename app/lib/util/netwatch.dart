@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:antgrid_relay_client/antgrid_relay_client.dart' show RelayNetTap;
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show RelayNetTap;
 
 import '../launcher/host_discovery.dart' show hostDir;
 import 'jsonl_sink.dart';
@@ -45,9 +46,16 @@ class NetwatchEvent {
   /// `sealed` | `handshake` | `control` | `drop`.
   final String kind;
 
-  /// `relay` | `local`. Always `relay` today — the loopback path speaks plain
-  /// JSON with no seal and no frames, and is deliberately uninstrumented. Kept
-  /// so a capture can never be misread as relay traffic it was not.
+  /// `relay` | `local`. The two are not the same wire — the relay path is
+  /// sealed frames over a routed socket, the loopback path is plain JSON with
+  /// no seal, no frames and no streams — so a capture that did not say which
+  /// one it came from could be read as relay traffic it never was.
+  ///
+  /// This app records the relay wire in full and the loopback wire ONLY where
+  /// it drops. The agent's `LocalListener` is the far end of the loopback
+  /// socket and already sees every frame that crossed it; see
+  /// `LocalTransport._dropped` for why recording them again here would double
+  /// a merged capture.
   final String transport;
 
   final String? channel;
@@ -313,6 +321,28 @@ Netwatch ensureNetwatch() {
   final armed = netwatch;
   if (armed != null) return armed;
   return _instance = Netwatch(null);
+}
+
+/// The capture tap for one project's loopback transport, or null when unarmed.
+///
+/// Two things it adds over [Netwatch.tap]. It stamps `detail.project`, because
+/// one recorder serves the whole process while a `LocalTransport` is per
+/// project — without it a capture with two projects open interleaves two
+/// conversations with nothing to tell them apart, and the agent's
+/// `LocalListener` stamps the same field on its own half so the two read as
+/// one. And it is gated on the environment alone: unlike a relay socket, a
+/// loopback transport is unreachable from `netwatch:configure` (the remote arm
+/// holds a `RelayService`, not this), so there is no later route to arm it.
+RelayNetTap? localNetTapFor(String projectId) {
+  if (!netwatchEnabled) return null;
+  final tap = ensureNetwatch().tap;
+  return (Map<String, Object?> event) {
+    final detail = <String, Object?>{
+      ...?(event['detail'] as Map?)?.cast<String, Object?>(),
+      'project': projectId,
+    };
+    tap({...event, 'detail': detail});
+  };
 }
 
 /// Test seam: install a capture regardless of the environment gate, or clear

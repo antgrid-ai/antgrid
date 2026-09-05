@@ -6,6 +6,7 @@ import 'package:web_socket_channel/io.dart';
 
 import 'agent_transport.dart';
 import 'buffered_agent_transport.dart';
+import 'relay_service.dart' show RelayNetTap;
 
 /// Thrown when the local agent's WebSocket closes during the handshake.
 ///
@@ -40,6 +41,10 @@ class LocalTransport extends BufferedAgentTransport {
   final int appPid;
   final String appVersion;
 
+  /// Frame-capture hook, or null when unarmed. See [_dropped] for what this
+  /// records and, more importantly, what it deliberately does not.
+  RelayNetTap? netTap;
+
   /// Bounds a single loopback WS upgrade attempt in [connect]. Injectable for
   /// tests.
   ///
@@ -62,7 +67,45 @@ class LocalTransport extends BufferedAgentTransport {
     required this.appPid,
     this.appVersion = 'app',
     this.connectTimeout = const Duration(seconds: 15),
+    this.netTap,
   });
+
+  /// Records a frame that never left, or never reached dispatch.
+  ///
+  /// This side records DROPS ONLY, and that asymmetry is the design. Loopback
+  /// is point to point with no intermediary, so the agent's `LocalListener` is
+  /// the far end of this very socket and already sees every frame that crossed
+  /// it — capturing the successful ones here too would double every row of a
+  /// merged capture. What the bridge cannot see is a frame this app never put
+  /// on the wire, and a handshake the bridge refused looks from here like
+  /// nothing at all. Those are the gaps this fills.
+  ///
+  /// Never carries a payload. The app's mirror of the schema has no body field
+  /// at all (`app/lib/util/netwatch.dart`), and the one frame this class sends
+  /// outside [send] is the hello — which carries the core's shared token, so no
+  /// site here may ever record frame text.
+  void _dropped(
+    String dir,
+    String reason, {
+    String? channel,
+    String? msgType,
+    String? frameId,
+    int? bytes,
+    Map<String, Object?>? detail,
+  }) {
+    netTap?.call({
+      'op': 'frame',
+      'dir': dir,
+      'kind': 'drop',
+      'transport': 'local',
+      'channel': channel,
+      'msgType': msgType,
+      'frameId': frameId,
+      'bytes': bytes,
+      'reason': reason,
+      'detail': detail,
+    });
+  }
 
   @override
   bool get isLocal => true;
@@ -105,6 +148,18 @@ class LocalTransport extends BufferedAgentTransport {
         // failure (already abandoned) without an unhandled-rejection.
         unawaited(pendingWs.then((ws) => ws.close(), onError: (_) {}));
         if (attempt == maxAttempts) {
+          // Recorded because it is the one connect failure with NO bridge-side
+          // counterpart: a port that accepts the socket and never upgrades it
+          // leaves the listener with nothing to log, so without this row the
+          // capture simply stops with no explanation.
+          _dropped(
+            'tx',
+            'connect-timeout',
+            detail: {
+              'attempts': maxAttempts,
+              'ms': connectTimeout.inMilliseconds,
+            },
+          );
           throw LocalTransportHandshakeException(
             'WS connect timed out after ${connectTimeout.inMilliseconds}ms'
             ' ($maxAttempts attempts)',
@@ -135,9 +190,27 @@ class LocalTransport extends BufferedAgentTransport {
               handshakeDone = true;
               if (!ready.isCompleted) ready.complete();
             } else if (!ready.isCompleted) {
+              // Only the reply's `type`, never the map: this is the handshake
+              // leg, and nothing on it is worth the risk of recording verbatim.
+              final replyType = m['type'];
+              _dropped(
+                'rx',
+                'handshake-not-ready',
+                msgType: 'hello',
+                detail: replyType is String ? {'replyType': replyType} : null,
+              );
               ready.completeError(StateError('handshake: $m'));
             }
           } catch (e) {
+            // The type alone. A `FormatException` prints the source it choked
+            // on, which on this leg is the agent's answer to a frame carrying
+            // our token — not a string to copy into a capture file.
+            _dropped(
+              'rx',
+              'handshake-unparseable',
+              msgType: 'hello',
+              detail: {'error': '${e.runtimeType}'},
+            );
             if (!ready.isCompleted) ready.completeError(e);
           }
           return;
@@ -147,12 +220,26 @@ class LocalTransport extends BufferedAgentTransport {
           final channel = (env['channel'] as String?) ?? 'control';
           env.remove('channel');
           dispatchDecoded(env, channel);
-        } catch (_) {
-          // Silently ignore malformed frames.
+        } catch (e) {
+          // Was silent. A frame the agent sent and this app threw away is
+          // invisible in the bridge's half of the capture, which records it as
+          // delivered — the two halves disagreeing is the only evidence.
+          _dropped(
+            'rx',
+            'unparseable',
+            bytes: data is String ? data.length : null,
+            detail: {'error': '${e.runtimeType}'},
+          );
         }
       },
       onError: (e) {
         if (!ready.isCompleted) {
+          _dropped(
+            'rx',
+            'handshake-socket-error',
+            msgType: 'hello',
+            detail: {'error': '${e.runtimeType}'},
+          );
           ready.completeError(e);
         } else {
           setState(TransportState.error);
@@ -160,6 +247,17 @@ class LocalTransport extends BufferedAgentTransport {
       },
       onDone: () {
         if (!ready.isCompleted) {
+          // The close code is the whole message here, and it is the direct
+          // counterpart to the listener's own `recordHelloRefused`: 4401 bad
+          // token, 4409 superseded, 4410 too old to route a managed checkout.
+          // The bridge records WHY it refused; this records that we were
+          // refused, so one capture answers "won't connect" from both ends.
+          _dropped(
+            'rx',
+            'handshake-closed',
+            msgType: 'hello',
+            detail: {if (_ch?.closeCode != null) 'closeCode': _ch!.closeCode!},
+          );
           ready.completeError(
             LocalTransportHandshakeException(
               'socket closed before ready',
@@ -226,10 +324,32 @@ class LocalTransport extends BufferedAgentTransport {
     Map<String, dynamic> message, {
     String channel = 'control',
   }) async {
+    final ch = _ch;
+    if (ch == null) {
+      // The `?.` that used to be here swallowed this. A send after teardown (or
+      // before connect) reaches no wire at all, so the bridge has no record of
+      // it and the caller is left awaiting a reply to a message that was never
+      // sent — which is exactly the symptom this row explains.
+      _dropped(
+        'tx',
+        'no-channel',
+        channel: channel,
+        msgType: message['type'] as String?,
+        frameId: message['id'] as String?,
+      );
+      return;
+    }
     try {
-      _ch?.sink.add(jsonEncode({'channel': channel, ...message}));
-    } catch (_) {
-      // best-effort send
+      ch.sink.add(jsonEncode({'channel': channel, ...message}));
+    } catch (e) {
+      _dropped(
+        'tx',
+        'send-failed',
+        channel: channel,
+        msgType: message['type'] as String?,
+        frameId: message['id'] as String?,
+        detail: {'error': '${e.runtimeType}'},
+      );
     }
   }
 
