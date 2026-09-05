@@ -35,11 +35,11 @@ import { links, RELEASES_URL } from "../config";
     </li>
   </ul>
 
-  {/* The three step ids are the landing targets for the confirmation page's
-      cards (pages/download/started.astro), which is the first thing a reader
-      sees after a download and holds no instructions of its own. Renaming one
-      drops them at the top of this page instead of at their step;
-      contracts.spec.ts pins the cards to these ids for that reason. */}
+  {/* The three step ids are the landing targets for the download page's cards
+      (pages/download/index.astro), which is the first thing a reader sees after
+      a download and holds no instructions of its own. Renaming one drops them at
+      the top of this page instead of at their step; contracts.spec.ts pins the
+      cards to these ids for that reason. */}
   <h2 id="install">Step 1 — Install the desktop app</h2>
 
   <p>
@@ -49,10 +49,10 @@ import { links, RELEASES_URL } from "../config";
   </p>
 
   {/* These link straight at the artifacts, unlike the hero's buttons, which
-      route through the confirmation page. A reader who has scrolled to their
-      platform inside the guide is already looking at the instructions that page
-      exists to deliver — sending them out to be told what they are reading
-      would be a lap for nothing. */}
+      route through /download. A reader who has scrolled to their platform
+      inside the guide is already looking at the instructions that page exists
+      to deliver — sending them out to be told what they are reading would be a
+      lap for nothing. */}
   <h3 id="windows">Windows</h3>
   <p>
     <a href={links.downloadWindows}>Download for Windows</a> fetches the

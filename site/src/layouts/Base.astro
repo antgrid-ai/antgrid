@@ -54,6 +54,14 @@ const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
           : /linux/i.test(s) && !/android/i.test(s)
             ? "linux"
             : "win";
+        // A SECOND axis, and the reason it cannot be folded into data-os: the
+        // mapping above deliberately answers "which build would this reader
+        // want", so it files Android under win and iPhone under mac. That is
+        // right for OFFERING a build — a phone reader is usually fetching one
+        // for a machine they will sit at later — and catastrophic for FIRING
+        // one, because it makes every phone look like a desktop that matched.
+        // Nothing may auto-download while this is set.
+        if (/iphone|ipad|ipod|android|mobile/i.test(s)) d.dataset.form = "mobile";
       })();
     </script>
     {/* For a page that needs its own pre-paint work, on the same terms as the
