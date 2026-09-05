@@ -286,6 +286,29 @@ program
     console.log(`Written to ${path}. Open this project in the Antgrid desktop app — it launches and manages the bridge for you.`);
   });
 
+// antgrid watch subcommand — live capture of the machine relay socket. Reads
+// host.json for the control port + token, so it attaches to the ALREADY-RUNNING
+// host rather than starting anything.
+program
+  .command("watch")
+  .description("Stream relay frames from the running host (connection debugging)")
+  .option("--json", "Emit raw JSONL instead of the rendered table")
+  .option("--export <file>", "Append raw JSONL to a file as well")
+  .option("--limit <n>", "Buffered events to replay before following (default 200)")
+  .option("--no-follow", "Print the buffered snapshot and exit")
+  .option("--dir <path>", "ANTGRID_DIR of the target host (debug builds use ~/.antgrid-dev)")
+  .option("--join <file>", "Pair this capture against an app-side netwatch.log (implies --no-follow)")
+  .option("--remote", "Ask the connected app to capture its side and ship it here (the only way to reach a phone)")
+  .action(async (opts: { json?: boolean; export?: string; limit?: string; follow?: boolean; dir?: string; join?: string; remote?: boolean }) => {
+    const { runNetwatchCli } = await import("./cli/netwatch");
+    const limit = opts.limit === undefined ? undefined : Number(opts.limit);
+    if (limit !== undefined && (!Number.isFinite(limit) || limit <= 0)) {
+      console.error("antgrid watch: --limit must be a positive number");
+      process.exit(1);
+    }
+    process.exit(await runNetwatchCli({ ...opts, limit }));
+  });
+
 // antgrid phones subcommand — inspect and drop local phone records. Whether a
 // phone may drive this machine is one machine-wide switch (mobile-access), not
 // anything this CLI manages.

@@ -43,6 +43,16 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     allowActiveSessions: z.boolean().optional(),
     stashIfDirty: z.boolean().optional(),
   }),
+  // Arms or disarms the CONNECTED app's own frame capture (`antgrid watch
+  // --remote`). A phone has no env var and no UI for this, so the desktop's
+  // loopback plane is the only control surface it has. Diagnostics only — it
+  // moves no data and touches no project.
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("netwatch:remote"),
+    enabled: z.boolean(),
+    ttlMs: z.number().int().positive().optional(),
+  }),
   // Discloses a checkout's absolute path to the caller. Deliberately confined
   // to THIS plane: checkout paths are host-local (checkout-types.ts) and the
   // loopback socket + token is the only transport that can reach this schema —
@@ -127,4 +137,5 @@ export type ControlResponse =
   | { id: string; ok: true; type: "git:remote-state"; status: BranchRemoteStatus }
   | { id: string; ok: true; type: "git:checkout"; current: string; stashed?: StashEntry }
   | { id: string; ok: true; type: "checkout:path"; path: string }
+  | { id: string; ok: true; type: "netwatch:remote"; enabled: boolean }
   | { id: string; ok: false; error: { code: string; message: string } };

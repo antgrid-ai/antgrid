@@ -1387,6 +1387,23 @@ export class HostServer {
       }
       case "checkout:path":
         return this.handleCheckoutPath(req);
+      case "netwatch:remote": {
+        // No control plane = no app to ask, and answering `ok` would leave the
+        // watcher waiting for a half that can never arrive.
+        const relay = this.controlPlaneRelay;
+        if (!relay || !relay.hasEstablishedSession) {
+          return { id: req.id, ok: false, error: { code: "NO_APP_CONNECTED", message: "no app has an E2E session with this machine" } };
+        }
+        // The app refuses a TTL-less arm outright (nothing on the device can
+        // stop a capture, so an arm nothing lapses is the one thing it will not
+        // honour). Enforce it here rather than answering `ok` for a request the
+        // app will silently discard — this reply is all the caller ever gets.
+        if (req.enabled && typeof req.ttlMs !== "number") {
+          return { id: req.id, ok: false, error: { code: "TTL_REQUIRED", message: "arming a remote capture requires ttlMs" } };
+        }
+        relay.send(createMessage("netwatch:configure", { enabled: req.enabled, ttlMs: req.ttlMs }));
+        return { id: req.id, ok: true, type: "netwatch:remote", enabled: req.enabled };
+      }
     }
   }
 
