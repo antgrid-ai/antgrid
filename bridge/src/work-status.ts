@@ -84,6 +84,16 @@ export interface WorkStatusState {
  *  turn-end closes. Never collides with a real session id (a uuid). */
 export const UNATTRIBUTED_TURN = "";
 
+/** Is a turn open for [sessionId]? True for the session's own turn and for the
+ *  anonymous one, because a project mid-turn under {@link UNATTRIBUTED_TURN}
+ *  cannot say WHICH session is busy — so every session is, as far as anything
+ *  that must not interrupt one is concerned. Shared with the session-bus
+ *  delivery gate, which fails silently if it drifts from the status reduction:
+ *  a delivery submitted against an unattributed turn lands mid-turn. */
+export function turnOpenFor(activeTurns: ReadonlySet<string>, sessionId: string): boolean {
+  return activeTurns.has(sessionId) || activeTurns.has(UNATTRIBUTED_TURN);
+}
+
 /** Shared empty set for every session-id set on the state — turns, running
  *  sessions, keystroke/typed markers. */
 const EMPTY_IDS: ReadonlySet<string> = new Set();
@@ -167,9 +177,7 @@ function statusFor(sessionId: string, i: WorkInputs): WorkStatus {
     case "task_complete":
     case "idle": return "done";
     default:
-      return i.activeTurns.has(sessionId) || i.activeTurns.has(UNATTRIBUTED_TURN)
-        ? "working"
-        : "done";
+      return turnOpenFor(i.activeTurns, sessionId) ? "working" : "done";
   }
 }
 
@@ -202,6 +210,36 @@ function deriveUnread(i: WorkInputs, raw: ReadonlyMap<string, WorkStatus>, prev?
   }
   for (const seen of i.focusedSessions.values()) unread.delete(seen);
   return unread;
+}
+
+/**
+ * Sessions whose "blocked on a human" state flipped between two reductions.
+ *
+ * `attention` is this reduction's word for an unanswered permission request or
+ * question, which is the only thing on a bridge that says its own human is what
+ * the work waits on. Pure, so a caller can read the edge BEFORE it swaps the
+ * state it is comparing against, for the reason closedTurns (delivery-queue.ts)
+ * is.
+ *
+ * A session that left the map stopped waiting on anyone: only a running session
+ * carries a status, and a stopped agent is blocked on nothing.
+ */
+export function attentionEdges(
+  prev: { sessionStatuses: ReadonlyMap<string, WorkStatus> },
+  next: { sessionStatuses: ReadonlyMap<string, WorkStatus> },
+): { sessionId: string; blocked: boolean }[] {
+  const edges: { sessionId: string; blocked: boolean }[] = [];
+  for (const [id, status] of next.sessionStatuses) {
+    const was = prev.sessionStatuses.get(id) === "attention";
+    const is = status === "attention";
+    if (was !== is) edges.push({ sessionId: id, blocked: is });
+  }
+  for (const [id, status] of prev.sessionStatuses) {
+    if (status === "attention" && !next.sessionStatuses.has(id)) {
+      edges.push({ sessionId: id, blocked: false });
+    }
+  }
+  return edges;
 }
 
 /** Derive the per-session map and its rollup.

@@ -5,7 +5,8 @@ import {
 } from "./terminal-session";
 import type { GracefulExitAsk } from "./agents/types";
 import { ScrollbackBuffer } from "./scrollback";
-import { TerminalModeTracker } from "./terminal-modes";
+import { submitPlan } from "./pty-submit";
+import { BRACKETED_PASTE, TerminalModeTracker } from "./terminal-modes";
 import { MAX_ATTACH_BLOB, TerminalScreen } from "./terminal-screen";
 import { logger } from "./logger";
 const log = logger.child({ component: "terminal-manager" });
@@ -514,13 +515,26 @@ export class TerminalManager {
     session.write(data);
   }
 
+  /**
+   * Submit `line` as one prompt.
+   *
+   * A PTY is a keystroke channel: a newline in the text is Enter, so a caller
+   * handing over a rendered block (a session-bus delivery is 15-25 lines) would
+   * otherwise submit its first line and leave the agent acting on the rest as
+   * separate turns. Framed as a bracketed paste when the guest has announced the
+   * mode, flattened when it has not — the tracker is consulted rather than the
+   * agent guessed at, so an agent that drops the mode degrades to a readable
+   * single line instead of pasting escape sequences into its own composer.
+   */
   submit(terminalId: string, line: string): void {
     const session = this.sessions.get(terminalId);
     if (!session) {
       log.warn(`Terminal "${terminalId}" not found for submit`);
       return;
     }
-    session.submit(line);
+    const plan = submitPlan(line, this.modeTrackers.get(terminalId)?.isSet(BRACKETED_PASTE) === true);
+    if (plan.paste) session.submitPaste(plan.text);
+    else session.submit(plan.text);
   }
 
   /**

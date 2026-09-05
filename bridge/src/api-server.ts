@@ -10,6 +10,18 @@ import { AGENTS, BY_HOOK_NAME } from "./agents/registry";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
+import {
+  AnswerBodySchema,
+  AskBodySchema,
+  AssignBodySchema,
+  CancelBodySchema,
+  FindingBodySchema,
+  PublishArtifactBodySchema,
+  ReportBodySchema,
+  type SessionBusApi,
+} from "./session-bus/api";
+import { ARTIFACT_CHUNK_BYTES } from "./session-bus/constants";
+import { SESSION_BUS_ERRORS, isRefusal } from "./session-bus/errors";
 
 /** The tree one caller of this API works in: its own `antgrid.yaml`, and the
  *  filesystem root a command it names must run against. */
@@ -60,6 +72,14 @@ export interface AgentContext {
    *  status. Bridge-internal: this never emits an app-facing frame — unlike
    *  /notify, a turn-start is not a user-facing notification. */
   onTurnStart?: (terminalId?: string) => void;
+  /** The multi-machine session bus, when this core built one. Every decision the
+   *  `/session-bus/*` routes make is made in here, so the MCP tools above them
+   *  stay a transport and cannot answer differently from the routes. Absent
+   *  means the core has no bus at all (a test core, or one built before the
+   *  session manager was ready), and every route answers 503 rather than
+   *  reporting the caller as a non-member — which would list an agent no session
+   *  tools with nothing saying why. */
+  sessionBus?: SessionBusApi;
 }
 
 const VERSION = "0.1.0";
@@ -135,6 +155,32 @@ function json(data: unknown, status = 200) {
 
 function textResponse(data: string, status = 200) {
   return new Response(data, { status, headers: { "Content-Type": "text/plain" } });
+}
+
+/** One rendering for every session-bus answer: a refusal becomes its own status
+ *  and code, a result becomes 200. The status comes from `SESSION_BUS_ERRORS`, so
+ *  a route and the tool calling it can never disagree about what a code means. */
+function sessionBusJson(result: unknown): Response {
+  if (isRefusal(result)) {
+    return json({ error: result.error, code: result.code }, SESSION_BUS_ERRORS[result.code]);
+  }
+  return json(result);
+}
+
+function sessionBusPost<T>(schema: z.ZodType<T>, body: unknown, run: (b: T) => unknown): Response {
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) return json({ error: "Invalid body" }, 400);
+  return sessionBusJson(run(parsed.data));
+}
+
+/** A non-negative integer query param, or [fallback] for anything else. A caller
+ *  that spelled a range badly reads from the start rather than being refused:
+ *  the artifact read is clamped to one chunk on the bridge side anyway. */
+function intParam(url: URL, name: string, fallback: number): number {
+  const raw = url.searchParams.get(name);
+  if (raw === null) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 // Cursor merges hook tiers, so a machine with both the project-tier entries
@@ -412,6 +458,72 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
         ctx.onHandlerEvent?.(parsed.data);
         return json({ ok: true });
+      }
+
+      // The session bus. Every route resolves the CALLER from `?terminalId=` —
+      // the slot `ANTGRID_TERMINAL_ID` stamped into the agent's environment,
+      // which the MCP server puts on every request. The terminal id IS the
+      // session id for an agent session, which is what turns a request into a
+      // role; a service PTY names none and resolves to a non-member.
+      if (path.startsWith("/session-bus/")) {
+        const bus = ctx.sessionBus;
+        if (!bus) return json({ error: "Session bus not available", code: "AGENT_NOT_READY" }, 503);
+        const terminalId = url.searchParams.get("terminalId") ?? undefined;
+        const rest = path.slice("/session-bus/".length);
+
+        if (req.method === "GET") {
+          if (rest === "role") return json(bus.role(terminalId));
+          if (rest === "session") return sessionBusJson(bus.session(terminalId));
+          if (rest === "brief") return sessionBusJson(bus.brief(terminalId));
+          if (rest === "peers") return sessionBusJson(bus.peers(terminalId));
+          if (rest === "tasks") return sessionBusJson(bus.listTasks(terminalId));
+          if (rest === "artifacts") return sessionBusJson(bus.listArtifacts(terminalId));
+          const task = rest.match(/^tasks\/([^/]+)$/);
+          if (task) return sessionBusJson(bus.getTask(terminalId, decodeURIComponent(task[1])));
+          const artifact = rest.match(/^artifacts\/([^/]+)$/);
+          if (artifact) {
+            return sessionBusJson(bus.getArtifact(
+              terminalId,
+              decodeURIComponent(artifact[1]),
+              intParam(url, "offset", 0),
+              intParam(url, "length", ARTIFACT_CHUNK_BYTES),
+            ));
+          }
+          return json({ error: "Not found" }, 404);
+        }
+
+        if (req.method !== "POST") return json({ error: "Not found" }, 404);
+
+        // An unreadable body is treated as an absent one rather than answered
+        // 400 here: every POST below validates with its own schema, so the
+        // refusal is identical, and `open` carries no body at all.
+        let body: unknown;
+        try { body = await req.json(); } catch { body = undefined; }
+
+        if (rest === "tasks") return sessionBusPost(AssignBodySchema, body, (b) => bus.assign(terminalId, b));
+        if (rest === "findings") return sessionBusPost(FindingBodySchema, body, (b) => bus.reportFinding(terminalId, b));
+        if (rest === "ask") return sessionBusPost(AskBodySchema, body, (b) => bus.askLead(terminalId, b));
+        if (rest === "artifacts") {
+          return sessionBusPost(PublishArtifactBodySchema, body, (b) => bus.publishArtifact(terminalId, b));
+        }
+
+        const verb = rest.match(/^tasks\/([^/]+)\/(cancel|answer|open|complete|fail)$/);
+        if (verb) {
+          const taskId = decodeURIComponent(verb[1]);
+          switch (verb[2]) {
+            case "cancel":
+              return sessionBusPost(CancelBodySchema, body, (b) => bus.cancelTask(terminalId, taskId, b));
+            case "answer":
+              return sessionBusPost(AnswerBodySchema, body, (b) => bus.answerPeer(terminalId, taskId, b));
+            case "open":
+              return sessionBusJson(bus.openTask(terminalId, taskId));
+            case "complete":
+              return sessionBusPost(ReportBodySchema, body, (b) => bus.reportComplete(terminalId, taskId, b));
+            default:
+              return sessionBusPost(ReportBodySchema, body, (b) => bus.reportFailure(terminalId, taskId, b));
+          }
+        }
+        return json({ error: "Not found" }, 404);
       }
 
       return json({ error: "Not found" }, 404);

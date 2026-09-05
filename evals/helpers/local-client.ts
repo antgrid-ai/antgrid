@@ -10,7 +10,12 @@ export class LocalTestClient {
   private ws: WebSocket | null = null;
   private listeners = new Set<(msg: AbMessage, channel: string) => void>();
 
-  async connect(disc: LocalConnectInfo): Promise<void> {
+  /** `capabilities` mirrors the desktop app's hello envelope — a loopback owner
+   *  only receives session-bus frames once it declares itself the carrier. */
+  async connect(
+    disc: LocalConnectInfo,
+    opts?: { capabilities?: Record<string, unknown> },
+  ): Promise<void> {
     this.ws = new WebSocket(`ws://127.0.0.1:${disc.port}`);
     await new Promise<void>((resolve, reject) => {
       this.ws!.onopen = () => resolve();
@@ -33,7 +38,10 @@ export class LocalTestClient {
       };
     });
 
-    this.ws.send(JSON.stringify({ type: "hello", token: disc.token, appPid: process.pid, appVersion: "eval" }));
+    this.ws.send(JSON.stringify({
+      type: "hello", token: disc.token, appPid: process.pid, appVersion: "eval",
+      ...(opts?.capabilities ? { capabilities: opts.capabilities } : {}),
+    }));
     await readyPromise;
   }
 

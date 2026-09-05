@@ -21,6 +21,10 @@
  * frame, and replaying its "set" half would leave the app holding a frame that
  * never ends.
  */
+/** DECSET 2004. Exported because a caller submitting a multi-line block has to
+ *  know whether the guest will read it as one paste or as a line per newline. */
+export const BRACKETED_PASTE = 2004;
+
 export const TRACKED_MODES: ReadonlySet<number> = new Set([
   1, // DECCKM — application cursor keys (changes arrow-key encoding)
   25, // cursor visibility
@@ -28,7 +32,7 @@ export const TRACKED_MODES: ReadonlySet<number> = new Set([
   1004, // focus in/out reporting
   1005, 1006, 1015, 1016, // mouse coordinate encodings
   1049, // alternate screen
-  2004, // bracketed paste
+  BRACKETED_PASTE,
 ]);
 
 /** The only tracked mode whose reset state is ON. */
@@ -163,6 +167,18 @@ export class TerminalModeTracker {
    * cursor restore, so a sequence that moved or painted would land the cursor
    * somewhere the source never had it.
    */
+  /**
+   * Whether the guest has `mode` on, as the stream last said.
+   *
+   * False for a mode never seen. A caller choosing an input encoding on this
+   * answer must therefore degrade to the plain path rather than read silence as
+   * support: every tracked mode is an opt-in the guest announces, and acting on
+   * one it never announced puts raw escape sequences in its composer.
+   */
+  isSet(mode: number): boolean {
+    return this.latched.get(mode) === true;
+  }
+
   supplementalPrelude(): string {
     const parts: string[] = [];
     for (const [mode, set] of this.latched) {

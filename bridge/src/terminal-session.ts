@@ -958,6 +958,15 @@ export class TerminalSession {
   }
 
   /**
+   * Send a multi-line block as one prompt. Callable only where the guest is
+   * known to honour bracketed paste — `TerminalManager.submit` owns that
+   * decision, because the mode tracker lives with the scrollback, not here.
+   */
+  submitPaste(text: string): void {
+    this.submitQueue.submitPaste(text);
+  }
+
+  /**
    * Answer the VT capability queries the spawned process emits at startup.
    * The responder is stateful (it carries a query split across PTY chunks and
    * follows the guest's own mode changes), so it must live for the whole

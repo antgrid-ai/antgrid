@@ -6,8 +6,9 @@ import { createRelayPromotion, type RelayPromotionController, type RelayPromotio
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./stream-mux";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnStart, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, attentionEdges, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { renderBrief } from "./session-bus/delivery";
+import { SessionBusDeliveryQueue, closedTurns, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
@@ -101,6 +102,10 @@ export class ProjectCore {
   // the app's Recent/sidebar reflect activity WITHOUT warming this core. The
   // reduction is a pure fold over outbound bus frames — see work-status.ts.
   private _work: WorkStatusState = initialWorkStatus;
+  /** Turn-boundary delivery for this project's session-bus lines (spec 5.2).
+   *  Owned here because the turn-open set it waits on is THIS reduction, and
+   *  nothing below the core can see one. */
+  private deliveries: SessionBusDeliveryQueue | null = null;
   private _onWorkStatusChange: (() => void) | null = null;
   private _onSessionsChange: (() => void) | null = null;
   /** Identity signature (id/name/archived, sorted) of the last `session:updated`
@@ -124,6 +129,22 @@ export class ProjectCore {
 
   get projectId(): string { return this.core?.projectId ?? ""; }
   get localConnectInfo(): { port: number; token: string } | null { return this._localConnectInfo; }
+
+  /** Session-bus outbound on a LEAD bridge. This bridge can never reach the
+   *  peer machine (D7), so the desktop owner is the only carrier, and the frame
+   *  goes to it directly: publishing would fan the lead's task traffic out to
+   *  the human's phone as well (spec 4.1). False means it did not leave. */
+  sendToOwner(msg: AbMessage): boolean {
+    return this.listener?.deliverToOwner(msg) ?? false;
+  }
+
+  /** Session-bus outbound on a PEER bridge, addressed at the one app session
+   *  that carried the exchange in. The phone is attached to the same stream, so
+   *  a broadcast here would leak the whole lead-to-peer exchange to it — the
+   *  mirror image of the invariant {@link sendToOwner} keeps. */
+  sendToAppSession(peerId: string, msg: AbMessage): boolean {
+    return this.streamHandle?.sendTo(msg, "control", { kind: "peer", peerId }) ?? false;
+  }
   hasIsolatedSessions(): boolean { return this.core?.hasIsolatedSessions() ?? false; }
 
   /** Current reduced work status (working/attention/done/error) for the
@@ -200,7 +221,26 @@ export class ProjectCore {
     const changed = next.status !== this._work.status
       || next.runningCount !== this._work.runningCount
       || perSessionChanged;
+    // Computed against the OLD state and drained against the new one: the
+    // closing edge is the whole delivery boundary, and reading it after the
+    // swap would compare the new state with itself.
+    const closed = closedTurns(this._work, next);
+    // A human blocking a peer stops its tasks' expiry clocks (spec 5.3), so the
+    // same pre-swap read serves both: `attention` is this reduction's name for an
+    // unanswered permission request or question, and there is no other place a
+    // bridge learns its own human is the hold-up.
+    const attention = attentionEdges(this._work, next);
     this._work = next;
+    for (const sessionId of closed) {
+      // An agent with no per-session turn reporting closes the UNATTRIBUTED_TURN
+      // key instead of its own id (see work-status.ts), and that close is a real
+      // boundary for every session in the project — the same reading `statusFor`
+      // already takes. Draining only the literal id would leave those agents'
+      // deliveries waiting for an edge that never comes.
+      if (sessionId === UNATTRIBUTED_TURN) this.deliveries?.drainAll();
+      else this.deliveries?.drain(sessionId);
+    }
+    for (const edge of attention) this.core?.sessionBus.humanBlocked(edge.sessionId, edge.blocked);
     if (changed) this._onWorkStatusChange?.();
     // The advert is not the only consumer: `session:updated` stamps each entry's
     // status from this same reduction, and the session list is otherwise only
@@ -355,9 +395,31 @@ export class ProjectCore {
       // this is that something, and every production core gets it so a held
       // brief is never a missing dependency.
       renderBriefInstruction: renderBrief,
+      sendToOwner: (msg) => this.sendToOwner(msg),
+      sendToAppSession: (peerId, msg) => this.sendToAppSession(peerId, msg),
+      // This machine's half of every session-bus address. Absent in local mode,
+      // where no frame can leave the machine to need one.
+      machineId: () => this.deps.remote?.machineDeviceId() ?? null,
+      // Only a desktop owner that declared itself a carrier can move a frame to
+      // the machine it is addressed to (D7); anything else is an unreachable
+      // peer, not a failed one.
+      carrierPresent: () => this.listener?.ownerCarriesSessionBus ?? false,
+      queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       relayUrl: this.deps.relayUrl,
     });
     this.core = core;
+    // Lazily reached in both directions on purpose: the queue reads the core to
+    // submit and the core writes the queue to hold, and neither exists when the
+    // other is built.
+    this.deliveries = new SessionBusDeliveryQueue({
+      abDir: core.abDir,
+      projectId: core.projectId,
+      // The reduction's own predicate, not a second reading of the same set: an
+      // agent that cannot attribute its turn-starts records them under
+      // UNATTRIBUTED_TURN, and a delivery submitted against one lands mid-turn.
+      isTurnOpen: (sessionId) => turnOpenFor(this._work.activeTurns, sessionId),
+      inject: (line) => this.core?.injectBusLine(line.sessionId, line.text) ?? false,
+    });
     const bus = new MessageBus();
     this.bus = bus;
     core.attachTransport(bus);
@@ -367,6 +429,11 @@ export class ProjectCore {
       this.observeWorkStatus(msg);
       if (msg.type === "session:updated") {
         this.observeSessionsIdentity(msg.sessions);
+        // A line held across a restart has no turn to close behind it: its
+        // session boots idle, so this list — emitted whenever a session starts
+        // or stops — is the edge that gets it delivered. A no-op on an empty
+        // queue, which is every ordinary project.
+        this.deliveries?.drainAll();
         if (core.hasIsolatedSessions()) this.listener?.requireCheckoutRouting();
       }
     } });

@@ -99,6 +99,594 @@ async function api(method: "GET" | "POST", path: string, body?: unknown): Promis
   }
 }
 
+// -- session bus (spec 4.5) -------------------------------------------------
+//
+// The tool list is ROLE-SHAPED: a lead sees the tools that hand work out, a peer
+// the ones that report on it, and a terminal in no multi-machine session sees
+// neither. Both halves are the point — offering a peer `antgrid_assign_task`
+// buys a call the bridge then refuses, and a tool the agent must not use is
+// better absent than present-and-refusing.
+//
+// The role is asked of the BRIDGE and never derived here: this process knows
+// only its terminal id, and which session that terminal belongs to is a fact the
+// session manager owns and can change while the agent runs. Every tool below is
+// one HTTP call to the route that already made the decision — no cap, no
+// membership test and no state transition is evaluated in this process, which is
+// the thing those bounds exist to bound.
+
+interface McpTool {
+  name: string;
+  description: string;
+  inputSchema: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required: string[];
+  };
+}
+
+function str(description: string) {
+  return { type: "string", description };
+}
+
+function strArray(description: string) {
+  return { type: "array", items: { type: "string" }, description };
+}
+
+/** The artifact-id parameter, shared by every verb that can attach evidence.
+ *  Ids come from `antgrid_publish_artifact`; an id this session did not publish
+ *  is refused rather than dropped, so a report never travels having quietly lost
+ *  what it was pointing at. */
+const ARTIFACT_IDS = strArray(
+  "Ids of artifacts this session published, attached to the message as handles.",
+);
+
+/** Free text for anything the sender met that the other side did not ask about.
+ *  Named rather than folded into the body so it renders under its own heading:
+ *  the surprise is the part a lead most needs to read. */
+const UNEXPECTED = str("Anything encountered that the instruction did not anticipate.");
+
+const LEAD_TOOLS: McpTool[] = [
+  {
+    name: "antgrid_list_peers",
+    description: "List the peer sessions of this multi-machine session: which machine each runs on, whether it is still active, and whether a message could leave this bridge for it right now.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "antgrid_assign_task",
+    description: "Give a peer session a unit of work. Returns the task id; the peer's result arrives back in this session as a message, so do not poll for it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        peer: str("The peer's session id, as printed by antgrid_list_peers."),
+        summary: str("One line naming the work, shown wherever the task is listed."),
+        instruction: str("What the peer should do, in full. It cannot see this session's conversation."),
+        artifactIds: ARTIFACT_IDS,
+        unexpected: UNEXPECTED,
+      },
+      required: ["peer", "summary", "instruction"],
+    },
+  },
+  {
+    name: "antgrid_list_tasks",
+    description: "List the tasks of this session: the ones this session assigned, and the ones it was given.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "antgrid_get_task",
+    description: "Read one task in full: its state, its findings so far, and the artifacts attached to it.",
+    inputSchema: {
+      type: "object",
+      properties: { taskId: str("Task id from antgrid_list_tasks.") },
+      required: ["taskId"],
+    },
+  },
+  {
+    name: "antgrid_cancel_task",
+    description: "Withdraw a task already given to a peer. The peer is told to stop; work it already did is not undone.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: str("Task id to withdraw."),
+        reason: str("Why it is being withdrawn. The peer is shown this."),
+      },
+      required: ["taskId", "reason"],
+    },
+  },
+  {
+    name: "antgrid_answer_peer",
+    description: "Answer a question a peer asked about a task it is working. The peer resumes on receipt.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: str("The task the question was asked about."),
+        summary: str("One line naming what is being answered."),
+        answer: str("The answer, in full."),
+      },
+      required: ["taskId", "summary", "answer"],
+    },
+  },
+];
+
+const PEER_TOOLS: McpTool[] = [
+  {
+    name: "antgrid_get_brief",
+    description: "Re-read the brief this session was created with: what it owns, what it must report, and what it may not touch.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "antgrid_open_task",
+    description: "Mark a task as being worked, so the lead can see it started.",
+    inputSchema: {
+      type: "object",
+      properties: { taskId: str("Task id to start work on.") },
+      required: ["taskId"],
+    },
+  },
+  {
+    name: "antgrid_report_complete",
+    description: "Report a task finished. This is what tells the lead the work is done — nothing else does.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: str("Task id being reported on."),
+        summary: str("One line saying what was done."),
+        text: str("The result in full: what changed, and where."),
+        artifactIds: ARTIFACT_IDS,
+        unexpected: UNEXPECTED,
+      },
+      required: ["taskId", "summary"],
+    },
+  },
+  {
+    name: "antgrid_report_failure",
+    description: "Report a task that cannot be finished, and why. Use this rather than going quiet: the lead is told nothing by an absence.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: str("Task id being reported on."),
+        summary: str("One line saying what failed."),
+        text: str("What was attempted and what stopped it."),
+        artifactIds: ARTIFACT_IDS,
+        unexpected: UNEXPECTED,
+      },
+      required: ["taskId", "summary"],
+    },
+  },
+  {
+    name: "antgrid_report_finding",
+    description: "Send the lead something worth knowing without ending the task — a discovery, a risk, a decision it should weigh in on.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: str("The task this concerns, when it concerns one."),
+        summary: str("One line naming the finding."),
+        text: str("The finding in full."),
+        unexpected: UNEXPECTED,
+      },
+      required: ["summary"],
+    },
+  },
+  {
+    name: "antgrid_ask_lead",
+    description: "Ask the lead a question about a task and wait. The answer arrives in this session as a message; do not poll for it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: str("The task the question is about."),
+        summary: str("One line naming what is being asked."),
+        question: str("The question in full, including what you already tried."),
+      },
+      required: ["taskId", "summary", "question"],
+    },
+  },
+];
+
+const SHARED_TOOLS: McpTool[] = [
+  {
+    name: "antgrid_publish_artifact",
+    description: "Store a file-sized piece of evidence — a diff, a log, a transcript — and get back an id to attach to a task or a report. Content itself does not travel; the other machine fetches it by id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: str("A short file-like name, e.g. build-failure.log."),
+        summary: str("One line saying what it is, shown wherever the handle appears."),
+        content: str("The text to store. Use contentBase64 instead for anything that is not text."),
+        contentBase64: str("Base64 bytes, for content that is not text. Pass exactly one of content or contentBase64."),
+        mediaType: str("Media type, defaulting to text/plain."),
+        taskId: str("The task this belongs to, when it belongs to one."),
+      },
+      required: ["name", "summary"],
+    },
+  },
+  {
+    name: "antgrid_list_artifacts",
+    description: "List the artifacts this session has published.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "antgrid_get_artifact",
+    description: "Read back the content of an artifact this session published, one chunk at a time.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        artifactId: str("Artifact id from antgrid_list_artifacts."),
+        offset: { type: "number", description: "Byte offset to read from. Default 0." },
+        length: { type: "number", description: "Bytes to read, clamped to one chunk." },
+      },
+      required: ["artifactId"],
+    },
+  },
+  {
+    name: "antgrid_session_status",
+    description: "Where this session stands in its multi-machine session: its role, its members, its open tasks, and how much of its task budget is left.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+];
+
+const BUS_TOOLS_BY_NAME = new Map(
+  [...LEAD_TOOLS, ...PEER_TOOLS, ...SHARED_TOOLS].map((t) => [t.name, t] as const),
+);
+
+export interface BusRoleView {
+  lead: boolean;
+  peer: boolean;
+}
+
+/** How long a resolved role is reused. A client re-lists tools far more often
+ *  than a session gains or loses members, and a role one list stale costs at
+ *  most a refusal the bridge itself authors. `tools/list_changed` is not emitted
+ *  yet, so a shorter window buys nothing a call would not already discover. */
+export const ROLE_CACHE_MS = 5_000;
+
+/**
+ * The caller's role, cached per SERVER rather than per process: an agent may run
+ * several servers for one invocation, and a cache outliving the server that made
+ * it would answer for a terminal that is no longer the one asking.
+ */
+export function createBusRoleCache(now: () => number = Date.now): { get(): Promise<BusRoleView> } {
+  let cached: { at: number; view: BusRoleView } | null = null;
+  return {
+    async get() {
+      const at = now();
+      if (cached && at - cached.at < ROLE_CACHE_MS) return cached.view;
+      const result = await api("GET", "/session-bus/role");
+      // An unreachable bridge, a core with no bus, and a terminal in no session
+      // are one answer here: no session tools. The failure is cached like a
+      // success on purpose — a client listing tools in a loop against a dead
+      // port is exactly the traffic this cache exists to stop.
+      const data = result.ok && typeof result.data === "object" && result.data !== null
+        ? result.data as { lead?: unknown; peer?: unknown }
+        : null;
+      const view = { lead: data?.lead === true, peer: data?.peer === true };
+      cached = { at, view };
+      return view;
+    },
+  };
+}
+
+/** A machine can lead one session and work another, so a role that is both gets
+ *  both tables. */
+export function sessionBusTools(role: BusRoleView): McpTool[] {
+  if (!role.lead && !role.peer) return [];
+  return [
+    ...(role.lead ? LEAD_TOOLS : []),
+    ...(role.peer ? PEER_TOOLS : []),
+    ...SHARED_TOOLS,
+  ];
+}
+
+export function isSessionBusTool(name: string): boolean {
+  return BUS_TOOLS_BY_NAME.has(name);
+}
+
+type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
+
+function toolText(text: string): ToolResult {
+  return { content: [{ type: "text", text }] };
+}
+
+function toolError(text: string): ToolResult {
+  return { content: [{ type: "text", text }], isError: true };
+}
+
+/** A refusal, rendered as the bridge wrote it. The code is appended rather than
+ *  translated: it is the one part of the answer an agent can act on
+ *  mechanically (retry later, ask a human, stop), and re-wording the sentence
+ *  would put this process back in the business of deciding. */
+function busError(result: ApiResult): string {
+  const data = result.data;
+  if (data && typeof data === "object") {
+    const error = (data as { error?: unknown }).error;
+    const code = (data as { code?: unknown }).code;
+    if (typeof error === "string") {
+      return typeof code === "string" ? `${error} (${code})` : error;
+    }
+  }
+  return String(data);
+}
+
+function argStr(args: Record<string, unknown> | undefined, key: string): string | undefined {
+  const v = args?.[key];
+  return typeof v === "string" ? v : undefined;
+}
+
+function argNum(args: Record<string, unknown> | undefined, key: string): number | undefined {
+  const v = args?.[key];
+  return typeof v === "number" ? v : undefined;
+}
+
+function argIds(args: Record<string, unknown> | undefined, key: string): string[] | undefined {
+  const v = args?.[key];
+  if (!Array.isArray(v)) return undefined;
+  return v.filter((x): x is string => typeof x === "string");
+}
+
+/** Drop the keys the caller left unset, so a body reaches a `.strict()` schema
+ *  carrying only what was actually said. */
+function body(fields: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
+}
+
+function taskLine(t: any): string {
+  const waiting = t.waitingOn ? ` waiting on ${t.waitingOn}` : "";
+  return `- ${t.taskId} [${t.state}${waiting}] ${t.title}`;
+}
+
+function artifactLine(a: any): string {
+  return `- ${a.artifactId} ${a.name} (${a.mediaType}, ${a.bytes} bytes): ${a.summary}`;
+}
+
+/**
+ * Run one session-bus tool. Every branch is the same shape — build a body, call
+ * the route, render what came back — because the route is where the decision was
+ * made.
+ */
+export async function callSessionBusTool(
+  name: string,
+  args: Record<string, unknown> | undefined,
+): Promise<ToolResult> {
+  const taskId = argStr(args, "taskId");
+  const taskPath = taskId ? `/session-bus/tasks/${encodeURIComponent(taskId)}` : null;
+
+  switch (name) {
+    case "antgrid_list_peers": {
+      const r = await api("GET", "/session-bus/peers");
+      if (!r.ok) return toolError(busError(r));
+      const peers = (r.data.peers ?? []) as any[];
+      if (peers.length === 0) return toolText("No peer sessions have joined this session yet.");
+      const lines = peers.map((p) =>
+        `- ${p.sessionName ?? p.sessionId} [${p.state}]${p.reachable ? "" : " (cannot be reached from here right now)"} id=${p.sessionId} machine=${p.machineLabel ?? p.machineId}`
+      );
+      return toolText(`Peers:\n${lines.join("\n")}`);
+    }
+
+    case "antgrid_assign_task": {
+      const r = await api("POST", "/session-bus/tasks", body({
+        peer: argStr(args, "peer"),
+        summary: argStr(args, "summary"),
+        instruction: argStr(args, "instruction"),
+        artifactIds: argIds(args, "artifactIds"),
+        unexpected: argStr(args, "unexpected"),
+      }));
+      if (!r.ok) return toolError(busError(r));
+      return toolText(`Assigned as task ${r.data.taskId}. The peer's result arrives here as a message.`);
+    }
+
+    case "antgrid_list_tasks": {
+      const r = await api("GET", "/session-bus/tasks");
+      if (!r.ok) return toolError(busError(r));
+      const tasks = (r.data.tasks ?? []) as any[];
+      if (tasks.length === 0) return toolText("No tasks on this session.");
+      return toolText(`Tasks:\n${tasks.map(taskLine).join("\n")}`);
+    }
+
+    case "antgrid_get_task": {
+      if (!taskPath) return toolError("Missing required argument: taskId");
+      const r = await api("GET", taskPath);
+      if (!r.ok) return toolError(busError(r));
+      return toolText(JSON.stringify(r.data, null, 2));
+    }
+
+    case "antgrid_cancel_task": {
+      if (!taskPath) return toolError("Missing required argument: taskId");
+      const r = await api("POST", `${taskPath}/cancel`, body({ reason: argStr(args, "reason") }));
+      if (!r.ok) return toolError(busError(r));
+      return toolText(`Task ${taskId} withdrawn. The peer has been told to stop.`);
+    }
+
+    case "antgrid_answer_peer": {
+      if (!taskPath) return toolError("Missing required argument: taskId");
+      const r = await api("POST", `${taskPath}/answer`, body({
+        summary: argStr(args, "summary"),
+        answer: argStr(args, "answer"),
+      }));
+      if (!r.ok) return toolError(busError(r));
+      return toolText(`Answer sent. The peer resumes task ${taskId} on receipt.`);
+    }
+
+    case "antgrid_get_brief": {
+      const r = await api("GET", "/session-bus/brief");
+      if (!r.ok) return toolError(busError(r));
+      const scope = (r.data.scope ?? []) as { label: string; text: string }[];
+      const scopeText = scope.length === 0 ? "" : `\n\n${scope.map((s) => `${s.label}: ${s.text}`).join("\n")}`;
+      return toolText(`${r.data.brief}${scopeText}`);
+    }
+
+    case "antgrid_open_task": {
+      if (!taskPath) return toolError("Missing required argument: taskId");
+      const r = await api("POST", `${taskPath}/open`);
+      if (!r.ok) return toolError(busError(r));
+      return toolText(`Task ${taskId} is now marked as being worked.`);
+    }
+
+    case "antgrid_report_complete":
+    case "antgrid_report_failure": {
+      if (!taskPath) return toolError("Missing required argument: taskId");
+      const done = name === "antgrid_report_complete";
+      const r = await api("POST", `${taskPath}/${done ? "complete" : "fail"}`, body({
+        summary: argStr(args, "summary"),
+        text: argStr(args, "text"),
+        artifactIds: argIds(args, "artifactIds"),
+        unexpected: argStr(args, "unexpected"),
+      }));
+      if (!r.ok) return toolError(busError(r));
+      return toolText(`Task ${taskId} reported ${done ? "complete" : "failed"}. The lead has been told.`);
+    }
+
+    case "antgrid_report_finding": {
+      const r = await api("POST", "/session-bus/findings", body({
+        taskId,
+        summary: argStr(args, "summary"),
+        text: argStr(args, "text"),
+        unexpected: argStr(args, "unexpected"),
+      }));
+      if (!r.ok) return toolError(busError(r));
+      return toolText(r.data.sent
+        ? "Finding sent to the lead."
+        : "Finding recorded on the task. It travels with the next report.");
+    }
+
+    case "antgrid_ask_lead": {
+      const r = await api("POST", "/session-bus/ask", body({
+        taskId,
+        summary: argStr(args, "summary"),
+        question: argStr(args, "question"),
+      }));
+      if (!r.ok) return toolError(busError(r));
+      return toolText("Question sent to the lead. Its answer arrives here as a message — stop and wait for it rather than polling.");
+    }
+
+    case "antgrid_publish_artifact": {
+      const r = await api("POST", "/session-bus/artifacts", body({
+        name: argStr(args, "name"),
+        summary: argStr(args, "summary"),
+        content: argStr(args, "content"),
+        contentBase64: argStr(args, "contentBase64"),
+        mediaType: argStr(args, "mediaType"),
+        taskId,
+      }));
+      if (!r.ok) return toolError(busError(r));
+      const a = r.data.artifact;
+      return toolText(`Published ${a.name} as ${a.artifactId} (${a.bytes} bytes). Attach that id to a task or a report.`);
+    }
+
+    case "antgrid_list_artifacts": {
+      const r = await api("GET", "/session-bus/artifacts");
+      if (!r.ok) return toolError(busError(r));
+      const artifacts = (r.data.artifacts ?? []) as any[];
+      if (artifacts.length === 0) return toolText("This session has published no artifacts.");
+      return toolText(`Artifacts:\n${artifacts.map(artifactLine).join("\n")}`);
+    }
+
+    case "antgrid_get_artifact": {
+      const artifactId = argStr(args, "artifactId");
+      if (!artifactId) return toolError("Missing required argument: artifactId");
+      const query = new URLSearchParams();
+      const offset = argNum(args, "offset");
+      const length = argNum(args, "length");
+      if (offset !== undefined) query.set("offset", String(offset));
+      if (length !== undefined) query.set("length", String(length));
+      const suffix = query.size > 0 ? `?${query.toString()}` : "";
+      const r = await api("GET", `/session-bus/artifacts/${encodeURIComponent(artifactId)}${suffix}`);
+      if (!r.ok) return toolError(busError(r));
+      const more = r.data.eof ? "" : "\n\n(more follows — read again with a higher offset)";
+      return toolText(`${r.data.text}${more}`);
+    }
+
+    case "antgrid_session_status": {
+      const r = await api("GET", "/session-bus/session");
+      if (!r.ok) return toolError(busError(r));
+      const d = r.data;
+      const members = (d.members ?? []) as any[];
+      const budget = d.budget ?? {};
+      const lines = [
+        `Role: ${d.role ?? "none"}${d.lead && d.peer ? " (leads one session, works another)" : ""}`,
+        `Session: ${d.sessionId} in context ${d.contextId}`,
+        `Members: ${members.length === 0 ? "none" : members.map((m) => `${m.sessionName ?? m.sessionId} [${m.state}]`).join(", ")}`,
+        `Open tasks: ${(d.openTaskIds ?? []).join(", ") || "none"}`,
+        `Task budget: ${budget.tasksRemaining} left of the session cap, ${budget.hourlyRemaining} in this hour${budget.halted ? " (halted: no progress)" : ""}`,
+      ];
+      return toolText(lines.join("\n"));
+    }
+
+    default:
+      return toolError(`Unknown tool: ${name}`);
+  }
+}
+
+/** The tools every caller gets, in a session or out of one. */
+const BASE_TOOLS: McpTool[] = [
+  {
+    name: "antgrid_init",
+    description: "Create a antgrid.yaml config file in the current or specified directory. Does not require the Antgrid agent to be running.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        path: {
+          type: "string",
+          description: "Directory path to create antgrid.yaml in (defaults to current working directory)",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "antgrid_list_commands",
+    description: "List available commands defined in the project's antgrid.yaml configuration.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "antgrid_run_command",
+    description: "Run a named command defined in antgrid.yaml. Returns the command output and exit code.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "Name of the command to run (as defined in antgrid.yaml)",
+        },
+        confirmed: {
+          type: "boolean",
+          description: "Set to true to run commands that require confirmation (confirm: true in antgrid.yaml). Default: false.",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "antgrid_list_terminals",
+    description: "List active terminals managed by the Antgrid agent. By default excludes 'agent' type terminals (interactive shells).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        includeAgent: {
+          type: "boolean",
+          description: "Include agent-type terminals (interactive shells). Default: false.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "antgrid_read_terminal",
+    description: "Read the recent output (scrollback buffer) from a specific terminal.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        terminalId: {
+          type: "string",
+          description: "ID of the terminal to read from (use antgrid_list_terminals to find IDs)",
+        },
+      },
+      required: ["terminalId"],
+    },
+  },
+];
+
 /**
  * Built per process rather than as a module-level singleton: an agent may run
  * several MCP servers for one invocation (two spawns per `claude -p` run,
@@ -110,78 +698,12 @@ export function createAntgridMcpServer(): Server {
     { capabilities: { tools: {} } },
   );
 
+  // Per server, so a second server in the same invocation resolves its own role
+  // rather than inheriting one taken for a terminal that is no longer asking.
+  const busRole = createBusRoleCache();
+
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
-      {
-        name: "antgrid_init",
-        description: "Create a antgrid.yaml config file in the current or specified directory. Does not require the Antgrid agent to be running.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            path: {
-              type: "string",
-              description: "Directory path to create antgrid.yaml in (defaults to current working directory)",
-            },
-          },
-          required: [],
-        },
-      },
-      {
-        name: "antgrid_list_commands",
-        description: "List available commands defined in the project's antgrid.yaml configuration.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {},
-          required: [],
-        },
-      },
-      {
-        name: "antgrid_run_command",
-        description: "Run a named command defined in antgrid.yaml. Returns the command output and exit code.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            name: {
-              type: "string",
-              description: "Name of the command to run (as defined in antgrid.yaml)",
-            },
-            confirmed: {
-              type: "boolean",
-              description: "Set to true to run commands that require confirmation (confirm: true in antgrid.yaml). Default: false.",
-            },
-          },
-          required: ["name"],
-        },
-      },
-      {
-        name: "antgrid_list_terminals",
-        description: "List active terminals managed by the Antgrid agent. By default excludes 'agent' type terminals (interactive shells).",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            includeAgent: {
-              type: "boolean",
-              description: "Include agent-type terminals (interactive shells). Default: false.",
-            },
-          },
-          required: [],
-        },
-      },
-      {
-        name: "antgrid_read_terminal",
-        description: "Read the recent output (scrollback buffer) from a specific terminal.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            terminalId: {
-              type: "string",
-              description: "ID of the terminal to read from (use antgrid_list_terminals to find IDs)",
-            },
-          },
-          required: ["terminalId"],
-        },
-      },
-    ],
+    tools: [...BASE_TOOLS, ...sessionBusTools(await busRole.get())],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -269,6 +791,11 @@ export function createAntgridMcpServer(): Server {
       }
 
       default:
+        // Dispatched by NAME, not by the role that listed it: a tool called by
+        // an agent whose role no longer offers it must reach the bridge and be
+        // refused there, with the reason the bridge authored — a local "unknown
+        // tool" would report a membership change as a broken server.
+        if (isSessionBusTool(name)) return await callSessionBusTool(name, args);
         return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }
   });
