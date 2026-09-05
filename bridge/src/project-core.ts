@@ -527,36 +527,47 @@ export class ProjectCore {
       // gate, whose `peerOnline` defaults true, so it reads "can receive in-band"
       // for a phone that has never connected and mutes push after a host restart.
       shouldFallback: () => !peerConnected || core.connState.appFocusPaused,
-      // A live peer names the exact device in session, so target only it. With no
-      // live peer, fall back to the persisted phone registry: delivery never needs
-      // the socket (the relay forwards to FCM/APNs blindly), and `currentPeerPubkey()`
-      // stays null after a host restart until the phone dials in — which it may
-      // never do while the user is away. Every registered phone is targeted then;
-      // picking one by `lastSeenAt` would guess which device the user holds and
-      // drop the notification when wrong, and `lastSeenAt` is stale in exactly
-      // this window.
+      // A CONNECTED peer names the exact device in session, so target only it.
+      // Otherwise fall back to the persisted phone registry: delivery never needs
+      // the socket (the relay forwards to FCM/APNs blindly), and no phone may be
+      // dialling at all — after a host restart, or once the user has closed the
+      // app for the night. Every registered phone is targeted then; picking one
+      // by `lastSeenAt` would guess which device the user holds and drop the
+      // notification when wrong, and `lastSeenAt` is stale in exactly this window.
       resolveTargets: () => {
         // Push carries project activity off this machine, so it rides the same
         // machine switch as every inbound verb — a token+pubkey alone must not
         // leak notifications from a machine that isn't mobile-reachable.
         // Fail-closed: an unwired host provider means no push.
         if (!(this.deps.remoteAccessEnabled?.() ?? false)) return [];
-        const peerPubkey = remote.currentPeerPubkey();
         const paired = core.pairedPhones.list();
-        const candidates = peerPubkey ? paired.filter((p) => p.phonePubkey === peerPubkey) : paired;
-        const targets = candidates.flatMap((p) =>
+        const reachable = (phones: typeof paired) => phones.flatMap((p) =>
           p.pushToken && p.pushPubkey
             ? [{ pushToken: p.pushToken, provider: p.pushProvider ?? "fcm", pushPubkey: p.pushPubkey }]
             : [],
         );
+        // Gated on the peer being CONNECTED, never on `currentPeerPubkey()` being
+        // set: peer-offline deliberately keeps `_peerId` for push fallback and a
+        // quick reconnect (relay-client.ts), so that pubkey names the last device
+        // SEEN for the rest of the process lifetime. A desktop app registers no
+        // push token, so one being closed would otherwise elect itself sole
+        // candidate and mute every phone on the account until the host restarts.
+        const livePubkey = peerConnected ? remote.currentPeerPubkey() : null;
+        const narrowed = livePubkey
+          ? reachable(paired.filter((p) => p.phonePubkey === livePubkey))
+          : [];
+        // Widen rather than drop: a narrow that resolved nobody reachable loses
+        // the notification exactly as completely as having no phone at all, so
+        // the live peer only ever REPLACES the broadcast when it can receive one.
+        const targets = narrowed.length > 0 ? narrowed : reachable(paired);
         if (targets.length === 0) {
           // The dispatcher can only report THAT it dropped the notification. A
           // pruned token and no phone at all are indistinguishable in host.log
           // without this.
           log.warn(
-            "push: no eligible phone for project %s (live peer: %s, paired: %d) — need a registered phone with a push token",
+            "push: no eligible phone for project %s (peer connected: %s, paired: %d) — need a registered phone with a push token",
             core.projectId,
-            peerPubkey ? "yes" : "none since agent start",
+            peerConnected ? "yes" : "no",
             paired.length,
           );
         }
