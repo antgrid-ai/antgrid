@@ -53,6 +53,23 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     enabled: z.boolean(),
     ttlMs: z.number().int().positive().optional(),
   }),
+  // Arms or disarms BODY capture for the loopback frames THIS bridge records
+  // (`antgrid watch --local`). Metadata is recorded unconditionally and no verb
+  // can turn it off — only payloads are worth asking for, so this is the whole
+  // switch. It is answered in-process: nothing is forwarded to the app, so it
+  // adds no wire message type, and it neither reads nor writes a working tree,
+  // so it needs no entry in CHECKOUT_VARIABLE_MESSAGE_TYPES either.
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("netwatch:local"),
+    bodies: z.boolean(),
+    // Optional for the reason netwatch:remote's is — a disarm has no window to
+    // state — and zero is admitted here rather than refused, so a caller that
+    // spells "off" as `{bodies: false, ttlMs: 0}` is answered instead of being
+    // rejected over a field it was not arming with. Positivity is the arming
+    // path's concern and is enforced there.
+    ttlMs: z.number().int().nonnegative().optional(),
+  }),
   // Discloses a checkout's absolute path to the caller. Deliberately confined
   // to THIS plane: checkout paths are host-local (checkout-types.ts) and the
   // loopback socket + token is the only transport that can reach this schema —
@@ -138,4 +155,9 @@ export type ControlResponse =
   | { id: string; ok: true; type: "git:checkout"; current: string; stashed?: StashEntry }
   | { id: string; ok: true; type: "checkout:path"; path: string }
   | { id: string; ok: true; type: "netwatch:remote"; enabled: boolean }
+  /** `ttlMs` is the window actually armed, which is not always the one asked
+   *  for (the host clamps), and `0` while disarmed. A watcher heartbeats inside
+   *  it, so echoing the request instead would let a clamped capture lapse under
+   *  a re-arm that believed it was early. */
+  | { id: string; ok: true; type: "netwatch:local"; bodies: boolean; ttlMs: number }
   | { id: string; ok: false; error: { code: string; message: string } };

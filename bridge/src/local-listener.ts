@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import { MessageBus, type Channel, type TransportSubscriber } from "./message-bus";
 import { parseMessageFast, type AbMessage } from "./protocol";
+import { netwatch, frameIdFor, captureBody } from "./netwatch";
 import { logger } from "./logger";
 const log = logger.child({ component: "local-listener" });
 
@@ -14,6 +15,13 @@ interface ConnState {
 export interface LocalListenerOptions {
   bus: MessageBus;
   token: string;
+  /**
+   * Diagnostics only — never an authorization or routing input. The netwatch
+   * ring is process-wide while a bridge hosts one listener per project core, so
+   * every core's loopback traffic lands in ONE interleaved stream; without this
+   * tag a reader cannot tell whose frames they are looking at.
+   */
+  projectId: string;
   /** Optional allow-list for Origin header. Default: only empty/missing Origin allowed. */
   allowedOrigins?: string[];
   /**
@@ -40,6 +48,11 @@ export class LocalListener implements TransportSubscriber {
   private busUnsubscribe: (() => void) | null = null;
 
   constructor(private opts: LocalListenerOptions) {}
+
+  /** Stamped on every event this listener records — see `projectId`'s note. */
+  private get netwatchDetail(): Record<string, string> {
+    return { project: this.opts.projectId };
+  }
 
   /** True while a desktop owner is connected over the loopback socket. The
    *  relay slot's `onPeerOffline` (phone left) consults this so it never
@@ -130,24 +143,74 @@ export class LocalListener implements TransportSubscriber {
 
   /** TransportSubscriber — bus -> wire (broadcast to owner only; spec invariant: ≤1 owner). */
   deliver(msg: AbMessage, channel: Channel): void {
-    if (!this.ownerSocket) return;
-    this.ownerSocket.send(JSON.stringify({ channel, ...msg }));
+    if (!this.ownerSocket) {
+      // The frame is discarded with no log at any level, no retry and no notice
+      // to anyone: a core emitting into a window where the desktop has quit,
+      // not yet said hello, or is mid-reconnect loses everything it produced,
+      // which is where "the app never showed that" begins.
+      netwatch.record({
+        dir: "tx", kind: "drop", transport: "local", channel,
+        msgType: msg.type, frameId: msg.id, reason: "no-owner",
+        detail: this.netwatchDetail,
+      });
+      return;
+    }
+    // Serialized once and reused for the byte count: this runs on every frame
+    // the desktop sees, terminal output included.
+    const json = JSON.stringify({ channel, ...msg });
+    this.ownerSocket.send(json);
+    netwatch.record({
+      dir: "tx", kind: "json", transport: "local", channel,
+      msgType: msg.type,
+      // Loopback is point-to-point with no intermediary re-wrapping anything, so
+      // the message's own uuid is already an id BOTH endpoints see — the relay
+      // path's nonce-derived key exists only because its route header has none.
+      frameId: msg.id,
+      bytes: Buffer.byteLength(json, "utf8"),
+      body: captureBody(json),
+      detail: this.netwatchDetail,
+    });
+  }
+
+  /**
+   * A refused hello is the one failure a relay-path capture can never show:
+   * both halves of that capture ride the sealed session, so a session that never
+   * came up records nothing at all and "it just never connected" is invisible by
+   * construction. On loopback it is an ordinary event.
+   *
+   * NEVER attach a body here, and never let the hello's text or its `token`
+   * field reach any recorded value. The envelope carries this core's shared
+   * secret in cleartext, and netwatch events are written to netwatch.log and
+   * handed out verbatim by the CLI's export — a captured hello would publish the
+   * credential that guards this socket. The frameId is a sha256 prefix of the
+   * frame, not the secret, and it is the only join key an id-less handshake has.
+   */
+  private recordHelloRefused(text: string, reason: string): void {
+    netwatch.record({
+      dir: "rx", kind: "drop", transport: "local",
+      reason, bytes: Buffer.byteLength(text, "utf8"),
+      frameId: frameIdFor(Buffer.from(text, "utf8"), false),
+      detail: this.netwatchDetail,
+    });
   }
 
   private handleHello(ws: ServerWebSocket<ConnState>, text: string, tokenBuf: Buffer): void {
     let envelope: any;
     try { envelope = JSON.parse(text); } catch {
       log.warn("local listener: rejecting hello (bad envelope), closing 4401");
+      this.recordHelloRefused(text, "hello-not-json");
       ws.close(CLOSE_UNAUTHORIZED, "bad envelope"); return;
     }
     if (envelope?.type !== "hello" || typeof envelope.token !== "string") {
       log.warn("local listener: rejecting hello (malformed), closing 4401");
+      this.recordHelloRefused(text, "hello-malformed");
       ws.close(CLOSE_UNAUTHORIZED, "bad hello"); return;
     }
     const presented = Buffer.from(envelope.token);
     const ok = presented.length === tokenBuf.length && timingSafeEqual(presented, tokenBuf);
     if (!ok) {
       log.warn("local listener: rejecting hello (bad token), closing 4401");
+      this.recordHelloRefused(text, "hello-bad-token");
       ws.close(CLOSE_UNAUTHORIZED, "bad token"); return;
     }
 
@@ -183,19 +246,74 @@ export class LocalListener implements TransportSubscriber {
     ws.data.appPid = newPid;
     ws.data.checkoutRouting = checkoutRouting;
     this.ownerSocket = ws;
-    ws.send(JSON.stringify({ type: "ready" }));
+    // The accepted hello and its answer, so a capture opens with the moment the
+    // desktop attached rather than with unexplained traffic from a socket the
+    // reader never saw come up. Recording only the REFUSALS would make every
+    // successful session look like it had no beginning.
+    //
+    // Body-free for the same reason `recordHelloRefused` is: this envelope
+    // carries the core's shared token, and an accepted hello carries a VALID
+    // one.
+    netwatch.record({
+      dir: "rx", kind: "handshake", transport: "local",
+      msgType: "hello", bytes: Buffer.byteLength(text, "utf8"),
+      frameId: frameIdFor(Buffer.from(text, "utf8"), false),
+      detail: { ...this.netwatchDetail, ...(newPid === undefined ? {} : { appPid: newPid }) },
+    });
+    const ready = JSON.stringify({ type: "ready" });
+    ws.send(ready);
+    netwatch.record({
+      dir: "tx", kind: "handshake", transport: "local",
+      msgType: "ready", bytes: Buffer.byteLength(ready, "utf8"),
+      frameId: frameIdFor(Buffer.from(ready, "utf8"), false),
+      detail: this.netwatchDetail,
+    });
     this.busUnsubscribe = this.opts.bus.subscribe(this);
     this.opts.onOwnerConnected?.();
   }
 
   private handleFrame(ws: ServerWebSocket<ConnState>, text: string): void {
     let envelope: any;
-    try { envelope = JSON.parse(text); } catch { return; }
+    try { envelope = JSON.parse(text); } catch {
+      // Text on an established socket that is not a message at all — a truncated
+      // send, or something else speaking to this port. The bridge returns
+      // silently, so without this the app's frame simply ceases to exist.
+      netwatch.record({
+        dir: "rx", kind: "drop", transport: "local",
+        reason: "not-json", bytes: Buffer.byteLength(text, "utf8"),
+        detail: this.netwatchDetail,
+      });
+      return;
+    }
     const channel: Channel = envelope.channel === "preview" ? "preview" : "control";
     delete envelope.channel;
     // parseMessageFast takes a JSON string — re-stringify after stripping channel.
     const msg = parseMessageFast(JSON.stringify(envelope));
-    if (!msg) return;
+    if (!msg) {
+      // An app and a bridge that disagree about the wire — a schema addition
+      // only one half shipped. It is silent on both sides, and from the app it
+      // is indistinguishable from a handler that simply chose not to answer.
+      netwatch.record({
+        dir: "rx", kind: "drop", transport: "local", channel,
+        msgType: typeof envelope?.type === "string" ? envelope.type : undefined,
+        frameId: typeof envelope?.id === "string" ? envelope.id : undefined,
+        reason: "unparseable", bytes: Buffer.byteLength(text, "utf8"),
+        // The one drop whose body earns its cost: "the schema refused it" is
+        // unactionable without the text that was refused. Safe here in a way it
+        // is not on the hello paths — this is post-handshake data plane and
+        // carries no credential.
+        body: captureBody(text),
+        detail: this.netwatchDetail,
+      });
+      return;
+    }
+    netwatch.record({
+      dir: "rx", kind: "json", transport: "local", channel,
+      msgType: msg.type, frameId: msg.id,
+      bytes: Buffer.byteLength(text, "utf8"),
+      body: captureBody(text),
+      detail: this.netwatchDetail,
+    });
     // `loopback`: the owner is the desktop, trusted by the socket + token — its
     // frames are never subject to the per-phone allowlist gate, even when this
     // core has also been promoted onto the relay (shared bus + handler).

@@ -27,6 +27,7 @@ import { snapshotAsksFor } from "./rpc/state-snapshot";
 import { generateEphemeralKeypair } from "./key-exchange";
 import { joinRelayWsPath } from "./relay-url";
 import { createMessage } from "./protocol";
+import { armBodyCapture } from "./netwatch";
 import { detectInstalledTools, type DetectOptions } from "./tool-detector";
 import { isChatCapableTool } from "./structured/chat-capable";
 import { buildAgentCatalog } from "./agent-catalog";
@@ -170,6 +171,20 @@ export interface OpenResult {
 // no-reconnect-hook periodic POST (the original design predates account-trust
 // admission replacing pair-request auto-approve; the interval choice stands).
 const HEARTBEAT_REFRESH_INTERVAL_MS = 60_000;
+
+/**
+ * Ceiling on a loopback body-capture window.
+ *
+ * A `setTimeout` delay past the runtime's 32-bit millisecond max fires
+ * IMMEDIATELY rather than late, so an ambitious ttl would disarm the capture on
+ * the spot while this reply says it is armed — the one failure a watcher has no
+ * way to notice. The clamp sits far below that, because the window is also how
+ * long the ring may hold payloads and the dead man's switch is worth nothing at
+ * a length nobody outlives. An over-long request is served a shorter window
+ * rather than refused: the watcher re-arms while it runs, so shortening costs
+ * it nothing and refusing would cost it the capture.
+ */
+const NETWATCH_LOCAL_MAX_TTL_MS = 3_600_000;
 
 export class HostServer {
   private readonly cores = new Map<string, CatalogEntry>();
@@ -1403,6 +1418,32 @@ export class HostServer {
         }
         relay.send(createMessage("netwatch:configure", { enabled: req.enabled, ttlMs: req.ttlMs }));
         return { id: req.id, ok: true, type: "netwatch:remote", enabled: req.enabled };
+      }
+      case "netwatch:local": {
+        // Bridge-local in the strongest sense: it arms a module flag in THIS
+        // process and sends nothing, which is why it carries no wire message
+        // type and why CHECKOUT_VARIABLE_MESSAGE_TYPES has no entry for it —
+        // there is no working tree anywhere in its reach. Its only door is this
+        // listener, bound to 127.0.0.1 behind the host.json bearer, the same
+        // boundary the /netwatch stream sits behind; a phone speaks AbMessage
+        // verbs over the relay and cannot name a ControlRequest at all.
+        if (!req.bodies) {
+          armBodyCapture(false, 0);
+          return { id: req.id, ok: true, type: "netwatch:local", bodies: false, ttlMs: 0 };
+        }
+        // The same refusal netwatch:remote makes of the app, for the same
+        // reason applied to ourselves: the TTL is the dead man's switch, so an
+        // arm without one is the single request that cannot be honoured — a
+        // watcher killed with SIGKILL sends no disarm, and this host would then
+        // record payloads for the rest of its life with nothing able to stop
+        // it. Answered here rather than left to armBodyCapture's own refusal,
+        // which is silent and would read to the caller as an armed capture.
+        if (typeof req.ttlMs !== "number" || req.ttlMs <= 0) {
+          return { id: req.id, ok: false, error: { code: "TTL_REQUIRED", message: "arming body capture requires a positive ttlMs" } };
+        }
+        const ttlMs = Math.min(req.ttlMs, NETWATCH_LOCAL_MAX_TTL_MS);
+        armBodyCapture(true, ttlMs);
+        return { id: req.id, ok: true, type: "netwatch:local", bodies: true, ttlMs };
       }
     }
   }

@@ -125,14 +125,57 @@ per-batch cap and byte budget — a capture that slows the session it is
 diagnosing has changed what it was measuring — so the batch carries a `dropped`
 count and never a silent gap.
 
-Three things it still does NOT show. Loopback traffic: a co-located app may take
-the `LocalListener` path instead (`app/lib/providers/agent_transport.dart` tries
-relay first, local second), which speaks plain JSON with no frames and never
-touches the relay — every event is tagged `transport` so a capture cannot be
-misread as relay traffic it is not. A session that never established: both
-halves ride the sealed control plane, so `--remote` can describe a connection
-that is misbehaving but structurally cannot describe one that never came up. And
-which machine an app-side frame belongs to: the app's recorder is process-wide,
-so an app connected to two machines that are BOTH watching reports every frame
-to both — same account, same user, and the events carry types and sizes, never
-payloads, but the reading is confusing rather than wrong.
+**Loopback: one side sees the whole wire.** A co-located app may take the
+`LocalListener` path instead of the relay (`app/lib/providers/agent_transport.dart`
+tries relay first, local second) — plain JSON on 127.0.0.1, no seal, no frames,
+no streams. That socket is point-to-point with nothing in between, so
+`bridge/src/local-listener.ts` alone is a *complete* capture: every frame
+`deliver()` sends is one the app received, and every frame `handleFrame()` sees
+is one the app sent. No second half, no `--join`, no app-side arming — the relay
+case needs all three only because a router sits between the endpoints and can
+swallow a frame neither of them ever hears about.
+
+```bash
+antgrid watch --local     # loopback only
+antgrid watch --relay     # relay only — omit both to see every transport
+antgrid watch --bodies    # ...and the plaintext of each loopback frame
+```
+
+Both transports are recorded either way: `--local`/`--relay` narrow what is
+rendered, never what the host keeps, and with neither given the table carries a
+transport column. The join key is free here — a loopback frame is a whole
+`AbMessage`, so its own `id` (the UUID `createAbMessage` mints) *is* the frameId,
+with nothing hashed on the hot path. The relay path's nonce-derived key exists
+only because its route header carries no message id. The one id-less loopback
+frame that reaches the ring is a refused `hello`, which falls back to
+`frameIdFor`'s sha256 prefix.
+
+**Bodies are opt-in, capped, and lapse on their own.** Metadata is recorded
+always — an intermittent bug is only diagnosable if the ring was already holding
+it by the time someone went looking — but a payload is recorded only while
+`--bodies` has armed it over the loopback control plane (`netwatch:local`, same
+bearer as `/netwatch`; it arms a flag in this process, sends nothing to the app,
+and adds no wire message type). Each body is truncated to
+`NETWATCH_BODY_MAX_CHARS` (4 KiB) at the record site rather than at render, so a
+screen of build log cannot evict the ring on its way to being shortened. The arm
+carries the same **dead-man TTL** `--remote` does, renewed while the watcher runs
+and clamped host-side to an hour: the watcher that armed it is the only thing
+that ever disarms it, and a `SIGKILL`ed watcher sends no disarm. It therefore
+needs a live stream — `--no-follow` and `--join` refuse it, though bodies already
+in the ring render under both.
+
+Two things to be blunt about. A body is plaintext — prompts, file contents,
+terminal output — so `--bodies --json > cap.jsonl` puts them unencrypted on disk
+for that run, and nothing scrubs or rotates the file. And a `hello` is never
+captured with its text, armed or not (`recordHelloRefused`): the envelope carries
+this core's shared secret in cleartext, so a refusal is recorded as a drop with a
+reason, a size and a hashed id, and nothing else.
+
+Two things it still does NOT show. A relay session that never established: both
+halves of that capture ride the sealed control plane, so `--remote` can describe
+a connection that is misbehaving but structurally cannot describe one that never
+came up (a refused loopback hello, by contrast, is an ordinary event). And which
+machine an app-side frame belongs to: the app's recorder is process-wide, so an
+app connected to two machines that are BOTH watching reports every frame to both
+— same account, same user, and the events carry types and sizes, never payloads,
+but the reading is confusing rather than wrong.
