@@ -340,6 +340,35 @@ describe("FileWatcher pause", () => {
     fw.stop();
   });
 
+  // The gap the hook above cannot see through on its own: a file written
+  // before the watch armed is reported by no event ever. `ignoreInitial`
+  // suppresses it as part of the initial scan, and chokidar reads each
+  // directory BEFORE attaching that directory's watch, so one landing in
+  // between is missed by both halves permanently. Nothing then moves the Git
+  // view until the 10s backstop poll — which is what made
+  // `git-status-freshness.test.ts` flake on CI, where the core boots slowly
+  // enough for a write to land in that window.
+  it("asks for a git refresh once the watch is armed", async () => {
+    let changes = 0;
+    const fw = new FileWatcher(
+      { path: tempDir, id: "p1" },
+      () => {},
+      createConnState(),
+      () => changes++,
+    );
+
+    writeFileSync(join(tempDir, "written-before-the-watch.ts"), "x");
+    fw.startWatching();
+
+    const deadline = Date.now() + 4000;
+    while (changes === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    expect(changes).toBeGreaterThan(0);
+    fw.stop();
+  });
+
   it("getTreeSnapshot returns current tree + fileSeq", () => {
     const connState = createConnState();
     const fw = new FileWatcher(

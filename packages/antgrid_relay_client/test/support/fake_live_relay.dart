@@ -21,9 +21,13 @@ class SentFrame {
 }
 
 class FakeLiveRelay extends RelayService {
+  // `netTap` is forwarded to the real RelayService because MachineSession reads
+  // the hook back off its socket (`relay.netTap`) rather than holding its own —
+  // without this passthrough a capture is unreachable from a faked relay.
   FakeLiveRelay({
     RelayConnectionState initial = RelayConnectionState.authenticated,
-  }) : super(crypto: CryptoService()) {
+    RelayNetTap? netTap,
+  }) : super(crypto: CryptoService(), netTap: netTap) {
     _current = AppState(connectionState: initial);
   }
 

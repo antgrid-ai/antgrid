@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
+import 'dart:typed_data';
 
 import 'agent_transport.dart';
 import 'buffered_agent_transport.dart';
@@ -321,8 +322,22 @@ class MachineSession {
     Map<String, dynamic> message,
     String channel,
   ) async {
+    final type = message['type'] is String ? message['type'] as String : null;
     final keys = _keys;
-    if (keys == null) return;
+    if (keys == null) {
+      // The phone-side mirror of the bridge's `no-e2e-session` drop. Usually
+      // benign (the bridge replays durable state on establishment), but it is
+      // also where a session that never comes back shows up first, and nothing
+      // else on this path observes it.
+      _dropped(
+        'tx',
+        'no-e2e-session',
+        channel: channel,
+        streamId: streamId,
+        msgType: type,
+      );
+      return;
+    }
     final envelope = <String, dynamic>{
       if (streamId != kControlStreamId) 's': streamId,
       'm': message,
@@ -332,10 +347,20 @@ class MachineSession {
     final bytes = utf8ByteLength(plaintext);
     try {
       if (bytes <= kFragThreshold) {
-        relay.sendMessage(machineDeviceId, channel, await t.seal(plaintext));
+        final sealed = await t.seal(plaintext);
+        relay.sendMessage(machineDeviceId, channel, sealed);
+        _annotate(_frameId(sealed), msgType: type, streamId: streamId);
         return;
       }
       if (bytes > kMaxTransferBytes) {
+        _dropped(
+          'tx',
+          'message-too-large',
+          channel: channel,
+          streamId: streamId,
+          msgType: type,
+          detail: {'bytes': bytes},
+        );
         if (!_fragSendErrors.isClosed) {
           _fragSendErrors.add(
             FragSendError(
@@ -346,7 +371,6 @@ class MachineSession {
         }
         return;
       }
-      final type = message['type'] as String?;
       final path = message['path'] as String?;
       final hint = type == 'file:content' && path != null
           ? FragHint('file:content', path)
@@ -355,10 +379,28 @@ class MachineSession {
       // per (machine, stream, counter) — the agent reassembles by bare id.
       final id = '$machineDeviceId-$streamId-${_fragCounter++}';
       for (final fragment in buildFragments(plaintext, id, hint)) {
-        relay.sendMessage(machineDeviceId, channel, await t.seal(fragment));
+        final sealed = await t.seal(fragment);
+        relay.sendMessage(machineDeviceId, channel, sealed);
+        // Each fragment is sealed on its own, so one message leaves as N frames
+        // with N unrelated ids. Naming every one with the parent type is what
+        // keeps a large transfer from reading as a burst of anonymous frames.
+        _annotate(_frameId(sealed), msgType: type, streamId: streamId);
       }
-    } catch (_) {
-      // best-effort send
+    } catch (e) {
+      // The type alone, as everywhere else a drop names an error: the try above
+      // wraps `seal` and `buildFragments`, and a FormatException/ArgumentError
+      // out of either prints the plaintext it choked on. `detail` is shipped to
+      // the bridge by NetwatchUploader and written into an operator's export
+      // file — the app's event has no `body` field precisely so a capture
+      // carries no payload, and this is the one door left open to it.
+      _dropped(
+        'tx',
+        'seal-failed',
+        channel: channel,
+        streamId: streamId,
+        msgType: type,
+        detail: {'error': '${e.runtimeType}'},
+      );
     }
   }
 
@@ -536,6 +578,52 @@ class MachineSession {
     unawaited(_sendSessionFrame({'type': 'ping'}).catchError((_) {}));
   }
 
+  // --- frame capture --------------------------------------------------------
+
+  /// Read off the socket rather than injected, so a capture is wired in exactly
+  /// one place (`app/lib/providers/relay_connection.dart`) and the two layers
+  /// can never disagree about whether one is armed.
+  RelayNetTap? get _tap => relay.netTap;
+
+  String? _frameId(Uint8List payload, [FrameKind kind = FrameKind.sealed]) =>
+      _tap == null ? null : frameIdOf(payload, kind);
+
+  /// Name a frame this layer can type but not identify. [RelayService] records
+  /// the wire event synchronously as the frame crosses the socket, so by the
+  /// time this runs the event it is naming is always already buffered.
+  void _annotate(String? frameId, {String? msgType, String? streamId}) {
+    final tap = _tap;
+    if (tap == null || frameId == null) return;
+    tap({
+      'op': 'annotate',
+      'frameId': frameId,
+      'msgType': msgType,
+      'streamId': streamId,
+    });
+  }
+
+  void _dropped(
+    String dir,
+    String reason, {
+    String? channel,
+    String? streamId,
+    String? msgType,
+    String? frameId,
+    Map<String, Object?>? detail,
+  }) {
+    _tap?.call({
+      'op': 'frame',
+      'dir': dir,
+      'kind': 'drop',
+      'channel': channel,
+      'streamId': streamId,
+      'msgType': msgType,
+      'frameId': frameId,
+      'reason': reason,
+      'detail': detail,
+    });
+  }
+
   // --- inbound dispatch -----------------------------------------------------
 
   void _onRouted(IncomingRouteMessage msg) {
@@ -571,40 +659,79 @@ class MachineSession {
     IncomingRouteMessage msg,
     SessionKeys keys,
   ) async {
+    // Captured before the open: the nonce that identifies this frame is only
+    // readable while the payload is still sealed, and the type that makes it
+    // legible only exists after. The two meet by id, not by threading — this
+    // path is chained through `_inboundTails` and is genuinely async, so a
+    // field would start mis-attributing under any concurrency.
+    final frameId = _frameId(msg.payload, msg.kind);
     final plaintext = await E2eTransportDart(
       sendKey: keys.p2a,
       recvKey: keys.a2p,
     ).open(msg.payload);
     // A candidate-key handshake frame during rekey (agent-ready/established) or
     // garbage → decrypt-or-drop.
-    if (plaintext == null) return;
+    if (plaintext == null) {
+      _dropped(
+        'rx',
+        'decrypt-failed',
+        channel: msg.channel,
+        frameId: frameId,
+        detail: {'kind': msg.kind.name},
+      );
+      return;
+    }
     _lastRecv = DateTime.now();
     _missedPongs = 0;
-    if (_reassembler.accept(plaintext, channel: msg.channel)) return;
-    _dispatchDecoded(plaintext, msg.channel);
+    if (_reassembler.accept(plaintext, channel: msg.channel)) {
+      // The reassembler consumes a fragment before any type is visible, so this
+      // is the only chance to say what it was. Matches the bridge's `__frag`.
+      _annotate(frameId, msgType: '__frag');
+      return;
+    }
+    _dispatchDecoded(plaintext, msg.channel, frameId);
   }
 
-  void _dispatchDecoded(String plaintext, String channel) {
+  /// [frameId] is absent for a reassembled message: it arrived as N frames with
+  /// N ids, and no single one of them carried it.
+  void _dispatchDecoded(String plaintext, String channel, [String? frameId]) {
     Map<String, dynamic> json;
     try {
       json = jsonDecode(plaintext) as Map<String, dynamic>;
     } catch (_) {
+      _dropped(
+        'rx',
+        'plaintext-not-json',
+        channel: channel,
+        frameId: frameId,
+      );
       return;
     }
     final type = json['type'];
     // Sealed-payload disambiguation: a top-level `type` string is a
     // session/liveness frame; an `m` field is stream/app traffic.
     if (type is String) {
+      _annotate(frameId, msgType: type);
       _handleSessionFrame(type);
       return;
     }
-    if (!json.containsKey('m')) return;
+    if (!json.containsKey('m')) {
+      _dropped('rx', 'unrecognized-plaintext', channel: channel, frameId: frameId);
+      return;
+    }
     final env = StreamEnvelope.fromJson(json);
-    if (env == null) return;
+    if (env == null) {
+      _dropped('rx', 'bad-envelope', channel: channel, frameId: frameId);
+      return;
+    }
     final sid = (env.s == null || env.s == kControlStreamId)
         ? kControlStreamId
         : env.s!;
     final m = env.m;
+    final mType = m is Map<String, dynamic> && m['type'] is String
+        ? m['type'] as String
+        : null;
+    _annotate(frameId, msgType: mType, streamId: sid);
     _snoopControl(sid, m);
     final st = _streams[sid];
     if (st != null && m is Map<String, dynamic>) {
@@ -622,6 +749,14 @@ class MachineSession {
       developer.log(
         'dropping inbound frame for unknown streamId $sid',
         name: 'antgrid.relay',
+      );
+      _dropped(
+        'rx',
+        'unknown-stream',
+        channel: channel,
+        streamId: sid,
+        msgType: mType,
+        frameId: frameId,
       );
     }
   }
@@ -801,12 +936,20 @@ class MachineSession {
 
   Future<void> _sendSessionFrame(Map<String, dynamic> obj) async {
     final keys = _keys;
-    if (keys == null) return;
+    final type = obj['type'] as String?;
+    if (keys == null) {
+      _dropped('tx', 'no-e2e-session', channel: 'control', msgType: type);
+      return;
+    }
     final ct = await E2eTransportDart(
       sendKey: keys.p2a,
       recvKey: keys.a2p,
     ).seal(jsonEncode(obj));
     relay.sendMessage(machineDeviceId, 'control', ct);
+    // Liveness frames are the cheapest signal that a session is alive at all —
+    // a capture where ping goes out and pong never comes back is the whole
+    // diagnosis for a silently dead socket.
+    _annotate(_frameId(ct), msgType: type);
   }
 
   Future<void> dispose() async {
@@ -922,6 +1065,20 @@ class StreamTransport extends BufferedAgentTransport {
   /// Deliver a decoded message that the session demuxed to this stream.
   void dispatchFromSession(Map<String, dynamic> json, String channel) =>
       dispatchDecoded(json, channel);
+
+  @override
+  void noteOrphanResponse(String? requestId, String channel) {
+    session.relay.netTap?.call({
+      'op': 'frame',
+      'dir': 'rx',
+      'kind': 'drop',
+      'channel': channel,
+      'streamId': streamId,
+      'msgType': 'response',
+      'reason': 'late-response',
+      'detail': {if (requestId != null) 'requestId': requestId},
+    });
+  }
 
   /// Re-pull the durable-state snapshot now that session keys are (re)installed,
   /// then re-drive the tier-3 hydrators. Order matters: the snapshot replays the

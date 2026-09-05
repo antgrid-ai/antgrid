@@ -121,4 +121,17 @@ void main() {
     await AbLog.flush();
     expect(readLines().length, 200);
   });
+
+  test('a flush with nothing queued does not kill the sink', () async {
+    AbLog.info('C', 'first');
+    await AbLog.flush();
+    // Nothing queued and the directory already made, so this drain takes no
+    // `await` at all — the case that used to leave the in-flight latch holding
+    // an already-completed future, after which every later flush returned it
+    // untouched and the file never grew again.
+    await AbLog.flush();
+    AbLog.info('C', 'second');
+    await AbLog.flush();
+    expect(readLines().map((l) => l['msg']), ['first', 'second']);
+  });
 }

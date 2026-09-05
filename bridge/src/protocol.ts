@@ -2146,6 +2146,40 @@ const AgentQuestionResolveMessage = BaseMessage.extend({
   answer: z.union([z.string(), z.array(z.string())]),
 });
 
+// ── Netwatch: shipping a remote app's half of the frame capture ───────────────
+// Both ride the machine CONTROL plane and are consumed by relay-client.ts before
+// anything project-scoped sees them. Deliberately absent from
+// CHECKOUT_VARIABLE_MESSAGE_TYPES: neither reads nor writes a working tree.
+
+// Agent -> app: arm or disarm the app's own frame capture. A phone has no env
+// var and no UI for this, so `antgrid watch --remote` is the only control
+// surface. `ttlMs` is a DEAD-MAN SWITCH, not a preference: a CLI killed with
+// SIGKILL sends no disarm, and a phone left capturing forever costs battery and
+// bandwidth with nothing on the device able to stop it. The watcher re-arms
+// well inside the window while it runs.
+const NetwatchConfigureMessage = BaseMessage.extend({
+  type: z.literal("netwatch:configure"),
+  enabled: z.boolean(),
+  ttlMs: z.number().int().positive().optional(),
+});
+
+// App -> agent: a batch of the app's own capture events. The element shape is
+// `NetwatchEvent` (netwatch.ts) minus the fields this side stamps itself, and is
+// passthrough on purpose — a bridge must forward an event from a NEWER app
+// without understanding every field, since the whole point is reading what that
+// app saw. `dropped` counts what the app's own budget discarded, so a gap in
+// `seq` is never mistaken for a frame that went missing on the wire.
+const NetwatchEventsMessage = BaseMessage.extend({
+  type: z.literal("netwatch:events"),
+  events: z.array(z.record(z.string(), z.unknown())).max(1000),
+  dropped: z.number().int().nonnegative().optional(),
+  /** The app's own clock when it sent this batch. The bridge subtracts it from
+   *  its own receive time to shift every `at` in the batch onto ONE clock — see
+   *  `Netwatch.ingestRemote`. Absent means no correction, which is right for an
+   *  app on this same machine. */
+  sentAt: z.number().optional(),
+});
+
 export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentHelloMessage,
   PortDetectedMessage,
@@ -2295,9 +2329,14 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentPermissionResolveMessage,
   AgentQuestionResolveMessage,
   AgentTaskStopMessage,
+  NetwatchConfigureMessage,
+  NetwatchEventsMessage,
 ]);
 
 export type AbMessage = z.infer<typeof AbMessageSchema>;
+
+export type NetwatchConfigure = z.infer<typeof NetwatchConfigureMessage>;
+export type NetwatchEvents = z.infer<typeof NetwatchEventsMessage>;
 
 export type TerminalNotificationMessage = z.infer<typeof TerminalNotificationMessage>;
 
@@ -2464,6 +2503,39 @@ export type AgentSessionAction = z.infer<typeof AgentSessionActionMessage>;
 export type AgentPermissionResolve = z.infer<typeof AgentPermissionResolveMessage>;
 export type AgentQuestionResolve = z.infer<typeof AgentQuestionResolveMessage>;
 
+/**
+ * Types whose wire text must never be recorded verbatim, however loudly an
+ * operator asks for bodies.
+ *
+ * `antgrid watch --bodies` exists to show what crossed a socket, and its output
+ * is printed to a terminal, streamed over `/netwatch`, and appended to an
+ * `--export` file that ends up pasted into bug reports. That is fine for a
+ * `tree:full` and catastrophic for these three: `agent:enableRelay` carries the
+ * account device's Ed25519 PRIVATE key plus `clientSecret` and `licenseToken`;
+ * `agent:question-resolve` is the answer to a question the agent may have
+ * flagged `isSecret`, which the UI masks on the way in; `terminal:input` is
+ * literally the user's keystrokes, password prompts inside the PTY included.
+ * The `tunnel:*` set is the preview proxy's own wire (tunnel-protocol.ts) and
+ * carries the proxied site's request and response headers verbatim — `Cookie`,
+ * `Authorization`, `Set-Cookie`. They are named here rather than there because
+ * one list is the only way this stays checkable; they are also the case that
+ * proves the check must key off the CLAIMED type, since `parseMessageFast`
+ * refuses them and they reach the ring down the `unparseable` path.
+ *
+ * Metadata (type, id, byte count) is still recorded — only the payload is
+ * withheld, so a capture still shows that the frame crossed and when.
+ *
+ * Add a type here in the same commit that gives it a secret-bearing field.
+ */
+export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
+  "agent:enableRelay",
+  "agent:question-resolve",
+  "terminal:input",
+  "tunnel:http-request",
+  "tunnel:http-response",
+  "tunnel:ws-open",
+]);
+
 /** The exhaustive checkout-variable protocol set. Any new filesystem-facing
  * type belongs here (and gets an explicit schema decision + contract test). */
 export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
@@ -2590,6 +2662,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
+  "netwatch:configure", "netwatch:events",
 ]);
 
 export function parseMessageFast(raw: string): AbMessage | null {
