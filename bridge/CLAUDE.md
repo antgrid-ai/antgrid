@@ -20,121 +20,74 @@ derived from `toPosts`). Nothing in `app/` changes: `BY_HOOK_NAME`, the tools ad
 `handlerObservable`, and the judge / transcript / title dispatch all derive from
 that one table.
 
-`AgentSpec.headless` is the one exception to "absence is the honest answer".
-It declares the agent's VERIFIED non-interactive argvs keyed by how far each may
-reach, and two callers share them: naming a session (`agents/title-generate.ts`)
-and the Handler's judge (`handler/judge.ts`). A missing entry still means "no
-argv has been run against this CLI" — but for naming, `resolveHeadless` then
-BORROWS the first installed agent that has one, because the whole job is inlined
-into the prompt. A judge is never borrowed, and `judgeCapable` is exactly "has a
-non-sealed entry". The field's own docstring carries the rules a new entry must
-satisfy (no writes, and how it keeps the run out of the user's `--resume`); add
-one only after running it. A naming spawn runs in a throwaway cwd, NEVER the
-session's checkout — see `headlessScratchCwd`. History a CLI offers no switch to
-skip is redirected per spawn instead (`HeadlessCommand.scratchEnv`, a fresh dir
-the runner deletes after), so never list a var that also carries credentials.
+Every field of `AgentSpec` and `HookProfile` is documented at its own declaration
+in `agents/types.ts`, which is where the rules a new entry must satisfy live —
+`headless` (verified argvs by reach; naming borrows, a judge never does),
+`gracefulExit` (narrows the default ask; see **Stopping an agent**), `posts` and
+`turnBoundaryEvents` (both REQUIRED so a profile cannot leave them unstated),
+`portFileFallback` (absence is a trust boundary), `augmentsDefaultSpec`,
+`resumeIsSubcommand`, `notifyBodyFromTranscript`, `update`. Two suites gate the
+table itself — `agent-hook-declarations.test.ts` checks each profile against the
+events the agent actually dispatches, and `agent-spec-characterization.test.ts`
+pins the resume/prompt argvs, the materialized hook files and codex's
+`trusted_hash` strings byte-for-byte. `headless.test.ts` covers reach selection
+and `judgeCapable`.
 
-`AgentSpec.gracefulExit` is the one field that REFINES the default rather than
-declaring a capability, and it is the opposite of `headless` for a reason: a
-guessed argv can do damage, a guessed soft ask cannot, because the sweep that
-follows it is unconditional. Every agent is asked with the platform default;
-an entry only narrows that, and a wrong one costs the grace period and nothing
-else. Add one only from a measured ask→exit, since an invented keystroke count
-is latency on every stop of that agent. Its shape and the `ETX` constant live
-in `agents/types.ts` rather than beside the PTY, because that module is
-declaration-only — the header there says what the reverse import breaks. See
-**Stopping an agent**.
+Four things are NOT answered at any declaration:
 
 **An agent's native session id is not stable across a resume**, so nothing may
 read a change of it as "a new conversation started". Measured on Claude Code:
-`--resume` copies the transcript into a NEW file and appends under a fresh id,
-so the same thread comes back wearing a different name. Every guard against
-re-naming a session is otherwise per-run — `SessionNamer` and `TitleAttempts`
-both die with the PTY — which is why the winning signal is also written to the
-session row as `autoTitleRank`, and why `SessionManager.noteConversationStart`
-records AT LAUNCH that a run continues the previous conversation. The first
-identity report spends that claim; every rotation after it is a real `/clear`.
-Get either half wrong and a stop/start pays another model spawn and renames the
-session — and not back to the same title, since the transcript read returns the
-LAST few messages, so the new name describes wherever the work had drifted to.
+`--resume` copies the transcript into a NEW file and appends under a fresh id, so
+the same thread comes back wearing a different name. Every guard against
+re-naming is otherwise per-run — `SessionNamer` and `TitleAttempts` both die with
+the PTY — which is why the winning signal is also written to the session row as
+`autoTitleRank`, and why `SessionManager.noteConversationStart` records AT LAUNCH
+that a run continues the previous conversation. The first identity report spends
+that claim; every rotation after it is a real `/clear`. Get either half wrong and
+a stop/start pays another model spawn and renames the session — not back to the
+same title, since the transcript read returns the LAST few messages. Nothing
+tests this.
 
-The `agent:tools` advert (and the loopback `tools:list` reply) carries TWO
-arrays, and the split is load-bearing. `tools[]` is the PATH probe — what this
-machine can actually launch. `agents[]` (`agent-catalog.ts`, projected from the
-whole registry) is what each agent IS: label, `chatCapable`, `judgeCapable`, and
-`handler.{terminal,chat}` from `handlerObservable`. The app needs the second for
-questions the probe structurally cannot answer — naming a cached session row
-from a machine that never probed, or offering a judge the current target lacks —
-so a new agent is named and capability-described in the app with no app release.
-Widening `tools[]` instead was rejected: an app predating the change would read
-every row as installed. `agents[]` is optional on the wire so an older bridge
-still parses, and each row is total so a bridge that sends the array has
-answered all of it.
+**The `agent:tools` advert carries TWO arrays and the split is load-bearing.**
+`tools[]` is the PATH probe — what this machine can launch. `agents[]`
+(`agent-catalog.ts`, projected from the whole registry) is what each agent IS.
+The app needs the second for questions the probe structurally cannot answer —
+naming a cached session row from a machine that never probed, or offering a judge
+the current target lacks — so a new agent is named and capability-described in
+the app with no app release. Widening `tools[]` instead was rejected: an app
+predating the change would read every row as installed. `agents[]` is optional on
+the wire so an older bridge still parses, and each row is total.
 
-`handlerObservable` has a SECOND reader, and the two are not interchangeable.
+**`handlerObservable` has a SECOND reader and the two are not interchangeable.**
 `agents[].handler` describes an agent, so it is the only answer available before
-anything is armed; each `handler:status` session snapshot carries
-`observability` (`full` | `escalate_only` | `unsupported`, from
-`HandlerEngine.observabilityFor`), which describes a SESSION — its live mode and
-its judge pick included — and is re-derived on every emit. It is optional on the
-wire for an older app, so its absence is "not reported", never `unsupported`.
-Keep `escalate_only` (watched, no headless judge) distinct from `unsupported`
-(nothing reaches the engine at all): collapsing them is what made an unwatchable
-arm look like an armed-and-quiet one.
+anything is armed; each `handler:status` snapshot carries `observability`
+(`HandlerEngine.observabilityFor`), which describes a SESSION and is re-derived on
+every emit. Optional on the wire, so its absence is "not reported", never
+`unsupported` — and `escalate_only` (watched, no headless judge) must stay
+distinct from `unsupported` (nothing reaches the engine), or an unwatchable arm
+looks armed-and-quiet.
 
-A `HookProfile` declares two things beyond its `inject`/`events`/`toPosts`, and
-both are REQUIRED so a new profile cannot leave them unstated:
-- `posts` — every loopback path the agent's INSTALLED integration can reach,
-  including one that posts from inside the agent's own runtime rather than
-  through `bridge hook` (opencode). It is what answers "can an armed Handler
-  ever hear from this agent's terminal sessions" (`/handler-event`) and "does it
-  probe the hook channel at startup" (`/hook-alive`), so it is deliberately not
-  derivable from `events`.
-- `turnBoundaryEvents` — `{start, end}`, the boundaries this agent's events
-  actually report; `needsKeystrokeTurnStart` reads it.
-
-`portFileFallback` is the profile's third, optional field, and its absence is a
-trust boundary rather than an omission — see its comment in `agents/types.ts`.
-
-In-app self-update is `src/update/`, and no agent owns any of it: `version.ts`
-is the injectable half (semver math, the one npm probe, the TTL latest-cache,
-and the quiesce→update→restart runner), `specs.ts` derives the per-agent table
-straight off `AgentSpec.update` and supplies the real spawns. An agent's whole
-share is its `AgentUpdate` record — npm package, PATH binary, updater argv, and
-`readState` for the one agent (codex) that writes updater state to disk
-(`agents/codex/home.ts`). Absent `update` = ships no self-updater, and the
-request fails soft. Which sessions a self-update quiesces resolves through
-`agentKeyFor`, never `SessionEntry.tool`: that field is set only when a session
-OVERRODE `agent.tool`, so reading it alone leaves every default-spec session
-attributed to the wrong agent — and the processes actually holding the binary
-running while it is replaced.
-
-The spec's positional/launch declarations answer questions no caller may
-re-derive from the key: `augmentsDefaultSpec` (does an antgrid.yaml
-default-spec launch still get this agent's hook injection AND resume argv),
-`resumeIsSubcommand` (does the resume argv fold AFTER the user's raw args), and
-`notifyBodyFromTranscript` (does a `/notify` post with no inline message have a
-transcript worth reading).
+**Which sessions a self-update quiesces resolves through `agentKeyFor`, never
+`SessionEntry.tool`** — that field is set only when a session OVERRODE
+`agent.tool`, so reading it alone attributes every default-spec session to the
+wrong agent, leaving the processes that hold the binary running while it is
+replaced. `src/update/` owns the rest: `version.ts` is the injectable half,
+`specs.ts` derives the table off `AgentSpec.update`.
 
 A chat agent's `chat-backend.ts` subclasses `ChatSession`
 (`src/structured/chat-session.ts`), which owns everything that is not about one
-provider: turn open/close and `stopReason`, the pending permission/question maps
-and their retraction at every turn boundary and at dispose, the capability
-state, the `setConfig` queue-then-validate path and `guardPick`, item
-first-sighting (and the partial-item merge), the plan/usage/delta/replay frames,
-and the transcript-snapshot guards. **Every `agent:*` frame is built there** — a
-backend that emits one itself has forked the wire. What the backend declares is
-its `ChatSessionProfile`: who names turns, whether its item frames are partial,
-whether a mid-turn transcript read is trustworthy, and whether its interrupt
-stops a turn or the whole session. Its own vocabulary is normalized in
-`mapping.ts` through `structured/tool-card.ts` (`ToolKind`/`ToolStatus`/
-`PlanStatus` + the item builders) and `structured/agent-error.ts` — the tables
-are per-agent, the shapes are not.
+provider — turn open/close, the pending permission/question maps and their
+retraction, the capability state, the `setConfig` queue-then-validate path, item
+first-sighting, and the transcript-snapshot guards. **Every `agent:*` frame is
+built there**: a backend that emits one itself has forked the wire. What the
+backend declares is its `ChatSessionProfile`. Its own vocabulary is normalized in
+`mapping.ts` through `structured/tool-card.ts` and `structured/agent-error.ts` —
+the tables are per-agent, the shapes are not.
 
-`hookName` is deliberately a second vocabulary (`claude`, not `claude-code`) —
-it is baked into on-disk hook configs and into codex's `trusted_hash`, so
-renaming one to match its key silently un-trusts hooks in every install that
-already has them.
+`hookName` is deliberately a second vocabulary (`claude`, not `claude-code`) — it
+is baked into on-disk hook configs and into codex's `trusted_hash`, so renaming
+one to match its key silently un-trusts hooks in every install that already has
+them.
 
 ## Component map
 
@@ -178,91 +131,32 @@ what is here is identity plus the contracts that span more than one of them.
 
 ## Stopping an agent
 
-A coding agent has an exit path of its own — Claude Code withdraws its
-`fullscreenBootPending[pid]` canary from `~/.claude.json` in a `process.on("exit")`
-hook, and a stale entry silently disables the fullscreen renderer MACHINE-WIDE,
-for every project, until the file is hand-edited. Neither `TerminateProcess` nor
-`SIGKILL` runs one. So every teardown path asks first and sweeps after.
+Every teardown path asks the agent to leave and then sweeps unconditionally. The
+reason the ask exists is external to this repo, so it is stated here: Claude Code
+withdraws its `fullscreenBootPending[pid]` canary from `~/.claude.json` in a
+`process.on("exit")` hook, and a stale entry silently disables the fullscreen
+renderer MACHINE-WIDE, for every project, until the file is hand-edited
+(`agents/registry.ts`). Neither `TerminateProcess` nor `SIGKILL` runs one.
 
-- **The ask never replaces the sweep.** `TerminalSession.close(graceMs)` asks,
-  waits at most the budget, and then does exactly what `kill()` did — same
-  `killProcessTree`, same job close — on BOTH branches, whether the agent left
-  or not. That is what keeps a wrong `gracefulExit` entry, an agent that ignores
-  the ask, and a platform where the ask cannot land from ever costing a process
-  tree; every guarantee under **Isolated sessions** is unchanged by construction.
-  `close()` is deliberately NOT `async`: `SessionManager.stopAndAwait` reads
-  `treeKilled` right after asking for the stop, and an assignment landing after
-  a suspension would hand that read a resolved placeholder and run
-  `git worktree remove` against a live checkout.
-- **`gracefulBudget` (`terminal-manager.ts`) is the only policy.** `graceMs` at
-  every call site is a BUDGET, not a promise. Only `type: "agent"` terminals are
-  asked — stamped at one site (`SessionManager.startNow`), which is what makes
-  this a fact rather than a list to maintain. A service or an ad-hoc terminal
-  gets none: on Windows the ask is a keystroke a cooked-mode reader (a
-  `bun install`, a build tool, a shell blocked on a child) cannot see at all, so
-  it would spend the whole budget to change nothing. `askNonAgents` is the
-  shutdown path and is not a widening — POSIX shutdown already SIGTERMed
-  everything and withdrawing that would be the regression.
-- **The two platforms ask by different means, and each has a precondition.**
-  POSIX signals the process GROUP (`kill(-pid, SIGTERM)`), never the bare
-  leader: `spawn()` shell-wraps a free-form command, so the leader is the
-  wrapper and the agent underneath it learns nothing. Windows writes Ctrl-C
-  (ETX) into the ConPTY — which a raw-mode TUI reads and a cooked-mode child
-  does not, and which is NOT a console `CTRL_C_EVENT`;
-  `GenerateConsoleCtrlEvent` was measured and reaches nothing from here.
-- **On Windows the descendant snapshot is taken BEFORE the ask.** An agent that
-  leaves on request takes with it the live parent links `taskkill /T` walks, and
-  a `ShellExecute` child was never in our job — so a survivor holding the
-  checkout would be unreachable by both. `snapshotDescendants` /
-  `survivingProcesses` (`win32-process.ts`) match on pid + parentPid + name, so
-  a recycled pid is never killed. Neither ever answers "all gone" for a process
-  table it could not read: both return **null**, because the safe reading
-  differs by caller — "all alive" for one that is only WAITING
-  (`awaitSnapshotGone` keeps polling), "all gone" for one about to KILL
-  (`killSnapshotSurvivors` sweeps nothing and logs). The grace itself is REFUSED
-  on either of the two failures that leave a departing leader unreachable — no
-  kill-on-close job, or a snapshot that could not be taken — since asking first
-  is then the one thing that genuinely costs reach, and each refusal is logged
-  once per reason.
-- **Budgets are ceilings set by the caller above.** Per-session teardown gets
-  `AGENT_GRACE_MS`, which must stay well inside `TEARDOWN_TIMEOUT_MS` (one
-  budget covers the exit AND the tree, and overrunning it surfaces as
-  `WORKTREE_DELETE_FAILED`). Shutdown clamps to `WINDOWS_SHUTDOWN_GRACE_MS` on
-  Windows ONLY, because `HostController.shutdownOwnedHost` force-kills the whole
-  tree seconds after asking; POSIX keeps the caller's full budget. That clamp
-  sits below the measured claude-code exit, so a Windows app-quit is the one
-  path where the ask is genuinely best-effort — raising it past the app's own
-  poll buys nothing, it just moves the force-kill upstream.
-- **A session inside its grace is not running.** `SessionManager.stopping` keys
-  on the session's own tree-kill promise, and `isRunning` subtracts it — the
-  seconds the ask is worth are seconds `tm.has(id)` still answers true, which
-  otherwise leaves Stop rendering a live row and makes the Start the user
-  presses next hit `startNow`'s already-running guard and be answered `ok: true`
-  having done nothing.
-- **A same-id respawn pays the replaced run's exit bookkeeping itself, at the
-  replacement.** The grace turned the replace window from ~200ms into seconds,
-  which is long enough for the user to press Stop and then Start — so the
-  replaced PTY's exit routinely lands on a slot the replacement already owns,
-  where the same-id gate in `TerminalManager`'s exit handler drops it. The gate
-  is right to (an exit frame for a live slot tells the app a running terminal is
-  dead, and nothing corrects it), but everything that exit OWED — `namer.forget`,
-  `forgetTitleAttempts`, the handler's per-terminal guard, `noteExited` — goes
-  with it, and the restarted session then inherits the dead run's title state and
-  arming. `spawn()`'s duplicate branch fires `onTerminalExited` itself, and the
-  ORDERING is the whole invariant: that cleanup is keyed by terminal id, so it
-  must run while the id still means the old run — dispatching it after the
-  replacement registers reclaims the LIVE run's state instead. Only the callback
-  fires there, never the frame.
-- **Chat mode has no PTY and so no ladder.** codex's ask is its stdin closing
-  (the app-server exits on EOF) with a bounded wait and a `killChildTree`
-  escalation. The SDK-driven backends own their own process lifetime and are not
-  covered here.
+The ladder itself is documented at each definition — `TerminalSession.close`
+(`terminal-session.ts`), `gracefulBudget` and the same-id respawn's exit
+bookkeeping (`terminal-manager.ts`), `AgentSpec.gracefulExit` (`agents/types.ts`),
+`snapshotDescendants` / `survivingProcesses` and their null contract
+(`win32-process.ts`), `AGENT_GRACE_MS` for how the budgets nest. Chat mode has no
+PTY and so no ladder: codex's ask is its stdin closing (`agents/codex/spawn.ts`).
+
+`terminal-graceful-exit.test.ts` gates all of it, and five of its cases PARSE the
+source rather than run it — close is not `async` and assigns its tree-kill promise
+before any suspension, nothing returns between the grace and the sweep, the grace
+is refused unless the sweep is job-backed, and the agents layer takes no runtime
+import. Break the shape and a test names the
+invariant, which is why the reasoning lives beside the code rather than here.
 
 ## Isolated sessions (`src/worktrees/`)
 
 The routing model — which message types carry a `checkoutId`, and the app-side set
 they are mirrored into by hand — is in `docs/architecture.md`. This is the
-host-side lifecycle and its traps.
+host-side lifecycle: what owns what, and where each invariant is written down.
 
 `WorktreeManager` owns managed-worktree lifecycle alone and DERIVES the worktree
 path; it accepts one from neither a client nor `SessionManager`. `CheckoutStore`
@@ -285,209 +179,46 @@ first for every project on the machine, Git-backed or not.
   repository FOLDER, so it cannot be recomputed once that folder is gone:
   removal reads `CheckoutRecord.path`, and `WorktreeManager.projectRoots` keeps
   the pre-rename `wt/<projectId>/` as a candidate for older checkouts.
-- **Two projects can share one worktree root, so nothing may delete a directory
-  it has not proved is its own.** The root name carries only 4 characters of the
-  projectId, and a repository cloned twice gives both copies the same label — so
-  `<label>-<4>` collides at 1-in-65536 per such pair, permanently for that
-  machine. Both sweeps therefore gate on `readCheckoutOwner` (`checkout-owner.ts`),
-  which reads the checkout's own `.git` pointer: it survives the main repository
-  being deleted, which is exactly when `reclaimForgottenProject` runs and when
-  `git rev-parse` refuses to answer. Reclaim removes RECORDED paths one by one —
-  never a blanket `rm` of the root, which destroyed the other project's
-  uncommitted work and reported `stranded: 0`. Regression: `worktree-shared-root.test.ts`.
-- **`main` is synthesized, never persisted.** `agent-core.ts` mints the `main`
-  `CheckoutRecord` from the project path at construction; nothing writes it to
-  `checkouts.json`, and `CheckoutRuntimeRegistry.remove("main")` is a no-op. A
-  store lookup for `main` therefore misses BY DESIGN — every reader special-cases
-  the id (`HostServer.handleCheckoutPath` is the pattern) rather than reporting an
-  unknown checkout. `checkout-types.ts` is where both kind questions are
-  answered, and they are not the same question: `isManagedCheckoutKind` (ours to
-  remove) and `isIsolatedCheckoutKind` (not the primary working tree, so
-  checkout-scoped routing applies). Comparing a `kind` literal inline instead is
-  how a new checkout kind becomes silently wrong in several places at once.
-- **The checkout path never crosses the session wire.** Frames carry a
-  `checkoutId`; the one place a host path is handed out is the loopback control
-  verb `checkout:path`, and even there the caller only NAMES a checkout (`main`
-  resolves from the host's seen catalog, anything else from `checkouts.json`). Its
-  absence from the E2E control plane is deliberate — a phone has no use for a path
-  on this machine.
-- **The dirty/unpushed refusal is duplicated on purpose and must stay in
-  lockstep.** `SessionManager.deleteManaged` preflights so the UI can refuse
-  without destroying anything; `WorktreeManager.removeNow` repeats it under the
-  project lock, closing the race. `WORKTREE_DIRTY` and `WORKTREE_UNPUSHED` are
-  distinct because the two losses are not the same — a directory, versus commits
-  that outlive it — and the app's dialog copy branches on which one it got. The cold-project path
-  (`HostServer.deleteColdSession`) has no preflight at all and leans entirely on
-  the manager's copy — that is the one that can never be relaxed.
-- **`git worktree remove` is the point of no return, and nothing after it may
-  throw.** The agent and the user are free to switch, rename or delete the
-  session's branch at any time — `git:checkout` is checkout-scoped, so the
-  isolated tree is theirs to move — and both of the branch's ordinary end states
-  make `git branch -D` exit non-zero: renamed away ("not found"), or checked out
-  in the user's own tree, which Git refuses to delete out from under a worktree.
-  Throwing there left the store row behind with no directory under it, and
-  `inspect` then reports the worktree missing forever, so the session could never
-  be deleted again. The branch is kept, `worktree_delete_branch_kept` is logged,
-  and the row goes. For the same reason `inspect`'s unpushed check reads
-  rev-list's EXIT CODE: it answers "nothing unpushed" and "I could not answer"
-  with the same empty stdout, and only a branch that is genuinely GONE means
-  nothing is at risk — every other failure refuses, and `force` is the way past.
-  `dirty` reads the exit code for the same reason, and the reclaim below sharpens
-  it: an unreadable `git status` counts as DIRTY wherever a `.git` link survives,
-  because taking it for clean would now hand the user's work to an `rm` rather
-  than to a Git that would have refused.
-- **A delete is seconds of real work, so it is advertised and it refuses.**
-  `SessionManager.deleting` (sessionId → checkoutId, in-memory, never in
-  `toPersisted`) is the single source for BOTH `SessionEntry.deleting` on the
-  wire and `isCheckoutDeleting`, which agent-core's inbound dispatch pulls to
-  refuse every checkout-variable verb for that checkout with
-  `control:result{CHECKOUT_DELETING}`. One set, one lifetime — a pushed mirror
-  could let the flag an app saw and the refusal it then gets disagree. The
-  refusal cannot be a skipped prepare: `runtimeFor` ends in `?? mainRuntime`, so
-  skipping answers a checkout-scoped request out of MAIN's tree. Three orderings
-  are load-bearing: the flag is set only AFTER the dirty/unpushed preflight (a
-  refusal the user can still answer must not blink the row through pending), it
-  is cleared BEFORE the failed-removal rollback re-prepares the runtime (never in
-  a `finally` — the checkout is being restored by then, not removed), and a
-  second `deleteManaged` or a `start()` on a flagged session is refused with
-  `WORKTREE_DELETE_IN_PROGRESS` so the flag's life is exactly one operation.
-  The guard only covers what enters agent-core's inbound dispatch — anything
-  served by `host-server.ts` or the HTTP tunnel bypasses it by construction,
-  `deleteColdSession` included, and leans on `WorktreeManager.removeNow`'s own
-  checks instead.
-- **Runtime teardown precedes `git worktree remove`, always, and must take whole
-  process TREES with it.** The checkout's runtime holds the very directory Git is
-  about to delete: auto-started `services:` PTYs are cwd'd inside it and the
-  watcher keeps handles open. On Windows an open handle is a sharing violation,
-  so `deleteManaged` tears the runtime down first and rebuilds it if Git refuses
-  anyway. Killing the PTY is not enough to achieve that: `IPty.kill()` signals the
-  leader alone, and Windows has no process group to signal in its place, so a
-  shell's children — and the headless `conhost.exe` every console child gets —
-  survive with the directory still open. `killProcessTree` (`terminal-session.ts`)
-  closes that, and it reaches the two platforms by different means that fail in
-  different ways. Windows walks parent links (`taskkill /T`), so it must be
-  issued BEFORE the leader dies — a dead leader no longer provides the links —
-  which is why `TerminalSession.kill()` chains its handle kill onto the tree
-  kill rather than firing both. The tree kill is issued synchronously and
-  AWAITED asynchronously: it returns a promise, so the delete path waits — on
-  Windows, where the promise settles on taskkill's exit and Git sweeps the
-  directory the instant it resolves; the POSIX arm settles at `kill(2)` return
-  and guarantees nothing, which costs nothing because POSIX unlinks regardless.
-  Every other caller ignores the promise and leaves the loop free: a blocking
-  wait on an ordinary terminal close is what made a delete go dark for its whole
-  duration. It therefore must never reject.
-  POSIX names the process GROUP, which needs no ordering but exists
-  only if the child leads one: a pid leading no group names no group and the
-  signal reaches nothing, silently. `processGroupSpawn()` is therefore a
-  PRECONDITION, not a preference, and every non-PTY spawn whose children must
-  die with it has to carry it (a PTY child already leads a session via its own
-  `setsid`). `command:run` is the case that needs all of it: `shell: true` means
-  the handle `teardownCheckoutRuntime` holds is the shell, never the command
-  whose cwd is inside the checkout — `killChildTree` is that pairing, and
-  `TerminalManager.killAndAwaitTree` its PTY counterpart (the same signal
-  `kill()` sends; only the waiting differs) — both take an optional grace that
-  precedes, and never substitutes for, everything described here (**Stopping an
-  agent**). Waiting for the tree is NOT waiting
-  for the PTY's exit — `SessionManager.awaitTerminalExit` is the other question,
-  and `stopAndAwait` needs both answers: an asynchronous taskkill can deliver
-  the leader's exit while it is still walking the rest of the tree, so the exit
-  alone no longer implies the directory is free.
-  A parent-link walk also cannot reach an ORPHAN at all, and orphans are the
-  ordinary case: the agent's own helpers outlive the PTY, and once their parent
-  has exited there is no tree left to walk while their cwd still holds the
-  checkout. Every PTY is therefore also assigned to a kill-on-close job
-  (`win32-process.ts`) the instant its pid exists — later is already too late
-  for whatever the child has spawned by then — and the handle is closed on
-  NATURAL exit as well as on kill, since an agent finishing by itself is what
-  usually happens and a handle nothing closes leaks the tree it owns. Closing
-  the handle IS the reap, so the kernel closing them as the bridge dies sweeps
-  every PTY tree with no shutdown handler involved, which is what covers a
-  force-killed bridge. It narrows the failure rather than removing it — a
-  `ShellExecute`-created child joins its creator's job, not ours — so
-  `listProcessesWithCwdUnder` names whoever still holds a directory when a
-  delete fails anyway, and `evictHolders` (`worktree-manager.ts`) then KILLS
-  that set and retries the reclaim once. Naming alone left the session
-  undeletable, because the user is typically on a phone and cannot reach a pid.
-  Four things make the kill defensible and every one is load-bearing: the path
-  must be under our own worktree root (never `record.managed`, which a
-  hand-edited store can lie about, and this is a kill); each holder is
-  re-verified through `survivingProcesses` in the instant before its handle
-  opens, since a pid alone may have been reissued to a stranger;
-  `terminateProcesses` refuses this process and every ancestor of it, because a
-  checkout with a dev stack in it is held by DOZENS of processes (measured) and
-  the app that spawned the bridge can be among them; and it is wired only into
-  the explicit delete, never the reconcile sweep, which rides on a create by a
-  user who asked for nothing to be removed. None of it applies off Windows.
-  Mind the asymmetry in what a survivor costs
-  — on Windows it blocks the delete outright, while POSIX unlinks the directory
-  out from under it and leaves only a process nobody will reap.
-- **A delete Git cannot finish, Antgrid finishes itself.** `removeNow` no longer
-  treats a non-zero `worktree remove`, or a checkout Git has stopped registering,
-  as a refusal to be reported and left alone. Both leave identical wreckage — a
-  directory that is ours, past guards the user already answered — and the older
-  behaviour made that wreckage PERMANENT: Git deletes `.git` early in its sweep,
-  so the next prune reaped the registration, and every retry then landed in an
-  unregistered-but-present branch that threw unconditionally. `reclaimOwnedPath`
-  deletes it directly and prunes afterwards (the registration is only prunable
-  once nothing claims the directory). It is guarded on the PATH being under
-  `<abDir>/wt/`, never on `record.managed` or `kind`: those are store metadata a
-  hand-edited file can lie about. It is best-effort — the caller re-tests and
-  still raises `WORKTREE_DELETE_FAILED`, because whatever held the directory open
-  is worth surfacing. Git's stderr goes to the local log via `logGitFailure`, and
-  deliberately NOT into the structured `logWorktreeEvent` payloads, which feed
-  analytics and so carry a code and no message. **Surfacing it means NAMING the
-  holder**: on Windows a delete that still fails enumerates the live processes
-  whose cwd is inside the checkout and puts them in the thrown message, capped
-  and spelled RELATIVE to the checkout — a host path never crosses the session
-  wire, and "an orphaned `bun.exe` in `bridge/`" is the actionable half anyway.
-  Their full paths go to the local log (`logDirectoryHolders`); only the COUNT
-  joins the events. That local line is emitted even when NO holder could be
-  named — off Windows, past a reconcile's scan budget, or for a directory refused
-  with nothing live in it — because the events carry no path and it is the only
-  thing that ever says which directory survived. Off Windows the enumeration
-  answers nothing and the sentence must read as it always did. **Naming a holder
-  is also why that failure has its own code.** `friendlyErrorCopy`
-  (`app/lib/widgets/ab_status_helpers.dart`) has a `WORKTREE_DELETE_FAILED` arm
-  and `sessionRefusalCopy` prefers an arm over the bridge's message, so that code
-  would swallow the clause it took a process-table scan to produce. The held case
-  throws `WORKTREE_DELETE_HELD` instead, which has no arm and so falls through to
-  `error.message` verbatim — give it one and the feature goes silent again, with
-  nothing failing to say so.
-  The reconcile sweep does the same reclaim and gets its own
-  `worktree_reclaim_failed` event — a survivor moves none of `ReconcileCounts`,
-  so without it the sweep reports itself as having had nothing to do while it
-  fails on the same stranded directories at every single create — but NOT the
-  same patience: it takes one bare `rm`, not `removeWithRetries`, because it
-  rides on a `session:create` the app abandons after 15s and is itself the retry
-  loop.
-- **A rollback is not a delete.** `rollbackPrepared` bypasses the dirty/unpushed
-  guard on purpose — no agent was ever admitted to that checkout — but never
-  drops a branch whose head has moved out from under it.
-- **Reconciliation may only DELETE on a complete read of the store.** `reconcile`
-  rides on an isolated create the user asked for, and its orphan sweep removes a
-  directory on the strength of no row naming it — so `CheckoutStore.read()`
-  reports `healthy` and the sweep refuses to run without it. `list()` answers `[]`
-  for an unreadable or unparseable file and silently drops an individually bad
-  row (deliberately, so one bad row cannot hide its siblings), and reading that
-  as "no checkouts exist" force-deletes every live worktree in the project. The
-  row-pruning half is safe on a partial read because its failure direction is
-  inaction. The sweep also repeats `removeNow`'s dirty refusal: housekeeping must
-  never be less reluctant than the delete the user asked for.
-- **A row whose worktree is gone must be pruned, not counted as live.** The
-  row-pruning half drops a managed row in two shapes, and both are the same
-  permanent loss wearing opposite symptoms: no directory at all, and a directory
-  Git has stopped registering that has ALSO lost its `.git` link (`isStranded`).
-  A row kept in either state makes its session undeletable forever — `remove()`
-  can neither find a worktree nor let Git drop one — and the second shape used to
-  read as healthy purely because the directory still existed. Both signals are
-  required for `isStranded`, and the `.git` check is what makes it safe: a
-  checkout someone is still working in keeps its link however odd its
-  registration looks. A row is only ever written AFTER `worktree add` and
-  `verifyCreated` succeeded under this same project lock, so a missing directory
-  is always post-hoc loss and never a create in flight. `registeredPaths`
-  distinguishes "Git says none" from "Git could not be asked" (`undefined`) — an
-  empty set standing in for an unanswered question would condemn every checkout
-  in the project at once.
+
+The rest of the lifecycle is a set of named invariants, each documented at its
+own definition and each gated by a test that fails when you break it. Named here
+so you know they exist; read the reasoning where it lives.
+
+`worktree-manager.ts` — **nothing deletes a directory it has not proved is its
+own** (two projects can share a worktree root; both sweeps gate on
+`readCheckoutOwner`, and reclaim removes recorded paths one at a time, never a
+blanket `rm`); **`git worktree remove` is the point of no return** and nothing
+after it may throw, which is why a kept branch is logged rather than raised and
+why `inspect` reads rev-list's EXIT CODE; **a delete Git cannot finish, Antgrid
+finishes itself** (`reclaimOwnedPath`, guarded on the path being under
+`<abDir>/wt/`, never on store metadata); **naming a holder is why that failure
+has its own code** — `WORKTREE_DELETE_HELD` must never gain a
+`friendlyErrorCopy` arm in the app or the clause goes silent; **eviction is
+wired only into the explicit delete**, never the reconcile sweep; **reconcile
+may only DELETE on a complete store read**, and **a row whose worktree is gone
+must be pruned** (`isStranded` needs both signals). Gated by
+`worktree-shared-root`, `worktree-reclaim`, `worktree-reconcile` and
+`worktree-manager-failures`.
+
+`session-manager.ts` — **the dirty/unpushed refusal is duplicated on purpose and
+must stay in lockstep** with `WorktreeManager.removeNow`, which closes the race
+under the project lock; the cold path (`HostServer.deleteColdSession`) has no
+preflight and leans entirely on the manager's copy. **A delete is advertised and
+refuses**: `SessionManager.deleting` is one in-memory set feeding both the wire
+flag and `isCheckoutDeleting`, and its three orderings are load-bearing. Gated by
+`session-delete-in-flight`.
+
+**Runtime teardown precedes `git worktree remove`, always, and must take whole
+process TREES with it** — Windows walks parent links so the tree kill must be
+issued before the leader dies, POSIX needs `processGroupSpawn()` as a
+precondition, and orphans are reached only by the kill-on-close job assigned the
+instant a pid exists. `terminal-session.ts` (`killProcessTree`),
+`win32-process.ts`, and **Stopping an agent** above.
+
+Two more are documented at their definitions and hold no trap worth restating:
+`main` is synthesized and never persisted (`checkout-runtime-registry.ts`,
+`checkout-types.ts` for the two distinct kind questions), and a rollback is not a
+delete (`rollbackPrepared`).
 - **`baseRef` is retained without a reader on purpose** — see its comment in
   `worktrees/checkout-types.ts`.
 
@@ -505,93 +236,39 @@ the step that actually failed.
 
 - **Setup runs before the checkout's `services`, and the deferral is the point.**
   `prepareCheckoutRuntime(checkout, { deferServices: true })` holds back the
-  `services` block ALONE — watchers, port detection and tunnels still start — and
-  `startDeferredServices` is the only thing that clears it (the config watcher
-  also refuses to spawn a service added while a checkout is deferred, or a setup
-  step editing `antgrid.yaml` would start what the deferral is holding).
+  `services` block ALONE — watchers, port detection and tunnels still start.
   Auto-starting `bun run dev` against an empty `node_modules` is a guaranteed
-  failure the user then has to read past. Every terminal state releases it, so
-  `runCheckoutSetup` MUST report exactly one of `done`/`failed`/`skipped` for
-  every run it is handed — a runner that returned nothing would leave that
-  checkout with no services at all. The deferral and the run are taken
-  TOGETHER or not at all, gated on `checkoutDeclaresSetup` at create time: a
-  checkout with no block gets neither, because deferring for a run that never
-  starts strands the dev server and stamping the `done` such a run reports
-  banners "Workspace ready" — durably, and on every launch after it — on a
-  project that never opted in. An EMPTY `steps` list counts as no block, the
-  same answer `begin()` gives it: the app's own nudge writes exactly that for a
-  project it cannot fingerprint (`buildStarterWorktreeSetup`), so reading it as
-  a declaration would reintroduce the banner through the app's writer. The run starts strictly
-  AFTER `createWorktree` has flushed, emitted and re-announced (the create reply
-  must go out well inside the app's 15 s pending-reply timeout), and it is never
-  awaited.
-- **A `running` setup state is never persisted.** `checkouts.json` carries
-  `setupState` only for the durable outcomes (`DURABLE_SETUP_STATES`,
-  `worktrees/checkout-types.ts`); `running` and `interrupted` can never be
-  written. `interrupted` is DERIVED on load from a marker's absence, so a bridge
-  that died mid-run comes back "Setup didn't finish" instead of a row that is
-  permanently preparing and unfixable — the same trap `deleting`'s comment in
-  `protocol.ts` was written to avoid. A marker's absence alone is not enough,
-  though: every checkout cut before the project declared a setup block carries
-  none either, so the derivation is gated on the checkout still DECLARING one
-  (`checkoutDeclaresSetup`), or an upgrade banners "Setup didn't finish" on every
-  isolated session the user already had. A checkout with no `checkouts.json`
-  row at all is the same answer, not a stronger one: a truncated or unreadable
-  store must not banner a whole project with a "Run setup" button `rerunSetup`
-  can only answer `WORKTREE_MISSING`. A rerun clears the marker BEFORE it starts,
-  for the same reason. There is deliberately no auto-rerun on launch: a setup
-  step can be expensive or destructive and the user did not ask for one on this
-  launch.
-- **The setup PTY must stay registered in the runtime's `configuredTerminalIds`
-  or a Windows delete breaks.** That map is what `teardownCheckoutRuntime` sweeps
-  with `killAndAwaitTree` before `git worktree remove`, and a live `bun install`
-  holding the checkout as its cwd is exactly the open handle Windows refuses to
-  delete around. It is registered identity-mapped (`<checkoutId>:setup` → itself,
-  since the app is handed the full id) and off the runner's OWN reported
-  terminalId, so a checkout that spawned nothing registers nothing.
-  A finished run is no longer IN `runs`, so
-  `handleExit` is not a reliable "is this a setup PTY" test: `killAndAwaitTree`
-  resolves on `killProcessTree` + `pty.kill()` returning, which is strictly
-  before node-pty dispatches `onExit`, so `finish()` has already dropped the
-  entry by the time the exit lands on every kill path (cancel, timeout, a rerun
-  over a live run, delete). `agent-core`'s own `setupTerminalIds` set is what
-  still knows, and is what the exit handler must consult.
-  `deleteManaged` additionally cancels a live run and AWAITS the kill on both of
-  its branches — after the dirty/unpushed preflight, since a refusal the user can
-  still answer must not have destroyed the run first — and never refuses a delete
-  on account of setup. The PTY carries no `type` (typing it `service` would put a
-  provisioning log in the services list), which is NOT the same as being
-  hidden: the app's ad-hoc terminal list selects by EXCLUDING `agent` and
-  `service`, so untyped reads there as "a user terminal". It is kept out by
-  name instead — `terminal_list_view.dart` drops every id any session's
-  `setup.terminalId` claims — or the user gets an interactive tab over a live
-  `bun install` and a close button that kills it. Its owner row in
-  `terminalOwners` also SURVIVES its exit, unlike every other terminal's:
-  `sendStatus` routes a terminal by that row, so dropping it would advertise
-  the finished transcript on main and prune it from the checkout bundle the
-  banner's "View setup log" reads — exactly when the run has failed. It is the
-  one terminal spawned with `retainScrollbackOnExit`: the failing step's output is read after the run at
-  least as often as during it, and `TerminalManager.forget` in teardown is what
-  gives that retention a definite end.
-- **`suppressOscTitle` must never be set on the setup PTY.** Step transitions
-  ride OSC 2 titles (`formatSetupStepMarker`), and that flag suppresses the
-  `onTitle` callback itself — the channel being used. The other half is
-  `onTerminalTitle` feeding `setupRunner.handleTitle` and RETURNING before the
-  namer fallback; without that guard the session namer reads setup progress as a
-  conversation title. `suppressOscNotifications` IS set: provisioning must never
-  raise an attention signal. Coarse transitions ride the immediate
-  `notifyObservers()` path, never the debounced activity emit, or the banner lags
-  a step behind; live output stays on the setup terminal's own `terminal:output`.
-- **The start gate lives on the bridge, in memory.** A `session:start` arriving
-  while setup runs records `pendingStart` (with its `initialPrompt`) and replies
-  `ok: true`. A start carrying NO prompt never clears one already queued — the
-  app gates its auto-start paths on `sessionStartQueued`, and this is the
-  backstop for the path that forgets to, since the prompt the user typed has
-  no other copy. `archive` drops a queued start outright: the agent must not
-  launch into a session the user has already put away — the entry carries `setup.pendingStart`, so the reply is honest.
-  A user who creates a session on a phone and locks the screen must come back to
-  a running agent, which is why the queue is not the app's. The prompt is
-  never persisted: a restart legitimately drops it and the session sits stopped
-  with a Start affordance. `session:setup` (`skip` releases the gate and leaves
-  the run going, `cancel` kills the tree, `rerun` starts fresh from a settled
-  state) is the only verb over it.
+  failure the user then has to read past. The deferral and the run are taken
+  TOGETHER or not at all, so `runCheckoutSetup` MUST report exactly one of
+  `done`/`failed`/`skipped` for every run it is handed — a runner that returned
+  nothing leaves that checkout with no services at all. The gate, the empty-steps
+  case and the create-reply ordering are on `checkoutSetupPolicy`
+  (`session-manager.ts`) and in `checkout-setup.ts`.
+
+The rest of the lifecycle is documented at its definitions and gated by
+`checkout-setup.test.ts`: **a `running` state is never persisted** and
+`interrupted` is DERIVED from a marker's absence, gated on the checkout still
+declaring a block (`DURABLE_SETUP_STATES` in `checkout-types.ts`,
+`checkoutSetupPolicy` and the recovery loop in `session-manager.ts`); **the setup
+PTY stays in `configuredTerminalIds`** or a Windows delete breaks on its open
+handle, and `agent-core`'s `setupTerminalIds` is what still identifies it after
+`finish()` has dropped the run; **`suppressOscTitle` must never be set on it**
+because step transitions ride the OSC 2 channel that flag suppresses
+(`checkout-setup.ts`), while `suppressOscNotifications` IS set.
+
+Three couplings reach into `app/` and so are gated by nothing on this side:
+- The setup PTY carries no `type`, which is not the same as hidden — the app's
+  ad-hoc list selects by EXCLUDING `agent` and `service`, so `terminal_list_view.dart`
+  must keep dropping every id a session's `setup.terminalId` claims, or the user
+  gets an interactive tab over a live `bun install` with a close button.
+- Its owner row in `terminalOwners` SURVIVES its exit, unlike every other
+  terminal's: `sendStatus` routes by that row, so dropping it prunes the
+  transcript the banner's "View setup log" reads — exactly when the run failed.
+- **The start gate lives on the bridge, in memory.** A `session:start` during a
+  run records `pendingStart` (with its `initialPrompt`) and replies `ok: true`; a
+  start carrying NO prompt never clears one already queued, because the app gates
+  its auto-start paths on `sessionStartQueued` and this is the backstop for the
+  path that forgets to. The queue is not the app's so a user who creates a
+  session on a phone and locks the screen comes back to a running agent. The
+  prompt is never persisted. `session:setup` (`skip`/`cancel`/`rerun`) is the
+  only verb over it.
