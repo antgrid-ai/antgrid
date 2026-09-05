@@ -22,6 +22,7 @@ import '../providers/relay_connection.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
+import '../session_bus/session_bus_carrier.dart';
 import '../storage/cached_sessions_store.dart';
 import '../launcher/host_control_client.dart';
 import '../navigation/back_intent.dart';
@@ -298,8 +299,38 @@ class _AppShellState extends ConsumerState<AppShell> {
     // for a machine de-selected in the picker is still reaped — the picker swaps
     // WorkspaceShell out entirely, so a reaper lower than here is unmounted
     // exactly when de-selection happens.
-    return ControlPlaneReaper(child: body);
+    return ControlPlaneReaper(child: SessionBusCarrierHost(child: body));
   }
+}
+
+/// Keeps the session-bus carrier alive for the app's lifetime.
+///
+/// The carrier is a `Notifier`, so something must hold a subscription or
+/// Riverpod never builds it. Mounted here, above the picker/workspace route
+/// switch, for the same reason as [ControlPlaneReaper] below and one more: a
+/// lead and its members must keep exchanging frames while the user is looking
+/// at an unrelated project, or at no project at all.
+class SessionBusCarrierHost extends ConsumerStatefulWidget {
+  const SessionBusCarrierHost({super.key, required this.child});
+  final Widget child;
+  @override
+  ConsumerState<SessionBusCarrierHost> createState() =>
+      _SessionBusCarrierHostState();
+}
+
+class _SessionBusCarrierHostState extends ConsumerState<SessionBusCarrierHost> {
+  @override
+  void initState() {
+    super.initState();
+    // listenManual, not a build-time watch: the carrier's status changes on
+    // every forwarded frame, and rebuilding the whole route subtree for a
+    // counter would be absurd. The reaper's own note below records the crash a
+    // build-time listen on a wide fan-in provider has already caused.
+    ref.listenManual(sessionBusCarrierProvider, (_, _) {});
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 /// Always-mounted control-plane socket reconciler. Mounted above the picker/

@@ -13,7 +13,7 @@ import '../widgets/drawer_entry_row.dart' show activateDrawerEntryById;
 import 'agent_transport.dart';
 import 'demo_mode.dart';
 import 'device_provisioning.dart';
-import 'providers.dart' show focusedServiceOrNull;
+import 'open_target_session.dart';
 import 'recent_sessions.dart';
 import 'sessions.dart';
 import 'ui_attention_providers.dart';
@@ -262,32 +262,14 @@ bool _applyInFocusedProject(ProviderContainer ref, NavLocation loc) {
   // that names none is a project destination and keeps its surface.
   var sessionRefused = false;
   if (sessionId != null) {
-    ref.read(activeSessionIdProvider.notifier).set(sessionId);
-    // Read back: the write is silently refused for a session the bridge is
-    // deleting, and revealing that session's surface afterwards would aim the
-    // workspace at a transcript nobody is going to be shown.
-    //
-    // Only that refusal, never a presence test of our own: an id this app does
-    // not recognise is written through by design (see [ActiveSessionId]),
-    // because the list for a project lands in stages and a guard demanding
-    // presence drops every selection made before it does — which is most of
-    // them. A session deleted while the toast was up is corrected by
-    // [reconcileActiveSession] on the next list change.
-    sessionRefused = ref.read(activeSessionIdProvider) != sessionId;
-    if (!sessionRefused) {
-      // Announcing the pick is what CLEARS the unread dot, and this path is the
-      // only route to a session that would otherwise skip it: the cross-project
-      // path gets it from `_bootstrapSessions`, and every manual tap from
-      // `session_row`'s own focused-project branch. Without it the bridge still
-      // believes this client is on the previously selected session — so the
-      // session now on screen keeps its dot, and the one the user left is
-      // exempted from earning another.
-      //
-      // `focusedServiceOrNull`, not the façade: this runs from a tap handler
-      // past an await, where the focused project's `ProjectSession` may be
-      // unresolved and reading the provider directly THROWS.
-      focusedServiceOrNull(ref, (s) => s.sessionsService)?.focus(sessionId);
-    }
+    // The shared write, so this route and a member-tab press cross the same
+    // [ActiveSessionId] refusal and announce the pick identically. Refused
+    // means the bridge is deleting that session; an id this app does not
+    // recognise is written through by design, because a project's list lands
+    // in stages and a guard demanding presence drops most selections made
+    // before it does — [reconcileActiveSession] corrects a stale one on the
+    // next list change.
+    sessionRefused = !focusSessionInFocusedProject(ref, sessionId);
   }
   // Even a route that lost its session still moves the user to the workspace:
   // the project is a real destination, and reporting success from the settings

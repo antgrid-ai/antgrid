@@ -311,47 +311,76 @@ bool pickerMatchesFocus(PickerProject p, String? focusId) {
 /// While the control-plane connection is in flight (or on any error / offline
 /// target / no host yet) this resolves to an empty map and the dropdown falls
 /// back to the persisted catalog.
-final newSessionDetectedToolsProvider = FutureProvider<Map<String, String?>>((
-  ref,
-) async {
-  final target = ref.watch(selectedTargetProjectProvider);
-  if (target == null) return const <String, String?>{};
+final newSessionDetectedToolsProvider = FutureProvider<Map<String, String?>>(
+  (ref) => ref.watch(
+    detectedToolsForProvider(
+      sessionTargetOf(ref.watch(selectedTargetProjectProvider)),
+    ).future,
+  ),
+);
 
-  // Before the local arm, same as [newSessionBranchCatalogProvider]: that arm
-  // spawns the real bridge host, and the demo's own agent is canned. The
-  // failure is silent — the surrounding catch swallows it — so nothing on
-  // screen would say the sample project had just started a bridge.
-  if (ref.watch(demoModeProvider)) {
-    return const <String, String?>{kDemoAgentTool: null};
-  }
+/// The typed target a picker row addresses, or null for no row.
+///
+/// The bridge between the composer's own selection model and every provider
+/// keyed by [SessionTarget] — which is what such a key has to be, since
+/// [PickerProject] carries no value equality and so can never key a family.
+SessionTarget? sessionTargetOf(PickerProject? project) {
+  if (project == null) return null;
+  if (project.isLocal) return LocalProject(project.id);
+  return RemoteProject(
+    machineUuid: project.machineUuid ?? baseDeviceUuid(project.id),
+    projectId: project.projectId ?? baseProjectId(project.id),
+  );
+}
 
-  if (target.isLocal) {
-    try {
-      final host = await ref.watch(hostControllerProvider).ensureHost();
-      final client = HostControlClient(
-        port: host.controlPort,
-        token: host.token,
-      );
-      try {
-        final listed = await client.toolsList();
-        return {for (final t in listed.tools) t.tool: t.label};
-      } finally {
-        client.close();
+/// Tools installed on [target]'s MACHINE, keyed by the target rather than read
+/// off the composer's current pick — [newSessionDetectedToolsProvider] above
+/// holds what the map means and where each arm sources it.
+///
+/// Keyed, because the add-machine dialog asks about a machine the composer is
+/// not pointing at: driving the composer's own selection to answer that would
+/// silently change what the composer creates next.
+final detectedToolsForProvider =
+    FutureProvider.family<Map<String, String?>, SessionTarget?>((
+      ref,
+      target,
+    ) async {
+      if (target == null) return const <String, String?>{};
+
+      // Before the local arm, same as [newSessionBranchCatalogProvider]: that arm
+      // spawns the real bridge host, and the demo's own agent is canned. The
+      // failure is silent — the surrounding catch swallows it — so nothing on
+      // screen would say the sample project had just started a bridge.
+      if (ref.watch(demoModeProvider)) {
+        return const <String, String?>{kDemoAgentTool: null};
       }
-    } catch (_) {
-      return const <String, String?>{};
-    }
-  }
 
-  // Remote: target.id is now the compound <uuid>.<projId> (Task 3). Tools are
-  // per-MACHINE, so key the control-plane state by the bare deviceUuid. Prefer
-  // the split machineUuid when present; fall back to deriving it from the id.
-  final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
-  final state = ref.watch(controlPlaneStateProvider(machineUuid)).value;
-  final tools = state?.tools;
-  if (tools == null) return const <String, String?>{};
-  return {for (final t in tools) t.tool: t.label};
-});
+      if (target.isLocal) {
+        try {
+          final host = await ref.watch(hostControllerProvider).ensureHost();
+          final client = HostControlClient(
+            port: host.controlPort,
+            token: host.token,
+          );
+          try {
+            final listed = await client.toolsList();
+            return {for (final t in listed.tools) t.tool: t.label};
+          } finally {
+            client.close();
+          }
+        } catch (_) {
+          return const <String, String?>{};
+        }
+      }
+
+      // Tools are per-MACHINE, so key the control-plane state by the bare
+      // deviceUuid rather than by the compound registration id.
+      final machineUuid = baseDeviceUuid(target.registrationId);
+      final state = ref.watch(controlPlaneStateProvider(machineUuid)).value;
+      final tools = state?.tools;
+      if (tools == null) return const <String, String?>{};
+      return {for (final t in tools) t.tool: t.label};
+    });
 
 /// Wire-advertised chat-capable tool keys for the selected target's MACHINE, or
 /// `null` when the bridge hasn't told us (older bridge pre-dating the
@@ -377,11 +406,22 @@ final newSessionDetectedToolsProvider = FutureProvider<Map<String, String?>>((
 /// with the composer means each mount starts fresh, with no stale dependent to
 /// notify. Keep this and [newSessionSupportsChatProvider] both autoDispose.
 final newSessionChatCapableToolsProvider =
-    FutureProvider.autoDispose<Set<String>?>((ref) async {
-      final target = ref.watch(selectedTargetProjectProvider);
+    FutureProvider.autoDispose<Set<String>?>(
+      (ref) => ref.watch(
+        chatCapableToolsForProvider(
+          sessionTargetOf(ref.watch(selectedTargetProjectProvider)),
+        ).future,
+      ),
+    );
+
+/// Chat-capable tool keys on [target]'s MACHINE — the keyed form of
+/// [newSessionChatCapableToolsProvider], whose doc holds both what a null means
+/// and why `autoDispose` is load-bearing here as well.
+final chatCapableToolsForProvider = FutureProvider.autoDispose
+    .family<Set<String>?, SessionTarget?>((ref, target) async {
       if (target == null) return null;
 
-      // Same host-spawn hazard as [newSessionDetectedToolsProvider] above.
+      // Same host-spawn hazard as [detectedToolsForProvider] above.
       if (ref.watch(demoModeProvider)) {
         return const <String>{kDemoAgentTool};
       }
@@ -406,7 +446,7 @@ final newSessionChatCapableToolsProvider =
         }
       }
 
-      final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
+      final machineUuid = baseDeviceUuid(target.registrationId);
       final state = ref.watch(controlPlaneStateProvider(machineUuid)).value;
       if (state == null) return null;
       return chatCapableSetOrNull(

@@ -671,6 +671,8 @@ class _StubSessionsService extends SessionsService {
     String approvalPolicy = 'default',
     String isolation = 'shared',
     String? baseBranch,
+    SessionMemberRef? memberOf,
+    String? brief,
   }) async {
     await onCreate();
     created++;

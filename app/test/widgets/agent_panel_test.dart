@@ -8,14 +8,20 @@
 import 'package:antgrid/design/widgets/ab_state_chip.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/ab_project.dart';
+import 'package:antgrid/models/session_entry.dart';
+import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/remote_access.dart';
+import 'package:antgrid/providers/sessions.dart';
+import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
+import 'package:antgrid/widgets/agent_transcript_view.dart';
 import 'package:antgrid/widgets/remote_host_chip.dart';
+import 'package:antgrid/widgets/session_member_tabs.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -51,6 +57,31 @@ AbProject _remoteProject() => AbProject(
   hostDeviceUuid: _remoteUuid,
   hostMachineName: 'build-server',
   lastOpenedAt: DateTime.now(),
+);
+
+const _memberProjectId = 'member-proj';
+
+SessionEntry _leadSession({required bool withMember}) => SessionEntry(
+  id: 'sess-lead',
+  name: 'Trace the leak',
+  createdAt: 0,
+  lastUsedAt: 0,
+  archived: false,
+  running: true,
+  mode: 'chat',
+  members: withMember
+      ? const [
+          SessionMember(
+            ref: SessionMemberRef(
+              machineId: 'peer-machine-uuid',
+              projectId: 'peer-proj',
+              sessionId: 'sess-peer',
+              machineLabel: 'Studio',
+            ),
+            joinedAt: 1,
+          ),
+        ]
+      : const [],
 );
 
 /// Renders the result of the real production [titleBarProjectActions] so the
@@ -399,6 +430,80 @@ void main() {
       expect(find.byTooltip('Hide panel'), findsNothing);
       expect(find.byTooltip('Hide projects'), findsNothing);
       expect(find.byTooltip('Show projects'), findsNothing);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  /// Pumps the desktop AgentPanel over a chat session that is (or is not) a
+  /// multi-machine one, so the strip's position is measured against the real
+  /// header and the real transcript rather than a stand-in column.
+  Future<void> pumpSession(WidgetTester tester, {required bool withMember}) async {
+    tester.view.physicalSize = const Size(1000, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final stores = await buildTestStoreOverrides();
+    addTearDown(stores.close);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          ...stores.overrides,
+          selectedTargetProvider.overrideWith(
+            () => ValueController<SessionTarget?>(
+              const LocalProject(_memberProjectId),
+            ),
+          ),
+          activeSessionProvider.overrideWithValue(
+            _leadSession(withMember: withMember),
+          ),
+          activeSessionIdProvider.overrideWith(
+            () => ValueController('sess-lead'),
+          ),
+          localDeviceUuidProvider.overrideWith((ref) async => _localUuid),
+          accountAgentsProvider.overrideWith(
+            (_) async => const <InventoryAgent>[],
+          ),
+        ],
+        child: const MaterialApp(home: Scaffold(body: AgentPanel())),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+  }
+
+  // The strip belongs BETWEEN the header and the transcript: above it the
+  // machine names would read as part of the breadcrumb, and below it they would
+  // scroll away with the conversation they are meant to switch.
+  testWidgets('AgentPanel mounts the member strip under the header', (
+    tester,
+  ) async {
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      await pumpSession(tester, withMember: true);
+
+      expect(find.byType(SessionMemberTabs), findsOneWidget);
+      final strip = tester.getTopLeft(find.byType(SessionMemberTabs)).dy;
+      expect(strip, greaterThanOrEqualTo(tester.getBottomLeft(find.byType(AgentBar)).dy));
+      expect(
+        strip,
+        lessThan(tester.getTopLeft(find.byType(AgentTranscriptView)).dy),
+      );
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  // Mounted unconditionally, so the panel never re-derives what membership
+  // means: a session working alone has to cost no row.
+  testWidgets('AgentPanel gives a solo session no strip', (tester) async {
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      await pumpSession(tester, withMember: false);
+
+      expect(find.byType(SessionMemberTabs), findsOneWidget);
+      expect(tester.getSize(find.byType(SessionMemberTabs)).height, 0);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

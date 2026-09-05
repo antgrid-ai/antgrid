@@ -313,6 +313,14 @@ class LocalAgentLauncher {
         port: connect.port,
         token: connect.token,
         appPid: pid,
+        // Unconditional: a LocalTransport only exists on a machine running a
+        // bridge, and this app is that bridge's loopback owner — the sole
+        // carrier for session-bus frames addressed to its projects' members
+        // (the bridge hands them to the owner only when it claims this).
+        capabilities: const {
+          'checkoutRouting': true,
+          'sessionBusCarrier': true,
+        },
       );
       await t.connect();
       _log('opened project $projectId (port ${connect.port})');

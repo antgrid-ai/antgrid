@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:antgrid/project/project_session_registry.dart';
+import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/control_plane.dart';
@@ -16,6 +17,7 @@ import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/app_shell.dart';
+import 'package:antgrid/session_bus/session_bus_links.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
@@ -77,6 +79,13 @@ final _focusedRegistrationProvider =
       () => ValueController(null),
     );
 
+/// Mutable stand-in for the derived session-bus links, so a test can end the
+/// last membership at runtime without driving a whole drawer + session graph.
+final _busLinksProvider =
+    NotifierProvider<ValueController<SessionBusLinks>, SessionBusLinks>(
+      () => ValueController(SessionBusLinks.empty),
+    );
+
 void main() {
   testWidgets(
     'reaper survives the picker→workspace child swap and still reaps when the canvas is left',
@@ -96,6 +105,10 @@ void main() {
 
       final container = ProviderContainer(
         overrides: [
+          // These two tests drive no drawer/session graph, so the derived link
+          // set is stated rather than computed — a membership is what the third
+          // test below exercises.
+          sessionBusLinksProvider.overrideWithValue(SessionBusLinks.empty),
           projectSessionRegistryProvider.overrideWith(
             () => ProjectSessionRegistryController(registry),
           ),
@@ -211,6 +224,10 @@ void main() {
 
       final container = ProviderContainer(
         overrides: [
+          // These two tests drive no drawer/session graph, so the derived link
+          // set is stated rather than computed — a membership is what the third
+          // test below exercises.
+          sessionBusLinksProvider.overrideWithValue(SessionBusLinks.empty),
           projectSessionRegistryProvider.overrideWith(
             () => ProjectSessionRegistryController(registry),
           ),
@@ -575,6 +592,87 @@ void main() {
       );
 
       await stores.cachedSessionsStore.flushNow();
+    },
+  );
+
+  testWidgets(
+    'a member machine is never reaped while the membership lasts, and is reaped after the last release',
+    (tester) async {
+      // The session bus runs through this app, so a member's socket is not a
+      // nicety: reaping it strands a session that is still running on that
+      // machine. Nothing commands the unpin either — it has to fall out of the
+      // links the moment the last member is released.
+      useInMemoryPrefs();
+      final stores = await buildTestStoreOverrides();
+      addTearDown(stores.close);
+
+      final registry = ProjectSessionRegistry(
+        localCap: 10,
+        relayCap: 30,
+        onEvict: (_) async {},
+      );
+      registry.touch('K.a', isLocal: false);
+      final mgr = _RecordingManager(['K', 'M']);
+      final container = ProviderContainer(
+        overrides: [
+          ...stores.overrides,
+          projectSessionRegistryProvider.overrideWith(
+            () => ProjectSessionRegistryController(registry),
+          ),
+          relayConnectionManagerProvider.overrideWithValue(mgr),
+          // Focused on a project and pinned to the workspace surface, so the
+          // canvas's "keep every open socket" clause cannot be what holds M.
+          selectedRegistrationIdProvider.overrideWith(
+            (ref) => ref.watch(_focusedRegistrationProvider),
+          ),
+          workbenchSurfaceProvider.overrideWith(
+            () => ValueController(WorkbenchSurface.workspace),
+          ),
+          sessionBusLinksProvider.overrideWith(
+            (ref) => ref.watch(_busLinksProvider),
+          ),
+          eagerControlPlanesEnabledProvider.overrideWithValue(false),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.read(_focusedRegistrationProvider.notifier).set('K.a');
+      container
+          .read(_busLinksProvider.notifier)
+          .set(
+            SessionBusLinks([
+              SessionBusLink(
+                leadProjectId: 'p-lead',
+                leadSessionId: 's-lead',
+                peer: const SessionMemberRef(
+                  machineId: 'M',
+                  projectId: 'p-peer',
+                  sessionId: 's-peer',
+                ),
+              ),
+            ]),
+          );
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const ControlPlaneReaper(child: SizedBox()),
+        ),
+      );
+
+      expect(
+        container.read(controlPlaneAliveTargetsProvider),
+        unorderedEquals(['K', 'M']),
+        reason:
+            'M backs no open project and is not focused — only the '
+            'membership keeps it alive',
+      );
+      expect(mgr.released, isEmpty);
+
+      container.read(_busLinksProvider.notifier).set(SessionBusLinks.empty);
+      await tester.pump();
+
+      expect(container.read(controlPlaneAliveTargetsProvider), ['K']);
+      expect(mgr.released, ['M']);
     },
   );
 }

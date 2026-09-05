@@ -6,6 +6,7 @@ import '../launcher/host_controller.dart';
 import '../launcher/local_agent_launcher.dart';
 import '../project/project_session_registry.dart';
 import '../services/control_plane_client.dart';
+import '../session_bus/session_bus_links.dart';
 import '../util/device_id.dart';
 import 'account_agents.dart';
 import 'agent_transport.dart';
@@ -379,5 +380,11 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // or expansion exists to claim them. Without this union the reaper would
   // close each eager socket moments after the kick opened it.
   alive.addAll(ref.watch(eagerControlPlaneTargetsProvider));
+  // Every machine hosting a member of a session this app leads. The session bus
+  // runs through this app (D7), so its socket is not a nicety: closing it
+  // silently strands a running member. Derived purely from the links, so the
+  // unpin needs no counterpart on any release path — the last membership ending
+  // removes the link, and the machine drops out of this set on the next pass.
+  alive.addAll(ref.watch(sessionBusLinksProvider).peerMachineIds);
   return alive;
 });

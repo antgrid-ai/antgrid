@@ -154,6 +154,19 @@ class SessionSetup {
   );
 }
 
+/// The most machines one session may hold at once. Hand-mirrors
+/// `MAX_SESSION_MEMBERS` (`bridge/src/protocol.ts`), which is what actually
+/// refuses the record — this copy exists so the Add-machine affordance can say
+/// the cap has been reached instead of letting the user compose a request the
+/// lead bridge will reject.
+const int kMaxSessionMembers = 16;
+
+/// Longest brief a `session:create` may carry. Hand-mirrors `MAX_BRIEF_CHARS`
+/// (`bridge/src/session-bus/delivery.ts`) for the same reason as
+/// [kMaxSessionMembers]: the field is bounded where it is typed, not only where
+/// it is refused.
+const int kMaxBriefChars = 10000;
+
 /// Address of one session in a multi-machine session — the machine, project and
 /// session that identify it, plus the labels a row renders with.
 ///

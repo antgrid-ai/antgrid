@@ -1,7 +1,53 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
+
+/// A loopback stand-in for the agent's local WS listener: completes the
+/// handshake, records the hello, and refuses the post-ready `state.snapshot`
+/// so [LocalTransport.connect] returns without waiting out its RPC budget.
+class _HelloRecorder {
+  late final HttpServer _server;
+  final hello = Completer<Map<String, dynamic>>();
+
+  int get port => _server.port;
+
+  Future<void> start() async {
+    _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    unawaited(
+      _server
+          .listen((req) async {
+            final ws = await WebSocketTransformer.upgrade(req);
+            ws.listen((data) {
+              final m = jsonDecode(data as String) as Map<String, dynamic>;
+              switch (m['type']) {
+                case 'hello':
+                  if (!hello.isCompleted) hello.complete(m);
+                  ws.add(jsonEncode({'type': 'ready'}));
+                case 'request':
+                  ws.add(
+                    jsonEncode({
+                      'type': 'response',
+                      'requestId': m['requestId'],
+                      'ok': false,
+                      'error': {
+                        'code': 'E_UNSUPPORTED',
+                        'message': 'no snapshot',
+                      },
+                    }),
+                  );
+              }
+            });
+          })
+          .asFuture<void>()
+          .catchError((Object _) {}),
+    );
+  }
+
+  Future<void> close() => _server.close(force: true);
+}
 
 void main() {
   test(
@@ -49,4 +95,46 @@ void main() {
       await expectLater(t.messages, emitsDone);
     },
   );
+
+  group('hello capabilities', () {
+    Future<Map<String, dynamic>> helloFrom({
+      Map<String, Object?>? capabilities,
+    }) async {
+      final agent = _HelloRecorder();
+      await agent.start();
+      addTearDown(agent.close);
+      final t = LocalTransport(
+        port: agent.port,
+        token: 't',
+        appPid: 1,
+        capabilities: capabilities ?? const {'checkoutRouting': true},
+      );
+      addTearDown(t.dispose);
+      await t.connect();
+      return agent.hello.future;
+    }
+
+    test('sends the default map when the caller names none', () async {
+      final hello = await helloFrom();
+      expect(hello['capabilities'], {'checkoutRouting': true});
+    });
+
+    test('sends a caller-supplied map verbatim', () async {
+      // Verbatim is the contract: the agent gates on individual flags, and a
+      // client that filtered to flags it recognized could never announce one
+      // added after it shipped.
+      final hello = await helloFrom(
+        capabilities: const {
+          'checkoutRouting': true,
+          'sessionBusCarrier': true,
+          'somethingNewerThanThisClient': 'yes',
+        },
+      );
+      expect(hello['capabilities'], {
+        'checkoutRouting': true,
+        'sessionBusCarrier': true,
+        'somethingNewerThanThisClient': 'yes',
+      });
+    });
+  });
 }

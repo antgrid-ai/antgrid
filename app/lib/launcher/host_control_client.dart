@@ -3,7 +3,11 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../services/control_plane_client.dart'
-    show AgentWorkStatus, parseAgentDescriptors, parseSessionStatuses;
+    show
+        AgentWorkStatus,
+        CapabilityCard,
+        parseAgentDescriptors,
+        parseSessionStatuses;
 import '../models/agent_descriptor.dart';
 import '../models/branch_remote_status.dart';
 import '../models/git_branch.dart';
@@ -481,6 +485,40 @@ class HostControlClient {
   Future<RemoteAccessPolicy> remoteAccessSet(bool enabled) async {
     final m = await _post({'type': 'mobile-access:set', 'enabled': enabled});
     return RemoteAccessPolicy.fromJson(m);
+  }
+
+  /// This machine's Capability Card for [projects] — the loopback twin of
+  /// [ControlPlaneClient.capabilityCard], which only ever answers for OTHER
+  /// machines.
+  ///
+  /// The caller supplies each project's path, like [gitBranches]: the desktop
+  /// holds its own catalog, so nothing here depends on the host's seen-project
+  /// map. A host that predates the verb rejects it as `BAD_REQUEST`, so every
+  /// caller degrades (no repo match) rather than failing the surface it feeds.
+  Future<CapabilityCard> capabilityCard({
+    required List<({String projectId, String projectPath, String? label})>
+    projects,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    final m = await _post({
+      'type': 'machine:capability-card',
+      'projects': [
+        for (final p in projects)
+          {
+            'projectId': p.projectId,
+            'projectPath': p.projectPath,
+            'label': ?p.label,
+          },
+      ],
+    }, timeout: timeout);
+    final card = CapabilityCard.fromJson(m);
+    if (card == null) {
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed machine:capability-card response',
+      );
+    }
+    return card;
   }
 
   Future<GitBranchCatalog> gitBranches({

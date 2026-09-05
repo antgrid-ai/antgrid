@@ -1395,6 +1395,20 @@ export class HostServer {
       case "mobile-access:get":
       case "mobile-access:set":
         return this.handleRemoteAccessVerb(req);
+      case "machine:capability-card": {
+        try {
+          const card = await readCapabilityCard(
+            req.projects.map((p) => ({ projectId: p.projectId, path: p.projectPath, label: p.label })),
+          );
+          return { id: req.id, ok: true, type: "machine:capability-card", os: card.os, projects: card.projects };
+        } catch (err: any) {
+          return {
+            id: req.id,
+            ok: false,
+            error: { code: err.code || "UNKNOWN_ERROR", message: err.message || String(err) },
+          };
+        }
+      }
       case "git:branches": {
         try {
           const catalog = await listLocalBranches(req.projectPath);

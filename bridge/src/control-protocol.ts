@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { AgentDescriptor } from "./protocol";
 import type { BranchRemoteStatus, StashEntry } from "./git-branches";
+import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capability-card";
 
 export const ControlRequestSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("project:list") }),
@@ -21,6 +22,28 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("phones:unpair"), phonePubkey: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("mobile-access:get") }),
   z.object({ id: z.string().min(1), type: z.literal("mobile-access:set"), enabled: z.boolean() }),
+  // The machine half of the Capability Card over the LOOPBACK plane. The relay
+  // plane already answers `machine.capability-card`, so without this the app
+  // cannot read the NORMALISED remote of a project on its own machine — the key
+  // the add-machine dialog matches a peer machine's projects against.
+  //
+  // Paths come from the caller, exactly as `git:branches` below takes them: the
+  // desktop already holds its own projects' paths, so this needs neither the
+  // seen-project catalog nor the remote-access gate that bound the relay-side
+  // handler (loopback callers are exempt by design).
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("machine:capability-card"),
+    projects: z
+      .array(
+        z.object({
+          projectId: z.string().min(1),
+          projectPath: z.string().min(1),
+          label: z.string().optional(),
+        }),
+      )
+      .max(MAX_CAPABILITY_CARD_PROJECTS),
+  }),
   z.object({
     id: z.string().min(1),
     type: z.literal("git:branches"),
@@ -123,6 +146,7 @@ export type ControlResponse =
   | { id: string; ok: true; type: "phones:unpair" }
   | { id: string; ok: true; type: "mobile-access:get"; enabled: boolean }
   | { id: string; ok: true; type: "mobile-access:set"; enabled: boolean }
+  | { id: string; ok: true; type: "machine:capability-card"; os: OsCard; projects: Record<string, RepoCard> }
   | { id: string; ok: true; type: "git:branches"; isRepository: boolean; current: string | null; branches: string[]; worktreeSessionsSupported: boolean }
   | { id: string; ok: true; type: "git:remote-state"; status: BranchRemoteStatus }
   | { id: string; ok: true; type: "git:checkout"; current: string; stashed?: StashEntry }

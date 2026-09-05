@@ -310,6 +310,11 @@ class SessionsService {
     return pending.future;
   }
 
+  /// [memberOf] and [brief] make this a PEER creation: the row the bridge
+  /// creates records the lead it answers to, and the brief is the first thing
+  /// its Handler is told. Both are refused apart — the bridge rejects a brief
+  /// with no [memberOf], and rejects [memberOf] with `isolation: 'worktree'`
+  /// (D10) — so a caller that sets either sets it deliberately.
   Future<SessionEntry?> create({
     String? name,
     String? tool,
@@ -319,6 +324,8 @@ class SessionsService {
     String approvalPolicy = 'default',
     String isolation = 'shared',
     String? baseBranch,
+    SessionMemberRef? memberOf,
+    String? brief,
   }) {
     final requestId = _newRequestId();
     final pending = _newPending<SessionEntry?>(
@@ -337,6 +344,8 @@ class SessionsService {
           'approvalPolicy': approvalPolicy,
           'isolation': isolation,
           'baseBranch': ?baseBranch,
+          'memberOf': ?memberOf?.toJson(),
+          'brief': ?brief,
         }),
       ),
     );
@@ -509,6 +518,70 @@ class SessionsService {
   void resyncFocus() {
     final id = _focused;
     if (id != null) focus(id);
+  }
+
+  /// Records [member] as a peer of [sessionId] on the LEAD's row.
+  ///
+  /// Both membership verbs raise on a refusal rather than collapsing it to
+  /// null: a record that did not land leaves a peer session running with
+  /// nothing pointing at it, and the caller's only correct answer is to undo
+  /// the creation it just made and say so.
+  Future<SessionEntry?> memberRecord({
+    required String sessionId,
+    required SessionMemberRef member,
+    String role = 'peer',
+  }) {
+    return _mutate('session:member-record', {
+      'sessionId': sessionId,
+      'member': member.toJson(),
+      'role': role,
+    }, raiseRefusal: true);
+  }
+
+  /// Releases [member] from [sessionId] on the LEAD's row.
+  ///
+  /// [member] is sent as the identifying triple alone — the labels a
+  /// [SessionMemberRef] also carries are the record's, and re-sending a stale
+  /// copy of them here could only overwrite fresher ones.
+  ///
+  /// [deleteRefused] is what makes the record `released-delete-refused`: the
+  /// peer's session is still on its machine, and the user still has work to do
+  /// about it (5.4). [reason] is the peer's own refusal code, carried as free
+  /// text for the row to show.
+  Future<SessionEntry?> memberRelease({
+    required String sessionId,
+    required SessionMemberRef member,
+    bool? deleteRefused,
+    String? reason,
+  }) {
+    return _mutate('session:member-release', {
+      'sessionId': sessionId,
+      'member': {
+        'machineId': member.machineId,
+        'projectId': member.projectId,
+        'sessionId': member.sessionId,
+      },
+      'deleteRefused': ?deleteRefused,
+      'reason': ?reason,
+    }, raiseRefusal: true);
+  }
+
+  /// Marks this PEER session's lead as unreachable, or reachable again (5.4).
+  ///
+  /// Peer-side only: the bridge never dials the lead, so the app is the only
+  /// thing that can answer this, and only when something actually asked — a
+  /// press on the lead tab that resolved no service. A mark and nothing more,
+  /// which is what keeps D11 honest: the absence is recorded and the user still
+  /// decides what to do about it. Idempotent on the bridge, which returns the
+  /// entry untouched when the state already matches.
+  Future<SessionEntry?> memberOrphan({
+    required String sessionId,
+    required bool orphaned,
+  }) {
+    return _mutate('session:member-orphan', {
+      'sessionId': sessionId,
+      'orphaned': orphaned,
+    }, raiseRefusal: true);
   }
 
   Future<SessionEntry?> _mutate(

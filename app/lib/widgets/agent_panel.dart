@@ -51,6 +51,8 @@ import 'remote_access_control.dart';
 import 'remote_host_chip.dart';
 import 'session_agent_mark.dart';
 import 'session_approval_badge.dart';
+import 'session_member_tabs.dart';
+import 'session_membership_menu.dart';
 import 'session_mode_control.dart';
 import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
@@ -119,11 +121,12 @@ class AgentPanel extends ConsumerWidget {
                 child: TitleBarBreadcrumb(showBranchPill: false),
               ),
               const SizedBox(width: AbTokens.space6),
-              const _SessionOverflowButton(),
+              const _SessionOverflowButton(compact: true),
             ],
           )
         else
           const AgentBar(),
+        const SessionMemberTabs(),
         const SessionSetupBanner(),
         Expanded(
           child: isChat && activeId != null
@@ -147,18 +150,31 @@ class AgentPanel extends ConsumerWidget {
   }
 }
 
-/// Mobile-only overflow trigger for the branch pill, the terminal/chat switch
-/// and the Handler shield/pill — see the comment above its call site in
-/// [AgentPanel.build]. Fitting all three inline left too little width for the
-/// session title itself on a phone; folding them behind one kebab is what
-/// gives the title (and its rename tap target) its room back. Desktop's
-/// [AgentBar] keeps them inline — the context panel there is wide enough.
-class _SessionOverflowButton extends StatelessWidget {
-  const _SessionOverflowButton();
+/// Overflow trigger for everything about the session that has no inline home.
+///
+/// On a phone (see the comment above its call site in [AgentPanel.build]) that
+/// is the branch pill, the terminal/chat switch and the Handler shield: fitting
+/// all three inline left too little width for the session title itself, and
+/// folding them behind one kebab is what gives the title (and its rename tap
+/// target) its room back. [AgentBar] keeps all three inline — the context panel
+/// there is wide enough — and opens the same kebab for the membership section
+/// alone, which has no inline form on either breakpoint.
+class _SessionOverflowButton extends ConsumerWidget {
+  const _SessionOverflowButton({required this.compact});
+
+  /// True for the phone header, which folds the branch pill, the mode switch
+  /// and the Handler row in behind the same kebab. False for [AgentBar], where
+  /// all three stay inline and only the membership section is left to fold —
+  /// so the button hides itself whenever that section is empty, which is every
+  /// session that works alone.
+  final bool compact;
 
   @override
-  Widget build(BuildContext context) {
-    return Builder(
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (!compact && ref.watch(sessionMembershipActionsProvider).isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final button = Builder(
       // AbCompactTapTargets: the toolbar row already owns its height, so the
       // button's mobile tap-target inflation (24px visual -> 44px hit box)
       // must not widen the box this anchors the popup to — without it the
@@ -177,6 +193,15 @@ class _SessionOverflowButton extends StatelessWidget {
         ),
       ),
     );
+    // The leading gap belongs to this button rather than to the bar: on
+    // desktop it is absent for every session that works alone, and a spacer
+    // emitted at the call site would end the bar with a gap leading nowhere.
+    return compact
+        ? button
+        : Padding(
+            padding: const EdgeInsets.only(left: AbTokens.space6),
+            child: button,
+          );
   }
 
   Future<void> _open(BuildContext anchor) async {
@@ -190,7 +215,7 @@ class _SessionOverflowButton extends StatelessWidget {
       // rather than the wider 4px default gap other (non-adjacent) popups use.
       gap: 2,
       preferred: AbMenuPlacement.below,
-      builder: (_) => const _SessionOverflowMenu(),
+      builder: (_) => _SessionOverflowMenu(compact: compact),
     );
   }
 }
@@ -202,7 +227,13 @@ class _SessionOverflowButton extends StatelessWidget {
 /// has to watch a provider renders as — see its doc for why a static
 /// [AbMenuItem] can't do this.
 class _SessionOverflowMenu extends ConsumerWidget {
-  const _SessionOverflowMenu();
+  const _SessionOverflowMenu({required this.compact});
+
+  /// See [_SessionOverflowButton.compact]. The membership rows are the only
+  /// ones both forms carry: everything above them has an inline home on the
+  /// desktop bar, and restating it here would give the same session two live
+  /// controls for one setting.
+  final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -211,9 +242,12 @@ class _SessionOverflowMenu extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (branch != null) AbMenuHeaderLabel(branch),
-        const SessionModeMenuItem(),
-        const _HandlerMenuItem(),
+        if (compact) ...[
+          if (branch != null) AbMenuHeaderLabel(branch),
+          const SessionModeMenuItem(),
+          const _HandlerMenuItem(),
+        ],
+        const SessionMembershipMenuItems(),
       ],
     );
   }
@@ -366,6 +400,7 @@ class AgentBar extends ConsumerWidget {
         const HandlerHeaderControl(),
         const SizedBox(width: AbTokens.space6),
         const WorkspaceMenuButton(),
+        const _SessionOverflowButton(compact: false),
         if (projectActions.isNotEmpty) ...[
           const SizedBox(width: AbTokens.space6),
           ...projectActions,
