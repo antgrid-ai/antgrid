@@ -375,24 +375,27 @@ void main() {
     expect(_addButton(tester).onTap, isNotNull);
   });
 
-  testWidgets('the machine is started in chat when its agent speaks chat', (
-    tester,
-  ) async {
-    await _openDialog(tester);
-    await _pickStudio(tester);
-    await _pickAgent(tester);
-    await _typeBrief(tester);
-    await tester.tap(find.text('Add'));
-    await tester.pumpAndSettle();
+  testWidgets(
+    'the machine is always started in terminal, even when its agent speaks '
+    'chat',
+    (tester) async {
+      // The seeded catalog and `chatCapableToolsForProvider` override both
+      // mark claude-code chat-capable — a peer created in chat mode gets no
+      // Antgrid MCP server and so could never receive a task, report, or ask
+      // the lead, which is exactly the regression this pins.
+      await _openDialog(tester);
+      await _pickStudio(tester);
+      await _pickAgent(tester);
+      await _typeBrief(tester);
+      await tester.tap(find.text('Add'));
+      await tester.pumpAndSettle();
 
-    // `chatCapableToolsForProvider` is autoDispose: read rather than watched,
-    // it answers its opening `AsyncLoading` and disposes again, which left the
-    // mode null for every agent no matter what the machine advertised.
-    expect(added, hasLength(1));
-    expect(added.single.tool, 'claude-code');
-    expect(added.single.mode, 'chat');
-    expect(added.single.brief, 'Take the Windows half');
-  });
+      expect(added, hasLength(1));
+      expect(added.single.tool, 'claude-code');
+      expect(added.single.mode, 'terminal');
+      expect(added.single.brief, 'Take the Windows half');
+    },
+  );
 
   testWidgets('a cancelled dialog has created nothing anywhere', (
     tester,

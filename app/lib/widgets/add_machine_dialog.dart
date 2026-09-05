@@ -111,7 +111,6 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
   List<PickerProject> _projectRows = const [];
   PickerProject? _resolvedProject;
   RepoCard? _repoCard;
-  Set<String>? _chatCapableTools;
 
   /// Machines already carrying an active member of this session. A second
   /// session on a machine that is already in is not refused by the bridge, but
@@ -159,20 +158,6 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
       if (row.projectId == matchId) return row;
     }
     return null;
-  }
-
-  /// Which of the peer machine's agents speak chat, or null while nobody has
-  /// said.
-  ///
-  /// WATCHED, like every other datum here, and that is the whole point:
-  /// `chatCapableToolsForProvider` is `autoDispose`, so a bare `read` at press
-  /// time creates the element, gets its opening `AsyncLoading` — its body is a
-  /// control-plane round trip — and disposes it again, answering null on every
-  /// press no matter what the machine advertised.
-  Set<String>? _readChatCapableTools() {
-    final peer = _peerTarget;
-    if (peer == null) return null;
-    return ref.watch(chatCapableToolsForProvider(peer)).value;
   }
 
   RepoCard? _readRepoCard(PickerProject? project) {
@@ -242,7 +227,6 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
     final host = navigator.context;
     final leadRef = _leadRef();
     final brief = _brief.text.trim();
-    final chatCapable = _chatCapableTools?.contains(tool);
     final model = _model;
     final add = container.read(addMachineActionProvider);
 
@@ -257,10 +241,11 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
         tool: tool,
         brief: brief,
         model: model,
-        // Null when nothing has told this app whether the tool speaks chat:
-        // the bridge picks the agent's own default, which is a better guess
-        // than either constant.
-        mode: chatCapable == null ? null : (chatCapable ? 'chat' : 'terminal'),
+        // Always terminal: a chat session gets no Antgrid MCP server at all
+        // (see the driver's own comment, e.g. claude-code/driver.ts), so a
+        // chat peer would have no session-bus tools and could never receive
+        // a task, report, or ask the lead.
+        mode: 'terminal',
         sessionName: project.name,
         peerMachineLabel: _machineLabel,
         peerProjectLabel: project.name,
@@ -302,7 +287,6 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
     _projectRows = _readProjectRows();
     _resolvedProject = _readResolvedProject(_projectRows);
     _repoCard = _readRepoCard(_resolvedProject);
-    _chatCapableTools = _readChatCapableTools();
     final project = _resolvedProject;
     final peer = _peerTarget;
     final card = _repoCard;

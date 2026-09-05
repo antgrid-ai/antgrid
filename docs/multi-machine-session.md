@@ -25,10 +25,12 @@ Known divergences from this document, which the code decides:
   field is a member whose machine the carrier cannot reach.
 - §5.4's "lead reports no such session -> peer self-deletes" is not implemented. Only orphan
   marking exists (D11 marks; the user acts).
-- Codex chat-mode sessions get no MCP server and so cannot be peers; the carrier attaches only
-  once the lead project is open in the desktop app (the lead bridge holds and retries until then);
-  MCP `tools/list_changed` is unwired, so an already-running agent sees session tools only after
-  its role cache expires; and artifacts are session-scoped with no cross-context fetch and no GC.
+- Add Machine always launches the peer in terminal mode: a chat session gets no MCP server at all
+  (the driver comments say so outright), so a chat peer would have no session-bus tools and could
+  never receive a task, report, or ask the lead. The carrier attaches only once the lead project is
+  open in the desktop app (the lead bridge holds and retries until then); MCP `tools/list_changed`
+  is unwired, so an already-running agent sees session tools only after its role cache expires; and
+  artifacts are session-scoped with no cross-context fetch and no GC.
 
 ---
 
