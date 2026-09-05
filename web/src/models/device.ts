@@ -64,7 +64,11 @@ export async function checkCapAndUpsert(
     displayName: string;
   }
 ): Promise<CheckCapResult> {
-  // Per-user advisory lock for the duration of this transaction.
+  // Per-user advisory lock held for this whole transaction: it is what closes
+  // the count -> insert TOCTOU window, so two concurrent registrations cannot
+  // both read a count under the cap and both insert. Every cap check belongs
+  // INSIDE it — one added outside is unserialized against this one and silently
+  // reopens the window this exists to close.
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${args.userId}))`;
 
   // Single round-trip: both cap counts + whether this device already exists
