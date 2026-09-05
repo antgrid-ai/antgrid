@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
+import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../models/workspace_view.dart';
@@ -170,13 +171,38 @@ class _WorkspaceTabBarState extends State<WorkspaceTabBar> {
                 spacing: AbTokens.space2,
                 children: [
                   if (widget.onToggleExpand != null)
-                    AbIconButton(
-                      icon: widget.isExpanded
-                          ? AbIcons.collapse
-                          : AbIcons.expand,
-                      tooltip: widget.isExpanded ? 'Restore' : 'Expand',
-                      onTap: widget.onToggleExpand,
-                    ),
+                    if (widget.isExpanded)
+                      // Expanded means the agent panel is gone from the
+                      // window entirely (see `_PanelMode.contextExpanded`'s
+                      // doc in workspace_shell.dart) — the ONLY way back, so
+                      // it reads as a labeled button rather than an icon a
+                      // returning user has to already know the meaning of.
+                      AbButton(
+                        compact: true,
+                        label: 'Restore',
+                        // Brighter than the label (which stays the button's
+                        // default textSecondary) so the glyph reads as an
+                        // icon next to the word, not a second run of text —
+                        // same color as the label made the pair blend
+                        // together at this size.
+                        leading: Padding(
+                          padding: const EdgeInsets.only(
+                            right: AbTokens.space2,
+                          ),
+                          child: AbIcon(
+                            AbIcons.collapse,
+                            size: AbTokens.iconButtonGlyph,
+                            color: context.antgrid.textPrimary,
+                          ),
+                        ),
+                        onTap: widget.onToggleExpand,
+                      )
+                    else
+                      AbIconButton(
+                        icon: AbIcons.expand,
+                        tooltip: 'Expand',
+                        onTap: widget.onToggleExpand,
+                      ),
                   // Hides the panel outright (not a collapse to a strip); the
                   // window title bar's panel control is the way back.
                   if (widget.onClose != null)

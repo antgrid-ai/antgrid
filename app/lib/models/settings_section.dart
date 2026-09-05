@@ -12,7 +12,6 @@ enum SettingsSection {
   appearance,
   uiSize,
   accessibility,
-  design,
   privacy,
   help,
   account,

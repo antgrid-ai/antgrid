@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_snack_bar.dart';
 
 import '../constants/breakpoints.dart';
@@ -138,12 +139,12 @@ Future<String?> _showPopover(
   return completer.future;
 }
 
-const double _kPopoverWidth = 380.0;
+const double _kPopoverWidth = 480.0;
 
-/// Ceiling on the thumbnail. Tall enough to recognise a cropped element or a
-/// drawing at a glance, short enough that the comment field stays in view
-/// without scrolling for the common case.
-const double _kCapturePreviewMaxHeight = 220.0;
+/// Default ceiling on [CaptureImagePreview]. Tall enough to recognise a
+/// cropped element or a drawing without squinting, short enough that the
+/// comment field stays in view without scrolling for the common case.
+const double _kCapturePreviewMaxHeight = 380.0;
 
 class _CommentContent extends StatefulWidget {
   final String selectedText;
@@ -225,16 +226,28 @@ class _CommentContentState extends State<_CommentContent> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            widget.sourceLabel,
-            style: AbTokens.monoStyle(
-              fontSize: AbTokens.fontXs,
-              color: context.antgrid.textMuted,
-            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text(
+                  widget.sourceLabel,
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: context.antgrid.textMuted,
+                  ),
+                ),
+              ),
+              AbIconButton(
+                icon: AbIcons.close,
+                tooltip: 'Cancel',
+                onTap: widget.onCancel,
+              ),
+            ],
           ),
           const SizedBox(height: AbTokens.space8),
           if (image != null) ...[
-            _CapturePreview(bytes: image),
+            CaptureImagePreview(bytes: image),
             const SizedBox(height: AbTokens.space8),
           ],
           Container(
@@ -259,6 +272,8 @@ class _CommentContentState extends State<_CommentContent> {
           TextField(
             controller: _commentController,
             focusNode: _focusNode,
+            minLines: 2,
+            maxLines: 2,
             style: AbTokens.sansStyle(fontSize: AbTokens.fontMd),
             decoration: InputDecoration(
               hintText: 'Add a comment (optional)',
@@ -291,25 +306,6 @@ class _CommentContentState extends State<_CommentContent> {
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              GestureDetector(
-                onTap: widget.onCancel,
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AbTokens.space8,
-                      vertical: AbTokens.space4,
-                    ),
-                    child: Text(
-                      'Cancel',
-                      style: AbTokens.sansStyle(
-                        color: context.antgrid.textMuted,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: AbTokens.space8),
               GestureDetector(
                 onTap: _send,
                 child: MouseRegion(
@@ -352,23 +348,31 @@ class _CommentContentState extends State<_CommentContent> {
   }
 }
 
-/// The exact image about to be attached, shown before it is.
+/// The exact image about to be attached, shown before it is. Shared by the
+/// comment popover above and by `showAutoSendCapture` (the draw tool's
+/// auto-send dialog), so both surfaces show the pending capture at the same
+/// size.
 ///
 /// Decoded at [_kCaptureDecodeWidth] rather than natively: a viewport capture
 /// is a multi-megapixel bitmap, and holding one at full size to draw it a
 /// couple of hundred pixels wide is the difference between a thumbnail and a
 /// spike in memory every time this box opens.
-class _CapturePreview extends StatelessWidget {
-  const _CapturePreview({required this.bytes});
+class CaptureImagePreview extends StatelessWidget {
+  const CaptureImagePreview({
+    super.key,
+    required this.bytes,
+    this.maxHeight = _kCapturePreviewMaxHeight,
+  });
 
-  static const int _kCaptureDecodeWidth = 760;
+  static const int _kCaptureDecodeWidth = 960;
 
   final Uint8List bytes;
+  final double maxHeight;
 
   @override
   Widget build(BuildContext context) {
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxHeight: _kCapturePreviewMaxHeight),
+      constraints: BoxConstraints(maxHeight: maxHeight),
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: context.antgrid.bgDeepest,

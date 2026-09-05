@@ -10,7 +10,7 @@ import '../project/project_session.dart';
 import 'pending_reply.dart';
 
 /// Upload failure with a machine [code] (mirrors the bridge's
-/// file:upload-result error codes, plus app-side OFFLINE/TIMEOUT).
+/// file:upload-result error codes, plus app-side OFFLINE/TIMEOUT/CANCELLED).
 class UploadException implements Exception {
   final String code;
   final String message;
@@ -18,6 +18,22 @@ class UploadException implements Exception {
 
   @override
   String toString() => 'UploadException($code): $message';
+}
+
+/// A one-shot cancel signal for [UploadService.upload]. Cancelling stops the
+/// chunk loop at its next check and races any in-flight ack wait (see
+/// `_raceCancel`), so the upload aborts within one round trip rather than
+/// waiting out the 30s step timeout — the bridge is left to sweep the
+/// abandoned uploadId itself, the same path an expired upload already takes.
+class UploadCancelToken {
+  final Completer<void> _completer = Completer<void>();
+
+  bool get isCancelled => _completer.isCompleted;
+  Future<void> get whenCancelled => _completer.future;
+
+  void cancel() {
+    if (!_completer.isCompleted) _completer.complete();
+  }
 }
 
 /// Snackbar copy for any upload failure. Every failure path in the attach and
@@ -32,6 +48,8 @@ String uploadErrorText(Object error, String fileName) {
         return 'Not connected to the agent — cannot upload "$fileName"';
       case 'TIMEOUT':
         return 'Upload of "$fileName" timed out';
+      case 'CANCELLED':
+        return 'Upload of "$fileName" was cancelled';
       case 'BUSY':
         return 'Too many uploads in progress — try again in a moment';
       case 'INVALID_NAME':
@@ -147,12 +165,14 @@ class UploadService {
   }
 
   /// Uploads [bytes] and returns where the bridge staged it. Throws
-  /// [UploadException] on any failure.
+  /// [UploadException] on any failure, including `CANCELLED` once
+  /// [cancelToken] has been cancelled.
   Future<UploadResult> upload({
     required String fileName,
     required Uint8List bytes,
     String? mimeType,
     void Function(int sent, int total)? onProgress,
+    UploadCancelToken? cancelToken,
   }) async {
     if (_disposed) {
       throw const UploadException('OFFLINE', 'Session closed');
@@ -173,7 +193,7 @@ class UploadService {
         'mimeType': ?mimeType,
       }),
     );
-    final startReply = await startReplyF;
+    final startReply = await _raceCancel(startReplyF, cancelToken);
     _throwIfError(startReply);
     final uploadId = startReply['uploadId'] as String;
     _requestIdByUpload[uploadId] = requestId;
@@ -183,10 +203,29 @@ class UploadService {
         requestId: requestId,
         bytes: bytes,
         onProgress: onProgress,
+        cancelToken: cancelToken,
       );
     } finally {
       _requestIdByUpload.remove(uploadId);
     }
+  }
+
+  /// Races a pending reply against [cancelToken] so a cancel lands within one
+  /// round trip instead of waiting out [_kStepTimeout]. The losing side is
+  /// left to resolve on its own — a late ack just completes an entry nothing
+  /// is awaiting any more, same as it does today for a reply that arrives
+  /// after this request already failed.
+  Future<Map<String, dynamic>> _raceCancel(
+    Future<Map<String, dynamic>> reply,
+    UploadCancelToken? cancelToken,
+  ) {
+    if (cancelToken == null) return reply;
+    return Future.any([
+      reply,
+      cancelToken.whenCancelled.then<Map<String, dynamic>>(
+        (_) => throw const UploadException('CANCELLED', 'Upload cancelled'),
+      ),
+    ]);
   }
 
   Future<UploadResult> _streamChunksAndFinish({
@@ -194,9 +233,13 @@ class UploadService {
     required String requestId,
     required Uint8List bytes,
     void Function(int sent, int total)? onProgress,
+    UploadCancelToken? cancelToken,
   }) async {
     var seq = 0;
     for (var off = 0; off < bytes.length; off += kChunkBytes) {
+      if (cancelToken?.isCancelled ?? false) {
+        throw const UploadException('CANCELLED', 'Upload cancelled');
+      }
       final end = math.min(off + kChunkBytes, bytes.length);
       final ackF = _await('ack:$uploadId:$seq');
       await session.sendForCheckout(
@@ -207,9 +250,12 @@ class UploadService {
           'data': base64Encode(Uint8List.sublistView(bytes, off, end)),
         }),
       );
-      _throwIfError(await ackF);
+      _throwIfError(await _raceCancel(ackF, cancelToken));
       onProgress?.call(end, bytes.length);
       seq++;
+    }
+    if (cancelToken?.isCancelled ?? false) {
+      throw const UploadException('CANCELLED', 'Upload cancelled');
     }
 
     final resultF = _await('done:$requestId');
@@ -217,7 +263,7 @@ class UploadService {
       checkoutId,
       createAbMessage('file:upload-done', {'uploadId': uploadId}),
     );
-    final result = await resultF;
+    final result = await _raceCancel(resultF, cancelToken);
     _throwIfError(result);
     return UploadResult(
       path: result['path'] as String,

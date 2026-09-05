@@ -37,6 +37,7 @@ import '../util/ab_log.dart';
 import '../widgets/new_session/environment_menu.dart'
     show PanelHint, PanelRow, PanelSectionHeader;
 import '../util/image_thumbnail.dart';
+import '../widgets/auto_send_capture_dialog.dart';
 import '../widgets/preview_draw_overlay.dart';
 import '../widgets/send_capture_to_agent.dart';
 import '../widgets/preview_empty_state.dart';
@@ -375,15 +376,16 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     _addrController.text = url;
   }
 
-  /// Resolve user input → a navigable URL on the ACTIVE tab. This panel
-  /// previews YOUR dev-server ports, not the open web, so the two things
-  /// worth doing with typed input are: follow an absolute URL exactly as
+  /// Resolve user input → a navigable URL on the ACTIVE tab. Only called by
+  /// [_handleAddressSubmit] once it has already ruled out a port/dev-server
+  /// link (see [parsePreviewTarget] there) — so the two things left worth
+  /// doing with what reaches here are: follow an absolute URL exactly as
   /// given (a redirect target, an OAuth provider, a link your own app
   /// produced — the webview has real device networking regardless of
-  /// local/relay mode, it isn't sandboxed to the tab's origin), or treat
-  /// free text as a PATH relative to that tab's origin — the useful "type
-  /// `/login` to jump around your own dev server" behavior this panel exists
-  /// for. There is no third case: a bare word that isn't a path doesn't get
+  /// local/relay mode, it isn't sandboxed to the tab's origin), or treat free
+  /// text as a PATH relative to that tab's origin — the useful "type `/login`
+  /// to jump around your own dev server" behavior this panel exists for.
+  /// There is no third case: a bare word that isn't a path doesn't get
   /// guessed at as a site or searched for.
   void _navigateToInput(String input) {
     final id = ref.read(previewStateProvider).value?.activeTabId;
@@ -415,23 +417,30 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   }
 
   /// Dispatches an address-bar submit to whichever job it means: opening a
-  /// NEW tab (no active tab to navigate, or the "+" button armed
-  /// [_composingNewTab]) versus navigating the active one. One field serves
-  /// both — a real browser's address bar does the same double duty for
-  /// "new tab" vs "this tab", it just has an actual blank tab to submit into
-  /// first; this panel has no such placeholder tab, so the flag stands in
-  /// for it.
+  /// NEW-OR-EXISTING tab for a port (no active tab to navigate, the "+"
+  /// button armed [_composingNewTab], or the text names a port/dev-server
+  /// link even with a tab already active) versus navigating the active tab
+  /// to a path on ITS OWN origin. One field serves both — a real browser's
+  /// address bar does the same double duty for "new tab" vs "this tab", it
+  /// just has an actual blank tab to submit into first; this panel has no
+  /// such placeholder tab, so the flag stands in for it.
   ///
-  /// A new tab accepts a PORT or a LINK to your own dev server (see
-  /// [parsePreviewTarget]) — both open through the real preview/tunnel
-  /// pipeline, same as picking one from the port list, and land at whatever
-  /// path the link named. Anything else is rejected: this previews your dev
-  /// server, not the open web.
+  /// [parsePreviewTarget] is checked before falling back to a same-origin
+  /// path even with a tab active: without this, typing a different port to
+  /// replace a wrong one (say `4000` was a mistake and `4200` is the real
+  /// server) fell through to [_navigateToInput], which reads a bare number as
+  /// a PATH on the CURRENT origin and requested `localhost:4000/4200` instead
+  /// of ever reaching port 4200. A port/link target reuses the tab-per-port
+  /// pipeline ([_openPort], same as the port list) rather than reloading one
+  /// — it switches straight to an already-open tab for that port, or opens a
+  /// new one. Anything that ISN'T a port/link (an actual path, or a foreign
+  /// absolute URL) still navigates the active tab in place: this previews
+  /// your dev server, not the open web.
   void _handleAddressSubmit(String input) {
     final activeId = ref.read(previewStateProvider).value?.activeTabId;
+    final trimmed = input.trim();
     if (activeId == null || _composingNewTab) {
       if (_composingNewTab) setState(() => _composingNewTab = false);
-      final trimmed = input.trim();
       if (trimmed.isEmpty) return;
 
       final target = parsePreviewTarget(trimmed);
@@ -446,6 +455,15 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       unawaited(_openPort(port, scheme, path: path));
       _addrFocus.unfocus();
       return;
+    }
+    if (trimmed.isNotEmpty) {
+      final target = parsePreviewTarget(trimmed);
+      if (target != null) {
+        final (port, scheme, path) = target;
+        unawaited(_openPort(port, scheme, path: path));
+        _addrFocus.unfocus();
+        return;
+      }
     }
     _navigateToInput(input);
   }
@@ -1074,16 +1092,18 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// the crop that are ABOUT to be sent — a drawing is already the whole
   /// message, made on the page the user was looking at. Interposing a second
   /// "are you sure, add a comment" step there only asks them to confirm what
-  /// they just drew. Where the words go instead depends on the mode, which is
-  /// what [sendCaptureToAgent] decides: a chat gets the image as an
-  /// attachment in its composer, ready to be typed at; a terminal gets the
-  /// staged path written into it on the spot.
+  /// they just drew. Where the words go instead depends on the mode: a chat
+  /// gets the image as an attachment in its composer, ready to be typed at,
+  /// and returns instantly; a terminal gets the staged path written into it
+  /// once the upload lands, which [showAutoSendCapture] shows a progress bar
+  /// for (and a way to cancel), since that upload is real time on the wire and
+  /// the drawing tool had nothing on screen for it before.
   Future<void> _sendDrawing(int port, Uint8List bytes) async {
     final container = ref.container;
     final sourceUrl = _tabStates[port]?.currentUrl ?? '';
     setState(() => _drawActiveForPort = null);
 
-    await sendCaptureToAgent(
+    await showAutoSendCapture(
       context: context,
       container: container,
       text: '[from preview screenshot: $sourceUrl]',

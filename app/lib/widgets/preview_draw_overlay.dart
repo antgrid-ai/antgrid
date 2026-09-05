@@ -233,10 +233,9 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
   final FocusNode _noteFocus = FocusNode();
 
   /// Holds primary focus for the overlay so Ctrl+Z (Cmd+Z on macOS) reaches
-  /// [_undo] the same way the toolbar button does. Autofocused rather than
-  /// requested explicitly: nothing else on this surface wants first focus,
-  /// and the note editor's own [FocusNode] takes it over the moment a note
-  /// is opened, same as any other descendant focus.
+  /// [_undo] the same way the toolbar button does. The note editor's own
+  /// [FocusNode] takes it over the moment a note is opened, same as any
+  /// other descendant focus.
   final FocusNode _overlayFocus = FocusNode(debugLabel: 'PreviewDrawOverlay');
 
   PreviewDrawTool _tool = PreviewDrawTool.pen;
@@ -256,6 +255,15 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
     // instead of stranding an editor nothing will close.
     _noteFocus.addListener(() {
       if (!_noteFocus.hasFocus) _commitNote();
+    });
+    // `autofocus` on the Focus widget below only wins when nothing else in
+    // the scope is already focused — the address bar (or whatever the user
+    // last touched before arming the pencil) is still mounted underneath and
+    // usually still holds it, which is what left Ctrl+Z with nowhere to
+    // land. An explicit request, once the overlay is actually in the tree,
+    // forces it over regardless of who had it before.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _overlayFocus.requestFocus();
     });
   }
 
@@ -388,6 +396,10 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
       }
     });
     _noteController.clear();
+    // Hand primary focus back to the overlay so Ctrl+Z keeps reaching
+    // [_undo] once the note editor's own FocusNode gives it up — nothing
+    // else on this surface claims focus on its own.
+    _overlayFocus.requestFocus();
   }
 
   /// Discards the note being typed outright, whatever it currently holds —
@@ -401,7 +413,7 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
       _marks.removeAt(index);
     });
     _noteController.clear();
-    _noteFocus.unfocus();
+    _overlayFocus.requestFocus();
   }
 
   void _undo() {

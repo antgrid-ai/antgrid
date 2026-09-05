@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -27,7 +26,6 @@ import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
 import '../widgets/settings/help_about_section.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
-import 'design_gallery_screen.dart';
 import 'upgrade_screen.dart';
 
 class _UiScaleStep {
@@ -63,7 +61,6 @@ extension SettingsSectionUI on SettingsSection {
     SettingsSection.appearance => 'APPEARANCE',
     SettingsSection.uiSize => 'UI SIZE',
     SettingsSection.accessibility => 'ACCESSIBILITY',
-    SettingsSection.design => 'DESIGN',
     SettingsSection.privacy => 'PRIVACY',
     SettingsSection.help => 'HELP',
     SettingsSection.account => 'ACCOUNT',
@@ -253,11 +250,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                             _PresetTile(
                               preset: preset,
                               selected: settings.preset == preset,
-                              caption:
-                                  settings.followSystemBrightness &&
-                                      preset == AbThemePreset.light
-                                  ? 'used when system is light'
-                                  : null,
                               onTap: () => preset == AbThemePreset.custom
                                   ? service.setCustomColors(
                                       bg:
@@ -373,25 +365,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                       ),
                     ],
                   ),
-                  // Dev-only: the design gallery is a developer reference, not a
-                  // user-facing feature — keep it out of release builds.
-                  if (!kReleaseMode) ...[
-                    const SizedBox(height: AbTokens.space12),
-                    _Section(
-                      section: SettingsSection.design,
-                      body: [
-                        const SizedBox(height: AbTokens.space8),
-                        AbButton(
-                          label: 'Open design gallery',
-                          onTap: () => Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => const DesignGalleryScreen(),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
                   const SizedBox(height: AbTokens.space12),
                   _Section(
                     section: SettingsSection.privacy,
@@ -511,16 +484,11 @@ class _PresetTile extends StatelessWidget {
     required this.preset,
     required this.selected,
     required this.onTap,
-    this.caption,
   });
 
   final AbThemePreset preset;
   final bool selected;
   final VoidCallback onTap;
-
-  /// Optional role hint under the preset name (e.g. the light preset's
-  /// "used when system is light" while follow-system is on).
-  final String? caption;
 
   AbColors _peek(BuildContext context) {
     if (preset == AbThemePreset.custom) {
@@ -569,18 +537,6 @@ class _PresetTile extends StatelessWidget {
                 fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
               ),
             ),
-            if (caption != null) ...[
-              const SizedBox(height: AbTokens.space2),
-              Text(
-                caption!,
-                // Colored with the TILE's palette (not the ambient theme) so
-                // the hint stays legible on the light preview surface.
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXxs,
-                  color: p.textMuted,
-                ),
-              ),
-            ],
           ],
         ),
       ),

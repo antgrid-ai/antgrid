@@ -70,6 +70,7 @@ import 'storage/update_handoff_store.dart';
 import 'update/update_gate.dart';
 import 'util/ab_log.dart';
 import 'util/detached.dart';
+import 'util/windows_paste_fix.dart';
 import 'widgets/auth_splash.dart';
 import 'widgets/demo_frame.dart';
 import 'window/window_chrome.dart';
@@ -106,6 +107,10 @@ Future<void> main() async {
     defaultDebugPrint(message, wrapWidth: wrapWidth);
   };
   WidgetsFlutterBinding.ensureInitialized();
+  // Before any text field can take a keystroke: Windows' clipboard-history
+  // paste (Win+V) types a bare "v" instead of pasting without this — see
+  // WindowsPasteFix's doc.
+  WindowsPasteFix.install();
   // Before any socket can seal a frame: the default cipher is pure Dart and
   // blocks the UI isolate for the whole of a tunneled preview response.
   installNativeE2eCipher();
