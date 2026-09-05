@@ -735,6 +735,14 @@ class _RemoveButton extends ConsumerStatefulWidget {
     // will be lost. Selected down to the bool: this is asked for every drawer
     // row, and the list identity changes on every `session:updated` of the
     // focused project.
+    //
+    // Deliberately UNFILTERED on `memberOf` — unlike the drawer's own
+    // session-list rows (`projects_drawer.dart`'s `whereVisibleInDrawer`),
+    // which hide a member session because it has a home elsewhere (the
+    // lead's member tab). Removing this project deletes its checkout and
+    // forgets it on the host, which would take a member session's peer
+    // bridge down with it — a project holding one is exactly the case this
+    // guard must still block, hidden row or not.
     if (entry is LocalProjectEntry &&
         ref.watch(
           sessionsForEntryProvider(

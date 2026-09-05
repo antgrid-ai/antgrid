@@ -442,7 +442,7 @@ The model catalog is per machine and per tool because it is discovered from a ru
 
 **Member tabs.** A compact strip above the transcript, *lead | peer*, present only on a session with members. Selecting a member swaps the transcript and composer to that member's session, and the rest of the workspace — files, git, preview, terminals, Handler — follows the selected member's checkout, because every one of those is checkout-scoped already. The peer's transcript is **fully interactive**: the user can steer a peer directly, and lifts still derive only from text typed into that member's Handler (§7.2), so nothing typed on the lead's tab reaches the peer's mandate.
 
-**Session list.** A peer session is an ordinary row in its own project on its own machine, with a *member of* badge naming the lead. Opening it there is the same session as the peer tab; there is one session, viewed from two places.
+**Session list.** A peer session is kept out of its own project's row in the drawer — that project's session list already has a home for it, the lead's member tab, and listing it twice would make one session two independently-tappable rows. It stays in Recent sessions, carrying a *member of* badge naming the lead, so a peer with no reachable lead right now is still reachable from somewhere on its own machine. Opening it from Recent or from the peer tab is the same session; there is one session, viewed from two places.
 
 **Queue.** Unchanged by any of this (§7.1): a peer's gates already reach the phone directly, and the queue is assembled in the app from the per-machine connections it already holds.
 

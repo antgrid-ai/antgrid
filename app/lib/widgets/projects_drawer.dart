@@ -20,6 +20,7 @@ import '../design/widgets/ab_tap_target.dart';
 import '../models/drawer_entry.dart';
 import '../project/project_session_registry.dart'
     show projectSessionRegistryProvider;
+import '../models/session_entry.dart';
 import '../models/session_target.dart';
 import '../providers/account_agents.dart';
 import '../providers/control_plane.dart';
@@ -767,6 +768,20 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
   }
 }
 
+/// A session belongs on its own project's drawer row UNLESS it is a MEMBER of
+/// a session led on another machine ([SessionEntry.memberOf] set) — that
+/// session already has a home, the lead's member tab, and this project's row
+/// is not it: the peer bridge, not this one, is what the tab drives. Showing
+/// it here too would be the same session as two independently-tappable rows.
+/// It still surfaces locally via Recent sessions ([recentSessionsProvider],
+/// deliberately unfiltered) so a peer with no reachable lead — orphaned, or
+/// simply not the machine the user is looking at right now — stays reachable
+/// from somewhere on this machine.
+extension _DrawerSessionVisibility on Iterable<SessionEntry> {
+  List<SessionEntry> whereVisibleInDrawer() =>
+      where((s) => !s.archived && s.memberOf == null).toList(growable: false);
+}
+
 /// Triggers the drawer's per-project session-list peek
 /// ([drawerProjectSessionsProvider]) and renders whatever
 /// [sessionsForEntryProvider] holds (cached first, then the freshly-fetched list
@@ -781,8 +796,7 @@ class _ProjectSessions extends ConsumerWidget {
     final fetch = ref.watch(drawerProjectSessionsProvider(regId));
     final sessions = ref
         .watch(sessionsForEntryProvider(regId))
-        .where((s) => !s.archived)
-        .toList(growable: false);
+        .whereVisibleInDrawer();
     if (sessions.isNotEmpty) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -837,8 +851,7 @@ class SessionsList extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final sessions = ref
         .watch(sessionsForEntryProvider(projectId))
-        .where((s) => !s.archived)
-        .toList(growable: false);
+        .whereVisibleInDrawer();
     // No wrapper Padding — session rows own their own gutter.
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
