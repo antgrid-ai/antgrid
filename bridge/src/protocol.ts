@@ -1526,14 +1526,47 @@ export const SessionMemberKeySchema = z.object({
   sessionId: z.string().min(1).max(200),
 });
 
+// The Capability Card as it travels ON a membership (spec 3.3): the two MVP
+// fields, both observed by the MEMBER's own bridge before any agent ran there.
+// Mirrors `OsCard`/`RepoCard` in capability-card.ts, which is where the values
+// are actually read — a second shape would be two things to keep true.
+//
+// Every field is optional and tolerates an explicit null, top to bottom, because
+// the reader that fills it already produces nulls (`readRepoCard`) and because a
+// machine that could not answer must still be able to join: refusing a
+// membership over a blank branch would cost the human the machine rather than
+// the field. Bounded like every other label here — the values are rendered into
+// an agent's prompt.
+export const SessionMemberCardSchema = z.object({
+  os: z.object({
+    name: z.string().max(60).nullish(),
+    version: z.string().max(200).nullish(),
+    arch: z.string().max(30).nullish(),
+  }).nullish(),
+  repo: z.object({
+    label: z.string().max(120).nullish(),
+    // The normalized `host[:port]/path` match key, never the raw remote URL: a
+    // raw one can carry a credential in its authority, and this value is
+    // rendered into a delivery and into a tool answer.
+    remote: z.string().max(300).nullish(),
+    branch: z.string().max(250).nullish(),
+  }).nullish(),
+});
+
 // Identity plus the labels a row renders from, so a member resolves with no
 // lookup on a machine that cannot reach the other one. Bounded because they
 // ride every session:updated frame AND are interpolated into a Handler
 // instruction, where the delivery template sanitizes them further.
+//
+// The card is the exception to that second half: hostnames and a repo path are
+// exactly what the Handler's authorizer reads as a grant, so no template may put
+// it in a WRAPPER. It travels as fenced data or as a tool answer, and never
+// through `HandlerEngine.instruct` (see session-bus/delivery.ts).
 export const SessionMemberRefSchema = SessionMemberKeySchema.extend({
   machineLabel: z.string().max(120).optional(),
   projectLabel: z.string().max(120).optional(),
   sessionName: z.string().max(120).optional(),
+  card: SessionMemberCardSchema.optional(),
 });
 
 // The lead half: present only on a lead's row, on the lead's own bridge.
@@ -1778,6 +1811,17 @@ export const SessionMemberRecordWire = z.object({
   // Constant today; named so a future leadership transfer records which side
   // this row was, rather than inferring it from a machine that has gone away.
   role: z.enum(["peer"]).default("peer"),
+  // The brief the human wrote for this machine, as the carrier sent it to the
+  // peer's own `session:create`. Carried here so the lead agent is told what its
+  // new peer was told (spec 3.3: the card reaches the lead packaged with the
+  // brief) — nothing else on this machine ever sees it, because the durable
+  // brief record lives on the peer.
+  //
+  // Optional: a carrier that recorded a membership without one leaves the lead a
+  // join notice with no mandate in it, which is what an older app produces and
+  // is still better than the lead learning of the machine from nothing at all.
+  // Not persisted — the join notice is the only reader.
+  brief: z.string().min(1).max(MAX_BRIEF_CHARS).optional(),
 });
 const SessionMemberRecordMessage = BaseMessage.extend({
   type: z.literal("session:member-record"),
@@ -2740,6 +2784,7 @@ export type SessionCreate = z.infer<typeof SessionCreateMessage>;
 export type SessionMember = z.infer<typeof SessionMemberSchema>;
 export type SessionMemberOf = z.infer<typeof SessionMemberOfSchema>;
 export type SessionMemberRef = z.infer<typeof SessionMemberRefSchema>;
+export type SessionMemberCard = z.infer<typeof SessionMemberCardSchema>;
 export type SessionMemberKey = z.infer<typeof SessionMemberKeySchema>;
 export type SessionMemberRecord = z.infer<typeof SessionMemberRecordMessage>;
 export type SessionMemberRelease = z.infer<typeof SessionMemberReleaseMessage>;

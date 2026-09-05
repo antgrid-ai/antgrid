@@ -38,6 +38,11 @@ String memberRegistrationId(
 /// Reads [activeSessionOrCachedProvider] for the id and name alone — both fixed
 /// for the life of a session — so a peer tab still identifies itself while its
 /// project's live list is re-subscribing.
+///
+/// Deliberately card-less. A [SessionMemberRef.card] is what one machine
+/// ANSWERED about itself as it joined another, and this ref is derived from the
+/// session on screen rather than from a membership — the row that recorded the
+/// join is the only place that answer lives.
 final viewedSessionRefProvider = Provider<SessionMemberRef?>((ref) {
   final target = ref.watch(selectedTargetProvider);
   final session = ref.watch(activeSessionOrCachedProvider);

@@ -110,7 +110,10 @@ void main() {
     );
   }
 
-  Future<AddMachineOutcome> Function() start(ProviderContainer container) {
+  Future<AddMachineOutcome> Function() start(
+    ProviderContainer container, {
+    SessionMemberCard? peerCard,
+  }) {
     late Future<AddMachineOutcome> future;
     future = addMachineToSession(
       container,
@@ -125,6 +128,7 @@ void main() {
       sessionName: 'app',
       peerMachineLabel: 'Studio',
       peerProjectLabel: 'app',
+      peerCard: peerCard,
     );
     return () => future;
   }
@@ -167,6 +171,84 @@ void main() {
     expect(result.ok, isTrue);
     expect(result.peer?.sessionId, 'sess-peer');
     expect(result.peer?.machineLabel, 'Studio');
+  });
+
+  test('the card and the brief both ride the record to the lead', () async {
+    final env = await setUpProjects();
+    final outcome = start(
+      env.container,
+      peerCard: SessionMemberCard(
+        osName: 'linux',
+        osVersion: '6.8',
+        osArch: 'x64',
+        repoLabel: 'app',
+        repoRemote: 'github.com/acme/app',
+        repoBranch: 'feature/leak',
+      ),
+    );
+    await _turn();
+
+    env.peer.emit('session:result', {
+      'requestId': _lastOfType(env.peer, 'session:create')['requestId'],
+      'ok': true,
+      'session': _sessionJson('sess-peer', 'app'),
+    });
+    await _turn();
+
+    final record = _lastOfType(env.lead, 'session:member-record');
+    // The same text the peer's own create carried. The durable brief lives on
+    // the peer's disk, so this copy is the only account of the human's mandate
+    // the lead's agent will ever be given.
+    expect(record['brief'], 'Take the Windows half');
+    final member = record['member'] as Map<String, dynamic>;
+    // Nested on the wire, per SessionMemberCardSchema — a flat copy would be
+    // refused by the lead bridge and the machine would never join.
+    expect(member['card'], {
+      'os': {'name': 'linux', 'version': '6.8', 'arch': 'x64'},
+      'repo': {
+        'label': 'app',
+        'remote': 'github.com/acme/app',
+        'branch': 'feature/leak',
+      },
+    });
+
+    env.lead.emit('session:result', {
+      'requestId': _lastOfType(env.lead, 'session:member-record')['requestId'],
+      'ok': true,
+      'session': _sessionJson('sess-lead', 'Trace the leak'),
+    });
+    final result = await outcome();
+    // The ref handed back is what puts the user on the new tab, so it carries
+    // the card the record does rather than a second, thinner copy.
+    expect(result.peer?.card?.repoBranch, 'feature/leak');
+  });
+
+  // A card is display metadata and a membership is not: a machine that could
+  // not answer still joins.
+  test('a machine with no card still joins', () async {
+    final env = await setUpProjects();
+    final outcome = start(env.container);
+    await _turn();
+
+    env.peer.emit('session:result', {
+      'requestId': _lastOfType(env.peer, 'session:create')['requestId'],
+      'ok': true,
+      'session': _sessionJson('sess-peer', 'app'),
+    });
+    await _turn();
+
+    final record = _lastOfType(env.lead, 'session:member-record');
+    expect(
+      (record['member'] as Map<String, dynamic>).containsKey('card'),
+      isFalse,
+    );
+
+    env.lead.emit('session:result', {
+      'requestId': record['requestId'],
+      'ok': true,
+      'session': _sessionJson('sess-lead', 'Trace the leak'),
+    });
+    expect((await outcome()).ok, isTrue);
   });
 
   test('a refused record deletes the session it was about', () async {

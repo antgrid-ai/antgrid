@@ -167,8 +167,141 @@ const int kMaxSessionMembers = 16;
 /// it is refused.
 const int kMaxBriefChars = 10000;
 
+/// The Capability Card as it travels ON a membership, flattened: the OS the
+/// member machine runs and the repo of the one project the membership is for.
+///
+/// Hand-mirrors the bridge `SessionMemberCardSchema` (`bridge/src/protocol.ts`),
+/// which nests the six values as `{ os: {name, version, arch}, repo: {label,
+/// remote, branch} }` — the wire shape lives in [toJson]/[fromJson] alone, and
+/// the two groups are flat here because every reader wants a value, not a group.
+///
+/// Every field is nullable, top to bottom: the bridge that fills the card
+/// already produces nulls for a project that is not a repo, and a machine that
+/// could not answer must still be able to join. A card is what the lead's agent
+/// is TOLD about its new peer, never something either side acts on.
+///
+/// [repoRemote] is the bridge's normalised credential-free `host[:port]/path`
+/// match key, never a raw remote URL — the value is rendered into an agent's
+/// prompt.
+class SessionMemberCard {
+  final String? osName;
+  final String? osVersion;
+  final String? osArch;
+  final String? repoLabel;
+  final String? repoRemote;
+  final String? repoBranch;
+
+  const SessionMemberCard._({
+    this.osName,
+    this.osVersion,
+    this.osArch,
+    this.repoLabel,
+    this.repoRemote,
+    this.repoBranch,
+  });
+
+  /// Clamps every value to the length the lead bridge refuses above, because a
+  /// card is display metadata and a membership is not: an over-long branch name
+  /// must cost its own tail, never the machine the user was joining.
+  factory SessionMemberCard({
+    String? osName,
+    String? osVersion,
+    String? osArch,
+    String? repoLabel,
+    String? repoRemote,
+    String? repoBranch,
+  }) => SessionMemberCard._(
+    osName: _bounded(osName, _kMaxOsName),
+    osVersion: _bounded(osVersion, _kMaxOsVersion),
+    osArch: _bounded(osArch, _kMaxOsArch),
+    repoLabel: _bounded(repoLabel, _kMaxRepoLabel),
+    repoRemote: _bounded(repoRemote, _kMaxRepoRemote),
+    repoBranch: _bounded(repoBranch, _kMaxRepoBranch),
+  );
+
+  /// A card that carries nothing, which is the same answer as no card at all —
+  /// so nothing serialises an empty group and [fromJson] resolves one to null.
+  bool get isEmpty =>
+      osName == null &&
+      osVersion == null &&
+      osArch == null &&
+      repoLabel == null &&
+      repoRemote == null &&
+      repoBranch == null;
+
+  Map<String, dynamic> toJson() => {
+    if (osName != null || osVersion != null || osArch != null)
+      'os': {
+        if (osName != null) 'name': osName,
+        if (osVersion != null) 'version': osVersion,
+        if (osArch != null) 'arch': osArch,
+      },
+    if (repoLabel != null || repoRemote != null || repoBranch != null)
+      'repo': {
+        if (repoLabel != null) 'label': repoLabel,
+        if (repoRemote != null) 'remote': repoRemote,
+        if (repoBranch != null) 'branch': repoBranch,
+      },
+  };
+
+  /// Null for anything that is not a card with a value in it — a missing key, a
+  /// non-map, a group of the wrong shape, a leaf that is not a string. The card
+  /// is the least load-bearing thing on a membership, so a malformed one costs
+  /// itself and never the member it arrived on.
+  static SessionMemberCard? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    String? leaf(Object? group, String key) {
+      if (group is! Map) return null;
+      final v = group[key];
+      return v is String && v.isNotEmpty ? v : null;
+    }
+
+    final os = raw['os'];
+    final repo = raw['repo'];
+    final card = SessionMemberCard(
+      osName: leaf(os, 'name'),
+      osVersion: leaf(os, 'version'),
+      osArch: leaf(os, 'arch'),
+      repoLabel: leaf(repo, 'label'),
+      repoRemote: leaf(repo, 'remote'),
+      repoBranch: leaf(repo, 'branch'),
+    );
+    return card.isEmpty ? null : card;
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SessionMemberCard &&
+          other.osName == osName &&
+          other.osVersion == osVersion &&
+          other.osArch == osArch &&
+          other.repoLabel == repoLabel &&
+          other.repoRemote == repoRemote &&
+          other.repoBranch == repoBranch;
+
+  @override
+  int get hashCode =>
+      Object.hash(osName, osVersion, osArch, repoLabel, repoRemote, repoBranch);
+}
+
+/// Hand-mirrored from the `.max()` on each leaf of the bridge
+/// `SessionMemberCardSchema`, which is what actually refuses the record.
+const int _kMaxOsName = 60;
+const int _kMaxOsVersion = 200;
+const int _kMaxOsArch = 30;
+const int _kMaxRepoLabel = 120;
+const int _kMaxRepoRemote = 300;
+const int _kMaxRepoBranch = 250;
+
+String? _bounded(String? value, int max) {
+  if (value == null || value.isEmpty) return null;
+  return value.length <= max ? value : value.substring(0, max);
+}
+
 /// Address of one session in a multi-machine session — the machine, project and
-/// session that identify it, plus the labels a row renders with.
+/// session that identify it, plus the labels a row renders with and the
+/// Capability Card of the machine it names.
 ///
 /// Hand-mirrors the bridge `SessionMemberRefSchema` (`bridge/src/protocol.ts`)
 /// per the package convention that the Dart side mirrors the TS Zod schemas by
@@ -176,6 +309,12 @@ const int kMaxBriefChars = 10000;
 /// `session:updated` frame and is rendered by rows served from the persisted
 /// cache, which can resolve no other machine's names at all; the bridge bounds
 /// their length for the same reason.
+///
+/// [card] rides along for the harder version of that reason: no bridge can read
+/// another machine, so what the peer answered about itself at join time is the
+/// only description of it the lead will ever hold. It reaches one reader — the
+/// lead's agent, told what machine just joined it — and is fenced as data there,
+/// because a hostname or a repo path in a WRAPPER would read as a grant.
 class SessionMemberRef {
   /// The account device uuid, which is how the app addresses a machine — never
   /// a relay slot id or a hostname.
@@ -186,6 +325,11 @@ class SessionMemberRef {
   final String? projectLabel;
   final String? sessionName;
 
+  /// What the machine answered about itself when the membership was made. Null
+  /// against a machine that could not answer and against a carrier predating
+  /// the field; both are the same "no card" a reader must render.
+  final SessionMemberCard? card;
+
   const SessionMemberRef({
     required this.machineId,
     required this.projectId,
@@ -193,6 +337,7 @@ class SessionMemberRef {
     this.machineLabel,
     this.projectLabel,
     this.sessionName,
+    this.card,
   });
 
   /// Identity across the three ids that address a member — the same triple the
@@ -207,6 +352,7 @@ class SessionMemberRef {
     if (machineLabel != null) 'machineLabel': machineLabel,
     if (projectLabel != null) 'projectLabel': projectLabel,
     if (sessionName != null) 'sessionName': sessionName,
+    if (card != null) 'card': card!.toJson(),
   };
 
   /// Null when any of the three ids is missing or empty. A ref that cannot be
@@ -226,6 +372,7 @@ class SessionMemberRef {
       machineLabel: j['machineLabel'] as String?,
       projectLabel: j['projectLabel'] as String?,
       sessionName: j['sessionName'] as String?,
+      card: SessionMemberCard.fromJson(j['card']),
     );
   }
 
@@ -238,7 +385,8 @@ class SessionMemberRef {
           other.sessionId == sessionId &&
           other.machineLabel == machineLabel &&
           other.projectLabel == projectLabel &&
-          other.sessionName == sessionName;
+          other.sessionName == sessionName &&
+          other.card == card;
 
   @override
   int get hashCode => Object.hash(
@@ -248,6 +396,7 @@ class SessionMemberRef {
     machineLabel,
     projectLabel,
     sessionName,
+    card,
   );
 }
 

@@ -526,15 +526,23 @@ class SessionsService {
   /// null: a record that did not land leaves a peer session running with
   /// nothing pointing at it, and the caller's only correct answer is to undo
   /// the creation it just made and say so.
+  ///
+  /// [brief] is the same text the peer's own `session:create` carried, sent a
+  /// second time because the durable brief record lives on the PEER and no
+  /// bridge can read another: without it the lead's agent is told a machine
+  /// joined and never told what the human asked of it. Omitted when the carrier
+  /// has none — the lead bridge refuses an empty one.
   Future<SessionEntry?> memberRecord({
     required String sessionId,
     required SessionMemberRef member,
     String role = 'peer',
+    String? brief,
   }) {
     return _mutate('session:member-record', {
       'sessionId': sessionId,
       'member': member.toJson(),
       'role': role,
+      'brief': ?brief,
     }, raiseRefusal: true);
   }
 

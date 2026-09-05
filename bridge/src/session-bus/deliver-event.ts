@@ -1,5 +1,5 @@
-// Which inbound bus events become a line in the receiving agent's session, and
-// what that line says.
+// Which arrivals become a line in the receiving agent's session, and what that
+// line says.
 //
 // One place, and a pure one, because the mapping is where the two halves of the
 // protocol meet: the coordinator decides what ARRIVED, the templates decide how
@@ -7,15 +7,28 @@
 // all. An event with no line here is not lost — it is on the task record, where
 // `antgrid_get_task` reads it — it simply does not interrupt.
 //
+// Two arrivals, not one. A bus event comes off the wire from the other machine;
+// a JOIN is written by this machine's own app, because no bridge can reach
+// another (D7) and so nothing arrives from the peer to announce itself. Both
+// produce the same kind of line and both go through the same queue.
+//
 // Nothing here injects or persists: it returns a line for the queue, which is
 // what makes the "wake for a completed task survives a restart" guarantee a
 // property of one module rather than of this mapping.
 
-import type { SessionMemberOf, BusEnvelope, BusPart } from "../protocol";
+import type { SessionMemberOf, SessionMemberRef, BusEnvelope, BusPart } from "../protocol";
+import { sha256Hex } from "./artifact-store";
 import { briefScope } from "./brief-store";
 import type { SessionBusEvent } from "./coordinator";
 import type { QueuedLine } from "./delivery-queue";
-import { renderAnswer, renderCancel, renderTask, renderWake, type TaskArtifactHandle } from "./delivery";
+import {
+  renderAnswer,
+  renderCancel,
+  renderJoined,
+  renderTask,
+  renderWake,
+  type TaskArtifactHandle,
+} from "./delivery";
 import { takeAskedQuestion } from "./api";
 
 export interface EventDeliveryDeps {
@@ -149,4 +162,49 @@ export function lineForEvent(
   }
 
   return null;
+}
+
+export interface JoinInput {
+  /** The LOCAL lead session that gained the member. */
+  sessionId: string;
+  /** That lead session's own name, for the delivery's `To:` line. */
+  leadSessionName?: string;
+  /** The member as the app recorded it, Capability Card included. */
+  member: SessionMemberRef;
+  /** The brief the human wrote for that machine, when the carrier sent one. */
+  brief?: string;
+}
+
+/**
+ * The queue id one join can ever produce, so a carrier that retries its
+ * `session:member-record` does not queue the notice twice.
+ *
+ * Hashed rather than joined: the three address parts are 200 characters each on
+ * the wire and a queued id is bounded well below their sum, so a concatenation
+ * would be truncated — and a truncated address collides two machines onto one
+ * id, which silently drops the second machine's notice.
+ */
+export function joinLineId(member: SessionMemberRef): string {
+  const address = JSON.stringify([member.machineId, member.projectId, member.sessionId]);
+  return `joined:${sha256Hex(new TextEncoder().encode(address))}`;
+}
+
+/**
+ * The line a lead session owes its agent when a machine joins it (spec 3.3).
+ *
+ * Always a line, unlike an event: a join is the human handing the lead a
+ * machine, and a lead that learns of a peer only by calling `antgrid_list_peers`
+ * would never learn of it at all.
+ */
+export function lineForJoin(input: JoinInput): Omit<QueuedLine, "queuedAt"> {
+  return {
+    id: joinLineId(input.member),
+    sessionId: input.sessionId,
+    kind: "joined",
+    text: renderJoined({
+      peer: input.member,
+      ...(input.leadSessionName === undefined ? {} : { leadSessionName: input.leadSessionName }),
+      ...(input.brief === undefined ? {} : { brief: input.brief }),
+    }),
+  };
 }

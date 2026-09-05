@@ -172,6 +172,10 @@ export interface RoleView {
   projectId?: string;
 }
 
+/** One member as a lead's tools see it. Extends the ref rather than restating
+ *  it, which is what carries the Capability Card through: spec 3.3 requires
+ *  list-peers to answer with each peer's OS and repo, and the card is on the
+ *  member row because only the peer's own bridge could observe it. */
 export interface PeerView extends SessionMemberRef {
   state: SessionMember["state"];
   joinedAt: number;

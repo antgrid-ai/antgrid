@@ -280,11 +280,26 @@ is the spec; this is the set of invariants a future edit breaks silently.
   never raw, never a bare instruction — and `delivery-queue.ts` holds the line
   until the turn closes. `DeliveryKindSchema` there is the whole set of queued
   kinds.
-- **The brief is deliberately not one of them.** It is delivered as a Handler
-  instruction at arm time (`flushPendingBrief` -> `handlerEngine.instruct`),
-  which is a turn boundary by construction, and its durable record is
-  `session-bus/brief-store.ts`. Nothing about a brief reaches the PTY, so a test
-  that watches the terminal for it is watching the wrong channel.
+- **The brief reaches the two sides by different channels, and only one of them
+  is the queue.** On the PEER it is a Handler INSTRUCTION at arm time
+  (`flushPendingBrief` -> `handlerEngine.instruct`, a turn boundary by
+  construction), with its durable record in `session-bus/brief-store.ts` — so a
+  test that watches the peer's terminal for a brief is watching the wrong
+  channel. On the LEAD the same text rides the `joined` notice through the
+  ordinary queue, because there it is context rather than a mandate to adopt and
+  nothing on the lead machine stores it.
+- **A join is announced, and it is not a bus event.** No bridge can reach
+  another (D7), so nothing arrives from the peer to say it joined: the app's own
+  `session:member-record` is what triggers `lineForJoin`, and only for a machine
+  that was not already an ACTIVE member (the same verb refreshes labels).
+- **The Capability Card travels on the member row and may only ever be FENCED.**
+  It is `SessionMemberCardSchema` on `SessionMemberRefSchema` (`protocol.ts`),
+  observed by the member's own bridge (`capability-card.ts`), and it is what
+  lets `antgrid_list_peers` answer OS + repo for a machine this bridge can never
+  reach. Its values are a hostname and a repo path — precisely what
+  `authorizeInstruction` reads as a grant — so no template may put it in a
+  wrapper, and the one kind that carries it (`joined`) must stay on the
+  `injectReply` path rather than reaching `instruct`.
 - **The runaway caps are `session-bus/task-guard.ts`** and every one of them is
   per SESSION, not per machine.
 - **`/session-bus/*` in `api-server.ts` is the loopback route table**, keyed off

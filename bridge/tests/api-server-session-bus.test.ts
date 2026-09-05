@@ -35,6 +35,13 @@ const PEER_MEMBER: SessionMember = {
   sessionId: PEER_SESSION,
   sessionName: "peer session",
   role: "peer",
+  // The Capability Card the peer's own bridge observed (spec 3.3). It is on the
+  // member row and nowhere else, so the peers route is the only thing that can
+  // ever answer a lead's "what is this machine".
+  card: {
+    os: { name: "Linux", version: "6.8.0", arch: "arm64" },
+    repo: { label: "ingest", remote: "github.com/acme/ingest", branch: "main" },
+  },
   joinedAt: 1_000,
   state: "active",
 };
@@ -246,6 +253,13 @@ describe("session-bus routes", () => {
       expect(on.status).toBe(200);
       expect(on.body.peers).toHaveLength(1);
       expect(on.body.peers[0]).toMatchObject({ sessionId: PEER_SESSION, reachable: true });
+      // The card reaches the lead's tools intact: an OS or a repo dropped here
+      // leaves antgrid_list_peers unable to say what a machine IS, which is the
+      // half of spec 3.3 the lead decides "what to ask" from.
+      expect(on.body.peers[0].card).toEqual({
+        os: { name: "Linux", version: "6.8.0", arch: "arm64" },
+        repo: { label: "ingest", remote: "github.com/acme/ingest", branch: "main" },
+      });
 
       const off = await get(without, "peers", LEAD_SESSION);
       expect(off.body.peers[0].reachable).toBe(false);

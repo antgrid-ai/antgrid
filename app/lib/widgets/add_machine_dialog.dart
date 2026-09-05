@@ -111,6 +111,7 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
   List<PickerProject> _projectRows = const [];
   PickerProject? _resolvedProject;
   RepoCard? _repoCard;
+  SessionMemberCard? _memberCard;
 
   /// Machines already carrying an active member of this session. A second
   /// session on a machine that is already in is not refused by the bridge, but
@@ -168,6 +169,28 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
         .watch(machineCapabilityCardProvider(uuid))
         .value
         ?.projects[projectId];
+  }
+
+  /// The card as the membership carries it: the machine's OS beside the repo of
+  /// the project that was picked, which is the pair the lead's agent is told.
+  ///
+  /// Null while the card is still in flight, and null for a machine that
+  /// answered nothing — Add stays available either way, because a membership
+  /// with no card is a machine joined and a refused one is not.
+  SessionMemberCard? _readMemberCard(RepoCard? repo) {
+    final uuid = _machineUuid;
+    if (uuid == null) return null;
+    final os = ref.watch(machineCapabilityCardProvider(uuid)).value?.os;
+    if (os == null && repo == null) return null;
+    final card = SessionMemberCard(
+      osName: os?.name,
+      osVersion: os?.version,
+      osArch: os?.arch,
+      repoLabel: repo?.label,
+      repoRemote: repo?.remote,
+      repoBranch: repo?.branch,
+    );
+    return card.isEmpty ? null : card;
   }
 
   SessionTarget? get _peerTarget {
@@ -228,6 +251,7 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
     final leadRef = _leadRef();
     final brief = _brief.text.trim();
     final model = _model;
+    final peerCard = _memberCard;
     final add = container.read(addMachineActionProvider);
 
     navigator.pop();
@@ -249,6 +273,7 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
         sessionName: project.name,
         peerMachineLabel: _machineLabel,
         peerProjectLabel: project.name,
+        peerCard: peerCard,
       );
       final error = outcome.error;
       if (error != null && host.mounted) showAbSnackBar(host, error);
@@ -287,6 +312,7 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
     _projectRows = _readProjectRows();
     _resolvedProject = _readResolvedProject(_projectRows);
     _repoCard = _readRepoCard(_resolvedProject);
+    _memberCard = _readMemberCard(_repoCard);
     final project = _resolvedProject;
     final peer = _peerTarget;
     final card = _repoCard;

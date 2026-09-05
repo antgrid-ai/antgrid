@@ -34,7 +34,8 @@ import { saveBrief } from "./session-bus/brief-store";
 import { removeSessionBusSession } from "./session-bus/store-fs";
 import { TASK_EXPIRY_MS } from "./session-bus/constants";
 import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
-import { lineForEvent } from "./session-bus/deliver-event";
+import { sameAddress } from "./session-bus/address";
+import { lineForEvent, lineForJoin, type JoinInput } from "./session-bus/deliver-event";
 import { neutralizeFenced } from "./session-bus/delivery";
 import type { QueuedLine } from "./session-bus/delivery-queue";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, SessionMemberOrphanWire, SessionMemberRecordWire, SessionMemberReleaseWire, SessionMembershipCreateWire, type AbMessage, type RpcRequest, type SessionEntry, type SessionMemberOf, type WorkStatus } from "./protocol";
@@ -948,6 +949,32 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       return;
     }
     if (!line) return;
+    deliverLine(line);
+  }
+
+  /** Tell a lead session's agent that a machine joined it, carrying that
+   *  machine's Capability Card and the brief the human gave it (spec 3.3).
+   *
+   *  Not a bus event: membership is written by this machine's own app, so
+   *  nothing arrives from the peer to announce it — but the line takes the same
+   *  turn-boundary queue as every other delivery, because a lead mid-turn is as
+   *  bad a moment to read a new mandate as any other. */
+  function deliverJoin(input: JoinInput): void {
+    let line: Omit<QueuedLine, "queuedAt">;
+    try {
+      line = lineForJoin(input);
+    } catch (err) {
+      // The membership is already on disk and already answered by the time this
+      // runs, so a rendering problem costs the notice and never the join.
+      log.warn("could not render a session-bus join notice: %s", err);
+      return;
+    }
+    deliverLine(line);
+  }
+
+  /** Hand a rendered line to whoever owns delivery: the turn-boundary queue when
+   *  one is wired, this core's own submit otherwise. */
+  function deliverLine(line: Omit<QueuedLine, "queuedAt">): void {
     if (opts.queueBusLine) { opts.queueBusLine(line); return; }
     injectBusLine(line.sessionId, line.text);
   }
@@ -1783,7 +1810,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             else if (verb.type === "session:member-record") {
               const parsed = SessionMemberRecordWire.safeParse(verb);
               if (!parsed.success) throw new Error("Malformed member payload.");
+              // Read BEFORE the write, because `recordMember` is also how a
+              // carrier refreshes a member's labels: only a machine that was not
+              // already an active member has actually joined, and re-announcing
+              // one that was costs the lead a turn to read a mandate it holds.
+              const led = s.get(parsed.data.sessionId);
+              const joining = !led?.members
+                ?.some((m) => m.state === "active" && sameAddress(m, parsed.data.member));
               await s.recordMember(parsed.data.sessionId, parsed.data.member, parsed.data.role);
+              // Strictly after the row is on disk: a notice for a membership the
+              // write then failed to record would name a peer no tool can
+              // address.
+              if (joining) {
+                deliverJoin({
+                  sessionId: parsed.data.sessionId,
+                  member: parsed.data.member,
+                  ...(led === undefined ? {} : { leadSessionName: led.name }),
+                  ...(parsed.data.brief === undefined ? {} : { brief: parsed.data.brief }),
+                });
+              }
             }
             else if (verb.type === "session:member-release") {
               const parsed = SessionMemberReleaseWire.safeParse(verb);

@@ -46,6 +46,17 @@ class AddMachineOutcome {
 /// project pin follow from the record alone — which is also the only reason a
 /// release can undo them without commanding anything.
 ///
+/// [peerCard] is the Capability Card the dialog already read to pre-select the
+/// project, carried rather than re-read here: the lead's record is what the peer
+/// machine WAS when it joined, and a second read would answer for a different
+/// moment. Null joins the machine with no card, which is what an unreachable
+/// card reader and an older peer bridge both produce.
+///
+/// [brief] is written to BOTH bridges: it is the peer's standing mandate on its
+/// own machine, and the lead's record carries a copy because nothing on the lead
+/// machine stores it and its agent would otherwise be told a machine joined with
+/// no account of what the human asked of it.
+///
 /// Takes the [ProviderContainer], never a `WidgetRef`: the dialog that starts
 /// this pops before it finishes, and this outlives it.
 Future<AddMachineOutcome> addMachineToSession(
@@ -61,6 +72,7 @@ Future<AddMachineOutcome> addMachineToSession(
   String? sessionName,
   String? peerMachineLabel,
   String? peerProjectLabel,
+  SessionMemberCard? peerCard,
 }) async {
   final priorRegistrationId = container.read(selectedRegistrationIdProvider);
   final priorSessionId = container.read(activeSessionIdProvider);
@@ -156,6 +168,7 @@ Future<AddMachineOutcome> addMachineToSession(
     machineLabel: peerMachineLabel,
     projectLabel: peerProjectLabel,
     sessionName: created.name,
+    card: peerCard,
   );
 
   final leadService = await warmServiceFor(
@@ -171,6 +184,7 @@ Future<AddMachineOutcome> addMachineToSession(
       await leadService.memberRecord(
         sessionId: leadSessionId,
         member: peerRef,
+        brief: brief.isEmpty ? null : brief,
       );
     } catch (e) {
       recordFailure = e;
@@ -268,6 +282,7 @@ typedef AddMachineFn =
       String? sessionName,
       String? peerMachineLabel,
       String? peerProjectLabel,
+      SessionMemberCard? peerCard,
     });
 
 final addMachineActionProvider = Provider<AddMachineFn>(

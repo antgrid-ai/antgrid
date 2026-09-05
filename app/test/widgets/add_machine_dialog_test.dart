@@ -76,6 +76,18 @@ const _studioProjects = [
   ),
 ];
 
+/// The laptop advertises a project but answers no Capability Card — an
+/// unreachable card reader and a bridge predating the verb both look like this,
+/// and a machine has to stay joinable through either.
+const _laptopProjects = [
+  AdvertisedProject(
+    projectId: 'spare',
+    label: 'spare',
+    path: '/w/spare',
+    running: true,
+  ),
+];
+
 const _studioCard = CapabilityCard(
   os: OsCard(name: 'linux', version: '6.8', arch: 'x64'),
   projects: {
@@ -130,7 +142,10 @@ late List<String> warmed;
 /// The flow itself is covered in `providers/add_machine_action_test.dart`; what
 /// is asserted here is what the DIALOG resolved before handing over — the mode
 /// above all, which is derived from a provider the dialog must have watched.
-late List<({String tool, String? mode, String brief})> added;
+typedef _AddCall =
+    ({String tool, String? mode, String brief, SessionMemberCard? card});
+
+late List<_AddCall> added;
 
 Future<void> _openDialog(
   WidgetTester tester, {
@@ -139,7 +154,7 @@ Future<void> _openDialog(
 }) async {
   useInMemoryPrefs();
   warmed = <String>[];
-  added = <({String tool, String? mode, String brief})>[];
+  added = <_AddCall>[];
   tester.view.physicalSize = const Size(900, 1000);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.reset);
@@ -157,7 +172,11 @@ Future<void> _openDialog(
         controlPlaneStateProvider.overrideWith(
           (ref, uuid) => Stream.value(
             ControlPlaneState(
-              projects: uuid == _studioUuid ? _studioProjects : const [],
+              projects: switch (uuid) {
+                _studioUuid => _studioProjects,
+                _laptopUuid => _laptopProjects,
+                _ => const <AdvertisedProject>[],
+              },
             ),
           ),
         ),
@@ -209,8 +228,9 @@ Future<void> _openDialog(
           sessionName,
           peerMachineLabel,
           peerProjectLabel,
+          peerCard,
         }) async {
-          added.add((tool: tool, mode: mode, brief: brief));
+          added.add((tool: tool, mode: mode, brief: brief, card: peerCard));
           return AddMachineOutcome.added(
             SessionMemberRef(
               machineId: peer.machineUuid,
@@ -396,6 +416,50 @@ void main() {
       expect(added.single.brief, 'Take the Windows half');
     },
   );
+
+  testWidgets('the card the dialog showed is the card it hands over', (
+    tester,
+  ) async {
+    await _openDialog(tester);
+    await _pickStudio(tester);
+    await _pickAgent(tester);
+    await _typeBrief(tester);
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+
+    // The machine's OS beside the repo of the project that was PICKED — the
+    // dialog reads a card for the whole catalog, and only one project's half of
+    // it belongs on this membership.
+    expect(
+      added.single.card,
+      SessionMemberCard(
+        osName: 'linux',
+        osVersion: '6.8',
+        osArch: 'x64',
+        repoRemote: _leadRemote,
+        repoBranch: 'feature/leak',
+      ),
+    );
+  });
+
+  testWidgets('a machine that answered no card is still addable', (
+    tester,
+  ) async {
+    await _openDialog(tester);
+    await _tapChip(tester, 'Select machine');
+    await tester.tap(find.text('Laptop'));
+    await tester.pumpAndSettle();
+    await _tapChip(tester, 'Select project');
+    await tester.tap(find.text('spare'));
+    await tester.pumpAndSettle();
+    await _pickAgent(tester);
+    await _typeBrief(tester);
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+
+    expect(added, hasLength(1));
+    expect(added.single.card, isNull);
+  });
 
   testWidgets('a cancelled dialog has created nothing anywhere', (
     tester,

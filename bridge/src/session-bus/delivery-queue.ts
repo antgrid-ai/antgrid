@@ -40,8 +40,10 @@ export const MAX_QUEUED_LINES = 64;
 /** Which template produced the line. Recorded so a queue dumped after a restart
  *  says what is waiting without re-parsing the rendered text — and the brief is
  *  deliberately absent: it is delivered as a Handler INSTRUCTION at arm time
- *  (`flushPendingBrief`), which is a boundary by construction. */
-export const DeliveryKindSchema = z.enum(["task", "wake", "answer", "cancel"]);
+ *  (`flushPendingBrief`), which is a boundary by construction. `joined` is the
+ *  same brief travelling the other way, to the LEAD, where it is context rather
+ *  than a mandate to adopt — so it takes the ordinary queued path. */
+export const DeliveryKindSchema = z.enum(["joined", "task", "wake", "answer", "cancel"]);
 export type DeliveryKind = z.infer<typeof DeliveryKindSchema>;
 
 export const QueuedLineSchema = z.object({
@@ -71,8 +73,11 @@ export function emptyDeliveries(): DeliveryQueueState {
 /** Which lines may be dropped to make room. A `task` is an assignment and a
  *  `cancel` is its withdrawal: lose either and the two machines disagree about
  *  what is being worked, which is the exact failure the sequenced half of the
- *  protocol exists to prevent. A `wake` and an `answer` only narrate a state the
- *  task record already holds. */
+ *  protocol exists to prevent. A `joined` is load-bearing for a third reason —
+ *  it is the ONLY place the human's brief for a peer is ever shown on the lead's
+ *  machine, since the durable brief record lives on the peer — so losing one
+ *  leaves the lead a machine it was never told the mandate for. A `wake` and an
+ *  `answer` only narrate a state the task record already holds. */
 const EVICTABLE_KINDS: ReadonlySet<DeliveryKind> = new Set<DeliveryKind>(["wake", "answer"]);
 
 /** Append, or return the state unchanged when the id is already queued. The

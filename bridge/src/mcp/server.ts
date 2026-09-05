@@ -148,7 +148,7 @@ const UNEXPECTED = str("Anything encountered that the instruction did not antici
 const LEAD_TOOLS: McpTool[] = [
   {
     name: "antgrid_list_peers",
-    description: "List the peer sessions of this multi-machine session: which machine each runs on, whether it is still active, and whether a message could leave this bridge for it right now.",
+    description: "List the peer sessions of this multi-machine session: which machine each runs on, what that machine's bridge observed about it (its OS and its repository), whether it is still active, and whether a message could leave this bridge for it right now.",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
@@ -436,6 +436,26 @@ function artifactLine(a: any): string {
   return `- ${a.artifactId} ${a.name} (${a.mediaType}, ${a.bytes} bytes): ${a.summary}`;
 }
 
+/** One peer, plus whatever its own bridge observed about it (spec 3.3).
+ *
+ *  The card's two lines are indented under the peer rather than appended to it:
+ *  a machine is picked by reading its OS and its repo against the work in hand,
+ *  and a single line carrying six values reads as one identifier. A field the
+ *  peer's bridge could not answer prints nothing at all — a blank here would
+ *  invite the lead to ask about an absence the card never claimed. */
+function peerLines(p: any): string[] {
+  const unreachable = p.reachable ? "" : " (cannot be reached from here right now)";
+  const out = [
+    `- ${p.sessionName ?? p.sessionId} [${p.state}]${unreachable}`
+    + ` id=${p.sessionId} machine=${p.machineLabel ?? p.machineId}`,
+  ];
+  const os = [p.card?.os?.name, p.card?.os?.version, p.card?.os?.arch].filter(Boolean);
+  if (os.length > 0) out.push(`  os: ${os.join(", ")}`);
+  const repo = [p.card?.repo?.label, p.card?.repo?.remote, p.card?.repo?.branch].filter(Boolean);
+  if (repo.length > 0) out.push(`  repo: ${repo.join(", ")}`);
+  return out;
+}
+
 /**
  * Run one session-bus tool. Every branch is the same shape — build a body, call
  * the route, render what came back — because the route is where the decision was
@@ -454,10 +474,7 @@ export async function callSessionBusTool(
       if (!r.ok) return toolError(busError(r));
       const peers = (r.data.peers ?? []) as any[];
       if (peers.length === 0) return toolText("No peer sessions have joined this session yet.");
-      const lines = peers.map((p) =>
-        `- ${p.sessionName ?? p.sessionId} [${p.state}]${p.reachable ? "" : " (cannot be reached from here right now)"} id=${p.sessionId} machine=${p.machineLabel ?? p.machineId}`
-      );
-      return toolText(`Peers:\n${lines.join("\n")}`);
+      return toolText(`Peers:\n${peers.flatMap(peerLines).join("\n")}`);
     }
 
     case "antgrid_assign_task": {

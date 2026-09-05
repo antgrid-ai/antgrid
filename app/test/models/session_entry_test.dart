@@ -558,5 +558,126 @@ void main() {
       );
       expect(e.copyWith(memberOf: other).memberOf, other);
     });
+
+    // The card is the one thing on a membership the lead's agent is TOLD, so
+    // the nesting has to survive the trip in both directions — the bridge
+    // schema nests it and this mirror flattens it.
+    test('a Capability Card on a member round-trips the wire shape', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'members': [
+          {
+            ...ref(),
+            'joinedAt': 1,
+            'card': {
+              'os': {'name': 'linux', 'version': '6.8', 'arch': 'x64'},
+              'repo': {
+                'label': 'app',
+                'remote': 'github.com/acme/app',
+                'branch': 'feature/leak',
+              },
+            },
+          },
+        ],
+      });
+      final card = e.members.single.ref.card!;
+      expect(card.osName, 'linux');
+      expect(card.osVersion, '6.8');
+      expect(card.osArch, 'x64');
+      expect(card.repoLabel, 'app');
+      expect(card.repoRemote, 'github.com/acme/app');
+      expect(card.repoBranch, 'feature/leak');
+
+      final again = SessionEntry.fromJson(e.toJson());
+      expect(again.members.single.ref.card, card);
+      expect(again, e);
+    });
+
+    // A machine that answered nothing must still be a member: refusing one over
+    // a blank field would cost the human the machine rather than the field.
+    test('a member with no card decodes as no card and serialises none', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'members': [
+          {...ref(), 'joinedAt': 1},
+          {...ref(), 'sessionId': 'sess-2', 'joinedAt': 1, 'card': {}},
+          {
+            ...ref(),
+            'sessionId': 'sess-3',
+            'joinedAt': 1,
+            'card': {'os': null, 'repo': null},
+          },
+        ],
+      });
+      expect(e.members, hasLength(3));
+      for (final m in e.members) {
+        expect(m.ref.card, isNull);
+        expect(m.toJson().containsKey('card'), isFalse);
+      }
+    });
+
+    // The least load-bearing thing on a membership must never take the machine
+    // down with it.
+    test('a malformed card costs itself and not the member', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'members': [
+          {...ref(), 'joinedAt': 1, 'card': 'linux'},
+          {
+            ...ref(),
+            'sessionId': 'sess-2',
+            'joinedAt': 1,
+            'card': {
+              'os': 7,
+              'repo': {'branch': 12, 'remote': 'a/b'},
+            },
+          },
+        ],
+      });
+      expect(e.members, hasLength(2));
+      expect(e.members.first.ref.card, isNull);
+      expect(e.members.last.ref.card!.repoBranch, isNull);
+      expect(e.members.last.ref.card!.repoRemote, 'a/b');
+    });
+
+    // The lead bridge refuses the whole record above its bounds, so a branch
+    // name longer than one loses its tail here rather than the membership.
+    test('an over-long card value is clamped, not refused', () {
+      final long = 'b' * 400;
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'members': [
+          {
+            ...ref(),
+            'joinedAt': 1,
+            'card': {
+              'repo': {'branch': long},
+            },
+          },
+        ],
+      });
+      expect(e.members.single.ref.card!.repoBranch, long.substring(0, 250));
+    });
+
+    // Equality is what makes a card change observable through SessionsState.
+    test('two members differing only in their card are not equal', () {
+      SessionEntry withBranch(String branch) => SessionEntry.fromJson({
+        ...base(),
+        'members': [
+          {
+            ...ref(),
+            'joinedAt': 1,
+            'card': {
+              'repo': {'branch': branch},
+            },
+          },
+        ],
+      });
+      expect(withBranch('main'), isNot(withBranch('feature/leak')));
+      expect(
+        withBranch('main').hashCode,
+        isNot(withBranch('feature/leak').hashCode),
+      );
+    });
   });
 }
