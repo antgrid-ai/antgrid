@@ -306,8 +306,11 @@ program
   .action(async (opts: { json?: boolean; export?: string; limit?: string; follow?: boolean; dir?: string; join?: string; remote?: boolean; local?: boolean; relay?: boolean; bodies?: boolean }) => {
     const { runNetwatchCli } = await import("./cli/netwatch");
     const limit = opts.limit === undefined ? undefined : Number(opts.limit);
-    if (limit !== undefined && (!Number.isFinite(limit) || limit <= 0)) {
-      console.error("antgrid watch: --limit must be a positive number");
+    // Zero is admitted, and means it: the /netwatch stream reads `limit=0` as
+    // "no replay, live tail only", which is the natural way to watch what
+    // happens NEXT without a screenful of history in front of it.
+    if (limit !== undefined && (!Number.isFinite(limit) || limit < 0)) {
+      console.error("antgrid watch: --limit must be zero or a positive number");
       process.exit(1);
     }
     process.exit(await runNetwatchCli({ ...opts, limit }));

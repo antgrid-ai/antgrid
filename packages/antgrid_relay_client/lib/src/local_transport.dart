@@ -221,13 +221,17 @@ class LocalTransport extends BufferedAgentTransport {
           env.remove('channel');
           dispatchDecoded(env, channel);
         } catch (e) {
-          // Was silent. A frame the agent sent and this app threw away is
-          // invisible in the bridge's half of the capture, which records it as
-          // delivered — the two halves disagreeing is the only evidence.
+          // A frame the agent sent and this app threw away is invisible in the
+          // bridge's half of the capture, which records it as delivered — the
+          // two halves disagreeing is the only evidence there is.
           _dropped(
             'rx',
             'unparseable',
-            bytes: data is String ? data.length : null,
+            // UTF-8, because the bridge counts the same frame with
+            // `Buffer.byteLength`: a String's `length` is UTF-16 code units, and
+            // a join printing both in one `bytes` column would show a size
+            // discrepancy that reads as truncation on the wire.
+            bytes: data is String ? utf8.encode(data).length : null,
             detail: {'error': '${e.runtimeType}'},
           );
         }
@@ -326,10 +330,10 @@ class LocalTransport extends BufferedAgentTransport {
   }) async {
     final ch = _ch;
     if (ch == null) {
-      // The `?.` that used to be here swallowed this. A send after teardown (or
-      // before connect) reaches no wire at all, so the bridge has no record of
-      // it and the caller is left awaiting a reply to a message that was never
-      // sent — which is exactly the symptom this row explains.
+      // A send after teardown (or before connect) reaches no wire at all, so
+      // the bridge has no record of it and the caller is left awaiting a reply
+      // to a message that was never sent — which is exactly the symptom this
+      // row explains.
       _dropped(
         'tx',
         'no-channel',

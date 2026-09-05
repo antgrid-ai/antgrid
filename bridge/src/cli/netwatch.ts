@@ -77,21 +77,33 @@ async function postControl(
     return { error: (err as Error).message };
   }
   if (!res.ok) return { error: `HTTP ${res.status}` };
-  const body = (await res.json()) as { ok: boolean; error?: { message?: string } } & Record<string, unknown>;
+  let body: { ok: boolean; error?: { message?: string } } & Record<string, unknown>;
+  try {
+    body = (await res.json()) as typeof body;
+  } catch {
+    // A 200 whose body is not JSON — a host shutting down mid-response. The
+    // disarm on the way out calls this from a SIGINT handler, so a throw here
+    // would take the exit with it.
+    return { error: "malformed reply" };
+  }
   return body.ok ? { error: null, reply: body } : { error: body.error?.message ?? "refused" };
 }
 
-/** Arm or disarm the connected app's capture. */
+/** Arm or disarm the connected app's capture. Reports the window the host
+ *  actually armed, for the reason setLocalBodies does: the host clamps, and a
+ *  heartbeat pacing itself off the request rather than the grant would let the
+ *  phone's dead man's switch lapse mid-run. */
 async function setRemoteCapture(
   host: { controlPort: number; token: string },
   enabled: boolean,
-): Promise<string | null> {
-  const { error } = await postControl(host, {
+): Promise<{ error: string | null; ttlMs: number }> {
+  const { error, reply } = await postControl(host, {
     type: "netwatch:remote",
     enabled,
     ...(enabled ? { ttlMs: CAPTURE_TTL_MS } : {}),
   });
-  return error;
+  const armed = reply?.ttlMs;
+  return { error, ttlMs: typeof armed === "number" && armed > 0 ? armed : CAPTURE_TTL_MS };
 }
 
 /** Arm or disarm plaintext recording for this host's loopback frames. Metadata
@@ -267,11 +279,12 @@ type Origin = "app" | "brg";
  *  failure: a drop never crossed the socket and a control frame carries no id,
  *  so neither can be paired even in a perfect capture. Counting those as
  *  matches would quietly flatter every report. */
-type Verdict = "matched" | "lost" | "unpaired" | "outside" | "na";
+type Verdict = "matched" | "discarded" | "lost" | "unpaired" | "outside" | "na";
 
 const VERDICT_NOTE: Record<Verdict, string> = {
   matched: "",
   na: "",
+  discarded: "arrived, then dropped",
   lost: "never arrived",
   unpaired: "sender not captured",
   outside: "outside capture overlap",
@@ -313,7 +326,14 @@ function readAppCapture(path: string): NetwatchEvent[] | null {
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
-      events.push(JSON.parse(line) as NetwatchEvent);
+      const e = JSON.parse(line) as NetwatchEvent;
+      // The cast is the only thing standing between this file and every
+      // downstream arithmetic, and `at` feeds all of it: the overlap window, the
+      // sort, and every latency printed. One row without a finite one makes
+      // `earliest()` NaN and collapses the overlap to null, at which point the
+      // join reports that the two halves share no window — a wrong answer where
+      // a dropped row would only have been a missing one.
+      if (Number.isFinite(e?.at)) events.push(e);
     } catch {
       // Torn last line, or a rotated file's boundary. Skip it.
     }
@@ -380,8 +400,15 @@ export function joinCaptures(
   bridge: NetwatchEvent[],
   now: number = Date.now(),
 ): { rows: { event: NetwatchEvent; origin: Origin; verdict: Verdict; deltaMs?: number }[]; overlap: [number, number] | null } {
-  const earliest = (xs: NetwatchEvent[]): number | null =>
-    xs.length === 0 ? null : Math.min(...xs.map((e) => e.at));
+  // A fold, not `Math.min(...xs.map(…))`: `netwatch.log` rotates at 10 MiB and a
+  // line is a couple of hundred bytes, so a full app capture spreads six figures
+  // of arguments and throws `RangeError: Maximum call stack size exceeded` —
+  // crashing the join on exactly the large capture it exists for.
+  const earliest = (xs: NetwatchEvent[]): number | null => {
+    let min: number | null = null;
+    for (const e of xs) if (min === null || e.at < min) min = e.at;
+    return min;
+  };
   const a = earliest(app);
   const b = earliest(bridge);
   const start = a !== null && b !== null ? Math.max(a, b) : null;
@@ -389,13 +416,17 @@ export function joinCaptures(
   const overlap: [number, number] | null =
     start !== null && start <= end ? [start, end] : null;
 
-  // A drop never crossed the socket, so it has no counterpart by definition and
-  // is excluded from the index — otherwise a dropped send would "match" the
+  // A `tx` drop never left this endpoint, so it has no counterpart by definition
+  // and stays out of the index — otherwise a dropped send would "match" the
   // receiver's unrelated frame of the same id, which cannot happen but would be
-  // a silent lie if it did.
+  // a silent lie if it did. An `rx` drop is the opposite case and belongs IN it:
+  // the frame did cross the socket and was thrown away on arrival, carrying the
+  // sender's own frameId (`decrypt-failed` in relay-client.ts is the one that
+  // matters). Excluding it verdicted the sender's half "never arrived" — turning
+  // the rekey race this capture exists to catch into a report of network loss.
   const index = new Map<string, NetwatchEvent[]>();
   const add = (e: NetwatchEvent): void => {
-    if (!e.frameId || e.kind === "drop") return;
+    if (!e.frameId || (e.kind === "drop" && e.dir !== "rx")) return;
     const bucket = index.get(e.frameId);
     if (bucket) bucket.push(e);
     else index.set(e.frameId, [e]);
@@ -404,10 +435,25 @@ export function joinCaptures(
   for (const e of bridge) add(e);
 
   const rows = [...app.map((e) => ({ e, origin: "app" as Origin })), ...bridge.map((e) => ({ e, origin: "brg" as Origin }))]
-    .sort((x, y) => x.e.at - y.e.at || x.e.seq - y.e.seq)
+    // `seq` counts one process's own records, so it orders rows only WITHIN an
+    // origin — netwatch.ts says as much, and an older capture file may not carry
+    // it at all, which made the subtraction NaN and left same-millisecond rows
+    // in whatever order the sort happened to land them. Across origins the
+    // meaningful tiebreak is causality: a send precedes the receive it caused.
+    .sort((x, y) =>
+      x.e.at - y.e.at ||
+      (x.origin === y.origin
+        ? (x.e.seq ?? 0) - (y.e.seq ?? 0)
+        : (x.e.dir === y.e.dir ? 0 : x.e.dir === "tx" ? -1 : 1)))
     .map(({ e, origin }) => {
       if (!e.frameId || e.kind === "drop") return { event: e, origin, verdict: "na" as Verdict };
       const peer = (index.get(e.frameId) ?? []).find((o) => o !== e && o.dir !== e.dir);
+      if (peer && peer.kind === "drop") {
+        // It reached the far end and died there. No latency: the peer row
+        // carries the reason, and timing a frame to its own discard would read
+        // as a successful delivery.
+        return { event: e, origin, verdict: "discarded" as Verdict };
+      }
       if (peer) {
         return {
           event: e,
@@ -446,7 +492,7 @@ async function runNetwatchJoin(
 
   const color = Boolean(process.stdout.isTTY);
   const { rows, overlap } = joinCaptures(appRows, bridgeRows);
-  const tally: Record<Verdict, number> = { matched: 0, lost: 0, unpaired: 0, outside: 0, na: 0 };
+  const tally: Record<Verdict, number> = { matched: 0, discarded: 0, lost: 0, unpaired: 0, outside: 0, na: 0 };
 
   for (const row of rows) {
     tally[row.verdict]++;
@@ -471,7 +517,7 @@ async function runNetwatchJoin(
         ? `+${row.deltaMs}ms`
         : VERDICT_NOTE[row.verdict] === ""
           ? ""
-          : `${row.verdict === "lost" ? "✗" : "?"} ${VERDICT_NOTE[row.verdict]}`;
+          : `${row.verdict === "lost" || row.verdict === "discarded" ? "✗" : "?"} ${VERDICT_NOTE[row.verdict]}`;
     console.log(renderJoinedRow(row.event, row.origin, note, color));
   }
 
@@ -497,7 +543,7 @@ async function runNetwatchJoin(
   );
   console.error(
     paint(
-      `#   matched ${tally.matched}   lost ${tally.lost}   ` +
+      `#   matched ${tally.matched}   arrived-then-dropped ${tally.discarded}   lost ${tally.lost}   ` +
         `sender-not-captured ${tally.unpaired}   outside-overlap ${tally.outside}   ` +
         `unpairable ${tally.na}`,
       "dim",
@@ -583,7 +629,7 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
     };
     if (remoteArmed) {
       remoteArmed = false;
-      const err = await setRemoteCapture(host, false);
+      const { error: err } = await setRemoteCapture(host, false);
       if (err) note("the app's capture", err);
     }
     if (bodiesArmed) {
@@ -594,7 +640,7 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
   };
 
   if (opts.remote) {
-    const err = await setRemoteCapture(host, true);
+    const { error: err, ttlMs: remoteTtlMs } = await setRemoteCapture(host, true);
     if (err) {
       console.error(`antgrid watch: could not arm the app's capture — ${err}`);
       console.error("An app must be connected to this machine over the relay for --remote to reach anything.");
@@ -678,7 +724,13 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
   // terminal, and each capture's own TTL covers the disarm that never lands.
   const onSigint = (): void => {
     summary();
-    void Promise.race([stopCaptures(), new Promise((r) => setTimeout(r, 1500))]).then(() => process.exit(0));
+    // `.catch` before `.then`, not after: this handler has already displaced
+    // SIGINT's default, so a rejected disarm (postControl's `res.json()` on a
+    // half-shut host, say) that skipped the exit would strand the terminal with
+    // no second Ctrl-C able to help it.
+    void Promise.race([stopCaptures(), new Promise((r) => setTimeout(r, 1500))])
+      .catch(() => {})
+      .then(() => process.exit(0));
   };
   process.on("SIGINT", onSigint);
 
@@ -702,6 +754,17 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
           }
           const note = notes.length > 0 ? ` (${notes.join("; ")})` : "";
           console.error(paint(`# --- live ---${note}`, "dim", color));
+        }
+        continue;
+      }
+      if (frame.event === "shed") {
+        // The host dropped live events because THIS reader could not keep up —
+        // a gap in what reached the screen, not in what crossed the wire, and
+        // saying which is the whole reason the host counts them.
+        const meta = parseJson<{ dropped?: number }>(frame.data);
+        drops += meta?.dropped ?? 0;
+        if (!opts.json) {
+          console.error(paint(`# ${meta?.dropped ?? 0} events dropped — this reader is behind the capture`, "yellow", color));
         }
         continue;
       }
@@ -730,7 +793,16 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
           return 1;
         }
       }
-      console.log(opts.json ? raw : renderEvent(event, color, opts.remote === true));
+      try {
+        console.log(opts.json ? raw : renderEvent(event, color, opts.remote === true));
+      } catch {
+        // A closed stdout — `| head`, or a pager quit — is the ordinary way to
+        // stop reading a firehose, not a failure. Leave the loop so the tally
+        // and the disarm below still run; without this the EPIPE escapes
+        // runNetwatchCli as an unhandled rejection and the caller's
+        // `process.exit(await …)` never happens.
+        break;
+      }
     }
   } finally {
     process.off("SIGINT", onSigint);

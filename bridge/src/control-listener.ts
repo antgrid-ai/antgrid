@@ -45,7 +45,8 @@ function netwatchStream(url: URL): Response {
   const requested = Number(raw);
   // `limit=0` means "no replay, live tail only" and must not fall through to
   // the ring's default — a caller asking for nothing would otherwise be served
-  // the whole 4096-event buffer and read it as live traffic.
+  // the ring's whole buffer (`DEFAULT_CAPACITY` in netwatch.ts, and larger
+  // still under ANTGRID_NETWATCH_CAPACITY) and read it as live traffic.
   const limit = raw !== null && Number.isFinite(requested) && requested >= 0 ? Math.floor(requested) : undefined;
   const follow = url.searchParams.get("follow") !== "0";
 
@@ -82,7 +83,28 @@ function netwatchStream(url: URL): Response {
         controller.close();
         return;
       }
-      unsubscribe = netwatch.subscribe((event) => send(`data: ${JSON.stringify(event)}\n\n`));
+      // Shed rather than queue when the reader falls behind. `enqueue` neither
+      // blocks nor throws past the high-water mark, so an unchecked live send
+      // grows this stream's internal queue without bound — and the producer is
+      // every loopback frame of every project, which on a scrolling build
+      // outruns a TTY render or a synchronous `--export` append with room to
+      // spare. The bridge owns every project core and PTY in this process, so
+      // an observer that can OOM it kills the thing it was attached to watch.
+      // The count is reported on the next send that fits, because a silent gap
+      // is exactly the blind spot the replay meta already exists to name.
+      let shed = 0;
+      unsubscribe = netwatch.subscribe((event) => {
+        const room = controller.desiredSize;
+        if (room !== null && room <= 0) {
+          shed++;
+          return;
+        }
+        if (shed > 0) {
+          send(`event: shed\ndata: ${JSON.stringify({ dropped: shed })}\n\n`);
+          shed = 0;
+        }
+        send(`data: ${JSON.stringify(event)}\n\n`);
+      });
       keepalive = setInterval(() => send(": ping\n\n"), NETWATCH_KEEPALIVE_MS);
       keepalive.unref?.();
     },
@@ -92,7 +114,13 @@ function netwatchStream(url: URL): Response {
       if (keepalive) clearInterval(keepalive);
       keepalive = null;
     },
-  });
+  // The default strategy counts ONE chunk, so `desiredSize` goes non-positive
+  // the moment a single event is queued unread — which is every burst, reader
+  // keeping up or not, and would shed almost everything. This is the buffer the
+  // shedding defends: deep enough that a normal reader never loses a row,
+  // bounded so a stalled one costs a known amount of memory rather than the
+  // process.
+  }, new CountQueuingStrategy({ highWaterMark: 1024 }));
 
   return new Response(stream, {
     headers: {

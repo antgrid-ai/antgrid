@@ -225,7 +225,17 @@ class Netwatch {
   }
 
   void _emit(NetwatchEvent e) {
-    _sink?.add(jsonEncode(e.toJson()));
+    try {
+      _sink?.add(jsonEncode(e.toJson()));
+    } catch (_) {
+      // `detail` arrives through an untyped map whose `cast` is a LAZY view, so
+      // a non-String key or non-encodable value first throws HERE — a grace
+      // period after the record, on a Timer stack that `tap`'s guard cannot
+      // reach. Uncaught it becomes a zone error, i.e. a fatal
+      // PlatformDispatcher.onError crash raised BY the observer. A malformed
+      // map costs its line of capture; the subscribers below still run, so a
+      // remote watcher is not silenced by a line it was never going to see.
+    }
     // Snapshot: a subscriber may unsubscribe from inside its own callback.
     for (final fn in _subscribers.toList()) {
       try {
@@ -337,11 +347,17 @@ RelayNetTap? localNetTapFor(String projectId) {
   if (!netwatchEnabled) return null;
   final tap = ensureNetwatch().tap;
   return (Map<String, Object?> event) {
-    final detail = <String, Object?>{
-      ...?(event['detail'] as Map?)?.cast<String, Object?>(),
-      'project': projectId,
-    };
-    tap({...event, 'detail': detail});
+    try {
+      final detail = <String, Object?>{
+        ...?(event['detail'] as Map?)?.cast<String, Object?>(),
+        'project': projectId,
+      };
+      tap({...event, 'detail': detail});
+    } catch (_) {
+      // The same fail-open `tap` keeps, restated because this runs OUTSIDE it:
+      // the spread forces the lazy `cast` view, so a malformed `detail` throws
+      // here, on the caller's own send/receive stack, before `tap` is reached.
+    }
   };
 }
 

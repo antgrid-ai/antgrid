@@ -154,10 +154,10 @@ export type ControlResponse =
   | { id: string; ok: true; type: "git:remote-state"; status: BranchRemoteStatus }
   | { id: string; ok: true; type: "git:checkout"; current: string; stashed?: StashEntry }
   | { id: string; ok: true; type: "checkout:path"; path: string }
-  | { id: string; ok: true; type: "netwatch:remote"; enabled: boolean }
   /** `ttlMs` is the window actually armed, which is not always the one asked
-   *  for (the host clamps), and `0` while disarmed. A watcher heartbeats inside
-   *  it, so echoing the request instead would let a clamped capture lapse under
-   *  a re-arm that believed it was early. */
+   *  for (the host clamps), and `0`/absent while disarmed. A watcher heartbeats
+   *  inside it, so echoing the request instead would let a clamped capture lapse
+   *  under a re-arm that believed it was early. */
+  | { id: string; ok: true; type: "netwatch:remote"; enabled: boolean; ttlMs?: number }
   | { id: string; ok: true; type: "netwatch:local"; bodies: boolean; ttlMs: number }
   | { id: string; ok: false; error: { code: string; message: string } };

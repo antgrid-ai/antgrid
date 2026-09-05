@@ -308,6 +308,35 @@ describe("LocalListener body capture", () => {
     ws.close();
   });
 
+  it("withholds a secret-bearing body even while armed", async () => {
+    const ws = await connectOwner();
+    armBodyCapture(true, 60_000);
+    // The account device's Ed25519 PRIVATE key rides this type over this exact
+    // socket (the desktop's enable-relay wizard), and `--bodies` output is
+    // printed, streamed over /netwatch, and appended to an --export file that
+    // gets pasted into bug reports.
+    const secret = "PRIVATE-KEY-MUST-NOT-BE-CAPTURED";
+    ws.send(JSON.stringify(createMessage("agent:enableRelay", {
+      auth: {
+        deviceUuid: "11111111-1111-4111-8111-111111111111",
+        ed25519Pub: "cHVi", ed25519Priv: secret,
+        clientId: "cid", clientSecret: secret, licenseToken: secret,
+      },
+    })));
+    // Same frame, malformed: a version skew lands on the `unparseable` path,
+    // which redacts off the CLAIMED type — a liar can only over-redact itself.
+    ws.send(JSON.stringify({ type: "agent:enableRelay", id: "x", auth: { bogus: secret } }));
+
+    const seen = await untilLocal(2);
+    for (const e of seen) {
+      expect(e.body).toBe("[redacted]");
+      expect(JSON.stringify(e)).not.toContain(secret);
+    }
+    // Metadata still lands — a capture must show the frame crossed and when.
+    expect(seen.every((e) => e.msgType === "agent:enableRelay" && e.bytes! > 0)).toBe(true);
+    ws.close();
+  });
+
   it("truncates a body at the cap and says how much it dropped", async () => {
     const ws = await connectOwner();
     armBodyCapture(true, 60_000);

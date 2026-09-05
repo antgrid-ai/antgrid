@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { encodeRouteFrame, FrameKind } from "antgrid-wire";
-import { Netwatch, netwatch, __resetNetwatchForTest } from "../src/netwatch";
+import { Netwatch, netwatch, armRemoteIngest, __resetNetwatchForTest } from "../src/netwatch";
 import { RelayClient } from "../src/relay-client";
 import type { AbMessage } from "../src/protocol";
 import { runNetwatchCli } from "../src/cli/netwatch";
@@ -132,6 +132,7 @@ describe("RelayClient netwatch:events ingest", () => {
 
   it("admits the batch and never forwards it downstream", () => {
     const seen: AbMessage[] = [];
+    armRemoteIngest(true, 60_000);
     client = makeClient(() => null, (m) => seen.push(m));
     deliverControlPlane(client, {
       type: "netwatch:events",
@@ -147,6 +148,7 @@ describe("RelayClient netwatch:events ingest", () => {
   });
 
   it("records what the app's own budget threw away", () => {
+    armRemoteIngest(true, 60_000);
     client = makeClient(() => null);
     deliverControlPlane(client, {
       type: "netwatch:events",
@@ -161,7 +163,47 @@ describe("RelayClient netwatch:events ingest", () => {
     expect(drop.detail).toMatchObject({ dropped: 12 });
   });
 
+  it("ignores a batch nobody armed", () => {
+    const seen: AbMessage[] = [];
+    client = makeClient(() => null, (m) => seen.push(m));
+    // Account trust alone reaches dispatchControlPlane, and that runs BEFORE
+    // the bus gate where the machine's remote-access switch lives — so an
+    // unarmed ingest is a peer writing into the operator's ring through the one
+    // plane meant to be inert for it, evicting the traffic they attached to
+    // read and putting peer-chosen rows in front of them as ground truth.
+    deliverControlPlane(client, {
+      type: "netwatch:events",
+      id: "1",
+      timestamp: Date.now(),
+      events: [appEvent()],
+      dropped: 5,
+    });
+
+    expect(netwatch.snapshot().filter((e) => e.origin === "app")).toHaveLength(0);
+    // Still consumed: forwarding it downstream would be strictly worse.
+    expect(seen).toHaveLength(0);
+  });
+
+  it("never takes a body from the peer", () => {
+    armRemoteIngest(true, 60_000);
+    client = makeClient(() => null);
+    // The app's own event has no `body` field, so one here was not captured on
+    // the app's side of the socket — it is a payload the peer chose to put in
+    // the operator's ring, past the `--bodies` gate that is all they armed.
+    deliverControlPlane(client, {
+      type: "netwatch:events",
+      id: "1",
+      timestamp: Date.now(),
+      events: [appEvent({ body: "smuggled-plaintext" })],
+    });
+
+    const e = netwatch.snapshot().find((x) => x.origin === "app")!;
+    expect(e.frameId).toBe("a3f9c2110bd4aa01bb02cc03");
+    expect(JSON.stringify(e)).not.toContain("smuggled-plaintext");
+  });
+
   it("survives a batch whose events are not an array", () => {
+    armRemoteIngest(true, 60_000);
     client = makeClient(() => null);
     // parseMessageFast checks the `type` and nothing else, so this reaches the
     // ingest exactly as the peer wrote it.

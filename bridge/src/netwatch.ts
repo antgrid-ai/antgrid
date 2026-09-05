@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Channel } from "./message-bus";
+import { BODY_REDACTED_MESSAGE_TYPES } from "./protocol";
 
 /** Which way the frame crossed the socket. */
 export type NetwatchDir = "tx" | "rx";
@@ -97,11 +98,22 @@ const DEFAULT_CAPACITY = 16384;
  * negative falls back rather than being honoured — the capacity is the modulus
  * of every ring index, so a bad one does not fail loudly, it produces a ring
  * that silently records nothing.
+ *
+ * The ceiling is the one bad value that WOULD fail loudly, and in the worst
+ * possible place: `new Array(n)` throws RangeError past 2^32-1, the ring is
+ * built at module scope, and this module is imported by the relay client, the
+ * loopback listener, the control listener and the host server — so a fat-fingered
+ * env var would take the whole bridge down at import with an error that names an
+ * array length rather than the variable. An observer must never be why the
+ * machine will not start.
  */
+const MAX_CAPACITY = 1_048_576;
+
 function resolveCapacity(raw: string | undefined): number {
   if (raw === undefined) return DEFAULT_CAPACITY;
   const n = Number(raw);
-  return Number.isInteger(n) && n > 0 ? n : DEFAULT_CAPACITY;
+  if (!Number.isInteger(n) || n <= 0) return DEFAULT_CAPACITY;
+  return Math.min(n, MAX_CAPACITY);
 }
 
 /** Bodies are the one thing the ring would hold that is payload, so they are
@@ -145,14 +157,66 @@ export function isBodyCaptureArmed(): boolean {
   return bodyCaptureEnabled;
 }
 
+let remoteIngestEnabled = false;
+let remoteIngestTimer: (ReturnType<typeof setTimeout> & { unref?: () => void }) | null = null;
+
+/**
+ * Arm or disarm acceptance of a peer's `netwatch:events` for at most `ttlMs`.
+ *
+ * An unarmed bridge must ignore the batch rather than ring it. Account trust is
+ * all it takes to reach `dispatchControlPlane`, and that path runs BEFORE
+ * `bus.dispatchInbound` — the only place the machine's remote-access switch is
+ * consulted for a relay frame — so without this an app the operator never armed,
+ * on a machine with remote access off, can evict the whole ring the operator
+ * attached to read and put peer-chosen rows in front of them as ground truth.
+ * The arm is set by the same `netwatch:remote` verb that tells the app to start,
+ * so the window this opens is exactly the one a watcher asked for.
+ *
+ * Same dead man's switch as `armBodyCapture`, for the same reason: a watcher
+ * killed with SIGKILL sends no disarm.
+ */
+export function armRemoteIngest(enabled: boolean, ttlMs: number): void {
+  if (remoteIngestTimer) clearTimeout(remoteIngestTimer);
+  remoteIngestTimer = null;
+  if (!enabled || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+    remoteIngestEnabled = false;
+    return;
+  }
+  remoteIngestEnabled = true;
+  remoteIngestTimer = setTimeout(() => {
+    remoteIngestEnabled = false;
+    remoteIngestTimer = null;
+  }, ttlMs) as ReturnType<typeof setTimeout> & { unref?: () => void };
+  remoteIngestTimer.unref?.();
+}
+
+export function isRemoteIngestArmed(): boolean {
+  return remoteIngestEnabled;
+}
+
 function truncationMarker(dropped: number): string {
   return `…[+${dropped} chars]`;
 }
+
+export const BODY_REDACTED_MARKER = "[redacted]";
 
 /**
  * The body a tap should record for this wire text, or `undefined` while
  * disarmed — the caller passes the answer straight into the event, so the
  * disarmed one has to be the absent field rather than an empty string.
+ *
+ * `msgType` is the type the frame CLAIMS, which need not have parsed — the
+ * `unparseable` drop path passes the raw string for exactly that reason. A
+ * sender that lies about its type can only over-redact its own frame, so
+ * trusting the claim here costs nothing and covers the malformed credential
+ * frame that the parsed-only reading would have leaked. A secret-bearing type
+ * (BODY_REDACTED_MESSAGE_TYPES) yields the marker rather than `undefined`, so
+ * the capture says the payload was withheld instead of reading like a frame
+ * recorded before the arm.
+ *
+ * The hole this leaves is a credential type NEITHER half knows by name, which
+ * is why the list has to grow in the same commit as any new secret field rather
+ * than after the first report.
  *
  * The marker is counted INSIDE the cap, not appended past it: the cap is what
  * bounds the ring's memory, so a body that announces its own truncation by
@@ -160,8 +224,9 @@ function truncationMarker(dropped: number): string {
  * the untruncated length can only over-reserve — the number finally printed is
  * smaller, so never longer — which is what keeps the count exact.
  */
-export function captureBody(text: string): string | undefined {
+export function captureBody(text: string, msgType?: string): string | undefined {
   if (!bodyCaptureEnabled) return undefined;
+  if (msgType !== undefined && BODY_REDACTED_MESSAGE_TYPES.has(msgType)) return BODY_REDACTED_MARKER;
   if (text.length <= NETWATCH_BODY_MAX_CHARS) return text;
   const keep = NETWATCH_BODY_MAX_CHARS - truncationMarker(text.length).length;
   return text.slice(0, keep) + truncationMarker(text.length - keep);
@@ -236,11 +301,21 @@ export class Netwatch {
       const dir = e.dir;
       const kind = e.kind;
       const at = e.at;
-      if ((dir !== "tx" && dir !== "rx") || typeof kind !== "string" || typeof at !== "number") continue;
+      // `typeof NaN === "number"`, and a NaN `at` is not a bad row but a bad
+      // CAPTURE: it renders as NaN:NaN:NaN, collapses `joinCaptures`' overlap
+      // window to nothing, and the join then reports that the two halves share
+      // no window — a tool that lies rather than one that is missing a row.
+      if ((dir !== "tx" && dir !== "rx") || typeof kind !== "string" || !Number.isFinite(at)) continue;
+      // The field set is otherwise passed through verbatim (see above), with
+      // `body` the one exception: the app's own event has no such field, so a
+      // body here was not captured on the app's side of the socket — it is a
+      // payload the peer chose to put in the operator's ring, past the local
+      // `--bodies` gate that is the only thing they armed.
+      const { body: _peerBody, ...rest } = e as Record<string, unknown> & { body?: unknown };
       this.push({
-        ...(e as unknown as NetwatchEvent),
+        ...(rest as unknown as NetwatchEvent),
         seq: typeof e.seq === "number" ? e.seq : 0,
-        at: at + skewMs,
+        at: (at as number) + skewMs,
         dir,
         origin: "app",
       });
@@ -312,6 +387,7 @@ export const netwatch = new Netwatch();
  */
 export function __resetNetwatchForTest(): void {
   armBodyCapture(false, 0);
+  armRemoteIngest(false, 0);
   const w = netwatch as unknown as {
     ring: (NetwatchEvent | undefined)[];
     write: number;

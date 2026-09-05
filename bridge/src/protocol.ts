@@ -2503,6 +2503,39 @@ export type AgentSessionAction = z.infer<typeof AgentSessionActionMessage>;
 export type AgentPermissionResolve = z.infer<typeof AgentPermissionResolveMessage>;
 export type AgentQuestionResolve = z.infer<typeof AgentQuestionResolveMessage>;
 
+/**
+ * Types whose wire text must never be recorded verbatim, however loudly an
+ * operator asks for bodies.
+ *
+ * `antgrid watch --bodies` exists to show what crossed a socket, and its output
+ * is printed to a terminal, streamed over `/netwatch`, and appended to an
+ * `--export` file that ends up pasted into bug reports. That is fine for a
+ * `tree:full` and catastrophic for these three: `agent:enableRelay` carries the
+ * account device's Ed25519 PRIVATE key plus `clientSecret` and `licenseToken`;
+ * `agent:question-resolve` is the answer to a question the agent may have
+ * flagged `isSecret`, which the UI masks on the way in; `terminal:input` is
+ * literally the user's keystrokes, password prompts inside the PTY included.
+ * The `tunnel:*` set is the preview proxy's own wire (tunnel-protocol.ts) and
+ * carries the proxied site's request and response headers verbatim — `Cookie`,
+ * `Authorization`, `Set-Cookie`. They are named here rather than there because
+ * one list is the only way this stays checkable; they are also the case that
+ * proves the check must key off the CLAIMED type, since `parseMessageFast`
+ * refuses them and they reach the ring down the `unparseable` path.
+ *
+ * Metadata (type, id, byte count) is still recorded — only the payload is
+ * withheld, so a capture still shows that the frame crossed and when.
+ *
+ * Add a type here in the same commit that gives it a secret-bearing field.
+ */
+export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
+  "agent:enableRelay",
+  "agent:question-resolve",
+  "terminal:input",
+  "tunnel:http-request",
+  "tunnel:http-response",
+  "tunnel:ws-open",
+]);
+
 /** The exhaustive checkout-variable protocol set. Any new filesystem-facing
  * type belongs here (and gets an explicit schema decision + contract test). */
 export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([

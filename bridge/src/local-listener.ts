@@ -47,12 +47,15 @@ export class LocalListener implements TransportSubscriber {
   private ownerSocket: ServerWebSocket<ConnState> | null = null;
   private busUnsubscribe: (() => void) | null = null;
 
-  constructor(private opts: LocalListenerOptions) {}
-
-  /** Stamped on every event this listener records — see `projectId`'s note. */
-  private get netwatchDetail(): Record<string, string> {
-    return { project: this.opts.projectId };
+  constructor(private opts: LocalListenerOptions) {
+    this.netwatchDetail = { project: opts.projectId };
   }
+
+  /** Stamped on every event this listener records — see `projectId`'s note.
+   *  Built once and shared: this rides the terminal-output hot path, where a
+   *  getter allocating a fresh object per frame is pure garbage for a value that
+   *  never changes. Shared safely because the ring only ever reads it. */
+  private readonly netwatchDetail: Record<string, string>;
 
   /** True while a desktop owner is connected over the loopback socket. The
    *  relay slot's `onPeerOffline` (phone left) consults this so it never
@@ -167,7 +170,7 @@ export class LocalListener implements TransportSubscriber {
       // path's nonce-derived key exists only because its route header has none.
       frameId: msg.id,
       bytes: Buffer.byteLength(json, "utf8"),
-      body: captureBody(json),
+      body: captureBody(json, msg.type),
       detail: this.netwatchDetail,
     });
   }
@@ -300,9 +303,10 @@ export class LocalListener implements TransportSubscriber {
         reason: "unparseable", bytes: Buffer.byteLength(text, "utf8"),
         // The one drop whose body earns its cost: "the schema refused it" is
         // unactionable without the text that was refused. Safe here in a way it
-        // is not on the hello paths — this is post-handshake data plane and
-        // carries no credential.
-        body: captureBody(text),
+        // is not on the hello paths — this is post-handshake data plane, and the
+        // claimed type is handed to captureBody so a malformed frame of a
+        // secret-bearing type redacts exactly as a well-formed one would.
+        body: captureBody(text, typeof envelope?.type === "string" ? envelope.type : undefined),
         detail: this.netwatchDetail,
       });
       return;
@@ -311,7 +315,7 @@ export class LocalListener implements TransportSubscriber {
       dir: "rx", kind: "json", transport: "local", channel,
       msgType: msg.type, frameId: msg.id,
       bytes: Buffer.byteLength(text, "utf8"),
-      body: captureBody(text),
+      body: captureBody(text, msg.type),
       detail: this.netwatchDetail,
     });
     // `loopback`: the owner is the desktop, trusted by the socket + token — its

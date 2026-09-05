@@ -57,7 +57,18 @@ class JsonlSink {
   }
 
   /// Drain queued lines to disk now (tests await before asserting).
-  Future<void> flush() => _inFlight ??= _drain();
+  ///
+  /// The completion hook clears the latch, NEVER `_drain`'s own `finally`. With
+  /// nothing queued and the directory already made, `_drain` reaches no `await`
+  /// and its body — the `finally` included — runs to completion BEFORE the
+  /// future it returns is assigned here. A self-clearing `_drain` would then be
+  /// storing a latch nothing can ever clear, and every later flush would
+  /// short-circuit on it: the sink queues forever and writes nothing again for
+  /// the life of the process. `whenComplete` cannot run early — its callback is
+  /// a microtask at the soonest — so the clear always follows the assignment.
+  Future<void> flush() => _inFlight ??= _drain().whenComplete(() {
+    _inFlight = null;
+  });
 
   Future<void> _drain() async {
     _timer?.cancel();
@@ -88,8 +99,6 @@ class JsonlSink {
       }
     } catch (_) {
       // Fail-open: never let logging crash a caller.
-    } finally {
-      _inFlight = null;
     }
   }
 

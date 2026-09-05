@@ -387,14 +387,19 @@ class MachineSession {
         _annotate(_frameId(sealed), msgType: type, streamId: streamId);
       }
     } catch (e) {
-      // best-effort send
+      // The type alone, as everywhere else a drop names an error: the try above
+      // wraps `seal` and `buildFragments`, and a FormatException/ArgumentError
+      // out of either prints the plaintext it choked on. `detail` is shipped to
+      // the bridge by NetwatchUploader and written into an operator's export
+      // file — the app's event has no `body` field precisely so a capture
+      // carries no payload, and this is the one door left open to it.
       _dropped(
         'tx',
         'seal-failed',
         channel: channel,
         streamId: streamId,
         msgType: type,
-        detail: {'error': '$e'},
+        detail: {'error': '${e.runtimeType}'},
       );
     }
   }

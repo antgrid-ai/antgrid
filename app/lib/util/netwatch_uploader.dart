@@ -91,10 +91,17 @@ class NetwatchUploader {
     if (ttl != null) {
       _ttlTimer = Timer(ttl, _disarm);
     }
-    if (_armed) return;
-    _armed = true;
-    _unsubscribe = _recorder.subscribe(_onEvent);
-    _flushTimer = Timer.periodic(flushEvery, (_) => _flush());
+    if (!_armed) {
+      _armed = true;
+      _unsubscribe = _recorder.subscribe(_onEvent);
+      _flushTimer = Timer.periodic(flushEvery, (_) => _flush());
+    }
+    // Outside the guard, so a re-arm re-asserts the tap rather than only
+    // extending the window. `onArmedChanged` is an assignment on the socket
+    // (`relay.netTap = …`), so re-running it is free — and it is the only way
+    // back from a tap cleared without this class being told, which leaves an
+    // uploader that reports itself armed while flushing empty batches for the
+    // life of the connection. Every watcher heartbeat then repairs it.
     onArmedChanged(true);
   }
 
@@ -123,7 +130,11 @@ class NetwatchUploader {
       return;
     }
     final json = e.toJson();
-    final cost = jsonEncode(json).length;
+    // Straight to UTF-8 in one pass: the budget exists to keep a diagnostic from
+    // changing the session it measures, so it has to charge wire bytes, and a
+    // String's `length` counts UTF-16 code units — a CJK path or an emoji in a
+    // msgType is charged a third of what it costs to send.
+    final cost = JsonUtf8Encoder().convert(json).length;
     if (!_spend(cost)) {
       _dropped++;
       return;

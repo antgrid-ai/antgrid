@@ -111,18 +111,25 @@ void main() {
     expect(sent.single['dropped'], 2);
   });
 
-  test('installs the tap on arm and removes it on disarm, once each', () async {
+  test('re-asserts the tap on every arm, and removes it once on disarm', () async {
     final up = make()
       ..configure(enabled: true, ttl: const Duration(minutes: 5))
       ..configure(enabled: true, ttl: const Duration(minutes: 5));
-    expect(arms, [true]);
+    // The arm is an assignment on the socket, not an event, so a watcher's
+    // heartbeat re-asserting it costs nothing — and it is the only way back
+    // from a tap cleared without this class being told (a rebuilt
+    // RelayService), which otherwise leaves an uploader reporting itself armed
+    // while it flushes empty batches for the life of the connection.
+    expect(arms, [true, true]);
 
     up
       ..configure(enabled: false)
       ..configure(enabled: false);
-    expect(arms, [true, false]);
+    // The disarm half stays once-only: it is what tears down the subscription
+    // and the flush timer, and running that twice would ship the tail twice.
+    expect(arms, [true, true, false]);
     up.dispose();
-    expect(arms, [true, false]);
+    expect(arms, [true, true, false]);
   });
 
   test('a disarm ships the tail it was holding', () async {

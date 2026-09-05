@@ -411,16 +411,69 @@ class RelayService {
   /// completes. Not part of the supported API.
   void debugSetChannel(WebSocketChannel channel) => _channel = channel;
 
+  /// The relay control fields worth carrying into a capture — the same set the
+  /// agent's half records, so a joined view reads as one conversation.
+  static Map<String, Object?>? _controlDetail(Map<String, dynamic> json) {
+    final detail = <String, Object?>{};
+    for (final k in const [
+      'code',
+      'retryable',
+      'ref',
+      'peerId',
+      'streamId',
+      'epoch',
+      'ok',
+      'reason',
+    ]) {
+      final v = json[k];
+      if (v != null) detail[k] = v;
+    }
+    return detail.isEmpty ? null : detail;
+  }
+
   void _handleText(String data) {
+    final tap = _netTap;
     Map<String, dynamic> json;
     try {
       json = jsonDecode(data) as Map<String, dynamic>;
     } catch (_) {
+      tap?.call({
+        'op': 'frame',
+        'dir': 'rx',
+        'kind': 'drop',
+        'bytes': utf8.encode(data).length,
+        'reason': 'unparseable',
+      });
       return;
     }
 
     final msg = parseRelayMessage(json);
-    if (msg == null) return;
+    if (msg == null) {
+      tap?.call({
+        'op': 'frame',
+        'dir': 'rx',
+        'kind': 'drop',
+        'msgType': json['type'] as String?,
+        'bytes': utf8.encode(data).length,
+        'reason': 'unknown-control',
+      });
+      return;
+    }
+
+    // Relay CONTROL json, not a sealed frame — the agent's half records the
+    // same class, and without this one the app is blind to everything the relay
+    // says to it. `error` with MESSAGE_RATE_LIMITED is the relay telling this
+    // sender it threw a frame away, which is the exact question a capture is
+    // opened to answer, and it would otherwise show as an idle app beside an
+    // agent that saw the socket stall.
+    tap?.call({
+      'op': 'frame',
+      'dir': 'rx',
+      'kind': 'control',
+      'msgType': json['type'] as String?,
+      'bytes': utf8.encode(data).length,
+      'detail': _controlDetail(json),
+    });
 
     _markInboundHealthy();
 
@@ -743,7 +796,16 @@ class RelayService {
   }
 
   void _send(Map<String, dynamic> data) {
-    _channel?.sink.add(jsonEncode(data));
+    final json = jsonEncode(data);
+    _netTap?.call({
+      'op': 'frame',
+      'dir': 'tx',
+      'kind': 'control',
+      'msgType': data['type'] as String?,
+      'streamId': data['streamId'] as String?,
+      'bytes': utf8.encode(json).length,
+    });
+    _channel?.sink.add(json);
   }
 
   void _cleanup() {

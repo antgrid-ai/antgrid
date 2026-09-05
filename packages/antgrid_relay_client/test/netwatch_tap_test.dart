@@ -189,11 +189,54 @@ void main() {
 
       relay.sendMessage('machine-1', 'preview', _sealedLookingPayload(0x5a));
 
-      final tx = capture.frames.singleWhere((e) => e['dir'] == 'tx');
-      expect(tx['kind'], 'sealed');
+      // By `kind`, not by `dir` alone: the socket's own control json — this
+      // connection's `hello`, and the `welcome` answering it — is captured too.
+      final tx = capture.frames.singleWhere(
+        (e) => e['dir'] == 'tx' && e['kind'] == 'sealed',
+      );
       expect(tx['channel'], 'preview');
       expect(tx['frameId'], '5a' * 12);
       expect(tx['bytes'], 22);
+      expect(capture.drops, isEmpty);
+    });
+
+    test('records the relay control json crossing in both directions', () async {
+      final connect = relay.connect(
+        server.wsUrl,
+        DeviceIdentity(
+          deviceId: 'phone-1#machine-1',
+          name: 'Test Phone',
+          ed25519PrivateKey: Uint8List(32),
+          ed25519PublicKey: Uint8List(32),
+          x25519PrivateKey: Uint8List(32),
+          x25519PublicKey: Uint8List(32),
+        ),
+        licenseToken: 'tok',
+        epoch: 1,
+        machineDeviceId: 'machine-1',
+      );
+      expect(await connections.moveNext(), isTrue);
+      connections.current.sendJson({
+        'type': 'welcome',
+        'deviceId': 'phone-1#machine-1',
+        'epoch': 1,
+        'serverTime': DateTime.now().toUtc().toIso8601String(),
+      });
+      await connect;
+
+      final control = capture.frames.where((e) => e['kind'] == 'control');
+      // The agent's half records this same class, so a capture missing it shows
+      // an idle app beside an agent that saw the socket answer — and an `error`
+      // here (MESSAGE_RATE_LIMITED) is the relay saying it threw a frame away,
+      // which is the question a capture is usually opened to answer.
+      expect(
+        control.where((e) => e['dir'] == 'tx').map((e) => e['msgType']),
+        contains('hello'),
+      );
+      final welcome = control.singleWhere((e) => e['dir'] == 'rx');
+      expect(welcome['msgType'], 'welcome');
+      expect(welcome['bytes'], isPositive);
+      expect((welcome['detail']! as Map)['epoch'], 1);
       expect(capture.drops, isEmpty);
     });
   });

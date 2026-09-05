@@ -35,7 +35,7 @@ import { FragReassembler } from "./frag-reassembler";
 import { prunePushToken } from "./push/prune";
 import { nextEpoch } from "./relay-epoch";
 import { StreamMux, type AttachStreamOpts, type StreamHandle } from "./stream-mux";
-import { netwatch, frameIdFor } from "./netwatch";
+import { netwatch, frameIdFor, isRemoteIngestArmed } from "./netwatch";
 
 export interface RelayClientOptions {
   url: string;
@@ -874,9 +874,17 @@ export class RelayClient {
       // that CARRIED it is already in the ring from routeAppEnvelope above, so
       // the batch's own arrival stays visible either way.
       if (msg.type === "netwatch:events") {
+        // Dropped unless a `netwatch:remote` on this machine asked for it.
+        // Account trust alone gets a peer to this line, and this line runs
+        // BEFORE `bus.dispatchInbound` — the only place the machine's
+        // remote-access switch is consulted for a relay frame — so an unarmed
+        // ingest is a peer writing into host memory through the one plane that
+        // is meant to be inert for it. Consumed either way: forwarding a
+        // capture batch to the bus would be strictly worse than ignoring it.
+        if (!isRemoteIngestArmed()) return;
         // parseMessageFast checks the `type` and nothing else, so `events` is
         // whatever the peer sent — an array only by convention until here.
-        const skewMs = typeof msg.sentAt === "number" ? Date.now() - msg.sentAt : 0;
+        const skewMs = typeof msg.sentAt === "number" && Number.isFinite(msg.sentAt) ? Date.now() - msg.sentAt : 0;
         if (Array.isArray(msg.events)) netwatch.ingestRemote(msg.events, skewMs);
         if (typeof msg.dropped === "number" && msg.dropped > 0) {
           netwatch.record({
