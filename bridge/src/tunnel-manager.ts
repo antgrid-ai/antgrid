@@ -12,6 +12,12 @@ import type { ConnState } from "./conn-state";
 interface WsUpstream {
   socket: WebSocket;
   open: boolean;
+  /** The tunnel is over: nothing this socket says may be routed by its id any
+   *  more, and nothing may be relayed into it. NOT derivable from [wsAbandoned]
+   *  membership — that Set is only the bounded eviction queue, and the two
+   *  legitimately disagree for a socket released while already open (never
+   *  added) and for an evicted one (removed, still abandoned). */
+  abandoned: boolean;
   pending: Array<{ data: string; binary: boolean }>;
   pendingBytes: number;
   checkoutId: string;
@@ -43,6 +49,17 @@ const WS_PREOPEN_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 /** Both buffers are fed from the data path, so their drop paths must never log
  *  per frame — a streaming socket would emit thousands of lines. */
 const WS_PREOPEN_WARN_INTERVAL_MS = 5_000;
+/** Upstream sockets whose tunnel ended mid-handshake are PARKED, not closed:
+ *  Bun aborts a socket that never finished its handshake with a RESET, and Node
+ *  hands an `upgrade` request to its listeners with its own error handler
+ *  already removed — so a dev server that ignored the upgrade (Vite does, for
+ *  any path or subprotocol it does not own) holds that socket with no error
+ *  listener at all, and the reset lands as an unhandled `read ECONNRESET` that
+ *  exits the dev server. Measured on Node 26 against Astro. Past this many
+ *  parked sockets the oldest is closed anyway: an upgrade nothing will ever
+ *  answer is a leaked fd per tunnel, and one bounded crash risk beats
+ *  unbounded growth. */
+const WS_ABANDONED_MAX = 32;
 
 /** How long a sent response stays replayable. Must outlive the app's 30s tunnel
  *  timeout so a retry issued just before it gives up still finds the entry. */
@@ -54,11 +71,12 @@ const OUTBOX_TTL_MS = 35_000;
 const OUTBOX_MAX_ENTRY_BYTES = 2 * 1024 * 1024;
 const OUTBOX_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 
+const WS_SUBPROTOCOL_HEADER = "sec-websocket-protocol";
+
 // Handshake headers the upstream connection owns: Bun mints its own key,
 // version and framing, and `host` follows from the URL we build. The
-// subprotocol is dropped rather than forwarded because nothing carries the
-// server's choice back to the browser — letting the server agree one the
-// browser never hears about is worse than negotiating none.
+// subprotocol header is minted by Bun too — from `protocols`, which is where
+// the browser's list goes instead (see [splitUpstreamWsHeaders]).
 const WS_HOP_BY_HOP_HEADERS = new Set([
   "connection",
   "upgrade",
@@ -69,16 +87,45 @@ const WS_HOP_BY_HOP_HEADERS = new Set([
   "sec-websocket-version",
   "sec-websocket-extensions",
   "sec-websocket-accept",
-  "sec-websocket-protocol",
+  WS_SUBPROTOCOL_HEADER,
 ]);
 
-function upstreamWsHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+/** Split the browser's handshake headers into the ones the upstream request may
+ *  carry and the subprotocol list Bun mints `Sec-WebSocket-Protocol` from. One
+ *  pass: the hop-by-hop filter already lowercases every key and already drops
+ *  the subprotocol header, so harvesting its value rides along for free.
+ *
+ *  A Vite-family dev server (Astro, Nuxt, SvelteKit, plain Vite and the rest)
+ *  only answers an HMR upgrade that names `vite-hmr`; one without it is never
+ *  upgraded. The app has already echoed the browser's first choice by the time
+ *  this socket opens, so the negotiation is optimistic — a server that picks a
+ *  later entry than the browser's first is not corrected. The app echoes off
+ *  ITS read of the same header (`_requestedSubprotocols` in
+ *  `app/lib/services/preview_proxy_server.dart`), so ORDER and the trim/drop-
+ *  empty rules must agree with it: a disagreement tells the browser a
+ *  subprotocol the dev server was never offered, which neither end can detect.
+ *  Deduping is deliberately one-sided, not drift — Bun's WebSocket constructor
+ *  REFUSES a list containing a duplicate (see [openUpstream]), while shelf
+ *  takes the app's list as a set already. */
+function splitUpstreamWsHeaders(
+  headers: Record<string, string> | undefined,
+): { headers: Record<string, string>; protocols: string[] } {
   const out: Record<string, string> = {};
+  const protocols = new Set<string>();
   for (const [k, v] of Object.entries(headers ?? {})) {
-    if (WS_HOP_BY_HOP_HEADERS.has(k.toLowerCase())) continue;
+    const lower = k.toLowerCase();
+    if (lower === WS_SUBPROTOCOL_HEADER) {
+      for (const p of v.split(",")) {
+        const trimmed = p.trim();
+        if (trimmed) protocols.add(trimmed);
+      }
+      // No `continue`: the hop-by-hop set below is still what drops this
+      // header, so its entry stays load-bearing rather than dead.
+    }
+    if (WS_HOP_BY_HOP_HEADERS.has(lower)) continue;
     out[k] = v;
   }
-  return out;
+  return { headers: out, protocols: [...protocols] };
 }
 
 export class TunnelManager {
@@ -114,6 +161,11 @@ export class TunnelManager {
   private wsPreopenBytes = 0;
   private wsPreopenWarnedAt = 0;
   private wsPreopenTtlMs: number;
+  /** Sockets released mid-handshake — see [WS_ABANDONED_MAX]. Insertion-ordered
+   *  so the oldest is the eviction candidate. Outlives [stop] on purpose: the
+   *  manager is gone, the dev server is not. */
+  private wsAbandoned = new Set<WsUpstream>();
+  private wsAbandonedMax: number;
   /** [stop] is terminal. Without this a frame still in flight when a checkout
    *  is torn down re-arms a timer on a manager nothing owns any more — the
    *  callers null nothing, so the flag is what has to hold the line. */
@@ -128,6 +180,7 @@ export class TunnelManager {
     relayHost: string;
     connState: ConnState;
     wsPreopenTtlMs?: number;
+    wsAbandonedMax?: number;
   }) {
     this.projectId = opts.projectId;
     this.portLabels = opts.portLabels;
@@ -137,6 +190,7 @@ export class TunnelManager {
     this.relayHost = opts.relayHost;
     this.connState = opts.connState;
     this.wsPreopenTtlMs = opts.wsPreopenTtlMs ?? WS_PREOPEN_TTL_MS;
+    this.wsAbandonedMax = opts.wsAbandonedMax ?? WS_ABANDONED_MAX;
   }
 
   onPortsUpdate(ports: PortInfo[]): void {
@@ -345,30 +399,66 @@ export class TunnelManager {
     // reason: without it every wss upstream dies in the TLS handshake, and a
     // dev server whose page needs a socket — Blazor, Vite HMR, a live-reload
     // shim — renders as a blank tab with nothing to point at.
-    // lib.dom's WebSocket shadows Bun's (tsconfig takes the default libs for an
-    // ESNext target), and its constructor's second parameter is `protocols` —
-    // so the options Bun does accept at runtime have to be cast past the type.
-    const wsOptions: Bun.WebSocketOptions = {
-      headers: upstreamWsHeaders(msg.headers),
-      ...(secure ? { tls: { rejectUnauthorized: false } } : {}),
-    };
-    const socket = new WebSocket(url, wsOptions as unknown as string[]);
+    const tlsOptions: Bun.WebSocketOptions = secure ? { tls: { rejectUnauthorized: false } } : {};
+    const { headers, protocols } = splitUpstreamWsHeaders(msg.headers);
+    // Every option is either a plain property or annotated on its own const,
+    // because TypeScript skips its excess-property check on a spread: a typo'd
+    // `protocolls`, or `tsl` above, inside `...(cond ? { ... } : {})` compiles
+    // clean and costs the whole option silently. An empty `protocols` sends no
+    // header, same as omitting it.
+    const wsOptions: Bun.WebSocketOptions = { headers, protocols, ...tlsOptions };
+    const socket = this.openUpstream(url, wsOptions, msg);
+    if (!socket) return;
     const entry: WsUpstream = {
       socket,
       open: false,
+      abandoned: false,
       pending: preopen?.frames ?? [],
       pendingBytes: preopen?.bytes ?? 0,
       checkoutId: msg.checkoutId,
     };
     this.wsTunnels.set(msg.tunnelId, entry);
 
+    // Captured instead of `msg`: these listeners outlive the frame — for a
+    // parked socket, potentially for the process — and `msg.headers` carries
+    // the browser's whole handshake, `Cookie` included.
+    const tunnelId = msg.tunnelId;
+    const checkoutId = entry.checkoutId;
+
     entry.socket.addEventListener("open", () => {
+      if (entry.abandoned) {
+        // Now a completed handshake, so this close is a FIN the server's own
+        // WebSocket layer answers — not the reset a close mid-handshake sends.
+        this.wsAbandoned.delete(entry);
+        entry.socket.close();
+        return;
+      }
       entry.open = true;
+      // The app answered the browser's 101 with `protocols[0]` before this
+      // socket existed, so a server that picks a LATER entry leaves the two
+      // ends framing to different subprotocols with no error on either — Bun
+      // opens on any answer — and this log is the only place that shows.
+      // It catches only that half: measured, Bun reports `protocol` as the
+      // FIRST OFFERED entry when the server echoes none at all, so a server
+      // that negotiated nothing is indistinguishable here from one that
+      // accepted the browser's choice.
+      if (protocols.length > 0 && entry.socket.protocol && entry.socket.protocol !== protocols[0]) {
+        log.warn(
+          "WS tunnel %s: upstream chose subprotocol %s, the page was told %s",
+          tunnelId,
+          entry.socket.protocol,
+          protocols[0],
+        );
+      }
       for (const frame of entry.pending) this.sendUpstream(entry, frame.data, frame.binary);
       entry.pending = [];
       entry.pendingBytes = 0;
     });
+    // A released socket answers to nobody: its tunnel id is already gone from
+    // the map and, over a long park, may even name a newer tunnel — so nothing
+    // it does may be routed by that id.
     entry.socket.addEventListener("message", (event) => {
+      if (entry.abandoned) return;
       const binary = typeof event.data !== "string";
       const data = typeof event.data === "string"
         ? event.data
@@ -377,16 +467,88 @@ export class TunnelManager {
           : Buffer.from(event.data as Uint8Array).toString("base64");
       this.sendTunnel({
         type: "tunnel:ws-data",
-        tunnelId: msg.tunnelId,
+        tunnelId,
         data,
         ...(binary ? { binary: true } : {}),
-        checkoutId: msg.checkoutId,
+        checkoutId,
       });
     });
-    entry.socket.addEventListener("close", (event) =>
-      this.teardownWs(msg.tunnelId, event.code, event.reason),
-    );
-    entry.socket.addEventListener("error", () => this.teardownWs(msg.tunnelId));
+    // Both endings free the park slot first: a socket that ERRORS while parked
+    // holds one just as a closed one does, and the budget has no TTL to
+    // reclaim it later.
+    const settle = (code?: number, reason?: string) => {
+      this.wsAbandoned.delete(entry);
+      if (entry.abandoned) return;
+      this.teardownWs(tunnelId, code, reason);
+    };
+    entry.socket.addEventListener("close", (event) => settle(event.code, event.reason));
+    entry.socket.addEventListener("error", () => settle());
+  }
+
+  /** The upstream socket for [onWsOpen], or undefined once the tunnel has been
+   *  refused. The constructor VALIDATES both of the strings the browser chose:
+   *  Bun throws `SyntaxError` for a subprotocol that is not an RFC 6455 token
+   *  and for a URL carrying a fragment. Nothing between the relay's message
+   *  listener and here catches, and `index.ts` answers an uncaught exception by
+   *  shutting the whole host down — so an escape here would cost every agent on
+   *  the machine. Refuse the one tunnel instead, which is what every other
+   *  upstream failure already does.
+   *
+   *  lib.dom's WebSocket shadows Bun's (tsconfig takes the default libs for an
+   *  ESNext target) and its constructor's second parameter is `protocols`, so
+   *  the options Bun does accept at runtime have to be cast past the type. */
+  private openUpstream(
+    url: string,
+    wsOptions: Bun.WebSocketOptions,
+    msg: TunnelWsOpen,
+  ): WebSocket | undefined {
+    try {
+      return new WebSocket(url, wsOptions as unknown as string[]);
+    } catch (err) {
+      log.warn("Refusing WS tunnel %s: upstream connection was rejected: %s", msg.tunnelId, err);
+      this.sendTunnel({
+        type: "tunnel:ws-close",
+        tunnelId: msg.tunnelId,
+        reason: "upstream connection could not be opened",
+        checkoutId: msg.checkoutId,
+      });
+      return undefined;
+    }
+  }
+
+  /** Close an upstream whose tunnel is over. An OPEN socket closes now. One
+   *  still CONNECTING is parked and closed once it opens — or once it fails on
+   *  its own — because closing it now is a reset, and a reset can take the dev
+   *  server down with it (see [WS_ABANDONED_MAX]). The park is bounded.
+   *
+   *  The caller MUST have dropped the entry from [wsTunnels] first. Releasing
+   *  marks the socket abandoned, which permanently suppresses the
+   *  `tunnel:ws-close` its own ending would have sent — so an entry left mapped
+   *  becomes immortal (nothing else deletes it, and [onWsOpen] refuses every
+   *  reuse of that id) with the app never told the tunnel died. */
+  private releaseUpstream(entry: WsUpstream): void {
+    // Marked on BOTH branches, not just the park: a close is a handshake the
+    // peer may keep sending frames through, so anything the socket still says
+    // would be routed by an id that names nothing, or someone else's tunnel.
+    entry.abandoned = true;
+    entry.pending = [];
+    entry.pendingBytes = 0;
+    if (entry.open) {
+      entry.socket.close();
+      return;
+    }
+    // Same shape as [evictOutbox]: drain until under budget, so the bound holds
+    // whatever [wsAbandonedMax] is rather than only for a set that grows by one.
+    for (const oldest of this.wsAbandoned) {
+      if (this.wsAbandoned.size < this.wsAbandonedMax) break;
+      // The one path that closes a socket mid-handshake, which is the reset the
+      // park exists to avoid — so it says so, like every other drop path here.
+      // Logged before the delete, so the count is read and not reconstructed.
+      log.warn("Cutting a parked WS handshake: %d parked, cap %d", this.wsAbandoned.size, this.wsAbandonedMax);
+      this.wsAbandoned.delete(oldest);
+      oldest.socket.close();
+    }
+    this.wsAbandoned.add(entry);
   }
 
   /** Tell the app a tunnel is over and stop relaying it. Idempotent: a close
@@ -436,10 +598,12 @@ export class TunnelManager {
           "Closing WS tunnel %s: upstream handshake did not finish before its buffer filled",
           msg.tunnelId,
         );
-        // Report before closing: the socket's own close event runs the same
-        // teardown, and whichever wins owns the reason the app is told.
+        // Report FIRST: [teardownWs] is what removes the entry from
+        // [wsTunnels], and [releaseUpstream] neither removes it nor sends
+        // anything — so releasing first would leave a released entry in the map
+        // for [onWsData] to buffer into again.
         this.teardownWs(msg.tunnelId, undefined, "upstream handshake buffer overflow");
-        entry.socket.close();
+        this.releaseUpstream(entry);
         return;
       }
       entry.pending.push({ data: msg.data, binary: msg.binary === true });
@@ -573,7 +737,7 @@ export class TunnelManager {
       return;
     }
     this.wsTunnels.delete(msg.tunnelId);
-    entry.socket.close();
+    this.releaseUpstream(entry);
   }
 
   stop(): void {
@@ -595,7 +759,7 @@ export class TunnelManager {
         reason: "tunnel manager stopped",
         checkoutId: entry.checkoutId,
       });
-      entry.socket.close();
+      this.releaseUpstream(entry);
     }
     this.wsTunnels.clear();
     for (const pending of this.wsPreopen.values()) clearTimeout(pending.timer);

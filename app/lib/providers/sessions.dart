@@ -150,6 +150,34 @@ final pendingActiveSessionIdProvider =
       () => ValueController(null),
     );
 
+/// The queued session id whose auto-start [pendingActiveSessionIdProvider]'s
+/// drain must skip, or null.
+///
+/// The drain starts a stopped session and speaks its refusal
+/// (`_bootstrapSessions` in workspace_shell.dart) because a Recent-list tap
+/// means "resume this". A notification tap means "show me what happened":
+/// restarting an agent the user let finish spends tokens nobody asked for.
+///
+/// Holds the ID rather than a bare flag, and the drain only honours it when it
+/// EQUALS the id being resolved. Five other sites queue a pending id without
+/// knowing this provider exists, and the bootstrap has early returns past the
+/// point one is set — a flag surviving any of those would silently suppress an
+/// unrelated later Recent-list tap's resume, which is the one thing that tap
+/// means.
+///
+/// What that buys, precisely: a leftover value can only ever answer for a
+/// PAIR that survived together — this provider and the pending id both left
+/// set by a run that returned early, or both left by the three sites that null
+/// the pending id on a failed activation without seeing this one. A pair like
+/// that eats one auto-start: the Recent-list tap on that same session, or the
+/// default pick the bootstrap falls through to when that session is gone from
+/// the list. One tap, self-clearing on the next drain — the price of keeping
+/// those five sites ignorant of this provider, which is what makes them safe.
+final pendingSessionStartSuppressedIdProvider =
+    NotifierProvider<ValueController<String?>, String?>(
+      () => ValueController(null),
+    );
+
 /// The currently focused session entry, or null if none.
 final activeSessionProvider = Provider<SessionEntry?>((ref) {
   final id = ref.watch(activeSessionIdProvider);

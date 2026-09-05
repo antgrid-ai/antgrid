@@ -25,6 +25,12 @@ export interface ProjectCoreRemoteDeps {
   currentPeerPubkey(): string | null;
   /** E2E app capability, established only after authenticated app:ready. */
   currentPeerSupportsCheckoutRouting?(): boolean;
+  /** The bare machine deviceUuid this host registers under. The phone addresses
+   *  a project as `<machineUuid>.<projectId>`, so a push sealed without it is a
+   *  push the phone cannot open. Required, unlike currentPeerSupportsCheckoutRouting:
+   *  optional would let the wizard-promotion supplier ship unroutable pushes and
+   *  still compile. */
+  machineDeviceId(): string;
   /** Blind FCM push forward over the machine socket (fallback delivery). */
   sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
 }
@@ -515,6 +521,7 @@ export class ProjectCore {
     // the live path handles the online case and the dispatcher no-ops then.
     const dispatcher = createPushDispatcher({
       projectId: core.projectId,
+      machineUuid: () => remote.machineDeviceId(),
       // Fire when the phone can't receive in-band: no live peer OR backgrounded
       // (`client:focus-state`). NOT connState.suppressed — that's the heavy-stream
       // gate, whose `peerOnline` defaults true, so it reads "can receive in-band"

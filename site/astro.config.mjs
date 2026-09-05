@@ -84,21 +84,28 @@ export default defineConfig({
   integrations: [
     // simple-icons is named explicitly because astro-icon otherwise assigns an
     // installed collection `["*"]` and inlines the whole pack into the build's
-    // virtual module — 3,700 icons and ~4.7MB of source, to draw seven brand
-    // marks in Compat.astro. Collections left unnamed (tabler) keep `*`.
+    // virtual module — 3,700 icons and ~4.7MB of source, to draw five brand
+    // marks in Compat.astro. (Claude Code and Mistral AI moved to src/icons/
+    // with a tightened viewBox — the simple-icons originals letterbox short of
+    // the full 24x24, so they render smaller than their siblings.) Collections
+    // left unnamed (tabler) keep `*`.
     icon({
       include: {
         "simple-icons": [
-          "claudecode",
           "openai",
           "opencode",
           "cursor",
           "githubcopilot",
           "kimi",
-          "mistralai",
         ],
       },
     }),
-    sitemap({ filter: (page) => !page.includes("/og-card") }),
+    // Both exclusions are pages that carry robots=noindex, and a sitemap that
+    // submits a noindex URL is a conflict Search Console reports rather than
+    // ignores. og-card is the screenshot source for the social card;
+    // download/started only means anything with a ?platform= the sitemap
+    // cannot carry, so an indexed copy would rank as a thank-you for a
+    // download the visitor never started.
+    sitemap({ filter: (page) => !page.includes("/og-card") && !page.includes("/download/started") }),
   ],
 });

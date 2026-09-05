@@ -2,11 +2,11 @@ import { test, expect, afterEach, beforeEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createDecipheriv, hkdfSync, randomUUID } from "node:crypto";
 import { ProjectCore } from "../../src/project-core";
 import { computeProjectId } from "../../src/project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "../../src/paired-phones";
-import { generateEphemeralKeypair } from "../../src/key-exchange";
+import { generateEphemeralKeypair, deriveSharedSecret } from "../../src/key-exchange";
 import { createMessage } from "../../src/protocol";
 import type { MessageBus } from "../../src/message-bus";
 
@@ -30,6 +30,20 @@ afterEach(() => {
 interface Delivered {
   pushToken: string;
   provider: string;
+  blob: { epk: string; box: string };
+}
+
+/** Opens a sealed push with the recipient's push private key, mirroring the
+ *  app's decode. Deliberately independent of `sealPush` rather than sharing a
+ *  helper with it, so a change to the sealing format fails here instead of
+ *  being masked by both sides moving together. */
+function openPush(blob: { epk: string; box: string }, privateKey: Buffer): any {
+  const epk = Buffer.from(blob.epk, "base64");
+  const key = Buffer.from(hkdfSync("sha256", deriveSharedSecret(privateKey, epk), epk, "antgrid-push-v1", 32));
+  const raw = Buffer.from(blob.box, "base64");
+  const decipher = createDecipheriv("aes-256-gcm", key, raw.subarray(0, 12));
+  decipher.setAuthTag(raw.subarray(raw.length - 16));
+  return JSON.parse(Buffer.concat([decipher.update(raw.subarray(12, raw.length - 16)), decipher.final()]).toString("utf8"));
 }
 
 /** A relay slot whose phone has NEVER connected during this agent lifetime —
@@ -71,6 +85,7 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
         return { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
       },
       currentPeerPubkey: () => null,
+      machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
     },
   });
@@ -82,7 +97,7 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
       createMessage("notification:push", { notificationType: "task_complete", message: "built", projectId }),
       "control",
     );
-  return { notify, delivered, projectId };
+  return { notify, delivered, projectId, phonePush };
 }
 
 test("push targets the persisted phone when no peer has connected this agent lifetime", async () => {
@@ -98,6 +113,20 @@ test("push targets the persisted phone when no peer has connected this agent lif
   expect(delivered).toHaveLength(1);
   expect(delivered[0].pushToken).toBe("TOKEN");
   expect(delivered[0].provider).toBe("fcm");
+});
+
+test("the sealed payload names the machine the phone must dial", async () => {
+  // This is the only suite that drives a real ProjectCore through to deliver(),
+  // so it is the only place the project-core -> dispatcher hop is proved rather
+  // than injected. projectId alone is sha256(realpath(folder)) and names no
+  // machine, so a payload missing machineUuid is one the phone cannot open.
+  const { notify, delivered, projectId, phonePush } = await startRestartedAgent({ mobileAccess: true });
+
+  notify();
+
+  const opened = openPush(delivered[0].blob, phonePush.privateKey);
+  expect(opened.machineUuid).toBe("machine-uuid");
+  expect(opened.projectId).toBe(projectId);
 });
 
 test("persisted-store fallback still refuses to push from a machine with mobile access off", async () => {
