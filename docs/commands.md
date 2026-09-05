@@ -72,6 +72,7 @@ bounded ring recording at all times, which is replayed before the live tail.
 
 ```bash
 antgrid watch                       # rendered table, replay then follow
+antgrid watch --ui                  # ...in its own window instead (see below)
 antgrid watch --json > cap.jsonl    # raw JSONL
 antgrid watch --no-follow           # buffered snapshot, then exit
 antgrid watch --dir ~/.antgrid-dev  # a debug-build app's host
@@ -182,6 +183,34 @@ for that run, and nothing scrubs or rotates the file. And a `hello` is never
 captured with its text, armed or not (`recordHelloRefused`): the envelope carries
 this core's shared secret in cleartext, so a refusal is recorded as a drop with a
 reason, a size and a hashed id, and nothing else.
+
+**A window instead of a table.** `antgrid watch --ui` mints a launch link, opens
+it as its own OS window (Chromium's `--app=`, falling back to an ordinary browser
+tab) and exits — the window is the session, not this terminal. It reads the same
+ring live and adds what a table cannot: a text filter over type, channel, reason,
+detail and body; transport chips; drops-only; pause; stick-to-bottom with a jump
+pill; click-for-detail with the full body; and both arming switches, each with
+its own heartbeat and the same dead-man TTL. **export** writes exactly what is on
+screen as JSONL. `--local`/`--relay`/`--limit` set the window's opening state;
+every other flag is refused, because the window owns what it would have answered.
+
+```bash
+antgrid watch --ui                  # a window, and the terminal is yours again
+antgrid watch --ui --local          # ...opening on the loopback transport
+antgrid watch --ui --no-open        # print the link instead of launching
+```
+
+The link is a credential and is treated as one. `host.json`'s bearer never
+reaches the browser — it opens `POST /control`, which starts projects, checks out
+branches and discloses host paths — so the URL carries a **single-use ticket** in
+its fragment, which no browser sends to a server. The page spends it for a
+session token that reaches `GET /netwatch` and the two `netwatch:*` arming verbs
+and nothing else, holds it in `sessionStorage` (origin-scoped down to the port,
+unlike a cookie) and strips the fragment, so the copy left in browser history is
+already spent. Every `/netwatch` route additionally refuses a `Host` this
+listener never published and any cross-site fetch, which is what closes DNS
+rebinding. The page loads nothing from anywhere, renders every peer-supplied
+value through `textContent`, and runs under a nonce CSP whose default is `'none'`.
 
 Two things it still does NOT show. A relay session that never established: both
 halves of that capture ride the sealed control plane, so `--remote` can describe

@@ -1,6 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { ControlRequestSchema, type ControlRequest, type ControlResponse } from "./control-protocol";
 import { netwatch } from "./netwatch";
+import { netwatchUiPage } from "./netwatch-ui-page";
+import { redeemUiTicket, validateUiSession } from "./netwatch-ui-session";
 import { logger } from "./logger";
 const log = logger.child({ component: "control-listener" });
 
@@ -17,12 +19,53 @@ export interface ControlListenerOptions {
  *  warm core. Mirrors local-listener's payload bound. */
 const MAX_CONTROL_BODY_BYTES = 64 * 1024;
 
-function bearerMatches(header: string | null, token: string): boolean {
-  if (!header || !header.startsWith("Bearer ")) return false;
-  const presented = Buffer.from(header.slice("Bearer ".length));
-  const expected = Buffer.from(token);
-  return presented.length === expected.length && timingSafeEqual(presented, expected);
+function bearerToken(header: string | null): string | null {
+  if (!header || !header.startsWith("Bearer ")) return null;
+  return header.slice("Bearer ".length);
 }
+
+function bearerMatches(header: string | null, token: string): boolean {
+  const presented = bearerToken(header);
+  if (presented === null) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Whether a browser could have been tricked into making this request.
+ *
+ * Everything below `/netwatch` is now reachable from a page, which brings two
+ * attacks the bearer alone does not answer. DNS rebinding gives an attacker's
+ * document a `Host` of its own domain while the socket lands here, so a `Host`
+ * this listener never published means the request came by a name rather than by
+ * the address — refuse it. `Sec-Fetch-Site` and `Origin` are set by the browser
+ * and cannot be forged by page script, so their ABSENCE is what identifies a
+ * non-browser caller (the CLI, curl) and anything cross-site is refused.
+ *
+ * `/control` is deliberately left alone: it is not reachable from the viewer,
+ * its clients predate these headers, and widening a guard onto the plane that
+ * starts projects is not something a diagnostics feature gets to do.
+ */
+function browserGuardsPass(req: Request, port: number): boolean {
+  const host = req.headers.get("host");
+  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}` && host !== `[::1]:${port}`) {
+    return false;
+  }
+  const site = req.headers.get("sec-fetch-site");
+  if (site !== null && site !== "same-origin" && site !== "none") return false;
+  const origin = req.headers.get("origin");
+  if (origin !== null && origin !== `http://127.0.0.1:${port}` && origin !== `http://localhost:${port}`) {
+    return false;
+  }
+  return true;
+}
+
+/** The two verbs a viewer session may reach. It holds a credential derived from
+ *  the host bearer, not the bearer itself, so the narrowing has to be stated
+ *  here rather than inherited: everything else on `ControlRequestSchema` starts
+ *  projects, checks out branches or discloses host paths. */
+const UI_ARMABLE = new Set(["netwatch:local", "netwatch:remote"]);
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -140,18 +183,97 @@ export class ControlListener {
     return this.server.port;
   }
 
+  /**
+   * Everything under `/netwatch`: the stream the CLI and the viewer both read,
+   * the viewer document itself, and the two POSTs that turn a launch ticket
+   * into a client of that stream. All of it has already passed
+   * `browserGuardsPass`.
+   */
+  private async handleNetwatch(req: Request, url: URL): Promise<Response> {
+    const header = req.headers.get("authorization");
+    const presented = bearerToken(header);
+    // A viewer session is admitted on exactly two routes, and the host bearer
+    // still opens both — the CLI reads the same stream.
+    const authed = bearerMatches(header, this.opts.token) ||
+      (presented !== null && validateUiSession(presented));
+
+    if (req.method === "GET" && url.pathname === "/netwatch") {
+      if (!authed) return new Response("unauthorized", { status: 401 });
+      return netwatchStream(url);
+    }
+
+    if (req.method === "GET" && url.pathname === "/netwatch/ui") {
+      // Unauthenticated on purpose: a browser sends no bearer on a navigation,
+      // and this document holds no capture and no credential. It is inert until
+      // it can spend a ticket for one.
+      const { html, csp } = netwatchUiPage(randomBytes(16).toString("hex"));
+      return new Response(html, {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "content-security-policy": csp,
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer",
+          "x-content-type-options": "nosniff",
+        },
+      });
+    }
+
+    if (req.method === "POST" && url.pathname === "/netwatch/ui/session") {
+      let raw: unknown;
+      try { raw = await req.json(); } catch { return new Response("bad json", { status: 400 }); }
+      const ticket = (raw as { ticket?: unknown } | null)?.ticket;
+      const session = typeof ticket === "string" ? redeemUiTicket(ticket) : null;
+      // Unknown, spent and lapsed are one answer: telling them apart tells a
+      // guesser which half of the guess was right.
+      if (session === null) return new Response("unauthorized", { status: 401 });
+      return json({ token: session });
+    }
+
+    if (req.method === "POST" && url.pathname === "/netwatch/ui/arm") {
+      if (!authed) return new Response("unauthorized", { status: 401 });
+      let raw: unknown;
+      try {
+        raw = await req.json();
+      } catch {
+        return json({ id: "", ok: false, error: { code: "BAD_JSON", message: "invalid JSON body" } }, 400);
+      }
+      const parsed = ControlRequestSchema.safeParse(raw);
+      if (!parsed.success) {
+        const id = typeof (raw as any)?.id === "string" ? (raw as any).id : "";
+        return json({ id, ok: false, error: { code: "BAD_REQUEST", message: parsed.error.issues.map((i) => i.message).join("; ") } }, 400);
+      }
+      // The schema admits every control verb; this route admits two of them.
+      if (!UI_ARMABLE.has(parsed.data.type)) {
+        return json({ id: parsed.data.id, ok: false, error: { code: "FORBIDDEN", message: "not reachable from the capture viewer" } }, 403);
+      }
+      try {
+        const res = await this.opts.handler(parsed.data);
+        return json(res, res.ok ? 200 : 400);
+      } catch (err) {
+        log.error("netwatch arm threw: %s", (err as Error).message);
+        return json({ id: parsed.data.id, ok: false, error: { code: "INTERNAL", message: (err as Error).message } }, 500);
+      }
+    }
+
+    return new Response("not found", { status: 404 });
+  }
+
   async start(): Promise<void> {
     this.server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       maxRequestBodySize: MAX_CONTROL_BODY_BYTES,
-      fetch: async (req) => {
+      fetch: async (req, server) => {
         const url = new URL(req.url);
-        if (req.method === "GET" && url.pathname === "/netwatch") {
-          if (!bearerMatches(req.headers.get("authorization"), this.opts.token)) {
-            return new Response("unauthorized", { status: 401 });
+        // Undefined only for a unix-socket server, which this never is; the
+        // guard would have nothing to compare a Host against, so refuse rather
+        // than wave the request through.
+        const port = server.port;
+        if (url.pathname === "/netwatch" || url.pathname.startsWith("/netwatch/")) {
+          if (port === undefined || !browserGuardsPass(req, port)) {
+            return new Response("not found", { status: 404 });
           }
-          return netwatchStream(url);
+          return this.handleNetwatch(req, url);
         }
         if (req.method !== "POST" || url.pathname !== "/control") {
           return new Response("not found", { status: 404 });

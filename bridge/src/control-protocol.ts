@@ -70,6 +70,13 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     // path's concern and is enforced there.
     ttlMs: z.number().int().nonnegative().optional(),
   }),
+  // Mints a single-use launch ticket for the capture viewer and reports the URL
+  // that spends it (`antgrid watch --ui`). The ticket is NOT this plane's
+  // bearer: a browser sends no Authorization header on a navigation, so the
+  // only channel to the page is a URL, and a URL outlives the tab in history
+  // and in anything the operator pastes. What it buys is scoped to reading the
+  // capture stream and arming capture — see netwatch-ui-session.ts.
+  z.object({ id: z.string().min(1), type: z.literal("netwatch:ui") }),
   // Discloses a checkout's absolute path to the caller. Deliberately confined
   // to THIS plane: checkout paths are host-local (checkout-types.ts) and the
   // loopback socket + token is the only transport that can reach this schema —
@@ -160,4 +167,7 @@ export type ControlResponse =
    *  under a re-arm that believed it was early. */
   | { id: string; ok: true; type: "netwatch:remote"; enabled: boolean; ttlMs?: number }
   | { id: string; ok: true; type: "netwatch:local"; bodies: boolean; ttlMs: number }
+  /** `url` carries the ticket in its FRAGMENT, which no browser sends to a
+   *  server and no proxy logs — the page reads it, spends it and strips it. */
+  | { id: string; ok: true; type: "netwatch:ui"; url: string; expiresInMs: number }
   | { id: string; ok: false; error: { code: string; message: string } };

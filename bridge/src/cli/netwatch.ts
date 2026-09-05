@@ -1,5 +1,6 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { readHostFile, hostFilePath } from "../host-discovery";
+import { openStandaloneWindow } from "./open-window";
 import { NETWATCH_BODY_MAX_CHARS, type NetwatchEvent } from "../netwatch";
 
 export interface NetwatchCliOptions {
@@ -38,6 +39,15 @@ export interface NetwatchCliOptions {
    * it out loud, which is what this flag does.
    */
   bodies?: boolean;
+  /**
+   * Open the capture in a window instead of this terminal. The window is the
+   * whole session: it holds its own filter, pause, export and arming controls,
+   * so this CLI mints the link, hands it over and exits rather than staying
+   * around as a second, worse view of the same ring.
+   */
+  ui?: boolean;
+  /** `--no-open`: print the link rather than launching a browser with it. */
+  open?: boolean;
 }
 
 /**
@@ -117,6 +127,72 @@ async function setLocalBodies(
   const { error, reply } = await postControl(host, { type: "netwatch:local", bodies, ttlMs: CAPTURE_TTL_MS });
   const armed = reply?.ttlMs;
   return { error, ttlMs: typeof armed === "number" && armed > 0 ? armed : CAPTURE_TTL_MS };
+}
+
+/**
+ * Mint a viewer link and hand it to a browser.
+ *
+ * The flags this refuses are not conflicts of meaning but of ownership: the
+ * window renders, filters, pauses, exports and arms for itself, so a run that
+ * also asked this terminal to do one of those has two answers to the same
+ * question and only one of them is on screen. `--local`/`--relay`/`--limit` are
+ * the exception — they are the window's OPENING state, so they ride along in
+ * the fragment.
+ */
+async function runNetwatchUi(
+  opts: NetwatchCliOptions,
+  host: { controlPort: number; token: string; pid: number; agentVersion: string },
+): Promise<number> {
+  const owned: Array<[string, unknown]> = [
+    ["--json", opts.json],
+    ["--export", opts.export],
+    ["--join", opts.join],
+    ["--remote", opts.remote],
+    ["--bodies", opts.bodies],
+    ["--no-follow", opts.follow === false],
+  ];
+  const clashes = owned.filter(([, on]) => Boolean(on)).map(([flag]) => flag);
+  if (clashes.length > 0) {
+    console.error(`antgrid watch: --ui does not combine with ${clashes.join(", ")}.`);
+    console.error("The window owns those: it filters, pauses, exports and arms capture itself.");
+    return 1;
+  }
+
+  const { error, reply } = await postControl(host, { type: "netwatch:ui" });
+  if (error !== null || typeof reply?.url !== "string") {
+    console.error(`antgrid watch: could not mint a viewer link — ${error ?? "malformed reply"}`);
+    console.error("host.json may be stale; the host writes a fresh one on every start.");
+    return 1;
+  }
+
+  // Semicolons, not ampersands: this string is handed to `cmd /c start` on
+  // Windows, where an unquoted `&` ends the command.
+  let url = reply.url;
+  if (opts.local) url += ";f=local";
+  else if (opts.relay) url += ";f=relay";
+  if (opts.limit !== undefined) url += `;n=${opts.limit}`;
+
+  const seconds = Math.round((typeof reply.expiresInMs === "number" ? reply.expiresInMs : 120_000) / 1000);
+  if (opts.open === false) {
+    console.error(`# capture viewer for ${host.agentVersion} (pid ${host.pid}) — single-use, lapses in ${seconds}s`);
+    console.log(url);
+    return 0;
+  }
+
+  const how = openStandaloneWindow(url);
+  if (how === "failed") {
+    console.error("antgrid watch: could not launch a browser. Open this yourself:");
+    console.log(url);
+    return 0;
+  }
+  console.error(
+    `# capture viewer for ${host.agentVersion} (pid ${host.pid}) opened in ` +
+      `${how === "window" ? "its own window" : "your browser"}`,
+  );
+  // Deliberately not printed on the success path: the link is a credential, and
+  // a scrollback is the one place it would outlive its own two minutes.
+  console.error(`# the link was single-use and lapses in ${seconds}s — run this again for another`);
+  return 0;
 }
 
 const COLOR = {
@@ -571,6 +647,8 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
     console.error("~/.antgrid-dev — point at it with --dir or ANTGRID_DIR.");
     return 1;
   }
+
+  if (opts.ui) return runNetwatchUi(opts, host);
 
   if (opts.join) {
     // A phone writes no netwatch.log — hostDir() resolves from USERPROFILE/HOME

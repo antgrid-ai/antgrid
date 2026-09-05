@@ -28,6 +28,7 @@ import { generateEphemeralKeypair } from "./key-exchange";
 import { joinRelayWsPath } from "./relay-url";
 import { createMessage } from "./protocol";
 import { armBodyCapture, armRemoteIngest } from "./netwatch";
+import { mintUiTicket, TICKET_TTL_MS } from "./netwatch-ui-session";
 import { detectInstalledTools, type DetectOptions } from "./tool-detector";
 import { isChatCapableTool } from "./structured/chat-capable";
 import { buildAgentCatalog } from "./agent-catalog";
@@ -1456,6 +1457,22 @@ export class HostServer {
         const ttlMs = Math.min(req.ttlMs, NETWATCH_MAX_TTL_MS);
         armBodyCapture(true, ttlMs);
         return { id: req.id, ok: true, type: "netwatch:local", bodies: true, ttlMs };
+      }
+      case "netwatch:ui": {
+        // The viewer is served by the same listener answering this request, so
+        // its port is the one the caller is already talking to — never a
+        // published or configured one that could drift from it.
+        const control = this.control;
+        if (!control) {
+          return { id: req.id, ok: false, error: { code: "NO_CONTROL_PLANE", message: "the loopback control plane is not bound" } };
+        }
+        return {
+          id: req.id,
+          ok: true,
+          type: "netwatch:ui",
+          url: `http://127.0.0.1:${control.port}/netwatch/ui#t=${mintUiTicket()}`,
+          expiresInMs: TICKET_TTL_MS,
+        };
       }
     }
   }

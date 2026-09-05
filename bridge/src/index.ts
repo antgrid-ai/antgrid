@@ -303,7 +303,9 @@ program
   .option("--local", "Show only loopback frames — the transport a desktop app on this machine uses")
   .option("--relay", "Show only relay frames — the transport a phone uses")
   .option("--bodies", "Record loopback frame plaintext while this runs (truncated per frame; metadata is always recorded)")
-  .action(async (opts: { json?: boolean; export?: string; limit?: string; follow?: boolean; dir?: string; join?: string; remote?: boolean; local?: boolean; relay?: boolean; bodies?: boolean }) => {
+  .option("--ui", "Open the capture in its own window instead of this terminal, and exit")
+  .option("--no-open", "With --ui, print the link rather than launching a browser")
+  .action(async (opts: { json?: boolean; export?: string; limit?: string; follow?: boolean; dir?: string; join?: string; remote?: boolean; local?: boolean; relay?: boolean; bodies?: boolean; ui?: boolean; open?: boolean }) => {
     const { runNetwatchCli } = await import("./cli/netwatch");
     const limit = opts.limit === undefined ? undefined : Number(opts.limit);
     // Zero is admitted, and means it: the /netwatch stream reads `limit=0` as
