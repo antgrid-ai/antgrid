@@ -405,6 +405,7 @@ export class ProjectCore {
       // peer, not a failed one.
       carrierPresent: () => this.listener?.ownerCarriesSessionBus ?? false,
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
+      forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),
       relayUrl: this.deps.relayUrl,
     });
     this.core = core;

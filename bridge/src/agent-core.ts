@@ -31,6 +31,7 @@ import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } f
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
 import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
 import { saveBrief } from "./session-bus/brief-store";
+import { removeSessionBusSession } from "./session-bus/store-fs";
 import { TASK_EXPIRY_MS } from "./session-bus/constants";
 import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
 import { lineForEvent } from "./session-bus/deliver-event";
@@ -423,6 +424,11 @@ export interface BuildAgentCoreOptions {
    *  lives in the reduction ABOVE this core, so a core built without one has
    *  nothing to wait on and submits immediately instead. */
   queueBusLine?: (line: Omit<QueuedLine, "queuedAt">) => void;
+  /** Drop every line that queue is still holding for a session. A held line is
+   *  retried at the head of its session's queue forever, so a deleted session's
+   *  would sit against the project-wide cap and evict a live session's assign.
+   *  Absent for the same reason {@link queueBusLine} is. */
+  forgetBusLines?: (sessionId: string) => void;
   /** Test-only release-gate override. Production callers omit this and use the
    * central capability constant. */
   worktreeSessionsSupported?: boolean;
@@ -1744,11 +1750,29 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             else if (verb.type === "session:rename") s.rename(verb.sessionId, verb.name);
             else if (verb.type === "session:archive") s.archive(verb.sessionId);
             else if (verb.type === "session:unarchive") s.unarchive(verb.sessionId);
-            else if (verb.type === "session:delete") await s.delete(verb.sessionId, {
-              force: verb.force,
-              removeCheckout: verb.removeCheckout,
-              deleteBranch: verb.deleteBranch,
-            });
+            else if (verb.type === "session:delete") {
+              await s.delete(verb.sessionId, {
+                force: verb.force,
+                removeCheckout: verb.removeCheckout,
+                deleteBranch: verb.deleteBranch,
+              });
+              // The bus half of the row goes with the row. Nothing else ever
+              // removes it: the coordinator would keep retrying an outbox for a
+              // session that no longer exists, and the on-disk records and
+              // artifact bytes would outlive every reader of them. Deliberately
+              // after the delete succeeded — a refused delete (dirty worktree)
+              // leaves a live session that still owes its lead a report.
+              sessionBus.forget(verb.sessionId);
+              opts.forgetBusLines?.(verb.sessionId);
+              try {
+                removeSessionBusSession(abDir, project.id, verb.sessionId);
+              } catch (err) {
+                // A file another process still holds costs disk, never the
+                // delete the app is waiting on — and never a second
+                // session:result for a requestId this arm is about to answer.
+                log.warn("could not remove the session-bus store for %s: %s", verb.sessionId, err);
+              }
+            }
             else if (verb.type === "session:set-mode") await s.setMode(verb.sessionId, verb.mode);
             else if (verb.type === "session:setup") await s.applySetupAction(verb.sessionId, verb.action);
             // The three membership verbs re-parse before they touch the store:

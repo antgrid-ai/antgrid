@@ -14,6 +14,19 @@ The relay authenticates devices via a single signed `hello` frame (Ed25519
 proof-of-possession) but cannot decrypt payloads. Two WS channels: `control`
 (terminal, files, status) and `preview` (HTTP tunnel).
 
+### The session bus
+
+A multi-machine session's agent-to-agent frames (`session-bus:*`) never cross
+machines by themselves. A LEAD bridge hands every outbound bus frame to its
+loopback owner socket and nowhere else (`ProjectCore.sendToOwner`), and only to
+an owner that declared `capabilities.sessionBusCarrier` on its hello: the
+desktop app is the only carrier, and it forwards the frame verbatim onto the
+peer machine's own relay connection. A PEER answers on the one app session that
+carried the exchange in (`ProjectCore.sendToAppSession`), never by broadcast, so
+the traffic is invisible to the human's phone by design. The spec is
+`docs/multi-machine-session.md`; the host-side invariants are in
+`bridge/CLAUDE.md`.
+
 ## Checkout-scoped routing
 
 A session can run in a managed git worktree instead of the project root, so everything

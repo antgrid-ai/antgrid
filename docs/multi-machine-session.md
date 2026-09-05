@@ -4,6 +4,31 @@
 **Status:** Draft v0.15
 **Date:** 2026-09-04
 **Build plan:** `docs/multi-machine-session-waves.md`
+**Implementation:** waves 0-5 are landed — see §0.
+
+---
+
+## 0. Status
+
+Waves 0-5 of the build plan are landed. The end-to-end proof is
+`evals/tests/gate-multi-machine.test.ts`, which drives two real bridges against one relay with the
+desktop carrier played by a test object; the host-side invariants it pins are in `bridge/CLAUDE.md`
+(**The session bus**) and the carrier's in `app/CLAUDE.md`.
+
+Known divergences from this document, which the code decides:
+
+- A brief is NOT a queued delivery. It lands as a Handler instruction at arm time
+  (`flushPendingBrief` in `bridge/src/agent-core.ts`); `DeliveryKindSchema`
+  (`bridge/src/session-bus/delivery-queue.ts`) is the set that reaches a PTY.
+- A peer bridge cannot refuse its own delete: the dirty/unpushed refusals belong to the isolated
+  worktree path, and a peer session may not be isolated (D10). The refusal that occurs in the
+  field is a member whose machine the carrier cannot reach.
+- §5.4's "lead reports no such session -> peer self-deletes" is not implemented. Only orphan
+  marking exists (D11 marks; the user acts).
+- Codex chat-mode sessions get no MCP server and so cannot be peers; the carrier attaches only
+  once the lead project is open in the desktop app (the lead bridge holds and retries until then);
+  MCP `tools/list_changed` is unwired, so an already-running agent sees session tools only after
+  its role cache expires; and artifacts are session-scoped with no cross-context fetch and no GC.
 
 ---
 

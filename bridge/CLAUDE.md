@@ -255,6 +255,68 @@ for every project, until the file is hand-edited. Neither `TerminateProcess` nor
   escalation. The SDK-driven backends own their own process lifetime and are not
   covered here.
 
+## The session bus (`src/session-bus/`)
+
+The agent-to-agent plane of a multi-machine session. `docs/multi-machine-session.md`
+is the spec; this is the set of invariants a future edit breaks silently.
+
+- **Outbound on a LEAD goes to the loopback owner and nowhere else.**
+  `ProjectCore.sendToOwner` is the only path, and `local-listener.ts` hands a
+  bus frame to an owner only if its hello declared
+  `capabilities.sessionBusCarrier` (`ownerCarriesSessionBus`, surfaced to the
+  loopback API as `carrierPresent` and to a caller as a member's `reachable`).
+  The desktop app is the carrier; no attached carrier means the frame is HELD
+  and retried by the coordinator, never dropped, so a closed desktop is an
+  indefinitely delayed exchange rather than a failed one.
+- **Outbound on a PEER is `sendToAppSession(peerId)`,** keyed by the app session
+  that carried the exchange in (`busOriginByContext` / `noteBusOrigin` in
+  `agent-core.ts`). Falling through to the loopback owner would hand the lead's
+  answer to THIS machine's desktop, which accepts it and returns true — booking a
+  delivery that never happened and retiring the only outbox entry that could
+  retry it. A broadcast would additionally leak the whole exchange to the human's
+  phone, which is the mirror of the lead-side invariant above.
+- **Every delivery into an agent is rendered, and lands at a TURN BOUNDARY.**
+  `session-bus/delivery.ts` wraps the other agent's content as fenced data —
+  never raw, never a bare instruction — and `delivery-queue.ts` holds the line
+  until the turn closes. `DeliveryKindSchema` there is the whole set of queued
+  kinds.
+- **The brief is deliberately not one of them.** It is delivered as a Handler
+  instruction at arm time (`flushPendingBrief` -> `handlerEngine.instruct`),
+  which is a turn boundary by construction, and its durable record is
+  `session-bus/brief-store.ts`. Nothing about a brief reaches the PTY, so a test
+  that watches the terminal for it is watching the wrong channel.
+- **The runaway caps are `session-bus/task-guard.ts`** and every one of them is
+  per SESSION, not per machine.
+- **`/session-bus/*` in `api-server.ts` is the loopback route table**, keyed off
+  `?terminalId=` — which is what turns a caller into a role, and the same slot
+  that resolves an isolated session's checkout. Membership and bus frames route
+  by `sessionId` on the project stream, so nothing here carries a `checkoutId`
+  (the comment above `session:setup` in `protocol.ts` is the standing reason).
+
+Known gaps, stated rather than papered over: a codex CHAT session gets no MCP
+server at all (`codexNotifyOnlyArgs`) and so cannot act as a peer; the MCP
+server does not emit `tools/list_changed`, so an agent already running when its
+session gained a role sees the session tools only once the role cache expires;
+and artifacts (`session-bus/artifact-store.ts`) are session-scoped with no
+cross-context fetch and nothing that reclaims them.
+
+## The MCP subcommand
+
+`src/mcp/server.ts` and its `antgrid-bridge mcp` entry are described under
+**Adding an agent** (the `mcp/server.ts` bullet): how it is self-invoked, how
+`augmentAgentLaunch` injects it per spawn from `AgentSpec.mcp`, and why stdout
+and `ANTGRID_API_PORT` are what they are. Two things the session bus adds to it:
+
+- **The tool table is a function of the caller's ROLE**, asked of the bridge over
+  `GET /session-bus/role` and never derived in the server process
+  (`sessionBusTools`). A machine may lead one session and work another, so both
+  halves can be present at once, and a session with no role lists none.
+- **A tool is DISPATCHED by name, not by the role that listed it.** The role is
+  cached with a short TTL because a client re-lists far more often than a session
+  gains members, so a call whose role has moved on must still reach the bridge
+  and be refused there — the refusal is the bridge's to author, never the
+  server's to guess.
+
 ## Isolated sessions (`src/worktrees/`)
 
 The routing model — which message types carry a `checkoutId`, and the app-side set
