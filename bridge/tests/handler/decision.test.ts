@@ -258,6 +258,54 @@ describe("buildDecidePrompt", () => {
     expect(p).toContain("notify.draftReply");
   });
 
+  // The judge is a cheap model reading a capped excerpt. Its authority has to
+  // rest on what it holds and the agent does not, so the positive half of that
+  // — intent and completion — must be stated, not left implied by the bounds.
+  it("scopes the judge to intent and completion rather than technical merit", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" });
+    expect(p).toContain("You are not an expert on the task");
+    expect(p).toContain("Technical merit");
+    expect(p.indexOf("ALTITUDE")).toBeLessThan(p.indexOf("You are not an expert on the task"));
+    expect(p.indexOf("You are not an expert on the task"))
+      .toBeLessThan(p.indexOf("bounded excerpt of the session"));
+  });
+
+  // Same line, not merely the same list: a judge that is not a task expert can
+  // read the bare floor as "escalate whenever the technical call is unclear",
+  // which is every interesting pause. What confidence is measured against has to
+  // arrive with the rule that spends it.
+  it("measures the confidence floor against intent and completion", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" });
+    const floor = p.split("\n").find((l) => l.includes("If you cannot answer with high confidence"));
+    expect(floor).toBeDefined();
+    expect(floor!).toContain("never against technical merit");
+    expect(floor!).toContain("whether a step serves the stated intent");
+  });
+
+  // A choice between approaches falls through both halves of the who-can-answer
+  // split, so without this the raw question reaches the user. Ordered inside the
+  // ask-first run it refines: above the test it is a rule with nothing to apply to,
+  // below the blocker clause it separates that clause from the test it bounds.
+  it("turns a choice between approaches into options before it spends anyone", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" });
+    expect(p).toContain("Ask the agent for the options it sees and what each costs");
+    expect(p).toContain("decide against the SESSION GOAL");
+    expect(p.indexOf("could one read-only question"))
+      .toBeLessThan(p.indexOf("Ask the agent for the options it sees"));
+    expect(p.indexOf("Ask the agent for the options it sees"))
+      .toBeLessThan(p.indexOf("reported, not worked around"));
+  });
+
+  // An escalation the judge could not decide still has to be cheap to answer, and
+  // the chip is the only field that reaches the agent verbatim — so the option it
+  // carries is named here rather than left to the judge's formatting.
+  it("routes the options to the notify body and the recommendation to the chip", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" });
+    const rule = p.split("\n").find((l) => l.includes("Ask the agent for the options it sees"));
+    expect(rule!).toContain("notify.body");
+    expect(rule!).toContain("notify.draftReply");
+  });
+
   // The judge reads a transcript the agent itself wrote, where `claude` appears
   // and `claude-code` — our routing key — never does.
   it("names the supervised agent by its CLI name", () => {
