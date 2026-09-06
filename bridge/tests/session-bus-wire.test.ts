@@ -26,6 +26,7 @@ import {
   type SessionBusEvent,
   type SessionBusSelf,
 } from "../src/session-bus/coordinator";
+import { HELD_MESSAGE_TTL_MS } from "../src/session-bus/held-store";
 import { NO_PROGRESS_EXCHANGES } from "../src/session-bus/task-guard";
 
 const LEAD_REF: SessionMemberRef = {
@@ -533,7 +534,8 @@ describe("session-bus coordinator across a carrier", () => {
     });
     expect("ok" in res && res.ok).toBe(true);
     expect((res as { sent: boolean }).sent).toBe(true);
-    // Spec 6 makes these lossy: nothing enters the outbox, so nothing retries.
+    // Never the outbox: that queue is stop-and-wait (D13), so a finding parked
+    // in it would block the next transition on the task behind an unacked note.
     expect(peer.task(PEER_REF.sessionId, taskId)!.outbox).toHaveLength(0);
 
     const sent = drain();
@@ -542,5 +544,90 @@ describe("session-bus coordinator across a carrier", () => {
     expect(leadEvents.some((e) => e.kind === "message")).toBe(true);
     // A message is not acked — an ack would make a lossy note stop-and-wait.
     expect(carried).toEqual([]);
+  });
+
+  // D13 lets a message be lost and gives it nothing to dedup by, so one already
+  // on the wire can never be resent. One the transport REFUSED is a different
+  // frame: it never reached the relay, so putting it out later is a delivery and
+  // not a second copy — and it is the case that decides whether a peer keeps its
+  // finding across the seconds its carrier is away.
+  test("a refused message is held and goes once when a route returns", () => {
+    const taskId = assign();
+    drain();
+    drain();
+    carrierUp = false;
+
+    const res = peer.message({
+      sessionId: PEER_REF.sessionId,
+      taskId,
+      to: LEAD_REF,
+      summary: "a finding",
+      parts: [{ kind: "text", text: "the suite is red" }],
+    });
+    expect(res).toMatchObject({ ok: true, sent: false, held: true });
+    // Held is not queued: the task's own outbox stays free for transitions.
+    expect(peer.task(PEER_REF.sessionId, taskId)!.outbox).toHaveLength(0);
+    expect(carried).toEqual([]);
+
+    carrierUp = true;
+    peer.pump();
+    expect(carried).toHaveLength(1);
+    expect(carried[0]!.type).toBe("session-bus:message");
+
+    carried.length = 0;
+    peer.pump();
+    expect(carried).toEqual([]);
+  });
+
+  test("a held message survives a restart of the machine that could not send it", () => {
+    const taskId = assign();
+    drain();
+    drain();
+    carrierUp = false;
+    peer.message({
+      sessionId: PEER_REF.sessionId,
+      taskId,
+      to: LEAD_REF,
+      summary: "a finding",
+      parts: [{ kind: "text", text: "the suite is red" }],
+    });
+    peer.stop();
+    carried.length = 0;
+
+    const resumed = new SessionBusCoordinator({
+      abDir: join(dir, "peer"),
+      projectId: "p-peer",
+      self: selfFor(PEER_REF),
+      send: (frame) => { carried.push(frame); return true; },
+      now: () => now,
+      newId: () => "id-restart-msg",
+    });
+    resumed.resume();
+    resumed.pump();
+    resumed.stop();
+
+    expect(carried).toHaveLength(1);
+    expect(carried[0]!.type).toBe("session-bus:message");
+  });
+
+  test("a held message stops being worth delivering once its task would have lapsed", () => {
+    const taskId = assign();
+    drain();
+    drain();
+    carrierUp = false;
+    peer.message({
+      sessionId: PEER_REF.sessionId,
+      taskId,
+      to: LEAD_REF,
+      summary: "a finding",
+      parts: [{ kind: "text", text: "the suite is red" }],
+    });
+
+    now += HELD_MESSAGE_TTL_MS;
+    carrierUp = true;
+    peer.pump();
+    // The lossiness D13 asks for, spent where it costs least: a finding about
+    // work the lead has already given up on arrives as noise, not as news.
+    expect(carried.filter((f) => f.type === "session-bus:message")).toEqual([]);
   });
 });

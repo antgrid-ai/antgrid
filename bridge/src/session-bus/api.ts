@@ -244,7 +244,10 @@ export interface SessionBusApi {
   openTask(terminalId: string | undefined, taskId: string): { ok: true } | SessionBusRefusal;
   reportComplete(terminalId: string | undefined, taskId: string, body: ReportBody): { ok: true } | SessionBusRefusal;
   reportFailure(terminalId: string | undefined, taskId: string, body: ReportBody): { ok: true } | SessionBusRefusal;
-  reportFinding(terminalId: string | undefined, body: FindingBody): { ok: true; sent: boolean } | SessionBusRefusal;
+  reportFinding(
+    terminalId: string | undefined,
+    body: FindingBody,
+  ): { ok: true; sent: boolean; held: boolean } | SessionBusRefusal;
   askLead(terminalId: string | undefined, body: AskBody): { ok: true; requestId: string } | SessionBusRefusal;
   publishArtifact(
     terminalId: string | undefined,
@@ -618,7 +621,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
         ...(body.unexpected === undefined ? {} : { unexpected: body.unexpected }),
         contextId: m.memberOf.sessionId,
       });
-      return isRefusal(sent) ? sent : { ok: true, sent: sent.sent };
+      return isRefusal(sent) ? sent : { ok: true, sent: sent.sent, held: sent.held };
     },
 
     askLead(terminalId, body) {

@@ -31,6 +31,15 @@ import { ARTIFACT_CHUNK_BYTES } from "./constants";
 import { checkEnvelopeSize, stampEnvelope, type EnvelopeDraft } from "./envelope";
 import { refuse, type SessionBusRefusal } from "./errors";
 import {
+  expireHeld,
+  hasHeld,
+  holdMessage,
+  loadHeld,
+  releaseHeld,
+  saveHeld,
+  type HeldState,
+} from "./held-store";
+import {
   appendLog,
   loadMessageLog,
   saveMessageLog,
@@ -132,6 +141,11 @@ export interface CoordinatorDeps {
 interface SessionState {
   tasks: TaskStoreState;
   log: MessageLogState;
+  /** Messages the transport refused, awaiting a route. Separate from the
+   *  per-task outbox on purpose: that one is stop-and-wait (D13), so a finding
+   *  queued there would block the transition behind it, and a taskless finding
+   *  has no record to queue on at all. */
+  held: HeldState;
   /** Read on the first fetch this session answers: most sessions publish nothing
    *  and never pay for the file. */
   artifacts: ArtifactState | null;
@@ -439,7 +453,7 @@ export class SessionBusCoordinator {
    * dropped rather than queued — unbounded retry behind text that changes no
    * state buys nothing, and the state that matters travels as a transition.
    */
-  message(input: MessageInput): { ok: true; sent: boolean; messageId: string } | SessionBusRefusal {
+  message(input: MessageInput): { ok: true; sent: boolean; held: boolean; messageId: string } | SessionBusRefusal {
     const self = this.deps.self(input.sessionId);
     if (!self) return this.noSelf();
     const s = this.stateFor(input.sessionId);
@@ -470,7 +484,8 @@ export class SessionBusCoordinator {
     // it to the peer machine's own desktop app, which accepts it and reports it
     // sent. A record refines the answer when there is one.
     const role = rec?.role ?? this.roleForContext(input.sessionId, contextId);
-    const sent = this.deps.send(frame, { contextId, role, to: keyOf(input.to) });
+    const to = keyOf(input.to);
+    const sent = this.deps.send(frame, { contextId, role, to });
 
     let tasks = s.tasks;
     if (rec) {
@@ -481,11 +496,19 @@ export class SessionBusCoordinator {
         ...textOf(input.parts),
       });
     }
+    // A false return is this bridge refusing before the frame reached the relay,
+    // so keeping it is redelivery rather than a duplicate — the one retry an
+    // unacked message can safely have (held-store). The finding recorded just
+    // above is a local copy and travels on nothing.
+    const held = sent
+      ? s.held
+      : holdMessage(s.held, { messageId: envelope.messageId, contextId, role, to, frame, heldAt: now });
     this.commit(input.sessionId, {
       tasks: withExchange(tasks, now),
-      log: appendLog(s.log, { at: now, direction: "out", peer: keyOf(input.to), envelope }),
+      log: appendLog(s.log, { at: now, direction: "out", peer: to, envelope }),
+      ...(held === s.held ? {} : { held }),
     });
-    return { ok: true, sent, messageId: envelope.messageId };
+    return { ok: true, sent, held: hasHeld(held, envelope.messageId), messageId: envelope.messageId };
   }
 
   /** Ask the machine that published an artifact for one slice of it. Unacked and
@@ -593,6 +616,7 @@ export class SessionBusCoordinator {
     for (const sessionId of [...this.sessions.keys()]) {
       this.expire(sessionId, now);
       this.flushOutbox(sessionId, now);
+      this.flushHeld(sessionId, now);
     }
     if (this.timer && !this.anyPending()) this.stop();
   }
@@ -605,6 +629,7 @@ export class SessionBusCoordinator {
       s = {
         tasks: loadTasks(this.deps.abDir, this.deps.projectId, sessionId),
         log: loadMessageLog(this.deps.abDir, this.deps.projectId, sessionId),
+        held: loadHeld(this.deps.abDir, this.deps.projectId, sessionId),
         artifacts: null,
       };
       this.sessions.set(sessionId, s);
@@ -622,6 +647,7 @@ export class SessionBusCoordinator {
     this.sessions.set(sessionId, next);
     if (next.tasks !== s.tasks) saveTasks(this.deps.abDir, this.deps.projectId, sessionId, next.tasks);
     if (next.log !== s.log) saveMessageLog(this.deps.abDir, this.deps.projectId, sessionId, next.log);
+    if (next.held !== s.held) saveHeld(this.deps.abDir, this.deps.projectId, sessionId, next.held);
     this.ensureTimer();
   }
 
@@ -636,6 +662,9 @@ export class SessionBusCoordinator {
 
   private anyPending(): boolean {
     for (const s of this.sessions.values()) {
+      // A held message is the only thing a session can be waiting on with no
+      // task at all, so the timer has to count it or nothing ever retries it.
+      if (s.held.held.length > 0) return true;
       for (const t of s.tasks.tasks) {
         if (t.outbox.length > 0) return true;
         if (!isTerminal(t.state) && t.expiredAt === undefined) return true;
@@ -714,6 +743,31 @@ export class SessionBusCoordinator {
       if (sent) tasks = noteAttempt(tasks, taskId, entry.seq, now);
     }
     if (tasks !== s.tasks) this.commit(sessionId, { tasks });
+  }
+
+  /**
+   * Retry what a missing route refused.
+   *
+   * Only frames that never left are held (held-store), so redelivery here cannot
+   * duplicate at the receiver. A route belongs to a context and fails whole, so
+   * stopping that context at its first refusal is what keeps a peer's findings
+   * arriving in the order it reported them.
+   */
+  private flushHeld(sessionId: string, now: number): void {
+    const s = this.stateFor(sessionId);
+    const live = expireHeld(s.held, now);
+    const sent: string[] = [];
+    const refused = new Set<string>();
+    for (const m of live.held) {
+      if (refused.has(m.contextId)) continue;
+      if (this.deps.send(m.frame as AbMessage, { contextId: m.contextId, role: m.role, to: m.to })) {
+        sent.push(m.messageId);
+      } else {
+        refused.add(m.contextId);
+      }
+    }
+    const next = releaseHeld(live, sent);
+    if (next !== s.held) this.commit(sessionId, { held: next });
   }
 
   private expire(sessionId: string, now: number): void {

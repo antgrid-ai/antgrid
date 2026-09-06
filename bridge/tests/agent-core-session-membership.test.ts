@@ -383,4 +383,47 @@ describe("the carrier that creates a membership is the peer's route home", () =>
     expect(note).toMatchObject({ ok: true, sent: false });
     expect(toOwner).toEqual([]);
   }, 30_000);
+
+  // A route is learned from inbound traffic, and a restarted bridge has received
+  // none. The task store beside it comes back off disk and re-arms its retries,
+  // so every one of them would refuse; and on a task the peer has already acked,
+  // the lead has no reason to send the frame that would teach it a route.
+  test("a remembered carrier route survives a restart of the peer bridge", async () => {
+    const first = await attached({
+      machineId: "peer-machine",
+      sendToAppSession: () => true,
+      sendToOwner: () => true,
+    });
+    first.bus.dispatchInbound(createMessage("session:create", {
+      requestId: "c1", name: "Peer", memberOf: lead,
+    }), "control", "relay", "carrier-1");
+    const peerSessionId = ((await resultFor(first.sent, "c1")).session as SessionEntry).id;
+
+    const dying = core;
+    core = null;
+    await dying?.shutdown();
+
+    const routed: { peerId: string; type: string }[] = [];
+    await attached({
+      machineId: "peer-machine",
+      sendToAppSession: (peerId, msg) => {
+        routed.push({ peerId, type: msg.type });
+        return true;
+      },
+      sendToOwner: () => true,
+    });
+
+    // Nothing is dispatched into this core: the only thing that can name the
+    // carrier is what the dead process wrote down.
+    const note = core!.sessionBus.message({
+      sessionId: peerSessionId,
+      taskId: null,
+      to: lead,
+      summary: "found it",
+      parts: [{ kind: "text", text: "the codec is little-endian" }],
+      contextId: lead.sessionId,
+    });
+    expect(note).toMatchObject({ ok: true, sent: true });
+    expect(routed).toEqual([{ peerId: "carrier-1", type: "session-bus:message" }]);
+  }, 30_000);
 });

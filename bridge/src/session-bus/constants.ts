@@ -27,6 +27,25 @@ export const MAX_TASK_ARTIFACTS = 32;
  *  limit and take the whole store's parse down with it. */
 export const MAX_OUTBOX = 8;
 
+/** Outbound messages one session holds for want of a route. D13 allows a
+ *  message to be lost, so this bound is where that allowance is actually spent:
+ *  past it the oldest held finding goes, rather than a peer cut off for a day
+ *  growing a file that loads as empty. */
+export const MAX_HELD_MESSAGES = 32;
+
+/** How stale the persisted copy of a carrier route may get while the live one is
+ *  being refreshed. Every applied inbound frame restamps a route, and writing
+ *  the file each time would put a disk write behind every ack; skipping the
+ *  write entirely would let a busy context's persisted timestamp age past the
+ *  TTL and be dropped on the next restart while it was never idle. */
+export const BUS_ROUTE_PERSIST_INTERVAL_MS = 5 * 60_000;
+
+/** Carrier routes one project remembers across a restart. A route is one live
+ *  membership's way home, and `MAX_SESSION_MEMBERS` bounds how many of those a
+ *  session has — this is deliberately looser, because expired contexts are
+ *  pruned lazily and a project may hold several sessions at once. */
+export const MAX_BUS_ROUTES = 64;
+
 /** Retry schedule for an unacked transition, held at the last entry forever
  *  after. There is deliberately no give-up: D11 forbids inferring a state change
  *  from an absence, so a peer offline for an hour has not failed its task. */

@@ -32,7 +32,8 @@ import { augmentAgentLaunch } from "./agent-launch-augmenter";
 import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
 import { saveBrief } from "./session-bus/brief-store";
 import { removeSessionBusSession } from "./session-bus/store-fs";
-import { TASK_EXPIRY_MS } from "./session-bus/constants";
+import { BUS_ROUTE_PERSIST_INTERVAL_MS, MAX_BUS_ROUTES, TASK_EXPIRY_MS } from "./session-bus/constants";
+import { loadBusRoutes, saveBusRoutes } from "./session-bus/route-store";
 import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
 import { sameAddress } from "./session-bus/address";
 import { lineForEvent, lineForJoin, type JoinInput } from "./session-bus/deliver-event";
@@ -849,7 +850,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // because the bus fans out to every established session including the human's
   // phone (spec 4.1). A miss holds the frame in the outbox instead, which the
   // next inbound frame on the context clears.
-  const busOriginByContext = new Map<string, { peerId: string; at: number }>();
+  // Hydrated, because a fresh process has learned nothing and the task store it
+  // resumes beside would then refuse every retry it re-arms — see route-store.
+  const busOriginByContext = loadBusRoutes(abDir, project.id, BUS_ORIGIN_TTL_MS, Date.now());
+  let busRoutesSavedAt = 0;
+
+  /** Persist the map, throttled: a binding change or a prune is written at once,
+   *  a bare restamp only every {@link BUS_ROUTE_PERSIST_INTERVAL_MS}. */
+  function saveBusRoutesIfDue(now: number, force: boolean): void {
+    if (!force && now - busRoutesSavedAt < BUS_ROUTE_PERSIST_INTERVAL_MS) return;
+    busRoutesSavedAt = now;
+    try {
+      saveBusRoutes(abDir, project.id, busOriginByContext);
+    } catch (err) {
+      // A route that outlives this process is an optimisation over relearning
+      // one; a bridge must not fail to carry a frame because it could not write
+      // that down.
+      log.warn("session bus: could not persist carrier routes: %s", err);
+    }
+  }
 
   /** Contexts already warned about for having no route. An unroutable frame is
    *  retried on every outbox tick and `noteAttempt` advances the backoff only for
@@ -863,12 +882,27 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // already reachable without a route.
     if (!peerId) return;
     const now = Date.now();
+    let pruned = false;
     for (const [key, origin] of busOriginByContext) {
-      if (now - origin.at >= BUS_ORIGIN_TTL_MS) busOriginByContext.delete(key);
+      if (now - origin.at >= BUS_ORIGIN_TTL_MS) {
+        busOriginByContext.delete(key);
+        pruned = true;
+      }
     }
     const previous = busOriginByContext.get(contextId)?.peerId;
+    // Deleted before it is set so a restamp moves the entry to the back: a Map
+    // keeps first-insertion order, and the eviction below reads the front as the
+    // least recently carried.
+    busOriginByContext.delete(contextId);
     busOriginByContext.set(contextId, { peerId, at: now });
+    while (busOriginByContext.size > MAX_BUS_ROUTES) {
+      const oldest = busOriginByContext.keys().next();
+      if (oldest.done) break;
+      busOriginByContext.delete(oldest.value);
+      pruned = true;
+    }
     busRouteMissWarned.delete(contextId);
+    saveBusRoutesIfDue(now, pruned || previous !== peerId);
     // Logged because a carrier attach is otherwise invisible: nothing else
     // records which app session a bus context routes through, which makes a peer
     // that cannot answer indistinguishable from one that was never carried.
@@ -882,8 +916,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function busTargetFor(contextId: string): { peerId: string; at: number } | null {
     const origin = busOriginByContext.get(contextId);
     if (!origin) return null;
-    if (Date.now() - origin.at >= BUS_ORIGIN_TTL_MS) {
+    const now = Date.now();
+    if (now - origin.at >= BUS_ORIGIN_TTL_MS) {
       busOriginByContext.delete(contextId);
+      saveBusRoutesIfDue(now, true);
       return null;
     }
     return origin;

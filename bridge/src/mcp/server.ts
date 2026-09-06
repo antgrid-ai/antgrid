@@ -608,23 +608,15 @@ export async function callSessionBusTool(
       }));
       if (!r.ok) return toolError(busError(r));
       if (r.data.sent) return toolText("Finding sent to the lead.");
-      // A finding is never retried: `coordinator.message` is unsequenced and
-      // unacked, and a transition carries only the parts its caller passes, so
-      // the record `recordFinding` keeps on the task is this machine's own copy
-      // and not a queued send. Both branches must therefore say it did not
-      // arrive; only the remedy differs, and only a task gives the agent one.
-      if (taskId) {
-        return toolText(
-          `The finding did not reach the lead and nothing will retry it. It is recorded here on task `
-          + `${taskId}, so it is not lost on this machine — restate what the lead needs in your next `
-          + `report on that task, which IS queued and retried until it lands.`,
-        );
-      }
-      return toolError(
-        "The finding did not reach the lead, and with no taskId there is nothing to carry it — it was "
-        + "not delivered and nothing will retry it. Check antgrid_session_status for whether the lead "
-        + "is reachable, then send it again, or pass the taskId of a task you are working so a later "
-        + "report carries it.",
+      // Two things have to land together: this has NOT arrived, and it is not
+      // lost either. A frame the bridge refused never reached the relay, so it
+      // is redelivered rather than duplicated — and an agent that reads
+      // non-delivery as final composes a second copy, which the lead would take
+      // for a second finding with no seq to tell them apart.
+      return toolText(
+        "The lead's machine is not reachable from here right now, so the finding has not arrived. It "
+        + "is held on this bridge and retried until it lands — do not send it again. Keep working; "
+        + "antgrid_session_status says when the lead is reachable.",
       );
     }
 

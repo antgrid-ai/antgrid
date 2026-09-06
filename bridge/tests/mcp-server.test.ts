@@ -249,30 +249,19 @@ describe("the session-bus tool table", () => {
   // What an agent is TOLD is the whole interface here: it cannot see the outbox,
   // so a sentence that overstates delivery is the only thing standing between a
   // lost report and a retry it would otherwise have made.
-  test("a finding that did not leave and has no task to carry it is an error", async () => {
-    stub(() => Response.json({ ok: true, sent: false }));
+  test("a held finding says it has not arrived and that resending is not the answer", async () => {
+    stub(() => Response.json({ ok: true, sent: false, held: true }));
     const result = await callSessionBusTool("antgrid_report_finding", {
       summary: "the codec is little-endian",
       text: "checked against the fixtures",
     });
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toContain("not delivered");
-    expect(result.content[0]!.text).not.toContain("travels with the next report");
-  });
-
-  test("a finding held on a task says it did not arrive, and names the report that can carry it", async () => {
-    stub(() => Response.json({ ok: true, sent: false }));
-    const result = await callSessionBusTool("antgrid_report_finding", {
-      taskId: "t-1",
-      summary: "s",
-      text: "t",
-    });
+    // Not an error: it is retried, and an error here is what makes an agent
+    // compose a second copy of a finding that is already on its way.
     expect(result.isError).toBeUndefined();
     const text = result.content[0]!.text;
-    expect(text).toContain("did not reach the lead");
-    expect(text).toContain("t-1");
-    expect(text).toContain("report");
-    expect(text).not.toContain("travels with the next report");
+    expect(text).toContain("has not arrived");
+    expect(text).toContain("retried");
+    expect(text).toContain("do not send it again");
   });
 
   test("an assignment that has not reached the peer says so, and says not to repeat it", async () => {
