@@ -8,6 +8,9 @@ import {
   parseDecisionFromOutput,
   PERSONALITY_RULES,
 } from "../../src/handler/decision";
+// Typed rather than inline: the fixtures are what pin the two exported names,
+// since bun strips types and only the typecheck gate would notice them going.
+import type { DecisionAsk, DecisionAskOption } from "../../src/handler/decision";
 
 const GOAL = "Migrating auth";
 const BACKLOG_TEXT = "- id=i1 [queued] run the tests\n- id=i2 [done] update the docs";
@@ -520,5 +523,79 @@ describe("the reply budget in the decide prompt", () => {
       expect(build(n, "closer").match(/POSTURE/g)).toHaveLength(1);
       expect(build(n)).toContain(build(n, "watchdog").split("POSTURE")[1]);
     }
+  });
+});
+
+describe("the ask object on a decision", () => {
+  const ASK: DecisionAsk = {
+    question: "Should the migration keep the legacy session cookie?",
+    reasoning: "Both readings are defensible and the choice is not reversible.",
+    unblocked: ["i1", "i2"],
+  };
+  const OPTIONS: DecisionAskOption[] = [
+    { label: "Keep it", cost: "Old sessions survive; the cookie stays forever.", recommended: true },
+    { label: "Drop it", cost: "Everyone signs in again on deploy." },
+  ];
+
+  // Every case goes through the real entry point rather than the schema, because
+  // parseDecisionFromOutput is the only thing a judge's output ever meets.
+  const parseAsk = (ask: unknown) => parseDecisionFromOutput(JSON.stringify({
+    decision: "handle", confidence: 0.8, reason: "answering the agent",
+    reply: "carry on with the tests", ask,
+  }));
+
+  it("accepts an ask with options and an ask without them", () => {
+    expect(parseAsk({ ...ASK, options: OPTIONS }).decision?.ask?.options).toHaveLength(2);
+    // Absent options is a genuinely open question, not a malformed ask.
+    expect(parseAsk(ASK).decision?.ask?.question).toBe(ASK.question);
+    expect(parseAsk(ASK).decision?.ask?.options).toBeUndefined();
+  });
+
+  it("accepts the widest option list it allows", () => {
+    const four = [...OPTIONS, { label: "Defer", cost: "Nothing decided today." },
+      { label: "Split it", cost: "Two deploys instead of one." }];
+    expect(parseAsk({ ...ASK, options: four }).decision?.ask?.options).toHaveLength(4);
+  });
+
+  // One option is a card with no alternative: the user can only agree, which is
+  // not a question. The bound is refused here rather than dropped at render time,
+  // where an ask with nothing to tap is indistinguishable from a broken one.
+  it("refuses a single option", () => {
+    expect(parseAsk({ ...ASK, options: [OPTIONS[0]] }).decision).toBeNull();
+  });
+
+  // Presence of the object IS the signal, so a question made of spaces would
+  // raise a row with nothing on it and no way for the user to tell why.
+  it("refuses a question or a reasoning that is only whitespace", () => {
+    expect(parseAsk({ ...ASK, question: "   " }).decision).toBeNull();
+    expect(parseAsk({ ...ASK, reasoning: "\n\t " }).decision).toBeNull();
+  });
+
+  // An empty list claims nothing is still running, which is a blocking
+  // escalation wearing an ask's shape — the one thing this object may not be.
+  it("refuses an ask that unblocks nothing", () => {
+    expect(parseAsk({ ...ASK, unblocked: [] }).decision).toBeNull();
+  });
+
+  // The property that separates this spelling from re-reading `notify`: notify's
+  // sub-fields are required strings, so a judge that fills them with "" has said
+  // nothing, and only `ask` can carry the signal.
+  it("reads an all-empty notify block as no ask at all", () => {
+    const out = JSON.stringify({
+      decision: "handle", confidence: 0.8, reason: "answering the agent", reply: "y",
+      notify: { title: "", body: "", draftReply: "", urgency: "normal" },
+    });
+    const d = parseDecisionFromOutput(out).decision;
+    expect(d?.notify).toBeDefined();
+    expect(d?.ask).toBeUndefined();
+  });
+
+  // A hallucinated draft must not reach the row: with no field for it here and
+  // an engine that mints `draftReply: ""`, there is nothing for any composer on
+  // any app version to prefill into the one channel that mints authorization.
+  it("drops a draftReply a judge invents", () => {
+    const ask = parseAsk({ ...ASK, draftReply: "yes, drop the cookie" }).decision?.ask;
+    expect(ask).toBeDefined();
+    expect(ask).not.toHaveProperty("draftReply");
   });
 });

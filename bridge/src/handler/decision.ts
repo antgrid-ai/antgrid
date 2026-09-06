@@ -48,12 +48,55 @@ export const HandlerDecisionSchema = z.object({
     draftReply: z.string(),
     urgency: z.enum(["normal", "high"]),
   }).optional(),
+  // A question for the USER raised on a pass that is ALSO replying to the agent.
+  // Its own object, never a re-reading of `notify`: notify's sub-fields are
+  // `z.string()` and NOT optional, so a judge answering `handle` fills the whole
+  // block with empty strings rather than omitting it. Presence there says nothing
+  // at all. Presence HERE is the entire signal, which is why the two text fields
+  // are refined non-empty rather than merely typed.
+  //
+  // Three fields a reader will look for and not find, each absent for a reason.
+  // No `urgency`: the engine mints "normal" for every ask, because the `high`
+  // band is for a row that unblocks a stopped session in one tap and a question
+  // the agent is working past is definitionally not one. No `title`: escalate()
+  // does not read notify.title today either. And no `draftReply`: with the
+  // options carried here and resolved bridge-side, a judge-authored draft would
+  // be an artifact on the row for a composer to prefill — which is the one path
+  // that reaches authorizeInstruction. The engine mints an ask with
+  // `draftReply: ""`, so there is nothing to prefill on any app version.
+  ask: z.object({
+    question: z.string().refine((t) => t.trim().length > 0),
+    reasoning: z.string().refine((t) => t.trim().length > 0),
+    // Backlog ids the answer does NOT gate — the one part of "this does not stop
+    // the work" the harness can check, and it does check it (see raiseAsk) and
+    // re-checks it every pass (see reconcileAsks).
+    unblocked: z.array(z.string()).min(1).max(10),
+    // Optional, and 2..4: one option is a card with no alternative. Absent means a
+    // genuinely open question, rendered as a free-text row plus its still-working
+    // list — which is a complete ask, not a degraded one. No `choiceId` here: the
+    // ids are ENGINE-authored by position, because an id round-trips through the
+    // wire and resolves against the persisted row. It is identity, never
+    // authority, and nothing the judge writes may become one.
+    options: z.array(z.object({
+      label: z.string(),
+      // What picking this commits to, one clause. It is ALSO the reason line under
+      // the recommended row: a recommendation whose reason is not its cost is one
+      // the user cannot check.
+      cost: z.string(),
+      recommended: z.boolean().optional(),
+    })).min(2).max(4).optional(),
+  }).optional(),
   // Progress is reported as moves against existing ids, never as prose: the same
   // schema applyTransitions re-validates, so what the evaluator may say and what
   // the engine will accept cannot drift apart.
   transitions: z.array(ItemTransitionSchema).optional(),
 });
 export type HandlerDecision = z.infer<typeof HandlerDecisionSchema>;
+// Derived from the schema rather than declared beside it: raiseAsk reads these
+// to mint a row, and a hand-written second spelling could describe a shape the
+// judge is not actually permitted to send.
+export type DecisionAsk = NonNullable<HandlerDecision["ask"]>;
+export type DecisionAskOption = NonNullable<DecisionAsk["options"]>[number];
 
 // Re-exported, not redefined: the reaches an agent declares live on
 // AgentSpec.headless, and a second spelling here could drift from them.
