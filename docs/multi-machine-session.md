@@ -105,6 +105,8 @@ Aligned with the A2A protocol's data model. A2A is not adopted as a wire protoco
 
 **Membership is stored where the member lives.** The lead's session row carries `members[]` (machine, project, session, role, joined, state); each peer's session row carries `memberOf` (lead machine, project, session). Each bridge persists its own half in its own `sessions.json`, so a bridge restart on either side rebuilds its view without asking the other. Both fields are optional on the wire, so an older bridge or app parses a member row as an ordinary session.
 
+Of those three ids, **machine and session identify; project labels.** Each side records the project id it knew the other by at join time, and one checkout can legitimately be open as more than one project — a managed worktree opened in its own right hashes to an id of its own — so the two halves can disagree about the project and both be right. A session id is a uuid the other side copies rather than derives, so machine + session is the whole of the identity a receiver can verify, and it is what both the carrier and `handleInbound` match on. Matching on the project id too is what silently strands a membership: every frame refused, forever, over a display string.
+
 ### 3.2 Task lifecycle
 
 States, borrowed verbatim:

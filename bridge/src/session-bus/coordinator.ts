@@ -24,7 +24,7 @@ import {
   type TaskState,
   type WaitingOn,
 } from "../protocol";
-import { sameAddress } from "./address";
+import { addressesSameSession } from "./address";
 import { listSessionBusSessions } from "./store-fs";
 import { artifactById, loadArtifacts, readArtifactContent, type ArtifactState } from "./artifact-store";
 import {
@@ -307,7 +307,7 @@ export class SessionBusCoordinator {
    * Nothing here reports delivery, deliberately. The most this side observes is
    * whether a carrier accepted the hand-off, and a carrier that accepts can
    * still refuse to route with no way to say so back — so a delivery flag minted
-   * at this instant would be a guess dressed as a fact. The task's `ackedSeq` is
+   * at this instant would be a guess dressed as a fact. The task's `acked` is
    * the evidence, because an ack can only have come from the other bridge.
    */
   assign(input: AssignInput): { ok: true; taskId: string; seq: number } | SessionBusRefusal {
@@ -555,6 +555,27 @@ export class SessionBusCoordinator {
    * WITHOUT an ack: acking it would tell the sender a task is being worked that
    * nothing here will ever work.
    */
+  /** Sessions already reported as addressed by a project id other than this
+   *  bridge's own. A stored membership does not change its mind, so without the
+   *  latch this is a line per retry for the life of the session. */
+  private readonly driftWarned = new Set<string>();
+
+  /** Says once that the far side knows this session by a different project.
+   *
+   *  Nothing routes on that id any more, so this costs no delivery — but the
+   *  disagreement is worth a name: it is what a peer's row RENDERS, and it used
+   *  to be the difference between a session that worked and one that refused
+   *  every frame in silence. */
+  private warnIfProjectDrifted(self: SessionBusSelf, to: SessionMemberKey): void {
+    if (self.key.projectId === to.projectId) return;
+    if (this.driftWarned.has(to.sessionId)) return;
+    this.driftWarned.add(to.sessionId);
+    log.warn(
+      "session bus: the other machine addresses session %s as project %s, which this bridge holds as %s — matched on the session id",
+      to.sessionId, to.projectId, self.key.projectId,
+    );
+  }
+
   handleInbound(msg: AbMessage): InboundOutcome {
     switch (msg.type) {
       case "session-bus:assign":
@@ -569,7 +590,7 @@ export class SessionBusCoordinator {
         return false;
     }
     const self = this.deps.self(msg.to.sessionId);
-    if (!self || !sameAddress(self.key, msg.to)) {
+    if (!self || !addressesSameSession(self.key, msg.to)) {
       log.warn(
         { type: msg.type, to: msg.to },
         "session-bus: inbound frame addressed to a session this bridge does not hold; dropped",
@@ -577,6 +598,7 @@ export class SessionBusCoordinator {
       return "dropped";
     }
     const sessionId = msg.to.sessionId;
+    this.warnIfProjectDrifted(self, msg.to);
     switch (msg.type) {
       case "session-bus:assign":
         this.onTransition(sessionId, self, msg.from, msg.contextId, msg.taskId, msg.seq, "submitted", msg.envelope, {
@@ -761,7 +783,7 @@ export class SessionBusCoordinator {
    *  silent in both processes: nothing else logs a successful hand-off, and an
    *  unacked task is indistinguishable from a peer taking its time. */
   private warnIfUnacked(rec: TaskRecord, attempts: number): void {
-    if (rec.ackedSeq > 0) return;
+    if (rec.acked) return;
     if (attempts < SESSION_BUS_UNACKED_WARN_ATTEMPTS) return;
     if ((attempts - SESSION_BUS_UNACKED_WARN_ATTEMPTS) % SESSION_BUS_UNACKED_WARN_EVERY !== 0) return;
     // Labels, not `addressKey`: that key is one-way by construction and a line a

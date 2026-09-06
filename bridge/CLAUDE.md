@@ -273,7 +273,9 @@ is the spec; this is the set of invariants a future edit breaks silently.
   `carrierAttached` and never "reachable", an assignment reports a task id and
   no delivery, and the one honest answer — the peer's ack — is what
   `TaskView.reachedPeer`/`unacked` carry and what `antgrid_list_tasks` marks NOT
-  YET DELIVERED until it arrives. A lead that cannot tell a task nobody has
+  YET DELIVERED until it arrives. That evidence is the task's `acked` BOOLEAN and
+  never `ackedSeq > 0`: the opening assign carries seq 0 and `ackedSeq` starts at
+  0, so the number cannot tell "nothing has landed" from "the assign landed". A lead that cannot tell a task nobody has
   received from one being worked on re-assigns it, which is the duplicate the
   whole acked outbox exists to prevent. Since nothing on the wire reports the
   gap, the retry loop is its only witness: `warnIfUnacked` says so once a frame
@@ -282,6 +284,18 @@ is the spec; this is the set of invariants a future edit breaks silently.
   log line out of any of those three and a carrier that accepts frames and
   delivers none is silent in both processes again — which it was, for three
   hours, across a restart.
+- **A bus address is matched on machine + session; the project id is a LABEL.**
+  `addressesSameSession` (`session-bus/address.ts`) is what `handleInbound`
+  gates on, and the carrier matches a lead on its session id alone
+  (`classifyBusFrame`). One checkout can be open as more than one project — a
+  managed worktree opened in its own right hashes to an id of its own — so the
+  two machines legitimately hold different project ids for the same session, and
+  comparing them refused every frame forever over a display string. `sameAddress`
+  stays strict and stays correct for a member the app names on this bridge's own
+  row: both sides of that comparison come from one record. When the ids do
+  differ, both processes say so once (`the other machine addresses session … as
+  project …`, and the app's `peer addresses this lead by another project`) —
+  routing no longer depends on it, but a peer's row still renders it.
 - **Outbound on a PEER is `sendToAppSession(peerId)`,** keyed by the app session
   that carried the exchange in (`busOriginByContext` / `noteBusOrigin` in
   `agent-core.ts`). Falling through to the loopback owner would hand the lead's

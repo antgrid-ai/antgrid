@@ -60,15 +60,6 @@ class BusEndpoint {
   String toString() => 'BusEndpoint($key)';
 }
 
-/// Identity of a LEAD session as the carrier keys it: project + session, no
-/// machine. A lead frame arrives on that project's loopback transport, which
-/// can only belong to that project's own bridge, so the machine id in the frame
-/// adds nothing an app could independently verify — while requiring it would
-/// make delivery depend on the app and its co-located bridge agreeing on a uuid
-/// neither derives from the other.
-String busLeadKey(String projectId, String sessionId) =>
-    '$projectId/$sessionId';
-
 BusEndpoint? _endpoint(Object? raw) {
   if (raw is! Map) return null;
   final machineId = raw['machineId'];
@@ -110,16 +101,25 @@ enum BusForward {
 ///
 /// [localMachineId] is checked only against a peer's `to` (the memo's rule: a
 /// frame addressed to another machine is not ours to hand to a local bridge).
-/// A null value skips that one check rather than refusing everything: the
-/// project+session halves of `to` still have to name a lead this app carries,
-/// which is the substantive guard, and a carrier whose own device uuid has not
-/// resolved yet must not be a carrier that silently drops every reply.
+/// A null value skips that one check rather than refusing everything: `to` still
+/// has to name a lead session this app carries, which is the substantive guard,
+/// and a carrier whose own device uuid has not resolved yet must not be a
+/// carrier that silently drops every reply.
+///
+/// [allowedLeadSessionIds] is session ids ALONE — deliberately not the lead's
+/// machine or project. Neither identifies a lead: the frame already arrived on
+/// one project's loopback, so the project id restates the leg, and one checkout
+/// can be open as more than one project (a managed worktree opened in its own
+/// right hashes to a different id than the project it belongs to), which makes
+/// the id the two sides record differ for the same session. A session id is a
+/// uuid both bridges copy rather than derive, so it is the one part of the
+/// address that cannot drift.
 BusForward classifyBusFrame({
   required Map<String, dynamic> json,
   required bool fromLead,
   required String? localMachineId,
   required Set<String> allowedPeerKeys,
-  required Set<String> allowedLeadKeys,
+  required Set<String> allowedLeadSessionIds,
 }) {
   if (!isSessionBusFrame(json)) return BusForward.refuse;
   final from = busFrom(json);
@@ -127,7 +127,7 @@ BusForward classifyBusFrame({
   if (from == null || to == null) return BusForward.refuse;
 
   if (fromLead) {
-    if (!allowedLeadKeys.contains(busLeadKey(from.projectId, from.sessionId))) {
+    if (!allowedLeadSessionIds.contains(from.sessionId)) {
       return BusForward.refuse;
     }
     if (!allowedPeerKeys.contains(to.key)) return BusForward.refuse;
@@ -137,7 +137,7 @@ BusForward classifyBusFrame({
   if (localMachineId != null && to.machineId != localMachineId) {
     return BusForward.refuse;
   }
-  if (!allowedLeadKeys.contains(busLeadKey(to.projectId, to.sessionId))) {
+  if (!allowedLeadSessionIds.contains(to.sessionId)) {
     return BusForward.refuse;
   }
   if (!allowedPeerKeys.contains(from.key)) return BusForward.refuse;

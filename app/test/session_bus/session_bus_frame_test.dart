@@ -19,7 +19,7 @@ Map<String, dynamic> _frame({
 }) => {'type': type, 'from': from, 'to': to, 'contextId': 'ctx-1'};
 
 const _allowedPeers = {'m-peer/p-peer/s-peer'};
-const _allowedLeads = {'p-lead/s-lead'};
+const _allowedLeads = {'s-lead'};
 
 BusForward _classify(
   Map<String, dynamic> json, {
@@ -32,7 +32,7 @@ BusForward _classify(
   fromLead: fromLead,
   localMachineId: localMachineId,
   allowedPeerKeys: peers,
-  allowedLeadKeys: leads,
+  allowedLeadSessionIds: leads,
 );
 
 void main() {
@@ -185,7 +185,23 @@ void main() {
     });
   });
 
-  test('busLeadKey is machine-free', () {
-    expect(busLeadKey('p', 's'), 'p/s');
+  test('a lead is matched on its session alone, whatever project addresses it', () {
+    // The whole of the fix: one checkout can be open as more than one project,
+    // so the peer's stored `projectId` for its lead is a label the two machines
+    // can legitimately disagree on. Disagreeing on it used to strand the
+    // membership permanently, with every frame refused and nothing said.
+    final drifted = _frame(
+      to: {
+        'machineId': 'm-lead',
+        'projectId': 'a-project-this-app-never-heard-of',
+        'sessionId': 's-lead',
+      },
+      from: {
+        'machineId': 'm-peer',
+        'projectId': 'p-peer',
+        'sessionId': 's-peer',
+      },
+    );
+    expect(_classify(drifted, fromLead: false), BusForward.toLead);
   });
 }

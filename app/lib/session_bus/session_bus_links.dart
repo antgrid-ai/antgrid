@@ -5,7 +5,6 @@ import '../models/drawer_entry.dart';
 import '../models/session_entry.dart';
 import '../providers/drawer_entries.dart';
 import '../providers/sessions.dart';
-import 'session_bus_frame.dart';
 
 /// One live membership: a session led on THIS machine and one machine that is
 /// currently part of it. The unit both the carrier's legs and the warm-project
@@ -20,7 +19,10 @@ class SessionBusLink {
   });
 
   /// A LOCAL project id — also the drawer entry id and the key of the loopback
-  /// transport the lead bridge speaks over.
+  /// transport the lead bridge speaks over. A TRANSPORT key, never an identity:
+  /// the same checkout can be open as more than one project, so this says how to
+  /// reach the lead from this app, not which lead it is. [leadSessionId] is the
+  /// identity, and the only half a frame is matched on.
   final String leadProjectId;
   final String leadSessionId;
 
@@ -29,10 +31,6 @@ class SessionBusLink {
 
   /// `agentTransportForProvider`'s compound key for the peer's project.
   String get peerRegistrationId => '${peer.machineId}.${peer.projectId}';
-
-  /// The lead half, in the machine-free spelling `classifyBusFrame` compares
-  /// against — see [busLeadKey].
-  String get leadKey => busLeadKey(leadProjectId, leadSessionId);
 
   @override
   bool operator ==(Object other) =>
@@ -54,7 +52,8 @@ class SessionBusLink {
   );
 
   @override
-  String toString() => 'SessionBusLink($leadKey -> ${peer.key})';
+  String toString() =>
+      'SessionBusLink($leadProjectId/$leadSessionId -> ${peer.key})';
 }
 
 /// Value-equal snapshot of every live link.

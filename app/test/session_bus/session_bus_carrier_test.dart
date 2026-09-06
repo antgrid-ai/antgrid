@@ -436,6 +436,50 @@ void main() {
       expect(text, contains(_peerReg));
     });
 
+    test('a lead addressed by another project is carried, and said once', () async {
+      final h = _Harness(links: [_link()]);
+      final lead = h.transport(_leadProject);
+      final peer = h.transport(_peerReg);
+      h.registry.touch(_leadProject, isLocal: true);
+      h.start();
+      await h.settle();
+
+      // What a peer stores when it joined through a different project entry for
+      // the same tree — a managed worktree opened in its own right hashes to an
+      // id of its own. Two of them, because the warning is latched per session.
+      for (var i = 0; i < 2; i++) {
+        peer.emitJson(
+          _busFrame(
+            type: 'session-bus:ack',
+            from: const {
+              'machineId': 'm-peer',
+              'projectId': 'p-peer',
+              'sessionId': 's-peer',
+            },
+            to: const {
+              'machineId': 'm-lead',
+              'projectId': 'p-some-other-checkout',
+              'sessionId': _leadSession,
+            },
+          ),
+        );
+        await h.settle();
+      }
+
+      expect(h.status.toLead, 2, reason: 'the session id is what addresses it');
+      expect(h.status.refused, 0);
+      expect(lead.outbound, hasLength(2));
+
+      final text = await logText();
+      expect(text, contains('peer addresses this lead by another project'));
+      expect(text, contains('p-some-other-checkout'));
+      expect(
+        'peer addresses this lead'.allMatches(text).length,
+        1,
+        reason: 'latched per lead session, not written per frame',
+      );
+    });
+
     // The failure with no other witness: the lead's bridge keeps handing frames
     // to this app and being told they left, while a closed lead project means
     // nothing is attached to carry them.

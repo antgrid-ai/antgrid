@@ -103,6 +103,15 @@ export const TaskRecordSchema = z.object({
   nextSeq: z.number().int().nonnegative(),
   /** Highest outbound seq the other end acked. */
   ackedSeq: z.number().int().nonnegative(),
+  /** Whether the other end has EVER acked a frame of this task.
+   *
+   *  Not derivable from `ackedSeq`: the first frame of a task carries seq 0 and
+   *  `ackedSeq` starts at 0, so the two states that matter most — nothing has
+   *  landed, and the opening assign landed — are the same number. A task
+   *  written before this field existed reads false and is shown as un-acked
+   *  until its next ack, which is the safe direction: no surface may claim a
+   *  delivery it cannot observe. */
+  acked: z.boolean().default(false),
   outbox: z.array(OutboxEntrySchema).max(MAX_OUTBOX).default([]),
   findings: z.array(TaskFindingSchema).max(MAX_FINDINGS).default([]),
   artifactIds: z.array(z.string().max(200)).max(MAX_TASK_ARTIFACTS).default([]),
@@ -251,6 +260,7 @@ export function mintTask(s: TaskStoreState, input: MintTaskInput): { next: TaskS
     appliedSeq: 0,
     nextSeq: 1,
     ackedSeq: 0,
+    acked: false,
     outbox: [],
     findings: [],
     artifactIds: [],
@@ -409,6 +419,7 @@ export function applyTransition(s: TaskStoreState, t: InboundTransition, now: nu
       // read the peer's very first report as one.
       nextSeq: t.seq + 1,
       ackedSeq: 0,
+      acked: false,
       outbox: [],
       findings: [],
       artifactIds: [],
@@ -481,6 +492,7 @@ export function ackOutbound(s: TaskStoreState, taskId: string, seq: number): Tas
     ...rec,
     outbox: rec.outbox.filter((e) => e.seq !== seq),
     ackedSeq: Math.max(rec.ackedSeq, seq),
+    acked: true,
   };
   return replace(s, next);
 }

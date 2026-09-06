@@ -26,6 +26,7 @@ import '../providers/projects.dart';
 import '../providers/sessions.dart';
 import '../services/control_plane_client.dart';
 import '../util/detached.dart';
+import '../util/device_id.dart';
 import '../util/git_remote_match.dart';
 import 'new_session/environment_menu.dart';
 import 'new_session/picker_sources.dart';
@@ -318,6 +319,12 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
   /// Labels and the card are best-effort by schema, and the ones that exist are
   /// worth carrying: they are the only account a peer machine that has never
   /// dialled this one has of the session it answers to.
+  ///
+  /// `projectId` here is a LABEL, not an address. The peer stores it forever and
+  /// renders it, but nothing routes on it: one checkout can be open as more than
+  /// one project, so the id this app knows the lead by need not be the one the
+  /// peer's frames come back naming — which is why the carrier matches a lead on
+  /// its session id alone (`classifyBusFrame`).
   SessionMemberRef _leadRef() {
     final machineId = ref.read(localDeviceUuidProvider).value ?? '';
     String? projectLabel;
@@ -330,7 +337,10 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
     }
     return SessionMemberRef(
       machineId: machineId,
-      projectId: widget.leadRegistrationId,
+      // Bare project id, never the compound `<uuid>.<projectId>` — the same
+      // spelling `viewedSessionRefProvider` records, so a lead ref written here
+      // and one derived there compare equal.
+      projectId: baseProjectId(widget.leadRegistrationId),
       sessionId: widget.leadSessionId,
       machineLabel: machineLabel,
       projectLabel: projectLabel,

@@ -377,7 +377,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
     const mine = deps.coordinator
       .tasks(sessionId)
       .filter((t) => t.role === "lead" && t.peer.machineId === peer.machineId && t.peer.sessionId === peer.sessionId);
-    return mine.length > 0 && mine.every((t) => t.ackedSeq === 0);
+    return mine.length > 0 && mine.every((t) => !t.acked);
   }
 
   /** A member row plus what this bridge can actually observe about it.
@@ -410,7 +410,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       ...(rec.canceledAt === undefined ? {} : { canceledAt: rec.canceledAt }),
       ...(rec.cancelReason === undefined ? {} : { cancelReason: rec.cancelReason }),
       findings: rec.findings,
-      reachedPeer: rec.ackedSeq > 0,
+      reachedPeer: rec.acked,
       unacked: rec.outbox.length,
       // Only handles this machine actually holds bytes for. An id that arrived
       // in an envelope from the other machine is deliberately not listed: naming

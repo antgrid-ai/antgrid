@@ -119,6 +119,12 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
   /// carries something, so a link that breaks twice is said twice.
   final Set<String> _dropWarned = {};
 
+  /// Lead sessions already reported as addressed by a project id that is not
+  /// the one this app reaches them through. Latched per session: the condition
+  /// is a permanent property of a stored membership, so it would otherwise be
+  /// written on every frame for the life of the session.
+  final Set<String> _driftWarned = {};
+
   /// Lead projects last reported as carrying nothing because they are closed.
   /// Kept so the line is written when the situation CHANGES rather than on
   /// every reconcile — the link set is re-derived by ordinary session traffic.
@@ -262,6 +268,8 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
     _dropWarned.removeWhere(
       (id) => !wantedLeads.contains(id) && !wantedPeers.contains(id),
     );
+    final leadSessions = {for (final l in _links.links) l.leadSessionId};
+    _driftWarned.removeWhere((id) => !leadSessions.contains(id));
     for (final id in wantedLeads) {
       _ensureLeg(id, fromLead: true);
     }
@@ -362,7 +370,7 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
       fromLead: fromLead,
       localMachineId: ref.read(localDeviceUuidProvider).value,
       allowedPeerKeys: {for (final l in relevant) l.peer.key},
-      allowedLeadKeys: {for (final l in relevant) l.leadKey},
+      allowedLeadSessionIds: {for (final l in relevant) l.leadSessionId},
     );
 
     final to = busTo(json);
@@ -387,14 +395,43 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
           onSent: () => _toPeer++,
         );
       case BusForward.toLead:
+        // The leg comes from the LINK, never from `to.projectId`: that id is
+        // whatever project the peer recorded at join time, and one checkout can
+        // be open as more than one project, so it names a label rather than a
+        // route. `classifyBusFrame` has already established that this leg
+        // carries `to.sessionId`, which is what makes the lookup total.
+        final lead = relevant.firstWhere((l) => l.leadSessionId == to!.sessionId);
+        _noteProjectDrift(lead, to!);
         _forward(
-          _leads[to!.projectId],
+          _leads[lead.leadProjectId],
           raw,
-          legId: to.projectId,
+          legId: lead.leadProjectId,
           onSent: () => _toLead++,
         );
     }
     _publish();
+  }
+
+  /// Says once that a peer is addressing this lead by a project this app does
+  /// not reach it through.
+  ///
+  /// Routing no longer depends on the id, so this changes nothing about
+  /// delivery — but the two sides disagreeing about which project holds a
+  /// session is how a membership used to strand silently, and a peer's row
+  /// still RENDERS this id. Naming it is what turns the next occurrence into a
+  /// grep instead of an archaeology session over two machines' state files.
+  void _noteProjectDrift(SessionBusLink lead, BusEndpoint to) {
+    if (to.projectId == lead.leadProjectId) return;
+    if (!_driftWarned.add(lead.leadSessionId)) return;
+    AbLog.warn(
+      _kComponent,
+      'peer addresses this lead by another project — routed by session instead',
+      fields: {
+        'session': lead.leadSessionId,
+        'addressed': to.projectId,
+        'carried': lead.leadProjectId,
+      },
+    );
   }
 
   void _forward(

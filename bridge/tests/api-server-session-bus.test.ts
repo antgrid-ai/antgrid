@@ -685,6 +685,72 @@ describe("the role behind a taskless send", () => {
 // work the peer is already reading from work no machine has ever acknowledged.
 // The ack is the only evidence, so the task view carries it and the assignment
 // itself claims nothing.
+describe("the two machines may know the session by different projects", () => {
+  // A managed worktree opened in its own right hashes to a project id of its
+  // own, so the id a peer recorded for its lead need not be the one the lead
+  // bridge holds. Matching on it refused every frame in silence: the assign
+  // reached the peer, and the ack never got home.
+  test("an ack addressed by the wrong project still lands", async () => {
+    const lead = machine({
+      abDir: tempDir("bus-drift-lead-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [LEAD_SESSION],
+    });
+    const peer = machine({
+      abDir: tempDir("bus-drift-peer-"),
+      machineId: "m2",
+      projectId: "p2",
+      sessionIds: [PEER_SESSION],
+    });
+    try {
+      await post(lead, "tasks", LEAD_SESSION, {
+        peer: PEER_SESSION,
+        summary: "wire the codec",
+        instruction: "do the thing",
+      });
+
+      // Everything the peer sends home is addressed by what IT recorded at join
+      // time, which is the id under test.
+      for (const frame of lead.outbound.splice(0)) peer.coordinator.handleInbound(frame);
+      for (const frame of peer.outbound.splice(0)) {
+        const drifted = { ...frame, to: { ...(frame as any).to, projectId: "p1-worktree" } };
+        expect(lead.coordinator.handleInbound(drifted as AbMessage)).toBe("applied");
+      }
+
+      const tasks = await get(lead, "tasks", LEAD_SESSION);
+      expect(tasks.body.tasks[0]).toMatchObject({ reachedPeer: true, unacked: 0 });
+    } finally {
+      peer.stop();
+      lead.stop();
+    }
+  });
+
+  test("a frame for a session this bridge does not hold is still dropped", () => {
+    const lead = machine({
+      abDir: tempDir("bus-drift-unknown-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [LEAD_SESSION],
+    });
+    try {
+      // Relaxing the project id must not relax the session id with it: that one
+      // is the whole of what proves the sender means a session living here.
+      const stray = {
+        type: "session-bus:ack",
+        contextId: "ctx-1",
+        taskId: "t-1",
+        seq: 1,
+        from: { machineId: "m2", projectId: "p2", sessionId: PEER_SESSION },
+        to: { machineId: "m1", projectId: "p1", sessionId: "not-a-session-here" },
+      };
+      expect(lead.coordinator.handleInbound(stray as unknown as AbMessage)).toBe("dropped");
+    } finally {
+      lead.stop();
+    }
+  });
+});
+
 describe("an assignment is queued, and only an ack says it arrived", () => {
   test("an assignment reports no delivery, and the task says nothing has acked it", async () => {
     const lead = machine({

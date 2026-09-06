@@ -91,7 +91,6 @@ void main() {
     final link = links.links.single;
     expect(link.leadProjectId, 'p-lead');
     expect(link.leadSessionId, 's1');
-    expect(link.leadKey, 'p-lead/s1');
     expect(link.peerRegistrationId, 'm-peer.p-peer');
     expect(links.peerMachineIds, {'m-peer'});
   });
