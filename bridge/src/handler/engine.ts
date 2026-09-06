@@ -28,7 +28,7 @@ import {
 } from "./extract";
 import { appendActivity, type ActivityRecord } from "./config";
 import {
-  loadHandlerSession, saveHandlerSession, EscalationChoiceSchema,
+  loadHandlerSession, saveHandlerSession, EscalationChoiceSchema, OpenEscalationSchema,
   type EscalationChoice, type EscalationKind, type HandlerSessionRecord, type OpenEscalation,
 } from "./session-store";
 import {
@@ -40,7 +40,7 @@ import type { CapCommand } from "../structured/chat-session";
 import type { SessionAdapter } from "./session-adapter";
 import { handlerObservable, judgeCapable } from "../agents/registry";
 import { createEntitlementReader, type EntitlementReader } from "../entitlement";
-import { type HandlerDecision, DEFAULT_PERSONALITY } from "./decision";
+import { type DecisionAsk, type HandlerDecision, DEFAULT_PERSONALITY } from "./decision";
 import {
   LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS, TRANSIENT_CEILING, transientBackoffMs,
   defaultSchedule, TimerRegistry, type LifecycleDeps,
@@ -122,6 +122,36 @@ const MAX_BACKLOG_ITEMS = 100;
 // every report is preserved verbatim in the activity feed either way: the row is
 // only the reminder that one is there.
 const MAX_BLOCKED_REPORTS = 5;
+
+// One unanswered question per terminal, and not a queue depth. The answer
+// transports name the escalation they answer, so a second standing ask would no
+// longer make the user's own answer ambiguous — that reason is spent. What the
+// bound still buys is the notification volume a session that is supposed to be
+// getting on with the work may spend, and keeping a stranded ask from becoming a
+// stranded queue: an ask is retired by the user, by a dismiss, or by
+// reconcileAsks finding its claim expired, and none of those scales with depth.
+const MAX_OPEN_ASKS = 1;
+// How much of a question and its reasoning the row may carry. The row replays on
+// every handler:status frame, so it is bounded the way every other replayed
+// string is.
+const MAX_ASK_CHARS = 400;
+// How many refused asks ride along in the next decide prompt, on the same
+// bargain as MAX_REMEMBERED_REJECTIONS: enough that a judge learns why its
+// question vanished, short enough that it never becomes the prompt.
+const MAX_ASK_REJECTIONS = 2;
+// The tap options' bounds, kept in lockstep with OpenEscalationSchema's copy and
+// enforced by mintAskOptions rather than by a safeParse over the finished array:
+// a parse rejects EVERY option at once, so one over-long label would cost the
+// user a card the judge sized for four.
+const MAX_ASK_OPTION_LABEL = 80;
+const MAX_ASK_OPTION_COST = 160;
+// The same lockstep for `unblocked`, and this one is the sharp end. A row that
+// fails its own schema makes the WHOLE session record unreadable on the next
+// start — loadHandlerSession returns null and arm() rebuilds an empty session —
+// and a backlog id is `item-<projectId>-<ms>-<n>`, so a long projectId is enough
+// to breach it. A dropped id costs one line of the still-working list, which
+// reconcileAsks re-derives from the backlog anyway.
+const MAX_UNBLOCKED_ID_CHARS = 64;
 
 // How much of those reports the wrap-up push may name. The note shares one OS
 // notification with `wrapUpSummary` and `undoNote`, and OS surfaces truncate;
@@ -368,6 +398,15 @@ function clipQuote(text: string): string {
   return previewForUser(oneLine(text), MAX_AMENDMENT_QUOTE_CHARS);
 }
 
+// `clip` appends its ellipsis PAST the cap it is given, so clip(s, 80) can be 81
+// characters long. That is harmless where the cap is a reading budget, and fatal
+// where it is a wire bound the result is then validated against — one character
+// over and the whole array is refused. Clip to one short of the bound so the
+// ellipsis lands inside it, and leave a string already within the bound alone.
+function clipWithin(text: string, max: number): string {
+  return text.length <= max ? text : clip(text, max - 1);
+}
+
 function wakeClock(at: number): string {
   const d = new Date(at);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -399,6 +438,68 @@ const REJECT_CHOICE_TEXT = "Do not proceed. Wait for my instructions.";
  * repeat (post-Phase-5 the advisory floor records rather than escalates), while
  * over-lifting costs a session-wide grant the user never read. The real lift stays
  * one control away, in the user's own words, through the PA bar.
+ *
+ * WHY AN `ask` OPTION IS OUTSIDE ALL OF THE ABOVE, mechanically rather than by
+ * assertion. An `ask` (see raiseAsk) carries `askOptions`, a DIFFERENT field on a
+ * different code path; it never carries `choices` and never calls this function.
+ * Nothing here is loosened for it, and nothing here may be loosened for it later.
+ *
+ * 1. `authorizeInstruction` (authorization.ts) is the only writer of `s.auth`,
+ *    and it has exactly ONE call site in bridge/src: HandlerEngine.instruct.
+ *    An ask TAP arrives as `handler:answer` and reaches answerAsk, which calls
+ *    neither instruct nor authorizeInstruction nor queueExtraction nor
+ *    injectReply nor guard.reset. `s.auth.patterns`, `s.auth.paths` and
+ *    `s.auth.hosts` are therefore byte-identical across a tap. That is pinned as
+ *    a test (engine.test.ts, "a tap grants nothing"), not left as prose here.
+ *
+ * 2. The label the judge writes IS the entire payload of a tap. An askOption has
+ *    no `text`: the app sends `choiceId` alone, the bridge resolves it against
+ *    its OWN persisted row, and what is parked for the judge is the engine-
+ *    clipped label — the exact string the user read on the button. A label that
+ *    misrepresents what a tap sends is unspellable, because the label is what a
+ *    tap sends. This is why askOptions is a separate field rather than a second
+ *    producer into `choices`, where `text` and `label` can diverge and where
+ *    every existing consumer would type `text` into a PTY.
+ *
+ * 3. What a tap actually moves is text the agent could already put in front of
+ *    the judge. assembleContext feeds the transcript into ctx.text on every
+ *    pass, so a compromised agent can already steer the judge's prompt. A tap
+ *    moves agent-influenced text from one prompt section to another and moves
+ *    nothing into s.auth. No privilege is gained. What IS new is that the user's
+ *    tap ENDORSES one option — and an endorsement buys no floor exemption
+ *    anywhere: the judge's relay is an ordinary `handle`, screened by
+ *    checkReplyShape, the HARD floor (which nothing lifts), partitionWarnings
+ *    against an untouched s.auth, guard.check and the snapshot pass, exactly as
+ *    every other handle is.
+ *
+ * 4. Free text on an ask is the one path that DOES lift, and it lifts the same
+ *    way it always has: through this same single feed point, on the raw payload,
+ *    before extraction (see instruct). The lift stays in what the user typed.
+ *    Two things keep that true rather than aspirational — an ask row is minted
+ *    with `draftReply: ""` and the judge's `ask` object has no draftReply field
+ *    at all, so there is no judge-authored artifact for a composer to prefill;
+ *    and the ask sheet is its own widget with no prefill parameter, rather than
+ *    a branch inside the sheet that mints the lift.
+ *
+ * 5. The honest residue, stated so nobody mistakes it for a hole that was
+ *    missed. The judge writes the question rendered above that composer, so it
+ *    can ELICIT a string the user then types in their own words. That is a
+ *    human keystroke in the middle, not a lift derived from Assistant output, so
+ *    the invariant above is intact — but it raises the rate at which short,
+ *    late-night answers enter the funnel. Which is why the ask-answer branch of
+ *    instruct records an `instruction_authorized` row whenever ANYTHING was
+ *    granted, including the bare hosts describeGrant deliberately omits from its
+ *    ordinary feed row: at most one row per answered question, and the silent
+ *    session-long egress grant becomes visible exactly where this feature made
+ *    it more likely.
+ *
+ * NOTHING THIS FUNCTION COVERS CHANGED. quickChoicesFor is not edited by the ask
+ * feature. `choices` keeps its exact semantics and its exact transport
+ * (answerWithChoice -> reply -> terminal:input / agent:prompt). The [Approve]
+ * chip still answers that way and still takes no lift. If a future change ever
+ * routes askOptions through `choices`, or gives an askOption a `text`, or gives
+ * an ask tap a path into instruct, every numbered clause above stops holding at
+ * once and this comment is the record of what was being relied on.
  */
 export function quickChoicesFor(p: {
   kind?: EscalationKind;
@@ -532,6 +633,11 @@ interface ArmedSession {
   // prompt section states the refused items are STILL OPEN, so an entry has to be
   // dropped when its item closes or it contradicts the backlog beside it.
   evidenceRejections: { id: string; line: string }[];
+  // Asks the harness refused to raise, fed back the way the two lists above are
+  // and not persisted for the same reason. Fed to the JUDGE and not to the user:
+  // the reply was sent and the work went on, so nothing is waiting — but a judge
+  // that never learns why its question vanished asks the same one every pass.
+  askRejections: string[];
   // Per item, how many times the command anchor ALONE has refused a completion.
   // The waiver it feeds is the only exit from an item whose text carries a
   // command-shaped token that is not a command (see MAX_ANCHOR_REFUSALS). Not
@@ -624,6 +730,18 @@ function waivedAnchors(s: ArmedSession): ReadonlySet<string> {
 // wrap-up — for the rest of its life.
 function pendingQuestions(s: ArmedSession): number {
   return s.escalations.filter((e) => e.kind !== "guard_blocked").length;
+}
+
+// Questions the session has actually STOPPED for, as opposed to every question
+// it has put to the user. An ask rides a pass that already replied to the agent,
+// so the work went on and nothing is waiting on it — which is a different fact
+// from "somebody is being waited on", and only the park nudge wants this one.
+//
+// `!e.nonBlocking` rather than `e.nonBlocking === false`: a row written before
+// the field, and one an older bridge stripped it from and re-persisted, both mean
+// the session stopped.
+function blockingQuestions(s: ArmedSession): number {
+  return s.escalations.filter((e) => e.kind !== "guard_blocked" && !e.nonBlocking).length;
 }
 
 // Where a session lands once whatever it was doing is over — a judged decision,
@@ -959,6 +1077,7 @@ export class HandlerEngine {
       limitParks: 0,
       floorWarnings: [],
       evidenceRejections: [],
+      askRejections: [],
       evidenceRejected: new Set(),
       anchorRefusals: new Map(),
       auth: createAuthorization(),
@@ -1700,9 +1819,11 @@ export class HandlerEngine {
     const unparked = this.unparkIfParked(terminalId, s);
     // An id-less retraction means every PROMPT is gone. A `guard_blocked` row is
     // not a prompt — it carries no promptId, so the id-ed arm already keeps it,
-    // and no driver ever had anything to withdraw.
+    // and no driver ever had anything to withdraw. Neither is an ask: it is a
+    // question Handler put to the USER, held by nothing in the agent's runtime,
+    // so there is nothing here for a driver to take back.
     const kept = promptId === undefined
-      ? s.escalations.filter((e) => e.kind === "guard_blocked")
+      ? s.escalations.filter((e) => e.kind === "guard_blocked" || e.nonBlocking)
       : s.escalations.filter((e) => e.promptId !== promptId);
     if (!unparked && kept.length === s.escalations.length) return;
     s.escalations = kept;
@@ -1819,6 +1940,11 @@ export class HandlerEngine {
     // the ones that return early below, and a flag nothing clears would leave every
     // later answer waiting on a turn_end that has already been and gone.
     s.awaitingAgent = undefined;
+
+    // Before every early return below, for the same reason the clear above is: a
+    // standing ask's claim about what the work is getting on with is re-checked
+    // against the backlog on every event, not only on the ones that reach a judge.
+    this.reconcileAsks(evt.terminalId, s);
 
     // The second read of the same predicate, and what actually bounds the
     // revocation lag to the token's 3600s TTL — gating only at arm() would make
@@ -2058,6 +2184,12 @@ export class HandlerEngine {
         // ahead of a reply that then failed to go out would strand every answer on
         // this session until some other event happened to arrive.
         s.awaitingAgent = true;
+        // The first `handle` after an answer is where that answer stops being
+        // unrelayed: the judge held it in this pass's prompt and the reply it
+        // composed has just reached the agent. Deliberately not cleared on
+        // `continue` or `escalate` — a pass that relayed nothing leaves an answer
+        // that is still true and still owed to the agent.
+        s.askAnswer = undefined;
         this.guard.recordAutoReply(evt.terminalId, probe);
         // Both recorded after the inject and before the handle row, so the feed reads
         // as "what was saved, what was flagged, then what was sent". Auditability is
@@ -2066,6 +2198,20 @@ export class HandlerEngine {
         this.recordSnapshots(evt.terminalId, s, snapshots, [...warn, ...authorized]);
         this.noteFloorWarnings(evt.terminalId, s, warn);
         this.record(evt.terminalId, "handle", decision.reason, shape.written);
+        // Raised only here. Every guard above returns before this line — the shape
+        // rejection, the HARD floor, the runaway cap — so a row that says the work
+        // went on is one written after the reply provably reached the agent. That
+        // injected reply is also what schedules the pass which follows: the agent's
+        // own turn_end arrives on the paths agent-core already owns, the transcript
+        // has moved so contextHash differs, and nothing here arms a timer or clears
+        // the hash.
+        //
+        // The position is load-bearing in both directions and a later edit must
+        // keep it: after the concurrent-disarm recheck above (a session the user
+        // stopped mid-pass must gain no row), and before maybeWrapUp (which must
+        // see the row, so a pass that both finishes the backlog and asks cannot
+        // disarm out from under the question).
+        if (decision.ask) this.raiseAsk(evt.terminalId, s, decision.ask);
         if (this.maybeWrapUp(evt.terminalId, s)) return;
         s.state = restingState(s);
         this.persist(evt.terminalId, s, true);
@@ -2074,6 +2220,13 @@ export class HandlerEngine {
       }
 
       if (decision.decision === "continue") {
+        // Neither this branch nor the escalate below sends the agent anything, so a
+        // question marked "the work goes on" would sit over a session with no
+        // further event to raise it again — the exact state the ask shape exists to
+        // make unspellable.
+        if (decision.ask) {
+          log.warn("handler ask ignored on %s decision for %s", decision.decision, evt.terminalId);
+        }
         this.record(evt.terminalId, "continue", decision.reason);
         if (this.maybeWrapUp(evt.terminalId, s)) return;
         s.state = restingState(s);
@@ -2085,6 +2238,12 @@ export class HandlerEngine {
       // escalate: deliberately no wrap-up check — an escalation raised on the
       // same pass that completed the backlog stays pending for the human;
       // auto-disarming would bury the question.
+      //
+      // An `ask` here is ignored for the reason the continue branch states: this
+      // pass replies to nobody, so the row would have no event to raise it again.
+      if (decision.ask) {
+        log.warn("handler ask ignored on %s decision for %s", decision.decision, evt.terminalId);
+      }
       this.escalate(evt.terminalId, s, decision);
     } catch (err) {
       // A wrap-up (or a concurrent disarm) may already have dropped this
@@ -2266,8 +2425,12 @@ export class HandlerEngine {
     // answer a pending permission prompt on their behalf. The park is over
     // either way — the human is the resume path now. A report answers nothing,
     // so it is not one of those: leaving it in the count would strand every
-    // parked session that happened to be holding one.
-    if (pendingQuestions(s) > 0) return;
+    // parked session that happened to be holding one. An ask is not one either,
+    // and for the sharper version of the same reason — the agent was already
+    // working PAST it when the park began, so it holds no prompt for a nudge to
+    // answer, and counting it here would strand the session on a question the
+    // user was told did not stop the work.
+    if (blockingQuestions(s) > 0) return;
     // Straight to the adapter, never through the auto-reply path: the nudge is
     // the supervisor's own recovery action, so it must neither advance the
     // runaway counter nor enter the circular-exchange window — a second park
@@ -2365,16 +2528,29 @@ export class HandlerEngine {
   // longer holds the session open forever.
   // Called only from the handle/continue branches — never on escalate.
   private maybeWrapUp(terminalId: string, s: ArmedSession): boolean {
+    // The backlog gate leads, so the question gate below reads a session whose
+    // asks have been reconciled against a FINISHED backlog. Ordering the two the
+    // other way is observationally identical on its own — both return false — and
+    // leaves nowhere to make that claim true.
+    if (!allTerminal(s.backlog)) return false;
+    // A question is non-blocking because there was other work its answer did not
+    // gate. With every item terminal there is none, so the claim has expired and
+    // the row goes back to meaning what an unanswered question has always meant.
+    // This is the site the per-event one cannot reach: a session whose backlog is
+    // finished has no further event coming to re-check it.
+    this.reconcileAsks(terminalId, s);
     // A wrap-up disarms the session. Never do that while a human question is
     // outstanding: an earlier escalate may already have banked the transitions
     // that completed the backlog (absorbTransitions runs on every decision,
     // including escalate), so a later handle/continue could otherwise auto-disarm
-    // and silently bury the unanswered escalation. A `guard_blocked` report is
-    // not such a question — nothing is waiting on it — and holding the wrap-up
-    // open for one would leave a finished session armed until somebody tapped
-    // Dismiss; the record and the push below carry the reports out instead.
+    // and silently bury the unanswered escalation. An ask needs no re-scope here
+    // — it is `kind: "reply"`, so it already counts, and that is the behaviour
+    // wanted: a finished backlog must not disarm over a question the user has
+    // been asked and has not answered. A `guard_blocked` report is not such a
+    // question — nothing is waiting on it — and holding the wrap-up open for one
+    // would leave a finished session armed until somebody tapped Dismiss; the
+    // record and the push below carry the reports out instead.
     if (pendingQuestions(s) > 0) return false;
-    if (!allTerminal(s.backlog)) return false;
     // Reports, not questions — pendingQuestions above is their complement. They
     // are frozen into the record because they die here: `disarm` drops the session
     // and takes `s.escalations` with it, and nothing can re-derive them afterwards.
@@ -2411,6 +2587,174 @@ export class HandlerEngine {
   // makes a frozen count a lie on a card whose whole job is to be read later.
   private openUndoCount(terminalId: string): number {
     return this.snapshots().filter((e) => e.terminalId === terminalId && e.undoneAt === undefined).length;
+  }
+
+  /**
+   * Raise a question for the USER on a pass that has ALREADY replied to the
+   * agent. The work goes on and the row waits; nothing here stops the session.
+   *
+   * Deliberately NOT routed through `escalate()`. That path derives its
+   * `draftReply` from `firstFilled(decision.notify?.draftReply, decision.reply,
+   * refused)`, so an ask would arrive carrying the line just typed at the agent
+   * as the user's own answer to offer back — and it would inherit
+   * `quickChoicesFor`, which an ask must not reach (see below).
+   */
+  private raiseAsk(terminalId: string, s: ArmedSession, ask: DecisionAsk): void {
+    if (s.escalations.filter((e) => e.nonBlocking).length >= MAX_OPEN_ASKS) {
+      return this.noteAskRejected(terminalId, s, ask, "a question of yours is still unanswered");
+    }
+    // The only checkable half of "non-blocking". renderBacklog prints every id, so
+    // the judge holds them; an ask that names none still open has described an
+    // escalation, whatever it claimed.
+    const live = new Set(s.backlog.filter((i) => !isTerminalStatus(i.status)).map((i) => i.id));
+    if (!ask.unblocked.some((id) => live.has(id))) {
+      return this.noteAskRejected(terminalId, s, ask, "named no backlog item that is still open");
+    }
+    const question = clip(ask.question, MAX_ASK_CHARS);
+    if (s.escalations.some((e) => e.nonBlocking && e.question === question)) {
+      return this.noteAskRejected(terminalId, s, ask, "the same question is already standing");
+    }
+    const esc: OpenEscalation = {
+      escalationId: this.id("esc"),
+      question,
+      reasoning: clip(ask.reasoning, MAX_ASK_CHARS),
+      // Empty by construction and never derived from the decision. A composer
+      // seeded from a judge-authored draft is the one path that reaches
+      // authorizeInstruction with text the user did not write, and the ask shape
+      // closes it here rather than at each of the sheets that read this field.
+      draftReply: "",
+      // Never the `high` band: that band is for a row that unblocks a stopped
+      // session in one tap, and this row stops nothing.
+      urgency: "normal",
+      kind: "reply",
+      nonBlocking: true,
+      unblocked: ask.unblocked.filter((id) => live.has(id) && id.length <= MAX_UNBLOCKED_ID_CHARS),
+      // NOT `quickChoicesFor`, and this is a reversal a reader will look for. All
+      // three of its gates screen text that is about to be typed into the agent's
+      // terminal, and an ask sends the agent nothing: the `resolve_in_session`
+      // clause withholds every chip on the premise that injected text cannot reach
+      // a stalled agent, the draft clause derives the whole card from a
+      // `draftReply` an ask does not have, and the destructive screen is a
+      // per-card `classifyDestructive` whose absolute-path sweep would warn on
+      // prose that never reaches a shell. Each of them returns undefined for the
+      // WHOLE card, silently, so reusing it here would withhold the options on
+      // exactly the sessions most likely to be holding a prompt.
+      askOptions: this.mintAskOptions(ask),
+      at: this.now(),
+    };
+    this.deps.sendAb(createMessage("handler:escalation", {
+      projectId: this.deps.projectId, terminalId, ...escalationWire(esc),
+    }));
+    s.escalations.push(esc);
+    // The existing `escalate` kind, not a new one: the row IS an escalation being
+    // raised, and a new activity value would be a fourth hand-mirrored enum
+    // (config.ts, protocol.ts, handler_state.dart) for nothing the feed cannot
+    // already say — the pass reads as "handle, then escalate".
+    this.record(terminalId, "escalate", ask.reasoning, previewForUser(question));
+    s.askRejections = [];
+  }
+
+  private noteAskRejected(terminalId: string, s: ArmedSession, ask: DecisionAsk, why: string): void {
+    s.askRejections = [...s.askRejections, `"${clip(ask.question, 80)}" — ${why}`].slice(-MAX_ASK_REJECTIONS);
+    this.record(terminalId, "escalate", `question not raised: ${why}`, previewForUser(ask.question));
+  }
+
+  /**
+   * The tap options for an ask, minted from the judge's labels.
+   *
+   * Every bound is enforced here rather than by handing the finished array to a
+   * safeParse, because that failure mode is dropping EVERY option: one over-long
+   * label would leave the user a question whose card the judge sized for four.
+   * Clipping keeps the option and costs a few characters instead, and the schema
+   * check at the end is the backstop for whatever clipping cannot fix — even that
+   * costs the options and never the question.
+   */
+  private mintAskOptions(ask: DecisionAsk): OpenEscalation["askOptions"] {
+    if (!ask.options) return undefined;
+    const minted: NonNullable<OpenEscalation["askOptions"]> = [];
+    for (const o of ask.options) {
+      // previewForUser ESCAPES control characters rather than stripping them, so it
+      // runs BEFORE the clip — escaping afterwards expands the string back over the
+      // bound it was just brought under.
+      const label = clipWithin(previewForUser(oneLine(o.label)), MAX_ASK_OPTION_LABEL);
+      const cost = clipWithin(previewForUser(oneLine(o.cost)), MAX_ASK_OPTION_COST);
+      // A label IS the whole payload of a tap and a cost is what the user checks a
+      // recommendation against, so an option missing either is not a choice anybody
+      // could make. Dropped rather than defaulted: the engine has nothing truthful
+      // to put there.
+      if (label.trim() === "" || cost.trim() === "") continue;
+      minted.push({
+        // Engine-authored by position. An id round-trips through the wire and
+        // resolves against this persisted row, so it is identity and never
+        // authority — nothing the judge writes may become one.
+        choiceId: `opt${minted.length + 1}`,
+        label,
+        cost,
+        // First `true` wins and the rest are cleared: two emphasised rows leave
+        // every app arbitrating between them, and none of them can.
+        ...(o.recommended && !minted.some((m) => m.recommended) ? { recommended: true as const } : {}),
+      });
+    }
+    // Never a one-chip card: a single option is a button that can only say yes.
+    // The ask still raises as a free-text question, which is a complete ask rather
+    // than a degraded one.
+    if (minted.length < 2) return undefined;
+    const parsed = OpenEscalationSchema.shape.askOptions.safeParse(minted);
+    return parsed.success ? parsed.data : undefined;
+  }
+
+  /**
+   * Re-check what every standing ask claimed the work was getting on with.
+   *
+   * `unblocked` is validated once at raise time, so on its own it is a promise
+   * about a moment that has passed: the items it named finish, and what is left
+   * is an ordinary question the session is waiting on. Run at the top of every
+   * pass AND again inside maybeWrapUp, because the second reaches the session the
+   * first cannot — one whose backlog is finished has no further event coming.
+   */
+  private reconcileAsks(terminalId: string, s: ArmedSession): void {
+    let changed = false;
+    for (const e of s.escalations) {
+      if (!e.nonBlocking) continue;
+      const before = e.unblocked ?? [];
+      // `blocked` counts as NOT running. TERMINAL is {done, skipped, failed}, so a
+      // blocked item is formally still open — but it is work that has not moved,
+      // and the whole claim the still-working list makes is one the user can check
+      // rather than one the row merely asserts.
+      const still = before.filter((id) => {
+        const item = s.backlog.find((i) => i.id === id);
+        return item !== undefined && !isTerminalStatus(item.status) && item.status !== "blocked";
+      });
+      if (still.length > 0) {
+        if (still.length !== before.length) {
+          // Assigned, never spliced: escalationWire hands out `{...e}` shallow
+          // copies, so every frame already published shares this array by
+          // reference and editing it in place would rewrite history.
+          e.unblocked = still;
+          changed = true;
+        }
+        continue;
+      }
+      if (before.length > 0) e.unblocked = [];
+      // Cleared TOGETHER and never one without the other. A promoted row that kept
+      // its options renders a card with live buttons that answerAsk then refuses,
+      // returning before the app can latch anything — no "Sending…", no error,
+      // nothing at all, on exactly the overnight path this feature exists to serve.
+      e.nonBlocking = undefined;
+      e.askOptions = undefined;
+      changed = true;
+      // No second push. The user was already woken when the question was raised,
+      // and a notification saying the same question now matters more is a second
+      // interruption for a fact the row itself carries.
+      this.record(terminalId, "escalate", "the work your question did not gate has finished");
+    }
+    // Emitted here rather than left to the caller: this runs before the branches
+    // that return early on a stale or parked event, and a promotion the app never
+    // sees leaves live buttons on a row this bridge would now refuse.
+    if (changed) {
+      this.persist(terminalId, s, true);
+      this.emitStatus();
+    }
   }
 
   private escalate(
@@ -2785,6 +3129,11 @@ export class HandlerEngine {
       // reading only the row would answer through the reply transport, into a PTY
       // the session never stopped.
       askAnswer: true as const,
+      // Derived from the parked answer rather than stored beside it: a second flag
+      // could say a relay is still owed after the handle branch dropped the answer
+      // it named. Omitted when nothing is parked, the way every optional field on
+      // this snapshot is — absent and false mean one thing here.
+      ...(s.askAnswer ? { askAnswerPending: true } : {}),
     }));
     const wrapUps = this.wrapUps();
     const entitlement = this.entitlementForApp();

@@ -6,10 +6,12 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { HandlerEngine, quickChoicesFor } from "../../src/handler/engine";
 import { RunawayGuard } from "../../src/handler/runaway-guard";
-import { LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS } from "../../src/handler/lifecycle";
+import {
+  LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS, TRANSIENT_CEILING,
+} from "../../src/handler/lifecycle";
 import { __setRootForTest } from "../../src/logger";
 import type { AbMessage } from "../../src/protocol";
-import type { HandlerDecision } from "../../src/handler/decision";
+import type { DecisionAsk, HandlerDecision } from "../../src/handler/decision";
 import type { InstructionItem, ItemTransition } from "../../src/handler/backlog";
 import { MAX_ITEM_CHARS, type ExtractedItem } from "../../src/handler/extract";
 import type { HandlerSessionRecord, OpenEscalation } from "../../src/handler/session-store";
@@ -4777,10 +4779,17 @@ describe("answering an ask", () => {
       nonBlocking: true, unblocked: ["i1"], askOptions: options, ...over,
     };
   }
-  // Armed with no goal on purpose: a goal is extracted at arm time and would put an
-  // item in every backlog assertion below — the surface a tap must leave empty.
+  // Armed with no goal on purpose: a goal is extracted at arm time and would put a
+  // SECOND item in every backlog assertion below — the surface a tap must leave
+  // exactly as it found it. The one item it does carry is the one every ask here
+  // names in `unblocked`, because reconcileAsks promotes an ask whose named work
+  // has finished or was never there — an ask over an empty backlog is a row this
+  // engine could not have minted.
   const armedWithAsk = (escalations: OpenEscalation[], over: Record<string, unknown> = {}) => {
-    const h = makeEngine({ loadSessionFn: () => sessionRecord({ goal: "", escalations }), ...over });
+    const h = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1")], escalations }),
+      ...over,
+    });
     h.engine.arm({ terminalId: "t1" });
     return h;
   };
@@ -4840,7 +4849,9 @@ describe("answering an ask", () => {
     })]);
     engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
     expect(lifted(session(engine))).toEqual({ patterns: [], paths: [], hosts: [] });
-    expect(session(engine).backlog).toEqual([]);
+    // The extractor is the other thing a tap must not reach: the backlog is what
+    // it was before, item for item.
+    expect(session(engine).backlog.map((i) => i.id)).toEqual(["i1"]);
     expect(records(activity, "instruction_authorized")).toEqual([]);
   });
 
@@ -4929,7 +4940,8 @@ describe("answering an ask", () => {
         .toBe("rm -rf");
       // NO extraction: the extractor splits a sentence into work, and an answer
       // routed through it becomes a backlog item the judge drives at the agent.
-      expect(session(engine).backlog).toEqual([]);
+      // The sentence names one, so a backlog left item for item is the assertion.
+      expect(session(engine).backlog.map((i) => i.id)).toEqual(["i1"]);
       expect(session(engine).askAnswer)
         .toMatchObject({ escalationId: "a1", answer: "use staging, and rm -rf build first", tapped: false });
       expect((saved.at(-1) as HandlerSessionRecord).escalations).toEqual([]);
@@ -4963,7 +4975,7 @@ describe("answering an ask", () => {
       });
       expect(warned).toContain("not a standing ask");
       expect(statuses(sent).length).toBe(beforeStatuses + 1);
-      expect(session(engine).backlog).toEqual([]);
+      expect(session(engine).backlog.map((i) => i.id)).toEqual(["i1"]);
       expect(lifted(session(engine))).toEqual({ patterns: [], paths: [], hosts: [] });
       expect(records(activity, "instruction_authorized")).toEqual([]);
       expect(session(engine).askAnswer).toBeUndefined();
@@ -5103,6 +5115,473 @@ describe("answering an ask", () => {
       engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
       await until(() => handed !== "unset");
       expect(handed).toBeUndefined();
+    });
+  });
+});
+
+describe("raising an ask", () => {
+  const QUESTION = "Which database should the migration target?";
+  const ASK: DecisionAsk = {
+    question: QUESTION,
+    reasoning: "the cutover order turns on it and nothing else on the list does",
+    unblocked: ["i1"],
+    options: [
+      { label: "Point it at staging for now", cost: "one extra deploy later" },
+      { label: "Go straight at production", cost: "no second cutover", recommended: true },
+    ],
+  };
+  const asking = (over: Partial<DecisionAsk> = {}, d: Partial<HandlerDecision> = {}) =>
+    decide({ decision: "handle", reply: "yes", ask: { ...ASK, ...over }, ...d });
+
+  interface AskFrame {
+    escalationId: string; question: string; reasoning: string; draftReply: string;
+    urgency: string; kind?: string; at: number;
+    nonBlocking?: boolean; unblocked?: string[];
+    choices?: { choiceId: string }[];
+    askOptions?: { choiceId: string; label: string; cost: string; recommended?: true }[];
+  }
+  const frames = (sent: AbMessage[]) =>
+    sent.filter((m) => m.type === "handler:escalation") as never as AskFrame[];
+  const rows = (sent: AbMessage[]): AskFrame[] => {
+    const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+      sessions: { escalations: AskFrame[] }[];
+    };
+    return status.sessions[0]?.escalations ?? [];
+  };
+  const askRows = (activity: unknown[]) =>
+    records(activity, "escalate") as { reason: string; detail?: string }[];
+
+  // The backlog is supplied at arm time, so nothing is extracted and `i1` is the
+  // one still-open item every ask below names.
+  const armedFor = (over: Record<string, unknown> = {}, backlog = [item("i1")]) => {
+    const h = makeEngine(over);
+    h.engine.arm({ terminalId: "t1", goal: GOAL, backlog });
+    return h;
+  };
+
+  it("a handle carrying an ask injects the reply and raises one non-blocking row", async () => {
+    const { engine, sent, injected } = armedFor({ runDecisionFn: async () => asking() });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(injected).toEqual([["t1", "yes"]]);
+    const raised = frames(sent);
+    expect(raised).toHaveLength(1);
+    const f = raised[0]!;
+    expect(f.nonBlocking).toBe(true);
+    expect(f.question).toBe(QUESTION);
+    // `normal`, never `high`: the high band is for a row that unblocks a stopped
+    // session in one tap, and this row stops nothing.
+    expect(f.urgency).toBe("normal");
+    expect(f.kind).toBe("reply");
+    // Both halves of the empty-composer guarantee. `choices` is the field every
+    // existing app surface types into the PTY, and `draftReply` is what a reply
+    // sheet prefills from — an ask carries neither, on any app version.
+    expect(f.choices).toBeUndefined();
+    expect(f.draftReply).toBe("");
+    expect(f.askOptions?.map((o) => o.choiceId)).toEqual(["opt1", "opt2"]);
+    expect(f.unblocked).toEqual(["i1"]);
+    // The session did not stop, but the row is still one the user has to answer.
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+  });
+
+  it("carries its options while a resolve_in_session row stands", async () => {
+    // quickChoicesFor withholds every chip there, on the premise that injected
+    // text cannot reach an agent stalled on a prompt. An ask injects nothing, so
+    // that premise is void for it — and it is not on this path at all.
+    const { engine, sent } = armedFor({ runDecisionFn: async () => asking() });
+    await engine.handleEvent({
+      terminalId: "t1", event: "permission_request", promptId: "p1", detail: "write a file",
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const ask = frames(sent).find((f) => f.nonBlocking)!;
+    expect(ask.askOptions).toHaveLength(2);
+  });
+
+  it("carries its options when a cost names an absolute path outside the project", async () => {
+    // The other gate that is not on this path: a per-card classifyDestructive
+    // whose absolute-path sweep would withhold the whole card over prose that
+    // never reaches a shell.
+    const { engine, sent } = armedFor({
+      runDecisionFn: async () => asking({
+        options: [
+          { label: "Keep the shared config", cost: "nothing under /etc/antgrid.conf moves" },
+          { label: "Rewrite it", cost: "the old /etc/antgrid.conf is gone" },
+        ],
+      }),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(frames(sent)[0]!.askOptions).toHaveLength(2);
+  });
+
+  it("clips an over-long label and cost rather than dropping the option", async () => {
+    const { engine, sent } = armedFor({
+      runDecisionFn: async () => asking({
+        options: [
+          { label: "L".repeat(81), cost: "C".repeat(161) },
+          { label: "short", cost: "also short" },
+        ],
+      }),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const [first] = frames(sent)[0]!.askOptions!;
+    // Clipped WITHIN the wire bound, ellipsis included: one character over and the
+    // schema check would answer by dropping every option on the card.
+    expect(first!.label).toHaveLength(80);
+    expect(first!.label.endsWith("…")).toBe(true);
+    expect(first!.cost).toHaveLength(160);
+  });
+
+  it("escapes a control character in a label instead of sending it raw", async () => {
+    const { engine, sent } = armedFor({
+      runDecisionFn: async () => asking({
+        options: [
+          { label: `ring${String.fromCharCode(7)}ring`, cost: "none" },
+          { label: "quiet", cost: "none" },
+        ],
+      }),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const [first] = frames(sent)[0]!.askOptions!;
+    expect(first!.label).toContain("x07");
+    expect(first!.label).not.toContain(String.fromCharCode(7));
+  });
+
+  it("drops an option with a blank label or cost and keeps the rest", async () => {
+    const { engine, sent } = armedFor({
+      runDecisionFn: async () => asking({
+        options: [
+          { label: "   ", cost: "one extra deploy" },
+          { label: "Go straight at production", cost: "no second cutover" },
+          { label: "Wait for the freeze", cost: "   " },
+          { label: "Ask the team first", cost: "a day" },
+        ],
+      }),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const opts = frames(sent)[0]!.askOptions!;
+    expect(opts.map((o) => o.label)).toEqual(["Go straight at production", "Ask the team first"]);
+    // Ids are minted by POSITION among the survivors, so they stay contiguous and
+    // no app can resolve one against an option that was dropped.
+    expect(opts.map((o) => o.choiceId)).toEqual(["opt1", "opt2"]);
+  });
+
+  it("raises the question with no options rather than a one-chip card", async () => {
+    const { engine, sent } = armedFor({
+      runDecisionFn: async () => asking({
+        options: [
+          { label: "Go straight at production", cost: "no second cutover" },
+          { label: "", cost: "one extra deploy" },
+        ],
+      }),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const f = frames(sent)[0]!;
+    // The question is never dropped over its options: a free-text ask is a
+    // complete ask, and a single option is a button that can only say yes.
+    expect(f.question).toBe(QUESTION);
+    expect(f.askOptions).toBeUndefined();
+  });
+
+  it("emphasises exactly one option however many the judge marked", async () => {
+    const { engine, sent } = armedFor({
+      runDecisionFn: async () => asking({
+        options: [
+          { label: "Point it at staging", cost: "one extra deploy", recommended: true },
+          { label: "Go straight at production", cost: "no second cutover", recommended: true },
+        ],
+      }),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(frames(sent)[0]!.askOptions!.map((o) => o.recommended)).toEqual([true, undefined]);
+  });
+
+  describe("the guards every ask is raised behind", () => {
+    it("raises nothing when the reply is refused by the HARD floor", async () => {
+      const { engine, sent, injected } = armedFor({
+        runDecisionFn: async () => asking({}, { reply: "mkfs.ext4 /dev/sdb" }),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(injected).toHaveLength(0);
+      expect(frames(sent).map((f) => f.kind)).toEqual(["guard_blocked"]);
+    });
+
+    it("raises nothing when the reply is refused by checkReplyShape", async () => {
+      const { engine, sent, injected } = armedFor({
+        runDecisionFn: async () => asking({}, { reply: "go\x1b[B\r" }),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(injected).toHaveLength(0);
+      expect(frames(sent).map((f) => f.kind)).toEqual(["guard_blocked"]);
+    });
+
+    it("raises nothing when the runaway cap has been spent", async () => {
+      // A row that says the work went on is one written after the reply provably
+      // reached the agent, so every guard above the call site has to return first.
+      const decisions: HandlerDecision[] = [decide({ decision: "handle", reply: "yes" })];
+      const { engine, sent } = armedFor({
+        guard: new RunawayGuard(1),
+        runDecisionFn: async () => decisions.shift() ?? asking(),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(frames(sent).map((f) => f.kind)).toEqual(["guard_blocked"]);
+    });
+
+    it("ignores an ask on a continue and on an escalate, loudly", async () => {
+      const decisions = [
+        decide({ decision: "continue", ask: ASK }),
+        decide({ decision: "escalate", ask: ASK }),
+      ];
+      const { engine, sent } = armedFor({ runDecisionFn: async () => decisions.shift()! });
+      const warnings = await capturingWarnings(async () => {
+        await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+        await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      });
+      // Neither branch sends the agent anything, so the row would sit over a
+      // session with no further event to raise it again.
+      expect(rows(sent).some((e) => e.nonBlocking)).toBe(false);
+      expect(warnings).toContain("handler ask ignored on continue");
+      expect(warnings).toContain("handler ask ignored on escalate");
+    });
+
+    it("refuses a second ask while one stands, and tells the judge why", async () => {
+      // Distinct replies, or the runaway guard refuses the second pass for
+      // repeating itself and the ask never reaches its own bound.
+      let n = 0;
+      const { engine, sent, activity } = armedFor({
+        runDecisionFn: async () => asking({ question: `${QUESTION} (${n})` }, { reply: `yes ${n++}` }),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      expect(frames(sent)).toHaveLength(1);
+      expect(askRows(activity).map((r) => r.reason))
+        .toContain("question not raised: a question of yours is still unanswered");
+    });
+
+    it("refuses an ask that names no still-open item", async () => {
+      const { engine, sent, activity } = armedFor(
+        { runDecisionFn: async () => asking() },
+        [item("i1", { status: "done", evidence: "ran to completion" })],
+      );
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(frames(sent)).toHaveLength(0);
+      expect(askRows(activity).map((r) => r.reason))
+        .toContain("question not raised: named no backlog item that is still open");
+    });
+
+    it("raises a repeated question once, on whichever bound is reached first", async () => {
+      // Two guards would each stop this, and at MAX_OPEN_ASKS = 1 the count is
+      // always the one that speaks: the duplicate-question check sits behind it and
+      // is what would still refuse a repeat if that bound were ever raised. The
+      // reason in the feed is asserted so a change to either is visible here.
+      let n = 0;
+      const { engine, sent, activity } = armedFor({
+        runDecisionFn: async () => asking({}, { reply: `yes ${n++}` }),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      expect(frames(sent)).toHaveLength(1);
+      expect(askRows(activity).map((r) => r.reason))
+        .toContain("question not raised: a question of yours is still unanswered");
+    });
+
+    it("drops an unblocked id the record could not carry", async () => {
+      // A row that fails its own schema makes the WHOLE session record unreadable
+      // on the next start, and the session comes back with no goal and no backlog.
+      // One past OpenEscalationSchema's own 64-character bound on an `unblocked`
+      // entry, spelled here the way the other bounds in this file are.
+      const long = "i".repeat(65);
+      const { engine, sent } = armedFor(
+        { runDecisionFn: async () => asking({ unblocked: [long, "i1"] }) },
+        [item(long), item("i1")],
+      );
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(frames(sent)[0]!.unblocked).toEqual(["i1"]);
+    });
+
+    it("spends exactly one judge call per agent event", async () => {
+      // The inertness the whole shape rests on: raising an ask arms no timer,
+      // clears no hash and schedules no pass of its own.
+      let judged = 0;
+      const { engine } = armedFor({ runDecisionFn: async () => { judged++; return asking(); } });
+      for (let i = 0; i < 4; i++) await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(judged).toBe(4);
+    });
+  });
+
+  // A standing ask, planted rather than raised, so each case starts from the state
+  // a bridge restart would rehydrate.
+  function standingAsk(over: Partial<OpenEscalation> = {}): OpenEscalation {
+    return {
+      escalationId: "a1", question: QUESTION, reasoning: "r", draftReply: "",
+      urgency: "normal", kind: "reply", at: 2, nonBlocking: true, unblocked: ["i1"],
+      askOptions: [
+        { choiceId: "opt1", label: "Point it at staging", cost: "one extra deploy" },
+        { choiceId: "opt2", label: "Go straight at production", cost: "no second cutover" },
+      ],
+      ...over,
+    };
+  }
+  const resumedWith = (
+    escalations: OpenEscalation[], backlog: InstructionItem[], over: Record<string, unknown> = {},
+  ) => {
+    const h = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: GOAL, backlog, escalations }),
+      runDecisionFn: async () => decide({}),
+      ...over,
+    });
+    h.engine.arm({ terminalId: "t1" });
+    return h;
+  };
+
+  describe("what an ask does not stop", () => {
+    it("the park timer still nudges", async () => {
+      const { engine, injected, timers } = resumedWith([standingAsk()], [item("i1")]);
+      await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+      timers.at(-1)!.fn();
+      // The nudge is an unsupervised submitted line, and the danger it exists to
+      // avoid is answering a pending prompt on the user's behalf. The agent was
+      // already working past this question, so it holds no prompt to answer.
+      expect(injected).toEqual([["t1", "continue"]]);
+    });
+
+    it("a blocking question still stops the park timer", async () => {
+      // The same row with its claim withdrawn: now it IS what the session stopped
+      // for, and the nudge would answer it on the user's behalf.
+      const { engine, injected, timers } = resumedWith(
+        [standingAsk({ nonBlocking: undefined, askOptions: undefined })], [item("i1")],
+      );
+      await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+      timers.at(-1)!.fn();
+      expect(injected).toHaveLength(0);
+    });
+
+    it("still suppresses both lifecycle ceilings", async () => {
+      // These are duplicate-row suppressors: an ask has already paged the user, and
+      // a stuck judge appending an identical row per failure is what they prevent.
+      const transient = resumedWith([standingAsk()], [item("i1")]);
+      for (let i = 0; i < TRANSIENT_CEILING; i++) {
+        await transient.engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+        const t = transient.timers.at(-1)!;
+        if (!t.fired && !t.cancelled) t.fn();
+      }
+      expect(frames(transient.sent)).toHaveLength(0);
+
+      const limit = resumedWith([standingAsk()], [item("i1")]);
+      for (let i = 0; i < LIMIT_PARK_CEILING; i++) {
+        await limit.engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+        const t = limit.timers.at(-1)!;
+        if (!t.fired && !t.cancelled) t.fn();
+      }
+      expect(frames(limit.sent)).toHaveLength(0);
+    });
+
+    it("an id-less prompt retraction keeps the ask and drops a plain reply row", async () => {
+      const { engine, sent } = resumedWith([standingAsk()], [item("i1")], {
+        runDecisionFn: async () => decide({ decision: "escalate" }),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(rows(sent)).toHaveLength(2);
+      engine.onPromptRetracted("t1");
+      // An id-less retraction means every PROMPT is gone, and a question Handler
+      // put to the USER was never one.
+      expect(rows(sent).map((e) => e.escalationId)).toEqual(["a1"]);
+    });
+
+    it("a finished backlog does not disarm over it", async () => {
+      const { engine, sent, activity } = resumedWith([standingAsk()], [item("i1")], {
+        runDecisionFn: async () => decide({
+          transitions: [{ id: "i1", status: "done", evidence: "ran to completion" }],
+        }),
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(records(activity, "wrapped_up")).toHaveLength(0);
+      expect(statusOf(sent).state).toBe("needs_you");
+      // Promoted on the way through, because the work it did not gate is over —
+      // and then held open by the ordinary pending-question gate.
+      expect(rows(sent)[0]!.nonBlocking).toBeUndefined();
+    });
+
+    it("a session holding only a guard_blocked report still wraps up", async () => {
+      // The complement, re-run because the wrap-up's two gates now have a
+      // reconcile between them.
+      const { engine, activity } = resumedWith(
+        [{
+          escalationId: "b0", question: "Handler did not send its reply", reasoning: "r",
+          draftReply: "d", urgency: "normal", at: 1, kind: "guard_blocked",
+        }],
+        [item("i1")],
+        {
+          runDecisionFn: async () => decide({
+            transitions: [{ id: "i1", status: "done", evidence: "ran to completion" }],
+          }),
+        },
+      );
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(records(activity, "wrapped_up")).toHaveLength(1);
+    });
+  });
+
+  describe("reconciling a standing ask", () => {
+    const twoIds = (backlog: InstructionItem[], over: Record<string, unknown> = {}) =>
+      resumedWith([standingAsk({ unblocked: ["i1", "i2"] })], backlog, over);
+
+    it("prunes the ids that finished and leaves the row standing", async () => {
+      const { engine, sent, activity } = twoIds([
+        item("i1", { status: "done", evidence: "ran to completion" }), item("i2"),
+      ]);
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      const row = rows(sent)[0]!;
+      expect(row.unblocked).toEqual(["i2"]);
+      expect(row.nonBlocking).toBe(true);
+      expect(row.askOptions).toHaveLength(2);
+      expect(askRows(activity)).toHaveLength(0);
+    });
+
+    it("promotes the row and strips its options once none of the work is running", async () => {
+      const { engine, sent, activity, pushes, saved } = twoIds([
+        item("i1", { status: "done", evidence: "ran to completion" }),
+        item("i2", { status: "skipped", evidence: "no longer needed" }),
+      ]);
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      const row = rows(sent)[0]!;
+      expect(row.nonBlocking).toBeUndefined();
+      // Stripped in the SAME mutation. A promoted row that kept its options renders
+      // live buttons that answerAsk then refuses, with nothing for the app to latch.
+      expect(row.askOptions).toBeUndefined();
+      expect(askRows(activity).map((r) => r.reason))
+        .toEqual(["the work your question did not gate has finished"]);
+      // No second push: the user was woken when the question was raised.
+      expect(pushes).toHaveLength(0);
+      expect((saved.at(-1) as HandlerSessionRecord).escalations[0]!.nonBlocking).toBeUndefined();
+    });
+
+    it("counts a permanently blocked item as not running", async () => {
+      // TERMINAL is {done, skipped, failed}, so `blocked` is formally still open —
+      // and a backlog that can never finish is exactly the session a gate behind
+      // allTerminal could never reach.
+      const { engine, sent } = twoIds([
+        item("i1", { status: "blocked" }),
+        item("i2", { status: "done", evidence: "ran to completion" }),
+      ]);
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(rows(sent)[0]!.nonBlocking).toBeUndefined();
+    });
+
+    it("promotes an ask whose named work was never in the backlog", async () => {
+      const { engine, sent } = twoIds([item("i3")]);
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(rows(sent)[0]!.nonBlocking).toBeUndefined();
+    });
+
+    it("promotes once, however many events follow", async () => {
+      const { engine, activity } = twoIds([
+        item("i1", { status: "done", evidence: "ran to completion" }),
+        item("i2", { status: "failed", evidence: "compiler said no" }),
+      ]);
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      expect(askRows(activity)).toHaveLength(1);
     });
   });
 });
