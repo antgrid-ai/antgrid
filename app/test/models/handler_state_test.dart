@@ -337,6 +337,278 @@ void main() {
     });
   });
 
+  group('the ask fields', () {
+    const keep = {
+      'choiceId': 'keep',
+      'label': 'Keep the current schema and note the gap',
+      'cost': 'Leaves the migration for later',
+    };
+    const migrate = {
+      'choiceId': 'migrate',
+      'label': 'Write the migration now',
+      'cost': 'Another twenty minutes before the tests run',
+      'recommended': true,
+    };
+    Map<String, dynamic> askWire({
+      Object? nonBlocking,
+      Object? unblocked,
+      Object? askOptions,
+    }) => {
+      'escalationId': 'e1',
+      'question': 'which shape?',
+      'reasoning': 'r',
+      'draftReply': '',
+      'urgency': 'normal',
+      'at': 1,
+      'nonBlocking': ?nonBlocking,
+      'unblocked': ?unblocked,
+      'askOptions': ?askOptions,
+    };
+
+    test('an ordinary row carries the conservative default for each', () {
+      // Absent is what every row before these fields meant, and what an older
+      // bridge — or one that stripped them on a downgrade — still says.
+      final e = HandlerEscalation.fromWire('t1', askWire())!;
+      expect(e.nonBlocking, isFalse);
+      expect(e.unblocked, isEmpty);
+      expect(e.askOptions, isNull);
+    });
+
+    test('a well-formed ask carries all three', () {
+      final e = HandlerEscalation.fromWire(
+        't1',
+        askWire(
+          nonBlocking: true,
+          unblocked: ['i1', 'i2'],
+          askOptions: [keep, migrate],
+        ),
+      )!;
+      expect(e.nonBlocking, isTrue);
+      expect(e.unblocked, ['i1', 'i2']);
+      expect(e.askOptions, hasLength(2));
+      expect(e.askOptions![0].choiceId, 'keep');
+      expect(e.askOptions![0].label, contains('Keep the current schema'));
+      expect(e.askOptions![0].cost, isNotEmpty);
+      expect(e.askOptions![0].recommended, isFalse);
+      expect(e.askOptions![1].recommended, isTrue);
+      // Parsed as its own shape and never into `choices`, which is the whole
+      // reason a tap on one cannot reach the session.
+      expect(e.choices, isNull);
+      expect(e.choiceById('keep'), isNull);
+    });
+
+    test('a non-bool nonBlocking reads as blocking and keeps the row', () {
+      // The wrong-typed value costs the ask treatment, never the question:
+      // dropping the row would leave the user with nothing to answer.
+      final e = HandlerEscalation.fromWire('t1', askWire(nonBlocking: 'yes'));
+      expect(e, isNotNull);
+      expect(e!.nonBlocking, isFalse);
+      expect(e.question, 'which shape?');
+    });
+
+    test('a malformed unblocked degrades to naming nothing', () {
+      // The claim is re-derived against the live backlog anyway, so a lost id
+      // costs a smaller count and never a wrong one.
+      expect(
+        HandlerEscalation.fromWire('t1', askWire(unblocked: 'i1'))!.unblocked,
+        isEmpty,
+      );
+      expect(
+        HandlerEscalation.fromWire(
+          't1',
+          askWire(unblocked: ['i1', 7]),
+        )!.unblocked,
+        ['i1'],
+      );
+    });
+
+    test('a bad options list drops the options, not the question', () {
+      for (final bad in <Object>[
+        [keep],
+        [keep, migrate, keep, migrate, keep],
+        [keep, 'nope'],
+        [
+          keep,
+          {'choiceId': '', 'label': 'Write it', 'cost': 'time'},
+        ],
+        [
+          keep,
+          {'choiceId': 'migrate', 'label': '', 'cost': 'time'},
+        ],
+        [
+          keep,
+          {'choiceId': 'migrate', 'label': 'x' * 81, 'cost': 'time'},
+        ],
+        [
+          keep,
+          {'choiceId': 'migrate', 'label': 'Write it', 'cost': ''},
+        ],
+        [
+          keep,
+          {'choiceId': 'migrate', 'label': 'Write it', 'cost': 'x' * 161},
+        ],
+        [
+          keep,
+          {'choiceId': 'z' * 41, 'label': 'Write it', 'cost': 'time'},
+        ],
+        // A tap is resolved by first match, so a repeated id would answer with
+        // an option the user did not read.
+        [
+          keep,
+          {'choiceId': 'keep', 'label': 'Keep it and move on', 'cost': 'time'},
+        ],
+        'askOptions',
+      ]) {
+        final e = HandlerEscalation.fromWire(
+          't1',
+          askWire(nonBlocking: true, askOptions: bad),
+        );
+        expect(e, isNotNull, reason: '$bad');
+        expect(e!.askOptions, isNull, reason: '$bad');
+        // The ask itself survives — it is still answerable in the user's own
+        // words.
+        expect(e.nonBlocking, isTrue, reason: '$bad');
+      }
+    });
+
+    test('anything but the wire true reads as not recommended', () {
+      // The wire spells it `true`-or-absent, so a second spelling must not
+      // become a second emphasised option.
+      final e = HandlerEscalation.fromWire(
+        't1',
+        askWire(
+          askOptions: [
+            {...keep, 'recommended': false},
+            {...migrate, 'recommended': 'yes'},
+          ],
+        ),
+      )!;
+      expect(e.askOptions!.every((o) => !o.recommended), isTrue);
+    });
+
+    test('withoutChoices and copyWith both carry all three', () {
+      final e = HandlerEscalation.fromWire(
+        't1',
+        askWire(
+          nonBlocking: true,
+          unblocked: ['i1'],
+          askOptions: [keep, migrate],
+        ),
+      )!;
+      final withdrawn = e.withoutChoices();
+      expect(withdrawn.nonBlocking, isTrue);
+      expect(withdrawn.unblocked, ['i1']);
+      expect(withdrawn.askOptions, hasLength(2));
+
+      final unchanged = e.copyWith();
+      expect(unchanged.nonBlocking, isTrue);
+      expect(unchanged.unblocked, ['i1']);
+      expect(unchanged.askOptions, hasLength(2));
+      expect(unchanged.question, 'which shape?');
+      expect(unchanged.at, 1);
+    });
+
+    test('copyWith is the only way to strip the options', () {
+      // Passing null cannot mean "clear" — it is indistinguishable from
+      // omitting the argument — so the downgrade the capability gate performs
+      // needs the explicit flag, and the two halves of an ask move together.
+      final e = HandlerEscalation.fromWire(
+        't1',
+        askWire(nonBlocking: true, askOptions: [keep, migrate]),
+      )!;
+      expect(e.copyWith(askOptions: null).askOptions, hasLength(2));
+      final downgraded = e.copyWith(nonBlocking: false, clearAskOptions: true);
+      expect(downgraded.nonBlocking, isFalse);
+      expect(downgraded.askOptions, isNull);
+      expect(downgraded.question, 'which shape?');
+    });
+  });
+
+  group('the ask capability on a session snapshot', () {
+    Map<String, dynamic> sessionWire({
+      Object? askAnswer,
+      Object? askAnswerPending,
+      List<Map<String, dynamic>> escalations = const [],
+    }) => {
+      'terminalId': 't1',
+      'state': 'needs_you',
+      'pendingEscalations': escalations.length,
+      'armedAt': 1,
+      'goal': 'g',
+      'backlog': <Map<String, dynamic>>[],
+      'escalations': escalations,
+      'askAnswer': ?askAnswer,
+      'askAnswerPending': ?askAnswerPending,
+    };
+    Map<String, dynamic> escWire(String id, {bool nonBlocking = false}) => {
+      'escalationId': id,
+      'question': 'q',
+      'reasoning': 'r',
+      'draftReply': '',
+      'urgency': 'normal',
+      'at': 1,
+      'nonBlocking': nonBlocking,
+    };
+
+    test('a bridge that advertises neither reads as neither', () {
+      final s = HandlerSessionState.fromWire(sessionWire())!;
+      expect(s.askAnswer, isFalse);
+      expect(s.askAnswerPending, isFalse);
+    });
+
+    test('both flags are carried, and a wrong type degrades to false', () {
+      final on = HandlerSessionState.fromWire(
+        sessionWire(askAnswer: true, askAnswerPending: true),
+      )!;
+      expect(on.askAnswer, isTrue);
+      expect(on.askAnswerPending, isTrue);
+
+      // Losing the armed card over a wrong-typed capability flag would be far
+      // worse than losing the capability.
+      final junk = HandlerSessionState.fromWire(
+        sessionWire(askAnswer: 'yes', askAnswerPending: 1),
+      );
+      expect(junk, isNotNull);
+      expect(junk!.askAnswer, isFalse);
+      expect(junk.askAnswerPending, isFalse);
+    });
+
+    test('asksOnly is true only while every standing row is an ask', () {
+      expect(
+        HandlerSessionState.fromWire(
+          sessionWire(
+            escalations: [
+              escWire('e1', nonBlocking: true),
+              escWire('e2', nonBlocking: true),
+            ],
+          ),
+        )!.asksOnly,
+        isTrue,
+      );
+      // A guard_blocked report parses as blocking, so one of them keeps the
+      // loud word for the whole session.
+      expect(
+        HandlerSessionState.fromWire(
+          sessionWire(
+            escalations: [escWire('e1', nonBlocking: true), escWire('e2')],
+          ),
+        )!.asksOnly,
+        isFalse,
+      );
+      // Nothing standing is not "only asks" — it is nothing.
+      expect(HandlerSessionState.fromWire(sessionWire())!.asksOnly, isFalse);
+    });
+
+    test('copyWith carries both flags', () {
+      final s = HandlerSessionState.fromWire(
+        sessionWire(askAnswer: true, askAnswerPending: true),
+      )!;
+      final narrowed = s.copyWith(pendingEscalations: 0);
+      expect(narrowed.askAnswer, isTrue);
+      expect(narrowed.askAnswerPending, isTrue);
+    });
+  });
+
   group('HandlerWrapUp.fromWire', () {
     Map<String, dynamic> wire({
       Object? outcomes,

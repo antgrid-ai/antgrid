@@ -26,6 +26,7 @@ Map<String, dynamic> _sessionJson({
   List<Map<String, dynamic>> escalations = const [],
   String? judgeTool,
   String? judgeModel,
+  Object? askAnswer,
 }) => {
   'terminalId': terminalId,
   'state': state,
@@ -36,6 +37,7 @@ Map<String, dynamic> _sessionJson({
   'escalations': escalations,
   'judgeTool': ?judgeTool,
   'judgeModel': ?judgeModel,
+  'askAnswer': ?askAnswer,
 };
 
 Map<String, dynamic> _sessionEntryJson(String id, {String mode = 'terminal'}) =>
@@ -85,6 +87,9 @@ Map<String, dynamic> _escalationJson(
   List<Map<String, dynamic>>? choices,
   String urgency = 'normal',
   int at = 1,
+  bool? nonBlocking,
+  List<String>? unblocked,
+  List<Map<String, dynamic>>? askOptions,
 }) => {
   'escalationId': escalationId,
   'question': 'q',
@@ -94,7 +99,24 @@ Map<String, dynamic> _escalationJson(
   'at': at,
   'kind': ?kind,
   'choices': ?choices,
+  'nonBlocking': ?nonBlocking,
+  'unblocked': ?unblocked,
+  'askOptions': ?askOptions,
 };
+
+const _askOptionsJson = [
+  {
+    'choiceId': 'keep',
+    'label': 'Keep the current schema and note the gap',
+    'cost': 'Leaves the migration for later',
+  },
+  {
+    'choiceId': 'migrate',
+    'label': 'Write the migration now',
+    'cost': 'Another twenty minutes before the tests run',
+    'recommended': true,
+  },
+];
 
 const _choicesJson = [
   {'choiceId': 'approve', 'label': 'Approve', 'text': 'd'},
@@ -906,6 +928,166 @@ void main() {
 
     expect(svc.currentState.sessions.keys, ['t1']);
     expect(svc.currentState.wrapUps.single.wrapUpId, 'w1');
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('the push and the replay agree about the ask fields', () async {
+    // The one thing coupling two separate hand-written field lists: the push
+    // builds a HandlerEscalation out of HandlerEscalationMessage, the replay
+    // builds one out of HandlerEscalation.fromWire, and a field only one of
+    // them reads makes the same row an ask for a moment and a stopped session
+    // for the rest of its life.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    final ask = _escalationJson(
+      'e1',
+      nonBlocking: true,
+      unblocked: ['i1', 'i2'],
+      askOptions: _askOptionsJson,
+    );
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(terminalId: 't1', pendingEscalations: 0, askAnswer: true),
+      ],
+    });
+    t.emit('handler:escalation', {
+      'projectId': 'p',
+      'terminalId': 't1',
+      ...ask,
+    });
+    await Future<void>.delayed(Duration.zero);
+    final pushed = svc.currentState.escalations.single;
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(
+          terminalId: 't1',
+          pendingEscalations: 1,
+          state: 'needs_you',
+          escalations: [ask],
+          askAnswer: true,
+        ),
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+    final replayed = svc.currentState.escalations.single;
+
+    expect(pushed.nonBlocking, isTrue);
+    expect(replayed.nonBlocking, pushed.nonBlocking);
+    expect(replayed.unblocked, pushed.unblocked);
+    expect(
+      replayed.askOptions?.map(
+        (o) => (o.choiceId, o.label, o.cost, o.recommended),
+      ),
+      pushed.askOptions?.map(
+        (o) => (o.choiceId, o.label, o.cost, o.recommended),
+      ),
+    );
+    expect(replayed.askOptions, hasLength(2));
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test(
+    'an ask on a bridge that cannot be answered reads as blocking',
+    () async {
+      // A bridge can read `nonBlocking` off a record a newer bridge wrote and
+      // re-emit it faithfully while having no verb that answers one, so the row
+      // cannot be its own capability signal. Ungated it would render a one-tap
+      // that goes nowhere, or a sheet whose text lands in the PTY.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': [
+          _sessionJson(
+            terminalId: 't1',
+            pendingEscalations: 1,
+            state: 'needs_you',
+            escalations: [
+              _escalationJson(
+                'e1',
+                nonBlocking: true,
+                askOptions: _askOptionsJson,
+              ),
+            ],
+          ),
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.escalations.single.nonBlocking, isFalse);
+      expect(svc.currentState.escalations.single.askOptions, isNull);
+      // The session's own copy is gated too, or the pill would say "asked you"
+      // over rows the list renders as stopping the agent.
+      final gated = svc.currentState.sessions['t1']!;
+      expect(gated.escalations.single.nonBlocking, isFalse);
+      expect(gated.asksOnly, isFalse);
+      // The question itself is untouched and still answerable in the user's own
+      // words.
+      expect(svc.currentState.escalations.single.question, 'q');
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test('the advert is re-read every emission and never latched', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    Map<String, dynamic> frame({Object? askAnswer}) => {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(
+          terminalId: 't1',
+          pendingEscalations: 1,
+          state: 'needs_you',
+          escalations: [
+            _escalationJson(
+              'e1',
+              nonBlocking: true,
+              unblocked: ['i1'],
+              askOptions: _askOptionsJson,
+            ),
+          ],
+          askAnswer: askAnswer,
+        ),
+      ],
+    };
+
+    t.emit('handler:status', frame(askAnswer: true));
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.escalations.single.nonBlocking, isTrue);
+    expect(svc.currentState.escalations.single.askOptions, hasLength(2));
+    expect(svc.currentState.sessions['t1']!.asksOnly, isTrue);
+    // `unblocked` is a claim about the backlog rather than a capability, so it
+    // rides through either way and the footer re-derives it.
+    expect(svc.currentState.escalations.single.unblocked, ['i1']);
+
+    // A rollback to a bridge that reads the field but cannot answer it takes
+    // the ask treatment away again on the very next frame.
+    t.emit('handler:status', frame());
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.escalations.single.nonBlocking, isFalse);
+    expect(svc.currentState.escalations.single.askOptions, isNull);
+    expect(svc.currentState.sessions['t1']!.asksOnly, isFalse);
 
     await sub.cancel();
     await svc.dispose();

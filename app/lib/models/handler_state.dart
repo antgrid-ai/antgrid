@@ -255,6 +255,22 @@ class HandlerSessionState {
   /// only from a bridge predating the field.
   final HandlerPersonality? personality;
 
+  /// Whether this bridge can be TOLD the answer to one of this session's asks —
+  /// `handler:answer` for a tap, an escalationId-bearing `handler:instruct` for
+  /// free text. False from a bridge that has neither.
+  ///
+  /// Presence on the wire is the whole signal, the way `observability`'s is.
+  /// The ask row cannot advertise itself: a bridge can read `nonBlocking` off a
+  /// record a newer bridge wrote and re-emit it faithfully while having no verb
+  /// that answers one, so an ungated row would render a one-tap that goes
+  /// nowhere or a sheet whose text lands in the PTY.
+  final bool askAnswer;
+
+  /// An answer has been given and has not reached the agent yet. State rather
+  /// than capability — it is the only surface that would ever expose a relay
+  /// that failed or is still waiting on the agent's next event.
+  final bool askAnswerPending;
+
   const HandlerSessionState({
     required this.terminalId,
     required this.runState,
@@ -269,9 +285,21 @@ class HandlerSessionState {
     this.parkedUntil,
     this.observability,
     this.personality,
+    this.askAnswer = false,
+    this.askAnswerPending = false,
   });
 
   int get backlogTotal => backlog.length;
+
+  /// Whether everything standing on this session is a question the agent is
+  /// working past. A `guard_blocked` report parses as blocking, so a session
+  /// holding one keeps the loud word — nothing but a Dismiss retires it.
+  ///
+  /// Reads the GATED rows: `HandlerService` clears `nonBlocking` on every
+  /// emission for a session that cannot be answered, so this is false on a
+  /// bridge that would leave the user's answer nowhere to go.
+  bool get asksOnly =>
+      escalations.isNotEmpty && escalations.every((e) => e.nonBlocking);
 
   /// Only `done` counts, never the other terminal states: `skipped` and
   /// `failed` close an item without achieving it, and reporting them as
@@ -296,6 +324,8 @@ class HandlerSessionState {
     parkedUntil: parkedUntil,
     observability: observability,
     personality: personality,
+    askAnswer: askAnswer,
+    askAnswerPending: askAnswerPending,
   );
 
   static HandlerSessionState? fromWire(dynamic json) {
@@ -341,6 +371,12 @@ class HandlerSessionState {
     // render either way.
     final parkKind = json['parkKind'];
     final parkedUntil = json['parkedUntil'];
+    // Both ask booleans degrade to false rather than rejecting the session, for
+    // the reason every other lenient read here has: a capability the bridge did
+    // not claim is one the app must not act on, and losing the armed card over
+    // a wrong-typed flag would be a far larger failure than losing the feature.
+    final askAnswer = json['askAnswer'];
+    final askAnswerPending = json['askAnswerPending'];
     return HandlerSessionState(
       terminalId: terminalId,
       runState: runState,
@@ -355,6 +391,8 @@ class HandlerSessionState {
       parkedUntil: parkedUntil is num ? parkedUntil.toInt() : null,
       observability: handlerObservabilityFromWire(json['observability']),
       personality: handlerPersonalityFromWire(json['personality']),
+      askAnswer: askAnswer is bool ? askAnswer : false,
+      askAnswerPending: askAnswerPending is bool ? askAnswerPending : false,
     );
   }
 }
@@ -465,6 +503,106 @@ class HandlerEscalationChoice {
   }
 }
 
+/// One tap-to-answer option on an ASK. Mirrors the `askOptions` element of
+/// `OpenEscalationWire` (`bridge/src/protocol.ts`) and `OpenEscalationSchema`
+/// (`bridge/src/handler/session-store.ts`) — three hand-written copies of one
+/// shape, so the bounds below move with them.
+///
+/// Deliberately NOT a [HandlerEscalationChoice] and never carried in
+/// [HandlerEscalation.choices]: a choice carries `text` that the ordinary reply
+/// transport types into the session, and an ask must send the agent nothing.
+/// There is no `text` here at all — a tap sends [choiceId] alone and the bridge
+/// resolves the words from its own persisted row, so what the user reads on the
+/// button is exactly what the judge is told they chose.
+class HandlerAskOption {
+  /// Stable name the bridge minted, so a tap can round-trip through an OS
+  /// notification action. Identity, never authority.
+  final String choiceId;
+
+  /// The answer itself, in the judge's words. Bounded at 80 rather than the 40
+  /// a chip label gets, because here the label IS the answer and has to carry a
+  /// sentence rather than name one that travels separately.
+  final String label;
+
+  /// What choosing it costs. Required, because it is what the reader has
+  /// instead of the verbatim `text` a quick choice shows them before they tap.
+  final String cost;
+
+  /// Whether the judge names this one as its pick. The wire spells it
+  /// `true`-or-absent, so absent and `false` are one thing and this is a plain
+  /// bool rather than a nullable one.
+  final bool recommended;
+
+  const HandlerAskOption({
+    required this.choiceId,
+    required this.label,
+    required this.cost,
+    this.recommended = false,
+  });
+
+  static const _maxChoiceId = 40;
+  static const _maxLabel = 80;
+  static const _maxCost = 160;
+
+  static HandlerAskOption? fromWire(dynamic json) {
+    if (json is! Map) return null;
+    final choiceId = json['choiceId'];
+    final label = json['label'];
+    final cost = json['cost'];
+    if (choiceId is! String ||
+        label is! String ||
+        cost is! String ||
+        choiceId.isEmpty ||
+        choiceId.length > _maxChoiceId ||
+        label.isEmpty ||
+        label.length > _maxLabel ||
+        cost.isEmpty ||
+        cost.length > _maxCost) {
+      return null;
+    }
+    return HandlerAskOption(
+      choiceId: choiceId,
+      label: label,
+      cost: cost,
+      // Anything but the wire's own `true` reads as not recommended: a second
+      // spelling of "no" must not become a second emphasised option.
+      recommended: json['recommended'] == true,
+    );
+  }
+
+  /// Parses the optional `askOptions` array carried by both the one-shot
+  /// escalation push and the status replay. Returns null — never an empty list
+  /// — whenever the options must be dropped, which leaves the QUESTION standing
+  /// and answerable in the user's own words:
+  ///
+  ///  - the key is absent: an ordinary escalation, or an ask the judge offered
+  ///    no options on.
+  ///  - the count is outside the wire's 2..4, or any entry is malformed. One
+  ///    button is not a choice, and a partial list hides the option the user
+  ///    would have picked.
+  ///  - two entries share a [choiceId]. A tap is resolved by first match, so a
+  ///    repeated id answers with an option the user did not read — which is
+  ///    exactly what sending the id rather than the words is supposed to make
+  ///    impossible.
+  ///
+  /// Never the `return null`-the-whole-row idiom [HandlerEscalation.fromWire]
+  /// uses for a wrong-typed `floorRule`: that idiom would cost the user the
+  /// question itself over decoration on it.
+  static List<HandlerAskOption>? listFromWire(dynamic json) {
+    if (json is! List || json.length < 2 || json.length > 4) return null;
+    final options = <HandlerAskOption>[];
+    for (final e in json) {
+      final option = fromWire(e);
+      if (option == null) return null;
+      options.add(option);
+    }
+    if (options.map((o) => o.choiceId).toSet().length != options.length) {
+      return null;
+    }
+    return options;
+  }
+}
+
 /// Urgent first, then oldest-first within each band.
 ///
 /// The band exists for the rows that unblock a session for one tap: the engine
@@ -515,6 +653,34 @@ class HandlerEscalation {
   /// the free-text sheet is unaffected by its presence.
   final List<HandlerEscalationChoice>? choices;
 
+  /// The session did NOT stop for this one — an ASK, raised on a pass that had
+  /// already replied to the agent, so the work went on and the user answers
+  /// when they can. False is what every row before this field meant.
+  ///
+  /// Hand-mirror of `OpenEscalationWire.nonBlocking` (`bridge/src/protocol.ts`)
+  /// and `OpenEscalationSchema` (`bridge/src/handler/session-store.ts`), and
+  /// spelled the same way round for the same reason: absent reads as blocking,
+  /// which is the safe answer on a row that predates the field and on one an
+  /// older bridge stripped it from.
+  ///
+  /// This is the GATED value, not the raw one. `HandlerService` clears it on
+  /// every emission for a session whose snapshot did not advertise `askAnswer`,
+  /// because a bridge can re-emit the field faithfully off a record a newer
+  /// bridge wrote while having no verb that answers one.
+  final bool nonBlocking;
+
+  /// Backlog ids the answer does not gate — what the agent is still working on
+  /// while the question stands. A claim to be re-derived against the owning
+  /// session's live backlog at render time, never a count to be trusted: an id
+  /// that has since finished costs a smaller number and never a wrong one.
+  final List<String> unblocked;
+
+  /// The tap-to-answer options on an ask, or null for one answerable only in
+  /// the user's own words. Never empty — see [HandlerAskOption.listFromWire].
+  /// Cleared alongside [nonBlocking] by the capability gate, so the two can
+  /// never disagree about whether a tap has anywhere to go.
+  final List<HandlerAskOption>? askOptions;
+
   const HandlerEscalation({
     required this.escalationId,
     required this.terminalId,
@@ -526,6 +692,9 @@ class HandlerEscalation {
     required this.at,
     this.kind,
     this.choices,
+    this.nonBlocking = false,
+    this.unblocked = const [],
+    this.askOptions,
   });
 
   /// The same escalation with its card withdrawn, still answerable in the
@@ -542,6 +711,41 @@ class HandlerEscalation {
     floorRule: floorRule,
     at: at,
     kind: kind,
+    nonBlocking: nonBlocking,
+    unblocked: unblocked,
+    askOptions: askOptions,
+  );
+
+  /// The same escalation with the ask half rewritten, for the one caller that
+  /// has to: `HandlerService`'s capability gate, which downgrades a row whose
+  /// session cannot be told the answer. Only the ask fields are settable —
+  /// everything else rides through — because nothing else has ever needed
+  /// changing after a parse, and a parameter nobody passes is a field a future
+  /// rebuild can silently drop.
+  ///
+  /// [askOptions] cannot be cleared by passing null (that is indistinguishable
+  /// from omitting it), so [clearAskOptions] exists and the two must never be
+  /// combined. Coverage that every wire field is carried is structural: see
+  /// `app/test/models/handler_escalation_mirror_gate_test.dart`.
+  HandlerEscalation copyWith({
+    bool? nonBlocking,
+    List<String>? unblocked,
+    List<HandlerAskOption>? askOptions,
+    bool clearAskOptions = false,
+  }) => HandlerEscalation(
+    escalationId: escalationId,
+    terminalId: terminalId,
+    question: question,
+    reasoning: reasoning,
+    draftReply: draftReply,
+    urgency: urgency,
+    floorRule: floorRule,
+    at: at,
+    kind: kind,
+    choices: choices,
+    nonBlocking: nonBlocking ?? this.nonBlocking,
+    unblocked: unblocked ?? this.unblocked,
+    askOptions: clearAskOptions ? null : (askOptions ?? this.askOptions),
   );
 
   HandlerEscalationChoice? choiceById(String choiceId) {
@@ -574,6 +778,8 @@ class HandlerEscalation {
     if (floorRule != null && floorRule is! String) return null;
     final kind = json['kind'];
     if (kind != null && kind is! String) return null;
+    final nonBlocking = json['nonBlocking'];
+    final unblocked = json['unblocked'];
     return HandlerEscalation(
       escalationId: escalationId,
       terminalId: terminalId,
@@ -588,6 +794,20 @@ class HandlerEscalation {
         json['choices'],
         kind: kind,
       ),
+      // The three ask fields DEGRADE rather than reject, unlike the `floorRule`
+      // and `kind` arms above: a wrong-typed value here costs the user a
+      // rendering nicety, and dropping the row over it would cost them the
+      // question. False, empty and null are each what a bridge predating the
+      // field says, so the conservative reading and the compatible one are the
+      // same value.
+      nonBlocking: nonBlocking is bool ? nonBlocking : false,
+      unblocked: unblocked is List
+          ? [
+              for (final id in unblocked)
+                if (id is String) id,
+            ]
+          : const [],
+      askOptions: HandlerAskOption.listFromWire(json['askOptions']),
     );
   }
 }

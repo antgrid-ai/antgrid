@@ -4,7 +4,7 @@ import 'agent_event.dart' show parseAgentEvent;
 import 'agent_hello.dart';
 import 'file_tree_models.dart';
 import 'git_sync_state.dart';
-import 'handler_state.dart' show HandlerEscalationChoice;
+import 'handler_state.dart' show HandlerAskOption, HandlerEscalationChoice;
 import 'layout_models.dart';
 import 'preview_models.dart';
 import 'service_status.dart';
@@ -346,6 +346,14 @@ class HandlerEscalationMessage {
   /// this and the status replay share.
   final List<HandlerEscalationChoice>? choices;
 
+  /// The ask half of the row, documented on [HandlerEscalation], which this
+  /// message is a hand-copy of. The push and the status replay build that
+  /// object from two separate field lists, so all three land here too or a row
+  /// reads as an ask on reconnect and as a stopped session while it is live.
+  final bool nonBlocking;
+  final List<String> unblocked;
+  final List<HandlerAskOption>? askOptions;
+
   const HandlerEscalationMessage({
     required this.id,
     required this.timestamp,
@@ -359,6 +367,9 @@ class HandlerEscalationMessage {
     this.floorRule,
     this.kind,
     this.choices,
+    this.nonBlocking = false,
+    this.unblocked = const [],
+    this.askOptions,
   });
 }
 
@@ -1976,6 +1987,8 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         }
         final floorRule = json['floorRule'];
         final kind = json['kind'] is String ? json['kind'] as String : null;
+        final nonBlocking = json['nonBlocking'];
+        final unblocked = json['unblocked'];
         return HandlerEscalationMessage(
           id: id,
           timestamp: timestamp,
@@ -1995,6 +2008,18 @@ Object? parseAbMessage(Map<String, dynamic> json) {
             json['choices'],
             kind: kind,
           ),
+          // Same is-check discipline, and the ask fields degrade for the same
+          // reason [HandlerEscalation.fromWire]'s do: the value each one takes
+          // when the key is missing is both the compatible reading and the
+          // conservative one.
+          nonBlocking: nonBlocking is bool ? nonBlocking : false,
+          unblocked: unblocked is List
+              ? [
+                  for (final id in unblocked)
+                    if (id is String) id,
+                ]
+              : const [],
+          askOptions: HandlerAskOption.listFromWire(json['askOptions']),
         );
       }
 

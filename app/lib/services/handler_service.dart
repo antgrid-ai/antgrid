@@ -114,14 +114,22 @@ class HandlerService {
   // only what the bridge has yet to retire.
   final Set<String> _answeredEscalations = {};
 
-  /// Withdraws the one-tap from any escalation where a tap would be unsafe,
-  /// leaving the free-text row — the question stays answerable either way, so
-  /// this can only ever cost the user one extra step.
+  /// Withdraws the one-tap from any escalation where a tap would be unsafe, and
+  /// downgrades every ask this bridge cannot be told the answer to — leaving
+  /// the free-text row in both cases, so the question stays answerable and this
+  /// can only ever cost the user one extra step.
   ///
   /// The single choke point on purpose: escalations reach [_state] from the
   /// one-shot push and from the status replay, and a floor that lived on only
   /// one of those would be a card the other path still renders.
-  List<HandlerEscalation> _withChoiceFloors(List<HandlerEscalation> all) {
+  ///
+  /// It takes the whole state because the capability gate is a fact about the
+  /// row's SESSION, and it rewrites the sessions' own escalation lists as well
+  /// as the flat one. Those are two copies of the same rows and both are read:
+  /// gating only the flat list would leave [HandlerSessionState.asksOnly] true
+  /// over rows the Needs-you list renders as stopping the agent, so the pill
+  /// and the list would disagree about what the session is waiting for.
+  HandlerState _applyEscalationFloors(HandlerState next) {
     // An agent blocked on an option-based prompt reads nothing until that prompt
     // is resolved, so a one-tap raised beside one sends text into a stalled
     // session and leaves the pill where it was — an action that looks like it
@@ -130,23 +138,43 @@ class HandlerService {
     // The bridge declines to mint choices in the same situation — this covers
     // the order it cannot see, a prompt arriving after the card was minted.
     final blocked = {
-      for (final e in all)
+      for (final e in next.escalations)
         if (e.kind == 'resolve_in_session') e.terminalId,
     };
-    return [
-      for (final e in all)
-        if (e.choices != null &&
-            (_answeredEscalations.contains(e.escalationId) ||
-                blocked.contains(e.terminalId)))
-          e.withoutChoices()
-        else
-          e,
-    ];
+    HandlerEscalation floor(HandlerEscalation e) {
+      // A `nonBlocking` row is only an ASK if this bridge can be told the
+      // answer. A bridge that can READ the field but not answer it is reachable
+      // — a Store rollback onto a record a newer bridge wrote re-emits it
+      // faithfully — and the row itself cannot advertise that. Ungated, an ask
+      // would render with a one-tap that goes nowhere, or a sheet whose text
+      // lands in the PTY. Never latched: the advert is re-read every emission,
+      // so a session that loses it downgrades on the very next frame.
+      final gated = next.sessions[e.terminalId]?.askAnswer == true
+          ? e
+          : e.copyWith(nonBlocking: false, clearAskOptions: true);
+      // The standing-prompt withdrawal needs no ask exemption and must not be
+      // given one: an ask carries no `choices`, so this rule already passes it
+      // through untouched.
+      return gated.choices != null &&
+              (_answeredEscalations.contains(gated.escalationId) ||
+                  blocked.contains(gated.terminalId))
+          ? gated.withoutChoices()
+          : gated;
+    }
+
+    return next.copyWith(
+      escalations: [for (final e in next.escalations) floor(e)],
+      sessions: {
+        for (final entry in next.sessions.entries)
+          entry.key: entry.value.copyWith(
+            escalations: [for (final e in entry.value.escalations) floor(e)],
+          ),
+      },
+    );
   }
 
   void _emit(HandlerState next) {
-    final floored = _withChoiceFloors(next.escalations);
-    _state = next.copyWith(escalations: floored);
+    _state = _applyEscalationFloors(next);
     if (!_disposed) _stateController.add(_state);
   }
 
@@ -369,6 +397,9 @@ class HandlerService {
           at: msg.timestamp,
           kind: msg.kind,
           choices: msg.choices,
+          nonBlocking: msg.nonBlocking,
+          unblocked: msg.unblocked,
+          askOptions: msg.askOptions,
         );
         _emit(
           _state.copyWith(
@@ -381,9 +412,9 @@ class HandlerService {
           ),
         );
         // Read back out of the state rather than forwarded: the floors in
-        // [_withChoiceFloors] may have withdrawn the card on the way in, and a
-        // notification offering choices the screen no longer shows would be a
-        // second surface disagreeing about what a tap does.
+        // [_applyEscalationFloors] may have withdrawn the card on the way in,
+        // and a notification offering choices the screen no longer shows would
+        // be a second surface disagreeing about what a tap does.
         _escalationController.add(
           _escalationById(escalation.escalationId) ?? escalation,
         );
@@ -880,8 +911,8 @@ class HandlerService {
     if (_disposed) return false;
     // Resolved against the state's copy, not the caller's: an escalation held
     // across a frame (or arriving by notification id) can have had its card
-    // withdrawn since — by _withChoiceFloors — and the stale object would still
-    // offer the tap the floors just took away.
+    // withdrawn since — by _applyEscalationFloors — and the stale object would
+    // still offer the tap the floors just took away.
     final current = _escalationById(escalation.escalationId) ?? escalation;
     final choice = current.choiceById(choiceId);
     if (choice == null) return false;
