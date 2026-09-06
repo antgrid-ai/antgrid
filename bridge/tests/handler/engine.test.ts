@@ -5585,3 +5585,136 @@ describe("raising an ask", () => {
     });
   });
 });
+
+describe("an ask survives a typed line", () => {
+  const tick = () => new Promise<void>((r) => { setTimeout(r, 1); });
+  const settle = async () => { for (let i = 0; i < 8; i++) await tick(); };
+
+  const ASK: OpenEscalation = {
+    escalationId: "a1", question: "Which database should the migration target?",
+    reasoning: "r", draftReply: "", urgency: "normal", kind: "reply", at: 2,
+    nonBlocking: true, unblocked: ["i1"],
+    askOptions: [
+      { choiceId: "opt1", label: "Point it at staging", cost: "one extra deploy" },
+      { choiceId: "opt2", label: "Go straight at production", cost: "no second cutover" },
+    ],
+  };
+  const BLOCKING: OpenEscalation = {
+    escalationId: "e1", question: "Proceed?", reasoning: "r", draftReply: "yes",
+    urgency: "normal", kind: "reply", at: 1,
+  };
+
+  // Planted rather than raised, so every case starts from the state a bridge
+  // restart rehydrates — which is also the only way an ask can outlive the pass
+  // that raised it, and so the state the clearing rule is really about.
+  const armed = (
+    escalations: OpenEscalation[], record: Partial<HandlerSessionRecord> = {},
+    over: Record<string, unknown> = {},
+  ) => {
+    const h = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: GOAL, backlog: [item("i1")], escalations, ...record }),
+      ...over,
+    });
+    h.engine.arm({ terminalId: "t1" });
+    return h;
+  };
+
+  interface PrivateSession {
+    escalations: OpenEscalation[];
+    transientFailures: number;
+    limitParks: number;
+    askAnswer?: { escalationId: string; question: string; answer: string; tapped: boolean; at: number };
+  }
+  const session = (engine: HandlerEngine): PrivateSession =>
+    (engine as unknown as { sessions: Map<string, PrivateSession> }).sessions.get("t1")!;
+  const ids = (engine: HandlerEngine) => session(engine).escalations.map((e) => e.escalationId);
+  const savedIds = (saved: unknown[]) =>
+    (saved.at(-1) as HandlerSessionRecord).escalations.map((e) => e.escalationId);
+  const statuses = (sent: AbMessage[]) => sent.filter((m) => m.type === "handler:status").length;
+
+  it("keeps the ask while clearing a blocking sibling in the same call", () => {
+    const { engine, sent, saved } = armed([BLOCKING, ASK]);
+    engine.onUserReply("t1", "do the other thing first\r");
+    // The line answered the blocking pause and reached the agent; Handler's own
+    // question was never what the session stopped for, so consuming it here would
+    // spend an answer to a different question.
+    expect(ids(engine)).toEqual(["a1"]);
+    expect(savedIds(saved)).toEqual(["a1"]);
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+  });
+
+  it("survives the restart that rehydrated it", () => {
+    const { engine, sent } = armed([ASK]);
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+    engine.onUserReply("t1", "carry on\r");
+    expect(ids(engine)).toEqual(["a1"]);
+    expect(statusOf(sent).state).toBe("needs_you");
+  });
+
+  it("resets the failure counters on a session standing only on an ask", () => {
+    const { engine, saved } = armed([ASK], { transientFailures: 2 });
+    engine.onUserReply("t1", "carry on\r");
+    // Nothing was cleared and nothing was unparked, so the whole point is that the
+    // counters moved anyway: transientBackoffMs reads this number, and leaving it
+    // at 2 means the next transient failure pages instead of backing off.
+    expect(session(engine).transientFailures).toBe(0);
+    // The record deliberately still says 2. The persist stayed behind the gate, so
+    // a typed line costs no disk write on a session it changes nothing else about
+    // — and a restart starts a fresh process at zero regardless.
+    expect((saved.at(-1) as HandlerSessionRecord).transientFailures).toBe(2);
+  });
+
+  it("resets them on a session with no rows at all", () => {
+    // The case the hoist widens into, and the one nothing covered before: a bare
+    // keystroke-submit on a quiet session used to leave a spent backoff standing.
+    const { engine } = armed([], { transientFailures: 2 });
+    engine.onUserReply("t1", "carry on\r");
+    expect(session(engine).transientFailures).toBe(0);
+  });
+
+  it("resets the limit-park count after a park that already resumed", async () => {
+    // limitParks is not persisted, so a park round-trip is the only way to reach a
+    // non-zero one on a session that is no longer parked — which is exactly the
+    // shape the early return used to skip.
+    const { engine, timers } = armed([ASK]);
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    expect(session(engine).limitParks).toBe(1);
+    timers.at(-1)!.fn();
+    engine.onUserReply("t1", "carry on\r");
+    expect(session(engine).limitParks).toBe(0);
+  });
+
+  it("a dismiss retires the ask, banks the decline, and starts no pass", async () => {
+    let decided = 0;
+    const { engine, saved, activity, sent } = armed([ASK], {}, {
+      runDecisionFn: async () => { decided++; return decide({}); },
+    });
+    engine.dismissEscalation("t1", "a1");
+    await settle();
+    expect(ids(engine)).toEqual([]);
+    // Banked as an answer so the judge learns the question was refused and stops
+    // re-asking it; a decline carries nothing the agent could act on, so unlike
+    // the two answer transports it starts no relay pass.
+    expect(session(engine).askAnswer).toEqual({
+      escalationId: "a1", question: ASK.question,
+      answer: "(the user declined to answer)", tapped: false, at: 1000,
+    });
+    expect(decided).toBe(0);
+    expect((saved.at(-1) as HandlerSessionRecord).askAnswer?.answer)
+      .toBe("(the user declined to answer)");
+    expect((records(activity, "escalate") as { reason: string }[]).map((r) => r.reason))
+      .toEqual(["you declined Handler's question"]);
+    expect(statusOf(sent).state).toBe("watching");
+  });
+
+  it("a dismiss on a blocking question beside an ask is still refused", () => {
+    const { engine, sent } = armed([BLOCKING, ASK]);
+    const before = statuses(sent);
+    engine.dismissEscalation("t1", "e1");
+    // A blocking `reply` row IS retired by the user's own line, so dismissing one
+    // would drop a live question more quietly than any path that exists today.
+    expect(ids(engine)).toEqual(["e1", "a1"]);
+    expect(statuses(sent)).toBe(before + 1);
+  });
+});

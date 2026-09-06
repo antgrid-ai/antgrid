@@ -1350,5 +1350,67 @@ void main() {
       await svc.dispose();
       await session.close();
     });
+
+    test('a dismiss declines an ask and still refuses a blocking '
+        'question', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', askFrame(siblings: [_escalationJson('stop-1')]));
+      await Future<void>.delayed(Duration.zero);
+      final rows = {
+        for (final e in svc.currentState.escalations) e.escalationId: e,
+      };
+
+      // A blocking row is retired by the user's own submitted line, so
+      // dismissing one would drop a live question more quietly than any path
+      // that exists today. Refused on both sides of the wire.
+      svc.dismiss(rows['stop-1']!);
+      expect(t.sent.any((m) => m['type'] == 'handler:dismiss'), isFalse);
+
+      // An ask is the other way round: no typed line retires it, so declining
+      // is the only exit that is not an answer.
+      svc.dismiss(rows['ask-1']!);
+      final dismissals = t.sent.where((m) => m['type'] == 'handler:dismiss');
+      expect(dismissals, hasLength(1));
+      expect(dismissals.single['escalationId'], 'ask-1');
+      expect(svc.currentState.escalations.map((e) => e.escalationId), [
+        'stop-1',
+      ]);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a line answering a blocking sibling leaves the ask standing', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', askFrame(siblings: [_escalationJson('stop-1')]));
+      await Future<void>.delayed(Duration.zero);
+
+      final stop = svc.currentState.escalations.firstWhere(
+        (e) => e.escalationId == 'stop-1',
+      );
+      expect(svc.reply(stop, 'go ahead'), isTrue);
+
+      // The bridge keeps the ask on a submitted line, so dropping it here would
+      // blank a question the very next snapshot brings straight back.
+      expect(svc.currentState.escalations.map((e) => e.escalationId), [
+        'ask-1',
+      ]);
+      final owner = svc.currentState.sessions['t1']!;
+      expect(owner.escalations.single.escalationId, 'ask-1');
+      expect(owner.pendingEscalations, 1);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
   });
 }

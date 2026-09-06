@@ -59,7 +59,13 @@ HandlerInstructionItem _item(String id, String text, String status) =>
 /// [kind] null is the free-text row; 'resolve_in_session' is the option-based
 /// prompt only the transcript can resolve; 'guard_blocked' is the report of an
 /// action Handler could not take, which only its card's Dismiss retires.
-HandlerEscalation _escalation(String id, {String? kind}) => HandlerEscalation(
+/// [nonBlocking] is the ask — a question Handler put to the user on a pass that
+/// had already replied to the agent, which no typed line retires either.
+HandlerEscalation _escalation(
+  String id, {
+  String? kind,
+  bool nonBlocking = false,
+}) => HandlerEscalation(
   escalationId: id,
   terminalId: 't1',
   question: 'proceed?',
@@ -68,6 +74,7 @@ HandlerEscalation _escalation(String id, {String? kind}) => HandlerEscalation(
   urgency: 'normal',
   at: 1,
   kind: kind,
+  nonBlocking: nonBlocking,
 );
 
 List<HandlerEscalation> _replies(int n) => [
@@ -553,6 +560,105 @@ void main() {
       expect(
         handlerTypingHint(_armed(runState: HandlerRunState.handling)),
         'Handler is replying — a message now may cross it',
+      );
+    });
+
+    test('an ask alone still warns, because the line reaches the agent', () {
+      // The one exemption that is still the user's to answer. A silent arm here
+      // would let them type, watch the line land, and believe they had answered
+      // a question that never moved.
+      expect(
+        handlerTypingHint(
+          _armed(
+            runState: HandlerRunState.needsYou,
+            escalations: [_escalation('a1', nonBlocking: true)],
+          ),
+        ),
+        "Your next message goes to the agent — Handler's question stays open",
+      );
+    });
+
+    test('an ask beside one question keeps both halves of the promise', () {
+      expect(
+        handlerTypingHint(
+          _armed(
+            runState: HandlerRunState.needsYou,
+            escalations: [
+              _escalation('a1', nonBlocking: true),
+              _escalation('e1'),
+            ],
+          ),
+        ),
+        'Your next message clears this question, answered or not — '
+        "Handler's own question stays open",
+      );
+    });
+
+    test('an ask is subtracted from the count a line promises to clear', () {
+      // The invisible failure this counts against: a missing subtrahend would
+      // read as "clears all 3", which is a promise the bridge refuses to keep
+      // rather than a hint that failed to appear.
+      expect(
+        handlerTypingHint(
+          _armed(
+            runState: HandlerRunState.needsYou,
+            escalations: [
+              _escalation('a1', nonBlocking: true),
+              _escalation('e1'),
+              _escalation('e2'),
+            ],
+          ),
+        ),
+        'Your next message clears all 2 questions, answered or not — '
+        "Handler's own question stays open",
+      );
+    });
+
+    test('an ask behind a prompt is appended to the redirect once', () {
+      expect(
+        handlerTypingHint(
+          _armed(
+            runState: HandlerRunState.needsYou,
+            escalations: [
+              _escalation('a1', nonBlocking: true),
+              _escalation('e1', kind: 'resolve_in_session'),
+            ],
+          ),
+        ),
+        'Answer the prompt in the transcript — not here — '
+        "Handler's question stays open",
+      );
+    });
+
+    test('an ask behind a prompt does not inflate the cleared count', () {
+      expect(
+        handlerTypingHint(
+          _armed(
+            runState: HandlerRunState.needsYou,
+            escalations: [
+              _escalation('a1', nonBlocking: true),
+              _escalation('e1', kind: 'resolve_in_session'),
+              _escalation('e2'),
+            ],
+          ),
+        ),
+        'Answer the prompt in the transcript — a message here clears the '
+        "other question — Handler's question stays open",
+      );
+    });
+
+    test('a parked session holding an ask promises only the resume', () {
+      // Reachable rather than theoretical: the park timer's nudge counts
+      // blocking questions alone, so an ask-only session parks and self-resumes.
+      expect(
+        handlerTypingHint(
+          _armed(
+            runState: HandlerRunState.parked,
+            parkKind: 'limit',
+            escalations: [_escalation('a1', nonBlocking: true)],
+          ),
+        ),
+        'Your next message resumes Handler now — its question stays open',
       );
     });
   });

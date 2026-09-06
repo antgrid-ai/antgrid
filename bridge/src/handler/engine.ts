@@ -1743,6 +1743,14 @@ export class HandlerEngine {
     // leaving the user never knowing Handler had wanted to act. `handler:dismiss`
     // is the only thing that retires one.
     //
+    // A `nonBlocking` row is not one either, and for a third reason. It is a
+    // question Handler put to the USER, raised on a pass that had already replied
+    // to the agent — so it is not a stale pause waiting to be superseded, and the
+    // line the user types is aimed at the AGENT, not at it. Retiring it here would
+    // consume an answer to a different question. What DOES retire one: an
+    // escalationId-bearing handler:answer or handler:instruct (the answer itself),
+    // a dismiss, or reconcileAsks finding nothing left that it did not gate.
+    //
     // A resolve retires the row for the prompt it names, plus any row too old to
     // carry an id at all. Never every row: drivers hold a MAP of pending prompts
     // (parallel tool calls open two at once), and dropping the sibling's row would
@@ -1754,18 +1762,33 @@ export class HandlerEngine {
     // already answered — one nothing can ever retire, since the resolve that would name
     // it has been and gone.
     if (resolved !== undefined) this.dropQueuedPrompts(terminalId, resolved);
-    const kept = s.escalations.filter((e) => e.kind === "guard_blocked"
+    // The ask clause is FIRST and outside the kind tests on purpose: an ask is
+    // minted kind `reply` and carries no `promptId`, so a future restructuring of
+    // the resolve arm around `promptId` rather than `kind` would swallow it.
+    // Spelled truthily to match the field's polarity — a row an older
+    // bridge stripped the flag from and re-persisted falls into the drop arm,
+    // which is the conservative reading.
+    const kept = s.escalations.filter((e) => e.nonBlocking
+      || e.kind === "guard_blocked"
       || (e.kind === "resolve_in_session"
         && (resolved === undefined || (e.promptId !== undefined && e.promptId !== resolved))));
     const cleared = kept.length < s.escalations.length;
-    if (!unparked && !cleared) return;
-    s.escalations = kept;
     // A human line is a fresh attempt, so the failure series that led here is
     // over. Without this the counters stay at their ceiling — only a judged turn
     // clears transientFailures — and the very next failure would page again
     // instead of backing off.
+    //
+    // Above the early return, because that reason was always about the human line
+    // and never about which rows it happened to clear — the coupling was
+    // incidental, which is why `guard.reset` and the hash clear already sit here.
+    // It therefore now also fires on a session standing only on an ask, and on
+    // one with no rows at all. The persist and the broadcast stay behind the
+    // gate, so the per-keystroke disk write and encrypted fan-out are unchanged;
+    // what a restart loses is a counter a fresh process starts at zero anyway.
     s.transientFailures = 0;
     s.limitParks = 0;
+    if (!unparked && !cleared) return;
+    s.escalations = kept;
     s.state = restingState(s);
     this.persist(terminalId, s, true);
     this.emitStatus();
@@ -2976,15 +2999,22 @@ export class HandlerEngine {
   }
 
   /**
-   * Retire one `guard_blocked` report — the user saying they have read it. It is
-   * the ONLY thing that takes such a row away: it reports an action Handler never
-   * took, so no agent event and no typed line can be an answer to it.
+   * Retire one row the user is done with: a `guard_blocked` report they have
+   * read, or an ask they are declining to answer. Both are rows nothing else can
+   * take away — a report describes an action Handler never took, so no agent
+   * event and no typed line answers it, and an ask survives a submitted line by
+   * the clearing rule in onUserReply.
    *
-   * Refuses every other kind, deliberately. A `reply` row is already retired by
-   * the user's own submitted line, and dismissing one would drop a live question
-   * more silently than any path that exists today; a `resolve_in_session` row is
-   * refused for the reason onUserReply refuses to clear one — the agent stays
-   * blocked and no further event re-raises it.
+   * Declining is a real move, not the absence of one. Without it the only way out
+   * of an ask is answering it, which forces every non-answer through the judge —
+   * and a question the user has decided not to engage with would stand until the
+   * work it named finished.
+   *
+   * Still refuses the other two kinds, deliberately. A blocking `reply` row IS
+   * retired by the user's own submitted line, so dismissing one would drop a live
+   * question more silently than any path that exists today; a `resolve_in_session`
+   * row is refused for the reason onUserReply refuses to clear one — the agent
+   * stays blocked and no further event re-raises it.
    *
    * Idempotent in every direction the app can get wrong: an id this session no
    * longer holds (a second tap racing the status frame that already dropped the
@@ -2993,11 +3023,21 @@ export class HandlerEngine {
   dismissEscalation(terminalId: string, escalationId: string): void {
     const s = this.sessions.get(terminalId);
     const esc = s?.escalations.find((e) => e.escalationId === escalationId);
-    if (!s || !esc || esc.kind !== "guard_blocked") {
+    if (!s || !esc || (esc.kind !== "guard_blocked" && !esc.nonBlocking)) {
       // The sender is holding a row this session no longer has, or one it may not
       // retire this way. A status resync is what removes it from their list.
       log.warn("handler dismiss ignored: %s on %s", escalationId, terminalId);
       this.emitStatus();
+      return;
+    }
+    if (esc.nonBlocking) {
+      // Parked as an answer because the judge has to LEARN this, or its next pass
+      // re-asks a question the user has already refused — and the refusal is the
+      // one outcome no agent event can imply. Deliberately not relayed: the two
+      // answer transports start a pass because they carry something the agent may
+      // need, and a decline carries nothing the agent could act on.
+      this.parkAskAnswer(terminalId, s, esc, "(the user declined to answer)", false);
+      this.record(terminalId, "escalate", "you declined Handler's question", previewForUser(esc.question));
       return;
     }
     // No new activity kind: the `escalate` row is the durable trace of the

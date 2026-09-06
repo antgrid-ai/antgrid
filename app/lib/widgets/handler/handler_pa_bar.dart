@@ -68,12 +68,20 @@ String handlerPaStatusLabel(HandlerSessionState session, {DateTime? now}) {
 /// answering them, and never says which — so the line has to promise clearing,
 /// not answers.
 ///
-/// Two kinds are exempt from that clearing on the bridge and so must be exempt
-/// from the promise here: `resolve_in_session` (only the transcript's own
-/// resolve carries the id) and `guard_blocked` (a report of an action Handler
-/// could not take, retired only by its card's Dismiss). This prose is a
-/// hand-mirror of that rule; getting it wrong promises the user something the
-/// bridge refuses to do.
+/// Three categories, not two, and the third is the one this prose exists for.
+/// Rows a line CLEARS are the ordinary blocking questions. Rows it leaves
+/// standing and that are not the user's to answer here are `resolve_in_session`
+/// (only the transcript's own resolve carries the id) and `guard_blocked` (a
+/// report of an action Handler could not take, retired only by its card's
+/// Dismiss) — both are subtracted from the count and otherwise unmentioned. A
+/// `nonBlocking` ask is the third: it also survives the line, but it is still
+/// the user's to answer, so it is subtracted AND named. Only its own card
+/// answers it (`handler:answer` for a tap, an escalationId-bearing
+/// `handler:instruct` for typed words) or declines it with a dismiss; a line
+/// typed here reaches the agent and leaves the question exactly where it was.
+///
+/// This prose is a hand-mirror of the bridge's clearing rule; getting it wrong
+/// promises the user something the bridge refuses to do.
 ///
 /// Nothing is ever blocked. Handler's whole premise is acting while you are
 /// away, so a lock the user has to remember to undo would be left in the wrong
@@ -90,7 +98,7 @@ String? handlerTypingHint(
   HandlerRunState.watching => null,
 };
 
-/// An option-based prompt (`kind: 'resolve_in_session'`) is one of the two rows
+/// An option-based prompt (`kind: 'resolve_in_session'`) is one of the rows
 /// a typed line neither answers nor clears — only the transcript's permission
 /// card or question form carries the id that resolves it, which is why
 /// `handler_screen.dart`'s `answer()` routes there instead of opening the reply
@@ -98,12 +106,27 @@ String? handlerTypingHint(
 int _prompts(HandlerSessionState session) =>
     session.escalations.where((e) => e.kind == 'resolve_in_session').length;
 
-/// The other one. A `guard_blocked` row reports an action Handler wanted to take
+/// A second one. A `guard_blocked` row reports an action Handler wanted to take
 /// and a guard refused, so there is no pause for a line to supersede — the
 /// bridge keeps it standing and only the card's Dismiss retires it. A hint that
 /// counted it would promise clearing the bridge will not do.
 int _reports(HandlerSessionState session) =>
     session.escalations.where((e) => e.kind == 'guard_blocked').length;
+
+/// Questions Handler asked the user that a typed line does not touch. Unlike
+/// the other two exemptions this row is still the user's to answer, so it is
+/// subtracted from the clear-count AND named in the prose.
+int _asks(HandlerSessionState s) =>
+    s.escalations.where((e) => e.nonBlocking).length;
+
+/// Appended once to whatever the line already promises, so the user reads one
+/// sentence rather than two competing ones.
+const _askStaysOpen = " — Handler's question stays open";
+
+/// The clear-count branch names questions the line DOES clear, and those are
+/// Handler's too — so beside it the ask needs the possessive to read as a
+/// different one.
+const _askStaysOpenBesideCleared = " — Handler's own question stays open";
 
 /// Plural because an agent can be stopped on several at once — parallel tool
 /// calls raise a permission prompt per call, and the bridge now carries a row
@@ -112,6 +135,7 @@ String _promptSubject(int prompts) =>
     prompts == 1 ? 'the prompt' : '$prompts prompts';
 
 String? _needsYouHint(HandlerSessionState session) {
+  final asks = _asks(session);
   final prompts = _prompts(session);
   if (prompts > 0) {
     // Both halves or neither. The redirect alone reads as "typing here does
@@ -120,29 +144,45 @@ String? _needsYouHint(HandlerSessionState session) {
     // stop, merely moved to the mixed case.
     final others = _others(session, prompts);
     final answer = 'Answer ${_promptSubject(prompts)} in the transcript';
-    if (others == 0) return '$answer — not here';
     final questions = others == 1 ? 'question' : '$others questions';
-    return '$answer — a message here clears the other $questions';
+    final line = others == 0
+        ? '$answer — not here'
+        : '$answer — a message here clears the other $questions';
+    return asks > 0 ? '$line$_askStaysOpen' : line;
   }
   final pending = _others(session, 0);
   // A session standing only on reports is at needs_you with nothing a typed line
-  // would clear, so the bar has nothing to warn about.
-  if (pending == 0) return null;
-  return pending > 1
+  // would clear, so the bar has nothing to warn about. An ask is the one
+  // exemption that still needs saying: the line reaches the agent and the
+  // question stays, and a user who read nothing here would believe they answered
+  // it. That is the worst of the outcomes, so it is the one with no silent arm.
+  if (pending == 0) {
+    return asks > 0
+        ? 'Your next message goes to the agent$_askStaysOpen'
+        : null;
+  }
+  final cleared = pending > 1
       ? 'Your next message clears all $pending questions, answered or not'
       : 'Your next message clears this question, answered or not';
+  return asks > 0 ? '$cleared$_askStaysOpenBesideCleared' : cleared;
 }
 
 /// The questions a submitted line actually clears: everything the bridge counts,
-/// minus the two kinds it keeps standing.
+/// minus the three categories it keeps standing.
 ///
 /// Counted off the bridge's own total rather than the parsed rows, for the same
 /// reason the prompt count is subtracted from it — a row the lenient parse
 /// dropped must not shrink the number this line promises to clear. Floored: the
 /// two arrive in one snapshot but the parse can only ever lose rows, never
 /// invent them.
-int _others(HandlerSessionState session, int prompts) =>
-    math.max(0, session.pendingEscalations - prompts - _reports(session));
+///
+/// `pendingEscalations` is `s.escalations.length` on the bridge, so it counts
+/// asks too — and a missing subtrahend here does not read as a missing hint, it
+/// reads as a promise to clear a question nothing clears.
+int _others(HandlerSessionState session, int prompts) => math.max(
+  0,
+  session.pendingEscalations - prompts - _reports(session) - _asks(session),
+);
 
 /// A park ends on the first submitted line either way, but a prompt raised
 /// before the park survives it (`enterPark` never touches `s.escalations`), and
@@ -150,7 +190,14 @@ int _others(HandlerSessionState session, int prompts) =>
 /// so the bare "resumes Handler" promise is one the bridge refuses to keep.
 String _parkedHint(HandlerSessionState session) {
   final prompts = _prompts(session);
-  if (prompts == 0) return 'Your next message resumes Handler now';
+  if (prompts == 0) {
+    // Reachable rather than theoretical: the park timer's nudge counts only
+    // BLOCKING questions, so a session standing on an ask alone parks and
+    // self-resumes like any other.
+    return _asks(session) > 0
+        ? 'Your next message resumes Handler now — its question stays open'
+        : 'Your next message resumes Handler now';
+  }
   final verb = prompts == 1 ? 'needs' : 'need';
   return 'Your next message ends the pause — ${_promptSubject(prompts)} '
       'still $verb the transcript';

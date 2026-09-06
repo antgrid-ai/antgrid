@@ -45,6 +45,14 @@ const uniqueChoiceIds = (cs: { choiceId: string }[]): boolean =>
 //    names it. Only an explicit dismiss retires one (see the clearing rule in
 //    onUserReply, and dismissEscalation in engine.ts).
 //
+// `nonBlocking` cuts ACROSS this enum and is retirement-relevant in its own
+// right: an ask is minted `reply`, and yet no submitted line supersedes it,
+// because it is a question Handler put to the user rather than a pause waiting on
+// the agent. What retires one is the answer itself — a `handler:answer` tap or a
+// `handler:instruct` naming its escalationId — or a dismiss (the user declining),
+// or reconcileAsks finding nothing left in the backlog that the question gated.
+// Reading the kind alone therefore does not tell you what takes a row away.
+//
 // The enum only ever widens, so a record written before a member existed still
 // parses; the reverse — an older bridge reading a newer record — fails the whole
 // record and comes back disarmed, which is the trade `version`'s note already owns.

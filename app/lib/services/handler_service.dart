@@ -681,16 +681,17 @@ class HandlerService {
     );
   }
 
-  /// Acknowledge a `guard_blocked` report — the only thing that retires one, on
-  /// either side of the wire. Nothing the agent or the user does next answers a
-  /// report about an action Handler never took.
+  /// Acknowledge a `guard_blocked` report, or decline an ask — the two rows a
+  /// submitted line never retires, so a dismiss is the only way out of either.
+  /// Nothing the agent does answers a report about an action Handler never took,
+  /// and an ask is the user's own to answer or refuse.
   ///
   /// Refuses every other kind: the app-side mirror of the bridge's own refusal,
-  /// because a Dismiss on a live question would drop it more silently than any
-  /// path that exists today.
+  /// because a Dismiss on a live blocking question would drop it more silently
+  /// than any path that exists today.
   void dismiss(HandlerEscalation escalation) {
     if (_disposed) return;
-    if (escalation.kind != 'guard_blocked') return;
+    if (escalation.kind != 'guard_blocked' && !escalation.nonBlocking) return;
     _sendDismiss(escalation);
     _dropRows(
       escalation.terminalId,
@@ -822,8 +823,15 @@ class HandlerService {
     // one already unblocked. A `guard_blocked` sibling is NOT one of those: the
     // bridge does not retire it on a submitted line, so suppressing it here would
     // hide a row the next snapshot still legitimately carries.
+    //
+    // Nor is an ask, and that exclusion is set hygiene rather than a live fix: an
+    // ask carries no `choices`, and the only thing that reads this set keys on
+    // `choices != null`, so an ask inside it changes nothing today. It earns its
+    // place against the refactor that gives an ask a card riding `choices`, at
+    // which point the inertness would end with nothing saying so.
     for (final e in _state.escalations) {
       if (e.terminalId == escalation.terminalId &&
+          !e.nonBlocking &&
           e.kind != 'resolve_in_session' &&
           e.kind != 'guard_blocked') {
         _answeredEscalations.add(e.escalationId);
@@ -842,10 +850,17 @@ class HandlerService {
   }
 
   /// Whether [e] outlives the submitted line that answered [answered]. Exactly
-  /// the bridge's rule: an option-based prompt is unanswerable by a typed line,
-  /// and a report is not answered by one either — but the report the user
-  /// replied FROM is dismissed alongside the send, so it goes.
+  /// the bridge's rule: an ask is a question Handler put to the user and the
+  /// typed line is aimed at the agent, an option-based prompt is unanswerable by
+  /// a typed line, and a report is not answered by one either — but the report
+  /// the user replied FROM is dismissed alongside the send, so it goes.
+  ///
+  /// Only `guard_blocked` carries that exclusion, and the asymmetry is the point:
+  /// [reply] sends a dismiss with the answer for a report, while an ask is never
+  /// answered through [reply] at all — its transports are [answerAsk] and
+  /// [answerAskText], which retire their own row.
   bool _survivesReply(HandlerEscalation e, HandlerEscalation answered) =>
+      e.nonBlocking ||
       e.kind == 'resolve_in_session' ||
       (e.kind == 'guard_blocked' &&
           e.escalationId != answered.escalationId);
