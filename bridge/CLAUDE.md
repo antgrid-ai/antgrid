@@ -264,10 +264,18 @@ is the spec; this is the set of invariants a future edit breaks silently.
   `ProjectCore.sendToOwner` is the only path, and `local-listener.ts` hands a
   bus frame to an owner only if its hello declared
   `capabilities.sessionBusCarrier` (`ownerCarriesSessionBus`, surfaced to the
-  loopback API as `carrierPresent` and to a caller as a member's `reachable`).
-  The desktop app is the carrier; no attached carrier means the frame is HELD
-  and retried by the coordinator, never dropped, so a closed desktop is an
-  indefinitely delayed exchange rather than a failed one.
+  loopback API as `carrierPresent` and to a caller as a member's
+  `carrierAttached`). The desktop app is the carrier; no attached carrier means
+  the frame is HELD and retried by the coordinator, never dropped, so a closed
+  desktop is an indefinitely delayed exchange rather than a failed one.
+- **Nothing this side of the relay may be reported as delivery.** The carrier
+  taking a frame says only that it left this machine, so a member is
+  `carrierAttached` and never "reachable", an assignment reports a task id and
+  no delivery, and the one honest answer — the peer's ack — is what
+  `TaskView.reachedPeer`/`unacked` carry and what `antgrid_list_tasks` marks NOT
+  YET DELIVERED until it arrives. A lead that cannot tell a task nobody has
+  received from one being worked on re-assigns it, which is the duplicate the
+  whole acked outbox exists to prevent.
 - **Outbound on a PEER is `sendToAppSession(peerId)`,** keyed by the app session
   that carried the exchange in (`busOriginByContext` / `noteBusOrigin` in
   `agent-core.ts`). Falling through to the loopback owner would hand the lead's

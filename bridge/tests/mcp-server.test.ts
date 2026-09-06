@@ -264,16 +264,64 @@ describe("the session-bus tool table", () => {
     expect(text).toContain("do not send it again");
   });
 
-  test("an assignment that has not reached the peer says so, and says not to repeat it", async () => {
-    stub(() => Response.json({ ok: true, taskId: "t-9", delivered: false }));
+  // The reply cannot say the task arrived — only an ack can — so it says where
+  // the answer to that question is instead, and forbids the retry an agent
+  // reaches for when it is told nothing.
+  test("an assignment says it is queued, points at the delivery state, and says not to repeat it", async () => {
+    stub(() => Response.json({ ok: true, taskId: "t-9" }));
     const result = await callSessionBusTool("antgrid_assign_task", {
       peer: "gateway",
       summary: "s",
       instruction: "i",
     });
     expect(result.isError).toBeUndefined();
-    expect(result.content[0]!.text).toContain("has not reached that machine yet");
-    expect(result.content[0]!.text).toContain("Do not assign it again");
+    const text = result.content[0]!.text;
+    expect(text).toContain("t-9");
+    expect(text).toContain("acknowledges");
+    expect(text).toContain("antgrid_list_tasks");
+    expect(text).toContain("Do not assign it again");
+  });
+
+  // The list is the lead's only account of whether an assignment travelled, so
+  // an unacked task must not read like one in progress on the other machine.
+  test("the task list marks an unacknowledged assignment, and leaves an acknowledged one alone", async () => {
+    stub(() => Response.json({
+      tasks: [
+        { taskId: "t-1", role: "lead", state: "assigned", title: "wire the codec", reachedPeer: false, unacked: 1 },
+        { taskId: "t-2", role: "lead", state: "working", title: "read the fixtures", reachedPeer: true, unacked: 0 },
+        { taskId: "t-3", role: "lead", state: "working", title: "port the tests", reachedPeer: true, unacked: 2 },
+      ],
+    }));
+    const result = await callSessionBusTool("antgrid_list_tasks", {});
+    const lines = result.content[0]!.text.split("\n");
+    expect(lines.find((l: string) => l.includes("t-1"))).toContain("NOT YET DELIVERED");
+    expect(lines.find((l: string) => l.includes("t-2"))).not.toContain("acknowledg");
+    expect(lines.find((l: string) => l.includes("t-3"))).toContain("last update not acknowledged");
+  });
+
+  // An agent handed raw JSON reads the routing identifiers in it as an address,
+  // which is the one thing the bus has to author; prose carries the same task
+  // with nothing addressable in it.
+  test("a task reads as prose, and names no machine or project id", async () => {
+    stub(() => Response.json({
+      taskId: "t-4",
+      role: "lead",
+      state: "working",
+      title: "wire the codec",
+      reachedPeer: true,
+      unacked: 0,
+      peer: { machineId: "m2", projectId: "p2", sessionId: "peer-1", sessionName: "gateway", machineLabel: "build-box" },
+      findings: [{ summary: "the codec is little-endian", text: "checked against the fixtures" }],
+    }));
+    const result = await callSessionBusTool("antgrid_get_task", { taskId: "t-4" });
+    const text = result.content[0]!.text;
+    expect(text).toContain("wire the codec");
+    expect(text).toContain("gateway");
+    expect(text).toContain("build-box");
+    expect(text).toContain("the codec is little-endian");
+    expect(text).not.toContain("m2");
+    expect(text).not.toContain("p2");
+    expect(text).not.toContain("{");
   });
 
   // A peer leads nobody, so `members` is empty on every status it reads. Without

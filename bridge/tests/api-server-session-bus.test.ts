@@ -251,7 +251,7 @@ describe("session-bus role resolution", () => {
 });
 
 describe("session-bus routes", () => {
-  test("a lead lists its peers, and reachability follows the carrier", async () => {
+  test("a lead lists its peers, and the carrier's presence is reported", async () => {
     const withCarrier = machine({
       abDir: tempDir("bus-carrier-"), machineId: "m1", projectId: "p1", sessionIds: [LEAD_SESSION],
     });
@@ -263,7 +263,10 @@ describe("session-bus routes", () => {
       const on = await get(withCarrier, "peers", LEAD_SESSION);
       expect(on.status).toBe(200);
       expect(on.body.peers).toHaveLength(1);
-      expect(on.body.peers[0]).toMatchObject({ sessionId: PEER_SESSION, reachable: true });
+      expect(on.body.peers[0]).toMatchObject({
+        sessionId: PEER_SESSION,
+        carrierAttached: true,
+      });
       // The card reaches the lead's tools intact: an OS or a repo dropped here
       // leaves antgrid_list_peers unable to say what a machine IS, which is the
       // half of spec 3.3 the lead decides "what to ask" from.
@@ -273,7 +276,7 @@ describe("session-bus routes", () => {
       });
 
       const off = await get(without, "peers", LEAD_SESSION);
-      expect(off.body.peers[0].reachable).toBe(false);
+      expect(off.body.peers[0].carrierAttached).toBe(false);
     } finally {
       withCarrier.stop();
       without.stop();
@@ -677,11 +680,13 @@ describe("the role behind a taskless send", () => {
   });
 });
 
-// The task is created either way — the outbox is what makes the send eventual —
-// but a lead told only "assigned" cannot tell work the peer is already reading
-// from work still sitting in the outbox because nothing can reach that machine.
-describe("an assignment says whether it left", () => {
-  test("a frame the carrier took is reported delivered", async () => {
+// Nothing here reports delivery: the carrier taking a frame is not the peer
+// machine receiving it, and a lead told "delivered" on that word cannot tell
+// work the peer is already reading from work no machine has ever acknowledged.
+// The ack is the only evidence, so the task view carries it and the assignment
+// itself claims nothing.
+describe("an assignment is queued, and only an ack says it arrived", () => {
+  test("an assignment reports no delivery, and the task says nothing has acked it", async () => {
     const lead = machine({
       abDir: tempDir("bus-deliver-ok-"),
       machineId: "m1",
@@ -694,13 +699,20 @@ describe("an assignment says whether it left", () => {
         summary: "wire the codec",
         instruction: "do the thing",
       });
-      expect(assigned.body).toMatchObject({ ok: true, delivered: true });
+      expect(assigned.body).toMatchObject({ ok: true });
+      expect(assigned.body.delivered).toBeUndefined();
+
+      const tasks = await get(lead, "tasks", LEAD_SESSION);
+      expect(tasks.body.tasks[0]).toMatchObject({
+        reachedPeer: false,
+        unacked: 1,
+      });
     } finally {
       lead.stop();
     }
   });
 
-  test("a frame that never left is reported undelivered, with the task still made", async () => {
+  test("a frame that never left is not distinguished, and the task is still made", async () => {
     const lead = machine({
       abDir: tempDir("bus-deliver-held-"),
       machineId: "m1",
@@ -714,11 +726,15 @@ describe("an assignment says whether it left", () => {
         summary: "wire the codec",
         instruction: "do the thing",
       });
-      expect(assigned.body).toMatchObject({ ok: true, delivered: false });
+      expect(assigned.body).toMatchObject({ ok: true });
       expect(typeof assigned.body.taskId).toBe("string");
       // Still listed, because the outbox will carry it when a carrier appears.
       const tasks = await get(lead, "tasks", LEAD_SESSION);
       expect(tasks.body.tasks).toHaveLength(1);
+      expect(tasks.body.tasks[0]).toMatchObject({
+        reachedPeer: false,
+        unacked: 1,
+      });
     } finally {
       lead.stop();
     }

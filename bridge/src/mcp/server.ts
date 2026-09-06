@@ -442,9 +442,46 @@ function body(fields: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
 }
 
+/** One task row, with the delivery fact the state alone cannot carry.
+ *
+ *  `submitted` reads identically whether the peer is working on it or never
+ *  received it, and an agent that cannot tell those apart waits forever on the
+ *  second. An ack is the only thing that separates them: it came from the other
+ *  bridge, so it cannot exist unless the task arrived. */
 function taskLine(t: any): string {
   const waiting = t.waitingOn ? ` waiting on ${t.waitingOn}` : "";
-  return `- ${t.taskId} [${t.state}${waiting}] ${t.title}`;
+  let delivery = "";
+  if (t.role === "lead" && !t.reachedPeer) {
+    delivery = " — NOT YET DELIVERED: nothing on that machine has acknowledged this task";
+  } else if (t.unacked > 0) {
+    delivery = " — last update not acknowledged yet";
+  }
+  return `- ${t.taskId} [${t.state}${waiting}] ${t.title}${delivery}`;
+}
+
+/** One task in full, as prose.
+ *
+ *  Machine and project ids stay out: every other bus surface names a machine by
+ *  its label, and an agent handed raw routing identifiers starts composing them
+ *  into addresses the bus is the only thing allowed to author. */
+function taskDetail(t: any): string {
+  const out = [taskLine(t).replace(/^- /, "")];
+  out.push(`peer: ${t.peer?.sessionName ?? t.peer?.sessionId} on ${t.peer?.machineLabel ?? "an unlabelled machine"}`);
+  if (t.cancelReason) out.push(`withdrawn: ${t.cancelReason}`);
+  if (t.expiredAt) out.push("lapsed: this task ran past its expiry and is no longer live");
+  const findings = (t.findings ?? []) as any[];
+  if (findings.length === 0) {
+    out.push("findings: none reported yet");
+  } else {
+    out.push("findings:");
+    for (const f of findings) out.push(`- ${f.summary}${f.text ? `: ${f.text}` : ""}`);
+  }
+  const artifacts = (t.artifacts ?? []) as any[];
+  if (artifacts.length > 0) {
+    out.push("artifacts:");
+    for (const a of artifacts) out.push(artifactLine(a));
+  }
+  return out.join("\n");
 }
 
 function artifactLine(a: any): string {
@@ -473,9 +510,14 @@ function memberCardLines(card: any, indent: string): string[] {
 
 /** One peer, plus whatever its own bridge observed about it. */
 function peerLines(p: any): string[] {
-  const unreachable = p.reachable ? "" : " (cannot be reached from here right now)";
+  // Never a reachability claim: this bridge cannot dial a peer (D7), so the two
+  // things it can say are whether anything can leave this machine at all and
+  // whether that peer has ever answered.
+  let note = "";
+  if (!p.carrierAttached) note = " (no carrier attached here — nothing can leave this machine)";
+  else if (p.awaitingFirstAck) note = " (nothing this machine sent has been acknowledged yet)";
   return [
-    `- ${p.sessionName ?? p.sessionId} [${p.state}]${unreachable}`
+    `- ${p.sessionName ?? p.sessionId} [${p.state}]${note}`
     + ` id=${p.sessionId} machine=${p.machineLabel ?? p.machineId}`,
     ...memberCardLines(p.card, "  "),
   ];
@@ -531,11 +573,15 @@ export async function callSessionBusTool(
         unexpected: argStr(args, "unexpected"),
       }));
       if (!r.ok) return toolError(busError(r));
-      return toolText(r.data.delivered
-        ? `Assigned as task ${r.data.taskId}. The peer's result arrives here as a message.`
-        : `Assigned as task ${r.data.taskId}, but it has not reached that machine yet — this bridge has no `
-          + `route to it right now. The task is queued and retried; the peer's result arrives here as a `
-          + `message once it lands. Do not assign it again.`);
+      // Never "delivered". The most this bridge observes is that a carrier took
+      // the frame, and the carrier can still refuse it with no way to say so
+      // back — so the only honest report at this instant is that it is queued.
+      // `antgrid_list_tasks` carries the ack, which is the real evidence.
+      return toolText(
+        `Assigned as task ${r.data.taskId}. It is queued and retried until the peer's machine `
+        + `acknowledges it; antgrid_list_tasks marks it NOT YET DELIVERED until then, and its result `
+        + `arrives here as a message. Do not assign it again.`,
+      );
     }
 
     case "antgrid_list_tasks": {
@@ -550,7 +596,7 @@ export async function callSessionBusTool(
       if (!taskPath) return toolError("Missing required argument: taskId");
       const r = await api("GET", taskPath);
       if (!r.ok) return toolError(busError(r));
-      return toolText(JSON.stringify(r.data, null, 2));
+      return toolText(taskDetail(r.data));
     }
 
     case "antgrid_cancel_task": {

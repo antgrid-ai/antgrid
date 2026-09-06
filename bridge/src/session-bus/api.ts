@@ -179,11 +179,15 @@ export interface RoleView {
 export interface PeerView extends SessionMemberRef {
   state: SessionMember["state"];
   joinedAt: number;
-  /** Whether a frame addressed here could leave this bridge right now. This
-   *  bridge can never observe the peer machine (D7), so it answers only for its
-   *  own half: an active member with a carrier attached. A false here is "I
-   *  cannot send", never "the peer is down". */
-  reachable: boolean;
+  /** Whether a carrier is attached to THIS machine — the whole of what this
+   *  bridge can observe. It is not the same as the member being reachable: the
+   *  carrier is an app that may still refuse to route this frame, and a lead
+   *  bridge holds no per-peer route to consult (D7). Per-task `reachedPeer` is
+   *  the evidence that the peer is actually there. */
+  carrierAttached: boolean;
+  /** True while this machine has given the member a task that nothing on the
+   *  other end has ever acked — the observable form of "it has not landed". */
+  awaitingFirstAck: boolean;
 }
 
 export interface TaskView {
@@ -202,6 +206,15 @@ export interface TaskView {
   cancelReason?: string;
   findings: TaskRecord["findings"];
   artifacts: ArtifactHandleView[];
+  /** Whether the OTHER machine has ever acked anything on this task.
+   *
+   *  The only end-to-end proof a task landed. `send` returning true means a
+   *  carrier accepted the hand-off, which is one hop short: the carrier can
+   *  refuse the frame afterwards and has no way to say so back. An ack came from
+   *  the other bridge, so it cannot be true unless the task arrived. */
+  reachedPeer: boolean;
+  /** Outbound frames on this task still waiting to be acked. */
+  unacked: number;
 }
 
 export interface ArtifactHandleView {
@@ -238,7 +251,7 @@ export interface SessionBusApi {
   peers(terminalId: string | undefined): { peers: PeerView[] } | SessionBusRefusal;
   listTasks(terminalId: string | undefined): { tasks: TaskView[] } | SessionBusRefusal;
   getTask(terminalId: string | undefined, taskId: string): TaskView | SessionBusRefusal;
-  assign(terminalId: string | undefined, body: AssignBody): { ok: true; taskId: string; delivered: boolean } | SessionBusRefusal;
+  assign(terminalId: string | undefined, body: AssignBody): { ok: true; taskId: string } | SessionBusRefusal;
   cancelTask(terminalId: string | undefined, taskId: string, body: CancelBody): { ok: true } | SessionBusRefusal;
   answerPeer(terminalId: string | undefined, taskId: string, body: AnswerBody): { ok: true } | SessionBusRefusal;
   openTask(terminalId: string | undefined, taskId: string): { ok: true } | SessionBusRefusal;
@@ -357,6 +370,29 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
     return loadArtifacts(deps.abDir, deps.projectId, sessionId);
   }
 
+  /** Whether every task this session gave [peer] is still unacked, with at
+   *  least one given. False for a member never assigned anything: silence about
+   *  a task that was never sent is not evidence of anything (D11). */
+  function awaitingFirstAck(sessionId: string, peer: { machineId: string; sessionId: string }): boolean {
+    const mine = deps.coordinator
+      .tasks(sessionId)
+      .filter((t) => t.role === "lead" && t.peer.machineId === peer.machineId && t.peer.sessionId === peer.sessionId);
+    return mine.length > 0 && mine.every((t) => t.ackedSeq === 0);
+  }
+
+  /** A member row plus what this bridge can actually observe about it.
+   *
+   *  Deliberately not a reachability claim: a lead bridge has no route to a peer
+   *  to test (D7), so the two facts it can stand behind are whether a carrier is
+   *  attached here and whether that peer has ever acked. */
+  function decorateMember<T extends { machineId: string; sessionId: string }>(
+    sessionId: string,
+    member: T,
+    carrier: boolean,
+  ): T & { carrierAttached: boolean; awaitingFirstAck: boolean } {
+    return { ...member, carrierAttached: carrier, awaitingFirstAck: awaitingFirstAck(sessionId, member) };
+  }
+
   function viewTask(sessionId: string, rec: TaskRecord): TaskView {
     const store = artifactsOf(sessionId);
     return {
@@ -374,6 +410,8 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       ...(rec.canceledAt === undefined ? {} : { canceledAt: rec.canceledAt }),
       ...(rec.cancelReason === undefined ? {} : { cancelReason: rec.cancelReason }),
       findings: rec.findings,
+      reachedPeer: rec.ackedSeq > 0,
+      unacked: rec.outbox.length,
       // Only handles this machine actually holds bytes for. An id that arrived
       // in an envelope from the other machine is deliberately not listed: naming
       // an artifact `get_artifact` cannot serve teaches the agent to distrust the
@@ -474,7 +512,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
         contextId: contextOf(m),
         self,
         ...(m.memberOf ? { memberOf: m.memberOf } : {}),
-        members: m.members.map((x) => ({ ...x, reachable: x.state === "active" && carrier })),
+        members: m.members.map((x) => decorateMember(m.sessionId, x, carrier)),
         scope: scopeOf(m.sessionId),
         ...(m.peer ? { brief: loadBrief(deps.abDir, deps.projectId, m.sessionId)?.brief } : {}),
         budget: deps.coordinator.budget(m.sessionId),
@@ -501,7 +539,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       if (!m) return notMember();
       if (!m.lead) return refuse("NOT_LEAD", "only the lead session of a multi-machine session has peers");
       const carrier = deps.carrierPresent();
-      return { peers: m.members.map((x) => ({ ...x, reachable: x.state === "active" && carrier })) };
+      return { peers: m.members.map((x) => decorateMember(m.sessionId, x, carrier)) };
     },
 
     listTasks(terminalId) {
@@ -544,7 +582,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       if (isRefusal(assigned)) return assigned;
       // Recorded after the mint so the ids the peer will name in a fetch are on
       // the lead's own task row too.
-      return { ok: true, taskId: assigned.taskId, delivered: assigned.delivered };
+      return { ok: true, taskId: assigned.taskId };
     },
 
     cancelTask(terminalId, taskId, body) {

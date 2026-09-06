@@ -300,12 +300,13 @@ export class SessionBusCoordinator {
    * outbox is what makes the send eventual, and a task that came into being only
    * once a carrier answered would be a task the lead cannot see it created.
    *
-   * `delivered` says which of those two happened. It is not a second success
-   * flag — the task is created either way — but a lead told only "assigned"
-   * cannot tell an assignment its peer is already reading from one still sitting
-   * in the outbox because no carrier has ever reached that machine.
+   * Nothing here reports delivery, deliberately. The most this side observes is
+   * whether a carrier accepted the hand-off, and a carrier that accepts can
+   * still refuse to route with no way to say so back — so a delivery flag minted
+   * at this instant would be a guess dressed as a fact. The task's `ackedSeq` is
+   * the evidence, because an ack can only have come from the other bridge.
    */
-  assign(input: AssignInput): { ok: true; taskId: string; seq: number; delivered: boolean } | SessionBusRefusal {
+  assign(input: AssignInput): { ok: true; taskId: string; seq: number } | SessionBusRefusal {
     const self = this.deps.self(input.sessionId);
     if (!self) return this.noSelf();
 
@@ -357,7 +358,7 @@ export class SessionBusCoordinator {
       tasks: attempt.tasks,
       log: appendLog(state.log, { at: now, direction: "out", peer: keyOf(input.peer), envelope }),
     });
-    return { ok: true, taskId, seq: minted.seq, delivered: attempt.sent };
+    return { ok: true, taskId, seq: minted.seq };
   }
 
   /** Withdraw a task. The cancel is a transition like any other — sequenced,
