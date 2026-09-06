@@ -62,3 +62,161 @@ switch off (all phones) or signing that device out of the account.
 
 The CLI resolves `ANTGRID_DIR` from its own shell env, so it only sees a dev
 host's store if that env matches how the host was launched.
+
+**Network watcher:** `antgrid watch` (`bridge/src/cli/netwatch.ts`) streams every
+frame crossing the machine relay socket — direction, channel, stream, size, the
+plaintext message type, and the drops. It attaches to the *already-running* host
+over the loopback control plane (`GET /netwatch`, same bearer token as
+`host.json`), so it starts nothing and needs no restart to arm; the host keeps a
+bounded ring recording at all times, which is replayed before the live tail.
+
+```bash
+antgrid watch                       # rendered table, replay then follow
+antgrid watch --ui                  # ...in its own window instead (see below)
+antgrid watch --json > cap.jsonl    # raw JSONL
+antgrid watch --no-follow           # buffered snapshot, then exit
+antgrid watch --dir ~/.antgrid-dev  # a debug-build app's host
+```
+
+**Both halves.** The app records its own side when `ANTGRID_NETWATCH` is set in
+its environment (runtime, so arming it needs no rebuild), to
+`<ANTGRID_DIR>/netwatch.log`. `--join` pairs the two on `frameId` — the sealed
+frame's AES-GCM nonce, which the relay forwards untouched and both endpoints
+therefore compute identically:
+
+```bash
+ANTGRID_NETWATCH=1 <launch the app>
+antgrid watch --dir ~/.antgrid-dev --join ~/.antgrid-dev/netwatch.log
+```
+
+```
+22:11:56.211  app  -> tx  ctrl  sealed  412B  a3f9c211  terminal:input  s:9f1c22ab
+22:11:56.233  brg  <- rx  ctrl  sealed  412B  a3f9c211  terminal:input  +22ms
+22:11:56.240  app  -> tx  ctrl  sealed   88B  cc12ef44  file:read       ✗ never arrived
+```
+
+This answers what neither endpoint can alone — the route header carries no
+message id, so the relay's `MESSAGE_RATE_LIMITED` tells the sender that
+*something* died but never which. A frame is only called lost inside the window
+both captures cover: that window runs to *now* (both halves are read live), but
+starts wherever the shorter one reaches, because the ring evicts and the file
+rotates. Frames from the last second are held back — the app annotates and
+batches before writing, so the newest ones are legitimately not on disk yet.
+
+**A phone's half comes back over the socket, not through a file.** `hostDir()`
+resolves from `USERPROFILE`/`HOME`, so there is no `netwatch.log` on a phone and
+no environment to arm one with. `--remote` asks the connected app directly
+(`netwatch:configure`), and its events arrive as `netwatch:events` batches that
+land in this host's own ring — so one live stream already carries both halves,
+with an origin column instead of a merge:
+
+```bash
+antgrid watch --remote          # ⊥ --join: this merges live, --join merges files
+```
+
+Four things worth knowing about it. It is **not retrospective** — the app
+installs its tap on receipt, so nothing before the command exists on that side
+(the desktop's env-armed capture is the retrospective one). The arm carries a
+**dead-man TTL** the watcher renews while it runs, because a `SIGKILL`ed watcher
+sends no disarm and nothing on the phone can turn a capture off. Timestamps are
+**shifted onto this machine's clock** using the batch's own send time; deltas
+between two app-side events stay exact, and one-way relay latency is not
+subtracted. And the app's uploader **drops rather than queues** past its
+per-batch cap and byte budget — a capture that slows the session it is
+diagnosing has changed what it was measuring — so the batch carries a `dropped`
+count and never a silent gap.
+
+**Loopback: one side sees the whole wire.** A co-located app may take the
+`LocalListener` path instead of the relay (`app/lib/providers/agent_transport.dart`
+tries relay first, local second) — plain JSON on 127.0.0.1, no seal, no frames,
+no streams. That socket is point-to-point with nothing in between, so
+`bridge/src/local-listener.ts` alone is a *complete* capture: every frame
+`deliver()` sends is one the app received, and every frame `handleFrame()` sees
+is one the app sent. No second half, no `--join`, no app-side arming — the relay
+case needs all three only because a router sits between the endpoints and can
+swallow a frame neither of them ever hears about.
+
+The one thing the listener structurally cannot see is a frame the app **never
+put** on the wire. `LocalTransport` (`packages/antgrid_relay_client`) records
+those into the same `ANTGRID_NETWATCH` file its relay half writes: a send into a
+torn-down channel, a reply this app could not decode, a port that accepted the
+socket and never upgraded it, and the handshake refusals — including the close
+code the listener answered with, which is what makes "won't connect" legible
+from both ends rather than as an absence of traffic. Drops only, never a
+successful frame (the listener already recorded those; a merged capture would
+otherwise carry every row twice) and never a body — the app's mirror of the
+schema has no body field at all, and the hello this side sends carries the
+core's shared token.
+
+```bash
+antgrid watch --local     # loopback only
+antgrid watch --relay     # relay only — omit both to see every transport
+antgrid watch --bodies    # ...and the plaintext of each loopback frame
+```
+
+Both transports are recorded either way: `--local`/`--relay` narrow what is
+rendered, never what the host keeps, and with neither given the table carries a
+transport column. The join key is free here — a loopback frame is a whole
+`AbMessage`, so its own `id` (the UUID `createAbMessage` mints) *is* the frameId,
+with nothing hashed on the hot path. The relay path's nonce-derived key exists
+only because its route header carries no message id. The one id-less loopback
+frame that reaches the ring is a refused `hello`, which falls back to
+`frameIdFor`'s sha256 prefix.
+
+**Bodies are opt-in, capped, and lapse on their own.** Metadata is recorded
+always — an intermittent bug is only diagnosable if the ring was already holding
+it by the time someone went looking — but a payload is recorded only while
+`--bodies` has armed it over the loopback control plane (`netwatch:local`, same
+bearer as `/netwatch`; it arms a flag in this process, sends nothing to the app,
+and adds no wire message type). Each body is truncated to
+`NETWATCH_BODY_MAX_CHARS` (4 KiB) at the record site rather than at render, so a
+screen of build log cannot evict the ring on its way to being shortened. The arm
+carries the same **dead-man TTL** `--remote` does, renewed while the watcher runs
+and clamped host-side to an hour: the watcher that armed it is the only thing
+that ever disarms it, and a `SIGKILL`ed watcher sends no disarm. It therefore
+needs a live stream — `--no-follow` and `--join` refuse it, though bodies already
+in the ring render under both.
+
+Two things to be blunt about. A body is plaintext — prompts, file contents,
+terminal output — so `--bodies --json > cap.jsonl` puts them unencrypted on disk
+for that run, and nothing scrubs or rotates the file. And a `hello` is never
+captured with its text, armed or not (`recordHelloRefused`): the envelope carries
+this core's shared secret in cleartext, so a refusal is recorded as a drop with a
+reason, a size and a hashed id, and nothing else.
+
+**A window instead of a table.** `antgrid watch --ui` mints a launch link, opens
+it as its own OS window (Chromium's `--app=`, falling back to an ordinary browser
+tab) and exits — the window is the session, not this terminal. It reads the same
+ring live and adds what a table cannot: a text filter over type, channel, reason,
+detail and body; transport chips; drops-only; pause; stick-to-bottom with a jump
+pill; click-for-detail with the full body; and both arming switches, each with
+its own heartbeat and the same dead-man TTL. **export** writes exactly what is on
+screen as JSONL. `--local`/`--relay`/`--limit` set the window's opening state;
+every other flag is refused, because the window owns what it would have answered.
+
+```bash
+antgrid watch --ui                  # a window, and the terminal is yours again
+antgrid watch --ui --local          # ...opening on the loopback transport
+antgrid watch --ui --no-open        # print the link instead of launching
+```
+
+The link is a credential and is treated as one. `host.json`'s bearer never
+reaches the browser — it opens `POST /control`, which starts projects, checks out
+branches and discloses host paths — so the URL carries a **single-use ticket** in
+its fragment, which no browser sends to a server. The page spends it for a
+session token that reaches `GET /netwatch` and the two `netwatch:*` arming verbs
+and nothing else, holds it in `sessionStorage` (origin-scoped down to the port,
+unlike a cookie) and strips the fragment, so the copy left in browser history is
+already spent. Every `/netwatch` route additionally refuses a `Host` this
+listener never published and any cross-site fetch, which is what closes DNS
+rebinding. The page loads nothing from anywhere, renders every peer-supplied
+value through `textContent`, and runs under a nonce CSP whose default is `'none'`.
+
+Two things it still does NOT show. A relay session that never established: both
+halves of that capture ride the sealed control plane, so `--remote` can describe
+a connection that is misbehaving but structurally cannot describe one that never
+came up (a refused loopback hello, by contrast, is an ordinary event). And which
+machine an app-side frame belongs to: the app's recorder is process-wide, so an
+app connected to two machines that are BOTH watching reports every frame to both
+— same account, same user, and the events carry types and sizes, never payloads,
+but the reading is confusing rather than wrong.

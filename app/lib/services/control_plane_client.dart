@@ -8,6 +8,8 @@ import '../models/agent_work_status.dart';
 import '../models/branch_remote_status.dart';
 import '../models/git_branch.dart';
 import '../models/session_entry.dart';
+import '../util/detached.dart';
+import '../util/netwatch_uploader.dart';
 import 'session_delete_policy.dart';
 
 export '../models/agent_work_status.dart' show AgentWorkStatus;
@@ -215,16 +217,34 @@ class ControlPlaneClient {
   Stream<ControlPlaneState> get stateStream => _stateController.stream;
   ControlPlaneState get currentState => _state;
 
+  /// Installs or clears the frame capture on the relay socket behind
+  /// [transport]. Null when the caller could not resolve one — this client is
+  /// then simply not a capture surface, and a `netwatch:configure` it cannot
+  /// honour is ignored rather than half-applied.
+  final void Function(bool armed)? netwatchArm;
+
+  NetwatchUploader? _netwatch;
+
   /// [peerPresence] emits `true` while the control-plane peer is connected and
   /// `false` when it drops. The relay transport never surfaces a disconnect, so
   /// without this signal a closed machine's last advert would linger as
   /// "online". On a `false` the cached advert is cleared so consumers read
   /// offline reactively (no manual refresh); the live message stream repopulates
   /// it when the agent re-adverts after the peer reconnects.
-  ControlPlaneClient({required this.transport, Stream<bool>? peerPresence}) {
+  ControlPlaneClient({
+    required this.transport,
+    Stream<bool>? peerPresence,
+    this.netwatchArm,
+  }) {
     _sub = transport.messages.listen(_onMessage);
     _presenceSub = peerPresence?.listen((present) {
-      if (!present) clearAdvert();
+      if (!present) {
+        clearAdvert();
+        // The machine that armed the capture is gone, so nothing is reading it
+        // and every batch would be sealed against a dead session. Re-arming is
+        // the watcher's job; it holds the only intent.
+        _netwatch?.configure(enabled: false);
+      }
     });
   }
 
@@ -254,7 +274,43 @@ class ControlPlaneClient {
       case 'agent:tools':
         _handleTools(json);
         break;
+      case 'netwatch:configure':
+        _handleNetwatchConfigure(json);
+        break;
     }
+  }
+
+  /// Arm or disarm this app's own frame capture, on the machine's request.
+  ///
+  /// This is the ONLY control surface a phone has for it: no environment, no
+  /// setting, no UI. `ttlMs` is the arm's expiry — a watcher that dies without
+  /// disarming must not leave a device uploading forever — and its ABSENCE
+  /// means an arm nothing lapses, which is why an enable without one is
+  /// refused rather than honoured indefinitely.
+  void _handleNetwatchConfigure(Map<String, dynamic> json) {
+    final enabled = json['enabled'];
+    if (enabled is! bool) return;
+    final arm = netwatchArm;
+    if (arm == null) return;
+    final ttlMs = json['ttlMs'];
+    if (enabled && ttlMs is! int) return;
+    // A disarm with nothing to disarm must not BUILD the uploader: constructing
+    // one installs the process-wide recorder, so the watcher's own cleanup —
+    // sent on every exit path, failures included — would arm what it came to
+    // stop.
+    if (!enabled && _netwatch == null) return;
+    final up = _netwatch ??= NetwatchUploader(
+      send: (payload) => detached(
+        'ControlPlaneClient',
+        'netwatch batch send failed',
+        () => transport.send(createAbMessage('netwatch:events', payload)),
+      ),
+      onArmedChanged: arm,
+    );
+    up.configure(
+      enabled: enabled,
+      ttl: ttlMs is int ? Duration(milliseconds: ttlMs) : null,
+    );
   }
 
   void _handleProjects(Map<String, dynamic> json) {
@@ -514,6 +570,10 @@ class ControlPlaneClient {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    // Before the subscriptions: disarming clears the tap, and a capture left
+    // armed on a socket this client no longer reads is pure cost.
+    _netwatch?.dispose();
+    _netwatch = null;
     await _sub?.cancel();
     _sub = null;
     await _presenceSub?.cancel();

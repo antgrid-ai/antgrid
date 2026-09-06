@@ -8,6 +8,7 @@ import '../connection/relay_mechanisms.dart';
 import '../connection/supervisor_state.dart';
 import '../util/ab_log.dart';
 import '../util/device_id.dart';
+import '../util/netwatch.dart';
 import 'device_revocation.dart';
 import 'providers.dart';
 
@@ -31,7 +32,18 @@ class RelayConnection {
     RelayService? relayOverride,
   }) : relay =
            relayOverride ??
-           RelayService(crypto: crypto, logger: _logRelayService);
+           RelayService(
+             crypto: crypto,
+             logger: _logRelayService,
+             // MachineSession reads the hook back off this socket rather than
+             // taking its own, so the two layers can never disagree about
+             // whether one is running. Gated on the env flag directly, never on
+             // whether a recorder happens to exist: a remote arm installs its
+             // own tap on the live socket (providers/control_plane.dart), and
+             // reading that recorder here would make every socket built
+             // afterwards born-tapped for the rest of the process.
+             netTap: netwatchEnabled ? ensureNetwatch().tap : null,
+           );
 
   /// Fires when the relay tells us this device has been revoked from the
   /// account. Distinct from the supervisor's `Blocked(deviceRevoked)`, which

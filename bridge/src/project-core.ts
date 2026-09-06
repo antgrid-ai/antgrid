@@ -380,6 +380,7 @@ export class ProjectCore {
     const listener = new LocalListener({
       bus,
       token,
+      projectId: core.projectId,
       // `onHandshakeComplete` is called twice intentionally and is idempotent:
       // here per owner connection, and eagerly below to prime managers at startup
       // (the loopback socket + token is the trust boundary; there's no E2E

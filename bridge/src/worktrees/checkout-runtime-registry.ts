@@ -62,6 +62,11 @@ export class CheckoutRuntimeRegistry<TConfig, TAgentSpec, TRuntime = unknown> {
   }
 
   async remove(checkoutId: string): Promise<void> {
+    // No-op for `main` rather than a miss: agent-core synthesizes that record
+    // from the project path at construction and nothing ever writes it to
+    // checkouts.json, so there is nothing here to drop and a store lookup for
+    // it misses BY DESIGN. Readers special-case the id (HostServer
+    // .handleCheckoutPath is the pattern) instead of reporting it unknown.
     if (checkoutId === "main") return;
     this.records.delete(checkoutId);
     this.configs.delete(checkoutId);

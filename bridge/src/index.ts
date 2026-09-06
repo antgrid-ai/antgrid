@@ -286,6 +286,38 @@ program
     console.log(`Written to ${path}. Open this project in the Antgrid desktop app — it launches and manages the bridge for you.`);
   });
 
+// antgrid watch subcommand — live capture of both wires this machine owns: the
+// relay socket, and the loopback socket a co-located desktop app rides. Reads
+// host.json for the control port + token, so it attaches to the ALREADY-RUNNING
+// host rather than starting anything.
+program
+  .command("watch")
+  .description("Stream relay and loopback frames from the running host (connection debugging)")
+  .option("--json", "Emit raw JSONL instead of the rendered table")
+  .option("--export <file>", "Append raw JSONL to a file as well")
+  .option("--limit <n>", "Buffered events to replay before following (default 200)")
+  .option("--no-follow", "Print the buffered snapshot and exit")
+  .option("--dir <path>", "ANTGRID_DIR of the target host (debug builds use ~/.antgrid-dev)")
+  .option("--join <file>", "Pair this capture against an app-side netwatch.log (implies --no-follow)")
+  .option("--remote", "Ask the connected app to capture its side and ship it here (the only way to reach a phone)")
+  .option("--local", "Show only loopback frames — the transport a desktop app on this machine uses")
+  .option("--relay", "Show only relay frames — the transport a phone uses")
+  .option("--bodies", "Record loopback frame plaintext while this runs (truncated per frame; metadata is always recorded)")
+  .option("--ui", "Open the capture in its own window instead of this terminal, and exit")
+  .option("--no-open", "With --ui, print the link rather than launching a browser")
+  .action(async (opts: { json?: boolean; export?: string; limit?: string; follow?: boolean; dir?: string; join?: string; remote?: boolean; local?: boolean; relay?: boolean; bodies?: boolean; ui?: boolean; open?: boolean }) => {
+    const { runNetwatchCli } = await import("./cli/netwatch");
+    const limit = opts.limit === undefined ? undefined : Number(opts.limit);
+    // Zero is admitted, and means it: the /netwatch stream reads `limit=0` as
+    // "no replay, live tail only", which is the natural way to watch what
+    // happens NEXT without a screenful of history in front of it.
+    if (limit !== undefined && (!Number.isFinite(limit) || limit < 0)) {
+      console.error("antgrid watch: --limit must be zero or a positive number");
+      process.exit(1);
+    }
+    process.exit(await runNetwatchCli({ ...opts, limit }));
+  });
+
 // antgrid phones subcommand — inspect and drop local phone records. Whether a
 // phone may drive this machine is one machine-wide switch (mobile-access), not
 // anything this CLI manages.

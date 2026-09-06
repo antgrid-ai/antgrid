@@ -10,6 +10,7 @@ import 'host_controller.dart';
 import 'project_id.dart';
 import '../config/build_info.dart';
 import '../util/ab_log.dart';
+import '../util/netwatch.dart';
 
 // ---------------------------------------------------------------------------
 // BootstrapPayload
@@ -313,6 +314,7 @@ class LocalAgentLauncher {
         port: connect.port,
         token: connect.token,
         appPid: pid,
+        netTap: localNetTapFor(projectId),
       );
       await t.connect();
       _log('opened project $projectId (port ${connect.port})');

@@ -7,6 +7,7 @@ import '../launcher/local_agent_launcher.dart';
 import '../project/project_session_registry.dart';
 import '../services/control_plane_client.dart';
 import '../util/device_id.dart';
+import '../util/netwatch.dart';
 import 'account_agents.dart';
 import 'agent_transport.dart';
 import 'drawer_expansion.dart';
@@ -51,9 +52,22 @@ final controlPlaneClientForProvider = FutureProvider.family<ControlPlaneClient?,
   // connection; a null peek just means no live socket → no presence to feed.
   final conn = ref.read(relayConnectionManagerProvider).peek(bareDeviceUuid);
   final presence = conn?.relay.peerPresenceStream;
+  // The capture tap goes on the SAME RelayService the presence above came from
+  // — the socket this control plane rides. Absent when there is no live one, in
+  // which case the client simply is not a capture surface: the machine's request
+  // to arm has nothing to arm.
+  final relay = conn?.relay;
   final client = ControlPlaneClient(
     transport: transport,
     peerPresence: presence,
+    // `|| netwatchEnabled`: a desktop may already be capturing to its own
+    // netwatch.log, and a remote DISARM must not take that with it — the two
+    // arming routes share one recorder and neither owns the tap.
+    netwatchArm: relay == null
+        ? null
+        : (armed) => relay.netTap = (armed || netwatchEnabled)
+              ? ensureNetwatch().tap
+              : null,
   );
   ref.onDispose(client.dispose);
   return client;

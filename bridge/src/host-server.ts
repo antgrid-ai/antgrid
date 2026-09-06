@@ -27,6 +27,8 @@ import { snapshotAsksFor } from "./rpc/state-snapshot";
 import { generateEphemeralKeypair } from "./key-exchange";
 import { joinRelayWsPath } from "./relay-url";
 import { createMessage } from "./protocol";
+import { armBodyCapture, armRemoteIngest } from "./netwatch";
+import { mintUiTicket, TICKET_TTL_MS } from "./netwatch-ui-session";
 import { detectInstalledTools, type DetectOptions } from "./tool-detector";
 import { isChatCapableTool } from "./structured/chat-capable";
 import { buildAgentCatalog } from "./agent-catalog";
@@ -170,6 +172,25 @@ export interface OpenResult {
 // no-reconnect-hook periodic POST (the original design predates account-trust
 // admission replacing pair-request auto-approve; the interval choice stands).
 const HEARTBEAT_REFRESH_INTERVAL_MS = 60_000;
+
+/**
+ * Ceiling on a loopback body-capture window.
+ *
+ * A `setTimeout` delay past the runtime's 32-bit millisecond max fires
+ * IMMEDIATELY rather than late, so an ambitious ttl would disarm the capture on
+ * the spot while this reply says it is armed — the one failure a watcher has no
+ * way to notice. The clamp sits far below that, because the window is also how
+ * long the ring may hold payloads and the dead man's switch is worth nothing at
+ * a length nobody outlives. An over-long request is served a shorter window
+ * rather than refused: the watcher re-arms while it runs, so shortening costs
+ * it nothing and refusing would cost it the capture.
+ *
+ * Bounds the remote arm too, where it matters MORE than it does here: a Dart
+ * `Timer` does not misfire on a huge duration, it simply never fires, and the
+ * phone has no UI, no env var and no verb of its own that can stop an upload —
+ * the TTL is the only control the device has over its own capture.
+ */
+const NETWATCH_MAX_TTL_MS = 3_600_000;
 
 export class HostServer {
   private readonly cores = new Map<string, CatalogEntry>();
@@ -1387,6 +1408,72 @@ export class HostServer {
       }
       case "checkout:path":
         return this.handleCheckoutPath(req);
+      case "netwatch:remote": {
+        // No control plane = no app to ask, and answering `ok` would leave the
+        // watcher waiting for a half that can never arrive.
+        const relay = this.controlPlaneRelay;
+        if (!relay || !relay.hasEstablishedSession) {
+          return { id: req.id, ok: false, error: { code: "NO_APP_CONNECTED", message: "no app has an E2E session with this machine" } };
+        }
+        // The app refuses a TTL-less arm outright (nothing on the device can
+        // stop a capture, so an arm nothing lapses is the one thing it will not
+        // honour). Enforce it here rather than answering `ok` for a request the
+        // app will silently discard — this reply is all the caller ever gets.
+        if (req.enabled && typeof req.ttlMs !== "number") {
+          return { id: req.id, ok: false, error: { code: "TTL_REQUIRED", message: "arming a remote capture requires ttlMs" } };
+        }
+        const ttlMs = req.enabled ? Math.min(req.ttlMs as number, NETWATCH_MAX_TTL_MS) : req.ttlMs;
+        // Open this machine's door to the app's batches for the same window the
+        // app is being told to record for, and only for it — an unarmed bridge
+        // ignores `netwatch:events` outright. The grace outlives the app's own
+        // lapse so a batch already in flight when the window closes is still the
+        // capture the watcher asked for rather than an unsolicited write.
+        armRemoteIngest(req.enabled, (ttlMs ?? 0) + 30_000);
+        relay.send(createMessage("netwatch:configure", { enabled: req.enabled, ttlMs }));
+        return { id: req.id, ok: true, type: "netwatch:remote", enabled: req.enabled, ttlMs };
+      }
+      case "netwatch:local": {
+        // Bridge-local in the strongest sense: it arms a module flag in THIS
+        // process and sends nothing, which is why it carries no wire message
+        // type and why CHECKOUT_VARIABLE_MESSAGE_TYPES has no entry for it —
+        // there is no working tree anywhere in its reach. Its only door is this
+        // listener, bound to 127.0.0.1 behind the host.json bearer, the same
+        // boundary the /netwatch stream sits behind; a phone speaks AbMessage
+        // verbs over the relay and cannot name a ControlRequest at all.
+        if (!req.bodies) {
+          armBodyCapture(false, 0);
+          return { id: req.id, ok: true, type: "netwatch:local", bodies: false, ttlMs: 0 };
+        }
+        // The same refusal netwatch:remote makes of the app, for the same
+        // reason applied to ourselves: the TTL is the dead man's switch, so an
+        // arm without one is the single request that cannot be honoured — a
+        // watcher killed with SIGKILL sends no disarm, and this host would then
+        // record payloads for the rest of its life with nothing able to stop
+        // it. Answered here rather than left to armBodyCapture's own refusal,
+        // which is silent and would read to the caller as an armed capture.
+        if (typeof req.ttlMs !== "number" || req.ttlMs <= 0) {
+          return { id: req.id, ok: false, error: { code: "TTL_REQUIRED", message: "arming body capture requires a positive ttlMs" } };
+        }
+        const ttlMs = Math.min(req.ttlMs, NETWATCH_MAX_TTL_MS);
+        armBodyCapture(true, ttlMs);
+        return { id: req.id, ok: true, type: "netwatch:local", bodies: true, ttlMs };
+      }
+      case "netwatch:ui": {
+        // The viewer is served by the same listener answering this request, so
+        // its port is the one the caller is already talking to — never a
+        // published or configured one that could drift from it.
+        const control = this.control;
+        if (!control) {
+          return { id: req.id, ok: false, error: { code: "NO_CONTROL_PLANE", message: "the loopback control plane is not bound" } };
+        }
+        return {
+          id: req.id,
+          ok: true,
+          type: "netwatch:ui",
+          url: `http://127.0.0.1:${control.port}/netwatch/ui#t=${mintUiTicket()}`,
+          expiresInMs: TICKET_TTL_MS,
+        };
+      }
     }
   }
 

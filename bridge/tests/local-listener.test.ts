@@ -8,7 +8,7 @@ let bus: MessageBus;
 
 beforeEach(async () => {
   bus = new MessageBus();
-  listener = new LocalListener({ bus, token: "secret-token" });
+  listener = new LocalListener({ bus, token: "secret-token", projectId: "test-project" });
   await listener.start();
 });
 afterEach(async () => { await listener.stop(); });

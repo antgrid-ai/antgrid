@@ -421,7 +421,12 @@ export class TunnelManager {
 
     // Captured instead of `msg`: these listeners outlive the frame — for a
     // parked socket, potentially for the process — and `msg.headers` carries
-    // the browser's whole handshake, `Cookie` included.
+    // the browser's whole handshake, `Cookie` included. Forwarding those is
+    // load-bearing: a cookie-authenticated dev server reads its session off
+    // the WebSocket request, not the page load before it, so dropping them
+    // opens an ANONYMOUS socket behind an authenticated page — which renders
+    // as "not authorized" rather than as a failure, and only on the phone,
+    // since the desktop WebView dials the port itself.
     const tunnelId = msg.tunnelId;
     const checkoutId = entry.checkoutId;
 

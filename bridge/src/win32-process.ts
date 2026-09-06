@@ -110,6 +110,7 @@ const kernel32Symbols = {
   },
   AssignProcessToJobObject: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
   OpenProcess: { args: [FFIType.u32, FFIType.i32, FFIType.u32], returns: FFIType.ptr },
+  TerminateProcess: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
   CloseHandle: { args: [FFIType.ptr], returns: FFIType.i32 },
   GetLastError: { args: [], returns: FFIType.u32 },
   CreateToolhelp32Snapshot: { args: [FFIType.u32, FFIType.u32], returns: FFIType.ptr },
@@ -500,9 +501,132 @@ export function survivingProcesses(
   });
 }
 
-/** A live process holding a directory as its current directory. */
+/**
+ * This process and every process it descends from, by pid.
+ *
+ * The one set {@link terminateProcesses} must never act on. Exported so the
+ * invariant can be asserted directly: a caller kills by CURRENT DIRECTORY, and
+ * nothing about a cwd match distinguishes a stray orphan from the app that
+ * launched the bridge that is doing the killing.
+ *
+ * Contains at least this process even when the table cannot be read — refusing
+ * to kill ourselves is the one answer that is safe without evidence. The walk
+ * stops on a cycle and on a pid the table does not know, both of which pid 0
+ * produces at the top of every chain.
+ */
+export function selfAndAncestors(): ReadonlySet<number> {
+  const protectedPids = new Set<number>([process.pid]);
+  const all = enumerateProcesses();
+  if (all === null) return protectedPids;
+  const byPid = new Map(all.map((p) => [p.pid, p]));
+  let current = byPid.get(process.pid);
+  while (current !== undefined && !protectedPids.has(current.parentPid)) {
+    protectedPids.add(current.parentPid);
+    current = byPid.get(current.parentPid);
+  }
+  return protectedPids;
+}
+
+/**
+ * Terminate the entries that are STILL the same processes, and nothing else.
+ *
+ * The kill a refused directory delete needs, which neither of the other two
+ * reaches. A holder is routinely an ORPHAN, so `taskkill /T` has no tree to
+ * walk to it; and it is a holder precisely because it was never a member of any
+ * job of ours — a child created through `ShellExecute` joins its creator's job,
+ * not the PTY's. What is left is its pid, and a pid alone is not safe to kill:
+ * by the time a delete has failed, retried and enumerated, Windows may have
+ * reissued it. So every entry goes back through {@link survivingProcesses}
+ * immediately before its handle is opened — the same identity rule the PTY
+ * sweep applies to its own snapshot.
+ *
+ * There is no `/T` here and none is wanted: the caller enumerates by CURRENT
+ * DIRECTORY, so a child that also holds the directory is already an entry in
+ * its own right, and one that does not hold it cannot be blocking the delete.
+ * Killing beyond the enumerated set would reach outside the only thing that
+ * justifies killing at all.
+ *
+ * Returns how many were terminated, or `null` when the process table could not
+ * be read. Those are different answers and callers must not merge them: zero
+ * means nothing needed killing, `null` means the sweep did not happen and the
+ * directory's holders are still there.
+ */
+export function terminateProcesses(entries: readonly ProcessIdentity[]): number | null {
+  const a = loadApi();
+  if (a === null) return null;
+  if (entries.length === 0) return 0;
+  const alive = survivingProcesses(entries);
+  if (alive === null) {
+    log.warn("process table unreadable; %d holder(s) left running", entries.length);
+    return null;
+  }
+  // Never this process, and never anything that leads to it. Measured on a
+  // real machine, a managed checkout with a dev stack in it is held as a
+  // current directory by DOZENS of processes, and the bridge's own ancestry —
+  // the app that spawned it above all — can be among them. Terminating an
+  // ancestor would take the bridge down mid-delete and, one level further up,
+  // kill the app the user is standing in; the checkout row would then survive
+  // with no directory under it, which is the undeletable session this whole
+  // path exists to prevent, arrived at from the other side.
+  const protectedPids = selfAndAncestors();
+  let terminated = 0;
+  for (const target of alive) {
+    if (protectedPids.has(target.pid)) {
+      log.debug({ pid: target.pid, name: target.name }, "holder is self or an ancestor; left running");
+      continue;
+    }
+    let handle: Pointer | null = null;
+    try {
+      handle = a.kernel32.OpenProcess(PROCESS_TERMINATE, 0, target.pid);
+      // Ordinary rather than exceptional: the holder may have exited between
+      // the verification above and here, and a protected process or one running
+      // as another user is refused outright. Either way the delete simply goes
+      // on to fail as it did before, and the caller reports the holder.
+      if (handle === null) {
+        log.debug({ pid: target.pid, lastError: lastError(a) }, "holder could not be opened");
+        continue;
+      }
+      // Exit code 1: whatever was watching this process should see a failure,
+      // because it did not finish — it was evicted from a directory.
+      if (a.kernel32.TerminateProcess(handle, 1) !== 0) {
+        terminated++;
+        log.info({ pid: target.pid, name: target.name }, "terminated directory holder");
+      } else {
+        log.debug({ pid: target.pid, lastError: lastError(a) }, "holder terminate failed");
+      }
+    } catch (err) {
+      log.debug({ pid: target.pid, err: String(err) }, "holder terminate threw");
+    } finally {
+      if (handle !== null) {
+        try {
+          a.kernel32.CloseHandle(handle);
+        } catch {
+          // Advisory path, as everywhere else here: a handle the kernel already
+          // rejected is nothing to report.
+        }
+      }
+    }
+  }
+  return terminated;
+}
+
+/**
+ * A live process holding a directory as its current directory.
+ *
+ * Structurally a {@link ProcessIdentity} with a `cwd`, and deliberately so:
+ * that shape is what lets a holder be re-verified by {@link survivingProcesses}
+ * in the instant before {@link terminateProcesses} opens a handle to it.
+ */
 export interface DirectoryHolder {
   readonly pid: number;
+  /**
+   * `th32ParentProcessID`, carried for IDENTITY rather than for the link — a
+   * holder is usually an orphan, so the parent it names is typically gone
+   * already. Windows never re-parents, so the field keeps naming the original
+   * creator forever, which is exactly what distinguishes this process from a
+   * stranger that has since inherited its pid.
+   */
+  readonly parentPid: number;
   /** Image name as Toolhelp reports it, e.g. `bun.exe`. */
   readonly name: string;
   /** The process's current directory, as the kernel spells it. */
@@ -542,7 +666,12 @@ export function listProcessesWithCwdUnder(root: string): DirectoryHolder[] {
       const pid = entryView.getUint32(PROCESSENTRY32W_PID_OFFSET, true);
       const cwd = readProcessCurrentDirectory(a, pid);
       if (cwd !== null && isUnderAny(normalizePath(cwd), prefixes)) {
-        held.push({ pid, name: readEntryName(entryView), cwd: stripTrailingSeparators(cwd) });
+        held.push({
+          pid,
+          parentPid: entryView.getUint32(PROCESSENTRY32W_PARENT_OFFSET, true),
+          name: readEntryName(entryView),
+          cwd: stripTrailingSeparators(cwd),
+        });
       }
       entryView.setUint32(0, PROCESSENTRY32W_SIZE, true);
       more = a.kernel32.Process32NextW(snapshot, ptr(entry));

@@ -193,11 +193,14 @@ async function getDiffStats(
  * `file-tree.ts`'s own MAX_FILE_SIZE. Anything larger reports 0 (rendered as a
  * plain dot, same as a binary file) rather than being loaded.
  *
- * Load-bearing, not defensive: `getGitStatus` runs on a 10-second interval for
- * the life of every warm project (`agent-core.ts`), and these reads are fanned
- * out concurrently — so one uncapped multi-hundred-MB untracked file (a build
- * log, a dump, anything not gitignored) is a full read plus a full scan of it
- * every 10 seconds, forever, with every such file resident at once.
+ * Load-bearing, not defensive: `getGitStatus` runs on a backstop poll for the
+ * life of every warm project (`agent-core.ts`), and these reads are fanned out
+ * concurrently — so one uncapped multi-hundred-MB untracked file (a build log,
+ * a dump, anything not gitignored) is a full read plus a full scan of it, with
+ * every such file resident at once. [scanUntrackedAdditions] keeps an unchanged
+ * one from paying that again on the next pass; a file being APPENDED to — which
+ * is what a build log is — moves its stat on every pass and so pays it every
+ * time. This cap is the only thing bounding that case.
  */
 const MAX_UNTRACKED_STAT_BYTES = 1_048_576;
 
@@ -227,9 +230,65 @@ async function countAddedLines(cwd: string, relPath: string): Promise<number> {
   }
 }
 
+/** A counted untracked file, keyed by the stat the count was read from. */
+interface AddedLinesScan {
+  mtimeMs: number;
+  size: number;
+  lines: number;
+}
+
+/**
+ * Per-checkout memo of [countAddedLines] results, in the same shape and with
+ * the same rebuild-per-pass bounding as [unresolvedConflictScans].
+ *
+ * This is what `--untracked-files=all` actually costs: every untracked file is
+ * READ and byte-scanned on every refresh, so a tree with thousands of them
+ * fans thousands of concurrent reads out every poll tick. [MAX_UNTRACKED_STAT_BYTES]
+ * caps how big one read may be; this removes the repeat.
+ *
+ * Accepted staleness: a rewrite landing in the same mtime millisecond at the
+ * same byte size keeps the previous count until the file is written again.
+ * Cosmetic, self-correcting, and the same trade the conflict memo makes.
+ */
+const untrackedLineScans = new Map<string, Map<string, AddedLinesScan>>();
+
+/** Added-line counts for [paths], in order, reading only what has changed
+ *  since the last pass over this checkout. */
+async function scanUntrackedAdditions(
+  cwd: string,
+  paths: string[],
+): Promise<number[]> {
+  const prior = untrackedLineScans.get(cwd);
+  const next = new Map<string, AddedLinesScan>();
+
+  const counts = await Promise.all(
+    paths.map(async (relPath) => {
+      let mtimeMs: number;
+      let size: number;
+      try {
+        const info = await stat(join(cwd, relPath));
+        mtimeMs = info.mtimeMs;
+        size = info.size;
+      } catch {
+        return 0; // unreadable, and nothing to key a memo on
+      }
+      const seen = prior?.get(relPath);
+      const lines = seen !== undefined && seen.mtimeMs === mtimeMs && seen.size === size
+        ? seen.lines
+        : await countAddedLines(cwd, relPath);
+      next.set(relPath, { mtimeMs, size, lines });
+      return lines;
+    }),
+  );
+
+  if (next.size > 0) untrackedLineScans.set(cwd, next);
+  else untrackedLineScans.delete(cwd);
+  return counts;
+}
+
 /**
  * Cap on a conflicted file this module will read to look for markers. Same
- * shape of protection as [MAX_UNTRACKED_STAT_BYTES] and the same 10-second
+ * shape of protection as [MAX_UNTRACKED_STAT_BYTES] and the same polled
  * cadence behind it, but its own constant: this one bounds a scan of a file
  * git has already told us is mid-merge, which is a much smaller set.
  */
@@ -261,6 +320,16 @@ interface ConflictScan {
  * the project comes back.
  */
 const unresolvedConflictScans = new Map<string, Map<string, ConflictScan>>();
+
+/** Drop both per-checkout scan memos for [cwd]. Each is pruned only by a
+ *  LATER pass over the same checkout finding nothing left to remember, and a
+ *  managed worktree gets deleted instead of passed over again — so without
+ *  this its whole map, one entry per untracked path, stays resident for the
+ *  life of the bridge process. Called from the checkout teardown sweep. */
+export function forgetGitScanMemos(cwd: string): void {
+  untrackedLineScans.delete(cwd);
+  unresolvedConflictScans.delete(cwd);
+}
 
 /** How much of a file decides whether it is binary — git's own threshold for
  * the same call. */
@@ -301,7 +370,7 @@ async function hasConflictMarkers(absPath: string): Promise<boolean> {
  * a partial scan can never clear one.
  *
  * Callers pass only the two-sided kinds. Reading is memoized against
- * [unresolvedConflictScans] because this runs on `getGitStatus`'s 10-second
+ * [unresolvedConflictScans] because this runs on `getGitStatus`'s backstop
  * poll: a big merge is hundreds of conflicted files, and re-reading every one
  * of them on every pass would put exactly the kind of fan-out on the app's
  * git:status path that [getGitStatus]'s own comment describes as the source of
@@ -403,11 +472,17 @@ async function runGit(
  * a pathspec). The prefix probe rides alongside it rather than before it —
  * neither needs the other's answer.
  *
+ * `untracked` selects the `--untracked-files=` mode and defaults to the only
+ * one [getGitStatus] may use. `"no"` is for the on-demand callers that read a
+ * single bucket and never look at `untracked`; it changes which entries print,
+ * never the exit code, so the null-vs-clean distinction below is unaffected.
+ *
  * Null when git failed outright (not a repository, most often), which every
  * caller must keep distinct from a clean tree.
  */
 async function readPorcelain(
   cwd: string,
+  untracked: "all" | "no" = "all",
 ): Promise<ReturnType<typeof parsePorcelain> | null> {
   const [status, prefix] = await Promise.all([
     // `--untracked-files=all`: git's default collapses a wholly-untracked
@@ -415,7 +490,18 @@ async function readPorcelain(
     // it, so a brand-new folder's files never got their own status/diff/line
     // count — clicking one in the tree opened nothing, and staging the
     // collapsed entry was the only way to make the individual files appear.
-    runGit(cwd, ["status", "--porcelain=v1", "--untracked-files=all", "-z"]),
+    // That is why the POLLED path keeps `all` and must never be given a
+    // cheaper mode: one cache (`cachedGitFiles` in `agent-core.ts`) is shared
+    // by every trigger, so a mode that varied by trigger would make the app's
+    // rendered Git view flip shape depending on which one last won. The mode
+    // is not where the poll's cost lives anyway — measured, `all`/`normal`/`no`
+    // are a wash on a mostly-clean tree; [scanUntrackedAdditions] is.
+    runGit(cwd, ["status", "--porcelain=v1", `--untracked-files=${untracked}`, "-z"]),
+    // Deliberately NOT memoized, obvious though it looks: the prefix is only
+    // constant per (cwd, repo-root) pair, and a `git init` in a subdirectory
+    // moves the root under a live checkout. A stale prefix does not fail — it
+    // silently mis-scopes the ENTIRE file list in [parsePorcelain]. It also
+    // costs no wall time, running concurrently with the status walk above.
     runGit(cwd, ["rev-parse", "--show-prefix"]),
   ]);
   if (status.exitCode !== 0) return null;
@@ -472,9 +558,20 @@ export async function getGitStatus(cwd: string): Promise<GitFileEntry[]> {
   const scannable = conflictList
     .filter(([, kind]) => kind === "bothModified" || kind === "bothAdded")
     .map(([path]) => path);
+  // `git diff HEAD` is the SECOND full tree walk of a refresh, and `statsFor`
+  // below is read only for renames, staged and unstaged entries (conflicts
+  // hardcode 0/0, untracked come from [scanUntrackedAdditions]) — so with all
+  // four of those buckets empty its result is provably unused. Keyed on all
+  // four rather than on "untracked only": a staged rename with no worktree
+  // change still needs the stats, and skipping there renders every file 0/0
+  // with no error to notice.
+  const needsDiffStats = conflicts.size > 0 || renames.size > 0
+    || staged.size > 0 || unstaged.size > 0;
   const [diffStats, untrackedAdditions, resolvedConflicts] = await Promise.all([
-    getDiffStats(cwd),
-    Promise.all(untrackedList.map((path) => countAddedLines(cwd, path))),
+    needsDiffStats
+      ? getDiffStats(cwd)
+      : new Map<string, { additions: number; deletions: number }>(),
+    scanUntrackedAdditions(cwd, untrackedList),
     scanConflictResolution(cwd, scannable),
   ]);
   const statsFor = (path: string) =>
@@ -529,7 +626,9 @@ export async function gitStage(cwd: string, files: string[]): Promise<GitOpResul
  */
 export async function gitUnstage(cwd: string, files: string[]): Promise<GitOpResult> {
   if (files.length === 0) return { success: true };
-  const renames = (await readPorcelain(cwd))?.renames ?? new Map<string, string>();
+  // `-uno`: only `renames` is read here, so walking every untracked file is
+  // work this call can never look at.
+  const renames = (await readPorcelain(cwd, "no"))?.renames ?? new Map<string, string>();
   const targets = new Set(files);
   for (const f of files) {
     const oldPath = renames.get(f);
@@ -560,7 +659,8 @@ export async function gitCommit(
   // because the wording is git's and localized. Naming the paths is the part
   // a client can act on, so the check happens here rather than being parsed
   // back out of stderr.
-  const conflicts = [...((await readPorcelain(cwd))?.conflicts.keys() ?? [])];
+  // `-uno`: only `conflicts` is read here — an untracked file can never be one.
+  const conflicts = [...((await readPorcelain(cwd, "no"))?.conflicts.keys() ?? [])];
   if (conflicts.length > 0) {
     return { success: false, error: unresolvedConflictError(conflicts) };
   }
@@ -617,7 +717,11 @@ export async function gitDiscard(
   // record collapses to a plain "A" — confirmed empirically, not a
   // hypothetical. [readPorcelain] narrows to this project AFTER git has
   // paired, for that reason.
-  const porcelain = await readPorcelain(cwd);
+  //
+  // `-uno`: only `renames`, `staged` and the null-vs-clean distinction are read
+  // below. Untracked files reach `clean` by NAME, from the caller's list, so
+  // they never had to appear in this status.
+  const porcelain = await readPorcelain(cwd, "no");
   // `includeStaged` is derived ENTIRELY from this read, so an unreadable status
   // (a concurrent `index.lock` is enough) would leave `stagedPaths` empty, skip
   // the reset, and let `restore` copy the index straight back over the worktree

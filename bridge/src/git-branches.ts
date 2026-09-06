@@ -469,11 +469,20 @@ export async function runGitRemote(
  *  same-name-on-origin, which is what a first push would create. `tracked`
  *  reports which of the two it was, because a missing ref means "deleted" only
  *  when config claimed one — a `.` remote (tracking a LOCAL branch) is a
- *  fallback, not tracking. */
+ *  fallback, not tracking.
+ *
+ *  `hasTrackingConfig` answers a narrower question and is NOT interchangeable
+ *  with `tracked`: it reports whether `branch.<n>.remote` is set AT ALL, which
+ *  is the git-level precondition for `@{upstream}` resolving. A `.` remote
+ *  leaves the fallback arm with `tracked: false` while `@{upstream}` still
+ *  resolves, so anything gating an upstream read on `tracked` silently zeroes
+ *  the counts of a branch that tracks a local one. */
 export async function resolvePushTarget(
   projectPath: string,
   branch: string,
-): Promise<{ remote: string; remoteBranch: string; tracked: boolean } | null> {
+): Promise<
+  { remote: string; remoteBranch: string; tracked: boolean; hasTrackingConfig: boolean } | null
+> {
   const [remoteCfg, mergeCfg] = await Promise.all([
     runGitRemote(projectPath, ["config", "--get", `branch.${branch}.remote`]),
     runGitRemote(projectPath, ["config", "--get", `branch.${branch}.merge`]),
@@ -481,17 +490,24 @@ export async function resolvePushTarget(
   const remote = remoteCfg.stdout.trim();
   const merge = mergeCfg.stdout.trim();
 
+  const hasTrackingConfig = remote.length > 0;
+
   if (remote && remote !== ".") {
     // `merge` is a full ref (refs/heads/x); absent means push.default names it
     // after the local branch.
     const remoteBranch = merge.startsWith("refs/heads/") ? merge.slice("refs/heads/".length) : branch;
-    return { remote, remoteBranch, tracked: true };
+    return { remote, remoteBranch, tracked: true, hasTrackingConfig };
   }
 
   const remotes = await runGitRemote(projectPath, ["remote"]);
   const names = remotes.stdout.split(/\r?\n/).map((n) => n.trim()).filter(Boolean);
   if (names.length === 0) return null;
-  return { remote: names.includes("origin") ? "origin" : names[0]!, remoteBranch: branch, tracked: false };
+  return {
+    remote: names.includes("origin") ? "origin" : names[0]!,
+    remoteBranch: branch,
+    tracked: false,
+    hasTrackingConfig,
+  };
 }
 
 export async function checkBranchAgainstRemote(
