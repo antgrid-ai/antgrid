@@ -8,8 +8,32 @@ import '../../design/widgets/ab_dialog.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../models/handler_state.dart';
 
-/// Collects the user's answer to an ask, in their own words, and returns it —
-/// or null if they backed out.
+/// What the ask sheet came back with.
+///
+/// Three outcomes, not two: `null` from the sheet means the user backed out
+/// without deciding and Handler is told nothing, whereas [HandlerAskDecline] is
+/// itself a decision the bridge records and parks so the judge learns not to
+/// ask again. Collapsing the two would leave a standing ask with no exit but
+/// answering it — the row survives a submitted line by design, so a user who
+/// does not want to engage would be stuck with it until the work it named
+/// finished and it was promoted into a question they must then answer anyway.
+sealed class HandlerAskSheetResult {
+  const HandlerAskSheetResult();
+}
+
+/// The user answered, in their own words. [text] is exactly what they typed.
+class HandlerAskAnswer extends HandlerAskSheetResult {
+  const HandlerAskAnswer(this.text);
+  final String text;
+}
+
+/// The user chose not to answer this question.
+class HandlerAskDecline extends HandlerAskSheetResult {
+  const HandlerAskDecline();
+}
+
+/// Collects the user's answer to an ask, in their own words, or their refusal
+/// to answer it — or null if they backed out without doing either.
 ///
 /// Its own widget rather than a `nonBlocking` branch inside
 /// `showHandlerReplySheet`, and with no prefill parameter anywhere in its API.
@@ -23,11 +47,11 @@ import '../../models/handler_state.dart';
 /// not. The reply sheet's own prefill stays right where it is and stays
 /// correct: there the draft is what a blocking escalation is asking the user to
 /// approve.
-Future<String?> showHandlerAskSheet(
+Future<HandlerAskSheetResult?> showHandlerAskSheet(
   BuildContext context,
   HandlerEscalation escalation,
 ) {
-  return showAbAdaptiveSheet<String>(
+  return showAbAdaptiveSheet<HandlerAskSheetResult>(
     context,
     child: _HandlerAskForm(escalation: escalation),
   );
@@ -114,6 +138,15 @@ class _HandlerAskFormState extends State<_HandlerAskForm> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
+              // Distinct from closing the sheet, which decides nothing. This
+              // is the only exit from a standing ask that is not an answer,
+              // and it reaches the bridge's own decline path — which parks the
+              // refusal so the judge does not simply ask again.
+              AbButton(
+                label: "Don't answer",
+                onTap: () => Navigator.pop(context, const HandlerAskDecline()),
+              ),
+              const SizedBox(width: AbTokens.space8),
               AbButton(label: 'Cancel', onTap: () => Navigator.pop(context)),
               const SizedBox(width: AbTokens.space8),
               // Disabled while the field is blank: an answer of nothing retires
@@ -127,7 +160,10 @@ class _HandlerAskFormState extends State<_HandlerAskForm> {
                   variant: AbButtonVariant.primary,
                   onTap: value.text.trim().isEmpty
                       ? null
-                      : () => Navigator.pop(context, _controller.text),
+                      : () => Navigator.pop(
+                          context,
+                          HandlerAskAnswer(_controller.text),
+                        ),
                 ),
               ),
             ],

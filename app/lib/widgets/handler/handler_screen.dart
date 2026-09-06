@@ -14,6 +14,7 @@ import '../../design/widgets/ab_list_row.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_progress_rule.dart';
 import '../../design/widgets/ab_section_header.dart';
+import '../../design/widgets/ab_snack_bar.dart';
 import '../../design/widgets/ab_state_chip.dart';
 import '../../design/widgets/ab_tooltip.dart';
 import '../../models/handler_state.dart';
@@ -90,13 +91,30 @@ class HandlerScreen extends ConsumerWidget {
         // would prefill the judge's draft and send the result into the session
         // as a submitted line — which is what an ask exists not to do: the
         // agent is still working, and the answer belongs to Handler.
-        final text = await showHandlerAskSheet(context, e);
-        if (text == null) return;
+        final result = await showHandlerAskSheet(context, e);
+        if (result == null) return;
         // Re-resolved after the sheet for the reason spelled out below.
-        focusedServiceOrNull(
-          container,
-          (s) => s.handlerService,
-        )?.answerAskText(e, text);
+        final asked = focusedServiceOrNull(container, (s) => s.handlerService);
+        if (asked == null) return;
+        if (result is HandlerAskDecline) {
+          asked.dismiss(e);
+          return;
+        }
+        final sent = asked.answerAskText(e, (result as HandlerAskAnswer).text);
+        // The one arm where a refusal costs the user real work. The service
+        // refuses a row that stopped being an ask while the sheet was open —
+        // the overnight case exactly, where the agent finishes the work the
+        // question did not gate while the user is still typing. The sheet has
+        // already popped and the text lives nowhere else, so saying nothing
+        // here reads as an answer given. The tap arm needs none of this: the
+        // card declines to latch and the user is out one tap.
+        if (!sent && context.mounted) {
+          showAbSnackBar(
+            context,
+            'That question changed while you were answering — your answer was '
+            'not sent. Handler is waiting on it here.',
+          );
+        }
         return;
       }
       if (e.kind == 'resolve_in_session') {

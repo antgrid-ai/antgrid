@@ -20,18 +20,48 @@ const _ask = HandlerEscalation(
   nonBlocking: true,
 );
 
-Future<String?> _open(WidgetTester tester, HandlerEscalation e) async {
-  String? result;
+/// Opens the sheet and hands back a box holding whatever it eventually returns.
+///
+/// A box rather than a value: the future completes when the sheet pops, which is
+/// after this returns, and reading it before then reports every outcome as null.
+Future<List<HandlerAskSheetResult?>> _openBoxed(
+  WidgetTester tester,
+  HandlerEscalation e,
+) async {
+  final box = <HandlerAskSheetResult?>[];
   await tester.pumpWidget(
     MaterialApp(
       home: Scaffold(
         body: Builder(
           builder: (context) => Center(
             child: ElevatedButton(
-              onPressed: () async => result = await showHandlerAskSheet(
-                context,
-                e,
-              ),
+              onPressed: () async =>
+                  box.add(await showHandlerAskSheet(context, e)),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.tap(find.text('open'));
+  await tester.pumpAndSettle();
+  return box;
+}
+
+Future<HandlerAskSheetResult?> _open(
+  WidgetTester tester,
+  HandlerEscalation e,
+) async {
+  HandlerAskSheetResult? result;
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (context) => Center(
+            child: ElevatedButton(
+              onPressed: () async =>
+                  result = await showHandlerAskSheet(context, e),
               child: const Text('open'),
             ),
           ),
@@ -56,14 +86,17 @@ void main() {
     // the judge's own words, and the text in this field is what mints a
     // session-long authorization lift.
     expect(find.text('migrate now'), findsNothing);
-    expect(tester.widget<TextField>(find.byType(TextField)).controller?.text, '');
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller?.text,
+      '',
+    );
 
     debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets('Send answer returns what the user typed', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-    String? captured = 'sentinel';
+    Object? captured = 'sentinel';
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -94,7 +127,34 @@ void main() {
     await tester.pump();
     await tester.tap(find.text('Send answer'));
     await tester.pumpAndSettle();
-    expect(captured, 'note the gap');
+    expect((captured as HandlerAskAnswer).text, 'note the gap');
+
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('backing out of the sheet decides nothing', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    final box = await _openBoxed(tester, _ask);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    // Null, not a decline: the screen sends nothing at all on this arm, so a
+    // user who opened the question to read it leaves it standing.
+    expect(box, [null]);
+
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('declining is a decision, and needs no text', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    final box = await _openBoxed(tester, _ask);
+    // Live with the field empty, unlike Send answer beside it: refusing to
+    // answer is not an answer of nothing. This is the only exit from a standing
+    // ask that is not an answer — an ask survives a submitted line by design, so
+    // without it the row stands until the work it named finishes and it is
+    // promoted into a question the user must answer anyway.
+    await tester.tap(find.text("Don't answer"));
+    await tester.pumpAndSettle();
+    expect(box.single, isA<HandlerAskDecline>());
 
     debugDefaultTargetPlatformOverride = null;
   });
