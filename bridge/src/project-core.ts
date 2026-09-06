@@ -42,6 +42,15 @@ export interface ProjectCoreRemoteDeps {
 
 export interface ProjectCoreDeps extends BuildAgentCoreOptions {
   remote?: ProjectCoreRemoteDeps; // Required when mode === "remote".
+  /** This machine's relay device id, supplied by the host for cores of EVERY
+   *  mode. The session bus needs it on a local core too: the lead of a
+   *  multi-machine session is a desktop-opened project, so `mode === "local"`,
+   *  and it still has to stamp its own half of every address it sends. Distinct
+   *  from `identity.deviceId`, which for a local core is a fresh randomUUID that
+   *  addresses no machine any peer knows. Null when the host has no relay
+   *  identity yet, which is a machine with no bus address rather than a session
+   *  that joined nothing — see the coordinator's `addressable`. */
+  machineDeviceId?: () => string | null;
   /** Host hook that lets the local wizard promotion path bring the machine relay
    *  socket up from the app-supplied credentials and attach this core as a
    *  stream. Absent for a bare agent (enabling relay is then unsupported). */
@@ -397,9 +406,11 @@ export class ProjectCore {
       renderBriefInstruction: renderBrief,
       sendToOwner: (msg) => this.sendToOwner(msg),
       sendToAppSession: (peerId, msg) => this.sendToAppSession(peerId, msg),
-      // This machine's half of every session-bus address. Absent in local mode,
-      // where no frame can leave the machine to need one.
-      machineId: () => this.deps.remote?.machineDeviceId() ?? null,
+      // This machine's half of every session-bus address. The relay slot's id
+      // wins when there is one, but a local core falls back to the host's — the
+      // bus travels by carrier, not by relay, so needing an address and having a
+      // relay stream are independent.
+      machineId: () => this.deps.remote?.machineDeviceId() ?? this.deps.machineDeviceId?.() ?? null,
       // Only a desktop owner that declared itself a carrier can move a frame to
       // the machine it is addressed to (D7); anything else is an unreachable
       // peer, not a failed one.

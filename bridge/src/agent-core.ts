@@ -412,9 +412,10 @@ export interface BuildAgentCoreOptions {
    *  back to a machine it cannot reach. */
   sendToAppSession?: (peerId: string, msg: AbMessage) => boolean;
   /** This machine's relay device id: its half of every session-bus address.
-   *  Null in local mode, where no frame can leave the machine to need one, and a
-   *  session with no address is refused `NOT_MEMBER` rather than given a
-   *  synthesized one. */
+   *  Supplied for local cores too — a lead is a desktop-opened project and still
+   *  stamps its own address on every frame it hands its carrier. Null only when
+   *  the host has no relay identity at all, and a session with no address is
+   *  refused `AGENT_NOT_READY` rather than given a synthesized one. */
   machineId?: () => string | null;
   /** Whether this core's carrier is attached right now. A lead reads it to say
    *  whether a peer is reachable at all; absent means no carrier, which is the
@@ -875,8 +876,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   // A session this bridge may address on the bus. Membership is the gate: a
   // carrier naming a session no human ever joined to a bus gets NOT_MEMBER
-  // rather than a synthesized identity, and a machine with no relay device id
-  // (local mode) has no address at all.
+  // rather than a synthesized identity, and a machine with no relay device id at
+  // all has no address to stamp. The coordinator's `addressable` is what tells
+  // those two nulls apart for the caller.
   function sessionBusSelf(sessionId: string): SessionBusSelf | null {
     const machineId = opts.machineId?.() ?? null;
     if (!machineId) return null;
@@ -901,6 +903,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     abDir,
     projectId: project.id,
     self: sessionBusSelf,
+    addressable: () => (opts.machineId?.() ?? null) !== null,
     // The lead hands every frame to its own desktop app; a peer answers on the
     // session that carried the task in. Neither path is the MessageBus.
     send: (frame, ctx) => {
@@ -1202,9 +1205,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (parsed.success && parsed.data.armed) {
           const { terminalId, goal, backlog, judgeTool, judgeModel, personality } = parsed.data;
           handlerEngine.arm({ terminalId, goal, backlog, judgeTool, judgeModel, personality });
-          // The one moment a held brief can land: a peer session is created
-          // before its agent runs, and instruct() drops silently until the
-          // Handler for that session is armed.
+          // Arming is the moment a brief becomes a MANDATE rather than a
+          // prompt: instruct() drops silently until the Handler is armed, and a
+          // peer that arms after create should get the Handler's framing rather
+          // than the queued line it would otherwise have had.
           flushPendingBrief(terminalId);
         } else if (parsed.success) {
           handlerEngine.disarm(parsed.data.terminalId);
@@ -1713,9 +1717,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // already acknowledged, so a failure in the delivery below must not
           // author a second session:result for a requestId the app has answered
           // — a carrier reading that as a failed create retries and ends up with
-          // two peer sessions. The brief only reaches an armed Handler anyway,
-          // which a session whose agent has not started does not have, so this
-          // is usually a no-op that keeps the ordering honest when it is not.
+          // two peer sessions. Usually this is where the brief actually goes
+          // out: an added machine starts in terminal mode and arms no Handler,
+          // so the queued path below is the one that runs, and its line waits at
+          // the head of the queue until the agent this create just started is up
+          // to take it.
           if (sessionId) flushPendingBrief(sessionId);
         })();
         break;
@@ -2131,14 +2137,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     })),
   });
 
-  /** Deliver a peer session's held brief, if one is held AND its Handler is
-   *  armed to receive it. Called at the two moments either can become true; a
-   *  no-op every other time, and safe to call again after a crash because the
-   *  brief is cleared only once it has been handed over.
+  /** Deliver a peer session's held brief by whichever route it has: the Handler
+   *  instruction when one is armed, and the turn-boundary delivery queue when
+   *  none is — which is the common case, since a machine added to a session
+   *  starts its agent in terminal mode. Called at both moments a brief can
+   *  become deliverable, and safe to call again after a crash because the brief
+   *  is cleared only once it has been handed over.
    *
-   *  The Handler instruction only. The durable copy the scope block is rendered
-   *  from is written at create (`session:create`), because a peer whose Handler
-   *  never arms still receives tasks and still has a mandate.
+   *  The durable copy the scope block is rendered from is written at create
+   *  (`session:create`), because a peer whose Handler never arms still receives
+   *  tasks and still has a mandate.
    *
    *  Deliberately fire-and-forget past the instruct: nothing on the wire is
    *  waiting, and the create reply has already gone. */
@@ -2149,28 +2157,51 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (!brief) return;
     const lead = s.memberOfFor(sessionId);
     if (!lead) return;
-    // Held, not dropped, when either is missing: an unarmed Handler is the
-    // normal state between create and start, and a core with no renderer is a
-    // build whose delivery module was never wired — neither is a reason to
-    // discard the only instruction this peer was given.
-    if (!handlerEngine.isArmed(sessionId)) return;
+    // Held, not dropped, when there is no renderer: that is a build whose
+    // delivery module was never wired, and an unwrapped brief is a mandate with
+    // no provenance.
     const render = opts.renderBriefInstruction;
     if (!render) {
       log.warn("brief held for session %s: no delivery renderer wired", sessionId);
       return;
     }
-    try {
-      // `fallbackText` is the human's brief unwrapped. When extraction produces
-      // nothing — no judge-capable tool, or a rate-limited spawn — the Handler
-      // files the instruction as one raw item truncated to its first few hundred
-      // characters, which for a wrapped delivery is all preamble and no mandate.
-      // Authorization still reads the rendered text, so this widens nothing.
-      handlerEngine.instruct({ terminalId: sessionId, text: render({ lead, brief }), fallbackText: brief });
-    } catch (err) {
-      // Held rather than lost: the brief is still on disk, so the next arm
-      // retries it.
-      log.warn("could not deliver brief for session %s: %s", sessionId, err);
-      return;
+    // Rendered inside each branch, never before them: a wrapper built for a
+    // route that turns out not to exist is a brief thrown away, and the renderer
+    // is the expensive half of this function.
+    if (handlerEngine.isArmed(sessionId)) {
+      try {
+        // `fallbackText` is the human's brief unwrapped. When extraction produces
+        // nothing — no judge-capable tool, or a rate-limited spawn — the Handler
+        // files the instruction as one raw item truncated to its first few hundred
+        // characters, which for a wrapped delivery is all preamble and no mandate.
+        // Authorization still reads the rendered text, so this widens nothing.
+        handlerEngine.instruct({ terminalId: sessionId, text: render({ lead, brief }), fallbackText: brief });
+      } catch (err) {
+        // Held rather than lost: the brief is still on disk, so the next arm
+        // retries it.
+        log.warn("could not deliver brief for session %s: %s", sessionId, err);
+        return;
+      }
+    } else {
+      // No Handler will ever arm on the common path — a machine added to a
+      // session starts its agent in TERMINAL mode — so the queue, not the arm,
+      // is what actually delivers most briefs. Same turn-boundary guarantee and
+      // the same wrapped template; only the mandate framing an armed Handler
+      // adds is missing, and a peer with no Handler has nothing to hand it to.
+      const queue = opts.queueBusLine;
+      if (!queue) {
+        log.warn("brief held for session %s: no delivery queue wired", sessionId);
+        return;
+      }
+      // One id per session: a brief is written once at create and this runs at
+      // every moment it could become deliverable, so a re-entry must not queue a
+      // second copy of the same mandate.
+      //
+      // Handing it over clears it, so a Handler armed AFTER this point finds
+      // nothing pending. That is the intended trade: the agent has already been
+      // given the brief, and the durable copy the scope block renders from is
+      // still on disk for `antgrid_get_brief` and for the arm's own context.
+      queue({ id: `brief:${sessionId}`, sessionId, kind: "brief", text: render({ lead, brief }) });
     }
     // Strictly after: a crash here costs a repeated instruction with identical
     // text, which the peer can absorb. Clearing first costs the brief outright.

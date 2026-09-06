@@ -41,13 +41,19 @@ const lead = { machineId: "lead-machine", projectId: "lead-project", sessionId: 
 const peer = { machineId: "peer-machine", projectId: "peer-project", sessionId: "peer-session" };
 
 async function attached(
-  opts?: { queueBusLine?: (line: Omit<QueuedLine, "queuedAt">) => void },
+  opts?: {
+    queueBusLine?: (line: Omit<QueuedLine, "queuedAt">) => void;
+    renderBriefInstruction?: (d: { lead: unknown; brief: string }) => string;
+  },
 ): Promise<{ sent: AbMessage[]; bus: MessageBus }> {
   core = await buildAgentCore({
     folder: root,
     mode: "local",
     identity: { deviceId: "agent", deviceName: "agent", createdAt: new Date().toISOString() },
     ...(opts?.queueBusLine ? { queueBusLine: opts.queueBusLine } : {}),
+    ...(opts?.renderBriefInstruction
+      ? { renderBriefInstruction: opts.renderBriefInstruction as never }
+      : {}),
   });
   const bus = new MessageBus();
   const sent: AbMessage[] = [];
@@ -237,4 +243,64 @@ test("refuses a card whose fields outrun their bounds", async () => {
   const refused = await resultFor(sent, "r1");
   expect(refused.ok).toBe(false);
   expect(refused.error).toContain("Malformed member payload");
+}, 30_000);
+
+// The Handler is the brief's other route and it is the RARE one: an added
+// machine starts its agent in terminal mode, so nothing ever arms and the queue
+// is what has to carry the mandate. Before this was wired the brief sat on disk
+// forever while the dialog that collected it reported success.
+test("a peer's brief is queued for its agent when no Handler arms", async () => {
+  const queued: Omit<QueuedLine, "queuedAt">[] = [];
+  const { sent, bus } = await attached({
+    queueBusLine: (line) => queued.push(line),
+    renderBriefInstruction: ({ brief }) => `WRAPPED<${brief}>`,
+  });
+
+  bus.dispatchInbound(createMessage("session:create", {
+    requestId: "c1", name: "Peer", memberOf: lead, brief: "Own the ingest service.",
+  }), "control", "loopback");
+  const created = await resultFor(sent, "c1");
+  expect(created.ok).toBe(true);
+  const peerId = (created.session as SessionEntry).id;
+
+  const brief = queued.find((l) => l.kind === "brief");
+  expect(brief).toBeDefined();
+  expect(brief).toMatchObject({ id: `brief:${peerId}`, sessionId: peerId });
+  // Wrapped by the renderer, never the human's text raw: a brief injected
+  // unwrapped is a mandate with no provenance.
+  expect(brief!.text).toBe("WRAPPED<Own the ingest service.>");
+}, 30_000);
+
+// Handing the brief over is what clears it, so a second create-time flush (a
+// carrier retrying, a restart replaying) must not queue the same mandate twice.
+test("a queued brief is handed over once", async () => {
+  const queued: Omit<QueuedLine, "queuedAt">[] = [];
+  const { sent, bus } = await attached({
+    queueBusLine: (line) => queued.push(line),
+    renderBriefInstruction: ({ brief }) => `WRAPPED<${brief}>`,
+  });
+
+  bus.dispatchInbound(createMessage("session:create", {
+    requestId: "c1", name: "Peer", memberOf: lead, brief: "Own the ingest service.",
+  }), "control", "loopback");
+  const peerId = ((await resultFor(sent, "c1")).session as SessionEntry).id;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  expect(queued.filter((l) => l.kind === "brief")).toHaveLength(1);
+  expect(peerId).toBeTruthy();
+}, 30_000);
+
+// A build with no renderer holds the brief rather than queueing it raw, and a
+// held brief is still on disk for the next attempt.
+test("a brief is held, not queued unwrapped, when no renderer is wired", async () => {
+  const queued: Omit<QueuedLine, "queuedAt">[] = [];
+  const { sent, bus } = await attached({ queueBusLine: (line) => queued.push(line) });
+
+  bus.dispatchInbound(createMessage("session:create", {
+    requestId: "c1", name: "Peer", memberOf: lead, brief: "Own the ingest service.",
+  }), "control", "loopback");
+  expect((await resultFor(sent, "c1")).ok).toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  expect(queued.filter((l) => l.kind === "brief")).toHaveLength(0);
 }, 30_000);

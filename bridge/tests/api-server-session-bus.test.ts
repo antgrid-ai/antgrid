@@ -583,3 +583,39 @@ describe("runaway caps reach the tool caller", () => {
     }
   });
 });
+
+// A lead whose own machine has no bus address was refused NOT_MEMBER, which
+// flatly contradicts /role saying `lead:true` and sends the reader hunting for a
+// membership bug that isn't there. The two nulls are different answers and the
+// caller has to be able to tell them apart.
+describe("a self with no address is not a self with no membership", () => {
+  function coordinatorWith(addressable?: () => boolean): SessionBusCoordinator {
+    return new SessionBusCoordinator({
+      abDir: tempDir("antgrid-bus-selfnull-"),
+      projectId: "proj",
+      // Null for the same reason in both cases; only `addressable` says which.
+      self: () => null,
+      send: () => true,
+      ...(addressable ? { addressable } : {}),
+    });
+  }
+
+  const assign = (c: SessionBusCoordinator) =>
+    c.assign({ sessionId: LEAD_SESSION, peer: "p", instruction: "go" } as never) as {
+      code?: string;
+    };
+
+  test("an unaddressable machine is AGENT_NOT_READY", () => {
+    expect(assign(coordinatorWith(() => false)).code).toBe("AGENT_NOT_READY");
+  });
+
+  test("an addressable machine keeps NOT_MEMBER", () => {
+    expect(assign(coordinatorWith(() => true)).code).toBe("NOT_MEMBER");
+  });
+
+  // A core that never wires it — every test harness and any older build — must
+  // keep the answer it has always given.
+  test("an unwired addressable keeps NOT_MEMBER", () => {
+    expect(assign(coordinatorWith()).code).toBe("NOT_MEMBER");
+  });
+});

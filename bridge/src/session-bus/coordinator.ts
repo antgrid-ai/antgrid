@@ -115,6 +115,15 @@ export interface CoordinatorDeps {
   /** This bridge's address for one of its own sessions, or null when the session
    *  is not a bus member or the machine has no identity to be addressed by. */
   self: (sessionId: string) => SessionBusSelf | null;
+  /** Whether this machine has a bus address at all. Consulted ONLY when `self`
+   *  answers null, to tell the two reasons it can apart: a session that joined
+   *  nothing is `NOT_MEMBER`, while a machine with no relay identity is
+   *  `AGENT_NOT_READY` — the same split `/session` already makes. Without it a
+   *  lead whose `/role` says `lead:true` is refused "not a member", which reads
+   *  as a membership bug and sends the reader looking in the wrong place.
+   *  Absent means addressable, so a core that never wires it keeps today's
+   *  answer. */
+  addressable?: () => boolean;
   onEvent?: (event: SessionBusEvent) => void;
   now?: () => number;
   newId?: () => string;
@@ -279,7 +288,7 @@ export class SessionBusCoordinator {
    */
   assign(input: AssignInput): { ok: true; taskId: string; seq: number } | SessionBusRefusal {
     const self = this.deps.self(input.sessionId);
-    if (!self) return notMember();
+    if (!self) return this.noSelf();
 
     const now = this.now();
     const state = this.stateFor(input.sessionId);
@@ -336,7 +345,7 @@ export class SessionBusCoordinator {
    *  work continuing. */
   cancel(sessionId: string, taskId: string, reason: string): { ok: true; seq: number } | SessionBusRefusal {
     const self = this.deps.self(sessionId);
-    if (!self) return notMember();
+    if (!self) return this.noSelf();
     const s = this.stateFor(sessionId);
     const rec = taskFor(s.tasks, taskId);
     if (!rec) return unknownTask();
@@ -372,7 +381,7 @@ export class SessionBusCoordinator {
    */
   report(input: ReportInput, state: TaskState): { ok: true; seq: number } | SessionBusRefusal {
     const self = this.deps.self(input.sessionId);
-    if (!self) return notMember();
+    if (!self) return this.noSelf();
     const s = this.stateFor(input.sessionId);
     const rec = taskFor(s.tasks, input.taskId);
     if (!rec) return unknownTask();
@@ -426,7 +435,7 @@ export class SessionBusCoordinator {
    */
   message(input: MessageInput): { ok: true; sent: boolean; messageId: string } | SessionBusRefusal {
     const self = this.deps.self(input.sessionId);
-    if (!self) return notMember();
+    if (!self) return this.noSelf();
     const s = this.stateFor(input.sessionId);
     const rec = input.taskId === null ? null : taskFor(s.tasks, input.taskId);
     if (input.taskId !== null && !rec) return unknownTask();
@@ -485,7 +494,7 @@ export class SessionBusCoordinator {
     length: number;
   }): { ok: true; requestId: string; sent: boolean } | SessionBusRefusal {
     const self = this.deps.self(input.sessionId);
-    if (!self) return notMember();
+    if (!self) return this.noSelf();
     const requestId = this.newId();
     const frame = createMessage("session-bus:fetch", {
       from: self.key,
@@ -627,6 +636,14 @@ export class SessionBusCoordinator {
       }
     }
     return false;
+  }
+
+  /** Why `self` came back null, as a refusal the caller can act on. */
+  private noSelf(): SessionBusRefusal {
+    if (this.deps.addressable?.() === false) {
+      return refuse("AGENT_NOT_READY", "this machine has no relay identity, so it has no bus address");
+    }
+    return notMember();
   }
 
   private stamp(self: SessionBusSelf, draft: EnvelopeDraft): BusEnvelope {

@@ -171,6 +171,30 @@ describe("the session-bus tool table", () => {
     expect(await createBusRoleCache().get()).toEqual({ lead: false, peer: false });
   });
 
+  // The watcher that tells a client its tool list moved is the one caller whose
+  // whole job is noticing a change, so the cache must not answer it.
+  test("refresh re-reads inside the window the cache would have served", async () => {
+    let role = { lead: false, peer: false };
+    let asked = 0;
+    stub((path) => {
+      if (path !== "/session-bus/role") return new Response("no", { status: 404 });
+      asked += 1;
+      return Response.json({ lead: role.lead, peer: role.peer });
+    });
+    let clock = 1_000;
+    const cache = createBusRoleCache(() => clock);
+    expect(await cache.get()).toEqual({ lead: false, peer: false });
+    // The machine is added here — inside the window a plain get() would serve
+    // from cache, which is exactly when a lead needs to be told.
+    role = { lead: true, peer: false };
+    expect(await cache.refresh()).toEqual({ lead: true, peer: false });
+    expect(asked).toBe(2);
+    // And the refreshed answer becomes the cached one, so the list the client
+    // asks for next matches the notification it was just sent.
+    expect(await cache.get()).toEqual({ lead: true, peer: false });
+    expect(asked).toBe(2);
+  });
+
   test("a resolved role is reused inside its window and re-read after it", async () => {
     let asked = 0;
     stub((path) => {

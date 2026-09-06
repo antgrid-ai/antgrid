@@ -715,6 +715,11 @@ test("a brief is wrapped and instructed once, when the Handler arms", async () =
 
   // Nothing is delivered before the Handler exists: instruct() is a silent
   // no-op unarmed, so a wrapper built here would be a brief thrown away.
+  //
+  // This core wires NO delivery queue, which is what keeps the brief pending
+  // until the arm below. A production core always has one and takes the queued
+  // route instead — covered in agent-core-session-membership.test.ts — so what
+  // this asserts is the instruct path itself, not the common one.
   expect(delivered).toEqual([]);
   expect(persistedSessions()).toContain("Own the backend.");
 

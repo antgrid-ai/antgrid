@@ -1619,6 +1619,11 @@ export class HostServer {
       // opening the same project locally would otherwise route around the gate,
       // and local is the desktop default.
       tierClaim: () => this.tierClaimNow(),
+      // Read live and given to every mode: the control plane can come up (or a
+      // wizard can credential this host) long after a local core warmed, and the
+      // session bus asks for this the moment a machine is added to one of its
+      // sessions — which is a local core's business as often as a remote one's.
+      machineDeviceId: () => this.controlPlaneRegistrationId,
       ensureMachineRelay: (msg) => this.ensureMachineRelay(msg),
       ...(mode === "remote" ? { remote } : {}),
     });

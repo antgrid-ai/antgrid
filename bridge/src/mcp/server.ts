@@ -343,12 +343,12 @@ export const ROLE_CACHE_MS = 5_000;
  * several servers for one invocation, and a cache outliving the server that made
  * it would answer for a terminal that is no longer the one asking.
  */
-export function createBusRoleCache(now: () => number = Date.now): { get(): Promise<BusRoleView> } {
+export function createBusRoleCache(
+  now: () => number = Date.now,
+): { get(): Promise<BusRoleView>; refresh(): Promise<BusRoleView> } {
   let cached: { at: number; view: BusRoleView } | null = null;
-  return {
-    async get() {
+  const resolve = async (): Promise<BusRoleView> => {
       const at = now();
-      if (cached && at - cached.at < ROLE_CACHE_MS) return cached.view;
       const result = await api("GET", "/session-bus/role");
       // An unreachable bridge, a core with no bus, and a terminal in no session
       // are one answer here: no session tools. The failure is cached like a
@@ -360,9 +360,24 @@ export function createBusRoleCache(now: () => number = Date.now): { get(): Promi
       const view = { lead: data?.lead === true, peer: data?.peer === true };
       cached = { at, view };
       return view;
+  };
+  return {
+    async get() {
+      const at = now();
+      if (cached && at - cached.at < ROLE_CACHE_MS) return cached.view;
+      return resolve();
     },
+    // Bypasses the TTL on purpose: the watcher below is the one caller whose
+    // whole job is to notice a change, and a cached answer is the one thing it
+    // must never be given.
+    refresh: resolve,
   };
 }
+
+/** How often a connected server re-asks for its role so it can tell the client
+ *  the tool list moved. A machine is added by a human pressing a button, so this
+ *  is the delay between that press and the lead being able to act on it. */
+export const ROLE_WATCH_MS = 5_000;
 
 /** A machine can lead one session and work another, so a role that is both gets
  *  both tables. */
@@ -712,16 +727,63 @@ const BASE_TOOLS: McpTool[] = [
 export function createAntgridMcpServer(): Server {
   const server = new Server(
     { name: "antgrid", version: "0.1.0" },
-    { capabilities: { tools: {} } },
+    // `listChanged` is not decoration: a client that was not told the list can
+    // move has no reason to ever re-list, and this server's list DOES move — a
+    // session becomes a lead the moment a human adds a machine to it, long after
+    // the client listed tools at connect. Without this the lead is handed a join
+    // notice telling it to call tools it was never offered.
+    { capabilities: { tools: { listChanged: true } } },
   );
 
   // Per server, so a second server in the same invocation resolves its own role
   // rather than inheriting one taken for a terminal that is no longer asking.
   const busRole = createBusRoleCache();
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [...BASE_TOOLS, ...sessionBusTools(await busRole.get())],
-  }));
+  let known: BusRoleView | null = null;
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    // Remembered as "what the client has been told", which is what the watcher
+    // below compares against — and taken from here rather than from a probe of
+    // its own, so resolving the role costs exactly the requests listing already
+    // made.
+    const view = await busRole.get();
+    known = view;
+    return { tools: [...BASE_TOOLS, ...sessionBusTools(view)] };
+  });
+
+  // Watch the role for as long as a client is attached. Polled rather than
+  // pushed because this process reaches the bridge only over the loopback API;
+  // one GET every few seconds against a port on the same machine is cheaper than
+  // the socket a push would need, and the timer is unref'd so it can never be
+  // what keeps an agent's MCP process alive.
+  let watch: ReturnType<typeof setInterval> | null = null;
+  server.oninitialized = () => {
+    watch = setInterval(() => {
+      void busRole.refresh().then((view) => {
+        const told = known;
+        known = view;
+        // A client that never listed is told only when there is something new
+        // to list; one that did is told whenever its list would now differ.
+        const stale = told === null
+          ? view.lead || view.peer
+          : view.lead !== told.lead || view.peer !== told.peer;
+        if (!stale) return;
+        // Fire-and-forget: a notification the transport could not take is a
+        // client that is going away anyway, and throwing here would take the
+        // timer with it.
+        void server.sendToolListChanged().catch(() => {});
+      }).catch(() => {});
+    }, ROLE_WATCH_MS);
+    watch.unref?.();
+  };
+  const stopWatch = () => {
+    if (watch) clearInterval(watch);
+    watch = null;
+  };
+  const priorClose = server.onclose;
+  server.onclose = () => {
+    stopWatch();
+    priorClose?.();
+  };
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
