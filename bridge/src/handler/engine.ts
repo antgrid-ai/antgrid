@@ -194,6 +194,24 @@ const MAX_ANCHOR_REFUSALS = 3;
 const MAX_ROW_SAMPLE_ENTRIES = 8;
 const MAX_ROW_SAMPLE_CHARS = 200;
 
+/**
+ * What "still running" means for an ask, read by BOTH the raise and the reconcile.
+ *
+ * `blocked` counts as NOT running. TERMINAL is {done, skipped, failed}, so a blocked
+ * item is formally still open — but it is work that has not moved, and the whole
+ * claim the still-working list makes is one the user can check rather than one the
+ * row merely asserts. The app's footer draws the same line.
+ *
+ * One function because the two sides disagreeing is silent and user-visible: a raise
+ * that counted a blocked item as live would mint the row, fire "Handler has a
+ * question", and be promoted away by the reconcile on the very next event — leaving
+ * a push, a card whose own footer contradicts it, and a feed row about work that
+ * never started.
+ */
+function isRunningItem(status: ItemStatus): boolean {
+  return !isTerminalStatus(status) && status !== "blocked";
+}
+
 // The item outcomes the activity feed carries a kind for. A skip is as
 // consequential as a completion, so they stay distinguishable without parsing
 // the reason text.
@@ -694,6 +712,15 @@ interface ArmedSession {
   // retires the row, so an answer lost to a restart leaves the user with no
   // surface that could tell them it went missing.
   askAnswer?: NonNullable<HandlerSessionRecord["askAnswer"]>;
+  // Bumped by every mutation that invalidates a decide prompt already in
+  // flight. The answer transports run straight off agent-core's switch rather
+  // than on `chains`, so they mutate this session while handleEventInner is
+  // suspended in its judge call; a pass that returns has to be able to tell
+  // whether the state it reasoned over is still the state it is writing back to.
+  // Deliberately not persisted: a generation only has meaning within one
+  // process's in-flight passes, and a restored one would compare against passes
+  // that no longer exist.
+  promptGen?: number;
   // An injected reply is outstanding, so the agent is working and its own
   // turn_end is already in flight. maybeRelayNow reads it to decide whether an
   // answer waits for that event or re-enters immediately: with a reply
@@ -1173,17 +1200,22 @@ export class HandlerEngine {
       // UNMOVED, and this ordering is the whole security property: the lift is
       // taken on the raw payload, before extraction, at the single feed point.
       const granted = authorizeInstruction(s.auth, text, this.deps.projectPath(p.terminalId));
-      // describeGrant reports g.destinations and NOT g.hosts, on purpose (see its
-      // comment) — the harvest reads any dotted token as a host, so echoing the
-      // superset back would call every source file a network permission. That is
-      // right for an instruction the user composed unprompted; it is wrong here,
-      // because Handler's own question is what elicited this sentence. At most one
-      // row per answered ask, so naming the hosts costs nothing and closes the
-      // only session-long grant the user could never see.
-      const described = describeGrant(granted) ?? (granted.hosts.length > 0
-        ? { reason: countPhrase(granted.hosts.length, ["host", "hosts"]), detail: rowSample(granted.hosts) }
-        : null);
+      const described = describeGrant(granted);
       if (described) this.record(p.terminalId, "instruction_authorized", described.reason, described.detail);
+      // Its OWN row, never describeGrant's fallback. describeGrant reports
+      // g.destinations and NOT g.hosts, on purpose (see its comment) — the harvest
+      // reads any dotted token as a host, so echoing the superset back would call
+      // every source file a network permission. That is right for an instruction the
+      // user composed unprompted; it is wrong here, because Handler's own question is
+      // what elicited this sentence. Written as a fallback it fired only when the
+      // answer granted nothing else at all, so "fetch it from mirror.example.net and
+      // unpack into ./vendor" reported "1 path" and the egress permission stayed
+      // exactly as invisible as before. At most one ask is answered at a time, so a
+      // second row costs nothing and closes the grant the user could never see.
+      if (granted.hosts.length > 0) {
+        this.record(p.terminalId, "instruction_authorized",
+          countPhrase(granted.hosts.length, ["host", "hosts"]), rowSample(granted.hosts));
+      }
       // NO queueExtraction. The extractor is told to split a sentence into work
       // (extract.ts) and has no third result arm, so an answer routed through it
       // becomes a backlog item the judge DRIVES at the agent — where the judge is
@@ -1285,6 +1317,13 @@ export class HandlerEngine {
     // prompt option moves nothing in it — and the next pass would return at the
     // unmoved-context check having judged nothing at all.
     s.lastJudgedContextHash = undefined;
+    // Paired with the clear above and load-bearing for the same reason. A pass
+    // already awaiting its verdict re-banks the hash it computed when it returns,
+    // which would undo that clear and leave the re-entry maybeRelayNow is about to
+    // queue returning at the unmoved-context check — with nothing else coming, on a
+    // `continue`, to ever carry this answer. The bump is what tells that pass its
+    // prompt went stale mid-flight.
+    s.promptGen = (s.promptGen ?? 0) + 1;
     // A park is not over because a question was answered — the dismissEscalation
     // precedent: the timer is still armed and parkKind/parkedUntil still describe
     // the wait.
@@ -2039,6 +2078,12 @@ export class HandlerEngine {
     // "timed out" versus "never ran" is the one distinction that would let the
     // budget in judge.ts be set from data rather than guessed at.
     let judgeTimedOut = false;
+    // What this pass actually put in front of its judge, captured so the write-back
+    // below can tell it apart from anything parked while the judge was thinking.
+    // The reference itself is the token: parkAskAnswer always assigns a fresh
+    // object, so identity answers "is the answer still the one I showed?" exactly.
+    let judgedAnswer: ArmedSession["askAnswer"];
+    const promptGen = s.promptGen ?? 0;
     try {
       const tool = this.deps.tool(evt.terminalId);
       catalog = this.deps.adapter.commandCatalog(evt.terminalId);
@@ -2075,6 +2120,9 @@ export class HandlerEngine {
         const r = checkReplyShape(replyShape(d), catalog);
         return r?.retryable ? r.reason : null;
       };
+      // Read once, here, and never through `s` again below: everything after the
+      // await has to compare against what the prompt was built from.
+      judgedAnswer = s.askAnswer;
       const runDecisionFn = this.deps.runDecisionFn ?? defaultRunDecision;
       decision = await runDecisionFn({
         tool: s.judgeTool ?? tool, model: s.judgeModel, goal: s.goal,
@@ -2093,17 +2141,17 @@ export class HandlerEngine {
         replyBudget: this.guard.remaining(evt.terminalId),
         // Derived per pass and never cached on the session: each section asserts
         // something the very next event can end — reconcileAsks retires a standing
-        // ask above, and the handle branch below drops a parked answer the moment
-        // it relays one. This is the discipline evidenceRejections earns by pruning.
+        // ask above, and the write-back below drops a parked answer the moment this
+        // pass has read it. This is the discipline evidenceRejections earns by pruning.
         openAsks: s.escalations.filter((e) => e.nonBlocking).map((e) => e.question),
         askRejections: s.askRejections,
         // Projected rather than passed whole: `escalationId` is how the answer was
         // routed here and `at` is bookkeeping, and neither is something the judge
         // can act on.
-        askAnswer: s.askAnswer && {
-          question: s.askAnswer.question,
-          answer: s.askAnswer.answer,
-          tapped: s.askAnswer.tapped,
+        askAnswer: judgedAnswer && {
+          question: judgedAnswer.question,
+          answer: judgedAnswer.answer,
+          tapped: judgedAnswer.tapped,
         },
         // The SUPERVISED agent, not the judge: `tool:` above is `s.judgeTool ?? tool`,
         // and a per-session judge pick can name a different CLI entirely.
@@ -2127,7 +2175,22 @@ export class HandlerEngine {
     // A judge that answered proves the provider is serving us again.
     s.transientFailures = 0;
     s.limitParks = 0;
-    s.lastJudgedContextHash = judgedHash;
+    // Banked only if nothing invalidated this prompt while it was in flight.
+    // parkAskAnswer clears the hash precisely so the re-entry it queues judges
+    // rather than returning early; re-banking unconditionally would undo that and
+    // strand the answer behind ANSWER QUEUED with no producer left to release it.
+    if ((s.promptGen ?? 0) === promptGen) s.lastJudgedContextHash = judgedHash;
+
+    // The answer is addressed to the JUDGE, not the agent, so a judge that reached
+    // a verdict has consumed it — on `continue` too, which decision.ts explicitly
+    // tells it to return when the answer changes nothing. Clearing only on `handle`
+    // left exactly that case re-injecting the same answer into every later prompt
+    // and pinning ANSWER QUEUED for the life of the session.
+    //
+    // Identity-checked, and that is the whole point: an answer parked while this
+    // pass was suspended in its judge call was never in this prompt, and clearing
+    // it here would destroy it unseen while every surface reported it delivered.
+    if (judgedAnswer !== undefined && s.askAnswer === judgedAnswer) s.askAnswer = undefined;
 
     // A rejection must not strand state in "handling" — reset before rethrowing so
     // the next event isn't ignored and the app's status pill reflects reality.
@@ -2221,12 +2284,6 @@ export class HandlerEngine {
         // ahead of a reply that then failed to go out would strand every answer on
         // this session until some other event happened to arrive.
         s.awaitingAgent = true;
-        // The first `handle` after an answer is where that answer stops being
-        // unrelayed: the judge held it in this pass's prompt and the reply it
-        // composed has just reached the agent. Deliberately not cleared on
-        // `continue` or `escalate` — a pass that relayed nothing leaves an answer
-        // that is still true and still owed to the agent.
-        s.askAnswer = undefined;
         this.guard.recordAutoReply(evt.terminalId, probe);
         // Both recorded after the inject and before the handle row, so the feed reads
         // as "what was saved, what was flagged, then what was sent". Auditability is
@@ -2651,7 +2708,7 @@ export class HandlerEngine {
     // The only checkable half of "non-blocking". renderBacklog prints every id, so
     // the judge holds them; an ask that names none still open has described an
     // escalation, whatever it claimed.
-    const live = new Set(s.backlog.filter((i) => !isTerminalStatus(i.status)).map((i) => i.id));
+    const live = new Set(s.backlog.filter((i) => isRunningItem(i.status)).map((i) => i.id));
     if (!ask.unblocked.some((id) => live.has(id))) {
       return this.noteAskRejected(terminalId, s, ask, "named no backlog item that is still open");
     }
@@ -2762,13 +2819,9 @@ export class HandlerEngine {
     for (const e of s.escalations) {
       if (!e.nonBlocking) continue;
       const before = e.unblocked ?? [];
-      // `blocked` counts as NOT running. TERMINAL is {done, skipped, failed}, so a
-      // blocked item is formally still open — but it is work that has not moved,
-      // and the whole claim the still-working list makes is one the user can check
-      // rather than one the row merely asserts.
       const still = before.filter((id) => {
         const item = s.backlog.find((i) => i.id === id);
-        return item !== undefined && !isTerminalStatus(item.status) && item.status !== "blocked";
+        return item !== undefined && isRunningItem(item.status);
       });
       if (still.length > 0) {
         if (still.length !== before.length) {

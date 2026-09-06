@@ -5802,22 +5802,92 @@ describe("the ask sections in the decide prompt", () => {
       .toEqual({ question: QUESTION, answer: "Go straight at production", tapped: true });
   });
 
-  it("keeps a parked answer in the prompt until a handle relays it", async () => {
+  it("hands a parked answer to exactly one judge pass, whatever it decides", async () => {
     const { engine, seen } = withStandingAsk(queued([
       decide({}),
       decide({ decision: "handle", reply: "the user picked production" }),
-      decide({}),
     ]));
     engine.arm({ terminalId: "t1" });
     engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt2" });
     await until(() => seen.length > 0);
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
-    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
-    // A `continue` relayed nothing, so the answer is still true and still owed.
-    // The pass that DOES relay reads it in its own prompt — that is what it
-    // composes from — and the pass after it is the first that must not.
+    // The answer is addressed to the JUDGE, not the agent, so the pass that READ
+    // it has consumed it — `continue` included, which decision.ts explicitly tells
+    // the judge to return when the answer changes nothing. Holding it for a relay
+    // that a `continue` says is not owed re-injects the same answer into every
+    // later prompt and pins ANSWER QUEUED for the life of the session.
     expect(seen.map((o) => o.askAnswer?.answer))
-      .toEqual(["Go straight at production", "Go straight at production", undefined]);
+      .toEqual(["Go straight at production", undefined]);
+  });
+
+  // An answer parked while a pass is suspended in its judge call was never in that
+  // pass's prompt. Both cases below are the ordinary one — a user taps shortly
+  // after the agent's turn ends — and the transports run straight off agent-core's
+  // switch rather than on the engine's per-terminal chain, so nothing serialises
+  // them behind the pass. A compromised agent widens the window at will by keeping
+  // a judge call in flight, which is why neither may depend on losing the race.
+  const racing = (verdict: HandlerDecision) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const seen: (string | undefined)[] = [];
+    let pass = 0;
+    const h = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1")], escalations: [standing()] }),
+      runDecisionFn: async (o: AskOpts) => {
+        seen.push(o.askAnswer?.answer);
+        // Only the first pass waits: it is the one the answer has to arrive behind.
+        if (pass++ === 0) await gate;
+        return pass === 1 ? verdict : decide({ decision: "handle", reply: "relayed" });
+      },
+    });
+    return { ...h, seen, release: () => release() };
+  };
+
+  it("keeps an answer parked when the in-flight pass relays without it", async () => {
+    const { engine, seen, release } = racing(decide({ decision: "handle", reply: "carry on" }));
+    engine.arm({ terminalId: "t1" });
+    const inFlight = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await until(() => seen.length > 0);
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt2" });
+    release();
+    await inFlight;
+    await until(() => seen.length > 1);
+    // Clearing on `handle` unconditionally destroyed this answer unseen, while the
+    // row was already retired and every surface reported it delivered.
+    expect(seen[0]).toBeUndefined();
+    expect(seen[1]).toBe("Go straight at production");
+  });
+
+  it("still delivers an answer parked under a pass that relays nothing", async () => {
+    const { engine, seen, release } = racing(decide({}));
+    engine.arm({ terminalId: "t1" });
+    const inFlight = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await until(() => seen.length > 0);
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt2" });
+    release();
+    await inFlight;
+    // The strand: a `continue` injects nothing, so no agent event is coming and the
+    // re-entry parkAskAnswer queued is the only producer left. Re-banking the hash
+    // this pass computed would undo the clear that re-entry depends on and leave the
+    // answer behind ANSWER QUEUED for good.
+    await until(() => seen.length > 1);
+    expect(seen[1]).toBe("Go straight at production");
+  });
+
+  it("refuses an ask over work that is only blocked", async () => {
+    const { engine, seen } = watching(queued([
+      decide({ decision: "handle", reply: "carry on", ask: ASK }),
+      decide({ decision: "handle", reply: "again" }),
+    ]), { loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1", { status: "blocked" })] }) });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // `blocked` is formally non-terminal, so a raise reading only isTerminalStatus
+    // accepted this — minting the row, firing "Handler has a question", and having
+    // reconcileAsks promote it away on the very next event. The two sides read one
+    // predicate now, so the refusal happens before any of that is user-visible.
+    expect(seen[1]!.openAsks).toEqual([]);
+    expect(seen[1]!.askRejections![0]).toContain("named no backlog item that is still open");
   });
 
   it("carries a refused question's reason forward, and a raised one clears it", async () => {
