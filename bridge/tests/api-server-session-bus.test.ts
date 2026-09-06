@@ -65,6 +65,10 @@ interface Machine {
   port: number;
   stop(): void;
   outbound: AbMessage[];
+  /** The routing decision behind each frame this machine tried to send. The
+   *  frame itself does not carry it — `role` chooses between the carrier and the
+   *  loopback owner, which is a difference only the sender can see. */
+  routes: { contextId: string; role: string }[];
 }
 
 function membershipOf(terminalId: string): SessionMembership | null {
@@ -86,8 +90,12 @@ function machine(opts: {
   projectId: string;
   sessionIds: string[];
   carrierPresent?: boolean;
+  /** False makes every send fail, which is what a machine with no carrier route
+   *  looks like from inside the coordinator. */
+  deliverable?: boolean;
 }): Machine {
   const outbound: AbMessage[] = [];
+  const routes: { contextId: string; role: string }[] = [];
   const coordinator = new SessionBusCoordinator({
     abDir: opts.abDir,
     projectId: opts.projectId,
@@ -98,7 +106,9 @@ function machine(opts: {
           ref: { machineId: opts.machineId, projectId: opts.projectId, sessionId },
         }
         : null,
-    send: (frame) => {
+    send: (frame, ctx) => {
+      routes.push({ contextId: ctx.contextId, role: ctx.role });
+      if (opts.deliverable === false) return false;
       outbound.push(frame);
       return true;
     },
@@ -124,6 +134,7 @@ function machine(opts: {
     coordinator,
     port: server.port,
     outbound,
+    routes,
     stop() {
       coordinator.stop();
       server.stop();
@@ -617,5 +628,99 @@ describe("a self with no address is not a self with no membership", () => {
   // keep the answer it has always given.
   test("an unwired addressable keeps NOT_MEMBER", () => {
     expect(assign(coordinatorWith()).code).toBe("NOT_MEMBER");
+  });
+});
+
+// The route a frame takes is chosen from the sender's ROLE in the context, and
+// for an unsequenced note there is no task record to read it off. Getting that
+// default wrong is silent in both directions: a misrouted finding is accepted by
+// whatever it reaches and reported sent.
+describe("the role behind a taskless send", () => {
+  test("a peer's finding before any task is routed as a peer", async () => {
+    const peer = machine({
+      abDir: tempDir("bus-role-peer-"),
+      machineId: "m2",
+      projectId: "p2",
+      sessionIds: [PEER_SESSION],
+    });
+    try {
+      const sent = await post(peer, "findings", PEER_SESSION, {
+        summary: "the codec is little-endian",
+        text: "checked against the fixtures",
+      });
+      expect(sent.status).toBe(200);
+      // The lead's session id, as a peer's context always is — and "peer", which
+      // is what sends it to the carrier rather than to this machine's own app.
+      expect(peer.routes).toEqual([{ contextId: LEAD_SESSION, role: "peer" }]);
+    } finally {
+      peer.stop();
+    }
+  });
+
+  test("a lead's own context is still led", async () => {
+    const lead = machine({
+      abDir: tempDir("bus-role-lead-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [LEAD_SESSION],
+    });
+    try {
+      await post(lead, "tasks", LEAD_SESSION, {
+        peer: PEER_SESSION,
+        summary: "wire the codec",
+        instruction: "do the thing",
+      });
+      expect(lead.routes).toEqual([{ contextId: LEAD_SESSION, role: "lead" }]);
+    } finally {
+      lead.stop();
+    }
+  });
+});
+
+// The task is created either way — the outbox is what makes the send eventual —
+// but a lead told only "assigned" cannot tell work the peer is already reading
+// from work still sitting in the outbox because nothing can reach that machine.
+describe("an assignment says whether it left", () => {
+  test("a frame the carrier took is reported delivered", async () => {
+    const lead = machine({
+      abDir: tempDir("bus-deliver-ok-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [LEAD_SESSION],
+    });
+    try {
+      const assigned = await post(lead, "tasks", LEAD_SESSION, {
+        peer: PEER_SESSION,
+        summary: "wire the codec",
+        instruction: "do the thing",
+      });
+      expect(assigned.body).toMatchObject({ ok: true, delivered: true });
+    } finally {
+      lead.stop();
+    }
+  });
+
+  test("a frame that never left is reported undelivered, with the task still made", async () => {
+    const lead = machine({
+      abDir: tempDir("bus-deliver-held-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [LEAD_SESSION],
+      deliverable: false,
+    });
+    try {
+      const assigned = await post(lead, "tasks", LEAD_SESSION, {
+        peer: PEER_SESSION,
+        summary: "wire the codec",
+        instruction: "do the thing",
+      });
+      expect(assigned.body).toMatchObject({ ok: true, delivered: false });
+      expect(typeof assigned.body.taskId).toBe("string");
+      // Still listed, because the outbox will carry it when a carrier appears.
+      const tasks = await get(lead, "tasks", LEAD_SESSION);
+      expect(tasks.body.tasks).toHaveLength(1);
+    } finally {
+      lead.stop();
+    }
   });
 });

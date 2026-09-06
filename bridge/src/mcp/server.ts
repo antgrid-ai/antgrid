@@ -318,7 +318,7 @@ const SHARED_TOOLS: McpTool[] = [
   },
   {
     name: "antgrid_session_status",
-    description: "Where this session stands in its multi-machine session: its role, its members, its open tasks, and how much of its task budget is left.",
+    description: "Where this session stands in its multi-machine session: its role, the lead it answers to (with that machine's OS and repository) or the members it leads, its open tasks, and how much of its task budget is left.",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
 ];
@@ -451,24 +451,54 @@ function artifactLine(a: any): string {
   return `- ${a.artifactId} ${a.name} (${a.mediaType}, ${a.bytes} bytes): ${a.summary}`;
 }
 
-/** One peer, plus whatever its own bridge observed about it (spec 3.3).
+/** A member's Capability Card (spec 3.3) as two optional lines.
  *
- *  The card's two lines are indented under the peer rather than appended to it:
- *  a machine is picked by reading its OS and its repo against the work in hand,
- *  and a single line carrying six values reads as one identifier. A field the
- *  peer's bridge could not answer prints nothing at all — a blank here would
- *  invite the lead to ask about an absence the card never claimed. */
+ *  Indented under the row it belongs to rather than appended to it: a machine is
+ *  judged by reading its OS and its repo against the work in hand, and a single
+ *  line carrying six values reads as one identifier. A field the observing
+ *  bridge could not answer prints nothing at all — a blank invites the reader to
+ *  ask about an absence the card never claimed.
+ *
+ *  Shared by the peer rows and the lead row, because both sides of a membership
+ *  carry the same shape and a peer reading who it answers to is owed the same
+ *  OS/repo the lead reads about it. */
+function memberCardLines(card: any, indent: string): string[] {
+  const out: string[] = [];
+  const os = [card?.os?.name, card?.os?.version, card?.os?.arch].filter(Boolean);
+  if (os.length > 0) out.push(`${indent}os: ${os.join(", ")}`);
+  const repo = [card?.repo?.label, card?.repo?.remote, card?.repo?.branch].filter(Boolean);
+  if (repo.length > 0) out.push(`${indent}repo: ${repo.join(", ")}`);
+  return out;
+}
+
+/** One peer, plus whatever its own bridge observed about it. */
 function peerLines(p: any): string[] {
   const unreachable = p.reachable ? "" : " (cannot be reached from here right now)";
-  const out = [
+  return [
     `- ${p.sessionName ?? p.sessionId} [${p.state}]${unreachable}`
     + ` id=${p.sessionId} machine=${p.machineLabel ?? p.machineId}`,
+    ...memberCardLines(p.card, "  "),
   ];
-  const os = [p.card?.os?.name, p.card?.os?.version, p.card?.os?.arch].filter(Boolean);
-  if (os.length > 0) out.push(`  os: ${os.join(", ")}`);
-  const repo = [p.card?.repo?.label, p.card?.repo?.remote, p.card?.repo?.branch].filter(Boolean);
-  if (repo.length > 0) out.push(`  repo: ${repo.join(", ")}`);
-  return out;
+}
+
+/** The lead this session answers to, when it has one.
+ *
+ *  A peer's `members` is always empty — it leads nobody — so a status built from
+ *  that list alone tells a peer nothing about the one session it IS attached to,
+ *  while the payload it was rendered from has carried the lead's ref and card
+ *  since the membership was recorded. This is also the peer's ONLY view of the
+ *  lead's machine: the card cannot ride in the brief, because a brief reaches an
+ *  armed Handler through `authorizeInstruction`, which reads a hostname and a
+ *  repo path as grants (see session-bus/delivery.ts). A tool result the agent
+ *  asked for meets no authorizer. */
+function leadLines(lead: any): string[] {
+  if (!lead) return [];
+  return [
+    `Leader: ${lead.sessionName ?? lead.sessionId} [${lead.state}]`
+    + ` id=${lead.sessionId} machine=${lead.machineLabel ?? lead.machineId}`
+    + (lead.projectLabel ? ` project=${lead.projectLabel}` : ""),
+    ...memberCardLines(lead.card, "  "),
+  ];
 }
 
 /**
@@ -501,7 +531,11 @@ export async function callSessionBusTool(
         unexpected: argStr(args, "unexpected"),
       }));
       if (!r.ok) return toolError(busError(r));
-      return toolText(`Assigned as task ${r.data.taskId}. The peer's result arrives here as a message.`);
+      return toolText(r.data.delivered
+        ? `Assigned as task ${r.data.taskId}. The peer's result arrives here as a message.`
+        : `Assigned as task ${r.data.taskId}, but it has not reached that machine yet — this bridge has no `
+          + `route to it right now. The task is queued and retried; the peer's result arrives here as a `
+          + `message once it lands. Do not assign it again.`);
     }
 
     case "antgrid_list_tasks": {
@@ -573,9 +607,19 @@ export async function callSessionBusTool(
         unexpected: argStr(args, "unexpected"),
       }));
       if (!r.ok) return toolError(busError(r));
-      return toolText(r.data.sent
-        ? "Finding sent to the lead."
-        : "Finding recorded on the task. It travels with the next report.");
+      if (r.data.sent) return toolText("Finding sent to the lead.");
+      // Only a task carries a finding forward: `coordinator.message` is neither
+      // queued nor acked, so a finding that did not leave and has no task to
+      // ride is simply gone. Saying "it travels with the next report" on that
+      // path — which is what this branch used to say for every unsent finding —
+      // tells the agent its work is safe when nothing will ever retry it.
+      if (taskId) return toolText("Finding recorded on the task. It travels with the next report.");
+      return toolError(
+        "The finding did not reach the lead, and with no taskId there is nothing to carry it — it was "
+        + "not delivered and nothing will retry it. Check antgrid_session_status for whether the lead "
+        + "is reachable, then send it again, or pass the taskId of a task you are working so a later "
+        + "report carries it.",
+      );
     }
 
     case "antgrid_ask_lead": {
@@ -634,6 +678,7 @@ export async function callSessionBusTool(
       const lines = [
         `Role: ${d.role ?? "none"}${d.lead && d.peer ? " (leads one session, works another)" : ""}`,
         `Session: ${d.sessionId} in context ${d.contextId}`,
+        ...leadLines(d.memberOf),
         `Members: ${members.length === 0 ? "none" : members.map((m) => `${m.sessionName ?? m.sessionId} [${m.state}]`).join(", ")}`,
         `Open tasks: ${(d.openTaskIds ?? []).join(", ") || "none"}`,
         `Task budget: ${budget.tasksRemaining} left of the session cap, ${budget.hourlyRemaining} in this hour${budget.halted ? " (halted: no progress)" : ""}`,

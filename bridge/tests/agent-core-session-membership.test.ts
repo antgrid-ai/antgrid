@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -44,6 +44,9 @@ async function attached(
   opts?: {
     queueBusLine?: (line: Omit<QueuedLine, "queuedAt">) => void;
     renderBriefInstruction?: (d: { lead: unknown; brief: string }) => string;
+    machineId?: string;
+    sendToAppSession?: (peerId: string, msg: AbMessage) => boolean;
+    sendToOwner?: (msg: AbMessage) => boolean;
   },
 ): Promise<{ sent: AbMessage[]; bus: MessageBus }> {
   core = await buildAgentCore({
@@ -54,6 +57,9 @@ async function attached(
     ...(opts?.renderBriefInstruction
       ? { renderBriefInstruction: opts.renderBriefInstruction as never }
       : {}),
+    ...(opts?.machineId ? { machineId: () => opts.machineId ?? null } : {}),
+    ...(opts?.sendToAppSession ? { sendToAppSession: opts.sendToAppSession } : {}),
+    ...(opts?.sendToOwner ? { sendToOwner: opts.sendToOwner } : {}),
   });
   const bus = new MessageBus();
   const sent: AbMessage[] = [];
@@ -304,3 +310,77 @@ test("a brief is held, not queued unwrapped, when no renderer is wired", async (
 
   expect(queued.filter((l) => l.kind === "brief")).toHaveLength(0);
 }, 30_000);
+
+// A peer bridge cannot dial the lead's machine (D7), so the app session that
+// carried a frame in is its only way back. Membership is created by
+// `session:create`, not by a bus frame, so before this the route was recorded
+// only once the LEAD had sent something — leaving a machine that had just been
+// added, briefed, and told to report unable to answer its own brief.
+describe("the carrier that creates a membership is the peer's route home", () => {
+  test("a peer's first outbound follows the app session that created it", async () => {
+    const routed: { peerId: string; type: string }[] = [];
+    const toOwner: AbMessage[] = [];
+    const { sent, bus } = await attached({
+      machineId: "peer-machine",
+      sendToAppSession: (peerId, msg) => {
+        routed.push({ peerId, type: msg.type });
+        return true;
+      },
+      sendToOwner: (msg) => {
+        toOwner.push(msg);
+        return true;
+      },
+    });
+    bus.dispatchInbound(createMessage("session:create", {
+      requestId: "c1", name: "Peer", memberOf: lead, brief: "Own the backend.",
+    }), "control", "relay", "carrier-1");
+    const created = await resultFor(sent, "c1");
+    const peerId = (created.session as SessionEntry).id;
+
+    // Taskless on purpose: a finding before any assignment is exactly what a
+    // brief saying "report what you find" asks for, and it is the case that had
+    // nowhere to go.
+    const note = core!.sessionBus.message({
+      sessionId: peerId,
+      taskId: null,
+      to: lead,
+      summary: "found it",
+      parts: [{ kind: "text", text: "the codec is little-endian" }],
+      contextId: lead.sessionId,
+    });
+    expect(note).toMatchObject({ ok: true, sent: true });
+    expect(routed).toEqual([{ peerId: "carrier-1", type: "session-bus:message" }]);
+    // Never the loopback owner: on a peer bridge that is the peer's OWN desktop
+    // app, which accepts the frame and books a delivery that never happened.
+    expect(toOwner).toEqual([]);
+  }, 30_000);
+
+  test("a peer with no carrier holds the frame instead of posting it to its own app", async () => {
+    const toOwner: AbMessage[] = [];
+    const { sent, bus } = await attached({
+      machineId: "peer-machine",
+      sendToAppSession: () => true,
+      sendToOwner: (msg) => {
+        toOwner.push(msg);
+        return true;
+      },
+    });
+    // No peerId: the loopback owner, which `noteBusOrigin` refuses to record
+    // because on THIS bridge it is not the lead's carrier.
+    bus.dispatchInbound(createMessage("session:create", {
+      requestId: "c1", name: "Peer", memberOf: lead,
+    }), "control", "loopback");
+    const created = await resultFor(sent, "c1");
+
+    const note = core!.sessionBus.message({
+      sessionId: (created.session as SessionEntry).id,
+      taskId: null,
+      to: lead,
+      summary: "found it",
+      parts: [{ kind: "text", text: "x" }],
+      contextId: lead.sessionId,
+    });
+    expect(note).toMatchObject({ ok: true, sent: false });
+    expect(toOwner).toEqual([]);
+  }, 30_000);
+});

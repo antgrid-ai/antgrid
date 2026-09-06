@@ -134,6 +134,8 @@ Nothing is asked of the peer agent. The peer bridge already knows both fields be
 
 **Delivered to the lead packaged with the brief.** The lead never holds a peer without a mission.
 
+**The lead's card travels the other way, on the membership, and is read as a tool result.** A peer that cannot say what machine it answers to cannot judge what it is being asked for. The card rides the `memberOf` the create carries — the same optional field a member row uses — and the peer's agent reads it from `antgrid_session_status`, never from the brief. That restriction is not stylistic: a brief reaches an armed Handler through `authorizeInstruction`, which reads a hostname or a repo path as a grant, so a card in a brief would widen the peer's lift on the lead machine's say-so. A tool result the agent asked for meets no authorizer.
+
 Deferred past MVP, in the order they will be wanted: dirty/unpushed state, running services and ports, installed agents (all bridge-observed), then an **agent-declared half** — toolchain, self-declared constraints, reachability — filled from the peer's first turn. The split stays as §3.4 says: anything the bridge can determine is never agent-authored.
 
 ### 3.4 Field ownership
@@ -146,6 +148,7 @@ Deferred past MVP, in the order they will be wanted: dirty/unpushed state, runni
 | | artifact set | lead bridge | agents contribute, the lead bridge holds |
 | | mandate | human | per member, approved before arming (§7.2) |
 | **Capability Card** | OS, repo | peer bridge | MVP card (§3.3) |
+| | OS, repo of the LEAD | lead bridge | read locally by the carrier, carried on `memberOf` (§3.3) |
 | | agent-declared half | peer agent | post-MVP; observed locally, only the peer can see them |
 | | constraints | peer agent | post-MVP; declared by the peer, never by the lead |
 | **Brief** | scope, ownership, prohibitions | human | MVP: user-authored (§5.1) |
@@ -274,10 +277,11 @@ The tools above must be present in every bridge-managed session with no manual s
 
 1. From the session kebab, the user opens **Add machine** (§7.5): a dialog with machine, project, tool, model, and the brief. The peer machine must have remote access switched on (the lead's app is a remote device to it) and the project must be in its catalog — the same two gates every remote verb already passes, and the dialog lists nothing that fails them.
 2. The **Capability Card** (OS + repo, §3.3) is shown inline as soon as a machine + project is picked, so the brief is written with the card in view. The brief states: what this peer owns, what it must report, what it may not do.
-3. On **Add**, the peer bridge **creates a new session in that project for the purpose** (D10), on the main checkout — diagnosis needs the environment as it is, not a fresh worktree — with the chosen tool and model. Its row carries `memberOf`; the lead's row gains the member.
+3. On **Add**, the peer bridge **creates a new session in that project for the purpose** (D10), on the main checkout — diagnosis needs the environment as it is, not a fresh worktree — with the chosen tool and model. Its row carries `memberOf`; the lead's row gains the member. Creating the membership is also what records the carrier as that peer's **route home**: a peer bridge cannot dial the lead's machine (D7), so the app session that created it is its only way back, and noting it here is what lets a peer answer before the lead has sent it anything.
 4. The brief is delivered to the peer's agent: as that session's Handler instruction when one is armed (§7.2), and otherwise as a queued `brief` delivery landing on a turn boundary — the ordinary case, since step 3 starts the peer in terminal mode.
 5. Card **and** brief are delivered together to the lead.
-6. Lead acknowledges and begins assigning tasks.
+6. The carrier **starts the peer's session**, last — after both bridges agree, because a start is the one step here that cannot be compensated. Create and start are separate verbs and creating a session runs no agent; the peer machine hosts no app of its own to notice, so nothing else would ever start it, and the brief queued in step 4 would wait forever for a turn boundary a stopped session never reaches.
+7. Lead acknowledges and begins assigning tasks.
 
 **Leadership defaults**, it is not elected: the machine already in conversation with the user is the lead. Adding a machine is the decision; election is not.
 

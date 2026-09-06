@@ -30,17 +30,23 @@ final machineCapabilityCardProvider = FutureProvider.autoDispose
       }
     });
 
-/// The bridge-NORMALISED `origin` of a LOCAL project, or null when it has none.
+/// THIS machine's Capability Card, answered for one of its own projects.
 ///
-/// Read over the loopback control plane rather than derived in Dart, so the key
-/// compared here and the key a remote machine reports come out of the SAME
-/// normaliser — a second implementation of a credential-stripping routine is
-/// both dead weight and a place for the two sides to disagree silently.
+/// Read over the loopback control plane rather than derived in Dart, so the OS
+/// and the normalised repo origin this reports and the ones a remote machine
+/// reports come out of the SAME code — a second implementation of a
+/// credential-stripping routine is both dead weight and a place for the two
+/// sides to disagree silently.
 ///
-/// Guarded against demo mode for the reason `detectedToolsForProvider` is: the
-/// local arm spawns the real bridge host, which a sample project must not do.
-final localProjectRemoteProvider = FutureProvider.autoDispose
-    .family<String?, String>((ref, projectId) async {
+/// Scoped to one project because that is what the card verb takes for a local
+/// read: unlike [machineCapabilityCardProvider], which asks a remote machine
+/// about everything it has seen so the dialog can match a repo, this answers
+/// about a project already chosen.
+///
+/// Guarded against demo mode for the reason `detectedToolsForProvider` is: this
+/// spawns the real bridge host, which a sample project must not do.
+final localCapabilityCardProvider = FutureProvider.autoDispose
+    .family<CapabilityCard?, String>((ref, projectId) async {
       if (ref.watch(demoModeProvider)) return null;
       final projects = ref.watch(projectsProvider);
       String? folder;
@@ -59,16 +65,26 @@ final localProjectRemoteProvider = FutureProvider.autoDispose
           token: host.token,
         );
         try {
-          final card = await client.capabilityCard(
+          return await client.capabilityCard(
             projects: [
               (projectId: projectId, projectPath: folder, label: label),
             ],
           );
-          return card.projects[projectId]?.remote;
         } finally {
           client.close();
         }
       } catch (_) {
         return null;
       }
+    });
+
+/// The bridge-NORMALISED `origin` of a LOCAL project, or null when it has none.
+///
+/// Derived from [localCapabilityCardProvider] rather than reading the card
+/// itself, so a screen that wants both the remote and the OS pays for one
+/// loopback round trip instead of two.
+final localProjectRemoteProvider = FutureProvider.autoDispose
+    .family<String?, String>((ref, projectId) async {
+      final card = await ref.watch(localCapabilityCardProvider(projectId).future);
+      return card?.projects[projectId]?.remote;
     });

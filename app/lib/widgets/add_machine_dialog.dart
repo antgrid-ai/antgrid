@@ -112,6 +112,7 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
   PickerProject? _resolvedProject;
   RepoCard? _repoCard;
   SessionMemberCard? _memberCard;
+  SessionMemberCard? _leadCard;
 
   /// Machines already carrying an active member of this session. A second
   /// session on a machine that is already in is not refused by the bridge, but
@@ -186,6 +187,35 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
       osName: os?.name,
       osVersion: os?.version,
       osArch: os?.arch,
+      repoLabel: repo?.label,
+      repoRemote: repo?.remote,
+      repoBranch: repo?.branch,
+    );
+    return card.isEmpty ? null : card;
+  }
+
+  /// THIS machine's card for the lead's project, as the peer's row will record
+  /// it — the mirror of [_readMemberCard], read locally instead of over the
+  /// control plane.
+  ///
+  /// The peer needs it because nothing else can tell it: a card may not ride in
+  /// the brief, whose armed-Handler route runs `authorizeInstruction` over the
+  /// whole text and reads a hostname or a repo path as a grant (see
+  /// session-bus/delivery.ts). Carried on the membership, it reaches the peer's
+  /// agent only through `antgrid_session_status`, which is a result the agent
+  /// asked for rather than a prompt written into it.
+  SessionMemberCard? _readLeadCard() {
+    final id = widget.leadRegistrationId;
+    final local = ref.watch(localCapabilityCardProvider(id)).value;
+    if (local == null) return null;
+    // A card is answered for the whole machine, so the OS half is always there;
+    // the repo half is a lookup, and a project the host does not advertise is
+    // omitted rather than reported empty.
+    final repo = local.projects[id];
+    final card = SessionMemberCard(
+      osName: local.os.name,
+      osVersion: local.os.version,
+      osArch: local.os.arch,
       repoLabel: repo?.label,
       repoRemote: repo?.remote,
       repoBranch: repo?.branch,
@@ -275,16 +305,19 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
         peerProjectLabel: project.name,
         peerCard: peerCard,
       );
-      final error = outcome.error;
-      if (error != null && host.mounted) showAbSnackBar(host, error);
+      // The message, not the error: a join that landed can still owe the user a
+      // sentence — a peer whose agent would not start is added and idle, which
+      // is nothing they can see from the member tab alone.
+      final message = outcome.message;
+      if (message != null && host.mounted) showAbSnackBar(host, message);
     });
   }
 
   /// The lead half of the membership, as the peer's row will record it.
   ///
-  /// Labels are best-effort by schema, and the ones that exist are worth
-  /// carrying: they are the only name a peer machine that has never dialled
-  /// this one can show for the session it answers to.
+  /// Labels and the card are best-effort by schema, and the ones that exist are
+  /// worth carrying: they are the only account a peer machine that has never
+  /// dialled this one has of the session it answers to.
   SessionMemberRef _leadRef() {
     final machineId = ref.read(localDeviceUuidProvider).value ?? '';
     String? projectLabel;
@@ -302,6 +335,7 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
       machineLabel: machineLabel,
       projectLabel: projectLabel,
       sessionName: ref.read(activeSessionOrCachedProvider)?.name,
+      card: _leadCard,
     );
   }
 
@@ -313,6 +347,7 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
     _resolvedProject = _readResolvedProject(_projectRows);
     _repoCard = _readRepoCard(_resolvedProject);
     _memberCard = _readMemberCard(_repoCard);
+    _leadCard = _readLeadCard();
     final project = _resolvedProject;
     final peer = _peerTarget;
     final card = _repoCard;

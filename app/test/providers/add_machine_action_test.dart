@@ -49,6 +49,18 @@ Map<String, dynamic> _lastOfType(FakeAgentTransport t, String type) =>
 bool _hasType(FakeAgentTransport t, String type) =>
     t.sent.any((m) => m['type'] == type);
 
+/// Answers the `session:start` the action sends once both bridges agree. Every
+/// success path reaches it, so a test that leaves it unanswered never finishes.
+void _answerStart(FakeAgentTransport peer, {bool ok = true}) {
+  final start = _lastOfType(peer, 'session:start');
+  peer.emit('session:result', {
+    'requestId': start['requestId'],
+    'ok': ok,
+    if (ok) 'session': _sessionJson('sess-peer', 'app'),
+    if (!ok) 'error': 'no agent binary on that machine',
+  });
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -166,6 +178,8 @@ void main() {
       'ok': true,
       'session': _sessionJson('sess-lead', 'Trace the leak'),
     });
+    await _turn();
+    _answerStart(env.peer);
 
     final result = await outcome();
     expect(result.ok, isTrue);
@@ -217,6 +231,8 @@ void main() {
       'ok': true,
       'session': _sessionJson('sess-lead', 'Trace the leak'),
     });
+    await _turn();
+    _answerStart(env.peer);
     final result = await outcome();
     // The ref handed back is what puts the user on the new tab, so it carries
     // the card the record does rather than a second, thinner copy.
@@ -248,7 +264,76 @@ void main() {
       'ok': true,
       'session': _sessionJson('sess-lead', 'Trace the leak'),
     });
+    await _turn();
+    _answerStart(env.peer);
     expect((await outcome()).ok, isTrue);
+  });
+
+  // `session:create` and `session:start` are separate verbs and create starts
+  // nothing, so without this the machine joins, holds the brief the create
+  // carried, and never runs: a queued delivery waits for a turn boundary a
+  // stopped session never reaches.
+  test("starts the peer's agent, last and with no prompt of its own", () async {
+    final env = await setUpProjects();
+    final outcome = start(env.container);
+    await _turn();
+
+    env.peer.emit('session:result', {
+      'requestId': _lastOfType(env.peer, 'session:create')['requestId'],
+      'ok': true,
+      'session': _sessionJson('sess-peer', 'app'),
+    });
+    await _turn();
+
+    // Not before the lead agreed: the compensation above deletes a session that
+    // has never run, and starting first would make that untrue.
+    expect(_hasType(env.peer, 'session:start'), isFalse);
+
+    env.lead.emit('session:result', {
+      'requestId': _lastOfType(env.lead, 'session:member-record')['requestId'],
+      'ok': true,
+      'session': _sessionJson('sess-lead', 'Trace the leak'),
+    });
+    await _turn();
+
+    final started = _lastOfType(env.peer, 'session:start');
+    expect(started['sessionId'], 'sess-peer');
+    // The brief is already queued on the peer bridge, wrapped by the delivery
+    // template. Repeating it here would hand the agent the human's mandate a
+    // second time and unwrapped.
+    expect(started.containsKey('initialPrompt'), isFalse);
+
+    _answerStart(env.peer);
+    expect((await outcome()).ok, isTrue);
+  });
+
+  test('a peer that would not start still joins, and the user is told', () async {
+    final env = await setUpProjects();
+    final outcome = start(env.container);
+    await _turn();
+
+    env.peer.emit('session:result', {
+      'requestId': _lastOfType(env.peer, 'session:create')['requestId'],
+      'ok': true,
+      'session': _sessionJson('sess-peer', 'app'),
+    });
+    await _turn();
+    env.lead.emit('session:result', {
+      'requestId': _lastOfType(env.lead, 'session:member-record')['requestId'],
+      'ok': true,
+      'session': _sessionJson('sess-lead', 'Trace the leak'),
+    });
+    await _turn();
+    _answerStart(env.peer, ok: false);
+
+    final result = await outcome();
+    // Joined, because it is: the membership landed on both bridges and the tab
+    // is the user's way to start it by hand.
+    expect(result.ok, isTrue);
+    expect(result.error, isNull);
+    expect(result.warning, contains('Studio'));
+    expect(result.warning, contains('did not start'));
+    expect(result.message, result.warning);
   });
 
   test('a refused record deletes the session it was about', () async {

@@ -285,8 +285,13 @@ export class SessionBusCoordinator {
    * The task exists the moment this returns, whether or not the frame left: the
    * outbox is what makes the send eventual, and a task that came into being only
    * once a carrier answered would be a task the lead cannot see it created.
+   *
+   * `delivered` says which of those two happened. It is not a second success
+   * flag — the task is created either way — but a lead told only "assigned"
+   * cannot tell an assignment its peer is already reading from one still sitting
+   * in the outbox because no carrier has ever reached that machine.
    */
-  assign(input: AssignInput): { ok: true; taskId: string; seq: number } | SessionBusRefusal {
+  assign(input: AssignInput): { ok: true; taskId: string; seq: number; delivered: boolean } | SessionBusRefusal {
     const self = this.deps.self(input.sessionId);
     if (!self) return this.noSelf();
 
@@ -333,11 +338,12 @@ export class SessionBusCoordinator {
       // pairing from creating a task no frame will ever carry.
       return refuse("AGENT_NOT_READY", "the task could not be queued for its peer");
     }
+    const attempt = this.firstAttempt(queued.next, queued.task, minted.seq, frame, now);
     this.commit(input.sessionId, {
-      tasks: this.firstAttempt(queued.next, queued.task, minted.seq, frame, now),
+      tasks: attempt.tasks,
       log: appendLog(state.log, { at: now, direction: "out", peer: keyOf(input.peer), envelope }),
     });
-    return { ok: true, taskId, seq: minted.seq };
+    return { ok: true, taskId, seq: minted.seq, delivered: attempt.sent };
   }
 
   /** Withdraw a task. The cancel is a transition like any other — sequenced,
@@ -367,7 +373,7 @@ export class SessionBusCoordinator {
     // frame whose seq disagreed with its outbox entry would be acked into a slot
     // that never retires.
     frame.seq = queued.seq;
-    this.commit(sessionId, { tasks: this.firstAttempt(queued.next, queued.task, queued.seq, frame, now) });
+    this.commit(sessionId, { tasks: this.firstAttempt(queued.next, queued.task, queued.seq, frame, now).tasks });
     return { ok: true, seq: queued.seq };
   }
 
@@ -418,7 +424,7 @@ export class SessionBusCoordinator {
     if (queued.kind !== "queued") return blocked(queued.reason);
     frame.seq = queued.seq;
     this.commit(input.sessionId, {
-      tasks: this.firstAttempt(queued.next, queued.task, queued.seq, frame, now),
+      tasks: this.firstAttempt(queued.next, queued.task, queued.seq, frame, now).tasks,
       log: appendLog(s.log, { at: now, direction: "out", peer: keyOf(rec.peer), envelope }),
     });
     return { ok: true, seq: queued.seq };
@@ -650,12 +656,23 @@ export class SessionBusCoordinator {
     return stampEnvelope(draft, { messageId: this.newId(), peer: self.ref, now: this.now() });
   }
 
-  /** Which end of the bus this session is on for a context, for a carrier that
-   *  wants to know before it has a task to ask. Lead is the answer when nothing
-   *  says otherwise: a context with no task yet is one this session opened. */
+  /** Which end of the bus this session is on for a context, for a caller that
+   *  needs to know before there is a task to ask.
+   *
+   *  A task record answers outright. With none, the CONTEXT ID does: a context
+   *  is named by its lead's session id (`contextOf`, session-bus/api.ts), so a
+   *  session whose own id is the context id opened that context and leads it,
+   *  and any other context id is one this session was joined into as a peer.
+   *
+   *  Defaulting to "lead" instead is exactly the misroute `message` warns about
+   *  one call up. A fresh peer has no tasks by definition, and reporting a
+   *  finding before it is assigned anything is what its brief asks of it — so
+   *  that default would post its first finding to its OWN machine's desktop app,
+   *  which accepts it and reports it sent. */
   private roleForContext(sessionId: string, contextId: string): BusRole {
     const tasks = tasksFor(this.stateFor(sessionId).tasks, contextId);
-    return tasks[0]?.role ?? "lead";
+    if (tasks[0]) return tasks[0].role;
+    return contextId === sessionId ? "lead" : "peer";
   }
 
   /** Make the one attempt `mintOutbound` counted on the caller's behalf.
@@ -663,6 +680,10 @@ export class SessionBusCoordinator {
    * Kept out of the timer's drain because a frame must go the instant it is
    * queued: routing the first send through the retry schedule would put a whole
    * backoff step in front of every task, on a link that is usually up.
+   *
+   * `sent` rides back with the state because the state alone cannot say: a held
+   * frame and a delivered one differ only in an outbox entry the caller does not
+   * read.
    */
   private firstAttempt(
     tasks: TaskStoreState,
@@ -670,9 +691,9 @@ export class SessionBusCoordinator {
     seq: number,
     frame: AbMessage,
     now: number,
-  ): TaskStoreState {
+  ): { tasks: TaskStoreState; sent: boolean } {
     const sent = this.deps.send(frame, { contextId: rec.contextId, role: rec.role, to: keyOf(rec.peer) });
-    return sent ? tasks : holdOutbound(tasks, rec.taskId, seq, now);
+    return { tasks: sent ? tasks : holdOutbound(tasks, rec.taskId, seq, now), sent };
   }
 
   private flushOutbox(sessionId: string, now: number): void {

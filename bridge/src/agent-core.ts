@@ -851,6 +851,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // next inbound frame on the context clears.
   const busOriginByContext = new Map<string, { peerId: string; at: number }>();
 
+  /** Contexts already warned about for having no route. An unroutable frame is
+   *  retried on every outbox tick and `noteAttempt` advances the backoff only for
+   *  a send that LEFT, so a per-attempt warning would repeat for the life of the
+   *  bridge. Cleared when a route appears, so a link that breaks twice is said
+   *  twice. */
+  const busRouteMissWarned = new Set<string>();
+
   function noteBusOrigin(contextId: string, peerId: string | undefined): void {
     // No peerId is the loopback owner, which is the lead's carrier and is
     // already reachable without a route.
@@ -859,7 +866,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     for (const [key, origin] of busOriginByContext) {
       if (now - origin.at >= BUS_ORIGIN_TTL_MS) busOriginByContext.delete(key);
     }
+    const previous = busOriginByContext.get(contextId)?.peerId;
     busOriginByContext.set(contextId, { peerId, at: now });
+    busRouteMissWarned.delete(contextId);
+    // Logged because a carrier attach is otherwise invisible: nothing else
+    // records which app session a bus context routes through, which makes a peer
+    // that cannot answer indistinguishable from one that was never carried.
+    if (previous !== peerId) {
+      log.info("session bus: context %s routes home via app session %s", contextId, peerId);
+    }
   }
 
   /** The live route entry, or null. Returned by reference so a caller that
@@ -914,7 +929,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // returns true — booking a delivery that never happened and retiring the
         // outbox entry that was the only thing left to retry it.
         const origin = busTargetFor(ctx.contextId);
-        if (!origin) return false;
+        if (!origin) {
+          if (!busRouteMissWarned.has(ctx.contextId)) {
+            busRouteMissWarned.add(ctx.contextId);
+            log.warn(
+              "session bus: no carrier route for context %s — frames held until one arrives",
+              ctx.contextId,
+            );
+          }
+          return false;
+        }
         const sent = opts.sendToAppSession?.(origin.peerId, frame) ?? false;
         if (sent) origin.at = Date.now();
         return sent;
@@ -1692,17 +1716,36 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             // the role, join time and state the store's schema requires, and the
             // wire's `memberOf` carries none of them.
             const createdLead = sessions?.memberOfFor(created.id);
-            if (createdLead && membership.data.brief) {
-              try {
-                saveBrief(abDir, project.id, created.id, {
-                  lead: createdLead,
-                  brief: membership.data.brief,
-                  now: Date.now(),
-                });
-              } catch (err) {
-                // Costs the scope restatement on later deliveries, never the
-                // session the app is waiting on.
-                log.warn("could not store the brief for session %s: %s", created.id, err);
+            if (createdLead) {
+              // The carrier that created this membership is this bridge's only
+              // way back to the lead (D7), and this is the only place a peer's
+              // route can be recorded before it speaks: the bus path notes an
+              // origin solely for a `session-bus:*` frame it applied, so without
+              // this a peer cannot answer the very brief it was just given until
+              // the lead happens to send it something first.
+              //
+              // Keyed on the STORED memberOf rather than the request, because
+              // that is the same value every outbound of this session keys its
+              // context on (`contextOf`, session-bus/api.ts) — two readings of
+              // one field is how the route and the frames drift apart.
+              //
+              // Noted only after `createMember` resolved, which satisfies the
+              // bus path's "only what the handler accepted" rule more strongly
+              // than an address check does: this carrier did not merely name a
+              // session this bridge holds, it created it.
+              noteBusOrigin(createdLead.sessionId, peerId);
+              if (membership.data.brief) {
+                try {
+                  saveBrief(abDir, project.id, created.id, {
+                    lead: createdLead,
+                    brief: membership.data.brief,
+                    now: Date.now(),
+                  });
+                } catch (err) {
+                  // Costs the scope restatement on later deliveries, never the
+                  // session the app is waiting on.
+                  log.warn("could not store the brief for session %s: %s", created.id, err);
+                }
               }
             }
           } catch (err) {
@@ -1720,8 +1763,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // two peer sessions. Usually this is where the brief actually goes
           // out: an added machine starts in terminal mode and arms no Handler,
           // so the queued path below is the one that runs, and its line waits at
-          // the head of the queue until the agent this create just started is up
-          // to take it.
+          // the head of the queue until an agent is running to take it. This verb
+          // does not start one: `session:start` is a separate verb, and the
+          // carrier owes it once the membership has landed on the lead.
           if (sessionId) flushPendingBrief(sessionId);
         })();
         break;

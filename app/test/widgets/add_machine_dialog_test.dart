@@ -143,14 +143,35 @@ late List<String> warmed;
 /// is asserted here is what the DIALOG resolved before handing over — the mode
 /// above all, which is derived from a provider the dialog must have watched.
 typedef AddCall =
-    ({String tool, String? mode, String brief, SessionMemberCard? card});
+    ({
+      String tool,
+      String? mode,
+      String brief,
+      SessionMemberCard? card,
+      SessionMemberRef leadRef,
+    });
 
 late List<AddCall> added;
+
+/// This machine's own card, as the loopback control plane would answer it. The
+/// lead half of a membership carries it so the peer can be told what it is
+/// working with — see [_localCard]'s use below.
+const _localCard = CapabilityCard(
+  os: OsCard(name: 'windows', version: '11', arch: 'x64'),
+  projects: {
+    _leadRegistrationId: RepoCard(
+      label: 'app',
+      remote: _leadRemote,
+      branch: 'development',
+    ),
+  },
+);
 
 Future<void> _openDialog(
   WidgetTester tester, {
   SessionEntry? session,
   String? leadRemote = _leadRemote,
+  CapabilityCard? localCard = _localCard,
 }) async {
   useInMemoryPrefs();
   warmed = <String>[];
@@ -186,6 +207,10 @@ Future<void> _openDialog(
         localProjectRemoteProvider.overrideWith(
           (ref, projectId) async =>
               projectId == _leadRegistrationId ? leadRemote : null,
+        ),
+        localCapabilityCardProvider.overrideWith(
+          (ref, projectId) async =>
+              projectId == _leadRegistrationId ? localCard : null,
         ),
         detectedToolsForProvider.overrideWith(
           (ref, target) async => const {'claude-code': 'Claude Code'},
@@ -230,7 +255,13 @@ Future<void> _openDialog(
           peerProjectLabel,
           peerCard,
         }) async {
-          added.add((tool: tool, mode: mode, brief: brief, card: peerCard));
+          added.add((
+            tool: tool,
+            mode: mode,
+            brief: brief,
+            card: peerCard,
+            leadRef: leadRef,
+          ));
           return AddMachineOutcome.added(
             SessionMemberRef(
               machineId: peer.machineUuid,
@@ -440,6 +471,51 @@ void main() {
         repoBranch: 'feature/leak',
       ),
     );
+  });
+
+  // The mirror of the test above, and the peer's only account of the machine it
+  // answers to: a Capability Card cannot ride in the brief, whose armed-Handler
+  // route authorizes the whole text and reads a hostname or a repo path as a
+  // grant, so the membership is what carries it and antgrid_session_status is
+  // where the peer's agent reads it.
+  testWidgets('the lead half of the membership carries the local card', (
+    tester,
+  ) async {
+    await _openDialog(tester);
+    await _pickStudio(tester);
+    await _pickAgent(tester);
+    await _typeBrief(tester);
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+
+    final lead = added.single.leadRef;
+    expect(lead.projectId, _leadRegistrationId);
+    expect(lead.sessionId, _leadSessionId);
+    expect(
+      lead.card,
+      SessionMemberCard(
+        osName: 'windows',
+        osVersion: '11',
+        osArch: 'x64',
+        repoLabel: 'app',
+        repoRemote: _leadRemote,
+        repoBranch: 'development',
+      ),
+    );
+  });
+
+  testWidgets('a lead whose own card is unreadable still joins the machine', (
+    tester,
+  ) async {
+    await _openDialog(tester, localCard: null);
+    await _pickStudio(tester);
+    await _pickAgent(tester);
+    await _typeBrief(tester);
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+
+    expect(added, hasLength(1));
+    expect(added.single.leadRef.card, isNull);
   });
 
   testWidgets('a machine that answered no card is still addable', (

@@ -20,15 +20,27 @@ import 'sessions.dart';
 /// on by reading it — a machine that would not start, a lead that would not
 /// record, or a peer session left behind that they have to remove by hand — and
 /// none of them is a case any caller branches on.
+///
+/// [warning] is the same kind of sentence on a join that LANDED. Not folded into
+/// [error]: a peer whose agent would not start is a member of this session and
+/// belongs on its tab, so the caller must still be handed the ref — but the
+/// machine sits idle until someone starts it, and nothing on that tab says so.
 @immutable
 class AddMachineOutcome {
-  const AddMachineOutcome.added(SessionMemberRef this.peer) : error = null;
-  const AddMachineOutcome.failed(String this.error) : peer = null;
+  const AddMachineOutcome.added(SessionMemberRef this.peer, {this.warning})
+    : error = null;
+  const AddMachineOutcome.failed(String this.error)
+    : peer = null,
+      warning = null;
 
   final SessionMemberRef? peer;
   final String? error;
+  final String? warning;
 
   bool get ok => peer != null;
+
+  /// The one sentence to put in front of the user, if there is one.
+  String? get message => error ?? warning;
 }
 
 /// Adds [peer]'s machine to the session [leadSessionId] leads, per §7.5.
@@ -40,6 +52,10 @@ class AddMachineOutcome {
 /// not. Step two failing is therefore compensated by deleting what step one
 /// made — and if that compensation also fails, the leftover is named rather
 /// than swallowed, because it is now the user's to clean up.
+///
+/// The peer's agent is started LAST, after both bridges agree, because a start
+/// is the one step here that cannot be compensated: an agent that has read its
+/// brief and begun work is not undone by deleting the session it ran in.
 ///
 /// Nothing is pinned or attached here. The membership landing on the lead's row
 /// is what `sessionBusLinksProvider` derives from, so the carrier and the warm-
@@ -224,9 +240,38 @@ Future<AddMachineOutcome> addMachineToSession(
     );
   }
 
+  // The peer now has a session and a membership but no agent: `session:create`
+  // and `session:start` are separate verbs and create starts nothing, while the
+  // brief handed over with the create is sitting at the head of that session's
+  // delivery queue waiting for a turn boundary a stopped session never reaches.
+  // Nothing else supplies this start — a peer machine runs no app of its own
+  // whose workspace bootstrap could adopt the session and start it.
+  //
+  // After the record rather than before it, so `_deleteQuietly` above keeps the
+  // "created seconds ago and has never run" that its `force` rests on.
+  //
+  // No `initialPrompt`: the brief is already queued on the peer bridge, wrapped
+  // by `renderBrief`. Passing it here would deliver the human's mandate a second
+  // time and unwrapped, which is the one thing spec 5.2 forbids.
+  String? startWarning;
+  try {
+    final started = await peerService.start(created.id, raiseRefusal: true);
+    if (started == null) startWarning = _startFailed(machineName, null);
+  } catch (e) {
+    startWarning = _startFailed(machineName, _reason(e));
+  }
+
   await selectMemberTab(container, peerRef);
-  return AddMachineOutcome.added(peerRef);
+  return AddMachineOutcome.added(peerRef, warning: startWarning);
 }
+
+/// Said when the join landed but the agent behind it did not come up. Names the
+/// remedy, because the session IS on its tab and the user's next move is to
+/// press start there rather than to add the machine again.
+String _startFailed(String machineName, String? reason) =>
+    '$machineName joined this session, but its agent did not start'
+    '${reason == null ? '' : ' ($reason)'}. '
+    'Open its tab and start it.';
 
 /// Best-effort undo of the peer session this flow created.
 ///

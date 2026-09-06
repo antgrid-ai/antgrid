@@ -238,7 +238,7 @@ export interface SessionBusApi {
   peers(terminalId: string | undefined): { peers: PeerView[] } | SessionBusRefusal;
   listTasks(terminalId: string | undefined): { tasks: TaskView[] } | SessionBusRefusal;
   getTask(terminalId: string | undefined, taskId: string): TaskView | SessionBusRefusal;
-  assign(terminalId: string | undefined, body: AssignBody): { ok: true; taskId: string } | SessionBusRefusal;
+  assign(terminalId: string | undefined, body: AssignBody): { ok: true; taskId: string; delivered: boolean } | SessionBusRefusal;
   cancelTask(terminalId: string | undefined, taskId: string, body: CancelBody): { ok: true } | SessionBusRefusal;
   answerPeer(terminalId: string | undefined, taskId: string, body: AnswerBody): { ok: true } | SessionBusRefusal;
   openTask(terminalId: string | undefined, taskId: string): { ok: true } | SessionBusRefusal;
@@ -541,7 +541,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       if (isRefusal(assigned)) return assigned;
       // Recorded after the mint so the ids the peer will name in a fetch are on
       // the lead's own task row too.
-      return { ok: true, taskId: assigned.taskId };
+      return { ok: true, taskId: assigned.taskId, delivered: assigned.delivered };
     },
 
     cancelTask(terminalId, taskId, body) {
