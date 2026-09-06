@@ -27,7 +27,11 @@ import {
 import { sameAddress } from "./address";
 import { listSessionBusSessions } from "./store-fs";
 import { artifactById, loadArtifacts, readArtifactContent, type ArtifactState } from "./artifact-store";
-import { ARTIFACT_CHUNK_BYTES } from "./constants";
+import {
+  ARTIFACT_CHUNK_BYTES,
+  SESSION_BUS_UNACKED_WARN_ATTEMPTS,
+  SESSION_BUS_UNACKED_WARN_EVERY,
+} from "./constants";
 import { checkEnvelopeSize, stampEnvelope, type EnvelopeDraft } from "./envelope";
 import { refuse, type SessionBusRefusal } from "./errors";
 import {
@@ -741,9 +745,35 @@ export class SessionBusCoordinator {
       });
       // A send that never left is not an attempt, and counting it would push a
       // live task's next retry out to a minute for a link that was never tried.
-      if (sent) tasks = noteAttempt(tasks, taskId, entry.seq, now);
+      if (!sent) continue;
+      tasks = noteAttempt(tasks, taskId, entry.seq, now);
+      this.warnIfUnacked(rec, entry.attempts + 1);
     }
     if (tasks !== s.tasks) this.commit(sessionId, { tasks });
+  }
+
+  /** Say out loud that a frame keeps leaving and nothing keeps arriving.
+   *
+   *  This is the only witness to the gap between "the carrier took it" and "the
+   *  peer got it". The carrier can accept a frame and then find no leg to put it
+   *  on — it has no way to report that back, and the retry then repeats forever
+   *  under a `sent` that was true every time. Without this the whole failure is
+   *  silent in both processes: nothing else logs a successful hand-off, and an
+   *  unacked task is indistinguishable from a peer taking its time. */
+  private warnIfUnacked(rec: TaskRecord, attempts: number): void {
+    if (rec.ackedSeq > 0) return;
+    if (attempts < SESSION_BUS_UNACKED_WARN_ATTEMPTS) return;
+    if ((attempts - SESSION_BUS_UNACKED_WARN_ATTEMPTS) % SESSION_BUS_UNACKED_WARN_EVERY !== 0) return;
+    // Labels, not `addressKey`: that key is one-way by construction and a line a
+    // human greps for is built from what the member is called.
+    log.warn(
+      "session bus: task %s has left this machine %d times with nothing acked — the carrier is accepting frames it is not delivering (context %s, to %s on %s)",
+      rec.taskId,
+      attempts,
+      rec.contextId,
+      rec.peer.sessionName ?? rec.peer.sessionId,
+      rec.peer.machineLabel ?? rec.peer.machineId,
+    );
   }
 
   /**

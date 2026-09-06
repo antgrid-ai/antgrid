@@ -275,7 +275,13 @@ is the spec; this is the set of invariants a future edit breaks silently.
   `TaskView.reachedPeer`/`unacked` carry and what `antgrid_list_tasks` marks NOT
   YET DELIVERED until it arrives. A lead that cannot tell a task nobody has
   received from one being worked on re-assigns it, which is the duplicate the
-  whole acked outbox exists to prevent.
+  whole acked outbox exists to prevent. Since nothing on the wire reports the
+  gap, the retry loop is its only witness: `warnIfUnacked` says so once a frame
+  has left this machine repeatedly with nothing acked, and the app says the
+  other half (`no leg for addressed member`, `lead project not open`). Take a
+  log line out of any of those three and a carrier that accepts frames and
+  delivers none is silent in both processes again — which it was, for three
+  hours, across a restart.
 - **Outbound on a PEER is `sendToAppSession(peerId)`,** keyed by the app session
   that carried the exchange in (`busOriginByContext` / `noteBusOrigin` in
   `agent-core.ts`). Falling through to the loopback owner would hand the lead's

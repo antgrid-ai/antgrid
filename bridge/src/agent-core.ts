@@ -877,6 +877,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  twice. */
   const busRouteMissWarned = new Set<string>();
 
+  /** The same latch for a LEAD with no carrier attached. Separate from the one
+   *  above because the two absences are different failures with different
+   *  remedies — no route home for a peer, versus no desktop app on this machine
+   *  — and a shared set would let one clear the other's warning. */
+  const busOwnerMissWarned = new Set<string>();
+
   function noteBusOrigin(contextId: string, peerId: string | undefined): void {
     // No peerId is the loopback owner, which is the lead's carrier and is
     // already reachable without a route.
@@ -979,7 +985,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (sent) origin.at = Date.now();
         return sent;
       }
-      return opts.sendToOwner?.(frame) ?? false;
+      // True here means the owner ACCEPTED the frame, which is the whole of what
+      // this process can observe: the app classifies and forwards afterwards, and
+      // an app that finds no leg for it drops it with no way to say so back. The
+      // task's ack is the only evidence of the rest, and `warnIfUnacked` in the
+      // coordinator is what says so when it never comes.
+      const sentToOwner = opts.sendToOwner?.(frame) ?? false;
+      if (sentToOwner) {
+        busOwnerMissWarned.delete(ctx.contextId);
+      } else if (!busOwnerMissWarned.has(ctx.contextId)) {
+        busOwnerMissWarned.add(ctx.contextId);
+        log.warn(
+          "session bus: no carrier attached to this machine for context %s — frames held until a desktop app attaches",
+          ctx.contextId,
+        );
+      }
+      return sentToOwner;
     },
     onEvent: (event) => {
       deliverBusEvent(event);

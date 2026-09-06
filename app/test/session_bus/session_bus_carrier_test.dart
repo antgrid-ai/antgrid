@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -6,6 +7,7 @@ import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/session_bus/session_bus_carrier.dart';
 import 'package:antgrid/session_bus/session_bus_links.dart';
+import 'package:antgrid/util/ab_log.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -395,4 +397,58 @@ void main() {
       expect(h.status.refused, 0);
     },
   );
+
+  // The counters answer a test; a log line answers the person holding a bridge
+  // that has been told 182 times that a frame left. Both silences below cost an
+  // afternoon of state-file archaeology to find once.
+  group('what the carrier says out loud', () {
+    late Directory tmp;
+    late String logPath;
+
+    setUp(() {
+      tmp = Directory.systemTemp.createTempSync('bus_carrier_log_');
+      logPath = '${tmp.path}/app.log';
+      AbLog.configureForTest(logPath);
+    });
+    tearDown(() {
+      AbLog.dispose();
+      tmp.deleteSync(recursive: true);
+    });
+
+    Future<String> logText() async {
+      await AbLog.flush();
+      final f = File(logPath);
+      return f.existsSync() ? f.readAsStringSync() : '';
+    }
+
+    test('a frame with nowhere to go names the leg it wanted', () async {
+      final h = _Harness(links: [_link()]);
+      final lead = h.transport(_leadProject);
+      h.registry.touch(_leadProject, isLocal: true);
+      h.start();
+      await h.settle();
+
+      lead.emitJson(_busFrame());
+      await h.settle();
+
+      final text = await logText();
+      expect(text, contains('no leg for addressed member'));
+      expect(text, contains(_peerReg));
+    });
+
+    // The failure with no other witness: the lead's bridge keeps handing frames
+    // to this app and being told they left, while a closed lead project means
+    // nothing is attached to carry them.
+    test('a link whose lead project is closed says nothing is carried', () async {
+      final h = _Harness(links: [_link()]);
+      h.transport(_leadProject);
+      h.start();
+      await h.settle();
+
+      expect(h.status.attachedLeads, 0);
+      final text = await logText();
+      expect(text, contains('lead project not open'));
+      expect(text, contains(_leadProject));
+    });
+  });
 }

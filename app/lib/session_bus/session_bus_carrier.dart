@@ -113,6 +113,17 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
   final Map<String, DateTime> _lastAttemptAt = {};
 
   SessionBusLinks _links = SessionBusLinks.empty;
+
+  /// Legs already reported as missing, so a bridge that retries a frame every
+  /// second does not write a line every second. Cleared the moment that leg
+  /// carries something, so a link that breaks twice is said twice.
+  final Set<String> _dropWarned = {};
+
+  /// Lead projects last reported as carrying nothing because they are closed.
+  /// Kept so the line is written when the situation CHANGES rather than on
+  /// every reconcile — the link set is re-derived by ordinary session traffic.
+  Set<String> _idleLeadsWarned = const {};
+
   Timer? _retry;
   bool _disposed = false;
   bool _reconciling = false;
@@ -218,6 +229,25 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
         if (wantedLeads.contains(l.leadProjectId)) l.peerRegistrationId,
     };
 
+    // A link whose lead project is closed attaches NOTHING — not the lead leg,
+    // and so not the peer leg either — while the lead's own bridge goes on
+    // handing frames to this app and being told they left. That is the one
+    // failure with no other witness on either side, so it is said here.
+    final idleLeads = <String>{
+      for (final l in _links.links)
+        if (!warm.contains(l.leadProjectId)) l.leadProjectId,
+    };
+    if (!setEquals(idleLeads, _idleLeadsWarned)) {
+      _idleLeadsWarned = idleLeads;
+      if (idleLeads.isNotEmpty) {
+        AbLog.warn(
+          _kComponent,
+          'lead project not open — carrying nothing for its members',
+          fields: {'leads': idleLeads.join(','), 'links': _links.length},
+        );
+      }
+    }
+
     _dropLegsOutside(_leads, wantedLeads);
     _dropLegsOutside(_peers, wantedPeers);
     // The throttle is per id and is never cleared on success, so a released
@@ -226,6 +256,11 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
     // belongs to a session it is no longer in.
     _lastAttemptAt.removeWhere(
       (id, _) => !wantedLeads.contains(id) && !wantedPeers.contains(id),
+    );
+    // Same reason, one latch further on: a warning left behind for a released
+    // member silences the first drop of its next join.
+    _dropWarned.removeWhere(
+      (id) => !wantedLeads.contains(id) && !wantedPeers.contains(id),
     );
     for (final id in wantedLeads) {
       _ensureLeg(id, fromLead: true);
@@ -345,9 +380,19 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
           },
         );
       case BusForward.toPeer:
-        _forward(_peers[to!.registrationId], raw, onSent: () => _toPeer++);
+        _forward(
+          _peers[to!.registrationId],
+          raw,
+          legId: to.registrationId,
+          onSent: () => _toPeer++,
+        );
       case BusForward.toLead:
-        _forward(_leads[to!.projectId], raw, onSent: () => _toLead++);
+        _forward(
+          _leads[to!.projectId],
+          raw,
+          legId: to.projectId,
+          onSent: () => _toLead++,
+        );
     }
     _publish();
   }
@@ -355,12 +400,25 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
   void _forward(
     _BusLeg? leg,
     InboundMessage raw, {
+    required String legId,
     required void Function() onSent,
   }) {
     if (leg == null) {
       _dropped++;
+      // The sending bridge is told this frame LEFT — accepting it is all the
+      // hand-off can report — so this line is the only place either process
+      // records that it went nowhere. Without it a bridge retries under a true
+      // `sent` forever and no log on either machine says why.
+      if (_dropWarned.add(legId)) {
+        AbLog.warn(
+          _kComponent,
+          'no leg for addressed member — frame not carried',
+          fields: {'leg': legId, 'type': raw.json['type']},
+        );
+      }
       return;
     }
+    _dropWarned.remove(legId);
     onSent();
     // The same channel it arrived on, and the same map: the app must not decide
     // anything about a frame it is only carrying.

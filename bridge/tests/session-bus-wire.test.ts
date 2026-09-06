@@ -1,9 +1,10 @@
 // bridge/tests/session-bus-wire.test.ts
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalListener } from "../src/local-listener";
+import { __setRootForTest } from "../src/logger";
 import { MessageBus } from "../src/message-bus";
 import {
   AbMessageSchema,
@@ -26,6 +27,7 @@ import {
   type SessionBusEvent,
   type SessionBusSelf,
 } from "../src/session-bus/coordinator";
+import { SESSION_BUS_UNACKED_WARN_ATTEMPTS } from "../src/session-bus/constants";
 import { HELD_MESSAGE_TTL_MS } from "../src/session-bus/held-store";
 import { NO_PROGRESS_EXCHANGES } from "../src/session-bus/task-guard";
 
@@ -283,6 +285,31 @@ describe("session-bus coordinator across a carrier", () => {
     if (!("ok" in res) || !res.ok) throw new Error(`assign refused: ${JSON.stringify(res)}`);
     return res.taskId;
   }
+
+  // A carrier that ACCEPTS a frame and then finds nowhere to put it reports the
+  // same `true` as one that delivered it, and the app has no way to say so back.
+  // The retry loop is then the only witness, and for three hours it said nothing
+  // at all — which is what this pins.
+  test("a frame that keeps leaving with nothing acked is said out loud", () => {
+    const lines: string[] = [];
+    __setRootForTest({ write: (s: string) => (lines.push(s), true) }, "debug");
+    try {
+      assign();
+      for (let i = 0; i < SESSION_BUS_UNACKED_WARN_ATTEMPTS + 2; i++) {
+        now += 61_000;
+        lead.pump();
+      }
+      const warned = lines.filter((l) => l.includes("with nothing acked"));
+      expect(warned.length).toBe(1);
+      expect(warned[0]).toContain(PEER_REF.sessionId);
+      expect(warned[0]).toContain(PEER_REF.machineLabel!);
+      // The frame really was accepted every time — this is the case that used to
+      // leave no trace anywhere.
+      expect(carried.length).toBeGreaterThan(SESSION_BUS_UNACKED_WARN_ATTEMPTS);
+    } finally {
+      __setRootForTest(process.stdout);
+    }
+  });
 
   test("an assign reaches the peer, is acked, and retires the lead's outbox", () => {
     const taskId = assign();

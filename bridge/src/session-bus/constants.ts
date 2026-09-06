@@ -51,6 +51,20 @@ export const MAX_BUS_ROUTES = 64;
  *  from an absence, so a peer offline for an hour has not failed its task. */
 export const SESSION_BUS_RETRY_BACKOFF_MS = [1_000, 5_000, 15_000, 60_000] as const;
 
+/** Attempts on one unacked transition before the bridge says so out loud.
+ *
+ *  A send is reported as having LEFT the moment the carrier accepts it, which is
+ *  a hop short of the peer receiving it — the app can accept a frame and then
+ *  find no leg to put it on, and it has no way to say so back. Nothing else
+ *  distinguishes that from a peer that is merely slow, so past this many
+ *  attempts with nothing acked the retry loop is the only witness there is. With
+ *  the backoff above this is minutes, not seconds. */
+export const SESSION_BUS_UNACKED_WARN_ATTEMPTS = 10;
+
+/** How often the warning above repeats while the silence lasts. One line three
+ *  hours ago is not an account of a link that is still failing now. */
+export const SESSION_BUS_UNACKED_WARN_EVERY = 60;
+
 /** Outstanding requests kept per session (spec 5.3), answered and open
  *  together — a request that was answered is the record proving it was. */
 export const MAX_PENDING = 64;
