@@ -253,3 +253,65 @@ test("focusing a session whose checkout is gone refreshes nothing for it", async
   // the worktree it strands is one no later delete can remove.
   expect(existsSync(gone.path)).toBe(false);
 }, 60_000);
+
+test(
+  "a background/foreground inside one connection leaves the checkout attended",
+  async () => {
+    await initRepo();
+    const { bus, sent } = await bootCore();
+    const session = await createIsolatedSession(bus, sent);
+    const checkoutId = session.checkoutId;
+    const checkout = await new CheckoutStore(core!.abDir, core!.projectId).get(checkoutId);
+    if (!checkout) throw new Error("checkout metadata missing");
+
+    writeFileSync(join(checkout.path, "tracked.txt"), "two\n");
+    await waitFor(sent, (m) =>
+      m.type === "git:status" && m.checkoutId === checkoutId
+      && m.files.some((f) => f.path === "tracked.txt" && !f.staged),
+    );
+
+    // Phase reference, and the state the user is actually in: a session on
+    // screen, so the cadence sits on the base period.
+    bus.dispatchInbound(
+      createMessage("session:focus", { sessionId: session.id }),
+      "control",
+      "loopback",
+    );
+
+    // The ONLY frame a background/foreground inside one live connection sends.
+    // `resyncFocus` rides a stream re-establish, so no `session:focus` follows
+    // the resume — if the pause edge drops the focus without the resume edge
+    // putting it back, the checkout the user is sitting on reads as unattended
+    // from here on.
+    bus.dispatchInbound(
+      createMessage("client:focus-state", { paused: true }),
+      "control",
+      "loopback",
+    );
+    // Long enough for the ladder to climb to its slowest tier while paused, so
+    // the next backstop poll is a full slow tier away rather than a tick away.
+    await sleep(BASE_MS * (SETTLED_TICK + 2));
+
+    bus.dispatchInbound(
+      createMessage("client:focus-state", { paused: false }),
+      "control",
+      "loopback",
+    );
+
+    // Index-only, so the watcher cannot see it and the window is far shorter
+    // than the tier the poll would still be on: only a cadence put back on the
+    // base period can report this in time.
+    const mark = sent.length;
+    await git(["add", "tracked.txt"], checkout.path);
+    const deadline = Date.now() + BASE_MS * 4;
+    let staged: AbMessage | undefined;
+    while (Date.now() < deadline && !staged) {
+      staged = statusesFor(sent, checkoutId, mark).find((m) =>
+        m.type === "git:status" && m.files.some((f) => f.path === "tracked.txt" && f.staged),
+      );
+      if (!staged) await sleep(10);
+    }
+    expect(staged?.type).toBe("git:status");
+  },
+  60_000,
+);

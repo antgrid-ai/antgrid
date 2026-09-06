@@ -61,7 +61,7 @@ import { dispatchRpc } from "./rpc/methods";
 import { snapshotAsksFor } from "./rpc/state-snapshot";
 import { StructuredAgentManager } from "./structured/structured-manager";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
-import { getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
+import { forgetGitScanMemos, getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote, listStashes, stashPop, stashDrop } from "./git-branches";
 import { getGitLog, getCommitFiles, getCommitFileDiff } from "./git-log";
 import { gitPull, gitPush, readSyncState, fetchRemote, EMPTY_SYNC_STATE, type GitSyncState } from "./git-sync";
@@ -589,12 +589,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   const terminalOwners = new Map<string, { checkoutId: string; externalId: string }>();
   // What each client last said is on screen (`session:focus`), dropped when it
   // declares it can render nothing here (`client:focus-state`) or when its
-  // socket goes away (`noteClientGone`) — the app restates its focus on
-  // resume. Read only by the setup push: a run whose
-  // banner the user is watching must not also buzz their phone. The work-status
-  // read state keeps its own copy in ProjectCore; this one exists because a
-  // core has no way back into that reduction.
+  // socket goes away (`noteClientGone`). A dropped socket is the app's to
+  // restate (`resyncFocus`); a pause is NOT — the app sends no `session:focus`
+  // on the resume edge, so this file restores it from [pausedFocusByClient].
+  // Read by the setup push (a run whose banner the user is watching must not
+  // also buzz their phone) and by [isCheckoutAttended]. The work-status read
+  // state keeps its own copy in ProjectCore; this one exists because a core has
+  // no way back into that reduction.
   const focusedSessionByClient = new Map<InboundSource, string>();
+
+  // What each paused client was looking at when it declared it could render
+  // nothing, so the reverse edge can put it back. Separate from the map above
+  // rather than a flag on it: everything that reads focus means "on screen
+  // NOW", and a paused client's session is not.
+  const pausedFocusByClient = new Map<InboundSource, string>();
 
   function createCheckoutRuntime(
     checkout: CheckoutRecord,
@@ -1431,7 +1439,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
       case "client:focus-state": {
         connState.appFocusPaused = msg.paused;
-        if (msg.paused) focusedSessionByClient.delete(client);
+        // Both edges, because the app restates its focus only on a STREAM
+        // re-establish (`resyncFocus`, driven by `streamReadyEvents`) — a
+        // background/foreground inside one live connection sends this frame
+        // and nothing else. Dropping the entry without putting it back left
+        // the checkout the user is sitting on reading as unattended, which is
+        // what [isCheckoutAttended] hands the backstop poll as permission to
+        // fall to its slowest tier while they watch it.
+        if (msg.paused) {
+          const focused = focusedSessionByClient.get(client);
+          if (focused !== undefined) pausedFocusByClient.set(client, focused);
+          focusedSessionByClient.delete(client);
+        } else {
+          const resumed = pausedFocusByClient.get(client);
+          pausedFocusByClient.delete(client);
+          if (resumed !== undefined && !focusedSessionByClient.has(client)) {
+            focusedSessionByClient.set(client, resumed);
+            refreshFocusedCheckout(resumed);
+          }
+        }
         opts.onClientFocusState?.(msg.paused, client);
         log.info("focus-state: paused=%s", msg.paused);
         break;
@@ -1989,8 +2015,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       fetchRemote(runtime.checkout.path)
         .then((fetched) => {
           if (!fetched || runtime.disposed) return;
-          return refreshGitStatusAttended(runtime).then(() => {
-            if (runtime.gitSyncFingerprint !== prevSync) sendGitSyncState(runtime);
+          // Plain [refreshGitStatus], NOT the attended variant: this is a
+          // 3-minute TIMER, not a signal that anyone is watching, and
+          // `fetchRemote` answers true on any exit-0 fetch — including the
+          // usual one that brought nothing down. Resetting on the fetch itself
+          // would put every tracked checkout back on the base period every
+          // 180s, which is shorter than the time it takes to climb the ladder
+          // and so would cancel the backoff outright. The counts MOVING is the
+          // real "this checkout is live" signal, so the reset rides that.
+          return refreshGitStatus(runtime).then(() => {
+            if (runtime.gitSyncFingerprint === prevSync) return;
+            resetGitPollCadence(runtime.gitPoll);
+            sendGitSyncState(runtime);
           });
         })
         .catch(() => {}),
@@ -2857,6 +2893,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // `onTerminalForgotten`, so this loop names only what the manager holds.
     for (const internalId of ownedTerminalIds) manager?.forget(internalId);
     dropCheckoutReplay(checkoutId);
+    // Keyed by path, and this path is about to stop existing: nothing will
+    // ever scan it again to prune the memos the way a live checkout does.
+    forgetGitScanMemos(runtime.checkout.path);
     await checkoutRuntimes.remove(checkoutId);
   }
 
@@ -3886,6 +3925,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     noteClientGone(client: InboundSource): void {
       focusedSessionByClient.delete(client);
+      // A socket that went away takes the pause with it: a reconnecting app
+      // re-declares both halves itself, and holding the id here would leak one
+      // entry per client for the life of the core.
+      pausedFocusByClient.delete(client);
     },
   };
 }

@@ -321,6 +321,16 @@ interface ConflictScan {
  */
 const unresolvedConflictScans = new Map<string, Map<string, ConflictScan>>();
 
+/** Drop both per-checkout scan memos for [cwd]. Each is pruned only by a
+ *  LATER pass over the same checkout finding nothing left to remember, and a
+ *  managed worktree gets deleted instead of passed over again — so without
+ *  this its whole map, one entry per untracked path, stays resident for the
+ *  life of the bridge process. Called from the checkout teardown sweep. */
+export function forgetGitScanMemos(cwd: string): void {
+  untrackedLineScans.delete(cwd);
+  unresolvedConflictScans.delete(cwd);
+}
+
 /** How much of a file decides whether it is binary — git's own threshold for
  * the same call. */
 const BINARY_SNIFF_BYTES = 8000;

@@ -283,6 +283,7 @@ describe("WorktreeManager delete failures", () => {
       expect(asked).toBe(0);
     });
 
+
     // The only place the eviction can be exercised end to end. POSIX unlinks a
     // directory whatever is standing in it, so there is no failure to recover
     // from and nothing to assert; on Windows a live process's current directory
@@ -360,6 +361,25 @@ describe("WorktreeManager delete failures", () => {
         ).rejects.toMatchObject({ code: "WORKTREE_DELETE_HELD" });
         expect(existsSync(managedPath)).toBe(true);
         expect(await store().get(record.id)).toMatchObject({ id: record.id });
+      });
+
+      test("retries when the holder exited instead of being terminated", async () => {
+        expect(entry).toBeDefined();
+        const record = await seed({ path: managedPath });
+        const git = fakeGit(managedPath, { removeExitCode: 1 });
+        // Zero terminated BY US, and the directory free anyway: the holder
+        // exited between the enumeration this report was built from and the
+        // eviction, which is ordinary for a process that was already on its
+        // way out. `terminateProcesses` documents zero and null as different
+        // answers for exactly this case — merged into one "nothing was
+        // released", the retry below never runs and the user keeps a session
+        // they cannot delete, named after a pid that is already gone.
+        await manager(git.run, {
+          listHolders: () => [{ ...entry, cwd: managedPath }],
+          terminateHolders: () => { holder?.kill(); return 0; },
+        }).remove({ checkoutId: record.id, force: true, deleteBranch: false });
+        expect(existsSync(managedPath)).toBe(false);
+        expect(await store().get(record.id)).toBeUndefined();
       });
 
       test("an eviction that throws stays the original failure", async () => {

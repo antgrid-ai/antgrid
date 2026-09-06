@@ -533,9 +533,14 @@ export class WorktreeManager {
       holders: holders.length,
       evicted: evicted ?? undefined,
     });
-    // A null (process table unreadable) and a zero both mean nothing was
-    // released, so the retry would only repeat a delete that just failed.
-    if (!evicted) return;
+    // `null` ONLY. `terminateProcesses` documents zero and null as different
+    // answers its callers must not merge: null is a process table it could not
+    // read, so no eviction was attempted and every holder is still there, but
+    // zero also covers each holder having exited between the enumeration this
+    // report is built from and the eviction — which frees the directory and
+    // makes the retry the only thing between the user and a session that
+    // cannot be deleted from a phone.
+    if (evicted === null) return;
     await this.reclaimOwnedPath(record, repoPath);
   }
 
