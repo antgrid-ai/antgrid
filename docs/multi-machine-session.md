@@ -17,9 +17,13 @@ desktop carrier played by a test object; the host-side invariants it pins are in
 
 Known divergences from this document, which the code decides:
 
-- A brief is NOT a queued delivery. It lands as a Handler instruction at arm time
-  (`flushPendingBrief` in `bridge/src/agent-core.ts`); `DeliveryKindSchema`
-  (`bridge/src/session-bus/delivery-queue.ts`) is the set that reaches a PTY.
+- A brief has two routes and the QUEUED one is the common path. `flushPendingBrief`
+  (`bridge/src/agent-core.ts`) hands it to the Handler as an instruction when one is
+  armed, and queues it as a `brief` delivery otherwise — which is what actually
+  happens, since Add machine starts a peer in terminal mode and arms no Handler.
+  Handing it over clears it, so whichever route runs first is the only one that
+  runs. `DeliveryKindSchema` (`bridge/src/session-bus/delivery-queue.ts`) is the
+  authoritative set.
 - A peer bridge cannot refuse its own delete: the dirty/unpushed refusals belong to the isolated
   worktree path, and a peer session may not be isolated (D10). The refusal that occurs in the
   field is a member whose machine the carrier cannot reach.
@@ -271,7 +275,7 @@ The tools above must be present in every bridge-managed session with no manual s
 1. From the session kebab, the user opens **Add machine** (§7.5): a dialog with machine, project, tool, model, and the brief. The peer machine must have remote access switched on (the lead's app is a remote device to it) and the project must be in its catalog — the same two gates every remote verb already passes, and the dialog lists nothing that fails them.
 2. The **Capability Card** (OS + repo, §3.3) is shown inline as soon as a machine + project is picked, so the brief is written with the card in view. The brief states: what this peer owns, what it must report, what it may not do.
 3. On **Add**, the peer bridge **creates a new session in that project for the purpose** (D10), on the main checkout — diagnosis needs the environment as it is, not a fresh worktree — with the chosen tool and model. Its row carries `memberOf`; the lead's row gains the member.
-4. The brief is delivered to the peer as that session's Handler instruction (§7.2).
+4. The brief is delivered to the peer's agent: as that session's Handler instruction when one is armed (§7.2), and otherwise as a queued `brief` delivery landing on a turn boundary — the ordinary case, since step 3 starts the peer in terminal mode.
 5. Card **and** brief are delivered together to the lead.
 6. Lead acknowledges and begins assigning tasks.
 
@@ -403,7 +407,7 @@ The queue is the product surface. The per-agent threads are the audit trail. The
 
 N agents × M gates is the fastest way to get the feature switched off.
 
-- **The mandate is the Handler session, one per member.** Goal, backlog, posture, and the instruction-scoped lifts derived from what the human typed. The peer's brief *is* its Handler instruction; approving the brief arms the peer.
+- **The mandate is the Handler session, one per member.** Goal, backlog, posture, and the instruction-scoped lifts derived from what the human typed. Where a peer runs WITHOUT a Handler — the default, since Add machine starts it in terminal mode — the brief is still its mandate and is still durable on the peer's disk, but it grants no lifts: an unarmed peer has no authorizer to lift anything, which is the conservative direction.
 - **Lifts do not transfer.** A lift is derived only from text the human typed into *that* member's Handler, never from a transcript, a judge, or another agent — so the lead cannot extend its own lifts to a peer, and the hard floor is liftable by nobody. The human approves the plan and each peer's brief; per-machine actions then run under each member's own mandate.
 - **Escalation on deviation only.**
 - Session expansion (adding a machine) is itself a natural gate, and is where blast radius doubles.
