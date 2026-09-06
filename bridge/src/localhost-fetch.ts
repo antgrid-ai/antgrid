@@ -234,7 +234,12 @@ export async function fetchLocalhost(opts: {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
-  /** Body encodings the phone advertised (`TunnelHttpRequest.acceptEncodings`). */
+  /** Body encodings the phone advertised (`TunnelHttpRequest.acceptEncodings`).
+   *  Only ever compress what this advertised: `bodyEncoding` reaches the app
+   *  as a bare string, so an app that predates the field renders the gzip
+   *  bytes as the body. Compatibility rides on that one field in both
+   *  directions — `z.object` strips it for an old bridge, and an old app
+   *  never sends it. */
   acceptEncodings?: string[];
 }): Promise<LocalhostFetchResult> {
   const parsed = new URL(opts.url);

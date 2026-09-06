@@ -2,7 +2,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { readdir, rm, rmdir } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { resolveAbDir } from "../antgrid-dir";
-import { listProcessesWithCwdUnder, type DirectoryHolder } from "../win32-process";
+import { listProcessesWithCwdUnder, terminateProcesses, type DirectoryHolder } from "../win32-process";
 import { branchSlug, checkoutDirName, projectRootName, sessionWords } from "./checkout-names";
 import { readCheckoutOwner, sameRepository } from "./checkout-owner";
 import { CheckoutStore } from "./checkout-store";
@@ -203,6 +203,11 @@ export interface WorktreeManagerOptions {
    * for it: it reads the real machine's process table, so a test can neither
    * arrange a holder nor assert on what a message made of one says. */
   listHolders?: (path: string) => DirectoryHolder[];
+  /** Paired with {@link listHolders}, and a seam for the same reason turned up
+   *  one notch: a test can no more kill a real holder than it can arrange one,
+   *  and a stub that actually terminated something would be a test that kills
+   *  processes on the machine running it. */
+  terminateHolders?: (holders: readonly DirectoryHolder[]) => number | null;
 }
 
 function canonical(path: string): string {
@@ -219,6 +224,7 @@ export class WorktreeManager {
   private readonly newCheckoutId: () => string;
   private readonly now: () => number;
   private readonly listHolders: (path: string) => DirectoryHolder[];
+  private readonly terminateHolders: (holders: readonly DirectoryHolder[]) => number | null;
   private readonly repoPaths = new Map<string, string>();
 
   constructor(private readonly options: WorktreeManagerOptions = {}) {
@@ -228,6 +234,7 @@ export class WorktreeManager {
     this.newCheckoutId = options.newCheckoutId ?? shortCheckoutId;
     this.now = options.now ?? Date.now;
     this.listHolders = options.listHolders ?? listProcessesWithCwdUnder;
+    this.terminateHolders = options.terminateHolders ?? terminateProcesses;
   }
 
   async prepareForSession(args: PrepareWorktreeArgs): Promise<CheckoutRecord> {
@@ -326,7 +333,12 @@ export class WorktreeManager {
     if (!exists) return { exists: false, registered, dirty: false, unpushedCommits: unpushed, locked: false };
     const entry = list.exitCode === 0 ? parseWorktreeList(list.stdout)
       .find((item) => canonical(item.path) === canonical(record.path)) : undefined;
-    const status = await this.git(["status", "--porcelain=v1", "--untracked-files=all"], record.path);
+    // `normal`, not `all`: this reduces to a boolean, and collapsing a wholly
+    // untracked directory to one entry is the same verdict for a fraction of
+    // the walk on a checkout with tens of thousands of files — which is on the
+    // critical path of a delete. Never `no`: this gates a WORKTREE_DIRTY
+    // refusal, and reading an untracked-only worktree as clean is data loss.
+    const status = await this.git(["status", "--porcelain=v1", "--untracked-files=normal"], record.path);
     // An unreadable status is not a clean one. `removeNow` now deletes the
     // directory itself whenever Git will not, so reading a failed `git status`
     // as "no local changes" is what would destroy them — a corrupt index or a
@@ -433,17 +445,27 @@ export class WorktreeManager {
       // the whole story the user gets unless the holder is named here.
       const holders = this.heldBy(record.path);
       logDirectoryHolders("worktree remove", record.path, holders);
-      if (holders.length > 0) {
+      // Naming them is not enough on its own. An orphan holds the directory
+      // until something kills it, and the user is routinely on a phone with no
+      // way to reach a pid on the dev machine — so a named holder was still a
+      // session nothing could delete, which is the state this whole path exists
+      // to prevent. Enumerated ONCE and reused: the list the eviction acts on
+      // has to be the same one the message names, or a holder could be killed
+      // and then not reported, or reported and never killed.
+      if (holders.length > 0) await this.evictHolders(record, repoPath, holders);
+      if (existsSync(record.path)) {
+        if (holders.length > 0) {
+          throw new WorktreeError(
+            "WORKTREE_DELETE_HELD",
+            `The isolated worktree's directory could not be removed.${describeHolders(record.path, holders)}`,
+            holders.length,
+          );
+        }
         throw new WorktreeError(
-          "WORKTREE_DELETE_HELD",
-          `The isolated worktree's directory could not be removed.${describeHolders(record.path, holders)}`,
-          holders.length,
+          "WORKTREE_DELETE_FAILED",
+          "The isolated worktree's directory could not be removed.",
         );
       }
-      throw new WorktreeError(
-        "WORKTREE_DELETE_FAILED",
-        "The isolated worktree's directory could not be removed.",
-      );
     }
     const verified = await this.inspectRegistration(repoPath, record.path);
     if (verified) throw new WorktreeError("WORKTREE_DELETE_FAILED", "Git still reports the isolated worktree.");
@@ -469,6 +491,57 @@ export class WorktreeManager {
    * enumeration that failed must never become a second, different failure. */
   private heldBy(path: string): DirectoryHolder[] {
     try { return this.listHolders(path); } catch { return []; }
+  }
+
+  /**
+   * Kill what is holding a managed checkout open, then retry the delete it
+   * refused.
+   *
+   * Guarded on the path exactly as [reclaimOwnedPath] is, and for a stronger
+   * reason than that one has: it deletes a directory under our own root, this
+   * kills processes for standing in it. A current directory is a LOCATION, not
+   * a claim of ownership — the holder may be a shell the user opened themselves
+   * — so the only thing that makes this defensible is that the location is a
+   * managed checkout whose deletion the user has already asked for and already
+   * answered the dirty/unpushed guards on. The guard below is what pins it to
+   * that, and it must never be relaxed into `record.managed`: that is metadata
+   * a hand-edited store can lie about, and this is a kill.
+   *
+   * Deliberately NOT wired into the reconcile sweep, which reclaims stranded
+   * directories as a side effect of CREATING a session. Killing there would act
+   * on a user who asked for nothing to be removed.
+   *
+   * Best-effort throughout: an eviction that frees nothing leaves the caller's
+   * existing report exactly as it was, rather than becoming a second, different
+   * failure on top of the one being reported.
+   */
+  private async evictHolders(
+    record: CheckoutRecord,
+    repoPath: string,
+    holders: readonly DirectoryHolder[],
+  ): Promise<void> {
+    if (!pathBelow(canonical(this.worktreeRoot()), canonical(record.path))) return;
+    let evicted: number | null;
+    try {
+      evicted = this.terminateHolders(holders);
+    } catch {
+      return;
+    }
+    logWorktreeEvent("worktree_delete_holders_evicted", {
+      checkoutId: record.id,
+      projectId: record.projectId,
+      holders: holders.length,
+      evicted: evicted ?? undefined,
+    });
+    // `null` ONLY. `terminateProcesses` documents zero and null as different
+    // answers its callers must not merge: null is a process table it could not
+    // read, so no eviction was attempted and every holder is still there, but
+    // zero also covers each holder having exited between the enumeration this
+    // report is built from and the eviction — which frees the directory and
+    // makes the retry the only thing between the user and a session that
+    // cannot be deleted from a phone.
+    if (evicted === null) return;
+    await this.reclaimOwnedPath(record, repoPath);
   }
 
   /** The managed-checkout root. Nothing outside it may be deleted by anything
@@ -812,7 +885,10 @@ export class WorktreeManager {
    * over a tree still full of the user's work; the `.git` link is what separates
    * that from the wreckage this sweep exists to reclaim, which has none. */
   private async hasLocalChanges(dir: string): Promise<boolean> {
-    const status = await this.git(["status", "--porcelain=v1", "--untracked-files=all"], dir)
+    // `normal` for the reason [inspect] gives, and `no` is forbidden here for
+    // the same one: this is the more reluctant of the two refusals, not the
+    // more permissive.
+    const status = await this.git(["status", "--porcelain=v1", "--untracked-files=normal"], dir)
       .catch(() => undefined);
     if (!status || status.exitCode !== 0) return existsSync(join(dir, ".git"));
     return status.stdout.trim().length > 0;

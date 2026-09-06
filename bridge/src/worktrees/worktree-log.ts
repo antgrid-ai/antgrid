@@ -19,6 +19,12 @@ export type WorktreeEvent =
    *  the branch to go, so a support bundle has to be able to see that it did not. */
   | "worktree_delete_branch_kept"
   | "worktree_delete_failed"
+  /** Live holders of a directory a delete could not remove were killed, and the
+   *  delete retried. Its own event rather than a field on the failure, because
+   *  it is the one path on which Antgrid kills a process it did not start — so
+   *  a support bundle has to be able to see that it happened even when the
+   *  retry then succeeded and the delete reported nothing wrong at all. */
+  | "worktree_delete_holders_evicted"
   /** A reconcile's orphan sweep attempted a directory and it survived. Its own
    *  event because the sweep's counts cannot express it: a failed reclaim moves
    *  none of them, so `worktree_reconcile_completed` reads exactly like a sweep
@@ -55,6 +61,12 @@ export interface WorktreeEventFields {
    *  question could not be asked: only Windows can answer it, and a zero would
    *  read as "nothing held it" everywhere else. */
   holders?: number;
+  /** How many of those holders were actually terminated. Absent rather than
+   *  zero when the process table could not be read, on the same rule as
+   *  `holders` above and for a sharper reason: zero means every holder had
+   *  already gone on its own, absent means the sweep never ran and they are all
+   *  still there. */
+  evicted?: number;
 }
 
 export function logWorktreeEvent(event: WorktreeEvent, fields: WorktreeEventFields = {}): void {
