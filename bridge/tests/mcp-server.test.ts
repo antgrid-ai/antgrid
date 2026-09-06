@@ -260,7 +260,7 @@ describe("the session-bus tool table", () => {
     expect(result.content[0]!.text).not.toContain("travels with the next report");
   });
 
-  test("a finding held on a task still says it travels", async () => {
+  test("a finding held on a task says it did not arrive, and names the report that can carry it", async () => {
     stub(() => Response.json({ ok: true, sent: false }));
     const result = await callSessionBusTool("antgrid_report_finding", {
       taskId: "t-1",
@@ -268,7 +268,11 @@ describe("the session-bus tool table", () => {
       text: "t",
     });
     expect(result.isError).toBeUndefined();
-    expect(result.content[0]!.text).toBe("Finding recorded on the task. It travels with the next report.");
+    const text = result.content[0]!.text;
+    expect(text).toContain("did not reach the lead");
+    expect(text).toContain("t-1");
+    expect(text).toContain("report");
+    expect(text).not.toContain("travels with the next report");
   });
 
   test("an assignment that has not reached the peer says so, and says not to repeat it", async () => {

@@ -608,12 +608,18 @@ export async function callSessionBusTool(
       }));
       if (!r.ok) return toolError(busError(r));
       if (r.data.sent) return toolText("Finding sent to the lead.");
-      // Only a task carries a finding forward: `coordinator.message` is neither
-      // queued nor acked, so a finding that did not leave and has no task to
-      // ride is simply gone. Saying "it travels with the next report" on that
-      // path — which is what this branch used to say for every unsent finding —
-      // tells the agent its work is safe when nothing will ever retry it.
-      if (taskId) return toolText("Finding recorded on the task. It travels with the next report.");
+      // A finding is never retried: `coordinator.message` is unsequenced and
+      // unacked, and a transition carries only the parts its caller passes, so
+      // the record `recordFinding` keeps on the task is this machine's own copy
+      // and not a queued send. Both branches must therefore say it did not
+      // arrive; only the remedy differs, and only a task gives the agent one.
+      if (taskId) {
+        return toolText(
+          `The finding did not reach the lead and nothing will retry it. It is recorded here on task `
+          + `${taskId}, so it is not lost on this machine — restate what the lead needs in your next `
+          + `report on that task, which IS queued and retried until it lands.`,
+        );
+      }
       return toolError(
         "The finding did not reach the lead, and with no taskId there is nothing to carry it — it was "
         + "not delivered and nothing will retry it. Check antgrid_session_status for whether the lead "
