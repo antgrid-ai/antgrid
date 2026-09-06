@@ -27,7 +27,11 @@ export type EscalationChoice = z.infer<typeof EscalationChoiceSchema>;
 // first match — so a repeated id means the chip the user read is not the one that
 // would be sent. Refined on the ARRAY, never the enclosing object, so
 // OpenEscalationWire keeps the `.shape` protocol.ts spreads into its message.
-const uniqueChoiceIds = (cs: EscalationChoice[]): boolean =>
+//
+// Typed on the id alone so the ask options below share this exact rule rather
+// than growing a second copy of it: the property being defended is about ids, not
+// about which of the two option shapes carries them.
+const uniqueChoiceIds = (cs: { choiceId: string }[]): boolean =>
   new Set(cs.map((c) => c.choiceId)).size === cs.length;
 
 // What answers an escalation, which is also what retires it:
@@ -76,6 +80,48 @@ export const OpenEscalationSchema = z.object({
   choices: z.array(EscalationChoiceSchema).min(2).max(3)
     .refine(uniqueChoiceIds, "choiceId must be unique").optional(),
   at: z.number(),
+  // The session did NOT stop for this one: it was raised on a pass that had
+  // already replied to the agent, so the work went on and the user answers when
+  // they can. Absent means what every row before this field meant — the session
+  // stopped and is waiting.
+  //
+  // Spelled `nonBlocking` and not `blocking` on purpose: the naive truthiness
+  // test (`if (e.nonBlocking)`) is then the SAFE reading on a row that predates
+  // the field AND on one an older bridge stripped it from and re-persisted.
+  // `blocking?: boolean` inverts that, and the failure is one character wide,
+  // silent, and repeated at every reader in two languages.
+  //
+  // RETIREMENT-RELEVANT, not merely a rendering flag: a submitted line does NOT
+  // clear one (see onUserReply's clearing rule). What retires one is an
+  // escalationId-bearing handler:answer or handler:instruct, a dismiss, or
+  // reconcileAsks finding nothing left that the question does not gate.
+  nonBlocking: z.boolean().optional(),
+  // Backlog ids the answer does not gate, validated once at raise time and
+  // re-checked against the live backlog on every pass (reconcileAsks) — the app
+  // re-derives the count from its own copy of the backlog rather than trusting
+  // a number, so the claim is verified at render time and not only at mint time.
+  unblocked: z.array(z.string().max(64)).max(10).optional(),
+  // The tap-to-answer options on an ASK. A separate field from `choices` and
+  // never a second producer into it: a `choices` entry carries `text` that the
+  // ordinary reply transport types into the PTY, and an ask must send the agent
+  // nothing. There is deliberately no `text` here — `label` IS the whole payload,
+  // resolved bridge-side from this row, so what the user reads on the button is
+  // exactly what the judge is told they chose. See quickChoicesFor's comment in
+  // handler/engine.ts for the authorization argument this shape rests on.
+  //
+  // `label` is bounded at 80 rather than the 40 EscalationChoiceSchema allows
+  // because there a label only names a reply that travels separately, while here
+  // it has to carry the whole answer as a sentence. Widening this one costs
+  // nothing — it is a new field, so no bound an existing row was written under
+  // moves.
+  askOptions: z.array(z.object({
+    choiceId: z.string().min(1).max(40),
+    label: z.string().min(1).max(80),
+    cost: z.string().min(1).max(160),
+    // z.literal(true), not z.boolean(): absent and `false` must mean one thing,
+    // and a literal makes the second spelling unsayable.
+    recommended: z.literal(true).optional(),
+  })).min(2).max(4).refine(uniqueChoiceIds, "choiceId must be unique").optional(),
 });
 export type OpenEscalation = z.infer<typeof OpenEscalationSchema>;
 
@@ -123,6 +169,20 @@ export const HandlerSessionRecordSchema = z.object({
   // itself is too stale to persist, but nudging without this would let a
   // restart resume an unsupervised turn.
   parkAwaitingJudge: z.boolean().optional(),
+  // The user's answer to a standing ask, parked until the judge relays it.
+  // Persisted, unlike askRejections and floorWarnings: a rejection lost to a
+  // restart costs the judge a hint, but an ANSWER lost to one costs the user
+  // their answer with the ask row already retired — they see nothing and believe
+  // they answered. This disk format's rule is that an unreadable distinction
+  // degrades to a halt, never to silence.
+  //
+  // Engine-internal and deliberately NOT on the wire, the same carve-out
+  // `promptId` documents: what the app needs is the one bit saying an answer is
+  // still queued, which rides the snapshot as `askAnswerPending`.
+  askAnswer: z.object({
+    escalationId: z.string(), question: z.string(), answer: z.string(),
+    tapped: z.boolean(), at: z.number(),
+  }).optional(),
 });
 export type HandlerSessionRecord = z.infer<typeof HandlerSessionRecordSchema>;
 

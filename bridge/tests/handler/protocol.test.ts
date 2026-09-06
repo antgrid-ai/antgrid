@@ -163,6 +163,58 @@ describe("handler wire", () => {
       .toBeNull();
   });
 
+  test("escalation carries the ask fields, and survives their absence", () => {
+    const base = {
+      projectId: "p", escalationId: "e1", terminalId: "t1", question: "q",
+      reasoning: "r", draftReply: "", urgency: "normal", at: 1,
+    } as const;
+    const option = (over: Record<string, unknown> = {}) =>
+      ({ choiceId: "staging", label: "Point it at staging", cost: "one extra deploy later", ...over });
+    const other = { choiceId: "prod", label: "Go straight at production", cost: "no second cutover" };
+    const send = (over: Record<string, unknown>) => parseMessage(JSON.stringify({
+      ...createMessage("handler:escalation", base), ...over,
+    }));
+    // Absent is every row a bridge sends today, and it must read as the stopped
+    // session it has always meant.
+    const bare = parseMessage(JSON.stringify(createMessage("handler:escalation", base))) as any;
+    expect(bare).toBeTruthy();
+    expect(bare.nonBlocking).toBeUndefined();
+    expect(bare.askOptions).toBeUndefined();
+
+    const full = send({
+      nonBlocking: true, unblocked: ["i1", "i2"],
+      askOptions: [option(), { ...other, recommended: true }],
+    }) as any;
+    expect(full.nonBlocking).toBe(true);
+    expect(full.unblocked).toEqual(["i1", "i2"]);
+    // `label` is the whole payload of a tap, so it has to survive the wire
+    // verbatim — there is no second field the answer could be recovered from.
+    expect(full.askOptions[0].label).toBe("Point it at staging");
+    expect(full.askOptions[1].recommended).toBe(true);
+    // Each field stands alone: the app's capability gate strips them one at a
+    // time and must never produce a frame this refuses.
+    expect(send({ nonBlocking: true })).toBeTruthy();
+    expect(send({ unblocked: [] })).toBeTruthy();
+
+    // Four is what a notification action row can carry; one is a question with no
+    // alternative, and the composer is app-authored so it is never an entry here.
+    expect(send({ askOptions: [option(), other, option({ choiceId: "wait" }), option({ choiceId: "abort" })] })).toBeTruthy();
+    expect(send({ askOptions: [option()] })).toBeNull();
+    expect(send({ askOptions: [] })).toBeNull();
+    expect(send({ askOptions: [option(), other, option({ choiceId: "a" }), option({ choiceId: "b" }), option({ choiceId: "c" })] })).toBeNull();
+    // Every surface resolves a tap by first match, so a repeated id parks an
+    // answer the user did not read.
+    expect(send({ askOptions: [option(), option({ label: "Point it at staging, carefully" })] })).toBeNull();
+    // An option with nothing on it is a button whose answer is unreadable.
+    expect(send({ askOptions: [option({ label: "" }), other] })).toBeNull();
+    expect(send({ askOptions: [option({ cost: "" }), other] })).toBeNull();
+    expect(send({ askOptions: [option({ label: "x".repeat(81) }), other] })).toBeNull();
+    // `recommended` is z.literal(true) precisely so absent and `false` cannot
+    // become two spellings of the same thing.
+    expect(send({ askOptions: [option({ recommended: false }), other] })).toBeNull();
+    expect(send({ unblocked: Array.from({ length: 11 }, (_, i) => `i${i}`) })).toBeNull();
+  });
+
   test("status snapshot escalations carry kind and choices through the replay", () => {
     const msg = createMessage("handler:status", {
       snapshots: [],
@@ -249,6 +301,51 @@ describe("handler wire", () => {
     });
     const keys = Object.keys((parseMessage(JSON.stringify(msg)) as any).sessions[0]);
     expect(keys.at(-1)).toBe("observability");
+  });
+
+  test("status advertises that asks can be answered, and replays an ask row", () => {
+    // The advert lives on the SNAPSHOT and not on the row because the row cannot
+    // advertise itself: a bridge that reads `nonBlocking` off a record a newer one
+    // wrote re-emits it faithfully while having no verb that answers it. An app
+    // that acted on the row alone would answer through the reply transport, into a
+    // PTY the session never stopped.
+    const session = {
+      terminalId: "t1", state: "needs_you" as const, pendingEscalations: 1,
+      armedAt: 1, goal: "g", backlog,
+      escalations: [{
+        escalationId: "a1", question: "Which database should the migration target?",
+        reasoning: "r", draftReply: "", urgency: "normal" as const, at: 2,
+        nonBlocking: true, unblocked: ["i1"],
+        askOptions: [
+          { choiceId: "staging", label: "Point it at staging for now", cost: "one extra deploy later" },
+          { choiceId: "prod", label: "Go straight at production", cost: "no second cutover" },
+        ],
+      }],
+    };
+    const msg = createMessage("handler:status", {
+      snapshots: [], projectId: "p",
+      sessions: [{ ...session, askAnswer: true, askAnswerPending: true }],
+    } as never);
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.sessions[0].askAnswer).toBe(true);
+    expect(parsed.sessions[0].askAnswerPending).toBe(true);
+    expect(parsed.sessions[0].escalations[0].nonBlocking).toBe(true);
+    expect(parsed.sessions[0].escalations[0].unblocked).toEqual(["i1"]);
+    expect(parsed.sessions[0].escalations[0].askOptions[1].choiceId).toBe("prod");
+
+    // Absent is every bridge that predates the verb, and it must still deliver a
+    // frame whose rows carry the flag — that is the rollback case exactly.
+    const bare = parseMessage(JSON.stringify(createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [session],
+    } as never))) as any;
+    expect(bare).toBeTruthy();
+    expect(bare.sessions[0].askAnswer).toBeUndefined();
+    expect(bare.sessions[0].escalations[0].nonBlocking).toBe(true);
+
+    // z.literal(true), so there is no second spelling of "this bridge cannot".
+    expect(parseMessage(JSON.stringify(createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [{ ...session, askAnswer: false }],
+    } as never)))).toBeNull();
   });
 
   // The record the app reads hours later, when the session that produced it is

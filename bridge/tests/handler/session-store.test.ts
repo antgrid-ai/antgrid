@@ -3,8 +3,10 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import {
   loadHandlerSession, saveHandlerSession,
+  OpenEscalationSchema, HandlerSessionRecordSchema,
   type HandlerSessionRecord,
 } from "../../src/handler/session-store";
 
@@ -136,6 +138,53 @@ describe("session record round-trip", () => {
     expect(loadHandlerSession(abDir, "proj", "t1")).toBeNull();
   });
 
+  it("round-trips an ask row and the answer parked against it", () => {
+    // The parked answer is the one thing a restart cannot re-derive: the row it
+    // answered is already retired, so losing it leaves the user believing they
+    // answered with nothing on any surface saying otherwise.
+    const abDir = tmpAbDir();
+    saveHandlerSession(abDir, "proj", record({
+      escalations: [{
+        escalationId: "a1", question: "Which database should the migration target?",
+        reasoning: "the two are not interchangeable", draftReply: "",
+        urgency: "normal", at: 2,
+        nonBlocking: true, unblocked: ["i1"],
+        askOptions: [
+          { choiceId: "staging", label: "Point it at staging for now", cost: "one extra deploy later" },
+          { choiceId: "prod", label: "Go straight at production", cost: "no second cutover", recommended: true },
+        ],
+      }],
+      askAnswer: {
+        escalationId: "a1", question: "Which database should the migration target?",
+        answer: "Point it at staging for now", tapped: true, at: 3,
+      },
+    }));
+    const loaded = loadHandlerSession(abDir, "proj", "t1");
+    expect(loaded?.escalations[0].nonBlocking).toBe(true);
+    expect(loaded?.escalations[0].unblocked).toEqual(["i1"]);
+    expect(loaded?.escalations[0].askOptions?.map((o) => o.choiceId)).toEqual(["staging", "prod"]);
+    expect(loaded?.escalations[0].askOptions?.[1].recommended).toBe(true);
+    expect(loaded?.askAnswer?.answer).toBe("Point it at staging for now");
+    expect(loaded?.askAnswer?.tapped).toBe(true);
+  });
+
+  it("reads a record written before the ask fields existed as a stopped session", () => {
+    // Every record on disk today is this one, and the absent reading has to be the
+    // conservative one: no ask, nothing parked, a row the session stopped for.
+    const abDir = tmpAbDir();
+    saveHandlerSession(abDir, "proj", record({
+      escalations: [{
+        escalationId: "e1", question: "q", reasoning: "r", draftReply: "",
+        urgency: "normal", at: 2,
+      }],
+    }));
+    const loaded = loadHandlerSession(abDir, "proj", "t1");
+    expect(loaded?.escalations[0].nonBlocking).toBeUndefined();
+    expect(loaded?.escalations[0].unblocked).toBeUndefined();
+    expect(loaded?.escalations[0].askOptions).toBeUndefined();
+    expect(loaded?.askAnswer).toBeUndefined();
+  });
+
   it("keeps records apart per terminal", () => {
     const abDir = tmpAbDir();
     saveHandlerSession(abDir, "proj", record({ terminalId: "t1", goal: "one" }));
@@ -165,6 +214,16 @@ describe("session record rejection", () => {
     expect(loadHandlerSession(abDir, "proj", "t1")).toBeNull();
   });
 
+  // The ask fields ride version 2 rather than buying a bump. A record naming any
+  // other version is refused whichever direction it came from, which is what makes
+  // `version` too expensive to spend on an optional field: loadHandlerSession
+  // returns null on it and the session comes back armed at nothing.
+  it("refuses a version it does not name, in either direction", () => {
+    const abDir = tmpAbDir();
+    writeRaw(abDir, "t1", JSON.stringify({ ...record(), version: 3 }));
+    expect(loadHandlerSession(abDir, "proj", "t1")).toBeNull();
+  });
+
   // A duplicate id leaves the shadowed item undrivable and the session unable to
   // wrap up, so refusing the record beats rehydrating one that can never finish.
   it("refuses a backlog carrying a duplicate id", () => {
@@ -189,5 +248,67 @@ describe("session record rejection", () => {
       ...record(), backlog: [item("i1", { status: "in_progress" })],
     }));
     expect(loadHandlerSession(abDir, "proj", "t1")).toBeNull();
+  });
+});
+
+// A Store rollback puts a bridge that predates the ask in front of a record this
+// one wrote, and what it does with the four new fields decides whether the user's
+// session survives it. The shape below is derived from the live schemas by
+// removal, so it cannot drift away from what it claims to model.
+describe("a record this bridge writes stays readable to one that predates the ask", () => {
+  const priorEscalation = OpenEscalationSchema.omit({
+    nonBlocking: true, unblocked: true, askOptions: true,
+  });
+  const priorRecord = HandlerSessionRecordSchema
+    .omit({ askAnswer: true, escalations: true })
+    .extend({ escalations: z.array(priorEscalation) });
+
+  it("strips all four fields and keeps the session armed rather than failing", () => {
+    // Every schema here is a plain z.object with no .strict()/.passthrough(), so
+    // zod drops what the older shape does not declare and the parse SUCCEEDS. The
+    // goal, the backlog and the rows come through, and the ask degrades to an
+    // ordinary blocking question — which is that bridge's only correct behaviour.
+    // A refusal instead would take the whole session: loadHandlerSession returns
+    // null on any failure and arm() then builds a fresh one with goal "" and an
+    // empty backlog, silently.
+    const parsed = priorRecord.safeParse(record({
+      escalations: [{
+        escalationId: "a1", question: "Which database should the migration target?",
+        reasoning: "r", draftReply: "", urgency: "normal", at: 2,
+        nonBlocking: true, unblocked: ["i1"],
+        askOptions: [
+          { choiceId: "staging", label: "Point it at staging for now", cost: "one extra deploy later" },
+          { choiceId: "prod", label: "Go straight at production", cost: "no second cutover" },
+        ],
+      }, {
+        escalationId: "e2", question: "q", reasoning: "r", draftReply: "ship it",
+        urgency: "normal", at: 3,
+        choices: [
+          { choiceId: "approve", label: "Approve", text: "ship it" },
+          { choiceId: "reject", label: "Reject", text: "no" },
+        ],
+      }],
+      askAnswer: {
+        escalationId: "a1", question: "Which database should the migration target?",
+        answer: "Point it at staging for now", tapped: true, at: 4,
+      },
+    }));
+    expect(parsed.success).toBe(true);
+    const data = parsed.data as Record<string, unknown> & { escalations: Record<string, unknown>[] };
+    expect(data.goal).toBe("migrate the auth module");
+    expect(data.askAnswer).toBeUndefined();
+    expect(data.escalations).toHaveLength(2);
+    const ask = data.escalations[0];
+    expect(ask.escalationId).toBe("a1");
+    expect(ask.question).toBe("Which database should the migration target?");
+    expect("nonBlocking" in ask).toBe(false);
+    expect("unblocked" in ask).toBe(false);
+    expect("askOptions" in ask).toBe(false);
+    // The field this change deliberately did not touch: an ordinary quick-choice
+    // row must come back sendable, not merely present.
+    expect(data.escalations[1].choices).toEqual([
+      { choiceId: "approve", label: "Approve", text: "ship it" },
+      { choiceId: "reject", label: "Reject", text: "no" },
+    ]);
   });
 });

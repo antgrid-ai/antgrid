@@ -1137,6 +1137,50 @@ const OpenEscalationWire = z.object({
   choices: z.array(EscalationChoiceWire).min(2).max(3)
     .refine(uniqueChoiceIds, "choiceId must be unique").optional(),
   at: z.number(),
+  // The session did NOT stop for this one: it was raised on a pass that had
+  // already replied to the agent, so the work went on and the user answers when
+  // they can. Absent means what every row before this field meant — the session
+  // stopped and is waiting.
+  //
+  // Spelled `nonBlocking` and not `blocking` on purpose: the naive truthiness
+  // test (`if (e.nonBlocking)`) is then the SAFE reading on a row that predates
+  // the field AND on one an older bridge stripped it from and re-persisted.
+  // `blocking?: boolean` inverts that, and the failure is one character wide,
+  // silent, and repeated at every reader in two languages.
+  //
+  // An app may only act on this when the session's own snapshot also advertised
+  // `askAnswer`: a bridge can read this field off a record a newer bridge wrote
+  // and re-emit it faithfully while having no verb that answers one, so the row
+  // cannot be its own capability signal.
+  nonBlocking: z.boolean().optional(),
+  // Backlog ids the answer does not gate. The app re-derives the count from its
+  // own copy of the backlog rather than trusting a number, so a stale id costs a
+  // smaller count and never a wrong claim.
+  unblocked: z.array(z.string().max(64)).max(10).optional(),
+  // The tap-to-answer options on an ASK. A separate field from `choices` and
+  // never a second producer into it: a `choices` entry carries `text` that the
+  // ordinary reply transport types into the PTY, and an ask must send the agent
+  // nothing. There is deliberately no `text` here — `label` IS the whole payload,
+  // resolved bridge-side from the persisted row, so what the user reads on the
+  // button is exactly what the judge is told they chose. See quickChoicesFor's
+  // comment in handler/engine.ts for the authorization argument this shape rests
+  // on.
+  //
+  // `label` is bounded at 80 rather than the 40 EscalationChoiceWire allows
+  // because there a label only names a reply that travels separately, while here
+  // it has to carry the whole answer as a sentence.
+  //
+  // The uniqueness refinement rides the ARRAY for the reason `choices`' does:
+  // `.shape` below carries it into HandlerEscalationMessage, and a repeated
+  // choiceId resolves a tap to an option the user did not read.
+  askOptions: z.array(z.object({
+    choiceId: z.string().min(1).max(40),
+    label: z.string().min(1).max(80),
+    cost: z.string().min(1).max(160),
+    // z.literal(true), not z.boolean(): absent and `false` must mean one thing,
+    // and a literal makes the second spelling unsayable.
+    recommended: z.literal(true).optional(),
+  })).min(2).max(4).refine(uniqueChoiceIds, "choiceId must be unique").optional(),
 });
 
 // One snapshot, as the app sees it. Shared by the one-shot advert and the
@@ -1268,6 +1312,19 @@ const HandlerSessionSnapshot = z.object({
   // what an absent value would have meant. Optional and appended LAST for the
   // same reason `observability` is: an older app still parses the snapshot.
   personality: HandlerPersonalitySchema.optional(),
+  // Presence IS the capability signal, the way `observability`'s is and unlike
+  // `wrapUps`, where absent and empty mean the same thing: this bridge accepts
+  // handler:answer and an escalationId-bearing handler:instruct for this
+  // session's asks. ABSENT means an app must treat every `nonBlocking` row as an
+  // ordinary blocking escalation, because it has no way to answer one that would
+  // not land in the PTY. This exists because the ask ROW cannot advertise
+  // itself: a bridge that can READ the record field but not answer it (a Store
+  // rollback onto a record a newer bridge wrote) re-emits `nonBlocking`
+  // faithfully.
+  askAnswer: z.literal(true).optional(),
+  // An answer is parked and has not been relayed to the agent yet. State, not
+  // capability — a bridge with nothing parked simply omits it.
+  askAnswerPending: z.boolean().optional(),
 });
 
 // Why this machine will not run the Handler, in the words the app has to answer
