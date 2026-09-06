@@ -21,6 +21,7 @@ import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
 import '../../util/detached.dart';
 import '../../util/relative_time.dart';
+import 'handler_ask_sheet.dart';
 import 'handler_backlog_drawer.dart';
 import 'handler_blocked_action_card.dart';
 import 'handler_decision_card.dart';
@@ -83,6 +84,20 @@ class HandlerScreen extends ConsumerWidget {
 
     Future<void> answer(HandlerEscalation e) async {
       if (service == null) return;
+      if (e.nonBlocking) {
+        // An ask goes to its own sheet and its own transport. The reply sheet
+        // would prefill the judge's draft and send the result into the session
+        // as a submitted line — which is what an ask exists not to do: the
+        // agent is still working, and the answer belongs to Handler.
+        final text = await showHandlerAskSheet(context, e);
+        if (text == null) return;
+        // Re-resolved after the sheet for the reason spelled out below.
+        focusedServiceOrNull(
+          container,
+          (s) => s.handlerService,
+        )?.answerAskText(e, text);
+        return;
+      }
       if (e.kind == 'resolve_in_session') {
         // Option-based prompt — the chat transcript owns the resolution UI
         // (permission card / question form); focusing the session gets the
@@ -186,9 +201,21 @@ class HandlerScreen extends ConsumerWidget {
                     // The id, not the choice: the service resolves it against
                     // the escalation's own offered set, so the text on the wire
                     // is always the one the bridge authored.
+                    //
+                    // Re-resolved through the container like `onDismiss` above
+                    // rather than closing over the build-time instance: a card
+                    // outlives a project session rebuild, and a disposed
+                    // service answers `false` — which the card reads as a
+                    // refusal and correctly declines to latch, so today this
+                    // only ever cost a tap. Re-resolving makes that tap land.
                     onChoice: service == null
                         ? null
-                        : (choiceId) => service.answerWithChoice(e, choiceId),
+                        : (choiceId) =>
+                              focusedServiceOrNull(
+                                container,
+                                (s) => s.handlerService,
+                              )?.answerWithChoice(e, choiceId) ??
+                              false,
                     onCustomReply: service == null ? null : () => answer(e),
                   )
                 else

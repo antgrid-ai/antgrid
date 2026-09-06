@@ -919,6 +919,110 @@ class HandlerService {
     return reply(current, choice.text);
   }
 
+  /// The live ask an answer may be sent against, or null when there is none.
+  ///
+  /// Re-resolved through [_escalationById] with NO fallback to the caller's own
+  /// object, unlike [answerWithChoice]: a card or a sheet held across a frame
+  /// can be answering a question the bridge has already retired, and the bridge
+  /// fails exactly that answer closed. Falling back to the stale row would be
+  /// this app asking it to accept one.
+  ///
+  /// The session's advert is read again here rather than inferred from a row
+  /// [_applyEscalationFloors] has already gated, because it is the whole of
+  /// what says this bridge has a verb for the answer at all — one that does not
+  /// drops `handler:answer` at its parser with no error frame and nothing
+  /// logged, and reads an `escalationId` on `handler:instruct` as an ordinary
+  /// instruction.
+  HandlerEscalation? _resolveAsk(HandlerEscalation escalation) {
+    if (_disposed) return null;
+    final current = _escalationById(escalation.escalationId);
+    if (current == null || !current.nonBlocking) return null;
+    if (_state.sessions[current.terminalId]?.askAnswer != true) return null;
+    return current;
+  }
+
+  /// Optimistically retire the answered ask and nothing else. A submitted line
+  /// clears a terminal's whole free-text set on both sides of the wire, but an
+  /// answer names one escalation and the bridge retires that row alone — so a
+  /// sibling dropped here would come straight back off the next snapshot with
+  /// its own question still unanswered.
+  void _retireAnsweredAsk(HandlerEscalation answered) => _dropRows(
+    answered.terminalId,
+    (e) => e.escalationId != answered.escalationId,
+  );
+
+  /// Answer an ask by tapping one of its own options.
+  ///
+  /// The frame carries [choiceId] and nothing else. The option's words are the
+  /// judge's, so the bridge resolves them against its own persisted row, and
+  /// what the judge is told the user chose is exactly the string that was on
+  /// the button. That is also why this takes neither of the paths that already
+  /// exist: [reply] types the text into the session and sweeps every sibling
+  /// row the way a submitted line does, and [instruct] mints an authorization
+  /// lift out of it and queues an extraction the judge would then drive back at
+  /// the agent — which is the judge instructing the agent in the user's name.
+  ///
+  /// Returns synchronously whether the answer reached the wire, because the
+  /// card latches its pending state only on a send that happened and every
+  /// refusal below leaves the question standing.
+  bool answerAsk(HandlerEscalation escalation, String choiceId) {
+    final current = _resolveAsk(escalation);
+    if (current == null) return false;
+    // Resolved against the options this app is currently showing, so an id the
+    // user never saw a button for sends nothing rather than something else —
+    // the same floor [answerWithChoice] puts on a quick choice, and what lets
+    // an OS notification action carry an id safely.
+    final offered = current.askOptions ?? const <HandlerAskOption>[];
+    if (!offered.any((o) => o.choiceId == choiceId)) return false;
+    session.send(
+      createAbMessage('handler:answer', {
+        'projectId': session.projectId,
+        'terminalId': current.terminalId,
+        'escalationId': current.escalationId,
+        'choiceId': choiceId,
+      }),
+    );
+    _retireAnsweredAsk(current);
+    return true;
+  }
+
+  /// Answer an ask in the user's own words.
+  ///
+  /// The `escalationId` rides along because it is what tells the bridge this
+  /// sentence ANSWERS a standing question rather than opening new work; without
+  /// it the same frame lifts authorization for the session and is split into
+  /// backlog items.
+  ///
+  /// Built here rather than routed through [instruct], for a reason about the
+  /// drawer rather than the wire: [instruct] parks the sentence in
+  /// `pendingInstructions` against an [_instructBaselines] snapshot, and
+  /// [_retirePending] only lets it go once that terminal's backlog length or
+  /// `armedAt` has moved. An answer the judge merely reads moves neither, so
+  /// the "sending" row and the drawer's edit lock would stand for the rest of
+  /// the session and a corrected second answer would be refused as a duplicate.
+  /// That debounce exists because extraction APPENDS and nothing absorbs a
+  /// repeat — a fact about the one path an answer does not take.
+  ///
+  /// Returns whether the answer reached the wire, for the same reason
+  /// [answerAsk] does.
+  bool answerAskText(HandlerEscalation escalation, String text) {
+    final current = _resolveAsk(escalation);
+    if (current == null) return false;
+    // An empty answer retires the row here and is dropped by the bridge, which
+    // the user reads as an answer given and then silently lost.
+    if (text.trim().isEmpty) return false;
+    session.send(
+      createAbMessage('handler:instruct', {
+        'projectId': session.projectId,
+        'terminalId': current.terminalId,
+        'text': text,
+        'escalationId': current.escalationId,
+      }),
+    );
+    _retireAnsweredAsk(current);
+    return true;
+  }
+
   HandlerEscalation? _escalationById(String escalationId) {
     for (final e in _state.escalations) {
       if (e.escalationId == escalationId) return e;

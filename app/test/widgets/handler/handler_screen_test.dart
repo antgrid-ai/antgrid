@@ -132,11 +132,15 @@ Future<FakeAgentTransport> pumpLiveHandlerScreen(WidgetTester tester) async {
     cachedSessionsStore: cache,
     onClose: () async => await transport.dispose(),
   );
-  final service = HandlerService.fromSession(projectSession);
+  // The session's OWN service, not a second one built over the same streams:
+  // in production `handlerServiceProvider` reads exactly this instance, so a
+  // separate one would let a callback that re-resolves through
+  // `focusedServiceOrNull` act on a different HandlerService than the screen
+  // renders — a divergence no production path has.
+  final HandlerService service = projectSession.handlerService;
   final heavy = projectSession.heavyStream.listen((_) {}); // unpause the gate
   addTearDown(() async {
     await heavy.cancel();
-    await service.dispose();
     await projectSession.close();
   });
 
