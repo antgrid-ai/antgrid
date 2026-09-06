@@ -98,23 +98,41 @@ class HandlerPendingLabel extends StatelessWidget {
 
 /// What a run state is CALLED. `parked` is spoken as "Paused" everywhere — the
 /// wire word is an implementation detail the user never asked about.
-String handlerRunStateLabel(HandlerRunState state) => switch (state) {
-  HandlerRunState.watching => 'Watching',
-  HandlerRunState.handling => 'Handling',
-  HandlerRunState.needsYou => 'Needs you',
-  HandlerRunState.parked => 'Paused',
-};
+///
+/// [asksOnly] splits the one state that has two meanings. `needs_you` is the
+/// bridge's word for both "the session has stopped and is waiting on you" and
+/// "the session is still working and has a question standing" — see
+/// [HandlerSessionState.asksOnly], which reads the rows the capability gate has
+/// already been over. Only the second is an ask, and calling it "Needs you"
+/// tells the user their agent has stopped when it has not, which is the whole
+/// distinction the ask exists to make.
+String handlerRunStateLabel(HandlerRunState state, {bool asksOnly = false}) =>
+    switch (state) {
+      HandlerRunState.watching => 'Watching',
+      HandlerRunState.handling => 'Handling',
+      HandlerRunState.needsYou => asksOnly ? 'Asked you' : 'Needs you',
+      HandlerRunState.parked => 'Paused',
+    };
 
 /// Tone for a run state. Accent is reserved for the two states that mean work
 /// is moving or the user is wanted; watching is deliberately quiet, because it
 /// is the state a session sits in for hours.
-Color handlerRunStateColor(AbColors p, HandlerRunState state) =>
-    switch (state) {
-      HandlerRunState.watching => p.textMuted,
-      HandlerRunState.handling => p.accent,
-      HandlerRunState.needsYou => p.accent,
-      HandlerRunState.parked => p.warning,
-    };
+///
+/// An ask drops to [AbColors.textSecondary] rather than to the muted tier
+/// `watching` gets: it is still something the user is expected to answer, so it
+/// must not read as background, but it is not the stopped agent that earns the
+/// accent. The tone is the only part of the split a user takes in without
+/// reading, so it has to move with the word.
+Color handlerRunStateColor(
+  AbColors p,
+  HandlerRunState state, {
+  bool asksOnly = false,
+}) => switch (state) {
+  HandlerRunState.watching => p.textMuted,
+  HandlerRunState.handling => p.accent,
+  HandlerRunState.needsYou => asksOnly ? p.textSecondary : p.accent,
+  HandlerRunState.parked => p.warning,
+};
 
 /// Copy for the "this session cannot be watched" warning. [agentLabel] is the
 /// agent's display name when the catalog named one; without it the warning

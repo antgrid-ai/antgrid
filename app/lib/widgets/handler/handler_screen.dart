@@ -21,6 +21,7 @@ import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
 import '../../util/detached.dart';
 import '../../util/relative_time.dart';
+import 'handler_ask_footer.dart';
 import 'handler_ask_sheet.dart';
 import 'handler_backlog_drawer.dart';
 import 'handler_blocked_action_card.dart';
@@ -157,14 +158,25 @@ class HandlerScreen extends ConsumerWidget {
     // decision card, plain row) and this is the only piece all three share, so
     // it is the only place the marker cannot be added to two of them and
     // forgotten on the third.
-    Widget meta(int at, {bool urgent = false}) =>
-        _RowMeta(at: at, p: p, urgent: urgent);
+    Widget meta(int at, {bool urgent = false, bool asked = false}) =>
+        _RowMeta(at: at, p: p, urgent: urgent, asked: asked);
 
-    // The urgency test itself, once, for that same reason: spelled out at each
-    // of the three call sites it is three chances to omit, and a fourth row
-    // shape starts life without it.
+    // The urgency and ask tests themselves, once, for that same reason: spelled
+    // out at each of the three call sites they are three chances to omit, and a
+    // fourth row shape starts life without them.
     Widget escalationMeta(HandlerEscalation e) =>
-        meta(e.at, urgent: e.urgency == 'high');
+        meta(e.at, urgent: e.urgency == 'high', asked: e.nonBlocking);
+
+    // Built here rather than inside the widget that draws it, because the claim
+    // is only checkable against the OWNING session's live backlog and that is
+    // held on this screen's state. A session with no snapshot yet hands over an
+    // empty backlog, which the footer reads as nothing running.
+    Widget? askFooter(HandlerEscalation e) => e.nonBlocking
+        ? HandlerAskFooter(
+            escalation: e,
+            backlog: state.sessions[e.terminalId]?.backlog ?? const [],
+          )
+        : null;
 
     return CustomScrollView(
       slivers: [
@@ -194,10 +206,17 @@ class HandlerScreen extends ConsumerWidget {
                           )?.dismiss(e),
                     onReply: service == null ? null : () => answer(e),
                   )
-                else if (e.choices != null)
+                // An ask needs BOTH halves to draw buttons: the bridge clears
+                // `nonBlocking` and `askOptions` together when it promotes one,
+                // so a row carrying only one of them is a frame in flight and
+                // falls through to the plain row, which can still answer it in
+                // words.
+                else if (e.choices != null ||
+                    (e.nonBlocking && e.askOptions != null))
                   HandlerDecisionCard(
                     escalation: e,
                     trailing: escalationMeta(e),
+                    footer: askFooter(e),
                     // The id, not the choice: the service resolves it against
                     // the escalation's own offered set, so the text on the wire
                     // is always the one the bridge authored.
@@ -215,6 +234,18 @@ class HandlerScreen extends ConsumerWidget {
                                 container,
                                 (s) => s.handlerService,
                               )?.answerWithChoice(e, choiceId) ??
+                              false,
+                    // The ask's own transport, re-resolved for the same reason.
+                    // It sends the id alone and nothing into the session — the
+                    // service refuses a row it cannot answer, which is what the
+                    // card reads as a refusal and declines to latch on.
+                    onAskOption: service == null
+                        ? null
+                        : (choiceId) =>
+                              focusedServiceOrNull(
+                                container,
+                                (s) => s.handlerService,
+                              )?.answerAsk(e, choiceId) ??
                               false,
                     onCustomReply: service == null ? null : () => answer(e),
                   )
@@ -258,6 +289,19 @@ class HandlerScreen extends ConsumerWidget {
                             color: p.textMuted,
                           ),
                         ),
+                        // An ask reaching this row is one with no options to
+                        // tap — answerable in words alone, and owed the same
+                        // two things the card gives it: what happens to the
+                        // answer, and what is still running behind it.
+                        if (e.nonBlocking)
+                          Text(
+                            handlerAskLatencyNote,
+                            style: AbTokens.sansStyle(
+                              fontSize: AbTokens.fontXs,
+                              color: p.textMuted,
+                            ),
+                          ),
+                        ?askFooter(e),
                       ],
                     ),
                     trailing: escalationMeta(e),
@@ -398,13 +442,23 @@ class HandlerScreen extends ConsumerWidget {
 
 /// Right-aligned time metadata shown on escalation and activity rows.
 class _RowMeta extends StatelessWidget {
-  const _RowMeta({required this.at, required this.p, this.urgent = false});
+  const _RowMeta({
+    required this.at,
+    required this.p,
+    this.urgent = false,
+    this.asked = false,
+  });
   final int at;
   final AbColors p;
 
   /// Only escalations pass this. Snapshots and activity rows are history, and
   /// nothing about them is waiting on the user.
   final bool urgent;
+
+  /// The row is a question the session did not stop for. Also escalations only,
+  /// and mutually exclusive with [urgent] by construction — an ask is always
+  /// minted `normal` — so the precedence below is a floor rather than a case.
+  final bool asked;
 
   @override
   Widget build(BuildContext context) {
@@ -419,7 +473,14 @@ class _RowMeta extends StatelessWidget {
         // Above the timestamp, so the eye reaches it on the way down rather
         // than after it. System-assigned data, so the mono uppercase chip,
         // matching ESCALATE ONLY on the session card.
-        if (urgent) AbChip.system(label: 'URGENT', color: p.warning),
+        //
+        // One slot, so a row can never wear both words: URGENT wins, because a
+        // row that somehow carried both would be a stopped session, and that is
+        // the reading that must not be softened.
+        if (urgent)
+          AbChip.system(label: 'URGENT', color: p.warning)
+        else if (asked)
+          AbChip.system(label: 'ASKED', color: p.textSecondary),
         Text(_fmtTime(at), style: style),
       ],
     );
@@ -525,7 +586,16 @@ class _SessionCard extends StatelessWidget {
     final visibleItems = hiddenItems > 0
         ? session.backlog.sublist(0, _maxItemRows)
         : session.backlog;
-    final runStateColor = handlerRunStateColor(p, session.runState);
+    // The same split the header pill takes, from the same shared vocabulary:
+    // this card and that pill are on screen together on desktop, and one of
+    // them saying the session stopped while the other says it asked reads as
+    // two different sessions.
+    final asksOnly = session.asksOnly;
+    final runStateColor = handlerRunStateColor(
+      p,
+      session.runState,
+      asksOnly: asksOnly,
+    );
     final parkNote = handlerParkNote(session);
     final mutedMono = AbTokens.monoStyle(
       fontSize: AbTokens.fontXxs,
@@ -553,7 +623,10 @@ class _SessionCard extends StatelessWidget {
                 child: Row(
                   children: [
                     Text(
-                      handlerRunStateLabel(session.runState),
+                      handlerRunStateLabel(
+                        session.runState,
+                        asksOnly: asksOnly,
+                      ),
                       maxLines: 1,
                       softWrap: false,
                       overflow: TextOverflow.ellipsis,
@@ -590,6 +663,22 @@ class _SessionCard extends StatelessWidget {
                         child: AbChip.system(
                           label: 'ESCALATE ONLY',
                           color: p.warning,
+                        ),
+                      ),
+                    ],
+                    // The answer has been given and has not reached the agent
+                    // yet. It is the only surface that ever exposes a relay
+                    // that is still waiting or has failed — the ask row itself
+                    // is retired the moment the answer goes out, so without
+                    // this the user has nothing at all between their tap and
+                    // Handler's next pass.
+                    if (session.askAnswerPending) ...[
+                      const SizedBox(width: AbTokens.space6),
+                      AbTooltip(
+                        message: handlerAskLatencyNote,
+                        child: AbChip.system(
+                          label: 'ANSWER QUEUED',
+                          color: p.textSecondary,
                         ),
                       ),
                     ],

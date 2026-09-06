@@ -519,8 +519,12 @@ class HandlerHeaderControl extends ConsumerWidget {
       // Words and tone both come from the shared vocabulary, so this pill and
       // the Handler tab never describe one session two ways.
       final state = session.runState;
-      pillLabel = handlerRunStateLabel(state).toUpperCase();
-      pillColor = handlerRunStateColor(p, state);
+      // `asksOnly` reads the session's GATED rows, so a bridge that re-emits
+      // `nonBlocking` without advertising a verb that answers one keeps the
+      // loud word — the app must not soften a question it has no way to answer.
+      final asksOnly = session.asksOnly;
+      pillLabel = handlerRunStateLabel(state, asksOnly: asksOnly).toUpperCase();
+      pillColor = handlerRunStateColor(p, state, asksOnly: asksOnly);
       switch (state) {
         case HandlerRunState.needsYou:
           pillLabel = '$pillLabel ${session.pendingEscalations}';
@@ -556,8 +560,24 @@ class HandlerHeaderControl extends ConsumerWidget {
     final otherPending =
         state.pendingEscalations - (session?.pendingEscalations ?? 0);
     if (session?.runState != HandlerRunState.needsYou && otherPending > 0) {
-      pillLabel = 'NEEDS YOU $otherPending';
-      pillColor = p.accent;
+      // The word comes from the rows this override is actually counting, not
+      // from the focused session's own state: one blocking row anywhere in that
+      // set is a stopped agent, and a stopped agent outranks any number of
+      // questions the work is running past. Rows here are the project-wide list
+      // the capability gate has already been over.
+      //
+      // Spelled the same way round as `HandlerSessionState.asksOnly` — every
+      // row an ask, over a non-empty set — rather than as "no blocking row",
+      // because the count and the rows come from different places and the count
+      // can be the higher of the two. With nothing to read, the quiet word would
+      // be an assertion about rows this app does not hold, and the whole reason
+      // this override exists is that a stopped session must not hide.
+      final counted = state.escalations
+          .where((e) => e.terminalId != activeId)
+          .toList();
+      final asked = counted.isNotEmpty && counted.every((e) => e.nonBlocking);
+      pillLabel = '${asked ? 'ASKED YOU' : 'NEEDS YOU'} $otherPending';
+      pillColor = asked ? p.textSecondary : p.accent;
       pillNavigates = true;
     }
 
