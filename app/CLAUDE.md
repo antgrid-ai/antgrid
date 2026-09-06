@@ -6,6 +6,9 @@ Root `CLAUDE.md` keeps the repo-wide gotchas, commands and conventions. The
 app's relay layer lives outside this tree: see
 `packages/antgrid_relay_client/CLAUDE.md`.
 
+What may be written in any `CLAUDE.md`, this one included, is governed by
+*Maintaining these files* in the root `CLAUDE.md`.
+
 ## Component map
 
 What each area owns, plus the contracts that span more than one of them.

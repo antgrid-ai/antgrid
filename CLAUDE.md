@@ -7,7 +7,25 @@ This file provides guidance to Coding Agents (like Claude, Codex, etc) when work
 > your own scratch checkouts, not the isolated-session worktrees the product
 > manages for users.
 
-> **Maintaining this file.** Update it in the same commit that invalidates a fact. Before writing any fact, ask *will this be wrong after 3 months of normal work?* — if yes, pin a pointer to its source of truth (a command like `flutter test`, a directory, or a symbol + file) instead of the value. Never pin counts, exhaustive lists, file-tree dumps, or line numbers; keep only load-bearing invariants. If a command already reports a number, delete the number.
+> **Maintaining these files.** Governs the root file and every scoped
+> `CLAUDE.md` (`bridge/`, `app/`, `relay/`, `web/`,
+> `packages/antgrid_relay_client/`); update one in the same commit that
+> invalidates a fact. Two questions gate what may be written in one.
+>
+> **Will it be wrong after 3 months of normal work?** If yes, pin a pointer to
+> its source of truth (a command like `flutter test`, a directory, or a symbol
+> + file) instead of the value. Never counts, exhaustive lists, file-tree dumps
+> or line numbers; if a command already reports a number, delete the number.
+>
+> **What fails today if someone breaks it?** If a test in that component's own
+> suite fails, the reasoning is a comment at the code, not a paragraph every
+> session pays for. Same-suite is the whole test: a Dart file is not in the
+> bridge suite, an Android manifest is not in the Flutter suite.
+>
+> What survives both is what nothing catches — cross-cutting authoring rules
+> (no test fails for code nobody has written yet), platform config no suite
+> reads, rules about running the tests themselves, and invariants spanning two
+> components so neither owns them.
 
 ## Project Overview
 

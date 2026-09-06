@@ -4,6 +4,9 @@ Deep reference for the licensing/account service. Root `CLAUDE.md` holds the
 repo-wide gotchas, commands, and conventions — this file loads only when
 working under `web/`.
 
+What may be written in any `CLAUDE.md`, this one included, is governed by
+*Maintaining these files* in the root `CLAUDE.md`.
+
 - `env.ts` — Zod env loader (`JWT_SIGNING_SEED` ≥43 chars, `RELAY_INTERNAL_SECRET` ≥16). `TRUSTED_PROXY_IPS` (comma IPs/CIDRs) is parsed to `Cidr[]` at load by antgrid-wire's `parseTrustedProxies` — the same loader the relay uses, so the two cannot drift — and feeds `util/client-ip.ts`, the spoof-safe X-Forwarded-For resolver shared with the relay (peer must be a trusted proxy; walk right-to-left; empty set = header ignored; a fallback taken with a header present warns, throttled per kind). It keys `/events` rate buckets, sign-in-email requester IPs, and geo/country detection; never take a leftmost XFF hop directly. `app.ts` also rewrites `X-Forwarded-For` to the resolved single hop before handing a request to Better-Auth — `/api/auth/*` is publicly reachable, so the cross-device plugin must not be the only thing standing between a forged chain and a stored requester IP.
 - `db/` — `PrismaClient` factory (Prisma 6, `engineType="client"` + `runtime="bun"`, `@prisma/adapter-pg`, generated at `src/generated/prisma/`). Schema in `prisma/schema.prisma`; migrations via `prisma migrate` (`bun run migrate`). `Tx = PrismaClient | Prisma.TransactionClient` (alias `SqlRunner`) so helpers take client or tx. Fields camelCase; columns snake_case via `@map`. Tests use ephemeral DBs (`tests/helpers/pg.ts`: raw `postgres` only for CREATE/DROP, then `prisma migrate deploy`).
 - `crypto/jwt.ts` — Ed25519 signing via `jose`; `importJWK` memoized per `SigningKey` (WeakMap). Exports `DEVICE_TOKEN_TTL_SECONDS`.

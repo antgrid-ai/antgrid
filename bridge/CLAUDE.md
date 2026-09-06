@@ -3,6 +3,9 @@
 Deep reference for the bridge. Root `CLAUDE.md` holds the repo-wide gotchas,
 commands, and conventions — this file loads only when working under `bridge/`.
 
+What may be written in any `CLAUDE.md`, this one included, is governed by
+*Maintaining these files* in the root `CLAUDE.md`.
+
 ## Adding an agent
 
 **`src/agents/registry.ts` is the single entry point.** Add the key to

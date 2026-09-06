@@ -3,6 +3,9 @@
 Deep reference for the relay. Root `CLAUDE.md` holds the repo-wide gotchas,
 commands, and conventions — this file loads only when working under `relay/`.
 
+What may be written in any `CLAUDE.md`, this one included, is governed by
+*Maintaining these files* in the root `CLAUDE.md`.
+
 v3 protocol: single-frame `hello` auth, epochs, account-derived routing, streams. The v2 register/challenge stack is gone.
 
 - `server.ts` — WS listener: the first text frame MUST be a signed `hello` (anything else → `PROTOCOL_VIOLATION` + close 1008; 10s hello-or-die timer). The verification sequence is written as numbered steps in the source and MUST NOT be reordered — the reasoning for each position, notably why the replay record lands only after the signature verifies, is on the step it belongs to. `relayHost` binds the normalized upgrade `Host` header, which is why a reverse proxy has to preserve it (Caddy's default) or every hello signature fails. Config enforces `replayTtlMs ≥ 2·clockSkewMs` at load. Also serves `POST /internal/{revoke,expire}` for web push. Pinned by `tests/hello-auth.test.ts` and `tests/hello-smoke.test.ts`.
