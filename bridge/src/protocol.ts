@@ -1069,12 +1069,43 @@ export const HandlerInstructWire = z.object({
   // Extraction truncates for prompt budget; the cap is here so an absurd payload
   // is refused at the wire instead of being carried that far.
   text: z.string().max(10_000),
+  // Present = this frame ANSWERS the standing ask with this id and is NOT a new
+  // instruction. Optional because the schema is a plain non-strict z.object and
+  // an older bridge strips it — which is only safe because the app never sends
+  // it to a session whose snapshot did not advertise `askAnswer`. When it IS
+  // present and names nothing, instruct fails CLOSED rather than falling through
+  // to today's path: an answer silently promoted to an authorizing, extracting
+  // instruction is exactly the laundering the ask shape exists to prevent.
+  escalationId: z.string().max(64).optional(),
 });
 
 const HandlerInstructMessage = BaseMessage.extend({
   type: z.literal("handler:instruct"),
   projectId: z.string(),
 }).extend(HandlerInstructWire.shape);
+
+// One tap on an ask's option. `escalationId` is REQUIRED and `choiceId` is
+// REQUIRED: a dedicated verb whose id resolution fails CLOSED is what keeps a
+// cross-language field-name typo, and a row retired between the render and the
+// tap, from degrading into an authorizing handler:instruct. No `text` field, ever
+// — the option's words are judge-authored, so they are resolved bridge-side from
+// the persisted row and never travel back through the one channel that mints
+// lifts (see quickChoicesFor in handler/engine.ts).
+//
+// Payload-only schema for the same reason as HandlerInstructWire: parseMessageFast
+// admits it on the discriminator alone, so agent-core re-parses with this before
+// the engine retires a row, and the envelope below rides on `.shape` so the two
+// cannot drift apart.
+export const HandlerAnswerWire = z.object({
+  terminalId: z.string(),
+  escalationId: z.string().max(64),
+  choiceId: z.string().min(1).max(40),
+});
+
+const HandlerAnswerMessage = BaseMessage.extend({
+  type: z.literal("handler:answer"),
+  projectId: z.string(),
+}).extend(HandlerAnswerWire.shape);
 
 // One tap-to-answer option on a quick-choice escalation. `text` is sent as
 // the USER's own reply through the ordinary reply transport, so it must be
@@ -2259,6 +2290,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   HandlerSnapshotMessage,
   HandlerUndoMessage,
   HandlerDismissMessage,
+  HandlerAnswerMessage,
   GitStatusMessage,
   GitDiffRequestMessage,
   GitDiffContentMessage,
@@ -2403,6 +2435,7 @@ export type HandlerActivityMsg = z.infer<typeof HandlerActivityMessage>;
 export type HandlerSnapshotMsg = z.infer<typeof HandlerSnapshotMessage>;
 export type HandlerUndoMsg = z.infer<typeof HandlerUndoMessage>;
 export type HandlerDismissMsg = z.infer<typeof HandlerDismissMessage>;
+export type HandlerAnswerMsg = z.infer<typeof HandlerAnswerMessage>;
 export type GitStatus = z.infer<typeof GitStatusMessage>;
 export type GitDiffRequest = z.infer<typeof GitDiffRequestMessage>;
 export type GitDiffContent = z.infer<typeof GitDiffContentMessage>;
@@ -2609,7 +2642,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "control:result", "app:ready",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
-  "handler:snapshot", "handler:undo", "handler:dismiss",
+  "handler:snapshot", "handler:undo", "handler:dismiss", "handler:answer",
   "git:status", "git:diff", "git:diff-content",
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",

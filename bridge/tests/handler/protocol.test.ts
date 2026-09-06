@@ -1,7 +1,9 @@
 import { describe, test, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   createMessage, parseMessage, parseMessageFast,
-  HandlerConfigureWire, HandlerInstructWire, HandlerUndoWire, HandlerDismissWire,
+  HandlerAnswerWire, HandlerConfigureWire, HandlerInstructWire, HandlerUndoWire, HandlerDismissWire,
   type HandlerInstructionItem,
 } from "../../src/protocol";
 
@@ -630,4 +632,112 @@ describe("handler:dismiss", () => {
       expect(viaPayload).toBe(c.valid);
     });
   }
+});
+
+describe("handler:answer", () => {
+  test("the answer verb routes through both parse paths", () => {
+    const msg = createMessage("handler:answer", {
+      projectId: "p", terminalId: "t1", escalationId: "e1", choiceId: "staging",
+    });
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.escalationId).toBe("e1");
+    expect(parsed.choiceId).toBe("staging");
+    // The hot path admits it on the discriminator alone, which is why agent-core
+    // re-parses with HandlerAnswerWire before the engine parks an answer.
+    expect(parseMessageFast(JSON.stringify(msg))?.type).toBe("handler:answer");
+  });
+
+  test("a tap carries ids and nothing else", () => {
+    // The option's words are judge-authored and are resolved bridge-side from the
+    // persisted row. A `text` field here would be the second producer into the one
+    // channel that mints authorization lifts.
+    expect(Object.keys(HandlerAnswerWire.shape).sort())
+      .toEqual(["choiceId", "escalationId", "terminalId"]);
+  });
+
+  const cases: Array<{ name: string; payload: Record<string, unknown>; valid: boolean }> = [
+    { name: "a well-formed tap", payload: { terminalId: "t1", escalationId: "e1", choiceId: "opt1" }, valid: true },
+    // Both ids are REQUIRED so a cross-language field-name typo fails LOUDLY,
+    // through agent-core's re-parse warn and its status resync, rather than
+    // arriving as a frame that names no row.
+    { name: "missing escalationId", payload: { terminalId: "t1", choiceId: "opt1" }, valid: false },
+    { name: "missing choiceId", payload: { terminalId: "t1", escalationId: "e1" }, valid: false },
+    { name: "missing terminalId", payload: { escalationId: "e1", choiceId: "opt1" }, valid: false },
+    { name: "an empty choiceId", payload: { terminalId: "t1", escalationId: "e1", choiceId: "" }, valid: false },
+    { name: "a non-string choiceId", payload: { terminalId: "t1", escalationId: "e1", choiceId: 7 }, valid: false },
+    {
+      name: "a choiceId at the cap",
+      payload: { terminalId: "t1", escalationId: "e1", choiceId: "c".repeat(40) },
+      valid: true,
+    },
+    {
+      name: "a choiceId over the cap",
+      payload: { terminalId: "t1", escalationId: "e1", choiceId: "c".repeat(41) },
+      valid: false,
+    },
+    {
+      name: "an escalationId over the cap",
+      payload: { terminalId: "t1", escalationId: "e".repeat(65), choiceId: "opt1" },
+      valid: false,
+    },
+  ];
+
+  for (const c of cases) {
+    it(`payload and envelope agree on ${c.name}`, () => {
+      const viaPayload = HandlerAnswerWire.safeParse(c.payload).success;
+      const viaEnvelope = parseMessage(JSON.stringify({
+        id: crypto.randomUUID(), timestamp: 1, type: "handler:answer", projectId: "p", ...c.payload,
+      })) !== null;
+      expect(viaPayload).toBe(viaEnvelope);
+      expect(viaPayload).toBe(c.valid);
+    });
+  }
+
+  test("the verb is wired at all five registration points", () => {
+    // Miss one and the type fails SILENTLY: the frame parses and reaches nothing,
+    // or it answers and never parses. Modelled on the same assertion
+    // checkout-protocol-contract.test.ts makes for session:setup.
+    const protocol = readFileSync(join(import.meta.dir, "../../src/protocol.ts"), "utf8");
+    // 1. the schema, 2. the exported type.
+    expect(protocol).toContain('type: z.literal("handler:answer")');
+    expect(protocol).toContain("export type HandlerAnswerMsg =");
+    // 3. the handler. CLAUDE.md still calls it "the index.ts switch"; the inbound
+    // switch itself lives in agent-core.ts.
+    const core = readFileSync(join(import.meta.dir, "../../src/agent-core.ts"), "utf8");
+    expect(core).toContain('case "handler:answer"');
+    // 4. KNOWN_TYPES and 5. the AbMessageSchema union, proven by behaviour rather
+    // than by grep: the two parse paths refuse a type either one has not heard of.
+    const raw = JSON.stringify(createMessage("handler:answer", {
+      projectId: "p", terminalId: "t1", escalationId: "e1", choiceId: "opt1",
+    }));
+    expect(parseMessageFast(raw)?.type).toBe("handler:answer");
+    expect(parseMessage(raw)).toMatchObject({ type: "handler:answer", choiceId: "opt1" });
+  });
+});
+
+describe("handler:instruct answers an ask by naming it", () => {
+  const send = (over: Record<string, unknown>) => parseMessage(JSON.stringify({
+    ...createMessage("handler:instruct", { projectId: "p", terminalId: "t1", text: "use staging" }),
+    ...over,
+  })) as any;
+
+  test("escalationId rides the frame, and its absence is an ordinary instruction", () => {
+    expect(send({ escalationId: "e1" }).escalationId).toBe("e1");
+    expect(send({}).escalationId).toBeUndefined();
+    expect(send({ escalationId: "e".repeat(64) })).toBeTruthy();
+    expect(send({ escalationId: "e".repeat(65) })).toBeNull();
+    expect(send({ escalationId: 7 })).toBeNull();
+  });
+
+  test("a bridge that predates the field strips it and still parses the instruction", () => {
+    // The rollback case, and the whole reason the app may send this only to a
+    // session whose snapshot advertised `askAnswer`: the schema is a plain
+    // non-strict z.object, so an older bridge silently reads the frame as a new
+    // instruction — which is an authorizing, extracting one.
+    const old = HandlerInstructWire.omit({ escalationId: true });
+    const parsed = old.safeParse({ terminalId: "t1", text: "use staging", escalationId: "e1" });
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && "escalationId" in parsed.data).toBe(false);
+    expect(parsed.success && parsed.data.text).toBe("use staging");
+  });
 });

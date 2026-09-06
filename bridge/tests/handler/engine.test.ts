@@ -12,7 +12,7 @@ import type { AbMessage } from "../../src/protocol";
 import type { HandlerDecision } from "../../src/handler/decision";
 import type { InstructionItem, ItemTransition } from "../../src/handler/backlog";
 import { MAX_ITEM_CHARS, type ExtractedItem } from "../../src/handler/extract";
-import type { HandlerSessionRecord } from "../../src/handler/session-store";
+import type { HandlerSessionRecord, OpenEscalation } from "../../src/handler/session-store";
 import { MAX_STORED, type StoredSnapshot } from "../../src/handler/snapshot-store";
 import { MAX_STORED_WRAPUPS } from "../../src/handler/wrap-up-store";
 import type { WrapUpRecord } from "../../src/handler/wrap-up";
@@ -4747,5 +4747,362 @@ describe("observabilityFor", () => {
     const { engine, sent } = makeEngine({ observable: () => true, tool: () => "kimi" });
     engine.arm({ terminalId: "t1", goal: GOAL });
     expect(statusOf(sent).observability).toBe("escalate_only");
+  });
+});
+
+
+// The answer transports, tested against SYNTHETIC ask rows: nothing raises an ask
+// yet, so every row below is planted on disk and rehydrated by arm() — the same
+// path a bridge restart takes.
+describe("answering an ask", () => {
+  const tick = () => new Promise<void>((r) => { setTimeout(r, 1); });
+  // Both entry points are fire-and-forget, and the relay pass one of them may start
+  // runs on the engine's own per-terminal chain with a context assembly inside it —
+  // so a fixed number of macrotasks is a race the moment the process is loaded.
+  // Wait on the thing being asserted; spend `settle` only where the assertion is
+  // that nothing happened.
+  const settle = async () => { for (let i = 0; i < 8; i++) await tick(); };
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 400 && !cond(); i++) await tick();
+  };
+
+  const options = [
+    { choiceId: "opt1", label: "Point it at staging for now", cost: "one extra deploy later" },
+    { choiceId: "opt2", label: "Go straight at production", cost: "no second cutover", recommended: true as const },
+  ];
+  function ask(over: Partial<OpenEscalation> = {}): OpenEscalation {
+    return {
+      escalationId: "a1", question: "Which database should the migration target?",
+      reasoning: "r", draftReply: "", urgency: "normal", kind: "reply", at: 2,
+      nonBlocking: true, unblocked: ["i1"], askOptions: options, ...over,
+    };
+  }
+  // Armed with no goal on purpose: a goal is extracted at arm time and would put an
+  // item in every backlog assertion below — the surface a tap must leave empty.
+  const armedWithAsk = (escalations: OpenEscalation[], over: Record<string, unknown> = {}) => {
+    const h = makeEngine({ loadSessionFn: () => sessionRecord({ goal: "", escalations }), ...over });
+    h.engine.arm({ terminalId: "t1" });
+    return h;
+  };
+
+  // `auth` is in-memory and crosses no wire, so "a tap grants nothing" has no
+  // observable surface at all — and it is the single most load-bearing property of
+  // the whole ask shape. Read the session itself rather than assert something
+  // weaker beside it.
+  interface PrivateSession {
+    auth: { patterns: Set<string>; paths: Set<string>; hosts: Set<string> };
+    backlog: InstructionItem[];
+    escalations: OpenEscalation[];
+    lastJudgedContextHash?: string;
+    askAnswer?: { escalationId: string; question: string; answer: string; tapped: boolean; at: number };
+    awaitingAgent?: boolean;
+  }
+  const session = (engine: HandlerEngine): PrivateSession =>
+    (engine as unknown as { sessions: Map<string, PrivateSession> }).sessions.get("t1")!;
+  const lifted = (s: PrivateSession) =>
+    ({ patterns: [...s.auth.patterns], paths: [...s.auth.paths], hosts: [...s.auth.hosts] });
+  const statuses = (sent: AbMessage[]) => sent.filter((m) => m.type === "handler:status");
+  const escalateRows = (activity: unknown[]) =>
+    records(activity, "escalate") as { reason: string; detail?: string }[];
+
+  it("a tap parks the label, retires the row, and rests the session", () => {
+    const { engine, sent, saved, activity } = armedWithAsk([ask()]);
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt2" });
+    expect(session(engine).escalations).toEqual([]);
+    // The label the user read on the button, resolved from this bridge's own row:
+    // the frame carried an id and nothing else.
+    expect(session(engine).askAnswer).toEqual({
+      escalationId: "a1", question: "Which database should the migration target?",
+      answer: "Go straight at production", tapped: true, at: 1000,
+    });
+    expect(statusOf(sent).state).toBe("watching");
+    expect(statusOf(sent).pendingEscalations).toBe(0);
+    // Persisted, because the row it answers is already gone: an answer lost to a
+    // restart leaves the user with no surface that could say so.
+    const rec = saved.at(-1) as HandlerSessionRecord;
+    expect(rec.escalations).toEqual([]);
+    expect(rec.askAnswer?.answer).toBe("Go straight at production");
+    const rows = escalateRows(activity);
+    expect(rows[0]!.reason).toBe("you answered Handler's question");
+    expect(rows[0]!.detail).toBe("Go straight at production");
+  });
+
+  it("a tap grants nothing", () => {
+    // The whole authorization argument in one assertion: instruct is the only
+    // writer of `auth`, and a tap reaches neither it nor the extractor. The option
+    // deliberately names a command an instruction WOULD lift, so the test fails if
+    // a tap ever gains a path into either.
+    const { engine, activity } = armedWithAsk([ask({
+      askOptions: [
+        { choiceId: "opt1", label: "Yes — rm -rf build and re-run it", cost: "the build dir goes" },
+        { choiceId: "opt2", label: "No, leave it", cost: "the stale output stays" },
+      ],
+    })]);
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+    expect(lifted(session(engine))).toEqual({ patterns: [], paths: [], hosts: [] });
+    expect(session(engine).backlog).toEqual([]);
+    expect(records(activity, "instruction_authorized")).toEqual([]);
+  });
+
+  it("clears the banked context hash, or the pass that would relay judges nothing", () => {
+    // contextHash covers ctx.text alone, and an answer that lives only in a prompt
+    // option moves nothing in it — so the next pass would return at the
+    // unmoved-context check and the answer would be discarded with no row, no log
+    // and no push.
+    const { engine } = armedWithAsk([ask()]);
+    session(engine).lastJudgedContextHash = "banked";
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+    expect(session(engine).lastJudgedContextHash).toBeUndefined();
+  });
+
+  it("a park is not over because a question was answered", async () => {
+    const { engine, sent } = armedWithAsk([ask()]);
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    expect(statusOf(sent).state).toBe("parked");
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+    expect(statusOf(sent).state).toBe("parked");
+  });
+
+  const refusals: Array<{ name: string; escalationId: string; choiceId: string; rows: OpenEscalation[] }> = [
+    { name: "an escalationId this session does not hold", escalationId: "gone", choiceId: "opt1", rows: [ask()] },
+    {
+      name: "a row that is not an ask", escalationId: "a1", choiceId: "opt1",
+      rows: [ask({ nonBlocking: undefined })],
+    },
+    { name: "a choiceId the row does not carry", escalationId: "a1", choiceId: "opt9", rows: [ask()] },
+  ];
+  for (const c of refusals) {
+    it(`refuses ${c.name} and resyncs the sender`, async () => {
+      const { engine, sent, saved, activity } = armedWithAsk(c.rows);
+      const beforeStatuses = statuses(sent).length;
+      const beforeSaved = saved.length;
+      await capturingWarnings(async () => {
+        engine.answerAsk({ terminalId: "t1", escalationId: c.escalationId, choiceId: c.choiceId });
+      });
+      // Exactly one frame, and it is the resync: the row stands, nothing is parked,
+      // and nothing reached the feed.
+      expect(statuses(sent).length).toBe(beforeStatuses + 1);
+      expect(saved.length).toBe(beforeSaved);
+      expect(session(engine).escalations).toEqual(c.rows);
+      expect(session(engine).askAnswer).toBeUndefined();
+      expect(escalateRows(activity)).toEqual([]);
+    });
+  }
+
+  it("a tap on a terminal with no armed session is a safe no-op", async () => {
+    const { engine, sent } = makeEngine();
+    const warned = await capturingWarnings(async () => {
+      engine.answerAsk({ terminalId: "t-unknown", escalationId: "a1", choiceId: "opt1" });
+    });
+    expect(warned).toContain("no armed session");
+    expect(sent).toEqual([]);
+  });
+
+  it("a second answer replacing an unrelayed one says so in the feed", () => {
+    const { engine, activity } = armedWithAsk([ask(), ask({ escalationId: "a2" })]);
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+    engine.answerAsk({ terminalId: "t1", escalationId: "a2", choiceId: "opt2" });
+    const replaced = escalateRows(activity).find((r) => r.reason === "your earlier answer was replaced");
+    expect(replaced?.detail).toBe("Point it at staging for now");
+    expect(session(engine).askAnswer!.answer).toBe("Go straight at production");
+  });
+
+  it("the snapshot advertises that this bridge can be told an answer", () => {
+    // The row cannot advertise itself: a bridge that reads `nonBlocking` off a
+    // record a newer one wrote re-emits it faithfully with no verb that answers it,
+    // and an app acting on the row alone would answer into a live PTY.
+    const { sent } = armedWithAsk([ask()]);
+    expect((statusOf(sent) as unknown as { askAnswer?: true }).askAnswer).toBe(true);
+  });
+
+  describe("free text on handler:instruct", () => {
+    it("naming a standing ask parks the answer and never becomes work", async () => {
+      const { engine, activity, saved } = armedWithAsk([ask()]);
+      const granted = engine.instruct({
+        terminalId: "t1", escalationId: "a1", text: "use staging, and rm -rf build first",
+      });
+      await settle();
+      // The lift is still taken, on the raw payload and at the single feed point:
+      // it is the user's own sentence, and that is what authorization is scoped to.
+      expect(granted?.operations).toEqual([{ tier: "DESTRUCTIVE", matched: "rm -rf" }]);
+      expect((records(activity, "instruction_authorized")[0] as { reason: string }).reason)
+        .toBe("rm -rf");
+      // NO extraction: the extractor splits a sentence into work, and an answer
+      // routed through it becomes a backlog item the judge drives at the agent.
+      expect(session(engine).backlog).toEqual([]);
+      expect(session(engine).askAnswer)
+        .toMatchObject({ escalationId: "a1", answer: "use staging, and rm -rf build first", tapped: false });
+      expect((saved.at(-1) as HandlerSessionRecord).escalations).toEqual([]);
+    });
+
+    it("names the bare hosts describeGrant deliberately omits from an ordinary row", async () => {
+      // Handler's own question is what elicited this sentence, so the one
+      // session-long grant the user could never otherwise see is spelled out. At
+      // most one row per answered ask, which is what makes that affordable.
+      const { engine, activity } = armedWithAsk([ask()]);
+      engine.instruct({ terminalId: "t1", escalationId: "a1", text: "bump the version in package.json" });
+      await settle();
+      const rows = records(activity, "instruction_authorized") as { reason: string; detail?: string }[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.reason).toBe("1 host");
+      expect(rows[0]!.detail).toBe("package.json");
+    });
+
+    it("an escalationId naming nothing FAILS CLOSED rather than becoming an instruction", async () => {
+      // The race this exists for: reconcileAsks retires an ask by clearing
+      // `nonBlocking`, driven by agent events, so falling through here would
+      // authorize and extract a sentence the user sent as an ANSWER on a window the
+      // agent influences.
+      const { engine, activity, sent } = armedWithAsk([ask({ nonBlocking: undefined })]);
+      const beforeStatuses = statuses(sent).length;
+      const warned = await capturingWarnings(async () => {
+        expect(engine.instruct({
+          terminalId: "t1", escalationId: "a1", text: "clear the build dir with rm -rf build",
+        })).toBeNull();
+        await settle();
+      });
+      expect(warned).toContain("not a standing ask");
+      expect(statuses(sent).length).toBe(beforeStatuses + 1);
+      expect(session(engine).backlog).toEqual([]);
+      expect(lifted(session(engine))).toEqual({ patterns: [], paths: [], hosts: [] });
+      expect(records(activity, "instruction_authorized")).toEqual([]);
+      expect(session(engine).askAnswer).toBeUndefined();
+    });
+
+    it("an escalationId on an unarmed terminal takes no lift and resyncs", async () => {
+      const { engine, activity } = makeEngine();
+      await capturingWarnings(async () => {
+        expect(engine.instruct({ terminalId: "t-unknown", escalationId: "a1", text: "rm -rf build" }))
+          .toBeNull();
+        await settle();
+      });
+      expect(records(activity, "instruction_authorized")).toEqual([]);
+    });
+
+    it("an instruction carrying no escalationId is today's path, byte for byte", async () => {
+      const { engine, activity } = armedWithAsk([ask()]);
+      engine.instruct({ terminalId: "t1", text: "also update the docs" });
+      await until(() => session(engine).backlog.length > 0);
+      // Extracted as work, and the standing ask is untouched by it.
+      expect(session(engine).backlog).toHaveLength(1);
+      expect(session(engine).escalations).toHaveLength(1);
+      expect(escalateRows(activity)).toEqual([]);
+    });
+
+    it("an empty answer is dropped without retiring the question", async () => {
+      const { engine } = armedWithAsk([ask()]);
+      expect(engine.instruct({ terminalId: "t1", escalationId: "a1", text: "   " })).toBeNull();
+      await settle();
+      expect(session(engine).escalations).toHaveLength(1);
+      expect(session(engine).askAnswer).toBeUndefined();
+    });
+  });
+
+  describe("when the answer is relayed", () => {
+    it("waits for the agent's own turn_end while a reply is outstanding", async () => {
+      // The ask rides a handle that already injected, so the agent is working and
+      // its turn_end IS the relay pass. Re-entering here would race it and land the
+      // relay mid-turn, which is the delivery a framed answer exists to avoid.
+      const judged = { n: 0 };
+      const { engine } = armedWithAsk([ask()], {
+        runDecisionFn: async () => { judged.n++; return decide({ decision: "handle", reply: "carry on" }); },
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(judged.n).toBe(1);
+      expect(session(engine).awaitingAgent).toBe(true);
+      engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+      await settle();
+      expect(judged.n).toBe(1);
+    });
+
+    it("re-enters on the event `latest` already holds once nothing is outstanding", async () => {
+      const judged = { n: 0 };
+      const { engine } = armedWithAsk([ask()], {
+        runDecisionFn: async () => { judged.n++; return decide({}); },
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(judged.n).toBe(1);
+      expect(session(engine).awaitingAgent).toBeUndefined();
+      engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+      await until(() => judged.n === 2);
+      expect(judged.n).toBe(2);
+    });
+
+    it("an agent event clears the outstanding reply, so the next answer re-enters", async () => {
+      const judged = { n: 0 };
+      const decisions: HandlerDecision[] = [decide({ decision: "handle", reply: "carry on" })];
+      const { engine } = armedWithAsk([ask()], {
+        runDecisionFn: async () => { judged.n++; return decisions.shift() ?? decide({}); },
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(judged.n).toBe(2);
+      expect(session(engine).awaitingAgent).toBeUndefined();
+      engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+      await until(() => judged.n === 3);
+      expect(judged.n).toBe(3);
+    });
+
+    it("a fresher event overtaking the re-entry is the one that gets judged", async () => {
+      const seen: string[] = [];
+      const { engine } = armedWithAsk([ask()], {
+        runDecisionFn: async (o: { context: string }) => { seen.push(o.context); return decide({}); },
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+      await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      await settle();
+      // handleEvent's own liveness re-check is what keeps the re-entry from judging
+      // context the agent has already moved past.
+      expect(seen).toHaveLength(2);
+      expect(seen.at(-1)).not.toBe(seen[0]);
+    });
+
+    it("synthesises one event when a restart left nothing to re-enter on", async () => {
+      // The answered-after-a-restart case: `latest` is in-memory, so a bridge that
+      // came back between the ask and the answer has no event to re-enter on and no
+      // agent event is guaranteed ever again. Delivery was chosen over the smaller
+      // producer set, so one pass is started here.
+      const judged = { n: 0 };
+      const { engine, activity } = armedWithAsk([ask(), ask({ escalationId: "a2" })], {
+        runDecisionFn: async () => { judged.n++; return decide({}); },
+      });
+      const synthesised = () => escalateRows(activity)
+        .filter((r) => r.reason.startsWith("no agent event was due"));
+      engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+      await until(() => judged.n === 1);
+      expect(judged.n).toBe(1);
+      expect(synthesised()).toHaveLength(1);
+
+      // At most ONE per answered ask: the synthesised event is now `latest`, so the
+      // next answer re-enters on it rather than starting a second producer.
+      engine.answerAsk({ terminalId: "t1", escalationId: "a2", choiceId: "opt2" });
+      await until(() => judged.n === 2);
+      expect(judged.n).toBe(2);
+      expect(synthesised()).toHaveLength(1);
+    });
+
+    it("a synthesised pass judges without a transcript rather than throwing", async () => {
+      // A restarted bridge took its PTYs with it, so the path a pre-restart event
+      // held names a file for a terminal that is gone. The synthesised event carries
+      // none, and the live adapter is what answers instead.
+      let handed: string | undefined = "unset";
+      const { engine } = armedWithAsk([ask()], {
+        adapter: {
+          injectReply: () => {},
+          recentOutput: () => EVIDENCE_TAIL,
+          transcriptPath: () => undefined,
+          outputKind: () => "pty",
+          commandCatalog: () => undefined,
+        },
+        runDecisionFn: async (o: { transcriptPath?: string }) => {
+          handed = o.transcriptPath;
+          return decide({});
+        },
+      });
+      engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
+      await until(() => handed !== "unset");
+      expect(handed).toBeUndefined();
+    });
   });
 });

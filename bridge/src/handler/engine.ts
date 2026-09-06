@@ -581,6 +581,23 @@ interface ArmedSession {
   // is not — without it the rehydrated park would wake and nudge, letting the
   // agent carry on from a pause nobody ever assessed.
   parkAwaitingJudge?: boolean;
+  // The user's answer to a standing ask, waiting for a judge pass to relay it to
+  // the agent in the judge's own words. Set is unrelayed: the handle branch is
+  // what clears it, and it is the only place text provably reached the agent.
+  // Persisted, for the reason the record's own field states — answering an ask
+  // retires the row, so an answer lost to a restart leaves the user with no
+  // surface that could tell them it went missing.
+  askAnswer?: NonNullable<HandlerSessionRecord["askAnswer"]>;
+  // An injected reply is outstanding, so the agent is working and its own
+  // turn_end is already in flight. maybeRelayNow reads it to decide whether an
+  // answer waits for that event or re-enters immediately: with a reply
+  // outstanding, re-entering would land the relay mid-turn, which is the
+  // delivery a framed answer exists to avoid.
+  //
+  // Deliberately not persisted. A restart leaves nothing outstanding, and that
+  // default is the conservative one: the first answer after it re-enters rather
+  // than waiting on an event no process is going to raise.
+  awaitingAgent?: boolean;
 }
 
 // The rejections a REFUSED CITATION produces, as opposed to the harness
@@ -817,7 +834,7 @@ export class HandlerEngine {
       armedAt: s.armedAt, escalations: s.escalations,
       judgeTool: s.judgeTool, judgeModel: s.judgeModel, personality: s.personality,
       parkKind: s.parkKind, parkedUntil: s.parkedUntil, transientFailures: s.transientFailures,
-      parkAwaitingJudge: s.parkAwaitingJudge,
+      parkAwaitingJudge: s.parkAwaitingJudge, askAnswer: s.askAnswer,
     });
   }
 
@@ -933,6 +950,11 @@ export class HandlerEngine {
       // Off the RECORD, not off `resumed`: a deliberate disarm keeps the pick
       // for the next arm, exactly as the judge fields above do.
       personality: rec?.personality,
+      // Carried across the restart the way the escalations above it are, and for
+      // the sharper version of the same reason: the row this answers is already
+      // retired, so dropping the answer here would leave the user believing they
+      // had answered with nothing on any surface saying otherwise.
+      askAnswer: resumed?.askAnswer,
       transientFailures: resumed?.transientFailures ?? 0,
       limitParks: 0,
       floorWarnings: [],
@@ -1010,8 +1032,48 @@ export class HandlerEngine {
    * from their own words — "clear out the build dir" reads as a chore and is also
    * a session-long permission — so it is recorded here rather than left implicit.
    */
-  instruct(p: { terminalId: string; text: string }): GrantSummary | null {
+  instruct(p: { terminalId: string; text: string; escalationId?: string }): GrantSummary | null {
     const s = this.sessions.get(p.terminalId);
+    // Free text ANSWERING a standing ask, per the answer transport: the frame names
+    // the row it answers, and everything below this branch is left byte for byte as
+    // it was for an ordinary instruction.
+    if (p.escalationId !== undefined) {
+      const esc = s?.escalations.find((e) => e.escalationId === p.escalationId && e.nonBlocking);
+      // Fails CLOSED. Falling through here would authorize and extract a sentence
+      // the user sent as an ANSWER, on a window an agent can influence:
+      // reconcileAsks retires an ask by clearing `nonBlocking`, driven by agent
+      // events. Same reason a duplicate Send must not become a second instruction.
+      // The resync is what takes the row off the sender's list.
+      if (!s || !esc) {
+        log.warn("handler instruct ignored: %s is not a standing ask on %s", p.escalationId, p.terminalId);
+        this.emitStatus();
+        return null;
+      }
+      const text = p.text.trim();
+      if (!text) return null;
+      // UNMOVED, and this ordering is the whole security property: the lift is
+      // taken on the raw payload, before extraction, at the single feed point.
+      const granted = authorizeInstruction(s.auth, text, this.deps.projectPath(p.terminalId));
+      // describeGrant reports g.destinations and NOT g.hosts, on purpose (see its
+      // comment) — the harvest reads any dotted token as a host, so echoing the
+      // superset back would call every source file a network permission. That is
+      // right for an instruction the user composed unprompted; it is wrong here,
+      // because Handler's own question is what elicited this sentence. At most one
+      // row per answered ask, so naming the hosts costs nothing and closes the
+      // only session-long grant the user could never see.
+      const described = describeGrant(granted) ?? (granted.hosts.length > 0
+        ? { reason: countPhrase(granted.hosts.length, ["host", "hosts"]), detail: rowSample(granted.hosts) }
+        : null);
+      if (described) this.record(p.terminalId, "instruction_authorized", described.reason, described.detail);
+      // NO queueExtraction. The extractor is told to split a sentence into work
+      // (extract.ts) and has no third result arm, so an answer routed through it
+      // becomes a backlog item the judge DRIVES at the agent — where the judge is
+      // supposed to relay it in its own words on the next pass.
+      this.parkAskAnswer(p.terminalId, s, esc, text, false);
+      this.record(p.terminalId, "escalate", "you answered Handler's question", previewForUser(text));
+      this.maybeRelayNow(p.terminalId, s);
+      return granted;
+    }
     if (!s) {
       log.warn("handler instruct ignored: no armed session for %s", p.terminalId);
       return null;
@@ -1028,6 +1090,130 @@ export class HandlerEngine {
     }
     this.queueExtraction(p.terminalId, text);
     return granted;
+  }
+
+  /**
+   * One tap on an ask's option, recorded as the user's own answer.
+   *
+   * What it deliberately does NOT do, because every one of these is a path the
+   * ask shape exists to keep judge-authored text off (see quickChoicesFor):
+   * `authorizeInstruction`, `queueExtraction`, `injectReply`, `guard.reset`,
+   * `arm`, `disarm`, `enterPark`, and minting a snapshot. `s.auth` is
+   * byte-identical across a tap, and nothing here reaches the agent — the judge
+   * relays the answer in its own words on the pass that follows.
+   *
+   * The option's words never travel back on the wire: the app sends a
+   * `choiceId` and the label is resolved from this bridge's OWN persisted row,
+   * so what is parked for the judge is exactly the string the user read.
+   *
+   * Fails CLOSED in every direction the app can get wrong, and unlike
+   * `answerWithChoice` app-side there is no fallback to a caller-supplied row: an
+   * id this session does not hold as a standing ask (a tap racing the frame that
+   * already retired it) resyncs the sender rather than answering something else.
+   */
+  answerAsk(p: { terminalId: string; escalationId: string; choiceId: string }): void {
+    const s = this.sessions.get(p.terminalId);
+    if (!s) {
+      log.warn("handler answer ignored: no armed session for %s", p.terminalId);
+      return;
+    }
+    const esc = s.escalations.find((e) => e.escalationId === p.escalationId && e.nonBlocking);
+    if (!esc) {
+      log.warn("handler answer ignored: %s is not a standing ask on %s", p.escalationId, p.terminalId);
+      this.emitStatus();
+      return;
+    }
+    // Resolved against this row's own options, never against anything the frame
+    // carried: a `choiceId` is identity, and the label it names is what the user
+    // read on the button they pressed.
+    const option = esc.askOptions?.find((o) => o.choiceId === p.choiceId);
+    if (!option) {
+      log.warn("handler answer ignored: %s names no option on %s", p.choiceId, p.escalationId);
+      this.emitStatus();
+      return;
+    }
+    this.parkAskAnswer(p.terminalId, s, esc, option.label, true);
+    // The existing `escalate` value rather than a new one: the activity kind is
+    // hand-mirrored into two more files and a value missing from either renders
+    // as an unknown row at runtime, never as a build error.
+    this.record(p.terminalId, "escalate", "you answered Handler's question", previewForUser(option.label));
+    this.maybeRelayNow(p.terminalId, s);
+  }
+
+  /**
+   * Bank the user's answer and retire the question it answers. Shared by the tap
+   * and the free-text arms, so the two cannot come to differ about what
+   * answering an ask means.
+   */
+  private parkAskAnswer(
+    terminalId: string, s: ArmedSession, esc: OpenEscalation, answer: string, tapped: boolean,
+  ): void {
+    // A parked answer is by definition unrelayed — the handle branch clears it the
+    // moment one reaches the agent — so this is a real answer about to be lost.
+    // At most one ask stands at a time, and a silent replace would drop the first
+    // one with nothing anywhere saying so.
+    if (s.askAnswer) {
+      this.record(terminalId, "escalate", "your earlier answer was replaced",
+        previewForUser(s.askAnswer.answer));
+    }
+    s.askAnswer = {
+      escalationId: esc.escalationId, question: esc.question, answer, tapped, at: this.now(),
+    };
+    s.escalations = s.escalations.filter((e) => e !== esc);
+    // Without this the answer is discarded with no row, no log and no push.
+    // `contextHash` is computed over `ctx.text` alone and `assembleContext` builds
+    // that from the transcript plus recent PTY, so an answer that lives only in a
+    // prompt option moves nothing in it — and the next pass would return at the
+    // unmoved-context check having judged nothing at all.
+    s.lastJudgedContextHash = undefined;
+    // A park is not over because a question was answered — the dismissEscalation
+    // precedent: the timer is still armed and parkKind/parkedUntil still describe
+    // the wait.
+    if (s.state !== "parked") s.state = restingState(s);
+    this.persist(terminalId, s, true);
+    this.emitStatus();
+  }
+
+  /**
+   * Relay the parked answer now, or leave it for the pass that is already coming.
+   *
+   * The ask rides a handle that already injected a reply, so when a reply is
+   * still outstanding the agent's own turn_end is in flight and IS the pass that
+   * relays. Re-entering here would race it and land the relay mid-turn — the
+   * moment a framed delivery exists to avoid — so we do nothing and handleEvent's
+   * agent-originated producers stay the only sources of a pass.
+   *
+   * With nothing outstanding, no event is coming: the reply that carried the ask
+   * was answered hours ago and the agent is idle at a prompt. Then re-entering IS
+   * the delivery, and on an event `latest` already holds it is the same
+   * handleEvent call the two retryEvent sites already make (limit_cleared, park
+   * wake) — `latest.set` on the value already there is a no-op, and handleEvent's
+   * own liveness re-check still drops this pass if a fresher event overtakes it.
+   *
+   * An empty `latest` is the case that makes this a genuinely NEW producer, and
+   * it is the answered-after-a-restart one: `latest` is in-memory, so a bridge
+   * that came back between the ask and the answer has nothing to re-enter on and
+   * no agent event is guaranteed ever again. Guaranteed delivery was chosen over
+   * the smaller producer set, so one event is synthesised — at most one per
+   * answered ask, since answering retires the row and the synthesised event then
+   * becomes the `latest` any later answer re-enters on. It deliberately carries no
+   * transcriptPath: the one a pre-restart event held names a file for a PTY that
+   * is gone, and handleEventInner resolves the live adapter's path instead, which
+   * degrades to the PTY tail (and to no context at all) rather than throwing.
+   */
+  private maybeRelayNow(terminalId: string, s: ArmedSession): void {
+    if (s.awaitingAgent) return;
+    const evt = this.latest.get(terminalId);
+    // Nothing awaits either call: they carry their own sink the way the two
+    // retryEvent sites do, and a judge that fails re-parks through the same path.
+    if (evt) {
+      void this.handleEvent(evt).catch(() => {});
+      return;
+    }
+    // A pass nothing on the machine asked for is exactly the kind of thing a
+    // future reader has to be able to find in the feed.
+    this.record(terminalId, "escalate", "no agent event was due, so Handler started a pass to relay your answer");
+    void this.handleEvent({ terminalId, event: "turn_end" }).catch(() => {});
   }
 
   // `onlyIfEmpty` is for the arm-time pass: the goal is extracted once,
@@ -1627,6 +1813,13 @@ export class HandlerEngine {
     const s = this.sessions.get(evt.terminalId);
     if (!s) return; // unarmed session: Handler is per-session now
 
+    // The agent produced an event, so whatever was injected into it is no longer
+    // outstanding. Cleared here rather than on any one decision branch, and before
+    // any judge work: every event answers the question this flag asks, including
+    // the ones that return early below, and a flag nothing clears would leave every
+    // later answer waiting on a turn_end that has already been and gone.
+    s.awaitingAgent = undefined;
+
     // The second read of the same predicate, and what actually bounds the
     // revocation lag to the token's 3600s TTL — gating only at arm() would make
     // it the armed session's lifetime instead. Suspend rather than return
@@ -1859,6 +2052,12 @@ export class HandlerEngine {
         const command = findCommand(catalog, shape.verb);
         this.deps.adapter.injectReply(evt.terminalId, shape.written,
           command ? { id: command.id, args: shape.args } : undefined);
+        // AFTER the inject and never before it: this claims a reply is genuinely
+        // outstanding, and an answer that arrives while it is set waits for the
+        // agent's turn_end instead of re-entering (see maybeRelayNow). Setting it
+        // ahead of a reply that then failed to go out would strand every answer on
+        // this session until some other event happened to arrive.
+        s.awaitingAgent = true;
         this.guard.recordAutoReply(evt.terminalId, probe);
         // Both recorded after the inject and before the handle row, so the feed reads
         // as "what was saved, what was flagged, then what was sent". Auditability is
@@ -2578,6 +2777,14 @@ export class HandlerEngine {
       // an absent value would leave it showing nothing while the judge runs
       // under a posture all the same.
       personality: s.personality ?? DEFAULT_PERSONALITY,
+      // A constant, because it is a fact about THIS BRIDGE rather than about the
+      // session: answerAsk exists here and instruct reads an escalationId, so an
+      // app may act on a `nonBlocking` row. It has to be said on the wire because
+      // the row cannot say it — a bridge that reads the field off a record a newer
+      // one wrote re-emits it faithfully with no verb that answers it — and an app
+      // reading only the row would answer through the reply transport, into a PTY
+      // the session never stopped.
+      askAnswer: true as const,
     }));
     const wrapUps = this.wrapUps();
     const entitlement = this.entitlementForApp();

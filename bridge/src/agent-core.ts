@@ -28,7 +28,7 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, type InboundSource } from "./message-bus";
@@ -847,7 +847,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // the extraction prompt.
         const parsed = HandlerInstructWire.safeParse(msg);
         if (parsed.success) {
-          handlerEngine.instruct({ terminalId: parsed.data.terminalId, text: parsed.data.text });
+          handlerEngine.instruct({
+            terminalId: parsed.data.terminalId, text: parsed.data.text,
+            // Forwarded rather than dropped: present, it turns this frame into the
+            // ANSWER to a standing ask, which the engine resolves and fails closed
+            // on. An older bridge's non-strict schema strips it, which is why the
+            // app sends it only to a session that advertised `askAnswer`.
+            escalationId: parsed.data.escalationId,
+          });
         } else {
           // Rejected WITHOUT disarming, for the same reason a malformed arm is: a
           // bad instruct must not tear down the live armed session it was meant to
@@ -888,6 +895,28 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // bad dismiss must not tear down the live armed session it names a row on.
           // Re-emit status so the sender's UI resyncs.
           logger.warn("handler:dismiss rejected: malformed payload");
+          handlerEngine.emitStatus();
+        }
+        break;
+      }
+      case "handler:answer": {
+        // Same re-parse discipline as the four above: parseMessageFast validated
+        // the type and nothing else, and these two ids select which option on
+        // which standing ask is recorded as the user's own answer.
+        const parsed = HandlerAnswerWire.safeParse(msg);
+        if (parsed.success) {
+          handlerEngine.answerAsk({
+            terminalId: parsed.data.terminalId,
+            escalationId: parsed.data.escalationId,
+            choiceId: parsed.data.choiceId,
+          });
+        } else {
+          // Rejected WITHOUT disarming, for the same reason a malformed arm is: a
+          // bad answer must not tear down the live armed session whose question it
+          // was aimed at. Re-emit status so the sender's UI resyncs — a tap whose
+          // field names drifted across the two languages then shows up as a row
+          // that stayed put, rather than as an instruction nobody meant to send.
+          logger.warn("handler:answer rejected: malformed payload");
           handlerEngine.emitStatus();
         }
         break;
