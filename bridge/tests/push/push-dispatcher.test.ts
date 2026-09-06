@@ -34,6 +34,39 @@ test("composePush mirrors the app strings", () => {
   }))).toEqual({ title: "Handler — urgent", body: "Deploy?", kind: "handler", sourceMessageId: "e1", terminalId: "t" });
 });
 
+// The three titles are hand-mirrored in `handlerEscalationTitle`
+// (app/lib/screens/workspace_shell.dart) and pinned from the Dart side by
+// app/test/screens/handler_escalation_title_test.dart, which reads these very
+// literals back out of compose.ts. Changing a string here without changing it
+// there gives the user two accounts of one event, depending only on whether the
+// device was awake.
+const escalation = (over: Record<string, unknown> = {}) => createMessage("handler:escalation", {
+  projectId: "p1", escalationId: "e1", terminalId: "t", question: "Which schema?",
+  reasoning: "", draftReply: "", urgency: "normal", at: 1, ...over,
+});
+
+test("composePush: an ask is titled as a question, not as a stop", () => {
+  // Everything but the title is unchanged on purpose: `sourceMessageId` is what
+  // dedups the pushed copy against the live one, so an ask must keep spending
+  // the same id as any other escalation.
+  expect(composePush(escalation({ nonBlocking: true })))
+    .toEqual({ title: "Handler has a question", body: "Which schema?", kind: "handler", sourceMessageId: "e1", terminalId: "t" });
+});
+
+test("composePush: an escalation with no nonBlocking flag still stops the user", () => {
+  // The absent case is what every row predating the ask feature looks like, and
+  // every row an older bridge stripped the flag from and re-persisted.
+  expect(composePush(escalation())!.title).toBe("Handler needs you");
+  expect(composePush(escalation({ nonBlocking: false }))!.title).toBe("Handler needs you");
+});
+
+test("composePush: urgent outranks the ask wording", () => {
+  // Unreachable through raiseAsk, which mints `normal` for every ask — asserted
+  // so the precedence is a decision rather than an artifact of which branch
+  // happened to be written first.
+  expect(composePush(escalation({ urgency: "high", nonBlocking: true }))!.title).toBe("Handler — urgent");
+});
+
 test("composePush: sessionTitle becomes the title, message the body", () => {
   expect(composePush(createMessage("notification:push", {
     notificationType: "task_complete", message: "Added a regression test", sessionTitle: "Fix auth bug", projectId: "p1",

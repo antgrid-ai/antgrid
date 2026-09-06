@@ -101,6 +101,40 @@ const double _kBackOverscrollThreshold = 48.0;
 /// drops that stored preference back to unchosen (see `_PanelModeNames` there).
 enum _PanelMode { normal, contextHidden, contextExpanded }
 
+/// The title an escalation is surfaced under — the in-app toast and the OS
+/// notification this app raises for itself.
+///
+/// HAND-MIRRORED in `composePush`'s `handler:escalation` branch
+/// (`bridge/src/push/compose.ts`), which titles the SAME escalation for a phone
+/// that is asleep or detached while this titles it for an attached app. Nothing
+/// in CI couples them, so a string changed on one side alone describes one
+/// event two different ways depending only on whether the device was awake —
+/// which is why `handler_escalation_title_test.dart` reads the bridge's own
+/// literals back out of that file. A shared golden fixture the bridge test
+/// writes and the Dart test reads is the real fix and is not built here; until
+/// it is, these three strings live in four places.
+///
+/// Pulled out of [WorkspaceShellState] so the branch can be pinned against
+/// literal escalations without pumping the whole shell — same reasoning as
+/// [workspaceBlockingError].
+@visibleForTesting
+String handlerEscalationTitle(HandlerEscalation esc) {
+  if (esc.urgency == 'high') return 'Handler — urgent';
+  // A question Handler raised on a pass that had already replied to the agent:
+  // the work went on, so the word must not be the one that means the session
+  // stopped. Safe to read straight off the row here because every escalation
+  // reaching this point has been through `HandlerService`'s capability gate —
+  // an ask a bridge cannot be told the answer to arrives with `nonBlocking`
+  // already cleared, so the app never offers a word it cannot honour.
+  //
+  // The split is also the whole of what reaches a locked phone: the push
+  // payload carries no channel, priority or interruption level (see
+  // `composePush`), so both titles buzz and light the screen identically.
+  // Everything else that separates a question from a stop is visible only once
+  // the user has been interrupted and has opened the Handler tab.
+  return esc.nonBlocking ? 'Handler has a question' : 'Handler needs you';
+}
+
 /// Root layout orchestrator.
 ///
 /// Mobile (< kCompactBreakpoint): two-page [PageView] — agent page | workspace
@@ -510,9 +544,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // Route through the shared surfacer (foreground toast / background OS
     // notification), identical to the agent-notification paths, so an
     // escalation from ANY warm project is surfaced — not just the focused one.
-    final title = esc.urgency == 'high'
-        ? 'Handler — urgent'
-        : 'Handler needs you';
+    final title = handlerEscalationTitle(esc);
     final body = esc.question.isNotEmpty ? esc.question : 'Agent needs you';
     _onAgentNotification(
       title: title,
