@@ -471,3 +471,54 @@ describe("posture in the decide prompt", () => {
     expect(buildShapeRetryPrompt(p, "two moves")).toContain("POSTURE");
   });
 });
+
+describe("the reply budget in the decide prompt", () => {
+  const build = (replyBudget?: number, personality?: "watchdog" | "closer" | "autopilot") =>
+    buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "ctx", replyBudget, personality });
+
+  it("says nothing when the caller has no number to give", () => {
+    expect(build()).not.toContain("Concretely, right now");
+  });
+
+  it("counts one remaining reply in the singular", () => {
+    const p = build(1);
+    expect(p).toContain("1 consecutive auto-reply left");
+    expect(p).toContain("reads the same at 1 as it does at full budget");
+  });
+
+  it("counts more than one in the plural", () => {
+    expect(build(3)).toContain("3 consecutive auto-replies left");
+  });
+
+  // The regression a truthiness test produces: zero is the one value the judge
+  // most needs, and it is the one value `if (opts.replyBudget)` drops. It is also
+  // why zero gets its own sentence — "0 consecutive auto-replies left" asks the
+  // judge to work out that it has none.
+  it("states an exhausted run outright rather than interpolating zero", () => {
+    const p = build(0);
+    expect(p).toContain("your consecutive auto-reply run is spent");
+    expect(p).not.toContain("0 consecutive auto-repl");
+  });
+
+  // It is planning information subordinate to both rules that bound it: printed
+  // above the confidence floor it would read as a budget to spend down, and below
+  // the ask-first test it would arrive after the decision it informs.
+  it("prints below the rules that bound it and above the test it informs", () => {
+    const p = build(2);
+    expect(p.indexOf("If you cannot answer with high confidence, escalate"))
+      .toBeLessThan(p.indexOf("Concretely, right now"));
+    expect(p.indexOf("The two costs are not equal"))
+      .toBeLessThan(p.indexOf("Concretely, right now"));
+    expect(p.indexOf("Concretely, right now"))
+      .toBeLessThan(p.indexOf("could one read-only question"));
+  });
+
+  // The budget is not a posture and must not read as one: it says how much room
+  // is left, never where this session's line between handling and escalating sits.
+  it("leaves the posture untouched at every budget", () => {
+    for (const n of [0, 1, 4]) {
+      expect(build(n, "closer").match(/POSTURE/g)).toHaveLength(1);
+      expect(build(n)).toContain(build(n, "watchdog").split("POSTURE")[1]);
+    }
+  });
+});

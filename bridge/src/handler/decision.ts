@@ -99,6 +99,11 @@ export function buildDecidePrompt(opts: {
   goal: string; backlogText: string; context: string; transcriptPath?: string;
   floorWarnings?: string[];
   evidenceRejections?: string[];
+  // Consecutive auto-replies left before the guard refuses the next `handle` and
+  // raises the refusal itself. A floor rather than a promise: the caller reads it
+  // off the guard before the judge runs, and an item this same pass reports
+  // `done` restores the whole cap afterwards.
+  replyBudget?: number;
   // The agent being SUPERVISED, never the judge running this prompt — a
   // per-session judge pick can point at a different CLI entirely.
   agentTool?: string;
@@ -110,6 +115,7 @@ export function buildDecidePrompt(opts: {
   // posture — the judge is never asked to decide without one.
   personality?: HandlerPersonality;
 }): string {
+  const budget = opts.replyBudget;
   return [
     opts.agentTool
       ? `You are a supervisor standing in for the user while the coding agent \`${supervisedName(opts.agentTool)}\` works.`
@@ -165,6 +171,19 @@ export function buildDecidePrompt(opts: {
     // escalation stalls it until a human returns: nothing re-raises one, and a
     // blocked agent emits no further event (see `onUserReply` in engine.ts).
     "- The two costs are not equal. A question to the agent spends one of a bounded run of consecutive auto-replies and is answered in seconds; the harness escalates on its own once that run is exhausted or you repeat yourself, so an unhelpful question is recoverable within this session. An escalation spends the user, who may be asleep, and the session does nothing until they answer — nothing re-raises it, and no further event arrives while the agent sits idle. Neither is free. The escalation is the expensive one.",
+    // Printed directly under the rule that prices the two resources, because it is
+    // the only place the price is a live number rather than a standing asymmetry.
+    // Tested with `!== undefined` and never for truthiness or `?.length`: the two
+    // feedback sections above use the length idiom because an empty list has
+    // nothing to say, and an exhausted run is the one value here that says the
+    // most. Zero is a separate sentence rather than an interpolated count so the
+    // judge is never asked to do arithmetic on the number that decides whether its
+    // next `handle` reaches the agent at all.
+    ...(budget !== undefined
+      ? [budget === 0
+        ? "- Concretely, right now: your consecutive auto-reply run is spent. The next `handle` is refused before it reaches the agent and raised to the user as a report you did not write. Decide on what you already hold — let the agent continue, escalate, or wrap up."
+        : `- Concretely, right now: ${budget} consecutive auto-repl${budget === 1 ? "y" : "ies"} left before the harness stops sending them and raises the refusal to the user in words you did not choose; sending a reply you already sent spends the whole run in one step. This is planning information and never permission — every rule above reads the same at ${budget} as it does at full budget, and a reply you would not otherwise have sent is not made right by having room for it. Treat it as a floor rather than an allowance: an item reaching \`done\` restores it. If what is left plainly will not carry the work to somewhere the user can act, say so now instead of being cut off mid-run.`]
+      : []),
     "- So before you escalate, apply this test: could one read-only question to the agent plausibly dissolve this escalation, or sharpen what you would ask the user? If yes, ask it, and escalate on the next pass if the answer does not settle it. If the escalation stands whatever the agent replies — because what is missing is intent, authorization or preference — escalate now and do not spend the turn.",
     // The concrete form of the test above for the case it fits worst. A choice
     // between approaches is neither a fact the agent can hand over nor a preference

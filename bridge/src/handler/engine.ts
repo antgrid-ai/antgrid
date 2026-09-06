@@ -1742,6 +1742,13 @@ export class HandlerEngine {
         cwd: this.deps.projectPath(evt.terminalId),
         floorWarnings: s.floorWarnings,
         evidenceRejections: s.evidenceRejections.map((r) => r.line),
+        // Read off the live guard, so it is never stored on the session and never
+        // persisted. It is honest only in one direction: it is taken BEFORE the
+        // judge runs, while absorbTransitions calls guard.recordProgress after it
+        // on any `done`, so a prompt that said "1 left" can be followed by a fully
+        // restored cap in the same pass. That direction only ever makes the judge
+        // under-spend, which is why the prompt states a floor and never a promise.
+        replyBudget: this.guard.remaining(evt.terminalId),
         // The SUPERVISED agent, not the judge: `tool:` above is `s.judgeTool ?? tool`,
         // and a per-session judge pick can name a different CLI entirely.
         agentTool: tool,
