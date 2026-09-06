@@ -117,6 +117,9 @@ export async function runDecision(opts: {
   floorWarnings?: string[];
   evidenceRejections?: string[];
   replyBudget?: number;
+  openAsks?: string[];
+  askRejections?: string[];
+  askAnswer?: { question: string; answer: string; tapped: boolean };
   agentTool?: string;
   commands?: CapCommand[];
   personality?: HandlerPersonality;
@@ -131,6 +134,7 @@ export async function runDecision(opts: {
       goal: opts.goal, backlogText: opts.backlogText, context: opts.context, transcriptPath: path,
       floorWarnings: opts.floorWarnings, evidenceRejections: opts.evidenceRejections,
       replyBudget: opts.replyBudget,
+      openAsks: opts.openAsks, askRejections: opts.askRejections, askAnswer: opts.askAnswer,
       agentTool: opts.agentTool, commands: opts.commands,
       // The retry legs below append to this prompt rather than rebuilding one,
       // so the posture rides through them with nothing further to do.

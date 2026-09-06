@@ -5718,3 +5718,125 @@ describe("an ask survives a typed line", () => {
     expect(statuses(sent)).toBe(before + 1);
   });
 });
+
+describe("the ask sections in the decide prompt", () => {
+  const QUESTION = "Which database should the migration target?";
+  const ASK: DecisionAsk = {
+    question: QUESTION,
+    reasoning: "the cutover order turns on it and nothing else on the list does",
+    unblocked: ["i1"],
+    options: [
+      { label: "Point it at staging for now", cost: "one extra deploy later" },
+      { label: "Go straight at production", cost: "no second cutover" },
+    ],
+  };
+  interface AskOpts {
+    openAsks?: string[];
+    askRejections?: string[];
+    askAnswer?: { question: string; answer: string; tapped: boolean };
+  }
+  // What the engine owes buildDecidePrompt for the three ask sections, captured
+  // per pass. Copied on the way in rather than held: both lists are derived off
+  // live session state, so keeping the arrays themselves would let a later pass
+  // rewrite what an earlier one was shown.
+  const watching = (next: () => HandlerDecision, over: Record<string, unknown> = {}) => {
+    const seen: AskOpts[] = [];
+    const h = makeEngine({
+      runDecisionFn: async (o: AskOpts) => {
+        seen.push({
+          openAsks: o.openAsks ? [...o.openAsks] : undefined,
+          askRejections: o.askRejections ? [...o.askRejections] : undefined,
+          askAnswer: o.askAnswer ? { ...o.askAnswer } : undefined,
+        });
+        return next();
+      },
+      ...over,
+    });
+    return { ...h, seen };
+  };
+  const queued = (ds: HandlerDecision[]) => () => ds.shift() ?? decide({});
+  // The relay pass an answer starts runs on the engine's own per-terminal chain
+  // with a context assembly inside it, so a fixed number of ticks is a race under
+  // a loaded run. Wait on the thing being asserted.
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 400 && !cond(); i++) await new Promise<void>((r) => { setTimeout(r, 1); });
+  };
+  // Planted rather than raised, so the case starts from the state a bridge restart
+  // would rehydrate. The one backlog item below is what it names in `unblocked`,
+  // because reconcileAsks promotes an ask whose named work was never there.
+  const standing = (): OpenEscalation => ({
+    escalationId: "a1", question: QUESTION, reasoning: "r", draftReply: "",
+    urgency: "normal", kind: "reply", at: 2, nonBlocking: true, unblocked: ["i1"],
+    askOptions: [
+      { choiceId: "opt1", label: "Point it at staging for now", cost: "one extra deploy later" },
+      { choiceId: "opt2", label: "Go straight at production", cost: "no second cutover" },
+    ],
+  });
+  const withStandingAsk = (next: () => HandlerDecision) => watching(next, {
+    loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1")], escalations: [standing()] }),
+  });
+
+  it("lists the standing question on every pass after the one that raised it", async () => {
+    const { engine, seen } = watching(queued([
+      decide({ decision: "handle", reply: "carry on", ask: ASK }),
+      decide({ decision: "handle", reply: "carry on with the second half" }),
+    ]));
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i1")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // The pass that raises it is told nothing: the row does not exist until after
+    // the reply carrying it has provably reached the agent.
+    expect(seen[0]!.openAsks).toEqual([]);
+    expect(seen[1]!.openAsks).toEqual([QUESTION]);
+  });
+
+  it("stops listing an answered question and hands the judge the answer instead", async () => {
+    const { engine, seen } = withStandingAsk(() => decide({}));
+    engine.arm({ terminalId: "t1" });
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt2" });
+    await until(() => seen.length > 0);
+    expect(seen[0]!.openAsks).toEqual([]);
+    // The label off this bridge's own row: the frame that answered carried an id
+    // and nothing else.
+    expect(seen[0]!.askAnswer)
+      .toEqual({ question: QUESTION, answer: "Go straight at production", tapped: true });
+  });
+
+  it("keeps a parked answer in the prompt until a handle relays it", async () => {
+    const { engine, seen } = withStandingAsk(queued([
+      decide({}),
+      decide({ decision: "handle", reply: "the user picked production" }),
+      decide({}),
+    ]));
+    engine.arm({ terminalId: "t1" });
+    engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt2" });
+    await until(() => seen.length > 0);
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    // A `continue` relayed nothing, so the answer is still true and still owed.
+    // The pass that DOES relay reads it in its own prompt — that is what it
+    // composes from — and the pass after it is the first that must not.
+    expect(seen.map((o) => o.askAnswer?.answer))
+      .toEqual(["Go straight at production", "Go straight at production", undefined]);
+  });
+
+  it("carries a refused question's reason forward, and a raised one clears it", async () => {
+    const { engine, seen } = watching(queued([
+      decide({ decision: "handle", reply: "first", ask: ASK }),
+      decide({ decision: "handle", reply: "second", ask: { ...ASK, unblocked: ["i2"] } }),
+      decide({ decision: "handle", reply: "third" }),
+    ]));
+    // `i1` is not on this backlog, so the first ask names no still-open item and
+    // the harness refuses to raise it — while the reply riding it goes out, which
+    // is exactly why the judge cannot tell without being told.
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i2")] });
+    for (let i = 0; i < 3; i++) await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(seen[0]!.askRejections).toEqual([]);
+    expect(seen[1]!.askRejections)
+      .toEqual([`"${QUESTION}" — named no backlog item that is still open`]);
+    // A successful raise clears the list rather than leaving the judge told about
+    // a refusal it has already recovered from.
+    expect(seen[2]!.askRejections).toEqual([]);
+    expect(seen[2]!.openAsks).toEqual([QUESTION]);
+  });
+});

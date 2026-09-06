@@ -599,3 +599,165 @@ describe("the ask object on a decision", () => {
     expect(ask).not.toHaveProperty("draftReply");
   });
 });
+
+describe("the third move in the decide prompt", () => {
+  type PromptOpts = Parameters<typeof buildDecidePrompt>[0];
+  const build = (over: Partial<PromptOpts> = {}) =>
+    buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "ctx", ...over });
+  const QUESTION = "Which database should the migration target?";
+  const ANSWER = { question: QUESTION, answer: "Go straight at production", tapped: true };
+  const at = (p: string, s: string) => p.indexOf(s);
+  const count = (p: string, s: string) => p.split(s).length - 1;
+
+  it("teaches the move once, and says what an option is and where a tap goes", () => {
+    const p = build();
+    expect(count(p, "There is a third move between answering the agent")).toBe(1);
+    expect(count(p, "`ask` is read on a `handle` alone")).toBe(1);
+    expect(count(p, "One question at a time")).toBe(1);
+    expect(count(p, "An answer to your question comes back to YOU")).toBe(1);
+    expect(p).toContain("2 to 4 things the USER may pick between");
+    expect(p).toContain("at most one may carry `recommended`");
+    // The half of the shape a judge could otherwise only guess at: a tap is not a
+    // delivery, so nothing the user picks reaches the agent until the judge says it.
+    expect(p).toContain("A tap on one sends the AGENT nothing");
+  });
+
+  // Printed inside the escalate-or-ask-the-agent test rather than above it: above,
+  // the third move reads as a cheaper escalation; here it reads as the branch of
+  // that test where the user is the only one who can answer.
+  it("prints the third move inside the test it branches off", () => {
+    const p = build();
+    expect(at(p, "could one read-only question")).toBeLessThan(at(p, "There is a third move"));
+    expect(at(p, "There is a third move")).toBeLessThan(at(p, "`ask` is read on a `handle` alone"));
+    expect(at(p, "`ask` is read on a `handle` alone")).toBeLessThan(at(p, "One question at a time"));
+    expect(at(p, "One question at a time"))
+      .toBeLessThan(at(p, "An answer to your question comes back to YOU"));
+    expect(at(p, "An answer to your question comes back to YOU"))
+      .toBeLessThan(at(p, "Ask the agent for the options it sees"));
+  });
+
+  // Every pair the rest of this file pins, re-run over a prompt carrying four more
+  // bullets: the inserts are what a reordering would show up in first.
+  it("leaves every pinned pair of the rules list where it was", () => {
+    const p = build();
+    expect(at(p, "only the USER can settle"))
+      .toBeGreaterThan(at(p, "A wrong auto-reply is the expensive failure"));
+    expect(at(p, "ALTITUDE")).toBeLessThan(at(p, "You are not an expert on the task"));
+    expect(at(p, "You are not an expert on the task"))
+      .toBeLessThan(at(p, "bounded excerpt of the session"));
+    expect(at(p, "could one read-only question"))
+      .toBeLessThan(at(p, "Ask the agent for the options it sees"));
+    expect(at(p, "Ask the agent for the options it sees"))
+      .toBeLessThan(at(p, "reported, not worked around"));
+    expect(at(p, "Escalating always trumps recording progress")).toBeLessThan(at(p, "POSTURE"));
+    expect(at(p, "If you cannot answer with high confidence, escalate"))
+      .toBeLessThan(at(p, "The two costs are not equal"));
+    expect(at(p, "the split is by who can answer")).toBeLessThan(at(p, "The two costs are not equal"));
+    expect(at(p, "The two costs are not equal")).toBeLessThan(at(p, "could one read-only question"));
+    expect(at(p, "Set either `reply` or `action`")).toBeLessThan(at(p, "POSTURE"));
+  });
+
+  // The third move is not a posture and must not read as one: it says a move
+  // exists, never where this session's line between handling and escalating sits.
+  it("leaves the posture untouched", () => {
+    expect(build().match(/POSTURE/g)).toHaveLength(1);
+    expect(build()).toContain(build({ personality: "watchdog" }).split("POSTURE")[1]);
+    expect(build({ personality: "closer" }).match(/POSTURE/g)).toHaveLength(1);
+  });
+
+  // Extended, never re-bulleted: the cost rule is what prices the two resources,
+  // and a separate bullet would leave the reason the third move exists standing
+  // apart from the asymmetry that is its whole justification.
+  it("extends the cost rule rather than adding a bullet beside it", () => {
+    const line = build().split("\n").find((l) => l.includes("The two costs are not equal"))!;
+    expect(line).toContain("The escalation is the expensive one.");
+    expect(line).toContain("That is why `ask` is the only way to put a question to the user without stopping");
+  });
+
+  it("puts ask on the contract line with options and with no draft to prefill", () => {
+    const contract = build().split("\n").at(-1)!;
+    expect(contract).toContain('"ask":{"question":"...","reasoning":"..."');
+    expect(contract).toContain('"options":[{"label"');
+    expect(contract.indexOf('"ask":')).toBeLessThan(contract.indexOf('"transitions"'));
+    // `notify` carries a draftReply and `ask` must not. A contract line offering
+    // one would have a judge write it, and a judge-authored draft on the row is
+    // the one artifact a reply composer could prefill into the channel that mints
+    // authorization.
+    expect(contract.slice(contract.indexOf('"ask":'))).not.toContain("draftReply");
+  });
+
+  // The same absent-vs-empty discipline the floor warnings and the refused
+  // transitions take: an empty list is a pass with no standing question.
+  it("renders the standing-question section only when one is standing", () => {
+    for (const p of [build(), build({ openAsks: [] })]) {
+      expect(p).not.toContain("A QUESTION YOU HAVE ALREADY PUT TO THE USER");
+    }
+    const fed = build({ openAsks: [QUESTION] });
+    expect(fed).toContain("A QUESTION YOU HAVE ALREADY PUT TO THE USER");
+    expect(fed).toContain(`- ${QUESTION}`);
+    expect(fed).toContain("a second `ask` is discarded while this one stands");
+  });
+
+  it("renders the refused-question section only when one was refused", () => {
+    for (const p of [build(), build({ askRejections: [] })]) {
+      expect(p).not.toContain("QUESTIONS THE HARNESS DID NOT RAISE");
+    }
+    const fed = build({ askRejections: [`"${QUESTION}" — named no backlog item that is still open`] });
+    expect(fed).toContain("QUESTIONS THE HARNESS DID NOT RAISE LAST PASS");
+    expect(fed).toContain("named no backlog item that is still open");
+    expect(fed).toContain("only one may stand at a time");
+    // Two sections about two different refusals, and they must not collapse into
+    // one: a judge reading them as the same thing would look for its question
+    // among the transitions the harness refused.
+    expect(fed).not.toContain("THE HARNESS REFUSED");
+  });
+
+  it("says nothing about an answer the caller does not have", () => {
+    expect(build()).not.toContain("THE USER HAS ANSWERED A QUESTION YOU PUT TO THEM");
+  });
+
+  it("renders a tapped answer and a typed one in different words", () => {
+    const tapped = build({ askAnswer: ANSWER });
+    expect(tapped).toContain("THE USER HAS ANSWERED A QUESTION YOU PUT TO THEM");
+    expect(tapped).toContain(`- you asked: ${QUESTION}`);
+    expect(tapped).toContain("- they chose: Go straight at production");
+    expect(tapped).not.toContain("in their own words");
+
+    const typed = build({ askAnswer: { ...ANSWER, tapped: false } });
+    expect(typed).toContain("- they answered, in their own words: Go straight at production");
+    expect(typed).not.toContain("- they chose:");
+  });
+
+  it("tells the judge to relay it in its own words and never to cite it", () => {
+    // checkCitation grounds every quote against the RECENT CONTEXT block, and this
+    // answer is provably not in it — so a judge that cited it would collect an
+    // unverified-evidence rejection with nothing available to explain why.
+    const p = build({ askAnswer: ANSWER });
+    expect(p).toContain("say it yourself in this pass's `reply`");
+    expect(p).toContain("Do not cite it as `evidence` for a transition");
+  });
+
+  // The `!== undefined` property, and why this section does not use the `?.length`
+  // idiom the two above it do: an empty answer is still the user having answered,
+  // and dropping the section on it leaves the judge asking the question again.
+  it("renders an empty answer rather than reading it as no answer", () => {
+    expect(build({ askAnswer: { ...ANSWER, answer: "", tapped: false } }))
+      .toContain("THE USER HAS ANSWERED A QUESTION YOU PUT TO THEM");
+  });
+
+  it("prints all three below the posture and after the refused transitions", () => {
+    const p = build({
+      evidenceRejections: ['"i1" — done needs evidence'],
+      openAsks: [QUESTION],
+      askRejections: ['"an older question" — a question of yours is still unanswered'],
+      askAnswer: ANSWER,
+    });
+    expect(at(p, "POSTURE")).toBeLessThan(at(p, "THE HARNESS REFUSED"));
+    expect(at(p, "THE HARNESS REFUSED"))
+      .toBeLessThan(at(p, "A QUESTION YOU HAVE ALREADY PUT TO THE USER"));
+    expect(at(p, "A QUESTION YOU HAVE ALREADY PUT TO THE USER"))
+      .toBeLessThan(at(p, "QUESTIONS THE HARNESS DID NOT RAISE LAST PASS"));
+    expect(at(p, "QUESTIONS THE HARNESS DID NOT RAISE LAST PASS"))
+      .toBeLessThan(at(p, "THE USER HAS ANSWERED A QUESTION YOU PUT TO THEM"));
+  });
+});

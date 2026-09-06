@@ -2091,6 +2091,20 @@ export class HandlerEngine {
         // restored cap in the same pass. That direction only ever makes the judge
         // under-spend, which is why the prompt states a floor and never a promise.
         replyBudget: this.guard.remaining(evt.terminalId),
+        // Derived per pass and never cached on the session: each section asserts
+        // something the very next event can end — reconcileAsks retires a standing
+        // ask above, and the handle branch below drops a parked answer the moment
+        // it relays one. This is the discipline evidenceRejections earns by pruning.
+        openAsks: s.escalations.filter((e) => e.nonBlocking).map((e) => e.question),
+        askRejections: s.askRejections,
+        // Projected rather than passed whole: `escalationId` is how the answer was
+        // routed here and `at` is bookkeeping, and neither is something the judge
+        // can act on.
+        askAnswer: s.askAnswer && {
+          question: s.askAnswer.question,
+          answer: s.askAnswer.answer,
+          tapped: s.askAnswer.tapped,
+        },
         // The SUPERVISED agent, not the judge: `tool:` above is `s.judgeTool ?? tool`,
         // and a per-session judge pick can name a different CLI entirely.
         agentTool: tool,
@@ -2621,6 +2635,14 @@ export class HandlerEngine {
    * refused)`, so an ask would arrive carrying the line just typed at the agent
    * as the user's own answer to offer back — and it would inherit
    * `quickChoicesFor`, which an ask must not reach (see below).
+   *
+   * THE LIMIT, stated here because everything else about this feature reads as
+   * universal. An agent that surfaces its own question as a STRUCTURED prompt —
+   * `permission_request` or `question` — hits `isBlockingPrompt` in
+   * `handleEventInner` and takes the forced `resolve_in_session` escalate with no
+   * judge call at all, so no decide pass runs and nothing here is reachable for
+   * it. That branch is right to be terminal: the AGENT is stopped on the USER, so
+   * there is no work going on for an ask to claim, and it must stay so.
    */
   private raiseAsk(terminalId: string, s: ArmedSession, ask: DecisionAsk): void {
     if (s.escalations.filter((e) => e.nonBlocking).length >= MAX_OPEN_ASKS) {

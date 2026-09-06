@@ -147,6 +147,15 @@ export function buildDecidePrompt(opts: {
   // off the guard before the judge runs, and an item this same pass reports
   // `done` restores the whole cap afterwards.
   replyBudget?: number;
+  // Questions of the judge's own that the user has not answered yet, and asks the
+  // harness refused to raise last pass. Both are derived per pass by the caller,
+  // never cached: each section asserts a state that the very next event can end.
+  openAsks?: string[];
+  askRejections?: string[];
+  // The user's answer to a standing question, parked until a `handle` relays it.
+  // Projected down to what the judge can act on — the escalationId is routing and
+  // the timestamp is bookkeeping, and neither belongs in a prompt.
+  askAnswer?: { question: string; answer: string; tapped: boolean };
   // The agent being SUPERVISED, never the judge running this prompt — a
   // per-session judge pick can point at a different CLI entirely.
   agentTool?: string;
@@ -159,6 +168,7 @@ export function buildDecidePrompt(opts: {
   personality?: HandlerPersonality;
 }): string {
   const budget = opts.replyBudget;
+  const answered = opts.askAnswer;
   return [
     opts.agentTool
       ? `You are a supervisor standing in for the user while the coding agent \`${supervisedName(opts.agentTool)}\` works.`
@@ -213,7 +223,7 @@ export function buildDecidePrompt(opts: {
     // auto-reply run self-escalates inside the session, while an unanswered
     // escalation stalls it until a human returns: nothing re-raises one, and a
     // blocked agent emits no further event (see `onUserReply` in engine.ts).
-    "- The two costs are not equal. A question to the agent spends one of a bounded run of consecutive auto-replies and is answered in seconds; the harness escalates on its own once that run is exhausted or you repeat yourself, so an unhelpful question is recoverable within this session. An escalation spends the user, who may be asleep, and the session does nothing until they answer — nothing re-raises it, and no further event arrives while the agent sits idle. Neither is free. The escalation is the expensive one.",
+    "- The two costs are not equal. A question to the agent spends one of a bounded run of consecutive auto-replies and is answered in seconds; the harness escalates on its own once that run is exhausted or you repeat yourself, so an unhelpful question is recoverable within this session. An escalation spends the user, who may be asleep, and the session does nothing until they answer — nothing re-raises it, and no further event arrives while the agent sits idle. Neither is free. The escalation is the expensive one. That is why `ask` is the only way to put a question to the user without stopping: it rides a reply that keeps the agent producing the events this supervision runs on.",
     // Printed directly under the rule that prices the two resources, because it is
     // the only place the price is a live number rather than a standing asymmetry.
     // Tested with `!== undefined` and never for truthiness or `?.length`: the two
@@ -228,6 +238,21 @@ export function buildDecidePrompt(opts: {
         : `- Concretely, right now: ${budget} consecutive auto-repl${budget === 1 ? "y" : "ies"} left before the harness stops sending them and raises the refusal to the user in words you did not choose; sending a reply you already sent spends the whole run in one step. This is planning information and never permission — every rule above reads the same at ${budget} as it does at full budget, and a reply you would not otherwise have sent is not made right by having room for it. Treat it as a floor rather than an allowance: an item reaching \`done\` restores it. If what is left plainly will not carry the work to somewhere the user can act, say so now instead of being cut off mid-run.`]
       : []),
     "- So before you escalate, apply this test: could one read-only question to the agent plausibly dissolve this escalation, or sharpen what you would ask the user? If yes, ask it, and escalate on the next pass if the answer does not settle it. If the escalation stands whatever the agent replies — because what is missing is intent, authorization or preference — escalate now and do not spend the turn.",
+    // Printed directly under the escalate-or-ask-the-agent test because it is the
+    // one case that test cannot reach: what is missing is intent, authorization or
+    // preference — so the agent cannot dissolve it — and yet the work the answer
+    // does not gate is still running. Above it the third move would read as a
+    // cheaper escalation; here it reads as what it is, the branch of the test where
+    // the user is the only one who can answer and the session need not stop.
+    "- There is a third move between answering the agent and waking the user, and it is the only one that does both at once: on a `handle`, fill `ask` with a question for the USER while `reply` keeps the agent working. Use it only when both halves hold — the question is one only the user can settle (intent, authorization, preference), AND there is work already on the backlog that their answer does not gate. Name that work in `ask.unblocked` as backlog ids copied exactly from the list above. If everything left waits on the answer there is no such work, and this was an escalation. `ask.options` is optional and holds 2 to 4 things the USER may pick between, each with a `cost` saying what picking it commits to; at most one may carry `recommended`. A tap on one sends the AGENT nothing — the pick comes back to you, and passing it on is yours to do.",
+    "- `ask` is read on a `handle` alone. On `continue` or `escalate` it is discarded, because neither of those sends the agent anything: the session would sit behind a question you had told the user was not holding it up, with no further event arriving to raise it again.",
+    "- One question at a time. While a question of yours is unanswered it is listed for you below and a second `ask` is discarded rather than queued, so make the one you send the one you most need answered and do not reword it. An `ask` beside a reply that only marks time is worse than the escalation it avoided: the user reads a question over a session going nowhere, and nothing in the harness can check your claim that the rest of the work is independent except the ids you named.",
+    // The half a judge would otherwise have to infer from the absence of a rule.
+    // Nothing in the harness types an answer at the agent — answerAsk and the
+    // ask-answer branch of instruct both park it for the next prompt and stop
+    // there — so a judge that reads its own question as delegated leaves the user
+    // having answered into silence.
+    "- An answer to your question comes back to YOU, never to the agent. Relay it in your own words on a `handle`; the harness will not do it for you, and the agent is told nothing until you do.",
     // The concrete form of the test above for the case it fits worst. A choice
     // between approaches is neither a fact the agent can hand over nor a preference
     // only the user holds, so both halves of the who-can-answer split read as "not
@@ -275,6 +300,48 @@ export function buildDecidePrompt(opts: {
         "Cite differently or leave the item open; the same quote gets the same answer.",
       ]
       : []),
+    // The `?.length` idiom, like the two sections above it: an empty list is a
+    // pass with no standing question, and a header over no lines reads as one
+    // anyway. It is also the only thing that makes the one-question-at-a-time rule
+    // above actionable — a judge told a second `ask` is discarded and never shown
+    // which question is holding the slot can only guess at whether it has one.
+    ...(opts.openAsks?.length
+      ? [
+        "",
+        "A QUESTION YOU HAVE ALREADY PUT TO THE USER — unanswered, and the agent is working past it:",
+        ...opts.openAsks.map((q) => `- ${q}`),
+        "Do not ask it again and do not reword it; a second `ask` is discarded while this one stands. If the work has since reached the point where nothing more can be done without the answer, escalate.",
+      ]
+      : []),
+    // Named the same way the refused transitions above are, and for the same
+    // reason: the reply went out, so the pass looks like it worked, and the judge
+    // has no other way to learn that the question riding it never reached anybody.
+    ...(opts.askRejections?.length
+      ? [
+        "",
+        "QUESTIONS THE HARNESS DID NOT RAISE LAST PASS — your reply was sent, the question was not:",
+        ...opts.askRejections.map((r) => `- ${r}`),
+        "An `ask` must name backlog ids that are still open, and only one may stand at a time.",
+      ]
+      : []),
+    // Tested with `!== undefined` rather than the length idiom above, because this
+    // is one value and not a list: an answer of "" is still the user having
+    // answered, and dropping the section on it would leave the judge asking again.
+    ...(answered !== undefined
+      ? [
+        "",
+        "THE USER HAS ANSWERED A QUESTION YOU PUT TO THEM. This is their answer to YOU — the agent has not seen it and will not unless you pass it on:",
+        `- you asked: ${answered.question}`,
+        answered.tapped
+          ? `- they chose: ${answered.answer}`
+          : `- they answered, in their own words: ${answered.answer}`,
+        // The closing citation clause is not decoration: checkCitation grounds
+        // every `evidence` quote against the RECENT CONTEXT block alone, and this
+        // answer is provably not in it, so a judge that cited it would collect an
+        // unverified-evidence rejection it has no way to diagnose.
+        "It reached you and not the agent deliberately: the agent was working when it arrived, and a line copied from it would have landed in the middle of unrelated work. If it changes what the agent should do, say it yourself in this pass's `reply`, in your own words, at a point the agent can act on — that is a `handle`. If it changes nothing, say so in `reason` and let the agent continue. Do not ask this question again and do not reword it. Do not cite it as `evidence` for a transition: it is the user speaking, not the session's own record, and the harness grounds every quote against the RECENT CONTEXT block alone.",
+      ]
+      : []),
     // Two statements, never an empty header: an absent catalog is a real answer
     // (a PTY session has none and cannot get one), and announcing a "complete
     // set" that is empty would read as "this agent has no commands" — which is
@@ -311,7 +378,11 @@ export function buildDecidePrompt(opts: {
       : []),
     "",
     "Respond with ONLY a single JSON object, no prose, matching exactly:",
-    '{"decision":"continue|handle|escalate","confidence":0.0,"reason":"...","reply":"(when handle, and only if action is omitted) text to send the agent","action":{"kind":"slash_command|none","value":"/verb <args>"},"notify":{"title":"...","body":"...","draftReply":"...","urgency":"normal|high"},"transitions":[{"id":"...","status":"queued|active|done|blocked|skipped|failed","evidence":"verbatim quote","outcome":"..."}]}',
+    // `ask` carries no `draftReply`, and its absence here is as load-bearing as the
+    // schema's: a contract line offering one would have a judge write it, and a
+    // judge-authored draft on the row is the one artifact a reply composer could
+    // prefill into the channel that mints authorization.
+    '{"decision":"continue|handle|escalate","confidence":0.0,"reason":"...","reply":"(when handle, and only if action is omitted) text to send the agent","action":{"kind":"slash_command|none","value":"/verb <args>"},"notify":{"title":"...","body":"...","draftReply":"...","urgency":"normal|high"},"ask":{"question":"...","reasoning":"...","unblocked":["backlog id the answer does not gate"],"options":[{"label":"the answer as the user would give it","cost":"what picking this commits to","recommended":true}]},"transitions":[{"id":"...","status":"queued|active|done|blocked|skipped|failed","evidence":"verbatim quote","outcome":"..."}]}',
   ].join("\n");
 }
 
