@@ -284,7 +284,11 @@ export async function fetchLocalhost(opts: FetchLocalhostOpts): Promise<Localhos
   // closes the upstream connection and stops the origin producing (Bun's
   // `reader.cancel()` leaves it being pulled), so every exit path below aborts.
   const ctrl = new AbortController();
-  opts.signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
+  // An already-aborted signal never fires its listener, so mirror the state
+  // first: without this a caller that cancelled before we were entered gets a
+  // full uncancellable upstream fetch.
+  if (opts.signal?.aborted) ctrl.abort();
+  else opts.signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
   const headTimer = setTimeout(
     () => ctrl.abort(new Error("upstream headers timed out")),
     opts.headTimeoutMs ?? FETCH_HEAD_TIMEOUT_MS,

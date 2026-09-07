@@ -258,6 +258,27 @@ describe("TunnelManager HTTP streaming", () => {
     expect(last.chunks).toBe(sender.sent.filter((f) => f.type === "tunnel:http-chunk").length);
   });
 
+  test("a body that fails before the head goes out answers 502, not a bare end", async () => {
+    // A start the app never got and an end it did are the same two frames as a
+    // start the RELAY dropped, so a bare end here sends the app back to re-issue
+    // the request that has just failed. The cap is tested against the first read
+    // before anything is sliced, and a streamed origin declares no length, so
+    // the pre-check upstream of this cannot answer it first.
+    const route = startRoute({ writes: 1, writeBytes: 4096 });
+    const sender = makeSender();
+    const mgr = makeManager(sender, { maxBodyBytes: 1024 });
+
+    await mgr.onHttpRequest(request(route.port, "headless"));
+
+    expect(sender.sent).toHaveLength(1);
+    expect(sender.sent[0]).toMatchObject({
+      type: "tunnel:http-start",
+      status: 502,
+      last: true,
+    });
+    expect(rawBytes(sender.sent).toString("utf8")).toMatch(/MAX_BODY_SIZE/);
+  });
+
   test("an end frame's chunk count equals the chunks sent", async () => {
     const route = startRoute({ writes: 1, writeBytes: 10_000 });
     const sender = makeSender();

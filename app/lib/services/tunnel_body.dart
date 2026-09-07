@@ -15,8 +15,13 @@ import '../models/preview_models.dart';
 /// bridge added and the app does not know is a logged failure rather than a
 /// body that silently stops.
 List<int> decodeTunnelSlice(String data, String bodyEncoding) {
+  // Checked BEFORE the base64 pass: an encoding this app does not know says
+  // nothing about how its payload is framed, so decoding first would report
+  // whatever base64Decode disliked instead of the value that is actually the
+  // problem.
+  if (bodyEncoding != 'base64' && bodyEncoding != kTunnelGzipEncoding) {
+    throw FormatException('unknown tunnel bodyEncoding "$bodyEncoding"');
+  }
   final raw = base64Decode(data);
-  if (bodyEncoding == 'base64') return raw;
-  if (bodyEncoding == kTunnelGzipEncoding) return gzip.decode(raw);
-  throw FormatException('unknown tunnel bodyEncoding "$bodyEncoding"');
+  return bodyEncoding == 'base64' ? raw : gzip.decode(raw);
 }

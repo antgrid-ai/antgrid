@@ -1,3 +1,5 @@
+import { SOCKET_INFLIGHT_BYTES } from "antgrid-wire";
+
 export interface ConnectionLiveness {
   connectedAt: number;
   protocolPongAt?: number;
@@ -16,8 +18,17 @@ export interface LivenessAges {
  * stops counting as liveness. An authenticated frame proves the peer is up
  * and sending; that it is also READING is proved by our sends draining. A
  * backlog this deep, sampled on a sweep that already found no pong for a whole
- * window, is a reader that stopped, whatever its uplink is still saying. */
-export const INBOUND_LIVENESS_MAX_BACKLOG_BYTES = 1_048_576;
+ * window, is a reader that stopped, whatever its uplink is still saying.
+ *
+ * Derived from SOCKET_INFLIGHT_BYTES rather than picked: a sender obeying the
+ * flow-control contract may hold a whole socket window unacked toward one
+ * peer, and on a slow downlink that window sits right here — so any smaller
+ * threshold reaps a phone that is pulling a preview body as fast as its link
+ * allows, which is the case the inbound clause exists to rescue. One window is
+ * the bound for a socket carrying ONE sender; the relay→bridge socket fans
+ * in every app of the account (see the backpressure note in server.ts), so k
+ * uploading apps can still put a live bridge over this. */
+export const INBOUND_LIVENESS_MAX_BACKLOG_BYTES = SOCKET_INFLIGHT_BYTES;
 
 /** Per-socket relay liveness. Device ids are deliberately absent: a late
  * callback from a superseded socket must be unable to refresh its successor. */

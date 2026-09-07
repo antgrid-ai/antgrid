@@ -407,6 +407,8 @@ export class TunnelManager {
 
     const it = head.slices;
     let seq = 0;
+    // The head has left; only then is an `end` a terminator the app can read.
+    let started = false;
     try {
       const first = await it.next();
       const start = {
@@ -421,6 +423,7 @@ export class TunnelManager {
         checkoutId,
       };
       if (await this.emit(st, start, abort, cancelled) !== "sent") return;
+      started = true;
       if (start.last) { this.retain(requestId, st); return; }
       for (;;) {
         // Read-side pacing: the next slice is pulled only once the previous
@@ -447,6 +450,27 @@ export class TunnelManager {
       const reason = err instanceof UpstreamBodyError
         ? err.message
         : `upstream read failed: ${err instanceof Error ? err.message : String(err)}`;
+      if (!started) {
+        // The FIRST slice can fail (a stalled read, a body over the cap), and
+        // the headers have not gone out yet — same position as a head failure,
+        // so the same answer. A bare `end` here is indistinguishable from a
+        // `start` the relay dropped, which the app recovers from by re-issuing
+        // the request that has just failed.
+        const text = `Proxy error: ${reason}`;
+        log.warn("Tunnel stream %s failed before its head went out: %s", requestId, reason);
+        await this.emit(st, {
+          type: "tunnel:http-start",
+          requestId,
+          status: 502,
+          headers: {},
+          data: Buffer.from(text, "utf8").toString("base64"),
+          bodyEncoding: "base64",
+          last: true,
+          checkoutId,
+        }, abort, cancelled);
+        this.retain(requestId, st);
+        return;
+      }
       log.warn("Tunnel stream %s ended with error after %d chunk(s): %s", requestId, seq, reason);
       st.retain = false;
       await this.emit(st, { type: "tunnel:http-end", requestId, chunks: seq, error: reason, checkoutId }, abort, cancelled);
