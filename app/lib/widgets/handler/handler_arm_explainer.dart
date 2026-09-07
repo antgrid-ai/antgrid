@@ -104,8 +104,8 @@ typedef HandlerArmDecision = ({
 });
 
 /// Shows the arm sheet — what Handler will do here, with the session's judge,
-/// posture and an instruction composer on it. Returns what the user decided, or
-/// null if they backed out.
+/// lens, brief and an instruction composer on it. Returns what the user
+/// decided, or null if they backed out.
 ///
 /// A sheet rather than a dialog, for one reason: this screen tells a user their
 /// judge cannot run headless, and the picker that fixes it belongs beside the
@@ -175,33 +175,32 @@ class _ArmSheet extends ConsumerStatefulWidget {
 class _ArmSheetState extends ConsumerState<_ArmSheet> {
   /// What the sheet opens on, and the `from` side of its judge delta.
   ///
-  /// The posture is seeded to a real preset even where nothing has reported one
-  /// — unlike the settings sheet, which reports what the far end holds and must
-  /// show "not reported" rather than invent it. This is the control the sheet
-  /// exists for, and its unreported copy names a bridge too old to have the
-  /// setting, which is a claim this surface has no grounds to make.
+  /// The lens is seeded UNCOERCED, the same as everywhere else: a null pick
+  /// means this app has not been told what this session judges under, and the
+  /// control renders with nothing selected and says it runs as it was last set.
+  /// The cache is empty after a restart while the bridge still holds the lens
+  /// the slot was last given, so painting the default there would report a pick
+  /// nobody made — and then send nothing when the user "chose" it.
   ///
-  /// That seed is a DISPLAY value and never a report, so it is not what the
-  /// posture is sent against — see [_postureTouched]. The service cache is
-  /// empty for a disarmed session after a restart while the bridge still holds
-  /// the posture that session was last given, and treating the seed as the
-  /// stored value would reset that pick to the default on every re-arm. The
-  /// judge needs none of this, which is why it can diff normally: it is never
-  /// seeded in the first place.
+  /// Which is why the lens is not sent off this delta at all: see
+  /// [_roleTouched]. The judge needs none of it and diffs normally.
   late final HandlerSessionSettingsValue _opened = (
     judgeTool: widget.initial.judgeTool,
     judgeModel: widget.initial.judgeModel,
-    personality: widget.initial.personality ?? HandlerPersonality.watchdog,
+    lens: widget.initial.lens,
   );
   late HandlerSessionSettingsValue _value = _opened;
 
-  /// Whether the user has TOUCHED the posture control, which is not the same
-  /// question as whether the value ended up different. Moving off the seed and
-  /// back is still a choice, and the seed it lands on may not be what the
-  /// bridge holds — so any touch sends, and only an untouched control stays
-  /// silent. A tap on the cell already selected never reaches here: AbSegmented
-  /// swallows it, which is why this cannot simply be "the user tapped it".
-  bool _postureTouched = false;
+  /// Whether the user has ANSWERED each lens control, which is not the same
+  /// question as whether the value ended up different. The seed may not be what
+  /// the bridge holds, so moving off it and back is still a choice — and a tap
+  /// on the chip already shown is one too, which is why these are set from the
+  /// control's own taps rather than from a diff.
+  ///
+  /// Two flags over two fields, never one: a brief typed over a pick this app
+  /// was never told must not carry a role clear the user never made.
+  bool _roleTouched = false;
+  bool _briefTouched = false;
   final _instruction = TextEditingController();
 
   @override
@@ -269,7 +268,7 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
             // leading is what has always separated it from what follows.
             const SizedBox(height: AbTokens.space12),
           // Directly under the sentence about what gets queued, and above the
-          // posture control: this box IS the act, and how much Handler handles
+          // lens control: this box IS the act, and what the judge looks for
           // is a setting subordinate to it. No autofocus — the sheet is a thing
           // to read first, and a keyboard over it on a phone hides the copy
           // that explains what arming does.
@@ -296,7 +295,7 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
                 () => _value = (
                   judgeTool: pick.judgeTool,
                   judgeModel: pick.judgeModel,
-                  personality: _value.personality,
+                  lens: _value.lens,
                 ),
               ),
               judgeScopeNote: handlerJudgeScopeOnArm,
@@ -306,13 +305,16 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
           ),
           // The judge rows stay off this sheet — the composer's chip is that
           // picker here, and mounting both would be two controls for one value.
-          HandlerPostureControl(
+          HandlerLensControl(
             terminalId: widget.terminalId,
             value: _value,
-            onChanged: (next) => setState(() {
-              _value = next;
-              _postureTouched = true;
-            }),
+            // A brief typed and never submitted still rides this arm: the one
+            // commit here is the button below, so a field waiting on Enter
+            // would drop what the user wrote on the way out.
+            commitBriefOnEdit: true,
+            onChanged: (next) => setState(() => _value = next),
+            onRoleTapped: () => _roleTouched = true,
+            onBriefEdited: () => _briefTouched = true,
           ),
           Padding(
             padding: const EdgeInsets.all(AbTokens.space16),
@@ -328,13 +330,20 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
                   label: 'Arm Handler',
                   variant: AbButtonVariant.primary,
                   onTap: () {
+                    // Only the judge half of this delta is used: the lens is
+                    // sent off the touch flags instead, because a seed this app
+                    // was never told cannot be diffed against.
                     final edit = handlerSessionSettingsEdit(_opened, _value);
                     Navigator.of(context).maybePop((
                       settings: (
                         judgeTool: edit.judgeTool,
                         judgeModel: edit.judgeModel,
-                        personality: _postureTouched
-                            ? _value.personality
+                        role: _roleTouched ? (_value.lens?.roleId ?? '') : null,
+                        // Trimmed here rather than in the field, which commits
+                        // raw so the controller is never rewritten under the
+                        // cursor: a brief of nothing but spaces is a clear.
+                        brief: _briefTouched
+                            ? (_value.lens?.brief ?? '').trim()
                             : null,
                       ),
                       instruction: _instruction.text,
@@ -374,8 +383,8 @@ class _ArmSheetState extends ConsumerState<_ArmSheet> {
 /// away believing the session is watched.
 ///
 /// What the sheet sends is a DELTA: a control the user never touched sends
-/// nothing, so an arm cannot clear a judge or posture the bridge holds and this
-/// app has not yet been told about.
+/// nothing, so an arm cannot clear a judge, a lens or a brief the bridge holds
+/// and this app has not yet been told about.
 Future<void> armWithSheet({
   required BuildContext context,
   required ProviderContainer container,
@@ -423,7 +432,8 @@ Future<void> armWithSheet({
     goal: goal,
     judgeTool: decision.settings.judgeTool,
     judgeModel: decision.settings.judgeModel,
-    personality: decision.settings.personality,
+    role: decision.settings.role,
+    brief: decision.settings.brief,
   );
   latchHandlerArmedOnConfirmation(
     container,

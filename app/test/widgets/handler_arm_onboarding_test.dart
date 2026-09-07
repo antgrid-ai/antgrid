@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/navigation/root_navigator.dart';
@@ -580,6 +581,21 @@ void main() {
       await tester.pumpAndSettle();
     }
 
+    /// The machine naming the lenses it reads. Presence of the list is the
+    /// capability signal, so a sheet opened before one lands offers nothing to
+    /// pick — every test that touches the lens row sends this first.
+    Future<void> advertiseLenses(
+      WidgetTester tester,
+      FakeAgentTransport transport,
+    ) async {
+      transport.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': <dynamic>[],
+        'lenses': ['pm', 'qa', 'critic', 'release'],
+      });
+      await tester.pumpAndSettle();
+    }
+
     testWidgets('a remembered prompt arms as the session goal', (tester) async {
       final (transport, container, context) = await pumpArm(tester);
       container
@@ -600,6 +616,7 @@ void main() {
       tester,
     ) async {
       final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
 
       await armThroughSheet(tester, container, context);
 
@@ -607,11 +624,11 @@ void main() {
       expect(sent['armed'], true);
       expect(sent.containsKey('goal'), isFalse);
       expect(sent.containsKey('backlog'), isFalse);
-      // The posture the sheet SHOWS is a seed, not something the bridge
-      // reported: a cold cache over a session the bridge holds a posture for
-      // is the ordinary case after a restart, so an untouched control must
-      // send nothing rather than reset that pick to the default.
-      expect(sent.containsKey('personality'), isFalse);
+      // A cold cache over a session the bridge holds a lens for is the ordinary
+      // case after a restart, so an untouched control must send nothing rather
+      // than reset that pick to the default.
+      expect(sent.containsKey('role'), isFalse);
+      expect(sent.containsKey('brief'), isFalse);
       await confirmArmed(tester, transport);
     });
 
@@ -634,7 +651,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Arm Handler'), findsWidgets);
-      // …but without re-teaching what Handler is. The composer and the posture
+      // …but without re-teaching what Handler is. The composer and the lens
       // control are the whole sheet from here on.
       expect(
         find.textContaining('Handler watches this session while'),
@@ -653,8 +670,9 @@ void main() {
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('a posture picked on the sheet rides the arm', (tester) async {
+    testWidgets('a lens picked on the sheet rides the arm', (tester) async {
       final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
 
       unawaited(
         armWithSheet(
@@ -665,22 +683,24 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('AUTOPILOT'));
+      await tester.tap(find.text('QA'));
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
       await tester.pumpAndSettle();
 
-      expect(armFrame(transport)['personality'], 'autopilot');
+      expect(armFrame(transport)['role'], 'qa');
+      expect(armFrame(transport).containsKey('brief'), isFalse);
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('a posture moved away from and back still rides the arm', (
+    testWidgets('a lens moved away from and back still rides the arm', (
       tester,
     ) async {
-      // The seed is a display value: the bridge may hold a posture this app has
-      // never been told about, so landing back on what the sheet opened showing
-      // is a choice about it, not the absence of one.
+      // The default is a real answer, not the absence of one: the bridge may
+      // hold a lens this app has never been told about, so landing back on the
+      // rules alone has to go out as a clear.
       final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
 
       unawaited(
         armWithSheet(
@@ -691,14 +711,72 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('CLOSER'));
+      await tester.tap(find.text('CRITIC'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('WATCHDOG'));
+      await tester.tap(find.text('INTENT AND COMPLETION'));
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
       await tester.pumpAndSettle();
 
-      expect(armFrame(transport)['personality'], 'watchdog');
+      expect(armFrame(transport)['role'], '');
+      await confirmArmed(tester, transport);
+    });
+
+    testWidgets('the default picked over a cold cache goes out as a clear', (
+      tester,
+    ) async {
+      // Nothing is selected when this app has not been told what the session
+      // runs, so the one tap that says "the rules alone" is the only thing that
+      // can replace a lens the bridge is holding.
+      final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('INTENT AND COMPLETION'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.pumpAndSettle();
+
+      expect(armFrame(transport)['role'], '');
+      await confirmArmed(tester, transport);
+    });
+
+    testWidgets('a brief typed and never submitted rides the arm alone', (
+      tester,
+    ) async {
+      // The sheet's one commit is its button, so a field waiting on Enter would
+      // drop what the user wrote — and a brief must not carry a lens clear the
+      // user never made.
+      final (transport, container, context) = await pumpArm(tester);
+      await advertiseLenses(tester, transport);
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byType(AbTextField),
+        '  watch the migrations  ',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.pumpAndSettle();
+
+      expect(armFrame(transport)['brief'], 'watch the migrations');
+      expect(armFrame(transport).containsKey('role'), isFalse);
       await confirmArmed(tester, transport);
     });
 

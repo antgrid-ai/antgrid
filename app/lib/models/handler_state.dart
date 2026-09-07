@@ -151,6 +151,34 @@ String handlerLensBlurb(HandlerLens? l) => switch (l) {
     'Asks whether the tests ran and the docs, migrations and changelog exist, and reports what still stands between the work and a release.',
 };
 
+/// What the caption says while the judge cannot run headless. The lens is
+/// stored and inert, and a control that reads as running while every pause
+/// comes to the user is the one claim this must never make.
+const String handlerLensParkedBlurb =
+    'Stored, but not running — nothing is being judged, so every pause comes '
+    'to you whatever this says.';
+
+/// What it says when this machine has never named the lenses it accepts. It
+/// asserts only that — the frame may predate lenses or simply not have arrived
+/// — because naming a cause this app cannot check is how a caption starts
+/// lying about a machine that is merely slow.
+const String handlerLensUnreportedBlurb =
+    'This machine has not named the lenses it reads, so there is nothing to '
+    'pick here yet.';
+
+/// What it says while this app has not been told which lens the session runs:
+/// a cold cache over a session the far end still holds one for. Never the
+/// default's own line — painting that would report a pick nobody stated.
+const String handlerLensUnsetBlurb =
+    'Runs as it was last set on this machine until you pick one.';
+
+/// What it says when the session runs an id this build cannot name — a newer
+/// machine's lens. The pick is real and is left alone until the user replaces
+/// it, which one tap does.
+const String handlerLensUnknownBlurb =
+    "This session is judging under a lens this build can't name — picking one "
+    'replaces it.';
+
 /// What the bridge will print of a brief, mirrored by hand from
 /// `MAX_BRIEF_CHARS` (`bridge/src/handler/decision.ts`). The bridge clips in
 /// UTF-16 code units and never refuses on length, so a field counting anything

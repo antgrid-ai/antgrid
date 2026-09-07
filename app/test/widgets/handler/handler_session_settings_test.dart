@@ -1,11 +1,13 @@
-// The two per-session Handler choices and the sheet they share. The rules that
+// The per-session Handler choices and the sheet they share. The rules that
 // matter here are the ones a screenshot cannot show: what a change SENDS, and
 // what the sheet claims while nothing is actually judging.
 import 'package:antgrid/design/theme_presets.dart';
-import 'package:antgrid/design/widgets/ab_segmented.dart';
+import 'package:antgrid/design/widgets/ab_chip.dart';
+import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
+import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/widgets/handler/handler_session_settings.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -32,14 +34,23 @@ AgentDescriptor _descriptor(String tool, {required bool judgeCapable}) =>
       handlerChat: true,
     );
 
+/// Every lens this build knows, which is what an up-to-date machine advertises.
+const _allLenses = ['pm', 'qa', 'critic', 'release'];
+
 HandlerSessionSettingsValue _value({
   String? judgeTool,
   String? judgeModel,
-  HandlerPersonality personality = HandlerPersonality.watchdog,
-}) => (
-  judgeTool: judgeTool,
-  judgeModel: judgeModel,
-  personality: personality,
+  HandlerLensPick? lens = (roleId: null, brief: null),
+}) => (judgeTool: judgeTool, judgeModel: judgeModel, lens: lens);
+
+/// The lens row is gated on the machine having named its lenses, so every pump
+/// states what this one advertises. `lenses: null` is the machine that never
+/// said, which is the inert case.
+HandlerState _state(List<String>? lenses) => HandlerState(
+  lenses: lenses,
+  sessions: const {},
+  escalations: const [],
+  activity: const [],
 );
 
 Future<void> _pump(
@@ -48,6 +59,7 @@ Future<void> _pump(
   Map<String, bool> catalog = const {'claude': true},
   ValueChanged<HandlerSessionSettingsValue>? onChanged,
   bool appliesNextPass = false,
+  List<String>? lenses = _allLenses,
 }) async {
   useInMemoryPrefs();
   await tester.pumpWidget(
@@ -58,6 +70,9 @@ Future<void> _pump(
             for (final e in catalog.entries)
               e.key: _descriptor(e.key, judgeCapable: e.value),
           }),
+        ),
+        handlerStateProvider.overrideWith(
+          (ref) => Stream.value(_state(lenses)),
         ),
       ],
       child: MaterialApp(
@@ -78,12 +93,13 @@ Future<void> _pump(
   await tester.pump();
 }
 
-/// Mounts ONE half of the settings block. The arm sheet takes the posture half
+/// Mounts ONE half of the settings block. The arm sheet takes the lens half
 /// alone, because its composer's chip is already the judge picker there.
 Future<void> _pumpHalf(
   WidgetTester tester,
   Widget half, {
   Map<String, bool> catalog = const {'claude': true},
+  List<String>? lenses = _allLenses,
 }) async {
   useInMemoryPrefs();
   await tester.pumpWidget(
@@ -94,6 +110,9 @@ Future<void> _pumpHalf(
             for (final e in catalog.entries)
               e.key: _descriptor(e.key, judgeCapable: e.value),
           }),
+        ),
+        handlerStateProvider.overrideWith(
+          (ref) => Stream.value(_state(lenses)),
         ),
       ],
       child: MaterialApp(
@@ -107,12 +126,16 @@ Future<void> _pumpHalf(
   await tester.pump();
 }
 
-// Nullable type argument: `selected` has to be able to match no cell at all,
-// which is how the control says the far end has never reported a posture.
-AbSegmented<HandlerPersonality?> _segmented(WidgetTester tester) =>
-    tester.widget<AbSegmented<HandlerPersonality?>>(
-      find.byType(AbSegmented<HandlerPersonality?>),
-    );
+/// Chip labels render uppercased, so every finder here names them that way.
+AbChip _chip(WidgetTester tester, String label) =>
+    tester.widget<AbChip>(find.widgetWithText(AbChip, label));
+
+const _defaultChip = 'INTENT AND COMPLETION';
+
+/// The brief's own field. The judge's model row is an [AbTextField] too on a
+/// machine that has never heard that CLI list its models, and the lens block is
+/// mounted first — so position is what tells the two apart.
+Finder get _briefField => find.byType(AbTextField).first;
 
 void main() {
   group('handlerSessionSettingsEdit', () {
@@ -121,7 +144,8 @@ void main() {
       final edit = handlerSessionSettingsEdit(v, v);
       expect(edit.judgeTool, isNull);
       expect(edit.judgeModel, isNull);
-      expect(edit.personality, isNull);
+      expect(edit.role, isNull);
+      expect(edit.brief, isNull);
     });
 
     test('only the moved field is sent', () {
@@ -130,10 +154,11 @@ void main() {
         _value(
           judgeTool: 'codex',
           judgeModel: 'o3',
-          personality: HandlerPersonality.autopilot,
+          lens: (roleId: 'qa', brief: null),
         ),
       );
-      expect(edit.personality, HandlerPersonality.autopilot);
+      expect(edit.role, 'qa');
+      expect(edit.brief, isNull);
       // The judge is untouched, so the wire must not carry it — a cold cache
       // would otherwise clear a pick the bridge holds and this app has never
       // been told about.
@@ -182,15 +207,49 @@ void main() {
       expect(edit.judgeModel, 'o4-mini');
     });
 
+    test('a return to the default is a clear, not silence', () {
+      final edit = handlerSessionSettingsEdit(
+        _value(lens: (roleId: 'qa', brief: null)),
+        _value(lens: (roleId: null, brief: null)),
+      );
+      expect(edit.role, '');
+    });
+
+    test('a pick made over a seed nobody stated always sends', () {
+      // A null `from` lens is "this app has not been told", and the bridge may
+      // hold anything — including an id this build cannot name — so the pick
+      // has to go out rather than be diffed into silence.
+      final edit = handlerSessionSettingsEdit(
+        _value(lens: null),
+        _value(lens: (roleId: 'pm', brief: null)),
+      );
+      expect(edit.role, 'pm');
+    });
+
+    test('a brief moves on its own, and clears as the empty string', () {
+      final typed = handlerSessionSettingsEdit(
+        _value(lens: (roleId: 'qa', brief: null)),
+        _value(lens: (roleId: 'qa', brief: 'show the failing case')),
+      );
+      expect(typed.brief, 'show the failing case');
+      expect(typed.role, isNull);
+
+      final cleared = handlerSessionSettingsEdit(
+        _value(lens: (roleId: 'qa', brief: 'show the failing case')),
+        _value(lens: (roleId: 'qa', brief: null)),
+      );
+      expect(cleared.brief, '');
+      expect(cleared.role, isNull);
+    });
   });
 
   group('handlerSessionSettingsFor', () {
-    test('a session with nothing stored reports no posture, never a guess', () {
-      // A bridge that has never named one is not a bridge running watchdog:
-      // seeding the default here would put a preset on screen as a live fact
-      // and then send nothing when the user "changed" it to what was shown.
+    test('a session with nothing stored reports no lens, never a guess', () {
+      // A machine that has never advertised lenses is not a machine running the
+      // unnamed default: seeding it here would put a lens on screen as a live
+      // fact and then send nothing when the user "changed" it to what was shown.
       final seed = handlerSessionSettingsFor(null, 't1');
-      expect(seed.personality, isNull);
+      expect(seed.lens, isNull);
       expect(seed.judgeTool, isNull);
       expect(seed.judgeModel, isNull);
     });
@@ -209,61 +268,69 @@ void main() {
   });
 
   group('the sheet', () {
-    testWidgets('leads with the posture and follows with the judge', (
+    testWidgets('leads with what it looks for and follows with the judge', (
       tester,
     ) async {
       await _pump(tester, value: _value(judgeTool: 'claude'));
-      final posture = tester.getTopLeft(find.text('HOW MUCH IT HANDLES')).dy;
+      final lens = tester.getTopLeft(find.text('WHAT IT LOOKS FOR')).dy;
+      final brief = tester.getTopLeft(find.text('BRIEF')).dy;
       final judge = tester.getTopLeft(find.text('JUDGED BY')).dy;
       final model = tester.getTopLeft(find.text('MODEL')).dy;
-      expect(posture, lessThan(judge));
+      expect(lens, lessThan(brief));
+      expect(brief, lessThan(judge));
       expect(judge, lessThan(model));
     });
 
-    testWidgets('a healthy judge leaves the posture live and unexplained', (
+    testWidgets('a healthy judge marks the running lens and nothing else', (
       tester,
     ) async {
       await _pump(tester, value: _value(judgeTool: 'claude'));
-      expect(_segmented(tester).inactive, isFalse);
-      expect(
-        find.text(handlerPersonalityBlurb(HandlerPersonality.watchdog)),
-        findsOneWidget,
-      );
-      expect(find.text(handlerPostureParkedBlurb), findsNothing);
+      final p = kDefaultPalette;
+      expect(_chip(tester, _defaultChip).selected, isTrue);
+      expect(_chip(tester, _defaultChip).color, p.accent);
+      // Exactly one: the accent is what says "this is what is running", and two
+      // of them would be two answers to one question.
+      final accented = tester
+          .widgetList<AbChip>(find.byType(AbChip))
+          .where((c) => c.color == p.accent);
+      expect(accented, hasLength(1));
+      expect(find.text(handlerLensBlurb(null)), findsOneWidget);
+      expect(find.text(handlerLensParkedBlurb), findsNothing);
     });
 
-    testWidgets('a judge that cannot run headless parks the posture', (
+    testWidgets('a judge that cannot run headless parks the lens', (
       tester,
     ) async {
       await _pump(
         tester,
-        value: _value(
-          judgeTool: 'codex',
-          personality: HandlerPersonality.autopilot,
-        ),
+        value: _value(judgeTool: 'codex', lens: (roleId: 'qa', brief: null)),
         catalog: const {'claude': true, 'codex': false},
       );
       // Still the user's choice to make — it starts working the moment the
       // judge is fixed — but it must not be painted as running.
-      expect(_segmented(tester).inactive, isTrue);
-      expect(find.text(handlerPostureParkedBlurb), findsOneWidget);
+      expect(_chip(tester, 'QA').selected, isTrue);
+      expect(_chip(tester, 'QA').color, isNull);
+      expect(find.text(handlerLensParkedBlurb), findsOneWidget);
       expect(find.textContaining(handlerJudgeParkedNotice('Codex')), findsOne);
     });
 
     testWidgets('the parked line outranks the next-pass line', (tester) async {
       // Both are true post-arm, and "takes effect next pass" implies it takes
-      // effect at all, which is the one thing a parked posture does not do.
+      // effect at all, which is the one thing a parked lens does not do.
       await _pump(
         tester,
         value: _value(judgeTool: 'codex'),
         catalog: const {'codex': false},
         appliesNextPass: true,
       );
-      expect(find.text(handlerPostureParkedBlurb), findsOneWidget);
-      expect(find.textContaining('Takes effect on the next pass.'), findsNothing);
+      expect(find.text(handlerLensParkedBlurb), findsOneWidget);
+      expect(
+        find.textContaining('Takes effect on the next pass.'),
+        findsNothing,
+      );
     });
 
-    testWidgets('post-arm, a live posture says when it lands', (tester) async {
+    testWidgets('post-arm, a live lens says when it lands', (tester) async {
       await _pump(
         tester,
         value: _value(judgeTool: 'claude'),
@@ -275,14 +342,123 @@ void main() {
       );
     });
 
-    testWidgets('the posture half carries no judge picker of its own', (
+    testWidgets('a machine that named no lenses offers nothing to pick', (
+      tester,
+    ) async {
+      await _pump(tester, value: _value(judgeTool: 'claude'), lenses: null);
+      for (final chip in tester.widgetList<AbChip>(find.byType(AbChip))) {
+        expect(chip.enabled, isFalse);
+        expect(chip.selected, isFalse);
+      }
+      expect(tester.widget<AbTextField>(_briefField).enabled, isFalse);
+      expect(find.text(handlerLensUnreportedBlurb), findsOneWidget);
+    });
+
+    testWidgets('only the lenses this machine named are offered', (
+      tester,
+    ) async {
+      // The intersection, so a newer app can never send an id the far end
+      // would strip off the frame in silence.
+      await _pump(
+        tester,
+        value: _value(judgeTool: 'claude'),
+        lenses: const ['pm', 'qa'],
+      );
+      expect(find.text('PM'), findsOneWidget);
+      expect(find.text('QA'), findsOneWidget);
+      expect(find.text('CRITIC'), findsNothing);
+      expect(find.text('RELEASE MANAGER'), findsNothing);
+      expect(find.text(_defaultChip), findsOneWidget);
+    });
+
+    testWidgets('a lens this build cannot name selects nothing and says so', (
+      tester,
+    ) async {
+      HandlerSessionSettingsValue? sent;
+      await _pump(
+        tester,
+        value: _value(
+          judgeTool: 'claude',
+          lens: (roleId: 'ship-it', brief: null),
+        ),
+        onChanged: (v) => sent = v,
+      );
+      for (final chip in tester.widgetList<AbChip>(find.byType(AbChip))) {
+        expect(chip.selected, isFalse);
+      }
+      expect(find.text(handlerLensUnknownBlurb), findsOneWidget);
+
+      // One tap on the default is what replaces it.
+      await tester.tap(find.text(_defaultChip));
+      await tester.pump();
+      expect(
+        handlerSessionSettingsEdit(
+          _value(judgeTool: 'claude', lens: (roleId: 'ship-it', brief: null)),
+          sent!,
+        ).role,
+        '',
+      );
+    });
+
+    testWidgets('a pick this app was never told selects nothing', (
+      tester,
+    ) async {
+      await _pump(tester, value: _value(judgeTool: 'claude', lens: null));
+      for (final chip in tester.widgetList<AbChip>(find.byType(AbChip))) {
+        expect(chip.selected, isFalse);
+        expect(chip.enabled, isTrue);
+      }
+      expect(find.text(handlerLensUnsetBlurb), findsOneWidget);
+    });
+
+    testWidgets('picking a lens sends it and leaves the judge alone', (
+      tester,
+    ) async {
+      HandlerSessionSettingsValue? sent;
+      final from = _value(judgeTool: 'claude');
+      await _pump(tester, value: from, onChanged: (v) => sent = v);
+
+      await tester.tap(find.text('QA'));
+      await tester.pump();
+
+      final edit = handlerSessionSettingsEdit(from, sent!);
+      expect(edit.role, 'qa');
+      expect(edit.judgeTool, isNull);
+      expect(edit.judgeModel, isNull);
+    });
+
+    testWidgets('a submitted brief commits trimmed, and clears as empty', (
+      tester,
+    ) async {
+      HandlerSessionSettingsValue? sent;
+      final from = _value(judgeTool: 'claude');
+      await _pump(tester, value: from, onChanged: (v) => sent = v);
+
+      await tester.enterText(_briefField, '  show tests  ');
+      await tester.pump();
+      // A keystroke alone commits nothing on this sheet: each commit is a
+      // configure frame, and the bridge's edit path buys a real judge pass.
+      expect(sent, isNull);
+
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(handlerSessionSettingsEdit(from, sent!).brief, 'show tests');
+
+      final typed = sent!;
+      await tester.enterText(_briefField, '');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(handlerSessionSettingsEdit(typed, sent!).brief, '');
+    });
+
+    testWidgets('the lens half carries no judge picker of its own', (
       tester,
     ) async {
       // On the arm sheet the composer's chip IS the judge picker, so mounting
       // these rows too would be two controls for one value.
       await _pumpHalf(
         tester,
-        HandlerPostureControl(
+        HandlerLensControl(
           terminalId: 't1',
           value: _value(judgeTool: 'codex'),
           onChanged: (_) {},
@@ -290,11 +466,11 @@ void main() {
         catalog: const {'codex': false},
       );
 
-      expect(find.text('HOW MUCH IT HANDLES'), findsOneWidget);
-      // The parked blurb REPLACES the personality one — a posture that is
-      // stored and inert must not also describe what it would be doing.
-      expect(find.text(handlerPostureParkedBlurb), findsOneWidget);
-      // The parked notice stays with the posture it parks: its copy never says
+      expect(find.text('WHAT IT LOOKS FOR'), findsOneWidget);
+      // The parked blurb REPLACES the lens one — a lens that is stored and
+      // inert must not also describe what it would be asking.
+      expect(find.text(handlerLensParkedBlurb), findsOneWidget);
+      // The parked notice stays with the lens it parks: its copy never says
       // "below", so on the arm sheet it points up at the chip and still reads
       // true.
       expect(find.textContaining(handlerJudgeParkedNotice('Codex')), findsOne);
@@ -302,7 +478,7 @@ void main() {
       expect(find.text('MODEL'), findsNothing);
     });
 
-    testWidgets('the judge half carries both picker rows and no posture', (
+    testWidgets('the judge half carries both picker rows and no lens', (
       tester,
     ) async {
       await _pumpHalf(
@@ -316,8 +492,9 @@ void main() {
 
       expect(find.text('JUDGED BY'), findsOneWidget);
       expect(find.text('MODEL'), findsOneWidget);
-      expect(find.text('HOW MUCH IT HANDLES'), findsNothing);
-      expect(find.byType(AbSegmented<HandlerPersonality>), findsNothing);
+      expect(find.text('WHAT IT LOOKS FOR'), findsNothing);
+      expect(find.text('BRIEF'), findsNothing);
+      expect(find.byType(AbChip), findsNothing);
     });
 
     testWidgets('picking a judge clears the model with it', (tester) async {

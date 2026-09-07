@@ -404,7 +404,7 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
     final next = (
       judgeTool: pick.judgeTool,
       judgeModel: pick.judgeModel,
-      personality: _judgeValue.personality,
+      lens: _judgeValue.lens,
     );
     final edit = handlerSessionSettingsEdit(_judgeValue, next);
     // Pinned only once the send is real: `_judgeValue` prefers `_judge`, so a

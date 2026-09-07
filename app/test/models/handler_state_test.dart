@@ -909,6 +909,17 @@ void main() {
       final gating = RegExp('escalat|handl', caseSensitive: false);
       expect(gating.hasMatch(handlerLensDefaultLabel), isFalse);
       expect(gating.hasMatch(handlerLensBlurb(null)), isFalse);
+      // The captions that qualify a lens are pinned with the lens copy itself:
+      // they sit in the same block on the same surface, and copy about a
+      // control is exactly where a threshold gets described by accident.
+      for (final caption in [
+        handlerLensParkedBlurb,
+        handlerLensUnreportedBlurb,
+        handlerLensUnsetBlurb,
+        handlerLensUnknownBlurb,
+      ]) {
+        expect(gating.hasMatch(caption), isFalse, reason: caption);
+      }
       for (final lens in HandlerLens.values) {
         expect(
           gating.hasMatch(handlerLensBlurb(lens)),
