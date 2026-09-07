@@ -118,6 +118,10 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
   SessionMemberCard? _memberCard;
   SessionMemberCard? _leadCard;
 
+  /// The machine whose agent list is being asked for right now, so an empty
+  /// list can say which of its two meanings it has.
+  String? _asking;
+
   /// Machines already carrying an active member of this session. A second
   /// session on a machine that is already in is not refused by the bridge, but
   /// it is never what the user meant by "add a machine".
@@ -241,9 +245,11 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
       !_briefEmpty;
 
   void _pickMachine(String uuid, String label) {
+    _askForAgents(uuid);
     setState(() {
       _machineUuid = uuid;
       _machineLabel = label;
+      _asking = uuid;
       // Every downstream pick is scoped to the machine — a project id, an
       // installed tool and that tool's model catalog are all per-machine — so
       // carrying any of them across would name something that may not exist
@@ -251,6 +257,30 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
       _project = null;
       _tool = null;
       _model = null;
+    });
+  }
+
+  /// Pull this machine's `agent:tools` advert instead of hoping one is cached.
+  ///
+  /// Everything else here is a pure READER of what the control plane already
+  /// holds, and a machine that had advertised its projects but not its tools
+  /// showed an empty agent list with nothing that would ever fill it: the
+  /// machine row is enabled off `projects`, and the two are separate adverts.
+  ///
+  /// Deliberately NOT `refreshControlPlanes`, whose probe CLEARS the advert when
+  /// the snapshot RPC fails: one timed-out request would empty the project list
+  /// under a pick the user had already made.
+  void _askForAgents(String uuid) {
+    final container = ref.container;
+    detached('AddMachine', 'asking a machine for its agents failed', () async {
+      try {
+        final client = await container.read(
+          controlPlaneClientForProvider(uuid).future,
+        );
+        await client?.refresh();
+      } finally {
+        if (mounted && _machineUuid == uuid) setState(() => _asking = null);
+      }
     });
   }
 
@@ -577,6 +607,7 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
         anchor,
         (paneContext) => _ToolPane(
           target: peer,
+          asking: _asking == _machineUuid,
           selected: _tool,
           onPick: (tool) {
             Navigator.of(paneContext).pop();
@@ -754,9 +785,15 @@ class _MachineRow extends ConsumerWidget {
 class _ToolPane extends ConsumerWidget {
   const _ToolPane({
     required this.target,
+    required this.asking,
     required this.selected,
     required this.onPick,
   });
+
+  /// Whether this machine is still being asked. An empty list means one thing
+  /// while the question is open and another once it has been answered, and the
+  /// user can act on only one of them.
+  final bool asking;
 
   final SessionTarget target;
   final String? selected;
@@ -766,8 +803,10 @@ class _ToolPane extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final detected = ref.watch(detectedToolsForProvider(target)).value;
     if (detected == null || detected.isEmpty) {
-      return const PanelHint(
-        'This machine has not said which agents it has installed.',
+      return PanelHint(
+        asking
+            ? 'Asking this machine which agents it has installed...'
+            : 'This machine has not said which agents it has installed.',
       );
     }
     final catalog = ref.watch(agentCatalogProvider);

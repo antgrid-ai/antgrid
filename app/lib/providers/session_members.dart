@@ -10,6 +10,7 @@ import 'device_provisioning.dart';
 import 'open_target_session.dart';
 import 'providers.dart';
 import 'recent_agents.dart';
+import 'session_setup.dart';
 import 'sessions.dart';
 
 /// The registration id that addresses [member]'s project — the id every focus,
@@ -217,6 +218,53 @@ Future<void> selectMemberTab(
     localMachineId: localMachineId,
     orphaned: outcome == OpenSessionOutcome.unreachable,
   );
+}
+
+/// Bring a lead session's members up with it.
+///
+/// A multi-machine session is ONE session that happens to span machines, and
+/// reopening it used to start only the half this app was focused on: every peer
+/// stayed stopped until the user walked to its member tab and pressed Start.
+/// Nothing else can do this. A peer's bridge is never told that its lead was
+/// opened, and the member tab press deliberately does not start — arriving at a
+/// session means "show me this", never "restart this agent"
+/// ([openTargetAndFocusSession]) — so a peer reached that way is exactly the one
+/// this exists for.
+///
+/// Best-effort and silent, per member. The user asked to open a session, not to
+/// hear about N machines: an unreachable peer is already visible as an idle
+/// member tab, and the lead's own start reports for itself. A caller that must
+/// NOT resume anything (a notification tap) simply does not call this.
+Future<void> startSessionMembers(
+  ProviderContainer container, {
+  required SessionEntry lead,
+}) async {
+  final members = [for (final m in lead.members) if (m.isActive) m.ref];
+  if (members.isEmpty) return;
+  final localMachineId = await container.read(localDeviceUuidProvider.future);
+  for (final peer in members) {
+    final service = await warmServiceFor(
+      container,
+      memberRegistrationId(peer, localMachineId: localMachineId),
+      (s) => s.sessionsService,
+    );
+    if (service == null) continue;
+    try {
+      // The peer's OWN row decides, never the member ref: a ref records who the
+      // member is and not what it is doing, so a start taken on the lead's copy
+      // would spend a turn on an agent that is already running.
+      final list = await service.requestList();
+      final row = [for (final s in list) if (s.id == peer.sessionId) s].firstOrNull;
+      if (row == null || row.running || row.deleting || row.archived) continue;
+      // The same gate every auto-start owes: while an isolated checkout's setup
+      // runs the bridge HOLDS the session's start, and a second one carries no
+      // prompt (see [sessionStartQueued]).
+      if (sessionStartQueued(row.setup)) continue;
+      await service.start(row.id);
+    } catch (_) {
+      // See above: nothing here is the user's to act on.
+    }
+  }
 }
 
 /// The peer session whose lead this press is about to probe, or null when the
