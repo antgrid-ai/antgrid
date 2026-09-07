@@ -7,6 +7,12 @@ import {
   captureStdout, modelwatch,
   type ModelCallContext, type ModelCallEvent, type ModelCallPhase,
 } from "../modelwatch";
+// Imported for its side effect — the module attaches the durable call log to the
+// ring at import — and imported HERE rather than from an entry point because
+// this file is the one function every model call on the machine passes through.
+// The shipped bridge re-invokes its own executable under hidden subcommands, so
+// an entry point is not a single place; the chokepoint is.
+import "../modelwatch-log";
 import { killChildTree, stripInheritedCertOverrides } from "../terminal-session";
 import { detectInstalledTools } from "../tool-detector";
 import { AGENTS, agentSpec } from "./registry";
