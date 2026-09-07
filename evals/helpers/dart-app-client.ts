@@ -322,6 +322,11 @@ export class DartAppClient {
    * events, then emits `snapshot-complete`. Without this the welcome-state
    * waiters race the agent's de-duped live burst and time out
    * non-deterministically.
+   *
+   * The production pull excludes `tree:full` (the app's own tree hydrator
+   * carries it), so on a project stream this client asks for the heavy types
+   * separately before it reports complete — see `_handleSnapshot` in
+   * `packages/antgrid_eval_client`.
    */
   async pullStateSnapshot(streamId = CONTROL_STREAM_ID, timeoutMs = 15_000): Promise<void> {
     const done = this.waitForEvent(

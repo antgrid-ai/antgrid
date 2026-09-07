@@ -180,8 +180,11 @@ function walk(
 
     // Walk in name order so a budget cut is deterministic: what survives is
     // always the same leading run of the listing, not whatever the filesystem
-    // happened to enumerate first.
-    entries.sort((a, b) => a.localeCompare(b));
+    // happened to enumerate first. Code-unit order, not `localeCompare`: this
+    // runs once per directory of every full tree build, and the collator is
+    // both far slower and dependent on the host's ICU data — which would make
+    // the cut differ between machines.
+    entries.sort();
     const children: FileTreeNode[] = [];
     let truncated = false;
     for (const entry of entries) {

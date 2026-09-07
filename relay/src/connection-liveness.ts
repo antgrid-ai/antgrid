@@ -15,8 +15,8 @@ export interface LivenessAges {
 /** Outbound bytes still queued for a socket beyond which its inbound traffic
  * stops counting as liveness. An authenticated frame proves the peer is up
  * and sending; that it is also READING is proved by our sends draining. A
- * backlog this deep, held for a whole window with no pong, is a reader that
- * stopped, whatever its uplink is still saying. */
+ * backlog this deep, sampled on a sweep that already found no pong for a whole
+ * window, is a reader that stopped, whatever its uplink is still saying. */
 export const INBOUND_LIVENESS_MAX_BACKLOG_BYTES = 1_048_576;
 
 /** Per-socket relay liveness. Device ids are deliberately absent: a late

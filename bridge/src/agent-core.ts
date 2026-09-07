@@ -3795,8 +3795,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // Same failure, same fix, as the machine control plane's own
           // `state.snapshot` intercept (`host-server.ts`); an unchanged
           // payload is a cheap no-op, since the bus dedups on it. Skipped for
-          // a pull that could not carry the status anyway (the app's separate
-          // tree pull) — nothing there to keep fresh.
+          // a pull that could not carry the status anyway — nothing there to
+          // keep fresh.
           for (const runtime of checkoutRuntimes.values()) {
             if (runtime.disposed) continue;
             sendStatus(runtime);
