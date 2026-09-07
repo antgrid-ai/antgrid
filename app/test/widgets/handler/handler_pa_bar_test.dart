@@ -3,7 +3,9 @@
 // send button, pinned under the session composer, read as a rival place to type
 // with nothing on either saying who receives it.
 import 'package:antgrid/design/ab_colors.dart';
+import 'package:antgrid/design/ab_icons.dart';
 import 'package:antgrid/design/widgets/ab_chip.dart';
+import 'package:antgrid/design/widgets/ab_icon.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/providers/first_run.dart';
@@ -31,7 +33,8 @@ HandlerSessionState _armed({
   int? pendingEscalations,
   String? parkKind,
   int? parkedUntil,
-  HandlerPersonality? personality,
+  String? roleId,
+  String? brief,
   HandlerObservability? observability,
 }) => HandlerSessionState(
   terminalId: 't1',
@@ -43,7 +46,8 @@ HandlerSessionState _armed({
   escalations: escalations,
   parkKind: parkKind,
   parkedUntil: parkedUntil,
-  personality: personality,
+  roleId: roleId,
+  brief: brief,
   observability: observability,
 );
 
@@ -52,6 +56,12 @@ HandlerSessionState _armed({
 /// guessing which fallback is in force.
 AbChip _chip(WidgetTester tester, String label) =>
     tester.widget<AbChip>(find.widgetWithText(AbChip, label));
+
+/// The brief marker carries no text, so the icon it draws is the only thing
+/// that identifies it.
+final Finder _briefMarker = find.byWidgetPredicate(
+  (w) => w is AbIcon && w.icon == AbIcons.comment,
+);
 
 HandlerInstructionItem _item(String id, String text, String status) =>
     HandlerInstructionItem(id: id, text: text, status: status, createdAt: 1);
@@ -87,10 +97,14 @@ List<HandlerEscalation> _replies(int n) => [
 /// The first-run store is here for the drawer the row opens, not for the bar:
 /// the drawer's disclaimer is retired by a persisted flag, and the provider
 /// holding it throws unless the store is injected.
+/// [lenses] is what the machine has advertised: the four this build knows,
+/// unless a test is standing up a machine that never named any (null), which
+/// is the only state the bar renders as a dash.
 Future<void> _pump(
   WidgetTester tester, {
   required Map<String, HandlerSessionState> sessions,
   HandlerBacklogOpener? opener,
+  List<String>? lenses = const ['pm', 'qa', 'critic', 'release'],
 }) async {
   useInMemoryPrefs();
   final firstRun = await FirstRunStore.open();
@@ -101,7 +115,10 @@ Future<void> _pump(
         activeSessionIdProvider.overrideWith(() => ValueController('t1')),
         handlerStateProvider.overrideWith(
           (ref) => Stream.value(
-            const HandlerState.initial().copyWith(sessions: sessions),
+            const HandlerState.initial().copyWith(
+              sessions: sessions,
+              lenses: lenses,
+            ),
           ),
         ),
         if (opener != null)
@@ -125,58 +142,110 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('the bar names the posture the bridge reported', (tester) async {
+  testWidgets('the bar names the lens', (tester) async {
     // The bar is on screen for the whole time a session is armed and is the
-    // only place the posture is visible at all, so "no chip" would be a state
-    // the user has to be taught to read.
-    await _pump(
-      tester,
-      sessions: {'t1': _armed(personality: HandlerPersonality.watchdog)},
-    );
+    // only place the lens is visible at all, so "no chip" would be a state the
+    // user has to be taught to read.
+    await _pump(tester, sessions: {'t1': _armed(roleId: 'qa')});
     final p = tester.element(find.byType(HandlerPaBar)).antgrid;
-    expect(_chip(tester, 'WATCHDOG').color, p.textMuted);
+    expect(_chip(tester, 'QA').color, p.textMuted);
   });
 
-  testWidgets('an unreported posture is a dash, never the default by name', (
+  testWidgets('the default is named as the default', (tester) async {
+    // The unnamed lens is still a live setting, and the chip that opens the
+    // sheet has to be on screen before the user has ever picked anything.
+    await _pump(tester, sessions: {'t1': _armed()});
+    expect(find.text('DEFAULT'), findsOneWidget);
+    expect(find.text('QA'), findsNothing);
+  });
+
+  testWidgets('a lens this build cannot name shows as itself', (tester) async {
+    // A newer machine's lens is a real pick this session is judging under.
+    // Folding it into the default would report a pick the user never made.
+    await _pump(tester, sessions: {'t1': _armed(roleId: 'ship-it')});
+    expect(find.text('SHIP-IT'), findsOneWidget);
+    expect(find.text('DEFAULT'), findsNothing);
+  });
+
+  testWidgets('a machine that never advertised lenses is a dash', (
     tester,
   ) async {
-    // This chip reads as a live fact about the session. A bridge too old to
-    // carry the field is not a bridge running watchdog, and naming the preset
-    // here would advertise a control over nothing.
-    await _pump(tester, sessions: {'t1': _armed()});
-    expect(find.text('WATCHDOG'), findsNothing);
+    // This chip reads as a live fact about the session. A machine that has
+    // never named the lenses it reads is not a machine running the default,
+    // and saying so here would advertise a control over nothing.
+    await _pump(tester, sessions: {'t1': _armed()}, lenses: null);
+    expect(find.text('DEFAULT'), findsNothing);
     final p = tester.element(find.byType(HandlerPaBar)).antgrid;
     expect(_chip(tester, '—').color, p.textMuted);
   });
 
-  testWidgets('the posture chip is tinted where nothing is being judged', (
+  testWidgets('the lens chip is tinted where nothing is being judged', (
     tester,
   ) async {
-    // Escalate-only means no decide pass runs at all, so a bar naming a
-    // posture in ordinary chrome would say the opposite of what is happening.
+    // Escalate-only means no decide pass runs at all, so a bar naming a lens
+    // in ordinary chrome would say the opposite of what is happening.
     await _pump(
       tester,
       sessions: {
         't1': _armed(
-          personality: HandlerPersonality.closer,
+          roleId: 'critic',
           observability: HandlerObservability.escalateOnly,
         ),
       },
     );
     final p = tester.element(find.byType(HandlerPaBar)).antgrid;
-    expect(_chip(tester, 'CLOSER').color, p.warning);
+    expect(_chip(tester, 'CRITIC').color, p.warning);
   });
 
-  testWidgets('tapping the posture chip does not open the backlog', (
+  testWidgets('a brief shows a marker beside the lens', (tester) async {
+    // A brief is invisible on this row otherwise, so a user who wrote one has
+    // no way to tell it survived without opening the sheet.
+    await _pump(
+      tester,
+      sessions: {'t1': _armed(roleId: 'qa', brief: 'watch the migrations')},
+    );
+    expect(_briefMarker, findsOneWidget);
+  });
+
+  testWidgets('no brief leaves the row unmarked', (tester) async {
+    await _pump(tester, sessions: {'t1': _armed(roleId: 'qa')});
+    expect(_briefMarker, findsNothing);
+  });
+
+  testWidgets('the brief marker is part of the same door as the lens', (
+    tester,
+  ) async {
+    // A mark the user cannot follow names something with nowhere to go and
+    // read it, so the marker lives INSIDE the gesture the chip opens the
+    // settings sheet with. Asserted structurally: a tap landing on nothing
+    // would leave the backlog shut too, and pass a test that only watched it.
+    String? opened;
+    await _pump(
+      tester,
+      sessions: {'t1': _armed(roleId: 'qa', brief: 'watch the migrations')},
+      opener: (terminalId) => opened = terminalId,
+    );
+    final door = find.ancestor(
+      of: find.text('QA'),
+      matching: find.byType(GestureDetector),
+    );
+    expect(find.descendant(of: door, matching: _briefMarker), findsOneWidget);
+
+    await tester.tap(_briefMarker);
+    await tester.pump();
+    expect(opened, isNull);
+  });
+
+  testWidgets('tapping the lens chip does not open the backlog', (
     tester,
   ) async {
     String? opened;
     await _pump(
       tester,
-      sessions: {'t1': _armed(personality: HandlerPersonality.watchdog)},
+      sessions: {'t1': _armed(roleId: 'qa')},
       opener: (terminalId) => opened = terminalId,
     );
-    await tester.tap(find.text('WATCHDOG'));
+    await tester.tap(find.text('QA'));
     await tester.pump();
     expect(opened, isNull);
   });

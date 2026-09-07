@@ -291,6 +291,31 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
         ref.watch(handlerBacklogOpenerProvider) ??
         (id) => unawaited(showHandlerBacklogDrawer(context, id));
     final hint = handlerTypingHint(session);
+    // An em-dash where this machine has never named the lenses it reads: the
+    // chip is read as a live fact about the session, and naming a lens on a
+    // machine that never advertised any is a claim about a control over
+    // nothing (see HandlerState.lenses). An id this build cannot name is shown
+    // as itself for the same reason — a newer machine's lens is a real pick,
+    // and folding it into the default would report one the user never made.
+    //
+    // "Default" is the bar's word for the unnamed lens: the picker's "Intent
+    // and completion" does not fit a row already short of width (see the
+    // subtitle note below), and a truncation like "Intent" would read as a
+    // fifth role. It is copy, never a value on the wire.
+    final role = session.role;
+    final lensLabel = state?.lenses == null
+        ? '—'
+        : session.roleId == null
+        ? 'Default'
+        : role == null
+        ? session.roleId!
+        : handlerLensLabel(role);
+    // Tinted where nothing is judging: the lens is stored and inert, and a bar
+    // naming it in ordinary chrome while every pause escalates says the
+    // opposite of what is happening.
+    final lensTone = session.observability == HandlerObservability.escalateOnly
+        ? p.warning
+        : p.textMuted;
 
     return Container(
       decoration: BoxDecoration(
@@ -314,10 +339,10 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // The posture, always — including the default. This bar is on
-            // screen for the whole time a session is armed, and it is the only
-            // place the setting is visible at all; showing it only once it has
-            // been changed makes "no chip" a state the user has to know how to
+            // The lens, always — including the default. This bar is on screen
+            // for the whole time a session is armed, and it is the only place
+            // the setting is visible at all; showing it only once it has been
+            // changed makes "no chip" a state the user has to know how to
             // read. It costs width the title is already short of (see the
             // subtitle note above), which is the trade.
             Builder(
@@ -329,25 +354,27 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
                   () =>
                       showHandlerSessionSettingsSheet(chipContext, terminalId),
                 ),
-                child: AbChip.system(
-                  // An em-dash where the bridge has reported no posture at all,
-                  // never the default's name: this chip is read as a live fact
-                  // about the session, and naming a preset the far end has
-                  // never heard of is a claim about a control over nothing (see
-                  // handlerPersonalityFromWire). The chip still opens the sheet,
-                  // which is where that gets explained.
-                  label: session.personality == null
-                      ? '—'
-                      : handlerPersonalityLabel(
-                          session.personality!,
-                        ).toUpperCase(),
-                  // Tinted where nothing is judging: the posture is stored and
-                  // inert, and a bar naming it in ordinary chrome while every
-                  // pause escalates says the opposite of what is happening.
-                  color:
-                      session.observability == HandlerObservability.escalateOnly
-                      ? p.warning
-                      : p.textMuted,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AbChip.system(label: lensLabel, color: lensTone),
+                    // The brief sits behind the same door as the lens it
+                    // qualifies, so the marker is inside the gesture rather
+                    // than beside it: a mark the user cannot follow names
+                    // something with nowhere to go and read it.
+                    if (session.brief != null)
+                      Padding(
+                        padding: const EdgeInsets.only(left: AbTokens.space4),
+                        child: Semantics(
+                          label: 'Brief added',
+                          child: AbIcon(
+                            AbIcons.comment,
+                            size: 11,
+                            color: lensTone,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
             ),
