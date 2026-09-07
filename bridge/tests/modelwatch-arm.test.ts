@@ -349,6 +349,24 @@ describe("GET /modelwatch", () => {
     });
     expect(res.status).toBe(200);
   });
+
+  it("treats limit=0 as no replay, not as the ring's default capacity", async () => {
+    // The ring's DEFAULT_CAPACITY is sized for days of model calls, so a
+    // caller asking for nothing (a live tail only) must not be handed that
+    // whole buffer and read it as this minute's traffic.
+    modelwatch.record(callEvent({ callId: "old-1" }));
+    modelwatch.record(callEvent({ callId: "old-2", phase: "end", wallMs: 5 }));
+    const port = await start();
+    const res = await fetch(`http://127.0.0.1:${port}/modelwatch?limit=0&follow=0`, {
+      headers: { authorization: `Bearer ${HOST_TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).not.toContain("old-1");
+    expect(body).not.toContain("old-2");
+    expect(body).toContain('"replayed":0');
+    expect(body).toContain('"buffered":2');
+  });
 });
 
 describe("arming modelwatch from the viewer", () => {

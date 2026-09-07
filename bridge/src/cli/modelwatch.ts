@@ -86,7 +86,7 @@ const DEFAULT_LIMIT = 600;
  * less has silently made the retry decorative — which is exactly the thing this
  * feature exists to put on screen.
  */
-const RETRY_FLOOR_MS = 5_000;
+export const RETRY_FLOOR_MS = 5_000;
 
 /**
  * Ceiling on attempts held open waiting for their outcome record.

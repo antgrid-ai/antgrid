@@ -193,6 +193,9 @@ pill; click-for-detail with the full body; and both arming switches, each with
 its own heartbeat and the same dead-man TTL. **export** writes exactly what is on
 screen as JSONL. `--local`/`--relay`/`--limit` set the window's opening state;
 every other flag is refused, because the window owns what it would have answered.
+The window carries a second tab, **calls**, over the model-call ring described
+below; the two feeds share this one document and the one session a ticket buys,
+and nothing else.
 
 ```bash
 antgrid watch --ui                  # a window, and the terminal is yours again
@@ -251,6 +254,20 @@ the spawn starts, the spawn exits with its timings, and the *caller* says what i
 made of the answer, which the spawn cannot know — and the rendered view folds
 them into one row on the call id they share. `--json` does not fold: it prints
 the records as recorded, for a reader piping them somewhere else.
+
+**The same ring, in the capture window's second tab.** `antgrid watch --ui`'s
+document carries a **calls** tab beside the frame capture, folding the same
+records by the same call id and attempt. Two things it does that the terminal
+cannot. It renders an attempt the moment its start record arrives, as an *in
+flight* row updated in place when the end and the outcome land, rather than
+batching until the call is over — a run you are waiting on is the one you most
+want on screen. And the duration cell pairs wall with the vendor's API time
+where the terminal pairs it with the budget; what a retry inherits is on the row
+that owed it, as the retry-budget note. **export** writes the raw records,
+unfolded, exactly as `--json` does. Everything else the tab shows — the arms,
+the vocabulary, the refusals to sum — is what this section already describes,
+with one addition: disarming **prompts** purges the captured text from the
+window and its export too, not only from the host's ring.
 
 **The retry budget is the number this exists for.** A judge gets two attempts
 against ONE budget (`runWithRetry` in `bridge/src/handler/judge.ts`), so what the
@@ -365,7 +382,12 @@ switch. It implies `--prompts`: transcript text and the model's answer are
 admitted only while both arms are up, so arming it alone would arm the dangerous
 capture and record nothing through it. For the same reason the capture viewer may
 arm the prompt parts and may **not** arm the context arm — it is refused at that
-route with `CONTEXT_ARM_FORBIDDEN` and is reachable only from this CLI.
+route with `CONTEXT_ARM_FORBIDDEN` and is reachable only from this CLI. The
+calls tab says that in words rather than leaving a dead-looking control: the
+boundary is on screen before anything is armed, and the refusal — which a
+prompts-only request can also receive, because arming prompts is what starts
+admitting transcript text once the CLI holds context up — is named where the
+toggle is.
 
 Both arms carry the **dead-man TTL** `--bodies` does, renewed while the watcher
 runs and clamped host-side, and both need a live stream (`--no-follow` refuses

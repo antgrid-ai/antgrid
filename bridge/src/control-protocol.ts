@@ -110,14 +110,9 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   // to watch model calls never has to name the other feature to get a window,
   // which is the whole reason the CLI can carry two subcommands.
   //
-  // The model-call view on that page is NOT written yet — the viewer today
-  // renders frames only, and nothing sends this verb, so a link minted here
-  // opens on the frame capture. Kept rather than deferred with the tab because
-  // the narrowing beside it is the load-bearing half and is live now: a viewer
-  // session may arm the prompt parts and may not arm the context arm
-  // (`uiArmRefusal` in control-listener.ts), and that rule wants to be settled
-  // and tested before a page exists that would otherwise be written against its
-  // absence.
+  // The document opens on the frame capture and reaches the calls feed by its
+  // tab: which feed a link lands on is not carried in the ticket, so a caller
+  // that wants the calls view has to say so on the page.
   z.object({ id: z.string().min(1), type: z.literal("modelwatch:ui") }),
   // Discloses a checkout's absolute path to the caller. Deliberately confined
   // to THIS plane: checkout paths are host-local (checkout-types.ts) and the
