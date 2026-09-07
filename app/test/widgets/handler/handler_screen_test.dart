@@ -367,7 +367,32 @@ void main() {
     );
     expect(find.textContaining('Done: run the tests'), findsOneWidget);
     expect(find.textContaining('Skipped: open a PR'), findsOneWidget);
-    expect(find.text('Goal edited'), findsOneWidget);
+    expect(find.text('Also asked: ship it'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  // Nothing was edited — a re-configure over a non-empty backlog stacks an
+  // instruction and leaves entry #1 where it was, so this row is the only
+  // place the added sentence ever surfaces. Proven against a reason distinct
+  // from the fixture default above, so a fixed label couldn't pass by accident.
+  testWidgets('a goal_edited row carries the sentence that was added, not a '
+      'fixed label', (tester) async {
+    await pumpHandlerScreen(
+      tester,
+      stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+        activity: const [
+          HandlerActivityRecord(
+            recordId: 'r1',
+            at: 1,
+            terminalId: 't1',
+            decision: 'goal_edited',
+            reason: 'also fix the flaky test',
+          ),
+        ],
+      ),
+    );
+    expect(find.text('Also asked: also fix the flaky test'), findsOneWidget);
+    expect(find.text('Goal edited'), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
 

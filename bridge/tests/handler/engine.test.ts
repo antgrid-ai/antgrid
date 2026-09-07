@@ -232,6 +232,86 @@ describe("arm/disarm", () => {
   });
 });
 
+// The wire's window onto the instruction list session-store.ts keeps in full —
+// see HandlerSessionSnapshot's `instructions` (protocol.ts) for the pin and the
+// elision arithmetic these pin down. `emitStatus` is called directly rather than
+// awaiting `instruct`'s extraction spawn: it is the same public re-emit
+// agent-core calls on every handshake, and calling it synchronously here is what
+// keeps these cases from racing the default `runExtractionFn`'s resolution.
+describe("the instructions window (handler:status)", () => {
+  function instructionsOf(sent: AbMessage[]): { total: number; items: string[] } | undefined {
+    const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+      sessions: Array<{ instructions?: { total: number; items: string[] } }>;
+    };
+    return status.sessions[0]?.instructions;
+  }
+
+  it("one instruction: the window is that entry, total 1", () => {
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(instructionsOf(sent)).toEqual({ total: 1, items: [GOAL] });
+  });
+
+  it("five instructions: the whole list, in order, total 5", () => {
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: "one" });
+    for (const text of ["two", "three", "four", "five"]) engine.instruct({ terminalId: "t1", text });
+    engine.emitStatus();
+    expect(instructionsOf(sent)).toEqual({ total: 5, items: ["one", "two", "three", "four", "five"] });
+  });
+
+  it("twelve instructions: entry #1 pinned, items[1..4] are entries 9-12, total 12", () => {
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: "one" });
+    for (let n = 2; n <= 12; n++) engine.instruct({ terminalId: "t1", text: `entry ${n}` });
+    engine.emitStatus();
+    expect(instructionsOf(sent)).toEqual({
+      total: 12,
+      items: ["one", "entry 9", "entry 10", "entry 11", "entry 12"],
+    });
+    // Entry #1 names the session on the card headline throughout, whatever has
+    // stacked onto it since.
+    expect(statusOf(sent).goal).toBe("one");
+  });
+
+  it("a multi-line instruction is collapsed, not escaped-then-collapsed, and stays within the wire bound", () => {
+    const { engine, sent } = makeEngine();
+    // oneLine BEFORE previewForUser: escaping first would turn the newline into
+    // the 4-char literal "\x0a" and burn budget collapsing was supposed to save.
+    const raw = `${"a".repeat(150)}\n${"b".repeat(50)}`;
+    engine.arm({ terminalId: "t1", goal: raw });
+    const window = instructionsOf(sent)!;
+    expect(window.items).toHaveLength(1);
+    expect(window.items[0]).not.toContain("\\x0a");
+    // The length itself, not just "no throw": clip alone can return 121 chars
+    // for a .max(120) field and blank the whole frame at the app's parser.
+    expect(window.items[0]!.length).toBeLessThanOrEqual(120);
+  });
+
+  it("an armed session with no instructions still emits the field, with total 0", () => {
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1" });
+    expect(instructionsOf(sent)).toEqual({ total: 0, items: [] });
+  });
+
+  it("the persisted record keeps the raw instruction list, not the wire window", () => {
+    const { engine, saved } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(lastSaved(saved).instructions).toEqual([{ text: GOAL, at: 1000 }]);
+  });
+
+  it("the wrap-up record does not gain the instructions window", async () => {
+    const { engine, wrapUps } = makeEngine({
+      runDecisionFn: async () => decide({ transitions: [{ id: "a", status: "done", evidence: "ran to completion" }] }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(wrapUps()).toHaveLength(1);
+    expect(wrapUps()[0]).not.toHaveProperty("instructions");
+    expect(wrapUps()[0]!.goal).toBe(GOAL);
+  });
+});
+
 const continueDecision = decide({});
 
 test("arm persists the judge choice on the session record and snapshot", () => {

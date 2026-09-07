@@ -9,11 +9,17 @@ const int kSessionOpeningPromptCap = 32;
 ///
 /// The New Session field is multi-line and built for long input, so pasting a
 /// whole issue body into it is an ordinary way to start a session — and this
-/// string is sent as the handler goal, which is unbounded on the wire, is
-/// interpolated verbatim into EVERY judge prompt for the life of the session,
-/// and becomes the wrap-up push body. None of those three bound it; an
-/// unbounded goal buys every judged event its tokens and can push the recent
-/// context a decision is made from out of a small model's window.
+/// string is sent as the handler goal, which is unbounded on the wire
+/// (`HandlerConfigureWire.goal`, protocol.ts). It does not stay unbounded once
+/// it lands, though: it becomes entry #1 of the session's instructions list,
+/// which `instructionLines` prints through `oneLine` under a fixed total
+/// character budget and trims OLDEST first — so once enough stacks on top of
+/// it, entry #1 is the very first line dropped, not something read on every
+/// judge pass. Nor does it become the wrap-up push body: `buildWrapUp` stores
+/// an already-clipped preview of the goal, and the push reads that stored
+/// value. The real cost of an unbounded paste is upstream of the prompt — a
+/// bridge that stores and re-persists the whole sentence, and an app holding
+/// one of these per remembered session.
 ///
 /// 400 is the bridge's own `MAX_ITEM_CHARS` (`bridge/src/handler/extract.ts`) —
 /// the size it already treats as one item's worth of user text, and exactly

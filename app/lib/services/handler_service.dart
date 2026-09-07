@@ -550,11 +550,19 @@ class HandlerService {
     // with words in it, no backlog carried alongside it (an app-supplied list is
     // already the user's own, and extracting the goal beside it would double
     // every item), and — for a session that is ALREADY armed — a goal that
-    // actually moved. Restating the same goal is a no-op there (`goalChanged` in
-    // bridge/src/handler/engine.ts), and a mark nothing will satisfy waits for
-    // the user's first sentence and swallows the frame that sentence's own
-    // append raised. `updateBacklog` sends a backlog and no goal, so an edit
-    // never sets this.
+    // actually moved. The bridge's own rule is `stacked` (bridge/src/handler/
+    // engine.ts): a restated sentence is a no-op unless it is not already
+    // ANYWHERE in the instructions list. This mirror can only test entry #1
+    // (`armedGoal`, the session's cached `goal`) — the app never holds the rest
+    // of the list, and the wire's windowed `instructions.items` couldn't fix
+    // that either: it clips each entry to 120 chars and carries entry #1 plus
+    // only the newest four. So a goal that restates an OLDER stacked sentence
+    // word for word reads here as new, while the bridge sees a restatement and
+    // stacks nothing. The false mark that leaves behind is contained by
+    // `_retirePending`, which drops it on the next frame reporting a non-empty
+    // backlog — costing at most one status frame wrongly credited to this
+    // extraction, never a mark stuck forever. `updateBacklog` sends a backlog
+    // and no goal, so an edit never sets this.
     //
     // A prediction, not a fact: the bridge also extracts a goal REHYDRATED off
     // its own disk record, which arrives on a one-tap arm carrying no goal at

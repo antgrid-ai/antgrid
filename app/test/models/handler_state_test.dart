@@ -607,6 +607,116 @@ void main() {
     });
   });
 
+  group('the instruction window on a session snapshot', () {
+    Map<String, dynamic> sessionWire({
+      Object? goal = 'g',
+      Object? instructions,
+    }) => {
+      'terminalId': 't1',
+      'state': 'watching',
+      'pendingEscalations': 0,
+      'armedAt': 1,
+      'goal': goal,
+      'backlog': <Map<String, dynamic>>[],
+      'escalations': <Map<String, dynamic>>[],
+      'instructions': ?instructions,
+    };
+
+    test('a full nested object parses', () {
+      final s = HandlerSessionState.fromWire(
+        sessionWire(
+          instructions: {
+            'total': 7,
+            'items': ['ship the parser', 'also add a changelog'],
+          },
+        ),
+      )!;
+      expect(s.instructions, ['ship the parser', 'also add a changelog']);
+      expect(s.instructionsTotal, 7);
+      expect(s.askedFor, s.instructions);
+      expect(s.askedForTotal, 7);
+    });
+
+    test('the object absent falls back to [goal]/1 through the getters '
+        'while the raw fields stay empty', () {
+      final s = HandlerSessionState.fromWire(sessionWire())!;
+      expect(s.instructions, isEmpty);
+      expect(s.instructionsTotal, 1);
+      // The raw fields are what an older bridge means; the getters are what a
+      // surface actually renders — and must read exactly as this session did
+      // before this field existed.
+      expect(s.askedFor, ['g']);
+      expect(s.askedForTotal, 1);
+    });
+
+    test('an empty goal and no object gives const []/0', () {
+      final s = HandlerSessionState.fromWire(sessionWire(goal: ''))!;
+      expect(s.instructions, isEmpty);
+      expect(s.instructionsTotal, 0);
+      expect(s.askedFor, isEmpty);
+      expect(s.askedForTotal, 0);
+    });
+
+    test('a malformed items value degrades without losing the session', () {
+      final s = HandlerSessionState.fromWire(
+        sessionWire(instructions: {'total': 3, 'items': 'not a list'}),
+      );
+      expect(s, isNotNull);
+      expect(s!.instructions, isEmpty);
+      // Falls back the same way absence does: the bridge sent a shape this
+      // build can't read, which is not evidence there is nothing to show.
+      expect(s.instructionsTotal, 1);
+      expect(s.askedFor, ['g']);
+    });
+
+    test('a total smaller than items.length is clamped up', () {
+      final s = HandlerSessionState.fromWire(
+        sessionWire(
+          instructions: {
+            'total': 1,
+            'items': ['first', 'second', 'third'],
+          },
+        ),
+      )!;
+      expect(s.instructions, hasLength(3));
+      // A bad total would otherwise RENDER as "3 items, 1 total" — a claim the
+      // frame itself disproves.
+      expect(s.instructionsTotal, 3);
+      expect(s.askedForTotal, 3);
+    });
+
+    test('a window smaller than total keeps the total', () {
+      final s = HandlerSessionState.fromWire(
+        sessionWire(
+          instructions: {
+            'total': 12,
+            'items': ['ship the parser', 'also add a changelog'],
+          },
+        ),
+      )!;
+      expect(s.instructions, hasLength(2));
+      expect(s.instructionsTotal, 12);
+      expect(s.askedForTotal - s.askedFor.length, 10);
+    });
+
+    test('copyWith carries instructions and instructionsTotal', () {
+      // `_applyEscalationFloors` (handler_service.dart) runs this on every
+      // session on every emit — a field missing from copyWith's body resets
+      // silently here, with every fromWire test above still green.
+      final s = HandlerSessionState.fromWire(
+        sessionWire(
+          instructions: {
+            'total': 4,
+            'items': ['ship the parser'],
+          },
+        ),
+      )!;
+      final narrowed = s.copyWith(pendingEscalations: 0);
+      expect(narrowed.instructions, ['ship the parser']);
+      expect(narrowed.instructionsTotal, 4);
+    });
+  });
+
   group('HandlerWrapUp.fromWire', () {
     Map<String, dynamic> wire({
       Object? outcomes,

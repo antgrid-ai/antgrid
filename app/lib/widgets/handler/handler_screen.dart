@@ -1118,7 +1118,11 @@ String _itemDecisionLabel(String decision) {
   AbColors p,
 ) => switch (r.decision) {
   'armed' => ('Armed', null),
-  'goal_edited' => ('Goal edited', null),
+  // Nothing was edited — a re-configure stacked a sentence that wasn't
+  // already in the list, and entry #1 (the header's goal) didn't move. Over
+  // a non-empty backlog this row is the only place that sentence ever
+  // surfaces, so the title has to carry it rather than a fixed label.
+  'goal_edited' => ('Also asked: ${r.reason}', null),
   // The pass that decided nothing needed doing, and the most frequent row in
   // the feed by a wide margin. It keeps the judge's reason — that is the only
   // trace of what Handler saw while the user was away — but takes the muted

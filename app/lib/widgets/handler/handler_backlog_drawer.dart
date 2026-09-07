@@ -13,6 +13,7 @@ import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_list_row.dart';
 import '../../design/widgets/ab_menu.dart';
+import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../models/handler_state.dart';
 import '../../providers/first_run.dart';
@@ -92,8 +93,12 @@ class HandlerBacklogDrawer extends ConsumerWidget {
             wraps: true,
           ),
         ),
-        if (session != null && session.goal.trim().isNotEmpty)
-          _GoalLine(goal: session.goal.trim()),
+        if (session != null && session.askedFor.isNotEmpty)
+          _AskedForHeader(
+            askedFor: session.askedFor,
+            askedForTotal: session.askedForTotal,
+            pending: pending,
+          ),
         if (session != null && backlog.isNotEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(
@@ -124,7 +129,7 @@ class HandlerBacklogDrawer extends ConsumerWidget {
                   ),
                   child: _NothingQueued(
                     armed: session != null,
-                    hasGoal: session?.goal.trim().isNotEmpty ?? false,
+                    hasInstructions: session?.askedFor.isNotEmpty ?? false,
                   ),
                 )
               : ListView.builder(
@@ -187,29 +192,30 @@ String? _sessionName(WidgetRef ref, String terminalId) {
 /// screen under this list, and a second route to one action is how one action
 /// ends up with two names.
 ///
-/// [hasGoal] is what stops the invitation reading as "nothing was received".
-/// The goal stands above this list and the bridge extracts items from it, so a
-/// user told to add what they want done would retype the sentence they started
-/// the session with — and the extraction that is already running appends it a
-/// second time. Naming the goal instead invites what is genuinely missing.
+/// [hasInstructions] is what stops the invitation reading as "nothing was
+/// received". What was asked for stands above this list and the bridge
+/// extracts items from it, so a user told to add what they want done would
+/// retype a sentence already there — and the extraction that is already
+/// running appends it a second time. Naming what stands above instead invites
+/// what is genuinely missing.
 class _NothingQueued extends StatelessWidget {
   const _NothingQueued({
     required this.armed,
-    required this.hasGoal,
+    required this.hasInstructions,
   });
 
   /// False for a terminal Handler was never armed on — a state with no
   /// invitation to make, since nothing here would receive it.
   final bool armed;
 
-  /// Whether a goal is stated above this list.
-  final bool hasGoal;
+  /// Whether [_AskedForHeader] has anything to show above this list.
+  final bool hasInstructions;
 
   @override
   Widget build(BuildContext context) => armed
       ? AbEmptyState(
-          title: hasGoal
-              ? 'Nothing queued beyond the goal above.'
+          title: hasInstructions
+              ? 'Nothing queued beyond what you asked for above.'
               : "Add what you want done while you're away.",
           subtitle:
               'Handler already answers what the agent pauses on. A backlog '
@@ -223,19 +229,89 @@ class _NothingQueued extends StatelessWidget {
         );
 }
 
-/// What the list is for, in the user's own words — and, since an arm carrying a
-/// goal is what the bridge extracts the backlog from, where these items came
-/// from. This sheet is where a user goes to ask that, and it is the only surface
-/// that can answer: the card it opens from shows the goal as a headline and says
-/// nothing about its relationship to the list underneath.
-class _GoalLine extends StatelessWidget {
-  const _GoalLine({required this.goal});
+/// What the list is for, in the user's own words — and, since the bridge
+/// extracts the backlog from what a user asks for, where these items came
+/// from. This sheet is where a user goes to ask that, and it is the only
+/// surface that can answer: the card it opens from shows only the session's
+/// opening sentence as a headline and says nothing about its relationship to
+/// the list underneath.
+///
+/// Entry #1 ([HandlerSessionState.askedFor]'s first element) is that opening
+/// sentence, and it keeps the headline role this block has always given it:
+/// a session is named by what it was opened to do, not by whatever was
+/// stacked onto it since (see `firstInstruction` in the bridge's
+/// `engine.ts`). Every later entry is a sentence the user added while the
+/// session ran, and — this is the part worth writing down — a sentence
+/// stacked over a non-empty backlog produces no backlog item of its own to
+/// point at (the extraction is still running) and no replayed
+/// `handler:activity` row (that wire is not replayed), so THIS BLOCK is the
+/// only place any of those later sentences can ever be seen again once the
+/// window scrolls past them.
+///
+/// Renders the whole window and no more — a heading, entry #1 over two lines,
+/// an elision line and the newest four at one line each. That worst case is
+/// seven lines of `fontXs`, and it is a ceiling worth knowing: nothing above
+/// the backlog's own `Flexible` scrolls, so anything added here comes straight
+/// out of that list's height on a keyboard-up phone.
+class _AskedForHeader extends StatelessWidget {
+  const _AskedForHeader({
+    required this.askedFor,
+    required this.askedForTotal,
+    required this.pending,
+  });
 
-  final String goal;
+  /// [HandlerSessionState.askedFor] — entry #1 first, then the newest up to
+  /// four, chronological.
+  final List<String> askedFor;
+
+  /// [HandlerSessionState.askedForTotal].
+  final int askedForTotal;
+
+  /// This terminal's outstanding `handler:instruct` sentences, so an entry
+  /// [engine.instruct] already pushed can be told apart from the identical
+  /// row [_PendingInstructionRow] is still drawing for it below.
+  final List<String> pending;
+
+  /// At most this many of the newest entries beyond entry #1 — the whole of
+  /// what the wire window carries, which is the point: no other surface in the
+  /// app renders a stacked sentence, so an entry this block drops is an entry
+  /// the user can never see again. Keep it equal to the bridge's own
+  /// `MAX_RECENT_INSTRUCTIONS` (`engine.ts`); a smaller number here quietly
+  /// discards rows the bridge spent wire budget to send.
+  static const _maxNewest = 4;
 
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
+    // engine.instruct pushes the raw sentence into the instruction list
+    // before extraction is even queued, so a routine status frame can carry
+    // it here while _PendingInstructionRow is still drawing the same
+    // sentence at the tail of the list below — one instruction, shown twice,
+    // in the window this sheet is likeliest to be open in.
+    final visible = [
+      for (final item in askedFor)
+        if (!pending.any((sent) => _looksSentAs(sent, item))) item,
+    ];
+    if (visible.isEmpty) return const SizedBox.shrink();
+
+    final first = visible.first;
+    final rest = visible.skip(1).toList();
+    final newest = rest.length <= _maxNewest
+        ? rest
+        : rest.sublist(rest.length - _maxNewest);
+    // Sentences no row on this sheet accounts for: the ones the bridge left
+    // out of the window, less any the filter above moved to a pending row
+    // below rather than dropped. Counting a filtered entry as elided would
+    // point the user past a row that is on screen two lines down — and since
+    // the filter only ever fires on the NEWEST sentences, it would also call
+    // them "in between".
+    final elided =
+        askedForTotal - (1 + newest.length) - (askedFor.length - visible.length);
+
+    final rowStyle = AbTokens.sansStyle(
+      fontSize: AbTokens.fontXs,
+      color: p.textSecondary,
+    );
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AbTokens.space16,
@@ -243,21 +319,75 @@ class _GoalLine extends StatelessWidget {
         AbTokens.space16,
         0,
       ),
-      child: Text(
-        'Working towards: $goal',
-        // The goal is a sentence the user typed on the New Session canvas at
-        // whatever length suited them, and one line clips most of a pasted one.
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        // A step brighter than the progress line below it: this is the user's
-        // own words, not a count the app derived.
-        style: AbTokens.sansStyle(
-          fontSize: AbTokens.fontXs,
-          color: p.textSecondary,
-        ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          AbSectionHeader(
+            label: 'What you asked for',
+            count: askedForTotal,
+            padding: EdgeInsets.zero,
+          ),
+          const SizedBox(height: AbTokens.space4),
+          Text(
+            first,
+            // Two lines for entry #1 alone: a sentence typed on the New
+            // Session canvas runs to whatever length suited the user, and one
+            // line clips most of a pasted one.
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: rowStyle,
+          ),
+          if (elided > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: AbTokens.space2),
+              child: Text(
+                elided == 1 ? '1 more in between' : '$elided more in between',
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXs,
+                  color: p.textMuted,
+                ),
+              ),
+            ),
+          for (final item in newest)
+            Padding(
+              padding: const EdgeInsets.only(top: AbTokens.space2),
+              child: Text(
+                item,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: rowStyle,
+              ),
+            ),
+        ],
       ),
     );
   }
+}
+
+/// Whether [pending] — the user's own untrimmed sentence, held while its
+/// `handler:instruct` is outstanding — is the wire item [wireItem] already
+/// became. Collapses whitespace the way the bridge's `oneLine` does before
+/// comparing, since a pasted newline survives in [pending] but not in
+/// [wireItem]; a control-character escape past that is not reproduced here,
+/// which only costs the rare instruction containing one an extra-cautious
+/// frame of double-render rather than a wrong match.
+///
+/// A clipped wire item is matched on its prefix, and an unclipped one only
+/// outright: the ellipsis is the sole evidence there is more sentence to
+/// agree with, and prefix-matching without it would call "run tests" and
+/// "run tests on Windows too" the same instruction.
+bool _looksSentAs(String pending, String wireItem) {
+  String oneLine(String s) => s.replaceAll(RegExp(r'\s+'), ' ').trim();
+  final sent = oneLine(pending);
+  final wire = oneLine(wireItem);
+  // The bridge's clipWithin (`bridge/src/handler/engine.ts`) lands the ellipsis
+  // INSIDE its bound, so a clipped item is one character short of that bound
+  // plus a '…'. Comparing a full bound's worth of raw characters from each
+  // side would differ on that last one and never match — in precisely the case
+  // (a pasted instruction) this filter exists for.
+  if (!wire.endsWith('…')) return sent == wire;
+  final body = wire.substring(0, wire.length - 1);
+  return sent.length >= body.length && sent.startsWith(body);
 }
 
 /// The instruction box, here rather than pinned above the session composer.

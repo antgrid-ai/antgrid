@@ -263,6 +263,22 @@ class HandlerSessionState {
   final String goal;
   final List<HandlerInstructionItem> backlog;
 
+  /// A window onto the user's own instruction stack — entry #1 (which [goal]
+  /// mirrors) followed by the newest up to four, oldest first. Never the whole
+  /// list: the bridge keeps every sentence the user ever typed
+  /// (`bridge/src/handler/session-store.ts`), but only this much travels.
+  /// Empty is a real answer, not "not reported" — a bridge that HAS this field
+  /// always sends it, including empty for an armed session nobody has
+  /// instructed yet, the same voice [askAnswer] and [roleId] already speak.
+  final List<String> instructions;
+
+  /// How many entries the bridge is actually holding — RETAINED, not lifetime:
+  /// `pushInstruction` splices the oldest away past its cap and nothing counts
+  /// the drops. `instructionsTotal - instructions.length` is the number elided
+  /// between entry #1 and the newest few, which is what makes the window
+  /// readable as "+N more" without a second count that could disagree with it.
+  final int instructionsTotal;
+
   /// Unanswered escalations replayed with every status snapshot, so the
   /// "needs you" list survives app restarts and reconnects (the one-shot
   /// `handler:escalation` push alone would be lost with the process).
@@ -326,6 +342,8 @@ class HandlerSessionState {
     required this.armedAt,
     required this.goal,
     required this.backlog,
+    this.instructions = const [],
+    this.instructionsTotal = 0,
     required this.escalations,
     this.judgeTool,
     this.judgeModel,
@@ -359,6 +377,30 @@ class HandlerSessionState {
   /// progress is the summary-inflation failure mode this guards against.
   int get backlogDone => backlog.where((i) => i.status == 'done').length;
 
+  /// What to show as "what the user asked for", from whichever of the two
+  /// fields a bridge actually sent. [instructions] wins whenever a bridge
+  /// populated it; a bridge that predates the field sends none, so this falls
+  /// back to the single sentence [goal] already carries — which is exactly how
+  /// this session rendered before [instructions] existed, and must keep
+  /// rendering for a bridge that still doesn't send it.
+  List<String> get askedFor => instructions.isNotEmpty
+      ? instructions
+      : (goal.trim().isEmpty ? const [] : [goal.trim()]);
+
+  /// The count to show beside [askedFor]. Reads [instructionsTotal] only while
+  /// [instructions] is actually populated — an older bridge's [goal] fallback
+  /// has no retained-count concept of its own, so its total is simply how many
+  /// sentences [askedFor] is showing.
+  int get askedForTotal => instructions.isNotEmpty
+      ? instructionsTotal
+      : askedFor.length;
+
+  // Re-lists every field on purpose, and both callers make that dangerous:
+  // `_applyEscalationFloors` and `_dropRows` (`handler_service.dart`) run
+  // inside `_emit` for every session on every frame, so a field left out of
+  // this body resets to its default on every single emit while every fromWire
+  // test stays green — no compile error, nothing to catch it but a reader
+  // checking the list by hand.
   HandlerSessionState copyWith({
     HandlerRunState? runState,
     int? pendingEscalations,
@@ -370,6 +412,8 @@ class HandlerSessionState {
     armedAt: armedAt,
     goal: goal,
     backlog: backlog,
+    instructions: instructions,
+    instructionsTotal: instructionsTotal,
     escalations: escalations ?? this.escalations,
     judgeTool: judgeTool,
     judgeModel: judgeModel,
@@ -436,6 +480,43 @@ class HandlerSessionState {
     // brief is worth losing the armed session over.
     final role = json['role'];
     final brief = json['brief'];
+    // Nested, not two sibling keys — the same reason `HandlerWrapUpOutcome`
+    // keeps `{total, items}` together rather than a second `more` field: two
+    // numbers that must agree are two numbers that can disagree. Absence
+    // means an older bridge, not "no instructions" (that is `{total: 0, items:
+    // []}`, a real and durable state for an armed session nobody has
+    // instructed), so the fallback below reproduces exactly what this session
+    // rendered before this field existed: [goal] alone.
+    //
+    // Otherwise lenient in the OPPOSITE direction from every read above: a
+    // bridge sending six entries or a 200-char one is sending truth, not
+    // malformed input, so its own 5/120 bounds are never enforced here —
+    // unlike `HandlerEscalationChoice`, which is bounded because a surface
+    // renders it as a fixed-size chip. `total` is the one number worth
+    // distrusting regardless, because unlike a role or a brief a bad one would
+    // actually RENDER: clamped up to what was actually parsed, never trusted
+    // outright.
+    final instructionsJson = json['instructions'];
+    var instructions = const <String>[];
+    // Trimmed, to agree with `askedFor`'s own fallback: a whitespace-only goal
+    // renders no row, so it must not be counted as one either.
+    var instructionsTotal = goal.trim().isEmpty ? 0 : 1;
+    if (instructionsJson is Map) {
+      final itemsJson = instructionsJson['items'];
+      if (itemsJson is List) {
+        instructions = [
+          for (final i in itemsJson)
+            if (i is String && i.isNotEmpty) i,
+        ];
+        final rawTotal = instructionsJson['total'];
+        final parsedTotal = rawTotal is num
+            ? rawTotal.toInt()
+            : instructions.length;
+        instructionsTotal = parsedTotal < instructions.length
+            ? instructions.length
+            : parsedTotal;
+      }
+    }
     return HandlerSessionState(
       terminalId: terminalId,
       runState: runState,
@@ -443,6 +524,8 @@ class HandlerSessionState {
       armedAt: armedAt.toInt(),
       goal: goal,
       backlog: backlog,
+      instructions: instructions,
+      instructionsTotal: instructionsTotal,
       escalations: escalations,
       judgeTool: judgeTool is String ? judgeTool : null,
       judgeModel: judgeModel is String ? judgeModel : null,

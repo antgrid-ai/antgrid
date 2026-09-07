@@ -120,6 +120,32 @@ function firstInstruction(instructions: InstructionEntry[]): string {
   return instructions[0]?.text ?? "";
 }
 
+// How many of the newest instructions ride beside the pinned first one — see
+// HandlerSessionSnapshot's `instructions` field (protocol.ts) for the pin and
+// the elision arithmetic this window exists to keep unambiguous.
+const MAX_RECENT_INSTRUCTIONS = 4;
+
+// The wire's `instructions` window: entry #1, then the newest
+// MAX_RECENT_INSTRUCTIONS, in chronological order — the whole list whenever it
+// holds five or fewer. `total` is `instructions.length` itself, so the caller
+// need not (and must not) pass anything else.
+//
+// Filters empty text out first for the same defensive reason decision.ts's
+// instructionLines does: InstructionEntrySchema.text has no .min(1).
+function instructionsWindow(instructions: InstructionEntry[]): { total: number; items: string[] } {
+  const texts = instructions.map((e) => e.text).filter((t) => t !== "");
+  const window = [...texts.slice(0, 1), ...texts.slice(1).slice(-MAX_RECENT_INSTRUCTIONS)];
+  return {
+    total: instructions.length,
+    // previewForUser escapes control characters, so it must run BEFORE the
+    // clip (see mintAskOptions) — and clipWithin, not clip, because this is a
+    // wire bound (.max(120)) rather than a reading budget: clip alone can
+    // return 121 chars and blank the whole handler:status frame at the app's
+    // parser.
+    items: window.map((t) => clipWithin(previewForUser(oneLine(t)), 120)),
+  };
+}
+
 // A ceiling on the WHOLE stack, where extract.ts's MAX_ITEMS bounds only one
 // response: renderBacklog(backlog) is interpolated into every subsequent decide
 // prompt, so repeated instructs would starve the supervisor's context budget —
@@ -1127,7 +1153,10 @@ export class HandlerEngine {
       // backlog-edit and judge-pick path (see updateBacklog in the app), and a
       // "Goal edited" row over an unchanged goal is a feed that misreports what
       // happened on every reorder and every judge change.
-      if (stacked) this.record(p.terminalId, "goal_edited", stated);
+      // Escaped and capped like every other activity row that quotes the user's
+      // own text back at them (see clipQuote). Without it the row carries up to
+      // MAX_INSTRUCTION_CHARS of unescaped user text onto the activity wire.
+      if (stacked) this.record(p.terminalId, "goal_edited", clipQuote(stated));
       this.emitStatus();
       // A goal landing on a session whose backlog is still empty is the user's
       // first statement of what this session is for — the 1-tap arm before it had
@@ -3342,6 +3371,11 @@ export class HandlerEngine {
       // leave the app unable to tell a picked lens from no pick at all.
       ...(s.role ? { role: s.role } : {}),
       ...(s.brief ? { brief: s.brief } : {}),
+      // Always sent, never conditioned on s.instructions being non-empty: an
+      // armed session nobody has instructed still owes `{ total: 0, items: [] }`
+      // — see HandlerSessionSnapshot's comment for why absence has to mean
+      // something else entirely.
+      instructions: instructionsWindow(s.instructions),
       // A constant, because it is a fact about THIS BRIDGE rather than about the
       // session: answerAsk exists here and instruct reads an escalationId, so an
       // app may act on a `nonBlocking` row. It has to be said on the wire because

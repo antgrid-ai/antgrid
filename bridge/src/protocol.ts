@@ -1350,6 +1350,9 @@ const HandlerSessionSnapshot = z.object({
   state: z.enum(["watching", "handling", "needs_you", "parked"]),
   pendingEscalations: z.number().int().nonnegative(),
   armedAt: z.number(),
+  // Mirrors instructions[0], so it moves if the store ever trims past
+  // MAX_INSTRUCTIONS (session-store.ts) — a live drift, documented rather than
+  // fixed here.
   goal: z.string(),
   backlog: BacklogWire,
   escalations: z.array(OpenEscalationWire),
@@ -1388,6 +1391,30 @@ const HandlerSessionSnapshot = z.object({
   // top-level `lenses` instead.
   role: HandlerLensSchema.optional(),
   brief: z.string().optional(),
+  // A window onto the full instruction list the store keeps (session-store.ts),
+  // not the list itself: `goal` above is the only other string this snapshot
+  // spends on it, and the app has nowhere durable to put more than a few — this
+  // is a REPLAY_TYPE and handler:activity, where a stacked sentence would
+  // otherwise show up, is not. Entry #1 stays pinned rather than dropped even
+  // when it falls out of the newest four: it is what names the session on the
+  // card headline, the wrap-up card, and the wrap-up push (see firstInstruction,
+  // engine.ts), and a window that could drop it would open a fresh divergence
+  // from those surfaces one tap wide. `total - items.length` is exactly what got
+  // elided BETWEEN position 0 and position 1 — always, since nothing between
+  // position 1 and the end is ever missing — which is what makes a
+  // non-contiguous window legible without a second count that could disagree
+  // with it. `total` is the RETAINED count (the store's array length), not a
+  // lifetime one: pushInstruction splices the oldest away past
+  // MAX_INSTRUCTIONS and nothing counts what it has already dropped. Optional
+  // and appended LAST for the reason `observability` is: an older app still
+  // parses the snapshot and every key it already reads keeps its position. A
+  // bridge that HAS this field always sends it, including `{ total: 0, items:
+  // [] }` for an armed session nobody has instructed — absence means "this
+  // bridge predates the list", never "no instructions".
+  instructions: z.object({
+    total: z.number().int().nonnegative(),
+    items: z.array(z.string().max(120)).max(5),
+  }).optional(),
 });
 
 // Why this machine will not run the Handler, in the words the app has to answer
