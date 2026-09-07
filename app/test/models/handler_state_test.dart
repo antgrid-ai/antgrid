@@ -893,6 +893,13 @@ void main() {
           isFalse,
           reason: '${handlerLensLabel(lens)} blurb describes the handle line',
         );
+        // The label is the chip's whole face, and the word most likely to be
+        // rewritten toward a dial ("Handles releases").
+        expect(
+          gating.hasMatch(handlerLensLabel(lens)),
+          isFalse,
+          reason: '${handlerLensToWire(lens)} label describes the handle line',
+        );
       }
     });
 

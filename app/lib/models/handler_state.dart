@@ -1346,10 +1346,15 @@ class HandlerState {
     Map<String, List<String>>? pendingInstructions,
     HandlerEntitlement? entitlement,
     bool clearEntitlement = false,
+    bool clearLenses = false,
   }) {
     return HandlerState(
       defaultTool: defaultTool ?? this.defaultTool,
-      lenses: lenses ?? this.lenses,
+      // Clearable because PRESENCE is the capability: a bridge replaced under
+      // a live remote session by one that predates the lens announces that
+      // only by leaving the key out, and an advert that could only latch on
+      // would keep offering chips that bridge silently strips.
+      lenses: clearLenses ? null : (lenses ?? this.lenses),
       sessions: sessions ?? this.sessions,
       escalations: escalations ?? this.escalations,
       activity: activity ?? this.activity,
@@ -1357,9 +1362,9 @@ class HandlerState {
       wrapUps: wrapUps ?? this.wrapUps,
       pendingUndo: pendingUndo ?? this.pendingUndo,
       pendingInstructions: pendingInstructions ?? this.pendingInstructions,
-      // The one field here that has to be CLEARABLE: a refusal is lifted by an
-      // upgrade or a fresh sign-in, and a gate that only ever latches on would
-      // outlive the thing it describes with no frame able to correct it.
+      // Clearable for the same reason: a refusal is lifted by an upgrade or a
+      // fresh sign-in, and a gate that only ever latches on would outlive the
+      // thing it describes with no frame able to correct it.
       entitlement: clearEntitlement ? null : (entitlement ?? this.entitlement),
     );
   }

@@ -415,6 +415,16 @@ describe("the lens in the decide prompt", () => {
     expect(p).not.toContain("POSTURE");
     expect(p).toBe(build(undefined, ""));
     expect(p).toBe(build(undefined, "   \n\t "));
+    // Structural, not a token ban: a default block would not spell itself LENS.
+    // Cutting the LENS block (its leading blank line through its last bullet)
+    // out of a lensed prompt must give the default prompt byte for byte, so
+    // any text printed ONLY when nothing is picked fails here.
+    const lensed = build("pm");
+    const start = lensed.indexOf("\nLENS");
+    const end = lensed.indexOf("\n\n", start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    expect(p).toBe(lensed.slice(0, start) + lensed.slice(end + 1));
   });
 
   it("prints one section carrying that lens's own text", () => {

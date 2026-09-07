@@ -359,7 +359,6 @@ class HandlerService {
       sessions: sessions,
       escalations: escalations,
       defaultTool: msg.defaultTool,
-      lenses: msg.lenses,
       snapshots: snapshots,
       wrapUps: wrapUps,
       pendingUndo: pendingUndo,
@@ -370,10 +369,17 @@ class HandlerService {
     // refusal that could only ever latch on would survive the upgrade that
     // lifted it. Never both arguments at once — see the copyWith rule.
     final entitlement = HandlerEntitlement.fromWire(msg.entitlement);
+    final gated = entitlement == null
+        ? next.copyWith(clearEntitlement: true)
+        : next.copyWith(entitlement: entitlement);
+    // The advert the same way. The cache above already reads the pick off the
+    // FRAME; the state has to agree with it, or a bridge downgraded under a
+    // live remote session keeps every lens chip enabled while the pick it
+    // seeds from says the machine never named one.
     _emit(
-      entitlement == null
-          ? next.copyWith(clearEntitlement: true)
-          : next.copyWith(entitlement: entitlement),
+      msg.lenses == null
+          ? gated.copyWith(clearLenses: true)
+          : gated.copyWith(lenses: msg.lenses),
     );
   }
 

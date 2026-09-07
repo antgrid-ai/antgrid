@@ -743,6 +743,36 @@ void main() {
       await session.close();
     });
 
+    test('a frame without the advert withdraws an earlier one', () async {
+      // The service outlives the bridge on the remote path: a machine that
+      // comes back running an older bridge replays its status onto the same
+      // instance, and that bridge says it has no lenses only by leaving the
+      // key out. An advert that could only latch on would keep the chips
+      // enabled and send a role the old configure schema strips silently.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+
+      statusWithLens(
+        t,
+        lenses: const ['pm', 'qa', 'critic', 'release'],
+        role: 'pm',
+        brief: 'watch the migrations',
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.lensesAdvertised, isTrue);
+
+      statusWithLens(t);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.lensesAdvertised, isFalse);
+      expect(svc.currentState.lenses, isNull);
+      expect(svc.lastKnownSettings('t1')?.lens, isNull);
+
+      await svc.dispose();
+      await session.close();
+    });
+
     test('the cache mirrors a clear before the snapshot round-trips', () async {
       // Reopening a sheet in this window must seed the CLEARED lens: a stale
       // seed committed by the next touched edit would silently restore it.

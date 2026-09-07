@@ -265,6 +265,14 @@ void main() {
     test('falls back to a nameless judge rather than a blank', () {
       expect(handlerJudgeParkedNotice(null), startsWith('This judge'));
     });
+
+    test('names no line between handling and escalating', () {
+      // Printed inside the lens block, so it is lens copy for the reader even
+      // though it lives beside the widget rather than in handler_state.dart.
+      final gating = RegExp('escalat|handl', caseSensitive: false);
+      expect(gating.hasMatch(handlerJudgeParkedNotice('Codex')), isFalse);
+      expect(gating.hasMatch(handlerJudgeParkedNotice(null)), isFalse);
+    });
   });
 
   group('the sheet', () {
@@ -449,6 +457,24 @@ void main() {
       await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pump();
       expect(handlerSessionSettingsEdit(typed, sent!).brief, '');
+    });
+
+    testWidgets('the brief stops where the prompt stops', (tester) async {
+      // Mirrored by hand from the bridge's MAX_BRIEF_CHARS. The bridge clips
+      // a longer brief rather than refusing it, so a cap that drifted here
+      // would let the user type a tail the judge never reads.
+      expect(handlerMaxBriefChars, 500);
+      HandlerSessionSettingsValue? sent;
+      final from = _value(judgeTool: 'claude');
+      await _pump(tester, value: from, onChanged: (v) => sent = v);
+
+      await tester.enterText(_briefField, 'x' * (handlerMaxBriefChars + 1));
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(
+        handlerSessionSettingsEdit(from, sent!).brief,
+        hasLength(handlerMaxBriefChars),
+      );
     });
 
     testWidgets('the lens half carries no judge picker of its own', (
