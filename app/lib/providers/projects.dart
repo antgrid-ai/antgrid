@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../launcher/host_control_client.dart';
 import '../models/ab_project.dart';
+import '../models/session_target.dart';
 import '../project/project_session_registry.dart';
 import '../storage/project_store.dart';
 import 'agent_transport.dart';
@@ -76,6 +77,63 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
     await purgeEntryState(ref, projectId);
     if (ref.read(selectedRegistrationIdProvider) == projectId) {
       ref.read(selectedTargetProvider.notifier).set(null);
+    }
+  }
+
+  /// Re-key a row the host does not open under the id it is stored by.
+  ///
+  /// The mirror of [forgetAlias], aimed at a row already in use rather than one
+  /// just picked. A folder picked before any host was warm keeps the selected
+  /// path's hash — `LocalAgentLauncher.resolveProject` peeks, so it answers
+  /// nothing then — and nothing ever re-resolves it afterwards: only a re-pick
+  /// asks again, and selecting the row from the drawer never does. The id is not
+  /// private to the drawer: it is the session-cache key, and `_leadRef`
+  /// (add_machine_dialog.dart) publishes it as this machine's identity, where a
+  /// peer stores and renders it for the life of the membership. So an alias that
+  /// survives one open survives every one after it.
+  ///
+  /// The repo path comes over with the id, and the label with it: the Capability
+  /// Card is read from this row's folder, so a row re-keyed but left pointing at
+  /// the worktree would still answer the worktree's branch.
+  ///
+  /// Matched on the folder as well as the id, for [forgetAlias]'s reason: this
+  /// may only touch the row the resolve it follows was about.
+  Future<void> adoptResolvedId({
+    required String staleId,
+    required String folder,
+    required ResolvedLocalProject resolved,
+  }) async {
+    if (resolved.projectId == staleId) return;
+    final all = _store.list();
+    final i = all.indexWhere((p) => p.projectId == staleId);
+    if (i < 0 || all[i].folder != folder) return;
+    final stale = all[i];
+    final wasSelected = ref.read(selectedRegistrationIdProvider) == staleId;
+    // A row already standing under the resolved id is the real one and is left
+    // exactly as it is — it may have been opened more recently than the alias,
+    // and adopting the alias's timestamps over it would reorder the drawer for
+    // no reason. Only the alias goes.
+    if (!all.any((p) => p.projectId == resolved.projectId)) {
+      await upsert(
+        AbProject(
+          projectId: resolved.projectId,
+          folder: resolved.repoPath,
+          displayName: resolved.label,
+          hostDeviceUuid: stale.hostDeviceUuid,
+          hostMachineName: stale.hostMachineName,
+          lastOpenedAt: stale.lastOpenedAt,
+        ),
+      );
+    }
+    await forgetAlias(staleId, folder: folder);
+    // `forgetAlias` clears a selection it invalidates, so the workspace is
+    // pointing at nothing by here. Land it on the row that replaced the alias
+    // rather than leaving the user on an empty shell for a project that is
+    // still open.
+    if (wasSelected) {
+      ref.read(selectedTargetProvider.notifier).set(
+        LocalProject(resolved.projectId),
+      );
     }
   }
 

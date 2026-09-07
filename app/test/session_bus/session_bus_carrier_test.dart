@@ -471,10 +471,10 @@ void main() {
       expect(lead.outbound, hasLength(2));
 
       final text = await logText();
-      expect(text, contains('peer addresses this lead by another project'));
+      expect(text, contains('this app holds the lead under a project'));
       expect(text, contains('p-some-other-checkout'));
       expect(
-        'peer addresses this lead'.allMatches(text).length,
+        'this app holds the lead'.allMatches(text).length,
         1,
         reason: 'latched per lead session, not written per frame',
       );

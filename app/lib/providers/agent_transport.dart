@@ -570,6 +570,38 @@ Future<AgentTransport?> _buildLocalTransportFor(
     relayUrl: device != null ? ref.read(defaultRelayUrlProvider) : null,
     telemetryEnabled: ref.read(telemetryEnabledProvider),
   );
+  // The host opened this folder as a project this row does not name. That is a
+  // linked worktree folding into its repository's primary checkout
+  // (`resolveProject`, bridge/src/worktrees/project-resolver.ts) under a row
+  // whose id is the selected path's hash — what a folder picked before any host
+  // was warm leaves behind, since the pick only PEEKS for one. Everything keeps
+  // working, which is the problem: the transport is keyed by the row while the
+  // sessions live under the host's id, and `_leadRef` (add_machine_dialog.dart)
+  // publishes the row's id to a peer machine as this machine's identity.
+  //
+  // Repaired here rather than at the pick because this is the first moment a
+  // host is guaranteed awake, and detached because the repair replaces the very
+  // registration this build is for: it must not run inside it.
+  if (result.projectId != projectId) {
+    final projects = ref.read(projectsProvider.notifier);
+    detached(
+      'AgentTransport',
+      're-keying a project row the host resolved elsewhere',
+      () async {
+        final resolved = await launcher.resolveProject(folder);
+        // Only the answer this open already acted on. A second resolve that
+        // says something else is a folder that moved under us, and re-keying to
+        // it would name a project this transport was never opened for.
+        if (resolved == null || resolved.projectId != result.projectId) return;
+        await projects.adoptResolvedId(
+          staleId: projectId,
+          folder: folder,
+          resolved: resolved,
+        );
+      },
+    );
+  }
+
   // NOTE: we deliberately do NOT terminate the host on app quit, even when this
   // process spawned it (result.owned). The host is a machine-level singleton
   // daemon: it persists across app runs (see HostController — attach via

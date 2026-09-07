@@ -412,24 +412,32 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
     _publish();
   }
 
-  /// Says once that a peer is addressing this lead by a project this app does
-  /// not reach it through.
+  /// Says once that this app holds the lead under a project id the peer does not
+  /// address it by.
+  ///
+  /// Worded from THIS app's side deliberately. The peer's id is the one that
+  /// came off a frame the lead's own bridge answered, so it is usually the
+  /// correct one and the app's row is the stale alias — a folder picked before
+  /// any host was warm keeps the selected path's hash while the bridge folds a
+  /// linked worktree into its primary checkout (`adoptResolvedId`,
+  /// providers/projects.dart). A reader greps this line precisely when
+  /// something is wrong, and pointing them across the wire sends them to the
+  /// machine that is right.
   ///
   /// Routing no longer depends on the id, so this changes nothing about
-  /// delivery — but the two sides disagreeing about which project holds a
-  /// session is how a membership used to strand silently, and a peer's row
-  /// still RENDERS this id. Naming it is what turns the next occurrence into a
-  /// grep instead of an archaeology session over two machines' state files.
+  /// delivery — but a peer's row still RENDERS the id it was given, so the two
+  /// sides disagreeing is visible to the other agent even when nothing strands.
   void _noteProjectDrift(SessionBusLink lead, BusEndpoint to) {
     if (to.projectId == lead.leadProjectId) return;
     if (!_driftWarned.add(lead.leadSessionId)) return;
     AbLog.warn(
       _kComponent,
-      'peer addresses this lead by another project — routed by session instead',
+      'this app holds the lead under a project the peer does not address it by '
+          '— routed by session instead',
       fields: {
         'session': lead.leadSessionId,
-        'addressed': to.projectId,
-        'carried': lead.leadProjectId,
+        'addressedByPeer': to.projectId,
+        'heldByThisApp': lead.leadProjectId,
       },
     );
   }
