@@ -1028,6 +1028,17 @@ const BacklogWire = z.array(InstructionItemWire).refine(
 export const HandlerPersonalitySchema = z.enum(["watchdog", "closer", "autopilot"]);
 export type HandlerPersonality = z.infer<typeof HandlerPersonalitySchema>;
 
+// The judge's lens: what it LOOKS FOR and ASKS ABOUT, added on top of the rules.
+// A lens only adds questions — autonomy is derived from the rules, so no value
+// here moves where the line between handling and escalating sits, changes what a
+// transition must cite, or withholds a transition the evidence supports.
+//
+// A bounded enum rather than free text because the value selects BRIDGE-AUTHORED
+// prompt text: nothing a sender types is interpolated by choosing one. The user's
+// own words travel separately as `brief`, fenced as user text.
+export const HandlerLensSchema = z.enum(["pm", "qa", "critic", "release"]);
+export type HandlerLens = z.infer<typeof HandlerLensSchema>;
+
 export const HandlerConfigureWire = z.object({
   terminalId: z.string(),
   armed: z.boolean(),
@@ -1048,6 +1059,22 @@ export const HandlerConfigureWire = z.object({
   // preset is a real choice, and the default is only what a session that has
   // never been given one judges as.
   personality: HandlerPersonalitySchema.optional(),
+  // The lens this session judges under. Absent = leave the stored lens
+  // untouched, the same absent-keeps rule judgeTool follows; "" = back to the
+  // unnamed default, which is the rules alone. An empty string rather than a
+  // JSON null because a sender that omits null-valued keys from its payload
+  // could not then say "clear" at all — only "keep".
+  role: z.union([HandlerLensSchema, z.literal("")]).optional(),
+  // The user's own words for what else to look for, added beneath the lens.
+  // Absent = keep, "" = clear.
+  //
+  // The bound is HandlerInstructWire.text's refuse-only-the-absurd one, NOT the
+  // prompt budget (MAX_BRIEF_CHARS, handler/decision.ts), which the engine applies
+  // by CLIPPING. agent-core re-parses the whole configure payload with this schema
+  // before arming, so a length refused here would drop the goal, the backlog, the
+  // judge picks and the arm itself — a user who tapped Arm Handler over a long
+  // sentence and walked away unwatched.
+  brief: z.string().max(10_000).optional(),
 });
 
 const HandlerConfigureMessage = BaseMessage.extend({
@@ -1356,6 +1383,16 @@ const HandlerSessionSnapshot = z.object({
   // An answer is parked and has not been relayed to the agent yet. State, not
   // capability — a bridge with nothing parked simply omits it.
   askAnswerPending: z.boolean().optional(),
+  // The lens this session judges under, and the user's brief beneath it. Both
+  // optional and appended LAST for the reason `observability` is: an older app
+  // still parses the snapshot and every key it already reads keeps its position.
+  //
+  // STATE, not a capability signal, unlike `askAnswer`: an absent `role` is the
+  // unnamed default rather than a bridge that cannot do lenses, and `brief` is
+  // present only when non-empty. What this bridge ACCEPTS rides the status frame's
+  // top-level `lenses` instead.
+  role: HandlerLensSchema.optional(),
+  brief: z.string().optional(),
 });
 
 // Why this machine will not run the Handler, in the words the app has to answer
@@ -1387,6 +1424,14 @@ const HandlerStatusMessage = BaseMessage.extend({
   // project agent tool) — chat slots resolve from their own SessionEntry.tool
   // app-side. Judge overrides themselves are per-session (see snapshot).
   defaultTool: z.string().optional(),
+  // The lens ids this bridge accepts. PRESENCE is the capability advert, the way a
+  // snapshot's `observability` is; the contents say which ids, so a newer app can
+  // offer the intersection and never send one this bridge would refuse.
+  //
+  // Top-level rather than per session because `sessions` holds ARMED sessions only,
+  // and the surface that needs this most is the arm sheet — a slot with no snapshot
+  // to read.
+  lenses: z.array(HandlerLensSchema).optional(),
   sessions: z.array(HandlerSessionSnapshot),
   // Every snapshot this project still knows about, replayed for the same reason
   // escalations are: an app that restarted between the advert and the tap would

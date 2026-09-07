@@ -185,6 +185,39 @@ describe("session record round-trip", () => {
     expect(loaded?.askAnswer).toBeUndefined();
   });
 
+  it("round-trips the lens and the brief", () => {
+    const abDir = tmpAbDir();
+    saveHandlerSession(abDir, "proj", record({
+      role: "qa", brief: "watch the migration path",
+    }));
+    const loaded = loadHandlerSession(abDir, "proj", "t1");
+    expect(loaded?.role).toBe("qa");
+    expect(loaded?.brief).toBe("watch the migration path");
+  });
+
+  // The record field is a lenient string and never the wire enum, because a value
+  // this build cannot name would otherwise fail the parse — and loadHandlerSession
+  // turns any failure into null, after which arm() rebuilds an empty session and
+  // the user's backlog is gone with no error anywhere.
+  it("loads a record naming a lens it does not know, with the backlog intact", () => {
+    const abDir = tmpAbDir();
+    writeRaw(abDir, "t1", JSON.stringify({ ...record(), role: "not-a-lens" }));
+    const loaded = loadHandlerSession(abDir, "proj", "t1");
+    expect(loaded?.goal).toBe("migrate the auth module");
+    expect(loaded?.backlog).toEqual([item("i1")]);
+    expect(loaded?.role).toBe("not-a-lens");
+  });
+
+  // Same reason, for length: the prompt budget is the engine's to clip to, and a
+  // bound on disk could only cost a session that was written under a looser one.
+  it("loads a brief far longer than any prompt would print", () => {
+    const abDir = tmpAbDir();
+    writeRaw(abDir, "t1", JSON.stringify({ ...record(), brief: "x".repeat(5_000) }));
+    const loaded = loadHandlerSession(abDir, "proj", "t1");
+    expect(loaded?.brief).toHaveLength(5_000);
+    expect(loaded?.goal).toBe("migrate the auth module");
+  });
+
   it("keeps records apart per terminal", () => {
     const abDir = tmpAbDir();
     saveHandlerSession(abDir, "proj", record({ terminalId: "t1", goal: "one" }));
@@ -310,5 +343,27 @@ describe("a record this bridge writes stays readable to one that predates the as
       { choiceId: "approve", label: "Approve", text: "ship it" },
       { choiceId: "reject", label: "Reject", text: "no" },
     ]);
+  });
+});
+
+// The same cell one release later: a Store rollback puts a bridge that predates
+// the lens in front of a record this one wrote. Derived from the live schema by
+// removal, so it cannot drift away from what it claims to model.
+describe("a record this bridge writes stays readable to one that predates the lens", () => {
+  const priorRecord = HandlerSessionRecordSchema.omit({ role: true, brief: true });
+
+  it("strips the lens and the brief and keeps the session armed rather than failing", () => {
+    // No .strict() anywhere on this schema, so zod drops what the older shape does
+    // not declare and the parse SUCCEEDS. The session survives under that bridge's
+    // own default and loses only the lens, which it could not have printed anyway.
+    const parsed = priorRecord.safeParse(record({
+      role: "release", brief: "note the changelog",
+    }));
+    expect(parsed.success).toBe(true);
+    const data = parsed.data as Record<string, unknown>;
+    expect(data.goal).toBe("migrate the auth module");
+    expect(data.backlog).toEqual([item("i1")]);
+    expect("role" in data).toBe(false);
+    expect("brief" in data).toBe(false);
   });
 });

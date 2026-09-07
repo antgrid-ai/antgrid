@@ -420,6 +420,39 @@ describe("handler wire", () => {
     expect(parsed.tool).toBeUndefined();
     expect(parsed.model).toBeUndefined();
   });
+
+  // `lenses` is top-level because the arm sheet reads it for a slot that has no
+  // snapshot yet, while a session's own lens is state on the snapshot.
+  test("handler:status advertises the lens ids at top level and carries the session's own lens", () => {
+    const msg = createMessage("handler:status", {
+      snapshots: [],
+      projectId: "p", lenses: ["pm", "qa", "critic", "release"],
+      sessions: [{
+        terminalId: "t", state: "watching", pendingEscalations: 0,
+        armedAt: 1, goal: "g", backlog: [],
+        escalations: [], role: "release", brief: "note the changelog",
+      }],
+    });
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.lenses).toEqual(["pm", "qa", "critic", "release"]);
+    expect(parsed.sessions[0].role).toBe("release");
+    expect(parsed.sessions[0].brief).toBe("note the changelog");
+  });
+
+  // Absent is the unnamed default, not a bridge that cannot do lenses — nothing
+  // may start defaulting the key on the way through.
+  test("a session with no lens carries neither key", () => {
+    const msg = createMessage("handler:status", {
+      snapshots: [], projectId: "p",
+      sessions: [{
+        terminalId: "t", state: "watching", pendingEscalations: 0,
+        armedAt: 1, goal: "g", backlog: [], escalations: [],
+      }],
+    });
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.sessions[0].role).toBeUndefined();
+    expect(parsed.sessions[0].brief).toBeUndefined();
+  });
 });
 
 // parseMessageFast validates ONLY the message type, so agent-core re-parses the
@@ -462,6 +495,53 @@ describe("HandlerConfigureWire (hot-path re-validation)", () => {
       terminalId: "t1", armed: true, backlog: [],
     }).success).toBe(true);
   });
+
+  it("carries a lens and a brief, and takes \"\" as the clear back to the default", () => {
+    const set = HandlerConfigureWire.safeParse({
+      terminalId: "t1", armed: true, role: "qa", brief: "watch the migration path",
+    });
+    expect(set.success).toBe(true);
+    if (set.success) {
+      expect(set.data.role).toBe("qa");
+      expect(set.data.brief).toBe("watch the migration path");
+    }
+    const cleared = HandlerConfigureWire.safeParse({
+      terminalId: "t1", armed: true, role: "", brief: "",
+    });
+    expect(cleared.success).toBe(true);
+    if (cleared.success) {
+      expect(cleared.data.role).toBe("");
+      expect(cleared.data.brief).toBe("");
+    }
+  });
+
+  // The lens ids are the bridge's own, and a value outside them would resolve to
+  // nothing the prompt can print.
+  it("rejects a lens id it does not define", () => {
+    expect(HandlerConfigureWire.safeParse({
+      terminalId: "t1", armed: true, role: "yolo",
+    }).success).toBe(false);
+  });
+
+  // The prompt budget is the ENGINE's, applied by clipping. Refusing a long brief
+  // here would drop the goal, the backlog, the judge picks and the arm along with
+  // it, since agent-core re-parses the whole payload with this schema.
+  it("accepts a brief far past the prompt budget and refuses only the absurd", () => {
+    expect(HandlerConfigureWire.safeParse({
+      terminalId: "t1", armed: true, brief: "x".repeat(5_000),
+    }).success).toBe(true);
+    expect(HandlerConfigureWire.safeParse({
+      terminalId: "t1", armed: true, brief: "x".repeat(10_001),
+    }).success).toBe(false);
+  });
+
+  // An older app still ships the retired posture key. Refusing the frame over it
+  // would take the arm with it.
+  it("still parses a configure whose only posture key is the legacy one", () => {
+    expect(HandlerConfigureWire.safeParse({
+      terminalId: "t1", armed: true, personality: "closer",
+    }).success).toBe(true);
+  });
 });
 
 // The two schemas are deliberate duplicates: the hot path re-validates the payload
@@ -483,6 +563,13 @@ describe("HandlerConfigureWire and HandlerConfigureMessage stay in lockstep", ()
       valid: true,
     },
     { name: "explicit backlog clear", payload: { terminalId: "t1", armed: true, backlog: [] }, valid: true },
+    {
+      name: "a lens and a brief",
+      payload: { terminalId: "t1", armed: true, role: "critic", brief: "mind the rollback" },
+      valid: true,
+    },
+    { name: "lens cleared to the default", payload: { terminalId: "t1", armed: true, role: "" }, valid: true },
+    { name: "unknown lens id", payload: { terminalId: "t1", armed: true, role: "yolo" }, valid: false },
     { name: "missing armed", payload: { terminalId: "t1" }, valid: false },
     { name: "non-string terminalId", payload: { terminalId: 7, armed: true }, valid: false },
     { name: "non-boolean armed", payload: { terminalId: "t1", armed: "yes" }, valid: false },

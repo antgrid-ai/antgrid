@@ -168,6 +168,14 @@ export const HandlerSessionRecordSchema = z.object({
   // before this field parses as itself — `version` stays 2, and the engine
   // resolves the absent case to the preset a fresh session gets.
   personality: HandlerPersonalitySchema.optional(),
+  // The session's lens, and the user's brief beneath it. Lenient strings rather
+  // than the wire enum on purpose: loadHandlerSession turns ANY parse failure into
+  // null and arm() then rebuilds an empty session — goal "", no backlog, no
+  // escalations, no parked answer — so a single value this build does not recognise
+  // would silently cost the user their backlog. The engine resolves an unknown lens
+  // to the unnamed default and clips the brief to the prompt budget.
+  role: z.string().optional(),
+  brief: z.string().optional(),
   // Park state, so a bridge restart mid-park strands nothing. Optional because
   // an unparked session genuinely has none.
   parkKind: z.enum(["limit", "outage"]).optional(),
