@@ -7,6 +7,7 @@ import type { GracefulExitAsk } from "./agents/types";
 import { ScrollbackBuffer } from "./scrollback";
 import { submitPlan } from "./pty-submit";
 import { BRACKETED_PASTE, TerminalModeTracker } from "./terminal-modes";
+import { SubmitGate } from "./submit-gate";
 import { MAX_ATTACH_BLOB, TerminalScreen } from "./terminal-screen";
 import { logger } from "./logger";
 const log = logger.child({ component: "terminal-manager" });
@@ -99,6 +100,9 @@ export class TerminalManager {
   private scrollbacks = new Map<string, ScrollbackBuffer>();
   /** Paired 1:1 with `scrollbacks` — the tail alone cannot carry mode state. */
   private modeTrackers = new Map<string, TerminalModeTracker>();
+  /** Holds an agent's submits until its TUI is reading — see `submit-gate.ts`.
+   *  Keyed like `modeTrackers` because it is fed from the same latch. */
+  private submitGate = new SubmitGate();
   /** Also paired 1:1 with `scrollbacks`, and the reason an attach can rebuild a
    *  SCREEN rather than replay a slice of the stream that drew one. A live
    *  `Terminal` per PTY costs memory, so every site that drops a scrollback
@@ -186,6 +190,10 @@ export class TerminalManager {
     this.scrollbacks.set(terminalId, scrollback);
     const modes = new TerminalModeTracker();
     this.modeTrackers.set(terminalId, modes);
+    // A fresh guest occupies this id, whatever the last one announced. Held
+    // submits are released here rather than at the previous exit so a respawn
+    // reusing a retained slot cannot inherit the dead run's readiness.
+    this.submitGate.reset(terminalId);
     // Assigned below, before `spawn()`, so no output can reach the handler
     // while it is null. Captured rather than looked up for the same reason
     // `scrollback` and `modes` are: a replaced PTY keeps emitting until its
@@ -225,6 +233,11 @@ export class TerminalManager {
         if (msg.type === "terminal:output") {
           scrollback.append(msg.data);
           modes.feed(msg.data);
+          // The guest configured how its INPUT is encoded, which is the same act
+          // as attaching its reader — the only announcement of readiness a PTY
+          // offers. Read off the same tracker the paste decision is taken from,
+          // so the two can never disagree about the guest.
+          if (modes.isSet(BRACKETED_PASTE)) this.submitGate.markReady(terminalId);
           // BEFORE the suppression drop. This placement is what makes a
           // suppressed window recoverable at all: a socket drop and a
           // backgrounded app both stop the outbound frame below, and only an
@@ -258,6 +271,7 @@ export class TerminalManager {
           // terminal is dead, and nothing later corrects it.
           const current = this.sessions.get(terminalId);
           if (current !== undefined && current !== session) return;
+          this.submitGate.reset(terminalId);
           // Forgotten while still live: the owner row is already gone, so the
           // exit frame would be stamped with main's checkout and the
           // bookkeeping below would resurrect the very rows `forget` deleted.
@@ -378,6 +392,7 @@ export class TerminalManager {
    *  tracker left behind for a terminal whose buffer is gone is unreachable
    *  state that lives for the process. */
   private resetMaps(): void {
+    for (const id of this.sessions.keys()) this.submitGate.reset(id);
     this.sessions.clear();
     this.scrollbacks.clear();
     this.modeTrackers.clear();
@@ -407,6 +422,7 @@ export class TerminalManager {
     this.retainScrollback.delete(terminalId);
     this.scrollbacks.delete(terminalId);
     this.modeTrackers.delete(terminalId);
+    this.submitGate.reset(terminalId);
     this.screens.get(terminalId)?.dispose();
     this.screens.delete(terminalId);
     this.stoppedTerminals.delete(terminalId);
@@ -525,6 +541,11 @@ export class TerminalManager {
    * mode, flattened when it has not — the tracker is consulted rather than the
    * agent guessed at, so an agent that drops the mode degrades to a readable
    * single line instead of pasting escape sequences into its own composer.
+   *
+   * An agent's submit is HELD until its TUI is reading (`submit-gate.ts`); a
+   * service terminal's is not. The read boundary the gate protects is a raw-mode
+   * TUI's, and a shell's line discipline delivers on the newline whenever it
+   * arrives, so gating a shell would only delay a line that was never at risk.
    */
   submit(terminalId: string, line: string): void {
     const session = this.sessions.get(terminalId);
@@ -532,6 +553,24 @@ export class TerminalManager {
       log.warn(`Terminal "${terminalId}" not found for submit`);
       return;
     }
+    if (session.type !== "agent") {
+      this.dispatchSubmit(terminalId, session, line);
+      return;
+    }
+    this.submitGate.run(terminalId, () => {
+      // The identity check the exit handler makes, for the same reason: a line
+      // held across a restart belongs to the run it was asked for, and the agent
+      // now holding the id never saw what it would be answering.
+      if (this.sessions.get(terminalId) !== session) return;
+      this.dispatchSubmit(terminalId, session, line);
+    });
+  }
+
+  /** The paste plan is taken at DELIVERY, not when the submit was asked for: a
+   *  guest that announced the mode while the line waited can carry it whole, and
+   *  flattening it against an answer taken before the announcement would cost
+   *  the block's line breaks for nothing. */
+  private dispatchSubmit(terminalId: string, session: TerminalSession, line: string): void {
     const plan = submitPlan(line, this.modeTrackers.get(terminalId)?.isSet(BRACKETED_PASTE) === true);
     if (plan.paste) session.submitPaste(plan.text);
     else session.submit(plan.text);
