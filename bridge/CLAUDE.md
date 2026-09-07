@@ -284,6 +284,28 @@ is the spec; this is the set of invariants a future edit breaks silently.
   log line out of any of those three and a carrier that accepts frames and
   delivers none is silent in both processes again — which it was, for three
   hours, across a restart.
+- **A report is the payload; every surface has to keep the whole of it.** The
+  wake card renders `WakeDelivery.result` (the envelope's text part) and not just
+  `metadata.summary`, and the store keeps that same report as `TaskRecord.result`
+  rather than dropping it on the terminal transition. Both are needed and neither
+  is sufficient: the card leaves the lead's context within a turn or two, and
+  `antgrid_get_task` is what is left after that — carrying the summary alone at
+  both ends is how a lead read `ASK ANSWER OK` while the result sat unread on the
+  other machine. `result` is deliberately NOT a finding: findings are interim, and
+  a completion listed among them reads as one more aside. The same rule covers
+  `metadata.unexpected`, which four tools advertise and which crossed the relay
+  intact for as long as nothing on the receiving side read it.
+- **`working` is a notification, never a gate.** `LEGAL_TRANSITIONS.submitted`
+  reaches everything `working` reaches, because `antgrid_open_task` is the only
+  thing that emits `working`, the task card does not require it, and a peer holds
+  no `antgrid_get_task` to see whether it called it. Narrowing that row again
+  makes a courtesy load bearing and refuses a peer that did the work. It cannot
+  be fixed instead by emitting `working` under the report: stop-and-wait (D13)
+  allows one transition per task in flight, so the synthesised pair refuses its
+  own second half. Two consequences the same reasoning owns: a refusal must NAME
+  the state the task is in (`blocked()` in `coordinator.ts`, from the `from`/`to`
+  the store returns), and `SessionView.openTasks` carries per-task state because
+  it is the ONLY reading a peer gets of its own work.
 - **A bus address is matched on machine + session; the project id is a LABEL.**
   `addressesSameSession` (`session-bus/address.ts`) is what `handleInbound`
   gates on, and the carrier matches a lead on its session id alone

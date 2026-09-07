@@ -16,6 +16,7 @@ import '../models/agent_event.dart';
 import '../models/session_entry.dart';
 import '../models/session_target.dart';
 import '../providers/add_machine_action.dart';
+import '../providers/account_agents.dart';
 import '../providers/agent_catalog.dart';
 import '../providers/capability_catalog.dart';
 import '../providers/control_plane.dart';
@@ -23,7 +24,9 @@ import '../providers/device_provisioning.dart';
 import '../providers/machine_capability_card.dart';
 import '../providers/new_session_picker.dart';
 import '../providers/projects.dart';
+import '../providers/recent_agents.dart';
 import '../providers/sessions.dart';
+import '../services/account_agents_api.dart';
 import '../services/control_plane_client.dart';
 import '../util/detached.dart';
 import '../util/device_id.dart';
@@ -314,6 +317,43 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
     });
   }
 
+  /// This machine's name as the OTHER machine will read it.
+  ///
+  /// Deliberately not `memberMachineLabelProvider`: that resolves a label for
+  /// display HERE and ends at "This machine", which is the one name that is
+  /// false everywhere this one is going. The label is stamped into the peer's
+  /// brief and onto every card it renders, so it has to mean the same thing on
+  /// a machine that has never seen this one.
+  ///
+  /// A local project's `hostMachineName` is empty — the bridge names the host of
+  /// projects it reaches, not the one it is — so the account inventory is what
+  /// actually answers, and the peer was left rendering `machine "unnamed"` for
+  /// as long as the empty string was passed through as if it were a name.
+  String? _leadMachineLabel(String machineId) {
+    String? clean(String? s) => (s != null && s.trim().isNotEmpty) ? s.trim() : null;
+
+    for (final p in ref.read(projectsProvider)) {
+      if (p.projectId != widget.leadRegistrationId) continue;
+      final own = clean(p.hostMachineName);
+      if (own != null) return own;
+      break;
+    }
+    for (final agent
+        in ref.read(accountAgentsProvider).value ?? const <InventoryAgent>[]) {
+      if (agent.deviceUuid != machineId) continue;
+      final name = clean(agent.machineName);
+      if (name != null) return name;
+    }
+    for (final recent in ref.read(recentAgentsProvider)) {
+      if (baseDeviceUuid(recent.agentDeviceId) != machineId) continue;
+      final name = clean(recent.hostMachineName);
+      if (name != null) return name;
+    }
+    // Null, never "" — an absent label renders as "an unlabelled machine", where
+    // an empty one renders as a machine actually named nothing.
+    return null;
+  }
+
   /// The lead half of the membership, as the peer's row will record it.
   ///
   /// Labels and the card are best-effort by schema, and the ones that exist are
@@ -328,11 +368,9 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
   SessionMemberRef _leadRef() {
     final machineId = ref.read(localDeviceUuidProvider).value ?? '';
     String? projectLabel;
-    String? machineLabel;
     for (final p in ref.read(projectsProvider)) {
       if (p.projectId != widget.leadRegistrationId) continue;
       projectLabel = p.displayName;
-      machineLabel = p.hostMachineName;
       break;
     }
     return SessionMemberRef(
@@ -342,7 +380,7 @@ class _AddMachineDialogState extends ConsumerState<_AddMachineDialog> {
       // and one derived there compare equal.
       projectId: baseProjectId(widget.leadRegistrationId),
       sessionId: widget.leadSessionId,
-      machineLabel: machineLabel,
+      machineLabel: _leadMachineLabel(machineId),
       projectLabel: projectLabel,
       sessionName: ref.read(activeSessionOrCachedProvider)?.name,
       card: _leadCard,

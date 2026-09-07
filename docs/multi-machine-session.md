@@ -114,6 +114,8 @@ States, borrowed verbatim:
 `submitted` → `working` → `completed` | `failed` | `canceled`
 with `input-required` reachable from `working`.
 
+**`working` is a notification, not a precondition.** Implementation widens that table by one row: `submitted` reaches everything `working` reaches. `open-task` is the only thing that emits `working`, the task card asks for it as a courtesy, and a peer holds no `get-task` with which to check it made the call — so requiring it made a courtesy load bearing and refused peers that had done the work and were reporting it finished. Reporting a result is itself the evidence the work started. The transition cannot instead be synthesised beneath the report: stop-and-wait (§6) allows one transition per task in flight, so the pair would refuse its own second half.
+
 `input-required` means the task is blocked awaiting an answer. A `waiting-on` discriminator, set by the bridge from the cause of the transition, says who owes it:
 
 | `waiting-on` | Raised by | Answered by |
@@ -248,6 +250,8 @@ Two surfaces. Bridge-owned fields (§3.4) are never parameters. **Role is derive
 
 Terminal states wake the lead (§5.2), so there is no separate polling tool. Intermediate findings from a task still `working` surface through `list-tasks`, then `get-task`.
 
+**A peer reads its own task states from `session-status`, and nowhere else.** `list-tasks` and `get-task` are lead tools, so the session view carries the state, the `waiting-on` and the title of every live task. Reduced to a list of ids it left a peer driving a state machine it could not observe — unable to confirm a task had started, that a question had registered as `input-required`, or why a report had been refused. For the same reason a refusal on a transition names the state the task is actually in: the refusal is the only feedback the peer gets.
+
 **Peer**
 
 | Tool | Notes |
@@ -303,6 +307,8 @@ Lead issues a Task to a peer. The MCP call returns a **request id** immediately.
 - **`list-tasks`** for intermediate findings from tasks still `working`.
 
 **A wake is a line submitted into the lead's session at its next turn boundary.** The bridge already observes turn open/close for every session; it never injects mid-turn, because a line landing inside a running turn is either queued behind it by the agent or inserted into its composer as text, and neither is a wake. The accepted cost is latency equal to the remainder of the current turn. The same mechanism delivers a brief and a task to a peer.
+
+**A wake carries the report, and the store keeps it.** The card renders the payload the peer sent, not only the one-line summary on the envelope, and the same report is recorded on the task so `get-task` still answers once the card has left the lead's context. Both halves are needed: carrying the summary at both ends left a lead reading a title while the result sat unread on the other machine, and a task reporting itself complete with "no findings reported". The report's unanticipated-findings field travels the same way — it exists to surface what the instruction got wrong, which is the part a lead most needs and the first thing a summary drops. Artifacts the peer published are NAMED on the card and on the task as references held on the peer's machine, never as handles this side can fetch: nothing routes bridge-to-bridge (D7), and an id offered as fetchable that then is not teaches the reader to distrust the list.
 
 Wake is triggered by task state the bridge observes. A finding with no task cannot wake anyone and is poll-only; a peer that has something urgent to report outside its assigned work uses `open-task` (§4.5), which is what keeps the rule uniform.
 

@@ -27,6 +27,7 @@ import {
   MAX_SUMMARY_CHARS,
   MAX_TASKS_PERSISTED,
   MAX_TASK_ARTIFACTS,
+  MAX_UNEXPECTED_CHARS,
   SESSION_BUS_RETRY_BACKOFF_MS,
   TASK_EXPIRY_MS,
 } from "./constants";
@@ -44,10 +45,26 @@ export { TaskStateSchema, WaitingOnSchema, type TaskState, type WaitingOn };
 
 const TERMINAL_STATES: readonly TaskState[] = ["completed", "failed", "canceled"];
 
-/** Spec 3.2, verbatim. The three terminal states go nowhere: a report that
- *  arrives after one is a finding, not a state change (see `post-terminal`). */
+/** Spec 3.2, with one widening the spec's own table does not have: `submitted`
+ *  reaches everything `working` reaches.
+ *
+ *  `working` is a NOTIFICATION, never a gate. It exists so a lead can see a task
+ *  was picked up, and `antgrid_open_task` is the only thing that emits it — a
+ *  courtesy the task card does not ask for and the peer's own tools cannot
+ *  confirm it made. The spec's narrower table made that courtesy load bearing: a
+ *  peer that did the work and reported it finished was refused, on a
+ *  precondition nothing told it about and no tool of its own could observe.
+ *  Reporting a result IS the evidence the work started, so the transition it
+ *  implies is granted rather than demanded.
+ *
+ *  Stop-and-wait (D13) is why this is a table change and not an implicit
+ *  `working` emitted underneath the report: only one transition per task may be
+ *  in flight, so a synthesised pair would refuse its own second half.
+ *
+ *  The three terminal states still go nowhere: a report that arrives after one
+ *  is a finding, not a state change (see `post-terminal`). */
 const LEGAL_TRANSITIONS: Record<TaskState, readonly TaskState[]> = {
-  submitted: ["working", "failed", "canceled"],
+  submitted: ["working", "input-required", "completed", "failed", "canceled"],
   working: ["input-required", "completed", "failed", "canceled"],
   "input-required": ["working", "failed", "canceled"],
   completed: [],
@@ -68,8 +85,31 @@ export const TaskFindingSchema = z.object({
   messageId: z.string().min(1).max(200),
   summary: z.string().min(1).max(MAX_SUMMARY_CHARS),
   text: z.string().max(MAX_FINDING_CHARS).optional(),
+  /** What the sender met that the instruction did not anticipate. Kept beside
+   *  the body rather than folded into it, because it is read for a different
+   *  reason: the body answers the question that was asked, and this is the part
+   *  that says the question was the wrong one. */
+  unexpected: z.string().max(MAX_UNEXPECTED_CHARS).optional(),
 });
 export type TaskFinding = z.infer<typeof TaskFindingSchema>;
+
+/** The report that carried a task into a terminal state.
+ *
+ *  Deliberately NOT a finding. A finding is interim by construction — the thing
+ *  a peer says while the work continues — and folding the closing report into
+ *  that array would make a completed task's summary read as one more aside. It
+ *  is kept at all because the wake card that announced it scrolls out of the
+ *  lead's context within a turn or two, after which this record is the only
+ *  place the result still exists.
+ *
+ *  `artifactIds` here are the PEER's, held on the peer's machine: they are
+ *  recorded so the handle survives, never merged into the task's own
+ *  `artifactIds`, which mean "bytes this bridge can serve". */
+export const TaskResultSchema = TaskFindingSchema.extend({
+  state: TaskStateSchema,
+  artifactIds: z.array(z.string().max(200)).max(MAX_TASK_ARTIFACTS).default([]),
+});
+export type TaskResult = z.infer<typeof TaskResultSchema>;
 
 /** One transition still waiting for its ack, with its retry bookkeeping.
  *  Persisted with the task so a restart RESUMES retrying rather than dropping a
@@ -114,6 +154,10 @@ export const TaskRecordSchema = z.object({
   acked: z.boolean().default(false),
   outbox: z.array(OutboxEntrySchema).max(MAX_OUTBOX).default([]),
   findings: z.array(TaskFindingSchema).max(MAX_FINDINGS).default([]),
+  /** Set once, by the transition that ended the task. Absent on a live task, and
+   *  absent on one ended by a cancel, whose cause is the lead's own
+   *  `cancelReason` rather than anything the peer reported. */
+  result: TaskResultSchema.optional(),
   artifactIds: z.array(z.string().max(200)).max(MAX_TASK_ARTIFACTS).default([]),
   /** Malformed results repaired so far, capped at one round trip (spec 6.2).
    *  Persisted on the TASK so a restart cannot reset it into a repair loop. */
@@ -168,6 +212,20 @@ export function taskCreatedAts(s: TaskStoreState): number[] {
 
 function replace(s: TaskStoreState, next: TaskRecord): TaskStoreState {
   return { guard: s.guard, tasks: s.tasks.map((t) => (t.taskId === next.taskId ? next : t)) };
+}
+
+/** One inbound report, capped, whatever it turns out to be: the finding a
+ *  post-terminal arrival becomes, or the result a terminal transition records.
+ *  Shared so those two can never drift into keeping different halves of the same
+ *  message. */
+function reportOf(t: InboundTransition, now: number): TaskFinding {
+  return {
+    at: now,
+    messageId: t.messageId,
+    summary: t.summary.slice(0, MAX_SUMMARY_CHARS),
+    ...(t.text ? { text: t.text.slice(0, MAX_FINDING_CHARS) } : {}),
+    ...(t.unexpected ? { unexpected: t.unexpected.slice(0, MAX_UNEXPECTED_CHARS) } : {}),
+  };
 }
 
 function appendFinding(rec: TaskRecord, f: TaskFinding): TaskRecord {
@@ -274,7 +332,16 @@ export function mintTask(s: TaskStoreState, input: MintTaskInput): { next: TaskS
 
 export type OutboundOutcome =
   | { kind: "queued"; next: TaskStoreState; seq: number; task: TaskRecord }
-  | { kind: "blocked"; reason: "unknown-task" | "in-flight" | "illegal" | "outbox-full" };
+  | {
+      kind: "blocked";
+      reason: "unknown-task" | "in-flight" | "illegal" | "outbox-full";
+      /** The states an `illegal` refusal was between. Carried because the agent
+       *  that reads the refusal cannot look either one up: `antgrid_get_task` is
+       *  a lead tool, so a peer told only "that is not a state this task can
+       *  reach" has no way left to find out which state it is in. */
+      from?: TaskState;
+      to?: TaskState;
+    };
 
 export interface OutboundTransition {
   taskId: string;
@@ -305,7 +372,7 @@ export function mintOutbound(s: TaskStoreState, t: OutboundTransition): Outbound
   const rec = taskFor(s, t.taskId);
   if (!rec) return { kind: "blocked", reason: "unknown-task" };
   if (t.state !== undefined && !isLegalTransition(rec.state, t.state)) {
-    return { kind: "blocked", reason: "illegal" };
+    return { kind: "blocked", reason: "illegal", from: rec.state, to: t.state };
   }
   const reusing = t.seq !== undefined;
   if (!reusing && rec.outbox.length > 0) return { kind: "blocked", reason: "in-flight" };
@@ -363,6 +430,9 @@ export interface InboundTransition {
   messageId: string;
   summary: string;
   text?: string;
+  unexpected?: string;
+  /** Artifact ids named by the sender, which live on the SENDER's machine. */
+  artifactIds?: readonly string[];
   /** Assign only: the task's title and the lead's expiry. */
   title?: string;
   expiresAt?: number;
@@ -446,13 +516,7 @@ export function applyTransition(s: TaskStoreState, t: InboundTransition, now: nu
   }
 
   if (isTerminal(rec.state)) {
-    const finding: TaskFinding = {
-      at: now,
-      messageId: t.messageId,
-      summary: t.summary.slice(0, MAX_SUMMARY_CHARS),
-      ...(t.text ? { text: t.text.slice(0, MAX_FINDING_CHARS) } : {}),
-    };
-    const task = { ...appendFinding(rec, finding), appliedSeq: t.seq };
+    const task = { ...appendFinding(rec, reportOf(t, now)), appliedSeq: t.seq };
     return { kind: "post-terminal", next: replace(s, task), task };
   }
 
@@ -465,6 +529,17 @@ export function applyTransition(s: TaskStoreState, t: InboundTransition, now: nu
   }
 
   let task: TaskRecord = { ...rec, state: t.state, appliedSeq: t.seq, updatedAt: now };
+  // The report that ENDS a task is kept, and kept HERE rather than in
+  // `findings`: this is the payload the whole exchange existed to produce, and
+  // dropping it left `antgrid_get_task` answering "none reported yet" about the
+  // same task it was reporting complete. A cancel is excluded — its text is the
+  // lead's reason, which has its own field.
+  if (t.state === "completed" || t.state === "failed") {
+    task = {
+      ...task,
+      result: { ...reportOf(t, now), state: t.state, artifactIds: [...(t.artifactIds ?? [])] },
+    };
+  }
   task = applyWaitingClock(task, t.state === "input-required" ? t.waitingOn : undefined, now);
   if (t.state === "canceled") {
     task = {

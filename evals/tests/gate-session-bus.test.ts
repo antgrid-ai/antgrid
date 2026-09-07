@@ -260,10 +260,17 @@ test("Lead assigns over loopback, the peer's completion wakes it at the turn bou
     () => queuedLines(env!.abDir, env!.projectId, leadSessionId).find((l) => l.kind === "wake"),
     15_000, "the wake line to be queued",
   );
+  // The envelope's text part travels too — the summary alone is a title, and
+  // the card is what the lead reads in the turn the result lands.
   const expectedWake = renderWake({
-    peer: PEER_REF, taskId, state: "completed", summary: SUMMARY,
+    peer: PEER_REF,
+    taskId,
+    state: "completed",
+    summary: SUMMARY,
+    result: "regenerate the prisma client and it passes",
   });
   expect(held.text).toBe(expectedWake);
+  expect(held.text).toContain("regenerate the prisma client and it passes");
 
   // Nothing submitted yet, and nothing submitted while the turn stays open.
   expect(sinkText(sink)).toBe("");

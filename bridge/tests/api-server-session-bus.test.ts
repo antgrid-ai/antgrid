@@ -444,6 +444,91 @@ describe("session-bus routes", () => {
     }
   });
 
+  // The path three agents took unprompted and the bridge refused: do the work,
+  // report it done, never call `antgrid_open_task` — which the task card did not
+  // name and the peer holds no tool to check it skipped.
+  test("a peer that never opened the task still completes it, body and all", async () => {
+    const { lead, peer, stop } = pair();
+    try {
+      const assigned = await post(lead, "tasks", LEAD_SESSION, {
+        peer: PEER_SESSION, summary: "port the codec", instruction: "Port it.",
+      });
+      const taskId = assigned.body.taskId as string;
+      deliver(lead, peer);
+
+      const done = await post(peer, `tasks/${taskId}/complete`, PEER_SESSION, {
+        summary: "ported",
+        text: "The codec is ported; the fixture round-trips.",
+        unexpected: "The vendored copy in tools/ is three versions behind.",
+      });
+      expect(done.status).toBe(200);
+      deliver(lead, peer);
+
+      const view = await get(lead, `tasks/${taskId}`, LEAD_SESSION);
+      expect(view.body.state).toBe("completed");
+      // The whole report, not the one line that summarises it.
+      expect(view.body.result).toMatchObject({
+        state: "completed",
+        summary: "ported",
+        text: "The codec is ported; the fixture round-trips.",
+        unexpected: "The vendored copy in tools/ is three versions behind.",
+      });
+    } finally {
+      stop();
+    }
+  });
+
+  // A peer holds no `antgrid_get_task`, so the session view is the only reading
+  // it gets of its own work. Ids alone left it unable to confirm a task had
+  // started, that a question had registered, or why a report was refused.
+  test("the session view tells a peer what state its own tasks are in", async () => {
+    const { lead, peer, stop } = pair();
+    try {
+      const assigned = await post(lead, "tasks", LEAD_SESSION, {
+        peer: PEER_SESSION, summary: "port the codec", instruction: "Port it.",
+      });
+      const taskId = assigned.body.taskId as string;
+      deliver(lead, peer);
+
+      const fresh = await get(peer, "session", PEER_SESSION);
+      expect(fresh.body.openTasks).toEqual([
+        { taskId, role: "peer", state: "submitted", title: "port the codec" },
+      ]);
+
+      expect((await post(peer, "ask", PEER_SESSION, {
+        taskId, summary: "which branch", question: "Which branch?",
+      })).status).toBe(200);
+      const asking = await get(peer, "session", PEER_SESSION);
+      expect(asking.body.openTasks[0]).toMatchObject({ state: "input-required", waitingOn: "lead" });
+      // The ids stay, so nothing reading the old shape loses its answer.
+      expect(asking.body.openTaskIds).toEqual([taskId]);
+    } finally {
+      stop();
+    }
+  });
+
+  // A refusal is the only feedback a peer gets on a move it cannot make, and it
+  // has no tool to look up the state it is in — so the refusal has to say it.
+  test("a refused transition names the state the task is actually in", async () => {
+    const { lead, peer, stop } = pair();
+    try {
+      const assigned = await post(lead, "tasks", LEAD_SESSION, {
+        peer: PEER_SESSION, summary: "s", instruction: "i",
+      });
+      const taskId = assigned.body.taskId as string;
+      deliver(lead, peer);
+
+      expect((await post(peer, `tasks/${taskId}/open`, PEER_SESSION, undefined)).status).toBe(200);
+      deliver(lead, peer);
+      const again = await post(peer, `tasks/${taskId}/open`, PEER_SESSION, undefined);
+      expect(again.status).toBe(409);
+      expect(again.body.code).toBe("DUPLICATE_STATE");
+      expect(again.body.error).toContain("working");
+    } finally {
+      stop();
+    }
+  });
+
   test("an answer to a task nobody is blocked on is refused rather than sent as a loose message", async () => {
     const { lead, peer, stop } = pair();
     try {
@@ -491,12 +576,23 @@ describe("session-bus routes", () => {
       deliver(lead, peer);
 
       const finding = await post(peer, "findings", PEER_SESSION, {
-        taskId, summary: "the relay pins bun 1.3.10", text: "Its APNs handshake fails.",
+        taskId,
+        summary: "the relay pins bun 1.3.10",
+        text: "Its APNs handshake fails.",
+        unexpected: "The pin is floating 1.3, not an exact version.",
       });
       expect(finding.status).toBe(200);
       expect(finding.body.ok).toBe(true);
       deliver(lead, peer);
-      expect((await get(lead, `tasks/${taskId}`, LEAD_SESSION)).body.state).toBe("submitted");
+      const view = await get(lead, `tasks/${taskId}`, LEAD_SESSION);
+      expect(view.body.state).toBe("submitted");
+      // Every field the sender filled survives the hop. `unexpected` crossed the
+      // relay on the envelope for as long as nothing on this side read it.
+      expect(view.body.findings[0]).toMatchObject({
+        summary: "the relay pins bun 1.3.10",
+        text: "Its APNs handshake fails.",
+        unexpected: "The pin is floating 1.3, not an exact version.",
+      });
     } finally {
       stop();
     }

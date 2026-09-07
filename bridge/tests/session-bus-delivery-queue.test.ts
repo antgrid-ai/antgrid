@@ -337,12 +337,16 @@ describe("which events become a line, and what it says", () => {
     };
     const l = lineForEvent(event, deps(abDir));
     expect(l).toMatchObject({ id: "msg-done", sessionId: SESSION, kind: "wake" });
+    // The envelope's text part rides along: the summary is a title, and the card
+    // is the only place the lead reads the result while it can still act on it.
     expect(l!.text).toBe(renderWake({
       peer: PEER_REF,
       taskId: "t-1",
       state: "completed",
       summary: "a summary",
+      result: "the body",
     }));
+    expect(l!.text).toContain("the body");
   });
 
   test("a failed and an input-required task both wake the lead; working does not", () => {
@@ -458,6 +462,7 @@ describe("which events become a line, and what it says", () => {
       taskId: "t-1",
       state: "completed",
       summary: "a summary",
+      result: "the body",
     }));
   });
 });

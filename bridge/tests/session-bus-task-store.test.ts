@@ -104,7 +104,8 @@ test("every legal transition is applied and every illegal one is refused", () =>
         s = step(s, inbound(1, "working"));
         s = step(s, inbound(2, "input-required", { waitingOn: "lead" }));
       } else if (from === "completed") {
-        // `submitted` cannot complete directly; only work can.
+        // Through `working`, which is the path a peer that opened its task takes
+        // — the direct one is legal too and is covered on its own below.
         s = step(s, inbound(1, "working"));
         s = step(s, inbound(2, "completed"));
       } else if (from !== "submitted") {
@@ -210,14 +211,87 @@ test("an illegal outbound transition is blocked before anything is queued", () =
   if (q.kind !== "queued") throw new Error("expected queued");
   const s = ackOutbound(q.next, "t1", 0);
 
-  expect(mintOutbound(s, { taskId: "t1", state: "input-required", frame: {}, now: T0 })).toEqual({
+  // A self-transition: the one move `submitted` still cannot make. The refusal
+  // names both states, because the agent that reads it holds no tool that could
+  // look up the one it is in.
+  expect(mintOutbound(s, { taskId: "t1", state: "submitted", frame: {}, now: T0 })).toEqual({
     kind: "blocked",
     reason: "illegal",
+    from: "submitted",
+    to: "submitted",
   });
   expect(mintOutbound(s, { taskId: "missing", state: "working", frame: {}, now: T0 })).toEqual({
     kind: "blocked",
     reason: "unknown-task",
   });
+});
+
+// `working` is a notification, not a gate. Requiring it made `antgrid_open_task`
+// load bearing for a peer that is never told to call it and holds no tool to see
+// that it did not — so a peer that did the work and reported it finished was
+// refused on a precondition it could neither learn nor observe.
+test("a peer that never opened its task may still report it finished", () => {
+  const s = peerSide();
+  const done = applyTransition(s, inbound(1, "completed", { summary: "suite green" }), T0 + 1);
+  expect(done.kind).toBe("applied");
+  expect(taskFor(done.next, "t1")!.state).toBe("completed");
+
+  const asked = applyTransition(peerSide(), inbound(1, "input-required", { waitingOn: "lead" }), T0 + 1);
+  expect(asked.kind).toBe("applied");
+  expect(taskFor(asked.next, "t1")!.waitingOn).toBe("lead");
+});
+
+// The report that ends a task is the payload the whole exchange existed to
+// produce, and it used to be read and thrown away: the fold kept the state and
+// none of the message, so `antgrid_get_task` answered "none reported" about the
+// task it was simultaneously reporting complete.
+test("the report that ends a task is kept on the record", () => {
+  const s = peerSide();
+  const done = applyTransition(
+    s,
+    inbound(1, "completed", {
+      summary: "suite green",
+      text: "424 pass, 0 fail. The flake was a shared temp dir.",
+      unexpected: "The staging DSN in .env.example points at production.",
+      artifactIds: ["a-1", "a-2"],
+    }),
+    T0 + 1,
+  );
+  if (done.kind !== "applied") throw new Error("expected applied");
+  const r = taskFor(done.next, "t1")!.result!;
+  expect(r.state).toBe("completed");
+  expect(r.summary).toBe("suite green");
+  expect(r.text).toContain("424 pass");
+  expect(r.unexpected).toContain("points at production");
+  expect(r.artifactIds).toEqual(["a-1", "a-2"]);
+  // Not folded into `findings`: a finding is what turned up along the way, and a
+  // completion listed among them reads as one more aside.
+  expect(taskFor(done.next, "t1")!.findings).toEqual([]);
+});
+
+// A cancel's text is the LEAD's reason, which has its own field. Recording it as
+// the peer's result would attribute the lead's words to the peer.
+test("a cancel leaves no result behind, only its reason", () => {
+  const s = peerSide();
+  const out = applyTransition(s, inbound(1, "canceled", { cancelReason: "no longer needed" }), T0 + 1);
+  if (out.kind !== "applied") throw new Error("expected applied");
+  expect(taskFor(out.next, "t1")!.result).toBeUndefined();
+  expect(taskFor(out.next, "t1")!.cancelReason).toBe("no longer needed");
+});
+
+// The surprise is the half of a report a lead most needs and the half nothing
+// used to keep — it crossed the wire on the envelope and was dropped at every
+// surface that could have shown it.
+test("a post-terminal report keeps what its sender did not anticipate", () => {
+  let s = peerSide();
+  s = step(s, inbound(1, "canceled", { cancelReason: "stop" }));
+  const late = applyTransition(
+    s,
+    inbound(2, "completed", { summary: "undid the migration", unexpected: "the rollback script is missing" }),
+    T0 + 1,
+  );
+  if (late.kind !== "post-terminal") throw new Error("expected post-terminal");
+  expect(taskFor(late.next, "t1")!.findings[0]!.unexpected).toBe("the rollback script is missing");
 });
 
 test("retry backoff climbs and then holds; there is no give-up", () => {

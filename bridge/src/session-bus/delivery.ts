@@ -506,6 +506,17 @@ export function renderJoined(d: JoinedDelivery): string {
   });
 }
 
+/** The sender's unanticipated-findings block, as its own paragraph or nothing
+ *  at all.
+ *
+ *  Its own heading, never appended to the body: this is the half of a report the
+ *  reader did not ask for, and burying it under the answer to the question that
+ *  WAS asked is how it goes unread. Empty renders nothing rather than a heading
+ *  over blank space. */
+function unexpectedBlock(unexpected: string | undefined): string[] {
+  return unexpected ? ["", "Not anticipated by the instruction:", unexpected] : [];
+}
+
 /** An artifact the lead attached to a task: a handle and a summary, never the
  *  bytes. The peer pulls what it decides it needs, which is what keeps another
  *  machine's evidence out of this prompt (6.3). */
@@ -528,12 +539,14 @@ export interface TaskDelivery {
    *  it, and one that omits it widens the mandate by silence. */
   scope: ScopeLine[];
   artifacts?: TaskArtifactHandle[];
+  /** Anything the lead met that its own instruction does not cover. */
+  unexpected?: string;
 }
 
 /** Render the line that carries a lead's task into a peer session. */
 export function renderTask(d: TaskDelivery): string {
   const scope = carriedScope(d.scope);
-  const body = [`Summary: ${d.summary}`, "", d.instruction];
+  const body = [`Summary: ${d.summary}`, "", d.instruction, ...unexpectedBlock(d.unexpected)];
   if (d.artifacts && d.artifacts.length > 0) {
     body.push("", "Artifacts the lead attached, fetched by id with antgrid_get_artifact:");
     for (const a of d.artifacts) body.push(`- ${a.artifactId} "${a.name}": ${a.summary}`);
@@ -552,7 +565,8 @@ export function renderTask(d: TaskDelivery): string {
       ...composedByBridge("lead"),
       "",
       "What this is: a task the lead assigned to this session over the session bus.",
-      "What to do: do the work described below, then report the outcome with antgrid_report_complete.",
+      "What to do: mark it started with antgrid_open_task so the lead can see it is being worked, do",
+      "the work described below, then report the outcome with antgrid_report_complete.",
       "If the work cannot be done, use antgrid_report_failure; if it needs a decision only the lead",
       "can make, use antgrid_ask_lead; to report something worth knowing before the task ends, use",
       "antgrid_report_finding.",
@@ -572,6 +586,17 @@ export interface WakeDelivery {
   waitingOn?: "lead" | "human";
   /** The peer's one-line summary of what happened. */
   summary: string;
+  /** The report in full, as the peer wrote it.
+   *
+   *  The summary alone was what this card carried at first, and it was not
+   *  enough: a lead reads the wake in the turn it arrives and the card is out of
+   *  context a turn or two later, so a body left off here is a body the lead
+   *  never sees at the moment it can still act on it. */
+  result?: string;
+  /** What the peer met that the task did not anticipate. */
+  unexpected?: string;
+  /** Artifacts the peer published, which live on the PEER's machine. */
+  artifacts?: TaskArtifactHandle[];
 }
 
 /**
@@ -592,10 +617,25 @@ export function renderWake(d: WakeDelivery): string {
           ? 'the state "input-required" and waits on the human, who is asked on the peer machine'
           : 'the state "input-required"';
 
+  // The summary is only LABELLED when something follows it. A wake whose whole
+  // content is one line reads as that line; heading it "Summary:" would put a
+  // section marker over a card with no sections.
+  const full = d.result && d.result !== d.summary;
+  const body = full ? [`Summary: ${d.summary}`, "", d.result!] : [d.summary];
+  body.push(...unexpectedBlock(d.unexpected));
+  if (d.artifacts && d.artifacts.length > 0) {
+    // Named without a tool to fetch them, on purpose. The bytes are on the other
+    // machine and this bridge has no route to them (D7), so the honest thing is
+    // to say the evidence exists and where — an id offered as fetchable that
+    // then cannot be fetched is worse than one offered as a reference.
+    body.push("", "Artifacts the peer published, held on its machine and not readable from here:");
+    for (const a of d.artifacts) body.push(`- ${a.artifactId} "${a.name}": ${a.summary}`);
+  }
+
   return renderDelivery({
     from: d.peer,
     fence: "RESULT",
-    content: d.summary,
+    content: body.join("\n"),
     scope: [],
     header: (labels) => [
       `[antgrid session bus] delivery: wake (template v${DELIVERY_TEMPLATE_VERSION})`,

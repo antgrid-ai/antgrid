@@ -361,7 +361,8 @@ test("renders the task wrapper in its documented shape", () => {
     "message from the lead agent.",
     "",
     "What this is: a task the lead assigned to this session over the session bus.",
-    "What to do: do the work described below, then report the outcome with antgrid_report_complete.",
+    "What to do: mark it started with antgrid_open_task so the lead can see it is being worked, do",
+    "the work described below, then report the outcome with antgrid_report_complete.",
     "If the work cannot be done, use antgrid_report_failure; if it needs a decision only the lead",
     "can make, use antgrid_ask_lead; to report something worth knowing before the task ends, use",
     "antgrid_report_finding.",
@@ -404,6 +405,70 @@ test("renders the wake wrapper in its documented shape", () => {
     "A null tenant id reaches the writer.",
     RESULT_CLOSE,
   ));
+});
+
+// The card is the ONLY place a peer is told how a task is worked: it holds no
+// reading tool for its own tasks, so a step the card leaves out is a step it
+// cannot discover. `antgrid_open_task` went unnamed here for as long as the
+// state table required it, which made the documented path the one that failed.
+test("the task card names the tool that starts the task", () => {
+  const rendered = renderTask({
+    lead: leadOf, taskId: "t-77", summary: "Trace the 500s.", instruction: "Reproduce it.", scope: [],
+  });
+  expect(rendered).toContain("antgrid_open_task");
+  expect(rendered.indexOf("antgrid_open_task")).toBeLessThan(rendered.indexOf("antgrid_report_complete"));
+});
+
+// The summary is one line and the report is the payload. Carrying only the
+// summary is what left a lead reading "OPEN THEN COMPLETE OK" while the result
+// it was waiting for sat unread on the other machine.
+test("a wake carries the report, not only the line that summarises it", () => {
+  const rendered = renderWake({
+    peer,
+    taskId: "t-77",
+    state: "completed",
+    summary: "A null tenant id reaches the writer.",
+    result: "ingest/writer.ts:212 dereferences tenant before the guard. Fixed by moving the guard up.",
+    unexpected: "The staging DSN in .env.example points at production.",
+    artifacts: [{ artifactId: "a-9", name: "trace.log", summary: "the failing request" }],
+  });
+  expect(rendered).toContain("Summary: A null tenant id reaches the writer.");
+  expect(rendered).toContain("ingest/writer.ts:212 dereferences tenant before the guard.");
+  expect(rendered).toContain("Not anticipated by the instruction:");
+  expect(rendered).toContain("The staging DSN in .env.example points at production.");
+  expect(rendered).toContain("held on its machine and not readable from here");
+  expect(rendered).toContain('- a-9 "trace.log": the failing request');
+  // Everything the peer wrote stays inside the fence, wrapper text included.
+  const open = rendered.indexOf(RESULT_OPEN);
+  expect(rendered.indexOf("ingest/writer.ts:212")).toBeGreaterThan(open);
+  expect(rendered.indexOf("The staging DSN")).toBeGreaterThan(open);
+});
+
+// A one-line wake is one line. The ask path relies on it: there the summary IS
+// the question, and a "Summary:" heading over a card with no other section
+// reads as a section marker for nothing.
+test("a wake with nothing under its summary is still just the summary", () => {
+  const rendered = renderWake({ peer, taskId: "t-77", state: "completed", summary: "done" });
+  expect(rendered).not.toContain("Summary:");
+  expect(rendered.slice(rendered.indexOf(RESULT_OPEN) + RESULT_OPEN.length, rendered.indexOf(RESULT_CLOSE)))
+    .toBe("\ndone\n");
+});
+
+// `unexpected` is the field an agent fills when the instruction was the wrong
+// one, so it is the field a lead most needs to see. It is rendered under its own
+// heading rather than appended to the body: the body answers the question that
+// was asked, and this says the question was wrong.
+test("what the lead did not anticipate is carried into the task card too", () => {
+  const rendered = renderTask({
+    lead: leadOf,
+    taskId: "t-77",
+    summary: "Trace the 500s.",
+    instruction: "Reproduce the failure.",
+    scope: [],
+    unexpected: "The service was already rolled back once this week.",
+  });
+  expect(rendered).toContain("Not anticipated by the instruction:");
+  expect(rendered).toContain("The service was already rolled back once this week.");
 });
 
 test("renders the answer wrapper in its documented shape", () => {

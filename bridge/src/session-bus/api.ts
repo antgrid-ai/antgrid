@@ -205,6 +205,10 @@ export interface TaskView {
   canceledAt?: number;
   cancelReason?: string;
   findings: TaskRecord["findings"];
+  /** The report that ended the task, absent while it is live. Separate from
+   *  `findings` because it answers a different question: the findings are what
+   *  turned up along the way, this is what the task was for. */
+  result?: TaskRecord["result"];
   artifacts: ArtifactHandleView[];
   /** Whether the OTHER machine has ever acked anything on this task.
    *
@@ -242,6 +246,23 @@ export interface SessionView {
   brief?: string;
   budget: GuardBudget;
   openTaskIds: string[];
+  /** The same tasks with the state each is in.
+   *
+   *  A peer holds no `antgrid_get_task`, so this is the ONLY place it can read
+   *  what its own work is doing. Ids alone left it driving a state machine it
+   *  could not observe: it could not confirm a task had started, could not tell
+   *  a question had registered as `input-required`, and could not see why a
+   *  report was refused. */
+  openTasks: OpenTaskView[];
+}
+
+/** One live task, reduced to what a session needs to decide its next move. */
+export interface OpenTaskView {
+  taskId: string;
+  role: BusRole;
+  state: TaskRecord["state"];
+  waitingOn?: TaskRecord["waitingOn"];
+  title: string;
 }
 
 export interface SessionBusApi {
@@ -410,6 +431,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       ...(rec.canceledAt === undefined ? {} : { canceledAt: rec.canceledAt }),
       ...(rec.cancelReason === undefined ? {} : { cancelReason: rec.cancelReason }),
       findings: rec.findings,
+      ...(rec.result === undefined ? {} : { result: rec.result }),
       reachedPeer: rec.acked,
       unacked: rec.outbox.length,
       // Only handles this machine actually holds bytes for. An id that arrived
@@ -504,6 +526,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       const self = selfRef(m);
       if (!self) return refuse("AGENT_NOT_READY", "this machine has no relay identity, so it has no bus address");
       const carrier = deps.carrierPresent();
+      const live = deps.coordinator.tasks(m.sessionId).filter((t) => !isTerminal(t.state));
       return {
         role: m.lead ? "lead" : "peer",
         lead: m.lead,
@@ -516,10 +539,14 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
         scope: scopeOf(m.sessionId),
         ...(m.peer ? { brief: loadBrief(deps.abDir, deps.projectId, m.sessionId)?.brief } : {}),
         budget: deps.coordinator.budget(m.sessionId),
-        openTaskIds: deps.coordinator
-          .tasks(m.sessionId)
-          .filter((t) => !isTerminal(t.state))
-          .map((t) => t.taskId),
+        openTaskIds: live.map((t) => t.taskId),
+        openTasks: live.map((t) => ({
+          taskId: t.taskId,
+          role: t.role,
+          state: t.state,
+          ...(t.waitingOn === undefined ? {} : { waitingOn: t.waitingOn }),
+          title: t.title,
+        })),
       };
     },
 

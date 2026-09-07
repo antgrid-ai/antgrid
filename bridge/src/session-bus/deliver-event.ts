@@ -88,6 +88,9 @@ export function lineForEvent(
         instruction: textOf(envelope.parts),
         scope: briefScope(deps.abDir, deps.projectId, event.sessionId),
         artifacts: artifactsOf(envelope.parts),
+        ...(envelope.metadata.unexpected === undefined
+          ? {}
+          : { unexpected: envelope.metadata.unexpected }),
       }),
     };
   }
@@ -112,6 +115,11 @@ export function lineForEvent(
           state: event.state,
           ...(event.task.waitingOn === undefined ? {} : { waitingOn: event.task.waitingOn }),
           summary: envelope.metadata.summary,
+          result: textOf(envelope.parts),
+          ...(envelope.metadata.unexpected === undefined
+            ? {}
+            : { unexpected: envelope.metadata.unexpected }),
+          artifacts: artifactsOf(envelope.parts),
         }),
       };
     }

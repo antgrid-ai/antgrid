@@ -486,9 +486,10 @@ test("Assign, ack and report cross two bridges, each delivered at its own turn b
       15_000, "B's queue to drop the delivered line",
     );
 
-    // (e) B reports back. `submitted -> completed` is not a legal transition, so
-    // opening the task is not decoration — it is the only route to a completion
-    // the lead will apply.
+    // (e) B reports back along the documented path: open, then complete. Opening
+    // is no longer a precondition — `submitted` reaches `completed` directly,
+    // because a peer holds no tool to see whether it made the call — so this
+    // covers the courtesy transition rather than a gate.
     const opened = await postJson(
       `${ex.peerApi}/session-bus/tasks/${encodeURIComponent(taskId)}/open?terminalId=${encodeURIComponent(ex.peerSessionId)}`,
       {},
@@ -515,9 +516,16 @@ test("Assign, ack and report cross two bridges, each delivered at its own turn b
       () => queuedLines(tb!.lead.abDir, tb!.lead.projectId, ex.leadSessionId).find((l) => l.kind === "wake"),
       20_000, "the wake line to be queued on A",
     );
+    // The body travels with the wake, not just the summary line: the card is
+    // what the lead reads in the turn the result arrives.
     expect(heldWake.text).toBe(renderWake({
-      peer: ex.peerRef, taskId, state: "completed", summary: REPORT_SUMMARY,
+      peer: ex.peerRef,
+      taskId,
+      state: "completed",
+      summary: REPORT_SUMMARY,
+      result: "regenerate the prisma client and it passes",
     }));
+    expect(heldWake.text).toContain("regenerate the prisma client and it passes");
     // Read twice with a settle in between, as on the peer direction: `until`
     // returns the instant the QUEUE file shows the line, and a submission racing
     // it would still be behind its own PTY round trip (submit -> pty -> sink ->

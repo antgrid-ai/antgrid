@@ -73,6 +73,7 @@ import {
   tasksFor,
   setHumanWait,
   tickExpiry,
+  type OutboundOutcome,
   type TaskRecord,
   type TaskStoreState,
 } from "./task-store";
@@ -386,7 +387,7 @@ export class SessionBusCoordinator {
       reason,
     });
     const queued = mintOutbound(s.tasks, { taskId, state: "canceled", frame, now, cancelReason: reason });
-    if (queued.kind !== "queued") return blocked(queued.reason);
+    if (queued.kind !== "queued") return blocked(queued);
     // The seq the record actually minted, stamped back onto the frame already in
     // the outbox: `mintOutbound` is the only thing allowed to choose one, and a
     // frame whose seq disagreed with its outbox entry would be acked into a slot
@@ -440,7 +441,7 @@ export class SessionBusCoordinator {
       now,
       ...(input.waitingOn === undefined ? {} : { waitingOn: input.waitingOn }),
     });
-    if (queued.kind !== "queued") return blocked(queued.reason);
+    if (queued.kind !== "queued") return blocked(queued);
     frame.seq = queued.seq;
     this.commit(input.sessionId, {
       tasks: this.firstAttempt(queued.next, queued.task, queued.seq, frame, now).tasks,
@@ -867,6 +868,10 @@ export class SessionBusCoordinator {
         messageId: envelope.messageId,
         summary: envelope.metadata.summary,
         ...textOf(envelope.parts),
+        ...(envelope.metadata.unexpected === undefined
+          ? {}
+          : { unexpected: envelope.metadata.unexpected }),
+        artifactIds: artifactIdsOf(envelope.parts),
         ...(extra.waitingOn === undefined ? {} : { waitingOn: extra.waitingOn }),
         ...(extra.expiresAt === undefined ? {} : { expiresAt: extra.expiresAt }),
       },
@@ -946,6 +951,9 @@ export class SessionBusCoordinator {
         messageId: envelope.messageId,
         summary: envelope.metadata.summary,
         ...textOf(envelope.parts),
+        ...(envelope.metadata.unexpected === undefined
+          ? {}
+          : { unexpected: envelope.metadata.unexpected }),
       });
     }
     this.commit(sessionId, {
@@ -1034,9 +1042,21 @@ function unknownTask(): SessionBusRefusal {
   return refuse("UNKNOWN_TASK", "no such task on this session");
 }
 
-function blocked(reason: "unknown-task" | "in-flight" | "illegal" | "outbox-full"): SessionBusRefusal {
-  if (reason === "unknown-task") return unknownTask();
-  if (reason === "illegal") return refuse("TASK_TERMINAL", "that is not a state this task can reach from here");
+/** Turn a store refusal into one an AGENT can act on.
+ *
+ *  Naming the current state is the whole point. A peer holds no reading tool for
+ *  its own tasks, so a refusal that describes only what it may not do leaves it
+ *  with no way to work out what it may — which is how "that is not a state this
+ *  task can reach from here" became the last word on a task nobody could
+ *  finish. */
+function blocked(o: Extract<OutboundOutcome, { kind: "blocked" }>): SessionBusRefusal {
+  if (o.reason === "unknown-task") return unknownTask();
+  if (o.reason === "illegal") {
+    if (!o.from) return refuse("DUPLICATE_STATE", "this task cannot move to the state being reported");
+    return isTerminal(o.from)
+      ? refuse("TASK_TERMINAL", `this task is already ${o.from}`)
+      : refuse("DUPLICATE_STATE", `this task is already "${o.from}", so it cannot move to "${o.to}"`);
+  }
   // Stop-and-wait: one transition per task is in flight at a time, so a second
   // one is not lost, it is early. The caller retries once the ack lands.
   return refuse("AGENT_NOT_READY", "the previous report on this task is still unacknowledged");
@@ -1051,6 +1071,14 @@ function keyOf(ref: SessionMemberKey | SessionMemberRef): SessionMemberKey {
 function textOf(parts: readonly BusPart[]): { text?: string } {
   const first = parts.find((p) => p.kind === "text");
   return first && first.kind === "text" ? { text: first.text } : {};
+}
+
+/** Artifact ids as they arrived, which name bytes held on the OTHER machine.
+ *  Kept as ids and nothing more: this bridge cannot serve them, and recording a
+ *  handle it cannot honour is still better than losing the only evidence that
+ *  the evidence exists. */
+function artifactIdsOf(parts: readonly BusPart[]): string[] {
+  return parts.flatMap((p) => (p.kind === "artifact" ? [p.artifactId] : []));
 }
 
 /** Count one exchange that moved no task: a finding, an answer, an aside. Only

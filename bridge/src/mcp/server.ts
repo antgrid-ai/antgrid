@@ -215,7 +215,7 @@ const PEER_TOOLS: McpTool[] = [
   },
   {
     name: "antgrid_open_task",
-    description: "Mark a task as being worked, so the lead can see it started.",
+    description: "Mark a task as being worked, so the lead can see it started. Optional — a result reported on a task that was never opened is still accepted — but call it before long work, so the lead is not left watching a task that looks untouched.",
     inputSchema: {
       type: "object",
       properties: { taskId: str("Task id to start work on.") },
@@ -224,7 +224,7 @@ const PEER_TOOLS: McpTool[] = [
   },
   {
     name: "antgrid_report_complete",
-    description: "Report a task finished. This is what tells the lead the work is done — nothing else does.",
+    description: "Report a task finished. This is what tells the lead the work is done — nothing else does. Works whether or not the task was opened first. Put the result in `text`: `summary` is one line, and a report that leaves `text` empty is all the lead ever gets.",
     inputSchema: {
       type: "object",
       properties: {
@@ -239,7 +239,7 @@ const PEER_TOOLS: McpTool[] = [
   },
   {
     name: "antgrid_report_failure",
-    description: "Report a task that cannot be finished, and why. Use this rather than going quiet: the lead is told nothing by an absence.",
+    description: "Report a task that cannot be finished, and why. Use this rather than going quiet: the lead is told nothing by an absence. Works whether or not the task was opened first.",
     inputSchema: {
       type: "object",
       properties: {
@@ -469,12 +469,27 @@ function taskDetail(t: any): string {
   out.push(`peer: ${t.peer?.sessionName ?? t.peer?.sessionId} on ${t.peer?.machineLabel ?? "an unlabelled machine"}`);
   if (t.cancelReason) out.push(`withdrawn: ${t.cancelReason}`);
   if (t.expiredAt) out.push("lapsed: this task ran past its expiry and is no longer live");
+  const r = t.result;
+  if (r) {
+    out.push(`result (${r.state}): ${r.summary}`);
+    if (r.text) out.push(r.text);
+    if (r.unexpected) out.push(`not anticipated by the task: ${r.unexpected}`);
+    const ids = (r.artifactIds ?? []) as string[];
+    // The peer's ids, listed as references rather than as fetchable handles: the
+    // bytes are on its machine and this bridge has no route to them (D7).
+    if (ids.length > 0) out.push(`artifacts published by the peer, on its machine: ${ids.join(", ")}`);
+  }
   const findings = (t.findings ?? []) as any[];
   if (findings.length === 0) {
-    out.push("findings: none reported yet");
+    // An absence of ASIDES, and said that way: the old wording read as "nothing
+    // was reported" on a task whose result is printed directly above it.
+    out.push("findings: none reported alongside the task");
   } else {
     out.push("findings:");
-    for (const f of findings) out.push(`- ${f.summary}${f.text ? `: ${f.text}` : ""}`);
+    for (const f of findings) {
+      out.push(`- ${f.summary}${f.text ? `: ${f.text}` : ""}`);
+      if (f.unexpected) out.push(`  not anticipated: ${f.unexpected}`);
+    }
   }
   const artifacts = (t.artifacts ?? []) as any[];
   if (artifacts.length > 0) {
@@ -486,6 +501,29 @@ function taskDetail(t: any): string {
 
 function artifactLine(a: any): string {
   return `- ${a.artifactId} ${a.name} (${a.mediaType}, ${a.bytes} bytes): ${a.summary}`;
+}
+
+/** The open tasks, one line each, with the state each is in.
+ *
+ *  Not a bare id list. A peer holds no `antgrid_get_task`, so this is the only
+ *  reading it gets of its own work: whether a task it was assigned has started,
+ *  whether a question it asked registered as `input-required`, and which side is
+ *  holding it. Falls back to the ids when a bridge answers without the states —
+ *  an older bridge is worth less information, not an error. */
+function openTaskLines(d: any): string[] {
+  const tasks = (d.openTasks ?? []) as any[];
+  if (tasks.length === 0) {
+    const ids = (d.openTaskIds ?? []) as string[];
+    return [`Open tasks: ${ids.join(", ") || "none"}`];
+  }
+  return [
+    "Open tasks:",
+    ...tasks.map((t) => {
+      const waiting = t.waitingOn ? `, waiting on ${t.waitingOn}` : "";
+      const side = t.role === "lead" ? "assigned by this session" : "assigned to this session";
+      return `- ${t.taskId} [${t.state}${waiting}] ${t.title} (${side})`;
+    }),
+  ];
 }
 
 /** A member's Capability Card (spec 3.3) as two optional lines.
@@ -724,7 +762,7 @@ export async function callSessionBusTool(
         `Session: ${d.sessionId} in context ${d.contextId}`,
         ...leadLines(d.memberOf),
         `Members: ${members.length === 0 ? "none" : members.map((m) => `${m.sessionName ?? m.sessionId} [${m.state}]`).join(", ")}`,
-        `Open tasks: ${(d.openTaskIds ?? []).join(", ") || "none"}`,
+        ...openTaskLines(d),
         `Task budget: ${budget.tasksRemaining} left of the session cap, ${budget.hourlyRemaining} in this hour${budget.halted ? " (halted: no progress)" : ""}`,
       ];
       return toolText(lines.join("\n"));
