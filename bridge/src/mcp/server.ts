@@ -168,7 +168,7 @@ const LEAD_TOOLS: McpTool[] = [
   },
   {
     name: "antgrid_list_tasks",
-    description: "List the tasks of this session: the ones this session assigned, and the ones it was given.",
+    description: "List the tasks of this session: the ones this session assigned, the ones it was given, and any a peer raised for itself.",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
@@ -253,17 +253,34 @@ const PEER_TOOLS: McpTool[] = [
     },
   },
   {
-    name: "antgrid_report_finding",
-    description: "Send the lead something worth knowing without ending the task — a discovery, a risk, a decision it should weigh in on. Name the taskId: this still works once a task is completed, failed or canceled, and it is then the only way to reach the lead about it.",
+    // NOT `antgrid_open_task`, which the spec calls `open-task` and this server
+    // shipped first under that name meaning something else entirely ("mark an
+    // assigned task started"). The names collide; the verbs do not.
+    name: "antgrid_raise_task",
+    description: "Open a task with the lead for work it has not assigned — something found along the way that is worth doing or worth deciding on. You are the one who will work it; the lead is told, and can cancel it or answer questions on it like any other task. Use this rather than staying quiet about work nobody asked for: an unassigned finding reaches nobody.",
     inputSchema: {
       type: "object",
       properties: {
-        taskId: str("The task this concerns, when it concerns one."),
+        summary: str("One line naming the work, shown wherever the task is listed."),
+        instruction: str("What this task is and why it is worth doing, in full. The lead cannot see this session's conversation."),
+        artifactIds: ARTIFACT_IDS,
+        unexpected: UNEXPECTED,
+      },
+      required: ["summary", "instruction"],
+    },
+  },
+  {
+    name: "antgrid_report_finding",
+    description: "Send the lead something worth knowing without ending the task — a discovery, a risk, a decision it should weigh in on. Name the taskId: this still works once a task is completed, failed or canceled, and it is then the only way to reach the lead about it. For something that belongs to no task at all, open one with antgrid_raise_task and report on that — a finding with no task reaches nobody.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: str("The task this concerns."),
         summary: str("One line naming the finding."),
         text: str("The finding in full."),
         unexpected: UNEXPECTED,
       },
-      required: ["summary"],
+      required: ["taskId", "summary"],
     },
   },
   {
@@ -450,13 +467,17 @@ function body(fields: Record<string, unknown>): Record<string, unknown> {
  *  bridge, so it cannot exist unless the task arrived. */
 function taskLine(t: any): string {
   const waiting = t.waitingOn ? ` waiting on ${t.waitingOn}` : "";
+  // Whose idea this task was, said only when it was not this session's. A lead
+  // reading its own list must not take work a peer opened for itself (4.5) as
+  // something it assigned; the peer's own list says it the other way round.
+  const origin = t.origin !== "peer" ? "" : t.role === "lead" ? " — raised by the peer" : " — raised by you";
   let delivery = "";
   if (t.role === "lead" && !t.reachedPeer) {
     delivery = " — NOT YET DELIVERED: nothing on that machine has acknowledged this task";
   } else if (t.unacked > 0) {
     delivery = " — last update not acknowledged yet";
   }
-  return `- ${t.taskId} [${t.state}${waiting}] ${t.title}${delivery}`;
+  return `- ${t.taskId} [${t.state}${waiting}] ${t.title}${origin}${delivery}`;
 }
 
 /** One task in full, as prose.
@@ -520,7 +541,12 @@ function openTaskLines(d: any): string[] {
     "Open tasks:",
     ...tasks.map((t) => {
       const waiting = t.waitingOn ? `, waiting on ${t.waitingOn}` : "";
-      const side = t.role === "lead" ? "assigned by this session" : "assigned to this session";
+      // A raised task (4.5) was assigned by nobody, so saying it was is the one
+      // thing this line must not do — it is the whole difference between work
+      // the lead asked for and work it is only being told about.
+      const side = t.origin === "peer"
+        ? (t.role === "lead" ? "raised by the peer, not assigned" : "raised by this session")
+        : (t.role === "lead" ? "assigned by this session" : "assigned to this session");
       return `- ${t.taskId} [${t.state}${waiting}] ${t.title} (${side})`;
     }),
   ];
@@ -688,6 +714,23 @@ export async function callSessionBusTool(
       }));
       if (!r.ok) return toolError(busError(r));
       return toolText(`Task ${taskId} reported ${done ? "complete" : "failed"}. The lead has been told.`);
+    }
+
+    case "antgrid_raise_task": {
+      const r = await api("POST", "/session-bus/raise", body({
+        summary: argStr(args, "summary"),
+        instruction: argStr(args, "instruction"),
+        artifactIds: argIds(args, "artifactIds"),
+        unexpected: argStr(args, "unexpected"),
+      }));
+      if (!r.ok) return toolError(busError(r));
+      // Queued, not delivered, for `antgrid_assign_task`'s reason — the same
+      // outbox carries it and the lead's ack is the same evidence.
+      return toolText(
+        `Opened as task ${r.data.taskId}, and it is yours to work. It is queued and retried until the `
+        + `lead's machine acknowledges it; antgrid_list_tasks marks it NOT YET DELIVERED until then. `
+        + `Report on it with antgrid_report_complete or antgrid_report_failure like any other task.`,
+      );
     }
 
     case "antgrid_report_finding": {

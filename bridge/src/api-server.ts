@@ -17,6 +17,7 @@ import {
   CancelBodySchema,
   FindingBodySchema,
   PublishArtifactBodySchema,
+  RaiseBodySchema,
   ReportBodySchema,
   type SessionBusApi,
 } from "./session-bus/api";
@@ -502,6 +503,10 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
 
         if (rest === "tasks") return sessionBusPost(AssignBodySchema, body, (b) => bus.assign(terminalId, b));
         if (rest === "findings") return sessionBusPost(FindingBodySchema, body, (b) => bus.reportFinding(terminalId, b));
+        // Not `tasks`, which is the LEAD's assign: the two mint the same record
+        // and differ only in who ends up working it, and one route serving both
+        // would have to read the role to know which it was handed.
+        if (rest === "raise") return sessionBusPost(RaiseBodySchema, body, (b) => bus.raiseTask(terminalId, b));
         if (rest === "ask") return sessionBusPost(AskBodySchema, body, (b) => bus.askLead(terminalId, b));
         if (rest === "artifacts") {
           return sessionBusPost(PublishArtifactBodySchema, body, (b) => bus.publishArtifact(terminalId, b));

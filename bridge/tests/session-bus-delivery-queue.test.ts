@@ -21,7 +21,7 @@ import {
 } from "../src/session-bus/delivery-queue";
 import { lineForEvent } from "../src/session-bus/deliver-event";
 import { UNATTRIBUTED_TURN, turnOpenFor } from "../src/work-status";
-import { renderAnswer, renderCancel, renderNote, renderTask, renderWake } from "../src/session-bus/delivery";
+import { renderAnswer, renderCancel, renderNote, renderRaised, renderTask, renderWake } from "../src/session-bus/delivery";
 import { briefScope, saveBrief } from "../src/session-bus/brief-store";
 import type { SessionBusEvent } from "../src/session-bus/coordinator";
 import type { TaskRecord } from "../src/session-bus/task-store";
@@ -326,6 +326,31 @@ describe("which events become a line, and what it says", () => {
     }));
   });
 
+  // The other half of `assigned`, and the one with no `memberOf` behind it: a
+  // lead has no membership row, so the peer-facing branch answers null for it and
+  // the lead would be told nothing about a task it is now waiting on.
+  test("a raise reaching the lead becomes the raised template, not the task one", () => {
+    const abDir = tempDir();
+    const event: SessionBusEvent = {
+      kind: "assigned",
+      sessionId: SESSION,
+      task: task({ role: "lead", origin: "peer" }),
+      envelope: envelope({ messageId: "msg-raised" }),
+    };
+    const l = lineForEvent(event, deps(abDir));
+    expect(l).toMatchObject({ id: "msg-raised", sessionId: SESSION, kind: "raised" });
+    expect(l!.text).toBe(renderRaised({
+      peer: PEER_REF,
+      taskId: "t-1",
+      summary: "a summary",
+      instruction: "the body",
+      artifacts: [],
+    }));
+    // It must not read as an assignment: the peer is already working it.
+    expect(l!.text).not.toContain("antgrid_report_complete");
+    expect(l!.text).toContain("antgrid_cancel_task");
+  });
+
   test("a completed task wakes its LEAD, rendered by renderWake", () => {
     const abDir = tempDir();
     const event: SessionBusEvent = {
@@ -393,8 +418,10 @@ describe("which events become a line, and what it says", () => {
     }
   });
 
-  // A taskless finding names no task, so nothing tells it apart from chatter and
-  // it stays undelivered by design (§12, D4a).
+  // Nothing on this side can produce one any more — `reportFinding` refuses a
+  // finding with no taskId and names `antgrid_raise_task` instead — but the
+  // receive side is what a bridge on an older build still sends at, and a line
+  // with no task is one nothing can render, list or answer.
   test("a finding naming no task stays undelivered even when it is the only channel left", () => {
     const abDir = tempDir();
     const event: SessionBusEvent = {

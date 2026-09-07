@@ -1172,6 +1172,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // the coordinator applies only frames addressed to a session it holds and
       // acks every one it applies, including the duplicates a retry produces.
       case "session-bus:assign":
+      case "session-bus:raise":
       case "session-bus:transition":
       case "session-bus:cancel":
       case "session-bus:message":

@@ -10,6 +10,9 @@ export const SESSION_BUS_ERRORS = {
   NOT_PEER: 403,
   UNKNOWN_PEER: 404,
   UNKNOWN_TASK: 404,
+  // 400 rather than 404: the caller named no task at all, which is a malformed
+  // request and not a task this session cannot find.
+  NO_TASK: 400,
   UNKNOWN_ARTIFACT: 404,
   TASK_TERMINAL: 409,
   DUPLICATE_STATE: 409,

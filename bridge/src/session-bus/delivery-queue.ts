@@ -47,8 +47,13 @@ export const MAX_QUEUED_LINES = 64;
  *  arms, and a brief with no other route would otherwise be held on disk
  *  forever while the dialog that collected it reported success. `joined` is the
  *  same brief travelling the other way, to the LEAD, where it is context rather
- *  than a mandate to adopt. */
-export const DeliveryKindSchema = z.enum(["brief", "joined", "task", "wake", "answer", "cancel", "note"]);
+ *  than a mandate to adopt.
+ *
+ *  `raised` is `task` pointing the other way: a peer's self-assigned task (4.5)
+ *  arriving at the LEAD. Its own kind rather than a `task` with the roles
+ *  swapped, because the two cards ask for opposite things — one is work to do,
+ *  the other is work already being done. */
+export const DeliveryKindSchema = z.enum(["brief", "joined", "task", "raised", "wake", "answer", "cancel", "note"]);
 export type DeliveryKind = z.infer<typeof DeliveryKindSchema>;
 
 export const QueuedLineSchema = z.object({

@@ -37,8 +37,8 @@ BusForward _classify(
 
 void main() {
   group('frame vocabulary', () {
-    test('recognizes exactly the seven bridge types', () {
-      expect(kSessionBusTypes, hasLength(7));
+    test('recognizes exactly the eight bridge types', () {
+      expect(kSessionBusTypes, hasLength(8));
       for (final type in kSessionBusTypes) {
         expect(isSessionBusFrame({'type': type}), isTrue);
       }

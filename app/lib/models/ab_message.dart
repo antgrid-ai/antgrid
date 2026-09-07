@@ -2053,6 +2053,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     // preview tunnel's frames effectively are) only so the classification gate
     // sees a type that is deliberately unrouted; see kUnroutedInboundTypes.
     case 'session-bus:assign':
+    case 'session-bus:raise':
     case 'session-bus:transition':
     case 'session-bus:cancel':
     case 'session-bus:message':

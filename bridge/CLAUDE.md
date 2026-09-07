@@ -314,11 +314,26 @@ is the spec; this is the set of invariants a future edit breaks silently.
   reopen. Hence the `note` kind. Two halves, and either alone leaves the hole:
   `coordinator.report` refuses a terminal task by NAMING the finding route, and
   `deliver-event` delivers a finding whose task is terminal. A peer told only
-  "already canceled" reaches for a taskless finding, which by design reaches
-  nobody. Delivered is not prompt: the note drains at the lead's next turn
+  "already canceled" reaches for a taskless finding, and there is no such thing:
+  `reportFinding` refuses one. Delivered is not prompt: the note drains at the lead's next turn
   boundary like every other line, so it buys "seen eventually", never "seen
   soon". The card names no answering tool on purpose — `answer_peer` is refused
   on a terminal task, so offering it sends the lead at a verb that cannot work.
+- **A finding names a task or it is refused, and the escape hatch is a second
+  verb.** A taskless finding was accepted and reported `sent`, but no record held
+  it: `antgrid_list_tasks` could not list it and `antgrid_get_task` had no id to
+  be given, so the spec's "poll-only" (D4a) named a poll that does not exist.
+  `reportFinding` refuses `NO_TASK` and names `antgrid_raise_task` — the spec's
+  `open-task` (4.5), which mints a task with `origin: peer` and crosses as
+  `session-bus:raise`. **`antgrid_open_task` is a DIFFERENT verb** that shipped
+  first under the colliding name and means "mark an assigned task started"; it
+  refuses anything not already assigned, so it can never serve this. The raise is
+  its own wire type rather than a flag on the assign because the two mint the same
+  record and differ only in which side works it — a bridge that did not know the
+  flag would take the wrong role, where an unknown type is refused. `origin` is
+  therefore not `role`: `role` is per machine and reverses across the wire (the
+  raiser holds `peer`, the receiver `lead`), `origin` is the same word on both
+  machines and is the only thing that can tell a lead it never asked for this.
 - **An artifact id from the other machine is a reference, not a handle.**
   `coordinator.onFetch` answers a `session-bus:fetch`; nothing sends one, so the
   requester half of cross-machine fetch does not exist. Every surface has to say

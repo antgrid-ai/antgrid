@@ -134,6 +134,13 @@ export const TaskRecordSchema = z.object({
   /** THIS bridge's role on THIS task. A machine can lead one task and work
    *  another, so role is per task and never per session. */
   role: z.enum(["lead", "peer"]),
+  /** Which side ASKED for this task, which `role` cannot say: a task the lead
+   *  assigned and one the peer raised both leave the peer working and the lead
+   *  waiting. Read wherever a task is named to a human or an agent, so a lead is
+   *  not shown work it never asked for as though it had asked.
+   *
+   *  Absent means `lead` — every task written before a peer could raise one. */
+  origin: z.enum(["lead", "peer"]).optional().catch(undefined),
   /** The other end, labels included so a row renders on a machine that can never
    *  reach the one it names (D7). */
   peer: SessionMemberRefSchema,
@@ -301,6 +308,9 @@ export interface MintTaskInput {
   title: string;
   now: number;
   expiresAt?: number;
+  /** `peer` when THIS bridge is raising a task with its own lead, which
+   *  reverses the roles: the minter works it, the machine it names waits. */
+  origin?: "lead" | "peer";
 }
 
 /**
@@ -314,7 +324,11 @@ export function mintTask(s: TaskStoreState, input: MintTaskInput): { next: TaskS
   const rec: TaskRecord = {
     taskId: input.taskId,
     contextId: input.contextId,
-    role: "lead",
+    // A raise is an assign pointed the other way: the side that opens the task
+    // is the side that will work it, so it takes `peer` and the machine it
+    // names takes `lead`.
+    role: input.origin === "peer" ? "peer" : "lead",
+    ...(input.origin === undefined ? {} : { origin: input.origin }),
     peer: input.peer,
     state: "submitted",
     title: input.title.slice(0, MAX_SUMMARY_CHARS),
@@ -436,6 +450,9 @@ export interface InboundTransition {
   unexpected?: string;
   /** Artifact ids named by the sender, which live on the SENDER's machine. */
   artifactIds?: readonly string[];
+  /** Assign only: which side asked. Absent is the lead, which every assign is;
+   *  `peer` marks a raise and reverses the receiving bridge's role. */
+  origin?: "lead" | "peer";
   /** Assign only: the task's title and the lead's expiry. */
   title?: string;
   expiresAt?: number;
@@ -482,7 +499,10 @@ export function applyTransition(s: TaskStoreState, t: InboundTransition, now: nu
     const created: TaskRecord = {
       taskId: t.taskId,
       contextId: t.contextId,
-      role: "peer",
+      // Mirror of `mintTask`: a raise arriving means the sender is working it
+      // and this bridge is the one waiting on it.
+      role: t.origin === "peer" ? "lead" : "peer",
+      ...(t.origin === undefined ? {} : { origin: t.origin }),
       peer: t.peer,
       state: "submitted",
       title: (t.title ?? t.summary).slice(0, MAX_SUMMARY_CHARS),

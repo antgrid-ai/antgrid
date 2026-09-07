@@ -630,6 +630,68 @@ describe("session-bus routes", () => {
     }
   });
 
+  // The escape hatch D4a leans on, and the refusal that points at it. Both
+  // halves are the test: a finding accepted with no task reported `sent` for
+  // bytes no tool could ever list or fetch.
+  test("a finding naming no task is refused, and names the verb that reaches", async () => {
+    const { peer, stop } = pair();
+    try {
+      const said = await post(peer, "findings", PEER_SESSION, {
+        summary: "the relay pins bun 1.3.10",
+        text: "Its APNs handshake fails.",
+      });
+      expect(said.status).toBe(400);
+      expect(said.body.code).toBe("NO_TASK");
+      expect(said.body.error).toContain("antgrid_raise_task");
+    } finally {
+      stop();
+    }
+  });
+
+  test("a peer raises its own task, and the lead gets it with the roles reversed", async () => {
+    const { lead, peer, stop } = pair();
+    try {
+      const raised = await post(peer, "raise", PEER_SESSION, {
+        summary: "the relay pins bun 1.3.10",
+        instruction: "Pin it to 1.3.14; the APNs handshake fails below that.",
+        unexpected: "Nothing in the brief mentioned the relay.",
+      });
+      expect(raised.status).toBe(200);
+      const taskId = raised.body.taskId as string;
+
+      // The raiser works it, so this side holds `peer` and can report on it.
+      const own = await get(peer, "session", PEER_SESSION);
+      expect(own.body.openTasks).toContainEqual(expect.objectContaining({ taskId }));
+
+      deliver(lead, peer);
+      const view = await get(lead, `tasks/${taskId}`, LEAD_SESSION);
+      expect(view.status).toBe(200);
+      expect(view.body.state).toBe("submitted");
+      // What `role` cannot say: the lead is waiting on work it never asked for.
+      expect(view.body.origin).toBe("peer");
+
+      const done = await post(peer, `tasks/${taskId}/complete`, PEER_SESSION, {
+        summary: "pinned", text: "relay/package.json now asks 1.3.14.",
+      });
+      expect(done.status).toBe(200);
+      deliver(lead, peer);
+      expect((await get(lead, `tasks/${taskId}`, LEAD_SESSION)).body.state).toBe("completed");
+    } finally {
+      stop();
+    }
+  });
+
+  test("only a peer may raise a task", async () => {
+    const { lead, stop } = pair();
+    try {
+      const raised = await post(lead, "raise", LEAD_SESSION, { summary: "s", instruction: "i" });
+      expect(raised.status).toBe(403);
+      expect(raised.body.code).toBe("NOT_PEER");
+    } finally {
+      stop();
+    }
+  });
+
   test("a finding travels without moving the task's state", async () => {
     const { lead, peer, stop } = pair();
     try {
@@ -799,7 +861,7 @@ describe("a self with no address is not a self with no membership", () => {
 // default wrong is silent in both directions: a misrouted finding is accepted by
 // whatever it reaches and reported sent.
 describe("the role behind a taskless send", () => {
-  test("a peer's finding before any task is routed as a peer", async () => {
+  test("a peer's raise before any task is routed as a peer", async () => {
     const peer = machine({
       abDir: tempDir("bus-role-peer-"),
       machineId: "m2",
@@ -807,9 +869,9 @@ describe("the role behind a taskless send", () => {
       sessionIds: [PEER_SESSION],
     });
     try {
-      const sent = await post(peer, "findings", PEER_SESSION, {
+      const sent = await post(peer, "raise", PEER_SESSION, {
         summary: "the codec is little-endian",
-        text: "checked against the fixtures",
+        instruction: "checked against the fixtures; worth pinning down",
       });
       expect(sent.status).toBe(200);
       // The lead's session id, as a peer's context always is — and "peer", which

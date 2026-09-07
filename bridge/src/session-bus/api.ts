@@ -117,6 +117,18 @@ export const FindingBodySchema = z
   })
   .strict();
 
+/** A peer opening its own task (spec 4.5). The same fields as an assign minus
+ *  `peer`: a peer has exactly one lead and names it from its own membership row,
+ *  so accepting an address here would let it author one. */
+export const RaiseBodySchema = z
+  .object({
+    summary: z.string().min(1).max(MAX_SUMMARY_CHARS),
+    instruction: z.string().min(1).max(MAX_PART_CHARS),
+    artifactIds: z.array(z.string().min(1).max(200)).max(8).optional(),
+    unexpected: z.string().max(MAX_UNEXPECTED_CHARS).optional(),
+  })
+  .strict();
+
 export const AskBodySchema = z
   .object({
     taskId: z.string().min(1).max(200),
@@ -150,6 +162,7 @@ export type CancelBody = z.infer<typeof CancelBodySchema>;
 export type AnswerBody = z.infer<typeof AnswerBodySchema>;
 export type ReportBody = z.infer<typeof ReportBodySchema>;
 export type FindingBody = z.infer<typeof FindingBodySchema>;
+export type RaiseBody = z.infer<typeof RaiseBodySchema>;
 export type AskBody = z.infer<typeof AskBodySchema>;
 export type PublishArtifactBody = z.infer<typeof PublishArtifactBodySchema>;
 
@@ -194,6 +207,11 @@ export interface TaskView {
   taskId: string;
   contextId: string;
   role: BusRole;
+  /** Which side asked for this task. Absent means `lead`, for every record
+   *  written before a peer could raise one. `role` cannot answer it: it reverses
+   *  across the wire, so both an assign and a raise leave the peer working and
+   *  the lead waiting. */
+  origin?: TaskRecord["origin"];
   state: TaskRecord["state"];
   waitingOn?: TaskRecord["waitingOn"];
   title: string;
@@ -260,6 +278,7 @@ export interface SessionView {
 export interface OpenTaskView {
   taskId: string;
   role: BusRole;
+  origin?: TaskRecord["origin"];
   state: TaskRecord["state"];
   waitingOn?: TaskRecord["waitingOn"];
   title: string;
@@ -282,6 +301,7 @@ export interface SessionBusApi {
     terminalId: string | undefined,
     body: FindingBody,
   ): { ok: true; sent: boolean; held: boolean } | SessionBusRefusal;
+  raiseTask(terminalId: string | undefined, body: RaiseBody): { ok: true; taskId: string } | SessionBusRefusal;
   askLead(terminalId: string | undefined, body: AskBody): { ok: true; requestId: string } | SessionBusRefusal;
   publishArtifact(
     terminalId: string | undefined,
@@ -420,6 +440,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       taskId: rec.taskId,
       contextId: rec.contextId,
       role: rec.role,
+      ...(rec.origin === undefined ? {} : { origin: rec.origin }),
       state: rec.state,
       ...(rec.waitingOn === undefined ? {} : { waitingOn: rec.waitingOn }),
       title: rec.title,
@@ -543,6 +564,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
         openTasks: live.map((t) => ({
           taskId: t.taskId,
           role: t.role,
+          ...(t.origin === undefined ? {} : { origin: t.origin }),
           state: t.state,
           ...(t.waitingOn === undefined ? {} : { waitingOn: t.waitingOn }),
           title: t.title,
@@ -680,13 +702,25 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       const m = resolve(terminalId);
       if (!m) return notMember();
       if (!m.peer || !m.memberOf) return refuse("NOT_PEER", "only a session working for a lead reports findings to it");
-      if (body.taskId) {
-        const rec = deps.coordinator.task(m.sessionId, body.taskId);
-        if (!rec || rec.role !== "peer") return unknownTask();
+      // A finding names a task or it names nothing anyone can reach. Spec 12
+      // (D4a) makes a taskless finding poll-only, but nothing can poll it: no
+      // task record holds it, so `antgrid_list_tasks` omits it and
+      // `antgrid_get_task` has no id to be given, and the bus has no inbox verb.
+      // Accepting it returned `sent: true` for bytes reachable only by opening
+      // the message log by hand. Refused instead, naming the verb that does
+      // reach -- which is what D4a says answers this case.
+      if (!body.taskId) {
+        return refuse(
+          "NO_TASK",
+          "a finding must name the task it is about; for something found outside "
+          + "any assigned task, open one with antgrid_raise_task and report on that",
+        );
       }
+      const rec = deps.coordinator.task(m.sessionId, body.taskId);
+      if (!rec || rec.role !== "peer") return unknownTask();
       const sent = deps.coordinator.message({
         sessionId: m.sessionId,
-        taskId: body.taskId ?? null,
+        taskId: body.taskId,
         to: m.memberOf,
         summary: body.summary,
         parts: [{ kind: "text", text: body.text ?? body.summary }],
@@ -694,6 +728,29 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
         contextId: m.memberOf.sessionId,
       });
       return isRefusal(sent) ? sent : { ok: true, sent: sent.sent, held: sent.held };
+    },
+
+    raiseTask(terminalId, body) {
+      const m = resolve(terminalId);
+      if (!m) return notMember();
+      if (!m.peer || !m.memberOf) {
+        return refuse("NOT_PEER", "only a session working for a lead opens a task with it");
+      }
+      const artifacts = partsForArtifacts(m.sessionId, body.artifactIds);
+      if (isRefusal(artifacts)) return artifacts;
+
+      // `memberOf` is the lead as this session's own membership row records it,
+      // which is the only address a peer has for it: nothing on this machine can
+      // look the lead up, and a ref built from anything else would put a
+      // fabricated address on a task.
+      const opened = deps.coordinator.raise({
+        sessionId: m.sessionId,
+        peer: m.memberOf,
+        summary: body.summary,
+        parts: [{ kind: "text", text: body.instruction }, ...artifacts],
+        ...(body.unexpected === undefined ? {} : { unexpected: body.unexpected }),
+      });
+      return isRefusal(opened) ? opened : { ok: true, taskId: opened.taskId };
     },
 
     askLead(terminalId, body) {

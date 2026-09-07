@@ -91,6 +91,37 @@ test("mintTask opens a lead-side task at seq 0 with a default expiry", () => {
   expect(taskCreatedAts(state)).toEqual([T0]);
 });
 
+// `origin` is the one fact `role` cannot carry, because `role` is per machine
+// and reverses across the wire. Get the reversal backwards and the raiser waits
+// on itself while the lead is handed work it cannot report on.
+test("a raise mints the opposite role on each machine, and both record who asked", () => {
+  const raised = mintTask(emptyTasks(), {
+    taskId: "t1",
+    contextId: "c1",
+    peer: PEER,
+    title: "pin the relay's bun",
+    now: T0,
+    origin: "peer",
+  });
+  const mine = taskFor(raised.next, "t1")!;
+  expect(mine.role).toBe("peer");
+  expect(mine.origin).toBe("peer");
+
+  const received = applyTransition(emptyTasks(), assign({ origin: "peer" }), T0);
+  expect(received.kind).toBe("applied");
+  const theirs = taskFor(received.next, "t1")!;
+  expect(theirs.role).toBe("lead");
+  expect(theirs.origin).toBe("peer");
+});
+
+// Every task written before a peer could raise one carries no `origin` at all,
+// and must keep reading as the lead's.
+test("a task with no origin is the lead's on both sides", () => {
+  expect(taskFor(lead().state, "t1")!.origin).toBeUndefined();
+  expect(taskFor(peerSide(), "t1")!.origin).toBeUndefined();
+  expect(taskFor(peerSide(), "t1")!.role).toBe("peer");
+});
+
 test("every legal transition is applied and every illegal one is refused", () => {
   const states: TaskState[] = ["submitted", "working", "input-required", "completed", "failed", "canceled"];
   for (const from of states) {

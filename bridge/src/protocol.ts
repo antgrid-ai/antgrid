@@ -2420,6 +2420,16 @@ export const SessionBusAssignWire = z.object({
   envelope: BusEnvelopeSchema,
 });
 
+/** A task the PEER opened with its own lead (spec 4.5), which is how something
+ *  found outside assigned work becomes visible: a finding that names no task is
+ *  refused, so without this a peer holding a brief and no task has nothing that
+ *  can ever reach anyone. Identical to an assign on the wire and deliberately
+ *  NOT a flag on one: the two differ only in who ends up working the task, and
+ *  a bridge that did not know the flag would read a raise as an assign and take
+ *  the wrong role — where an unknown TYPE is refused, which is the safe half of
+ *  being wrong. */
+export const SessionBusRaiseWire = SessionBusAssignWire;
+
 export const SessionBusTransitionWire = z.object({
   ...SessionBusBaseWire,
   taskId: z.string().min(1).max(200),
@@ -2480,6 +2490,10 @@ export const SessionBusAckWire = z.object({
 const SessionBusAssignMessage = BaseMessage.extend({
   type: z.literal("session-bus:assign"),
 }).extend(SessionBusAssignWire.shape);
+
+const SessionBusRaiseMessage = BaseMessage.extend({
+  type: z.literal("session-bus:raise"),
+}).extend(SessionBusRaiseWire.shape);
 
 const SessionBusTransitionMessage = BaseMessage.extend({
   type: z.literal("session-bus:transition"),
@@ -2659,6 +2673,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentQuestionResolveMessage,
   AgentTaskStopMessage,
   SessionBusAssignMessage,
+  SessionBusRaiseMessage,
   SessionBusTransitionMessage,
   SessionBusCancelMessage,
   SessionBusMessageMessage,
@@ -2842,6 +2857,7 @@ export type AgentSessionAction = z.infer<typeof AgentSessionActionMessage>;
 export type AgentPermissionResolve = z.infer<typeof AgentPermissionResolveMessage>;
 export type AgentQuestionResolve = z.infer<typeof AgentQuestionResolveMessage>;
 export type SessionBusAssign = z.infer<typeof SessionBusAssignMessage>;
+export type SessionBusRaise = z.infer<typeof SessionBusRaiseMessage>;
 export type SessionBusTransition = z.infer<typeof SessionBusTransitionMessage>;
 export type SessionBusCancel = z.infer<typeof SessionBusCancelMessage>;
 export type SessionBusMessage = z.infer<typeof SessionBusMessageMessage>;
@@ -2976,7 +2992,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
-  "session-bus:assign", "session-bus:transition", "session-bus:cancel", "session-bus:message",
+  "session-bus:assign", "session-bus:raise", "session-bus:transition", "session-bus:cancel", "session-bus:message",
   "session-bus:fetch", "session-bus:fetch:result", "session-bus:ack",
 ]);
 

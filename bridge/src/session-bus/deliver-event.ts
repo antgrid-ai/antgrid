@@ -26,6 +26,7 @@ import {
   renderCancel,
   renderJoined,
   renderNote,
+  renderRaised,
   renderTask,
   renderWake,
   type TaskArtifactHandle,
@@ -82,6 +83,31 @@ export function lineForEvent(
   const envelope = envelopeOf(event);
 
   if (event.kind === "assigned") {
+    // A raise arrives as an `assigned` too — same frame, same envelope — and is
+    // told apart by the ROLE the store gave the record: this session holds
+    // `lead` on a task it did not assign. Without this branch the lead is told
+    // nothing at all, since `memberOf` is empty for a lead and the peer-facing
+    // path below returns null on it.
+    if (event.task.role === "lead") {
+      if (!envelope) return null;
+      return {
+        id: envelope.messageId,
+        sessionId: event.sessionId,
+        kind: "raised",
+        taskId: event.task.taskId,
+        taskState: event.task.state,
+        text: renderRaised({
+          peer: event.task.peer,
+          taskId: event.task.taskId,
+          summary: envelope.metadata.summary,
+          instruction: textOf(envelope.parts),
+          artifacts: artifactsOf(envelope.parts),
+          ...(envelope.metadata.unexpected === undefined
+            ? {}
+            : { unexpected: envelope.metadata.unexpected }),
+        }),
+      };
+    }
     const lead = deps.memberOf(event.sessionId);
     if (!lead || !envelope) return null;
     return {

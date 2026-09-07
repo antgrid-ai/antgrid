@@ -577,6 +577,59 @@ export function renderTask(d: TaskDelivery): string {
   });
 }
 
+export interface RaisedDelivery {
+  /** The peer session that opened the task, and that will work it. */
+  peer: SessionMemberRef;
+  taskId: string;
+  /** The peer's one-line summary of the work it has taken on. */
+  summary: string;
+  /** Why the peer thinks it is worth doing, in full. */
+  instruction: string;
+  /** What the peer met that its brief did not anticipate. */
+  unexpected?: string;
+  /** Artifacts the peer published, which live on the PEER's machine. */
+  artifacts?: TaskArtifactHandle[];
+}
+
+/**
+ * Render the line that tells a lead a peer has opened a task of its own (4.5).
+ *
+ * The mirror of {@link renderTask} and deliberately not a variant of it: the two
+ * carry the same envelope but point opposite ways, so every "what to do" in this
+ * one is a lead's verb. It asks for nothing — the peer is already working —
+ * which is what keeps it a notice rather than a second assignment the lead has
+ * to accept before anything can happen.
+ */
+export function renderRaised(d: RaisedDelivery): string {
+  const body = [`Summary: ${d.summary}`, "", d.instruction, ...unexpectedBlock(d.unexpected)];
+  if (d.artifacts && d.artifacts.length > 0) {
+    // The same reference-not-handle rule the wake card follows: the bytes are on
+    // the peer's machine and nothing here can fetch them (D7).
+    body.push("", "Artifacts the peer published, held on its machine and not readable from here:");
+    for (const a of d.artifacts) body.push(`- ${a.artifactId} "${a.name}": ${a.summary}`);
+  }
+
+  return renderDelivery({
+    from: d.peer,
+    fence: "TASK",
+    content: body.join("\n"),
+    scope: [],
+    header: (labels) => [
+      `[antgrid session bus] delivery: raised (template v${DELIVERY_TEMPLATE_VERSION})`,
+      fromLine(labels, "peer"),
+      toLine(labels, "lead"),
+      taskLine(d.taskId),
+      ...composedByBridge("peer"),
+      "",
+      "What this is: a task the PEER opened for itself, for something it found outside the work this",
+      "session assigned. It is already being worked; this session was not asked to do it.",
+      "What to do: nothing, unless it should not be done — withdraw it with antgrid_cancel_task. The",
+      "peer may ask about it, and its result arrives here the way any other task's does.",
+      "",
+    ],
+  });
+}
+
 export interface WakeDelivery {
   /** The peer session whose task moved. */
   peer: SessionMemberRef;

@@ -370,6 +370,78 @@ export class SessionBusCoordinator {
     return { ok: true, taskId, seq: minted.seq };
   }
 
+  /**
+   * Open a task with this session's own LEAD, for something found outside any
+   * assigned work (spec 4.5).
+   *
+   * Structurally an {@link assign} with the roles swapped: this bridge works
+   * what it opens and the lead is the side that will be woken by the terminal
+   * state. Everything after the mint is shared — the same outbox, the same
+   * stop-and-wait sequencing, the same expiry — because a raised task is a task,
+   * and a second lifecycle beside the first is how the two drift.
+   *
+   * Bounded by the same guard an assign is. A peer that can open its own work is
+   * a peer that can open it in a loop, and the runaway guard is the only thing
+   * between that and a lead's session filling with tasks nobody asked for.
+   */
+  raise(input: AssignInput): { ok: true; taskId: string; seq: number } | SessionBusRefusal {
+    const self = this.deps.self(input.sessionId);
+    if (!self) return this.noSelf();
+
+    const now = this.now();
+    const state = this.stateFor(input.sessionId);
+    const guardRefusal = checkAssign(state.tasks.guard, taskCreatedAts(state.tasks), now);
+    if (guardRefusal) return refuse(guardRefusal.code, guardRefusal.reason);
+
+    const taskId = this.newId();
+    // The LEAD's session id, not this one's: `contextId` names the exchange, and
+    // both machines have to spell it the same way or the ack comes back about a
+    // conversation neither can find.
+    const contextId = input.contextId ?? input.peer.sessionId;
+    const envelope = this.stamp(self, {
+      taskId,
+      contextId,
+      parts: input.parts,
+      summary: input.summary,
+      ...(input.unexpected === undefined ? {} : { unexpected: input.unexpected }),
+    });
+    const tooLarge = checkEnvelopeSize(envelope);
+    if (tooLarge) return refuse(tooLarge, ENVELOPE_TOO_LARGE_REASON);
+
+    const minted = mintTask(state.tasks, {
+      taskId,
+      contextId,
+      peer: input.peer,
+      title: input.title ?? input.summary,
+      now,
+      origin: "peer",
+      ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+    });
+    const task = taskFor(minted.next, taskId);
+    const frame = createMessage("session-bus:raise", {
+      from: self.key,
+      to: keyOf(input.peer),
+      contextId,
+      taskId,
+      seq: minted.seq,
+      expiresAt: task?.expiresAt ?? now,
+      envelope,
+    });
+
+    const queued = mintOutbound(minted.next, { taskId, frame, seq: minted.seq, now });
+    if (queued.kind !== "queued") {
+      // Unreachable for the reason `assign` gives, and refused rather than
+      // asserted for the same one.
+      return refuse("AGENT_NOT_READY", "the task could not be queued for the lead");
+    }
+    const attempt = this.firstAttempt(queued.next, queued.task, minted.seq, frame, now);
+    this.commit(input.sessionId, {
+      tasks: attempt.tasks,
+      log: appendLog(state.log, { at: now, direction: "out", peer: keyOf(input.peer), envelope }),
+    });
+    return { ok: true, taskId, seq: minted.seq };
+  }
+
   /** Withdraw a task. The cancel is a transition like any other — sequenced,
    *  retried and acked — because "stop" arriving unreliably is worse than the
    *  work continuing. */
@@ -589,6 +661,7 @@ export class SessionBusCoordinator {
   handleInbound(msg: AbMessage): InboundOutcome {
     switch (msg.type) {
       case "session-bus:assign":
+      case "session-bus:raise":
       case "session-bus:transition":
       case "session-bus:cancel":
       case "session-bus:message":
@@ -613,6 +686,14 @@ export class SessionBusCoordinator {
       case "session-bus:assign":
         this.onTransition(sessionId, self, msg.from, msg.contextId, msg.taskId, msg.seq, "submitted", msg.envelope, {
           expiresAt: msg.expiresAt,
+        });
+        return "applied";
+      case "session-bus:raise":
+        // The only difference from an assign, and it is the whole point: the
+        // sender opened this task to work it, so this bridge takes `lead`.
+        this.onTransition(sessionId, self, msg.from, msg.contextId, msg.taskId, msg.seq, "submitted", msg.envelope, {
+          expiresAt: msg.expiresAt,
+          origin: "peer",
         });
         return "applied";
       case "session-bus:transition":
@@ -862,7 +943,7 @@ export class SessionBusCoordinator {
     seq: number,
     state: TaskState,
     envelope: BusEnvelope,
-    extra: { waitingOn?: WaitingOn; expiresAt?: number },
+    extra: { waitingOn?: WaitingOn; expiresAt?: number; origin?: "lead" | "peer" },
   ): void {
     const now = this.now();
     const s = this.stateFor(sessionId);
@@ -883,6 +964,7 @@ export class SessionBusCoordinator {
         artifactIds: artifactIdsOf(envelope.parts),
         ...(extra.waitingOn === undefined ? {} : { waitingOn: extra.waitingOn }),
         ...(extra.expiresAt === undefined ? {} : { expiresAt: extra.expiresAt }),
+        ...(extra.origin === undefined ? {} : { origin: extra.origin }),
       },
       now,
     );
