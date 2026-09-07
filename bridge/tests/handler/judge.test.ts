@@ -26,38 +26,38 @@ describe("runDecision", () => {
     const { spawn, calls } = fakeSpawn([GOOD]);
     let timedOut = 0;
     const d = await runDecision({
-      tool: "claude-code", goal: GOAL, backlogText: BACKLOG_TEXT, context: "C", cwd: ".", spawn,
+      tool: "claude-code", instructions: [GOAL], backlogText: BACKLOG_TEXT, context: "C", cwd: ".", spawn,
       onTimeout: () => { timedOut += 1; },
     });
     expect(d?.decision).toBe("continue");
     expect(calls.length).toBe(1);
     expect(timedOut).toBe(0);
   });
-  it("puts the goal and the backlog in front of the judge", async () => {
+  it("puts what the user asked for and the backlog in front of the judge", async () => {
     const { spawn, calls } = fakeSpawn([GOOD]);
-    await runDecision({ tool: "claude-code", goal: GOAL, backlogText: BACKLOG_TEXT, context: "C", cwd: ".", spawn });
+    await runDecision({ tool: "claude-code", instructions: [GOAL], backlogText: BACKLOG_TEXT, context: "C", cwd: ".", spawn });
     const prompt = calls[0].join(" ");
     expect(prompt).toContain(GOAL);
     expect(prompt).toContain(BACKLOG_TEXT);
   });
   it("retries once with the validation error, then fails closed", async () => {
     const { spawn, calls } = fakeSpawn(["garbage", "still garbage"]);
-    const d = await runDecision({ tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+    const d = await runDecision({ tool: "claude-code", instructions: [GOAL], backlogText: "", context: "C", cwd: ".", spawn });
     expect(d).toBeNull();
     expect(calls.length).toBe(2);
     // Retry prompt carries the error marker.
     expect(calls[1].join(" ")).toContain("was not a valid JSON object");
   });
   it("returns null for tools without a judge", async () => {
-    const d = await runDecision({ tool: "gemini", goal: GOAL, backlogText: "", context: "C", cwd: "." });
+    const d = await runDecision({ tool: "gemini", instructions: [GOAL], backlogText: "", context: "C", cwd: "." });
     expect(d).toBeNull();
   });
   it("only forwards transcriptPath into the prompt for readonly tiers", async () => {
     const ro = fakeSpawn([GOOD]);
-    await runDecision({ tool: "claude-code", goal: GOAL, backlogText: "", context: "C", transcriptPath: "/t.jsonl", cwd: ".", spawn: ro.spawn });
+    await runDecision({ tool: "claude-code", instructions: [GOAL], backlogText: "", context: "C", transcriptPath: "/t.jsonl", cwd: ".", spawn: ro.spawn });
     expect(ro.calls[0].join(" ")).toContain("/t.jsonl");
     const tr = fakeSpawn([GOOD]);
-    await runDecision({ tool: "opencode", goal: GOAL, backlogText: "", context: "C", transcriptPath: "/t.jsonl", cwd: ".", spawn: tr.spawn });
+    await runDecision({ tool: "opencode", instructions: [GOAL], backlogText: "", context: "C", transcriptPath: "/t.jsonl", cwd: ".", spawn: tr.spawn });
     expect(tr.calls[0].join(" ")).not.toContain("/t.jsonl");
   });
 
@@ -76,7 +76,7 @@ describe("runDecision", () => {
     }) as unknown as typeof Bun.spawn;
     let timedOut = 0;
     const d = await runDecision({
-      tool: "claude-code", goal: GOAL, backlogText: "", context: "C",
+      tool: "claude-code", instructions: [GOAL], backlogText: "", context: "C",
       cwd: ".", timeoutMs: 50, spawn, onTimeout: () => { timedOut += 1; },
     });
     expect(d).toBeNull();
@@ -107,7 +107,7 @@ describe("runDecision", () => {
     }) as unknown as typeof Bun.spawn;
     let timedOut = 0;
     const d = await runDecision({
-      tool: "claude-code", goal: GOAL, backlogText: "", context: "C",
+      tool: "claude-code", instructions: [GOAL], backlogText: "", context: "C",
       cwd: ".", timeoutMs: 80, spawn, onTimeout: () => { timedOut += 1; },
     });
     expect(calls.length).toBe(2);
@@ -125,7 +125,7 @@ describe("runDecision", () => {
     });
     const { spawn, calls } = fakeSpawn([bad, GOOD]);
     const d = await runDecision({
-      tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn,
+      tool: "claude-code", instructions: [GOAL], backlogText: "", context: "C", cwd: ".", spawn,
       retryIfShape: (x) => x.action?.value === "/etc/hosts" ? "slash command value is not a simple verb" : null,
     });
     expect(calls.length).toBe(2);
@@ -143,7 +143,7 @@ describe("runDecision", () => {
     });
     const { spawn, calls } = fakeSpawn([bad, bad]);
     const d = await runDecision({
-      tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn,
+      tool: "claude-code", instructions: [GOAL], backlogText: "", context: "C", cwd: ".", spawn,
       retryIfShape: () => "still not a simple verb",
     });
     expect(calls.length).toBe(2);
@@ -157,7 +157,7 @@ describe("runDecision", () => {
     const seen: string[] = [];
     const { spawn, calls } = fakeSpawn(["garbage", GOOD]);
     const d = await runDecision({
-      tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn,
+      tool: "claude-code", instructions: [GOAL], backlogText: "", context: "C", cwd: ".", spawn,
       retryIfShape: (x) => { seen.push(x.decision); return null; },
     });
     expect(seen).toEqual([]);
@@ -168,7 +168,7 @@ describe("runDecision", () => {
   it("passes the supervised agent and the catalog into the prompt", async () => {
     const { spawn, calls } = fakeSpawn([GOOD]);
     await runDecision({
-      tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn,
+      tool: "claude-code", instructions: [GOAL], backlogText: "", context: "C", cwd: ".", spawn,
       agentTool: "codex", commands: [{ id: "skill:x", name: "x" }],
     });
     expect(calls[0].join(" ")).toContain("codex");
@@ -195,7 +195,7 @@ describe("judge cwd", () => {
   it("spawns a decision in the cwd it was handed", async () => {
     const { spawn, cwds } = cwdCapturingSpawn(GOOD);
     await runDecision({
-      tool: "claude-code", goal: GOAL, backlogText: "", context: "C",
+      tool: "claude-code", instructions: [GOAL], backlogText: "", context: "C",
       cwd: "/checkout/here", spawn,
     });
     expect(cwds[0]).toBe("/checkout/here");
@@ -240,7 +240,7 @@ describe("judge env overrides", () => {
   it("merges the agent's judge env over the inherited one", async () => {
     const { spawn, envs } = envCapturingSpawn(GOOD);
     await withInheritedMarker(async () => {
-      await runDecision({ tool: "opencode", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+      await runDecision({ tool: "opencode", instructions: [GOAL], backlogText: "", context: "C", cwd: ".", spawn });
     });
     expect(envs[0]?.OPENCODE_DB).toBe(":memory:");
     expect(envs[0]?.[MARKER]).toBe("kept");
@@ -252,7 +252,7 @@ describe("judge env overrides", () => {
   it("inherits the whole environment for an agent that declares none", async () => {
     const { spawn, envs } = envCapturingSpawn(GOOD);
     await withInheritedMarker(async () => {
-      await runDecision({ tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+      await runDecision({ tool: "claude-code", instructions: [GOAL], backlogText: "", context: "C", cwd: ".", spawn });
     });
     expect(envs[0]?.[MARKER]).toBe("kept");
   });
@@ -266,7 +266,7 @@ describe("judge env overrides", () => {
     process.env.ANTGRID_TERMINAL_ID = "term-1";
     try {
       const { spawn, envs } = envCapturingSpawn(GOOD);
-      await runDecision({ tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+      await runDecision({ tool: "claude-code", instructions: [GOAL], backlogText: "", context: "C", cwd: ".", spawn });
       expect(envs[0]).toBeDefined();
       expect(envs[0]?.ANTGRID_TERMINAL_ID).toBeUndefined();
     } finally {

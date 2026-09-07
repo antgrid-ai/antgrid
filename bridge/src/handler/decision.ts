@@ -23,6 +23,49 @@ export function normalizeBrief(raw: string): string | undefined {
   return clip(oneLine(raw), MAX_BRIEF_CHARS, "") || undefined;
 }
 
+// What the whole WHAT THE USER ASKED FOR section may cost. Each entry is bounded
+// on its own (MAX_INSTRUCTION_CHARS, ./session-store), but a long session stacks
+// them, and this section shares one context window with the backlog and the
+// recent-context excerpt the decision actually turns on.
+export const MAX_INSTRUCTIONS_CHARS = 2_000;
+
+// Not "(none stated)": a judge told only that a field is empty has no second
+// place to look, and a one-tap arm — where this is the ordinary case — still
+// leaves the user's intent legible in the backlog and in their own turns.
+const NO_INSTRUCTIONS =
+  "(nothing stated — the user armed this session without saying what for. Read what they want from the BACKLOG below and from the user's own turns in RECENT CONTEXT, and do not invent an objective neither one supports.)";
+
+/** The instruction list as the prompt prints it, numbered in the order the user
+ *  gave them.
+ *
+ *  Over budget, the OLDEST go: a later sentence can supersede an earlier one, so
+ *  dropping the newest would print an instruction the user has already moved on
+ *  from as if it still stood. How many went is printed because a list that
+ *  silently starts at 3 reads as a list of three. The newest is kept whatever it
+ *  costs — clipped rather than dropped — since a section printing nothing would
+ *  read as a session nobody asked anything of.
+ *
+ *  Collapsed through `oneLine` for the reason the brief is: this is user free
+ *  text inside a section of headers, and a pasted newline would forge one. */
+function instructionLines(instructions: string[]): string[] {
+  const texts = instructions.map(oneLine).filter((t) => t !== "");
+  if (texts.length === 0) return [NO_INSTRUCTIONS];
+  const lines = texts.map((t, i) => `${i + 1}. ${t}`);
+  let dropped = 0;
+  let used = lines.reduce((n, l) => n + l.length + 1, 0);
+  while (dropped < lines.length - 1 && used > MAX_INSTRUCTIONS_CHARS) {
+    used -= lines[dropped]!.length + 1;
+    dropped += 1;
+  }
+  const kept = lines.slice(dropped);
+  if (used > MAX_INSTRUCTIONS_CHARS) kept[0] = clip(kept[0]!, MAX_INSTRUCTIONS_CHARS);
+  if (dropped === 0) return kept;
+  return [
+    `(${dropped} earlier instruction${dropped === 1 ? "" : "s"} omitted for length; the numbering below keeps their place.)`,
+    ...kept,
+  ];
+}
+
 // What the judge LOOKS FOR and ASKS ABOUT, added on top of the rules it is
 // printed under. Two properties every entry keeps, both machine-checked:
 //
@@ -39,7 +82,7 @@ export const LENS_RULES: Record<HandlerLens, string> = {
   qa:
     "You accept nothing on a claim. Where an item's only support is the agent's word, ask the agent to run what proves it and show the result: the command, the exit code, the failing case now passing. Ask what is untested and what would fail first. Report with the evidence cited and name what remains unverified.",
   critic:
-    "You look for what would make the current step wrong. At an item close, or before an irreversible step the goal already allows, ask the agent what it ruled out and why, and what breaks if its assumption is false. One probe per stop, then decide; a debate is not supervision. Critique against the goal and the evidence, never against taste, and never ask a blocked agent whether it is really blocked.",
+    "You look for what would make the current step wrong. At an item close, or before an irreversible step the user has already asked for, ask the agent what it ruled out and why, and what breaks if its assumption is false. One probe per stop, then decide; a debate is not supervision. Critique against what the user asked for and the evidence, never against taste, and never ask a blocked agent whether it is really blocked.",
   release:
     "You judge readiness to ship, not just completion. When an item is claimed finished, ask whether the tests ran, whether the docs, migrations or changelog the change implies exist, and what a user upgrading would hit first. Report an item as ready to ship only when someone else could ship it without asking the agent a question, and report in terms of what still stands between the work and a release.",
 };
@@ -157,7 +200,12 @@ function promptLine(s: string): string {
 // section is the same bargain one pass later: the harness has already dropped
 // those moves, and stating why is what stops the next pass re-citing identically.
 export function buildDecidePrompt(opts: {
-  goal: string; backlogText: string; context: string; transcriptPath?: string;
+  // Everything the user has asked for, verbatim and oldest first. Intent data
+  // and nothing more: a lift is taken from the typed instruction itself
+  // (authorizeInstruction), never from this list being printed, and the section
+  // is worded so a judge cannot read it as permission either.
+  instructions: string[];
+  backlogText: string; context: string; transcriptPath?: string;
   floorWarnings?: string[];
   evidenceRejections?: string[];
   // Consecutive auto-replies left before the guard refuses the next `handle` and
@@ -204,8 +252,8 @@ export function buildDecidePrompt(opts: {
     "Decide whether to let the agent continue, answer it on the user's behalf, or escalate to the user.",
     "`handle` types text at the agent, and it covers two moves: TELL the agent what to do next, or ASK it a question when what you are missing is something it can answer from the work in front of it. A question is a `handle` whose `reply` is the question — there is no separate decision value for one.",
     "",
-    "SESSION GOAL (the user's own words):",
-    opts.goal || "(none stated)",
+    "WHAT THE USER ASKED FOR (verbatim, in order — the earliest first, and a later line can supersede an earlier one):",
+    ...instructionLines(opts.instructions),
     "",
     "BACKLOG — the complete set of items you may report on. Each line starts with its id:",
     opts.backlogText || "(no items)",
@@ -243,7 +291,7 @@ export function buildDecidePrompt(opts: {
     // Ordered against the confidence rule above, never merely beside it: missing
     // information is exactly that rule's trigger, so an unordered "ask the agent"
     // would divert to the agent what only the user can settle.
-    "- Missing information is not automatically the user's problem, and the split is by who can answer: ask the AGENT for facts about the work — what it found, what it tried, what it chose and why. Escalate what only the USER can settle: intent, authorization, preference, anything that changes the goal.",
+    "- Missing information is not automatically the user's problem, and the split is by who can answer: ask the AGENT for facts about the work — what it found, what it tried, what it chose and why. Escalate what only the USER can settle: intent, authorization, preference, anything that changes what they asked for.",
     // Ordered below the confidence floor and the who-can-answer split, never above
     // either: these price the two resources, and a judge that read them first would
     // take "the user is expensive" as licence to answer what only the user can
@@ -291,9 +339,9 @@ export function buildDecidePrompt(opts: {
     // between approaches is neither a fact the agent can hand over nor a preference
     // only the user holds, so both halves of the who-can-answer split read as "not
     // mine" and the raw question gets forwarded. Enumerating first is what turns it
-    // into something the goal can decide — and failing that, into a choice the user
-    // can make without reconstructing the session.
-    "- When what stops the agent is a choice between ways of doing something, neither pick on technical grounds nor forward the open question. Ask the agent for the options it sees and what each costs. Then decide against the SESSION GOAL if the goal separates them; escalate if it does not, carrying the options, their costs and the one you would take. Put them in `notify.body`, and make `notify.draftReply` the option you would take, written as the instruction that would send it — the user is offered it as a one-tap chip. A short choice can be answered in seconds; an open engineering question makes the user rebuild the whole session first.",
+    // into something WHAT THE USER ASKED FOR can decide — and failing that, into a
+    // choice the user can make without reconstructing the session.
+    "- When what stops the agent is a choice between ways of doing something, neither pick on technical grounds nor forward the open question. Ask the agent for the options it sees and what each costs. Then decide against WHAT THE USER ASKED FOR if it separates them; escalate if it does not, carrying the options, their costs and the one you would take. Put them in `notify.body`, and make `notify.draftReply` the option you would take, written as the instruction that would send it — the user is offered it as a one-tap chip. A short choice can be answered in seconds; an open engineering question makes the user rebuild the whole session first.",
     // Printed against the safety rule below because it is the same guardrail from
     // the other side: the rule above sends the judge to the agent more often, and
     // the cheapest way for a blocked agent to answer "are you still blocked?" is to
@@ -310,11 +358,11 @@ export function buildDecidePrompt(opts: {
     // lens, and a lens stated among them would read as one more rule of equal
     // standing rather than as something they frame.
     //
-    // The brief prints INSIDE this section rather than beside SESSION GOAL: the
-    // goal is data about WHAT the session is for and belongs above the rules,
-    // while a brief is guidance about how to judge, and guidance above the rules
-    // reads as one more rule. It is one line by construction, so a pasted
-    // "RULES:" cannot start a header line of its own.
+    // The brief prints INSIDE this section rather than beside the instruction
+    // list: what the user asked for is data about WHAT the session is for and
+    // belongs above the rules, while a brief is guidance about how to judge, and
+    // guidance above the rules reads as one more rule. It is one line by
+    // construction, so a pasted "RULES:" cannot start a header line of its own.
     //
     // The closing sentence sits inside the section because both retry legs
     // re-append this whole prompt: a caveat kept anywhere else would have to be
@@ -414,7 +462,7 @@ export function buildDecidePrompt(opts: {
       ]
       : [
         "",
-        "No command catalog is available for this session. Prefer plain instructions; use a slash command only if the goal or backlog names one explicitly.",
+        "No command catalog is available for this session. Prefer plain instructions; use a slash command only if what the user asked for, or the backlog, names one explicitly.",
       ]),
     "",
     "RECENT CONTEXT:",

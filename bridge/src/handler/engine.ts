@@ -29,8 +29,10 @@ import {
 } from "./extract";
 import { appendActivity, type ActivityRecord } from "./config";
 import {
-  loadHandlerSession, saveHandlerSession, EscalationChoiceSchema, OpenEscalationSchema,
-  type EscalationChoice, type EscalationKind, type HandlerSessionRecord, type OpenEscalation,
+  loadHandlerSession, saveHandlerSession, normalizeInstruction, pushInstruction,
+  seedInstructionsFromGoal, EscalationChoiceSchema, OpenEscalationSchema,
+  type EscalationChoice, type EscalationKind, type HandlerSessionRecord,
+  type InstructionEntry, type OpenEscalation,
 } from "./session-store";
 import {
   allTerminal, applyTransitions, clip, isTerminalStatus, previewForUser, propagateBlocked, renderBacklog,
@@ -108,7 +110,15 @@ export type HandlerObservability = "full" | "escalate_only" | "unsupported";
 
 // One tap arms with no payload at all, so an activity row can legitimately be
 // written before anything has stated what the session is for.
-const NO_GOAL = "(no goal set)";
+const NOTHING_ASKED = "(nothing asked yet)";
+
+// What every one-string surface shows for a session: the wire's `goal`, the
+// persisted record's, the wrap-up headline. The FIRST entry rather than the
+// newest, because those surfaces name the session — and a session is named by
+// what it was opened to do, not by whatever was stacked onto it last.
+function firstInstruction(instructions: InstructionEntry[]): string {
+  return instructions[0]?.text ?? "";
+}
 
 // A ceiling on the WHOLE stack, where extract.ts's MAX_ITEMS bounds only one
 // response: renderBacklog(backlog) is interpolated into every subsequent decide
@@ -620,7 +630,10 @@ export interface HandlerEngineDeps {
 }
 
 interface ArmedSession {
-  goal: string;
+  // Everything the user has asked for on this session, verbatim and in order.
+  // The judge prompt prints the whole list; every other surface names the session
+  // with the FIRST entry alone (see firstInstruction).
+  instructions: InstructionEntry[];
   // The live instruction stack, and the only record of progress: an item's own
   // status is what it has reached, so nothing accumulates alongside it.
   backlog: InstructionItem[];
@@ -960,10 +973,15 @@ export class HandlerEngine {
 
   private now(): number { return this.deps.now ? this.deps.now() : Date.now(); }
   private id(prefix: string): string { return `${prefix}-${this.deps.projectId}-${this.now()}-${this.seq++}`; }
+  // Seeded here and not only in the store: an injected loader supplies records
+  // this engine must read the same way as the ones it wrote itself, and a record
+  // reaching arm() with an empty instruction list is a session the judge is told
+  // nobody asked anything of.
   private loadSession(terminalId: string): HandlerSessionRecord | null {
-    return this.deps.loadSessionFn
+    const rec = this.deps.loadSessionFn
       ? this.deps.loadSessionFn(terminalId)
       : loadHandlerSession(this.deps.abDir, this.deps.projectId, terminalId);
+    return rec && seedInstructionsFromGoal(rec);
   }
   private saveSession(rec: HandlerSessionRecord): void {
     (this.deps.saveSessionFn ?? ((r: HandlerSessionRecord) =>
@@ -1023,7 +1041,8 @@ export class HandlerEngine {
 
   private persist(terminalId: string, s: ArmedSession, armed: boolean, suspended?: boolean): void {
     this.saveSession({
-      version: 2, terminalId, armed, suspended, goal: s.goal, backlog: s.backlog,
+      version: 2, terminalId, armed, suspended,
+      goal: firstInstruction(s.instructions), instructions: s.instructions, backlog: s.backlog,
       armedAt: s.armedAt, escalations: s.escalations,
       judgeTool: s.judgeTool, judgeModel: s.judgeModel, role: s.role, brief: s.brief,
       parkKind: s.parkKind, parkedUntil: s.parkedUntil, transientFailures: s.transientFailures,
@@ -1085,8 +1104,16 @@ export class HandlerEngine {
       // Absent means "leave it alone", never "clear it" (an empty backlog is sent
       // as []): a re-arm or a goal edit carries no backlog, and the bridge's
       // copy is the one holding the statuses this session has banked.
-      const goalChanged = p.goal !== undefined && p.goal.trim() !== existing.goal.trim();
-      if (p.goal !== undefined) existing.goal = p.goal;
+      //
+      // The wire's `goal` mirrors the FIRST entry, and a later configure can
+      // carry it back unchanged after typed instructions have stacked behind it,
+      // so a sentence already anywhere in the list is a restatement, not a new
+      // thing asked for. The list is append-only: an edit is the user restating
+      // the objective, and the sentence they restated it FROM is what the agent
+      // has been working under.
+      const stated = normalizeInstruction(p.goal ?? "");
+      const stacked = stated !== "" && !existing.instructions.some((e) => e.text === stated);
+      if (stacked) pushInstruction(existing.instructions, stated, this.now());
       if (backlog !== undefined) existing.backlog = backlog;
       // A configure is the user restating what this session is for, so the last
       // pass's verdict no longer covers the same question — the next event is
@@ -1100,15 +1127,15 @@ export class HandlerEngine {
       // backlog-edit and judge-pick path (see updateBacklog in the app), and a
       // "Goal edited" row over an unchanged goal is a feed that misreports what
       // happened on every reorder and every judge change.
-      if (goalChanged) this.record(p.terminalId, "goal_edited", existing.goal || NO_GOAL);
+      if (stacked) this.record(p.terminalId, "goal_edited", stated);
       this.emitStatus();
       // A goal landing on a session whose backlog is still empty is the user's
       // first statement of what this session is for — the 1-tap arm before it had
       // nothing to extract. Once items exist, a new goal is a rename: stacking
       // more work goes through handler:instruct, and re-extracting here would
       // append a second copy of the sentence on every edit.
-      if (goalChanged && backlog === undefined && existing.goal.trim()) {
-        this.queueExtraction(p.terminalId, existing.goal.trim(), { onlyIfEmpty: true });
+      if (stacked && backlog === undefined) {
+        this.queueExtraction(p.terminalId, stated, { onlyIfEmpty: true });
       }
       return;
     }
@@ -1137,8 +1164,17 @@ export class HandlerEngine {
     // Carrying one across would wedge the slot: no typed line clears it, wrap-up
     // never fires, and the park nudge stops.
     const carried = (resumed?.escalations ?? []).filter((e) => e.kind !== "resolve_in_session");
+    // Copied, never the record's own array: the record is the loader's to keep,
+    // and the session mutates this list in place from here on.
+    const instructions = [...(resumed?.instructions ?? [])];
+    const stated = normalizeInstruction(p.goal ?? "");
+    // Same rule as the live branch above: a restart's re-arm restates the goal
+    // it resumed, and stacking it again would double it on every host launch.
+    if (stated !== "" && !instructions.some((e) => e.text === stated)) {
+      pushInstruction(instructions, stated, this.now());
+    }
     const s: ArmedSession = {
-      goal: p.goal ?? resumed?.goal ?? "",
+      instructions,
       backlog: backlog ?? resumed?.backlog ?? [],
       armedAt: resumed?.armedAt ?? this.now(),
       state: carried.length > 0 ? "needs_you" : "watching",
@@ -1175,7 +1211,7 @@ export class HandlerEngine {
     // is recorded above. Deliberately NOT "resumed", which belongs to the park
     // lifecycle; spending it here would make "did the park end?" unanswerable from
     // the feed. The rehydrated rows above this one are what mark it as a resume.
-    this.record(p.terminalId, "armed", s.goal || NO_GOAL);
+    this.record(p.terminalId, "armed", firstInstruction(s.instructions) || NOTHING_ASKED);
     this.emitStatus();
     // Rehydrated last, so the arm record still reads as the session's opening
     // line and a deadline already past can resume straight into the new process.
@@ -1186,8 +1222,11 @@ export class HandlerEngine {
     // extraction resolving behind the handoff. Skipped once a backlog exists — a
     // rehydrated or app-supplied one is already the user's list, and extracting
     // the goal alongside it would double every item.
-    if (s.goal.trim() && backlog === undefined) {
-      this.queueExtraction(p.terminalId, s.goal.trim(), { onlyIfEmpty: true });
+    // The NEWEST entry, which on this path is whatever this arm stated — or, for a
+    // rehydration that stated nothing, the last thing the previous process heard.
+    const seed = s.instructions.at(-1)?.text;
+    if (seed && backlog === undefined) {
+      this.queueExtraction(p.terminalId, seed, { onlyIfEmpty: true });
     }
   }
 
@@ -1296,6 +1335,13 @@ export class HandlerEngine {
     if (described) {
       this.record(p.terminalId, "instruction_authorized", described.reason, described.detail);
     }
+    // Kept verbatim beside the items it becomes: extraction splits the sentence
+    // into work and keeps none of the wording, so this list is the only place the
+    // judge can read what the user actually said. Persisted here rather than left
+    // to the extraction behind it — an extraction that yields nothing still leaves
+    // a sentence the user typed, and a restart must not lose it.
+    pushInstruction(s.instructions, normalizeInstruction(text), this.now());
+    this.persist(p.terminalId, s, true);
     this.queueExtraction(p.terminalId, text);
     return granted;
   }
@@ -2182,7 +2228,8 @@ export class HandlerEngine {
       judgedAnswer = s.askAnswer;
       const runDecisionFn = this.deps.runDecisionFn ?? defaultRunDecision;
       decision = await runDecisionFn({
-        tool: s.judgeTool ?? tool, model: s.judgeModel, goal: s.goal,
+        tool: s.judgeTool ?? tool, model: s.judgeModel,
+        instructions: s.instructions.map((i) => i.text),
         role: s.role, brief: s.brief,
         backlogText: renderBacklog(s.backlog),
         context: ctx.text, transcriptPath: ctx.transcriptPath ?? transcriptPath,
@@ -2709,7 +2756,7 @@ export class HandlerEngine {
       wrapUpId: this.id("wrap"),
       terminalId,
       at: this.now(),
-      goal: s.goal,
+      goal: firstInstruction(s.instructions),
       backlog: s.backlog,
       blockedReports: s.escalations.filter((e) => e.kind === "guard_blocked"),
     });
@@ -3274,7 +3321,9 @@ export class HandlerEngine {
       state: s.state,
       pendingEscalations: s.escalations.length,
       armedAt: s.armedAt,
-      goal: s.goal,
+      // The first instruction. The list itself does not cross the wire — no
+      // client renders more than this one string.
+      goal: firstInstruction(s.instructions),
       // Copied, never the live arrays: handler:status is a REPLAY_TYPE, so the bus
       // holds this frame by reference until the next one — and escalate() pushes onto
       // s.escalations in place, which rewrote a frame already published and left the

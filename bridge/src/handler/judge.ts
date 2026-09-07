@@ -112,7 +112,7 @@ export async function runDecision(opts: {
   // `tool` is the JUDGE's CLI (a per-session pick may name a different agent
   // from the one being watched); `agentTool` is the agent under supervision,
   // and only the prompt reads it.
-  tool: string; model?: string; goal: string; backlogText: string; context: string;
+  tool: string; model?: string; instructions: string[]; backlogText: string; context: string;
   transcriptPath?: string; cwd: string; timeoutMs?: number; spawn?: typeof Bun.spawn;
   floorWarnings?: string[];
   evidenceRejections?: string[];
@@ -132,7 +132,7 @@ export async function runDecision(opts: {
     timeoutMs: opts.timeoutMs ?? 45_000, spawn: opts.spawn, transcriptPath: opts.transcriptPath,
     retryIf: opts.retryIfShape, onTimeout: opts.onTimeout,
     makePrompt: (path) => buildDecidePrompt({
-      goal: opts.goal, backlogText: opts.backlogText, context: opts.context, transcriptPath: path,
+      instructions: opts.instructions, backlogText: opts.backlogText, context: opts.context, transcriptPath: path,
       floorWarnings: opts.floorWarnings, evidenceRejections: opts.evidenceRejections,
       replyBudget: opts.replyBudget,
       openAsks: opts.openAsks, askRejections: opts.askRejections, askAnswer: opts.askAnswer,

@@ -2,7 +2,39 @@
 import { z } from "zod";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, chmodSync } from "node:fs";
 import { join } from "node:path";
-import { BacklogSchema } from "./backlog";
+import { BacklogSchema, clip } from "./backlog";
+
+// One entry's ceiling, in lockstep with HandlerInstructWire.text (../protocol.ts):
+// an instruction reaches this list straight off that wire, and the arm-time
+// `goal` — which the configure wire does NOT bound, because a length refused
+// there would drop the arm it rode in on — is clipped to the same size here.
+// Declared rather than imported: protocol.ts imports this module.
+export const MAX_INSTRUCTION_CHARS = 10_000;
+
+// How many the record keeps. The whole stack is re-read on every load and the
+// newest entries are the ones still standing, so the oldest are what go.
+export const MAX_INSTRUCTIONS = 50;
+
+// One thing the user asked for, in their own words. `at` orders the list against
+// the activity feed; the ORDER is what says which sentence supersedes which, so
+// nothing may sort this list by anything else.
+export const InstructionEntrySchema = z.object({
+  text: z.string().max(MAX_INSTRUCTION_CHARS),
+  at: z.number(),
+});
+export type InstructionEntry = z.infer<typeof InstructionEntrySchema>;
+
+/** One instruction as the record stores it, or "" for nothing to store. */
+export function normalizeInstruction(raw: string): string {
+  return clip(raw.trim(), MAX_INSTRUCTION_CHARS, "");
+}
+
+/** Append one already-normalized instruction, dropping the oldest past the cap —
+ *  the same end the prompt budget trims from, and for the same reason. */
+export function pushInstruction(list: InstructionEntry[], text: string, at: number): void {
+  list.push({ text, at });
+  if (list.length > MAX_INSTRUCTIONS) list.splice(0, list.length - MAX_INSTRUCTIONS);
+}
 
 // One tap-to-answer option on a quick-choice escalation. `text` is sent as
 // the USER's own reply through the ordinary reply transport, so it must be
@@ -141,6 +173,11 @@ export const HandlerSessionRecordSchema = z.object({
   // cost is paid once, by every session armed at the moment of the upgrade, and
   // re-arming cannot recover the backlog v1 wrote. A later bump inherits the
   // same trade and has to re-decide it.
+  //
+  // `instructions` arrived without one, and that is the trade re-decided rather
+  // than skipped: the field is seeded from `goal` on read, so a version-2 record
+  // carries everything the new shape needs and a bump would spend a whole
+  // project's backlogs to say nothing extra.
   version: z.literal(2),
   terminalId: z.string(),
   armed: z.boolean(),
@@ -151,11 +188,25 @@ export const HandlerSessionRecordSchema = z.object({
   // escalations it exists to carry across exactly that gap. Optional: absent
   // means a deliberate disarm (or a record written before this field).
   suspended: z.boolean().optional(),
-  // The user's own words for the objective, plus the live instruction stack
-  // driven off it. BacklogSchema rather than a bare array: a duplicate id leaves
-  // the shadowed item undrivable and the session unable to wrap up, so a record
-  // carrying one is better refused than rehydrated.
+  // The FIRST instruction, mirrored. Never the source of truth — `instructions`
+  // is — and kept for two readers that cannot use the list: a bridge predating it
+  // (which reads this record as the session's objective and carries on), and the
+  // seeding below, which is the only way a record written before the list existed
+  // says anything about what the user asked for.
   goal: z.string(),
+  // Everything the user has asked for on this session, verbatim and in order.
+  // Verbatim because the judge prompt prints the list and a paraphrase there is a
+  // different instruction; in order because a later sentence supersedes an
+  // earlier one and nothing else records which came first.
+  //
+  // `.default([])` rather than `.optional()`: every record ever written carries a
+  // `goal` and none carried this, so absence has to resolve to a value
+  // seedInstructionsFromGoal can fill rather than to a second spelling of "empty"
+  // that every reader would then have to handle.
+  instructions: z.array(InstructionEntrySchema).max(MAX_INSTRUCTIONS).default([]),
+  // BacklogSchema rather than a bare array: a duplicate id leaves the shadowed
+  // item undrivable and the session unable to wrap up, so a record carrying one
+  // is better refused than rehydrated.
   backlog: BacklogSchema,
   armedAt: z.number(),
   escalations: z.array(OpenEscalationSchema),
@@ -209,12 +260,29 @@ function sessionPath(abDir: string, projectId: string, terminalId: string): stri
   return join(abDir, "agents", projectId, `handler-session-${encodeURIComponent(terminalId)}.json`);
 }
 
+/**
+ * A record as every reader wants it: `instructions` filled from `goal` for one
+ * written before the list existed.
+ *
+ * Applied at each read rather than once at upgrade, because nothing rewrites a
+ * disarmed session's file — a record can sit in the old shape for as long as the
+ * user leaves that session alone. Idempotent, so a reader that has its own record
+ * source (an injected loader, a test) can apply it without knowing whether the
+ * store already did.
+ */
+export function seedInstructionsFromGoal(rec: HandlerSessionRecord): HandlerSessionRecord {
+  if (rec.instructions.length > 0) return rec;
+  const text = normalizeInstruction(rec.goal);
+  if (text === "") return rec;
+  return { ...rec, instructions: [{ text, at: rec.armedAt }] };
+}
+
 export function loadHandlerSession(abDir: string, projectId: string, terminalId: string): HandlerSessionRecord | null {
   const path = sessionPath(abDir, projectId, terminalId);
   if (!existsSync(path)) return null;
   try {
     const parsed = HandlerSessionRecordSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
-    return parsed.success ? parsed.data : null;
+    return parsed.success ? seedInstructionsFromGoal(parsed.data) : null;
   } catch {
     return null;
   }

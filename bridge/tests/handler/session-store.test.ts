@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import {
-  loadHandlerSession, saveHandlerSession,
+  loadHandlerSession, saveHandlerSession, normalizeInstruction, pushInstruction,
+  MAX_INSTRUCTION_CHARS, MAX_INSTRUCTIONS,
   OpenEscalationSchema, HandlerSessionRecordSchema,
   type HandlerSessionRecord,
 } from "../../src/handler/session-store";
@@ -391,5 +392,86 @@ describe("a record this bridge writes stays readable to one that predates the le
     expect(data.backlog).toEqual([item("i1")]);
     expect("role" in data).toBe(false);
     expect("brief" in data).toBe(false);
+  });
+});
+
+
+// The list replaced `goal` as the source of truth without a version bump, so the
+// two halves that makes possible are what this covers: a record written before it
+// existed still parses, and it comes back saying what the user asked for.
+describe("the instruction list", () => {
+  it("round-trips entries verbatim and in order", () => {
+    const abDir = tmpAbDir();
+    saveHandlerSession(abDir, "proj", record({
+      instructions: [{ text: "ship the migration", at: 1 }, { text: "then open a PR", at: 2 }],
+    }));
+    expect(loadHandlerSession(abDir, "proj", "t1")?.instructions)
+      .toEqual([{ text: "ship the migration", at: 1 }, { text: "then open a PR", at: 2 }]);
+  });
+
+  // A version-2 record written before the field existed. Refusing it would have
+  // cost the session its backlog for a field the goal can seed, which is the whole
+  // argument for not bumping `version` — see its note in session-store.ts.
+  it("seeds one entry from the goal of a record that predates the field", () => {
+    const abDir = tmpAbDir();
+    writeRaw(abDir, "t1", JSON.stringify({
+      version: 2, terminalId: "t1", armed: true, goal: "migrate the auth module",
+      backlog: [item("i1")], armedAt: 123, escalations: [],
+    }));
+    const loaded = loadHandlerSession(abDir, "proj", "t1");
+    expect(loaded?.instructions).toEqual([{ text: "migrate the auth module", at: 123 }]);
+    expect(loaded?.backlog).toEqual([item("i1")]);
+  });
+
+  it("seeds nothing from an empty goal, so a one-tap arm stays one that asked nothing", () => {
+    const abDir = tmpAbDir();
+    writeRaw(abDir, "t1", JSON.stringify({
+      version: 2, terminalId: "t1", armed: true, goal: "  ",
+      backlog: [], armedAt: 123, escalations: [],
+    }));
+    expect(loadHandlerSession(abDir, "proj", "t1")?.instructions).toEqual([]);
+  });
+
+  // The seed only ever fills an empty list: a record carrying both is one this
+  // build wrote, where `goal` is the mirror of the first entry and not a second
+  // opinion about it.
+  it("leaves a record that already carries entries alone", () => {
+    const abDir = tmpAbDir();
+    writeRaw(abDir, "t1", JSON.stringify({
+      version: 2, terminalId: "t1", armed: true, goal: "the first one",
+      instructions: [{ text: "the first one", at: 1 }, { text: "and then this", at: 2 }],
+      backlog: [], armedAt: 123, escalations: [],
+    }));
+    expect(loadHandlerSession(abDir, "proj", "t1")?.instructions.map((i) => i.text))
+      .toEqual(["the first one", "and then this"]);
+  });
+
+  it("refuses a record whose list is past the cap rather than silently keeping part of it", () => {
+    const abDir = tmpAbDir();
+    writeRaw(abDir, "t1", JSON.stringify({
+      version: 2, terminalId: "t1", armed: true, goal: "g",
+      instructions: Array.from({ length: MAX_INSTRUCTIONS + 1 }, (_, n) => ({ text: `i${n}`, at: n })),
+      backlog: [], armedAt: 123, escalations: [],
+    }));
+    expect(loadHandlerSession(abDir, "proj", "t1")).toBeNull();
+  });
+});
+
+describe("pushInstruction", () => {
+  it("drops the oldest past the cap, the same end the prompt budget trims from", () => {
+    const list = Array.from({ length: MAX_INSTRUCTIONS }, (_, n) => ({ text: `i${n}`, at: n }));
+    pushInstruction(list, "newest", 999);
+    expect(list).toHaveLength(MAX_INSTRUCTIONS);
+    expect(list[0]!.text).toBe("i1");
+    expect(list.at(-1)!.text).toBe("newest");
+  });
+
+  it("normalizes to the wire's own ceiling so an unbounded arm goal cannot write an unreadable record", () => {
+    const abDir = tmpAbDir();
+    const list: { text: string; at: number }[] = [];
+    pushInstruction(list, normalizeInstruction(`  ${"x".repeat(MAX_INSTRUCTION_CHARS * 2)}  `), 1);
+    expect(list[0]!.text).toHaveLength(MAX_INSTRUCTION_CHARS);
+    saveHandlerSession(abDir, "proj", record({ instructions: list }));
+    expect(loadHandlerSession(abDir, "proj", "t1")?.instructions).toEqual(list);
   });
 });

@@ -35,7 +35,7 @@ function lastSaved(saved: unknown[]): HandlerSessionRecord {
 
 function sessionRecord(over: Partial<HandlerSessionRecord> = {}): HandlerSessionRecord {
   return {
-    version: 2, terminalId: "t1", armed: true, goal: GOAL, backlog: [],
+    version: 2, terminalId: "t1", armed: true, goal: GOAL, instructions: [], backlog: [],
     armedAt: 1, escalations: [], ...over,
   };
 }
@@ -168,17 +168,18 @@ describe("arm/disarm", () => {
     expect(status.sessions[0].terminalId).toBe("t1");
     expect(status.sessions[0].state).toBe("watching");
   });
-  it("a one-tap arm carries neither a goal nor a backlog", () => {
+  it("a one-tap arm carries no instruction and no backlog", () => {
     // Arming resolves before anything has stated what the session is for, so an
     // empty payload is a legitimate arm rather than a malformed one.
     const { engine, saved, activity } = makeEngine();
     engine.arm({ terminalId: "t1" });
     const rec = saved[0] as HandlerSessionRecord;
+    expect(rec.instructions).toEqual([]);
     expect(rec.goal).toBe("");
     expect(rec.backlog).toEqual([]);
-    expect((activity[0] as { reason: string }).reason).toBe("(no goal set)");
+    expect((activity[0] as { reason: string }).reason).toBe("(nothing asked yet)");
   });
-  it("re-arming an armed session logs goal_edited and leaves an absent backlog alone", () => {
+  it("re-arming an armed session stacks the new instruction and leaves an absent backlog alone", () => {
     // Absent means "leave it alone", never "clear it": the bridge's copy holds
     // the statuses this session has already banked, and a re-arm (or a judge
     // pick) carries no backlog.
@@ -189,9 +190,22 @@ describe("arm/disarm", () => {
     });
     engine.arm({ terminalId: "t1", goal: "edited" });
     expect((activity[1] as { decision: string }).decision).toBe("goal_edited");
+    expect((activity[1] as { reason: string }).reason).toBe("edited");
     const rec = saved.at(-1) as HandlerSessionRecord;
-    expect(rec.goal).toBe("edited");
+    // Append-only: the sentence the agent has been working under is still what
+    // the session was opened to do, so the edit stacks rather than replaces.
+    expect(rec.instructions.map((i) => i.text)).toEqual([GOAL, "edited"]);
+    expect(rec.goal).toBe(GOAL);
     expect(rec.backlog.map((i) => i.status)).toEqual(["done"]);
+  });
+  it("a re-arm restating the same goal stacks nothing and logs nothing", () => {
+    // handler:configure carries the whole payload on every judge pick and every
+    // backlog reorder, so an unchanged sentence is not a new instruction.
+    const { engine, saved, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    engine.arm({ terminalId: "t1", goal: GOAL, judgeTool: "claude-code" });
+    expect(lastSaved(saved).instructions.map((i) => i.text)).toEqual([GOAL]);
+    expect(records(activity, "goal_edited")).toHaveLength(0);
   });
   it("an explicitly empty backlog clears the stored one", () => {
     const { engine, saved } = makeEngine();
@@ -3414,6 +3428,108 @@ describe("lifecycle persistence", () => {
   });
 });
 
+// The judge is shown what the user asked for verbatim, so the list has to hold
+// every sentence in the order it arrived — extraction keeps none of the wording,
+// and nothing else on the session does either.
+describe("the instruction list", () => {
+  const settle = () => new Promise<void>((r) => { setTimeout(r, 0); });
+
+  it("an arm with a goal records one entry", () => {
+    const { engine, saved } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(lastSaved(saved).instructions.map((i) => i.text)).toEqual([GOAL]);
+    expect(lastSaved(saved).goal).toBe(GOAL);
+  });
+
+  it("every accepted instruction stacks in the order it was typed", async () => {
+    const { engine, saved } = makeEngine({ runExtractionFn: async () => ({ items: [], amend: [] }) });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    engine.instruct({ terminalId: "t1", text: "  and revert the migration  " });
+    engine.instruct({ terminalId: "t1", text: "then open a PR" });
+    await settle();
+    expect(lastSaved(saved).instructions.map((i) => i.text))
+      .toEqual([GOAL, "and revert the migration", "then open a PR"]);
+  });
+
+  it("an instruction on an unarmed terminal records nothing", () => {
+    const { engine, saved } = makeEngine();
+    engine.instruct({ terminalId: "t1", text: "do the thing" });
+    expect(saved).toHaveLength(0);
+  });
+
+  // The judge reads the list; only the typed instruction itself reaches
+  // authorizeInstruction, and the answer to a question Handler asked is parked for
+  // the judge rather than stacked as a new thing the user wants done.
+  it("an answer to a standing ask is not an instruction", async () => {
+    const standing = {
+      escalationId: "a1", question: "which registry?", reasoning: "only you can say",
+      draftReply: "", urgency: "normal" as const, at: 1, nonBlocking: true, unblocked: ["i1"],
+    };
+    const { engine, saved } = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: GOAL, backlog: [item("i1")], escalations: [standing] }),
+    });
+    engine.arm({ terminalId: "t1" });
+    engine.instruct({ terminalId: "t1", text: "the internal one", escalationId: "a1" });
+    await settle();
+    expect(lastSaved(saved).instructions.map((i) => i.text)).toEqual([GOAL]);
+  });
+
+  it("the judge is handed every entry, in order", async () => {
+    let seen: string[] = [];
+    const { engine } = makeEngine({
+      runExtractionFn: async () => ({ items: [], amend: [] }),
+      runDecisionFn: async (o: { instructions: string[] }) => {
+        seen = o.instructions;
+        return decide({});
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("i1")] });
+    engine.instruct({ terminalId: "t1", text: "and revert the migration" });
+    await settle();
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(seen).toEqual([GOAL, "and revert the migration"]);
+  });
+
+  // The record predates the field, which is the shape every session armed before
+  // this change is sitting in on disk.
+  it("a record carrying only a goal rehydrates as one instruction", () => {
+    const { engine, saved } = makeEngine({
+      loadSessionFn: () => ({
+        version: 2, terminalId: "t1", armed: true, suspended: true, goal: "migrate auth",
+        instructions: [], backlog: [item("i1")], armedAt: 7, escalations: [],
+      }),
+    });
+    engine.arm({ terminalId: "t1" });
+    expect(lastSaved(saved).instructions).toEqual([{ text: "migrate auth", at: 7 }]);
+  });
+
+  // The wrap-up push is read hours later on a lock screen, so its headline has to
+  // name the session — which is the first thing asked of it, not the last.
+  it("the wrap-up headline is the first instruction", async () => {
+    const { engine, pushes } = makeEngine({
+      runDecisionFn: async () => decide({
+        transitions: [{ id: "i1", status: "done", evidence: "ran to completion" }],
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: "land the migration", backlog: [item("i1")] });
+    engine.arm({ terminalId: "t1", goal: "and open a PR" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(pushes.at(-1)).toContain("Handler: done — land the migration");
+  });
+
+  it("falls back to the standing headline when nothing was ever asked", async () => {
+    const { engine, pushes } = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1")] }),
+      runDecisionFn: async () => decide({
+        transitions: [{ id: "i1", status: "done", evidence: "ran to completion" }],
+      }),
+    });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(pushes.at(-1)).toContain("Handler: done — session complete");
+  });
+});
+
 describe("instruct (extraction)", () => {
   // instruct() is deliberately fire-and-forget, so nothing returned by it
   // can be awaited — the tests wait on the macrotask queue instead.
@@ -3682,7 +3798,11 @@ describe("instruct (extraction)", () => {
     });
     expect(records(activity, "instruction_dropped")).toHaveLength(1);
     expect(statusOf(sent).backlog).toHaveLength(100);
-    expect(saved).toHaveLength(savedBefore);
+    // One save, and it is the sentence itself: the backlog took nothing, but what
+    // the user asked for is on the record either way and a restart must not lose
+    // the one copy of it.
+    expect(saved).toHaveLength(savedBefore + 1);
+    expect(lastSaved(saved).instructions.at(-1)?.text).toBe("also revert the migration");
     expect(sent.slice(sentBefore).map((m) => m.type))
       .toEqual(["handler:activity", "handler:status"]);
   });
@@ -4852,7 +4972,7 @@ describe("observabilityFor", () => {
     const { engine } = makeEngine({
       observable: () => true,
       tool: () => "kimi",
-      loadSessionFn: () => ({ terminalId: "t1", armed: false, judgeTool: "claude-code" }),
+      loadSessionFn: () => sessionRecord({ armed: false, judgeTool: "claude-code" }),
     });
     expect(engine.observabilityFor("t1")).toBe("full");
   });
