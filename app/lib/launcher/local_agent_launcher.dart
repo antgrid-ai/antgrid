@@ -7,6 +7,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import 'host_control_client.dart';
 import 'host_controller.dart';
+import 'host_discovery.dart' show HostFile;
 import 'project_id.dart';
 import '../config/build_info.dart';
 import '../util/ab_log.dart';
@@ -188,23 +189,9 @@ class LocalAgentLauncher {
       telemetryEnabled: telemetryEnabled,
     );
     final host = await _host.ensureHost();
-    final resolveClient = HostControlClient(
-      port: host.controlPort,
-      token: host.token,
-    );
-    String projectId;
-    String repoPath;
-    try {
-      final resolved = await resolveClient.projectResolve(folder);
-      projectId = resolved.projectId;
-      repoPath = resolved.repoPath;
-    } on HostControlException catch (e) {
-      if (e.code != 'BAD_REQUEST' && e.code != 'UNKNOWN_VERB') rethrow;
-      projectId = await computeProjectId(folder);
-      repoPath = folder;
-    } finally {
-      resolveClient.close();
-    }
+    final resolved = await _askResolve(host, folder);
+    final projectId = resolved?.projectId ?? await computeProjectId(folder);
+    final repoPath = resolved?.repoPath ?? folder;
     final existing = _inFlight[projectId];
     if (existing != null) {
       _log('openProject: projectId=$projectId — coalescing with in-flight');
@@ -227,6 +214,45 @@ class LocalAgentLauncher {
       // ignore: unawaited_futures
       _inFlight.remove(projectId);
     }
+  }
+
+  /// What [folder] opens as, according to [host], or null when it is too old
+  /// to know.
+  ///
+  /// The verb is the ONLY correct answer. A linked worktree folds into its
+  /// repository's primary checkout (`resolveProject`, bridge/src/worktrees/
+  /// project-resolver.ts) while [computeProjectId] hashes the selected path
+  /// alone, so the Dart mirror and the host disagree for every worktree — and
+  /// they disagree silently, because the app's own id still works as a
+  /// transport key.
+  Future<ResolvedLocalProject?> _askResolve(HostFile host, String folder) async {
+    final client = HostControlClient(port: host.controlPort, token: host.token);
+    try {
+      return await client.projectResolve(folder);
+    } on HostControlException catch (e) {
+      if (e.code != 'BAD_REQUEST' && e.code != 'UNKNOWN_VERB') rethrow;
+      return null;
+    } finally {
+      client.close();
+    }
+  }
+
+  /// The project identity [folder] would open as, without opening it.
+  ///
+  /// For the folder PICK, which must persist the same id the project will
+  /// later open under: a row keyed on the path hash of a worktree names a
+  /// project no bridge holds, and `_leadRef` (add_machine_dialog.dart) puts
+  /// that id on the wire as the lead's identity, where the peer stores it for
+  /// the life of the membership.
+  ///
+  /// Peeks rather than ensures: a pick must not be the thing that spawns a
+  /// host, and a machine with none yet answers the same question a moment
+  /// later through [openProject]. Null means "nobody could say" — the caller
+  /// keeps the path hash, which is what every host predating the verb gave it.
+  Future<ResolvedLocalProject?> resolveProject(String folder) async {
+    final host = await _host.peekHost();
+    if (host == null) return null;
+    return _askResolve(host, folder);
   }
 
   /// Eagerly bring up the singleton host with a project-less (machine-only)

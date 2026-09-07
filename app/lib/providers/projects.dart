@@ -53,6 +53,32 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
     if (changed) state = _store.list();
   }
 
+  /// Drop a row whose id the host does not agree with, for the folder it was
+  /// stamped from.
+  ///
+  /// One case only: a folder picked before the app asked the host what it
+  /// opens as. A linked worktree folds into its repository's primary checkout
+  /// on the bridge, so the path hash the pick used names a project no bridge
+  /// holds — and the row survives as a second drawer entry for the same
+  /// checkout, whose cached sessions keep a session-bus link keyed on an id no
+  /// lead project can ever answer to. Matched on the folder as well as the id,
+  /// so this can only remove the row the resolve it follows was about.
+  ///
+  /// Deliberately NOT [remove]: the host holds nothing under this id, and
+  /// `remove` would ask it to forget — which destroys isolated working
+  /// directories, and would aim that at whatever real project shares the id.
+  Future<void> forgetAlias(String projectId, {required String folder}) async {
+    final all = _store.list();
+    final i = all.indexWhere((p) => p.projectId == projectId);
+    if (i < 0 || all[i].folder != folder) return;
+    await _store.remove(projectId);
+    state = _store.list();
+    await purgeEntryState(ref, projectId);
+    if (ref.read(selectedRegistrationIdProvider) == projectId) {
+      ref.read(selectedTargetProvider.notifier).set(null);
+    }
+  }
+
   Future<void> remove(String id) async {
     // Only stop active sessions when the project is already warm — warming a
     // cold project just to stop sessions would block on the relay connect +

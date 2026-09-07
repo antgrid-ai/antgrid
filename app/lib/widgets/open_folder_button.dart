@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../design/widgets/ab_button.dart';
+import '../launcher/host_control_client.dart' show ResolvedLocalProject;
 import '../launcher/project_id.dart';
 import '../models/ab_project.dart';
 import '../providers/agent_transport.dart';
@@ -76,7 +77,37 @@ Future<String?> registerPickedFolder(
   String folder, {
   bool select = true,
 }) async {
-  final id = await computeProjectId(folder);
+  // Asked of the host, never derived here: a linked worktree opens as its
+  // repository's primary checkout, and `computeProjectId` — which hashes the
+  // selected path — is only the answer for a host too old to have the verb.
+  // The id persisted here becomes the drawer entry, the session cache key and
+  // the lead's identity on the session bus (`_leadRef`, add_machine_dialog),
+  // so a row that disagrees with the host is one the peer machine records
+  // forever.
+  //
+  // Swallowed on failure rather than surfaced: a pick that cannot reach the
+  // host still opens the folder, and the path hash is exactly what this did
+  // before the verb existed.
+  ResolvedLocalProject? resolved;
+  try {
+    resolved = await ref.read(localAgentLauncherProvider).resolveProject(folder);
+  } catch (_) {
+    resolved = null;
+  }
+  final id = resolved?.projectId ?? await computeProjectId(folder);
+  // The repo, not the folder that reached it: the checkout the host serves
+  // files, git and sessions from is the one the row should name, or the drawer
+  // labels a worktree over a workspace that is not it.
+  final repoPath = resolved?.repoPath ?? folder;
+  final label = resolved?.label ?? _basename(folder);
+  if (resolved != null) {
+    final selectedHash = await computeProjectId(folder);
+    if (selectedHash != id) {
+      await ref
+          .read(projectsProvider.notifier)
+          .forgetAlias(selectedHash, folder: folder);
+    }
+  }
   final hostUuid = await _resolveLocalHostUuid(ref);
   final projects = ref.read(projectsProvider);
   final existingMatches = projects.where((p) => p.projectId == id).toList();
@@ -97,8 +128,8 @@ Future<String?> registerPickedFolder(
   }
   final project = AbProject(
     projectId: id,
-    folder: folder,
-    displayName: _basename(folder),
+    folder: repoPath,
+    displayName: label,
     hostDeviceUuid: hostUuid,
     hostMachineName: '',
     lastOpenedAt: DateTime.now(),
