@@ -220,36 +220,24 @@ class PreviewProxyServer {
         if (rewritten != null) responseHeaders['location'] = rewritten;
       }
 
-      // A String body makes shelf re-encode to UTF-8 on the way out, so decoding
-      // to bytes here is not an extra pass — it replaces one.
-      if (response.bodyEncoding == kTunnelGzipEncoding) {
-        return shelf.Response(
-          response.status,
-          headers: responseHeaders,
-          body: gzip.decode(base64Decode(response.body)),
-          // shelf stamps `charset=utf-8` on a charset-less content-type only for
-          // a String body, and gzip is the first encoding that puts TEXT on the
-          // byte path. Restate it here or a charset-less `text/*` page decodes
-          // as latin-1 in the WebView — `nosniff` denies it a second guess.
-          encoding: _charsetlessTextType(responseHeaders['content-type'])
-              ? utf8
-              : null,
-        );
-      }
-      if (response.bodyEncoding == 'base64') {
-        final bodyBytes = base64Decode(response.body);
-        return shelf.Response(
-          response.status,
-          headers: responseHeaders,
-          body: bodyBytes,
-        );
-      } else {
-        return shelf.Response(
-          response.status,
-          headers: responseHeaders,
-          body: response.body,
-        );
-      }
+      // shelf writes a byte stream chunked (content-length is stripped above),
+      // so the WebView gets each slice as it arrives instead of waiting on the
+      // whole body. An error on that stream is deliberately NOT caught: it
+      // must reach dart:io, which destroys the connection without the
+      // terminating chunk, so the browser sees ERR_INCOMPLETE_CHUNKED_ENCODING
+      // rather than a complete-looking truncated bundle it would cache.
+      return shelf.Response(
+        response.status,
+        headers: responseHeaders,
+        body: response.body,
+        // Every body is bytes now, so shelf never stamps a charset by itself:
+        // restate utf-8 for a charset-less text type or the WebView decodes it
+        // as latin-1 — `nosniff` denies it a second guess. Binary types stay
+        // bare.
+        encoding: _charsetlessTextType(responseHeaders['content-type'])
+            ? utf8
+            : null,
+      );
     } catch (e) {
       return shelf.Response.internalServerError(body: 'Tunnel error: $e');
     }

@@ -23,19 +23,64 @@ export const TunnelHttpRequest = z.object({
   checkoutId: z.string().default("main"),
 });
 
-export const TunnelHttpResponse = z.object({
-  type: z.literal("tunnel:http-response"),
+/** Encoding of ONE body slice. Decided per slice, never once per response: a
+ *  gzip slice is an independent gzip member, so the app inflates each one on
+ *  its own and a slice that would have grown under gzip ships plain. */
+const TunnelSliceEncoding = z.enum(["base64", TUNNEL_GZIP_ENCODING]);
+
+/** Bridge → app: the head of a tunneled HTTP response plus body slice 0.
+ *  Exactly one per response. [last] present means slice 0 was the whole body,
+ *  which is the single-frame shape nearly every page asset takes. */
+export const TunnelHttpStart = z.object({
+  type: z.literal("tunnel:http-start"),
   requestId: z.string(),
   status: z.number().int(),
   headers: z.record(z.string(), z.string()),
   setCookies: z.array(z.string()).optional(),
-  body: z.string(),
-  bodyEncoding: z.enum(["utf8", "base64", TUNNEL_GZIP_ENCODING]),
+  data: z.string(),
+  bodyEncoding: TunnelSliceEncoding,
+  last: z.literal(true).optional(),
+  checkoutId: z.string().default("main"),
+});
+
+/** Bridge → app: body slice [seq] (1-based; slice 0 rode the start). Dense and
+ *  in order — a gap is the app's only signal that the relay dropped a frame,
+ *  since a drop is reported to the SENDER alone. */
+export const TunnelHttpChunk = z.object({
+  type: z.literal("tunnel:http-chunk"),
+  requestId: z.string(),
+  seq: z.number().int().positive(),
+  data: z.string(),
+  bodyEncoding: TunnelSliceEncoding,
+  checkoutId: z.string().default("main"),
+});
+
+/** Bridge → app: the response is over. [chunks] is the last `seq` emitted, so
+ *  a dropped FINAL chunk — the one hole an in-order channel cannot show — is
+ *  caught. [error] means the body is incomplete and must not be served as a
+ *  whole response. Never sent after a `last` start. */
+export const TunnelHttpEnd = z.object({
+  type: z.literal("tunnel:http-end"),
+  requestId: z.string(),
+  chunks: z.number().int().nonnegative(),
+  error: z.string().optional(),
+  checkoutId: z.string().default("main"),
+});
+
+/** App → bridge: stop streaming this response. Idempotent and best-effort —
+ *  an unknown requestId is a no-op. Without it a closed browser tab leaves the
+ *  bridge shipping a whole body through the phone's window. */
+export const TunnelHttpCancel = z.object({
+  type: z.literal("tunnel:http-cancel"),
+  requestId: z.string(),
   checkoutId: z.string().default("main"),
 });
 
 export type TunnelHttpRequest = z.infer<typeof TunnelHttpRequest>;
-export type TunnelHttpResponse = z.infer<typeof TunnelHttpResponse>;
+export type TunnelHttpStart = z.infer<typeof TunnelHttpStart>;
+export type TunnelHttpChunk = z.infer<typeof TunnelHttpChunk>;
+export type TunnelHttpEnd = z.infer<typeof TunnelHttpEnd>;
+export type TunnelHttpCancel = z.infer<typeof TunnelHttpCancel>;
 
 /** App → bridge: open a real upstream `ws(s)://localhost:<port><path>`
  *  connection, keyed by [tunnelId] for the life of the tab's WebSocket (a
@@ -88,7 +133,10 @@ export type TunnelWsClose = z.infer<typeof TunnelWsClose>;
 
 const TunnelMessageSchema = z.discriminatedUnion("type", [
   TunnelHttpRequest,
-  TunnelHttpResponse,
+  TunnelHttpStart,
+  TunnelHttpChunk,
+  TunnelHttpEnd,
+  TunnelHttpCancel,
   TunnelWsOpen,
   TunnelWsData,
   TunnelWsClose,
@@ -103,6 +151,26 @@ export function isTunnelMessage(raw: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Raw body bytes per slice. 192 KiB: a multiple of 3 so base64 is exactly
+ *  262_144 chars; ~262 KB sealed, so two slices fill one CREDIT_BATCH_BYTES and
+ *  seven pipeline inside CHANNEL_WINDOW_BYTES; well under FRAG_THRESHOLD so a
+ *  slice is always a single frame (base64 needs no JSON escaping, so the bound
+ *  is exact). The app does not mirror this — its contract is `seq`, not size. */
+export const TUNNEL_CHUNK_BYTES = 196_608;
+
+/** How long bytes short of a full slice wait for more before shipping,
+ *  measured from the FIRST pending byte — never re-armed by a later read, or
+ *  an event stream ticking faster than this would withhold the head (slice 0
+ *  rides `start`) until 192 KiB or EOF. Bounds first-byte latency for a
+ *  trickling body; a body that finishes arrives with its `done` immediately
+ *  and never pays it. */
+export const TUNNEL_CHUNK_FLUSH_MS = 50;
+
+/** Length of the base64 encoding of `n` bytes, without encoding anything. */
+export function base64Length(n: number): number {
+  return Math.ceil(n / 3) * 4;
 }
 
 export function parseTunnelMessage(raw: string | object): TunnelMessage | null {

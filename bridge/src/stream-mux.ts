@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { CONTROL_STREAM_ID } from "antgrid-wire";
 import type { Channel, MessageBus } from "./message-bus";
+import type { SendOutcome } from "./send-scheduler";
 import { createMessage, parseMessageFast } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { logger } from "./logger";
@@ -19,8 +20,11 @@ export const INVALID_NOTICE_TTL_MS = 60_000;
 export interface StreamHandle {
   readonly streamId: string;
   detach(): void;
-  /** Send a tunnel-protocol (preview channel) message tagged with this stream. */
-  sendTunnel(data: object): void;
+  /** Send a tunnel-protocol (preview channel) message tagged with this stream.
+   *  Resolves when the message left the send queue — "sent"/"dropped"/
+   *  "too-large" from the send path, or "gated" when this stream's outbound
+   *  authorization refused it. */
+  sendTunnel(data: object): Promise<SendOutcome>;
 }
 
 export interface AttachStreamOpts {
@@ -53,8 +57,9 @@ export interface AttachStreamOpts {
 export interface StreamMuxTransport {
   openStream(streamId: string): void;
   closeStream(streamId: string): void;
-  /** Seal + fragment + send one stream-tagged app envelope on `channel`. */
-  sendEnvelope(streamId: string, msg: unknown, channel: Channel): void;
+  /** Seal + fragment + send one stream-tagged app envelope on `channel`.
+   *  Resolves when the message left the send queue. */
+  sendEnvelope(streamId: string, msg: unknown, channel: Channel): Promise<SendOutcome>;
 }
 
 interface StreamEntry {
@@ -98,7 +103,7 @@ export class StreamMux {
     const unsub = bus.subscribe({
       deliver: (msg, channel) => {
         if (!mayDeliver()) return;
-        this.transport.sendEnvelope(streamId, msg, channel);
+        void this.transport.sendEnvelope(streamId, msg, channel);
       },
     });
     this.streams.set(streamId, { bus, unsub, opts, settled: false });
@@ -110,11 +115,15 @@ export class StreamMux {
       streamId,
       detach: () => this.detach(streamId),
       // Gated too: tunnel frames bypass the bus (see setPlainHook), so the
-      // subscriber check above never sees them.
-      sendTunnel: (data) => {
-        if (!mayDeliver()) return;
-        this.transport.sendEnvelope(streamId, data, "preview");
-      },
+      // subscriber check above never sees them. The refusal is "gated", NOT
+      // "dropped": a WS tunnel must survive the switch being off (the close a
+      // teardown would send is gated too, leaving the browser socket mute for
+      // the life of the page), and a cleared queue and a closed switch are
+      // different facts to the one consumer that awaits this.
+      sendTunnel: (data) =>
+        mayDeliver()
+          ? this.transport.sendEnvelope(streamId, data, "preview")
+          : Promise.resolve<SendOutcome>("gated"),
     };
   }
 
@@ -162,7 +171,7 @@ export class StreamMux {
       if (now - at >= INVALID_NOTICE_TTL_MS) this.invalidNotifiedAt.delete(id);
     }
     this.invalidNotifiedAt.set(streamId, now);
-    this.transport.sendEnvelope(
+    void this.transport.sendEnvelope(
       CONTROL_STREAM_ID,
       createMessage("stream-invalid", { streamId }),
       "control",

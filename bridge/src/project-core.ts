@@ -491,8 +491,23 @@ export class ProjectCore {
       // snapshots on reconnect. connState gates ALL bus subscribers at the source,
       // so don't suppress while a desktop owner shares it over loopback — that
       // would freeze the live local session.
-      onPeerOnline: () => { peerConnected = true; core.connState.peerOnline = true; },
+      onPeerOnline: () => {
+        // A tunneled body in flight across either edge is dead by construction —
+        // the relay client clears its queues at promotion and on peer-offline —
+        // but that clear only reaches a run parked on a send at that instant; a
+        // run between sends keeps streaming into a relay that will drop it or a
+        // session that will ignore it, competing for the preview window with the
+        // page reload the app is doing. The manager is the only thing that can
+        // stop it.
+        core.abortTunnelStreams();
+        peerConnected = true;
+        core.connState.peerOnline = true;
+      },
       onPeerOffline: () => {
+        // Before the hasOwner early return, and for the same reason as at
+        // peer-online: the phone has left whether or not a desktop owner is
+        // still here, and every body it was receiving is now unreachable.
+        core.abortTunnelStreams();
         // Unconditional, unlike the stream gate below: the loopback carve-out
         // keeps the DESKTOP's stream live, it doesn't make the phone reachable
         // in-band. Leaving this set would mute push on every promoted core.
@@ -656,6 +671,8 @@ export class ProjectCore {
     try { this.promotion?.stop(); } catch {}
     if (this.deps.mode === "remote" && this.streamHandle) {
       // Publish over the bus so the disconnecting notice rides this core's stream.
+      // Best-effort: a notice still queued in the relay client when the socket
+      // closes is dropped, and the phone learns of the shutdown by liveness.
       try { this.bus?.publish(createMessage("agent:disconnecting", { reason }), "control"); } catch {}
       await new Promise((resolve) => setTimeout(resolve, 200));
     }

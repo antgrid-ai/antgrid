@@ -21,8 +21,10 @@ import {
   normalizeRelayHost,
   TRANSFER_TIMEOUT_MS,
   GLOBAL_REASSEMBLY_BUDGET,
+  CREDIT_BATCH_BYTES,
 } from "antgrid-wire";
 import { FragReassembler } from "../../bridge/src/frag-reassembler";
+import { TUNNEL_GZIP_ENCODING } from "../../bridge/src/tunnel-protocol";
 
 /** The fake license token the eval relay gate (`fakeLicenseGate`) accepts. v3
  *  requires it for BOTH device types, so an app now sends it too.
@@ -63,6 +65,28 @@ export interface HelloForgeOpts {
   epoch?: number;
   /** Override the license token (default: TEST_LICENSE_TOKEN). */
   licenseToken?: string;
+}
+
+/** One tunneled HTTP response, reassembled from the frames the bridge streamed
+ *  for it. `frames` counts every frame consumed (start + chunks + end), so a
+ *  single-frame body reads `frames === 1`; `chunks` is how many
+ *  `tunnel:http-chunk` frames carried body after the head's own slice. */
+export interface TunnelHttpResult {
+  status: number;
+  headers: Record<string, string>;
+  setCookies: string[];
+  body: Buffer;
+  frames: number;
+  chunks: number;
+}
+
+/** Undo one body slice's encoding. Each gzip slice is an independent member, so
+ *  nothing carries over between slices. */
+function decodeTunnelSlice(frame: { data?: unknown; bodyEncoding?: unknown }): Buffer {
+  const data = typeof frame.data === "string" ? frame.data : "";
+  if (data === "") return Buffer.alloc(0);
+  const raw = Buffer.from(data, "base64");
+  return frame.bodyEncoding === TUNNEL_GZIP_ENCODING ? Buffer.from(Bun.gunzipSync(raw)) : raw;
 }
 
 /** The current E2E receive/send context (confirmed session or a rekey candidate). */
@@ -147,6 +171,15 @@ export class RelayClient {
    *  out sealed pongs, so the "swallow pongs" lever lives at the endpoint. */
   private swallowPongs = false;
   private rekeyInFlight = false;
+
+  // --- Per-channel flow control (receiver half; see docs/protocol/e2e-handshake.md §8.8) ---
+  // Cumulative sealed payload bytes taken off each channel since this session
+  // was established, and how much of that the agent has been told about. An
+  // eval client that never credits wedges the agent's window after one
+  // CHANNEL_WINDOW_BYTES, with liveness still green.
+  private rxConsumed: Record<"control" | "preview", number> = { control: 0, preview: 0 };
+  private rxCredited: Record<"control" | "preview", number> = { control: 0, preview: 0 };
+  private creditsPaused = false;
 
   private fragReassembler = new FragReassembler({
     timeoutMs: TRANSFER_TIMEOUT_MS,
@@ -404,6 +437,7 @@ export class RelayClient {
     if (this.established) {
       const pt = this.established.transport.open(payload);
       if (pt !== null) {
+        this.noteConsumed(channel, payload.length);
         this.onSealedPlaintext(pt, channel, false);
         return;
       }
@@ -415,9 +449,32 @@ export class RelayClient {
         return;
       }
     }
+    // The agent charged these bytes to its window the moment it wrote them, so
+    // a frame nothing could open is still consumed — leaving it uncounted would
+    // shrink that window for the rest of the session.
+    if (this.established) this.noteConsumed(channel, payload.length);
     // Undecryptable now: most likely a candidate agent-ready racing ahead of key
     // derivation — buffer for replay once the transport is installed.
     this.pendingEncrypted.push(new Uint8Array(payload));
+  }
+
+  private noteConsumed(channel: "control" | "preview", bytes: number): void {
+    this.rxConsumed[channel] += bytes;
+    if (this.rxConsumed[channel] - this.rxCredited[channel] >= CREDIT_BATCH_BYTES) this.sendCredit(channel);
+  }
+
+  /** `consumed` is cumulative, so a lost or reordered credit costs nothing —
+   *  the next one carries the whole total. */
+  private sendCredit(channel: "control" | "preview"): void {
+    const ctx = this.established;
+    if (!ctx || !this._pairedPeerId || this.creditsPaused) return;
+    this.rxCredited[channel] = this.rxConsumed[channel];
+    this.sendSealedFrame({ type: "credit", channel, consumed: this.rxConsumed[channel] }, ctx.transport, "control");
+  }
+
+  private resetRxFlow(): void {
+    this.rxConsumed = { control: 0, preview: 0 };
+    this.rxCredited = { control: 0, preview: 0 };
   }
 
   private onSealedPlaintext(plaintext: string, channel: "control" | "preview", fromPending: boolean): void {
@@ -460,14 +517,29 @@ export class RelayClient {
           this.dropEstablishedAttemptId = null;
           return;
         }
+        // Counters are per session on both sides: the agent zeroes its window
+        // as it sends this, so anything carried over would credit bytes it no
+        // longer has charged.
+        this.resetRxFlow();
         this.deliver(obj);
         return;
       case "ping": {
         // Answer sealed under whichever context is currently confirmed.
         const ctx = this.established;
-        if (ctx) this.sendSealedFrame({ type: "pong" }, ctx.transport, "control");
+        if (ctx) {
+          this.sendSealedFrame({ type: "pong" }, ctx.transport, "control");
+          // The agent's liveness tick is this client's only clock: re-sending
+          // both cumulative credits here is what heals one the relay dropped,
+          // for two ~60-byte frames per tick.
+          this.sendCredit("control");
+          this.sendCredit("preview");
+        }
         return;
       }
+      case "credit":
+        // The agent credits this client's own sends. Nothing here writes more
+        // than a window ahead of a reply, so there is no window to release.
+        return;
       case "pong":
         this.missedPongs = 0;
         return;
@@ -824,9 +896,12 @@ export class RelayClient {
     return streamId;
   }
 
-  /** Send an AbMessage tagged with a project stream (`{ s: streamId, m }`). */
-  sendOnStream(streamId: string, msg: AbMessage): void {
-    this.sendAppEnvelope(streamId, msg, "control");
+  /** Send a message tagged with a project stream (`{ s: streamId, m }`).
+   *  `msg` is `object` rather than `AbMessage` because the preview channel
+   *  carries tunnel-protocol frames, which are deliberately not AbMessages
+   *  (`parseMessageFast` rejecting them IS the routing). */
+  sendOnStream(streamId: string, msg: object, channel: "control" | "preview" = "control"): void {
+    this.sendAppEnvelope(streamId, msg, channel);
   }
 
   /** Await an AbMessage of `type` arriving on a specific project stream. */
@@ -845,7 +920,11 @@ export class RelayClient {
     this.sendAppEnvelope(CONTROL_STREAM_ID, msg, "control");
   }
 
-  /** Seal + send a tunnel-protocol message on the preview channel (control plane). */
+  /** Seal + send a tunnel-protocol message on the preview channel of the machine
+   *  CONTROL PLANE — where the bridge deliberately drops it (`onTunnelMessage:
+   *  () => {}` in host-server.ts). The tunnel is served per-project, so a frame
+   *  that expects an answer goes through `sendOnStream(streamId, …, "preview")`;
+   *  this exists only to drive the control-plane drop. */
   sendEncryptedTunnel(data: object): void {
     this.sendAppEnvelope(CONTROL_STREAM_ID, data, "preview");
   }
@@ -973,6 +1052,26 @@ export class RelayClient {
     this.swallowPongs = v;
   }
 
+  /** Test lever: while true this client emits no `credit` frame, so the agent's
+   *  send window on a channel closes after CHANNEL_WINDOW_BYTES and stays
+   *  closed. Liveness is unaffected — session frames bypass the gate — so the
+   *  session survives the stall. Releasing flushes both cumulative totals at
+   *  once, which is all the agent needs to resume. */
+  setCreditsPaused(v: boolean): void {
+    this.creditsPaused = v;
+    if (!v) {
+      this.sendCredit("control");
+      this.sendCredit("preview");
+    }
+  }
+
+  /** Cumulative sealed payload bytes taken off `channel` since this session was
+   *  established — the receiver-side view of what the agent charged to its
+   *  window. */
+  consumedBytes(channel: "control" | "preview"): number {
+    return this.rxConsumed[channel];
+  }
+
   // --- Waiters ---
 
   waitFor(match: (msg: any) => boolean, timeoutMs = 5_000): Promise<any> {
@@ -988,6 +1087,14 @@ export class RelayClient {
     const before = this.messageQueue.length;
     this.messageQueue = this.messageQueue.filter((m) => m?.type !== type);
     return before - this.messageQueue.length;
+  }
+
+  /** How many queued messages match, WITHOUT consuming any of them. Every other
+   *  accessor takes what it matches, so a test that samples "how much of this
+   *  stream has arrived so far" twice would consume the very frames it is
+   *  measuring. */
+  queuedCount(match: (msg: any) => boolean): number {
+    return this.messageQueue.filter(match).length;
   }
 
   private waitForCancelable(
@@ -1030,8 +1137,64 @@ export class RelayClient {
     return this.waitFor((msg: any) => msg.type === type, timeoutMs);
   }
 
-  waitForTunnelResponse(requestId: string, timeoutMs = 10_000): Promise<any> {
-    return this.waitFor((m: any) => m?.type === "tunnel:http-response" && m.requestId === requestId, timeoutMs);
+  /**
+   * Assemble one tunneled HTTP response: the `tunnel:http-start` for `requestId`
+   * (head + first body slice), then — unless that start was `last` — every
+   * `tunnel:http-chunk` up to the `tunnel:http-end`. `timeoutMs` bounds the
+   * WHOLE response, not each frame, so a stalled body fails on the same clock a
+   * whole-body reply used to.
+   *
+   * The seq and count checks are the app's own loss detection, restated here:
+   * the relay drops single frames on rate limit or backpressure and a FIFO
+   * cannot show a hole, so a body that quietly lost a chunk must fail the test
+   * rather than come back short.
+   */
+  async waitForTunnelResponse(requestId: string, timeoutMs = 10_000): Promise<TunnelHttpResult> {
+    const deadline = Date.now() + timeoutMs;
+    const left = () => Math.max(1, deadline - Date.now());
+
+    const start = await this.waitFor(
+      (m: any) => m?.type === "tunnel:http-start" && m.requestId === requestId,
+      left(),
+    );
+    const parts: Buffer[] = [decodeTunnelSlice(start)];
+    let frames = 1;
+    let chunks = 0;
+
+    while (start.last !== true) {
+      // Each waitFor takes the OLDEST match, and the bridge emits a stream's
+      // frames in order on one channel, so this walks the body in seq order.
+      const frame = await this.waitFor(
+        (m: any) =>
+          (m?.type === "tunnel:http-chunk" || m?.type === "tunnel:http-end") && m.requestId === requestId,
+        left(),
+      );
+      frames++;
+      if (frame.type === "tunnel:http-chunk") {
+        if (frame.seq !== chunks + 1) {
+          throw new Error(`seq gap on ${requestId}: chunk ${frame.seq} arrived, expected ${chunks + 1}`);
+        }
+        chunks++;
+        parts.push(decodeTunnelSlice(frame));
+        continue;
+      }
+      if (typeof frame.error === "string") {
+        throw new Error(`tunnel stream ${requestId} ended with error: ${frame.error}`);
+      }
+      if (frame.chunks !== chunks) {
+        throw new Error(`chunk count mismatch on ${requestId}: end claims ${frame.chunks}, received ${chunks}`);
+      }
+      break;
+    }
+
+    return {
+      status: start.status,
+      headers: (start.headers ?? {}) as Record<string, string>,
+      setCookies: (start.setCookies ?? []) as string[],
+      body: Buffer.concat(parts),
+      frames,
+      chunks,
+    };
   }
 
   /**

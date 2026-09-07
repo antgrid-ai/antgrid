@@ -451,6 +451,10 @@ class ControlPlaneClient {
           'project:start not delivered — the session is reconnecting',
         );
       }
+      // Deliberately un-timed inside the action's own bound: the send resolves
+      // at hand-off to the socket, and every path that abandons a queued frame
+      // — session teardown, dispose, the stream detaching — completes it, so
+      // this cannot outlive the session that owns it.
       await transport.send(
         createAbMessage('project:start', {'projectId': projectId}),
       );

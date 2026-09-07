@@ -13,4 +13,5 @@ export * from "./relay-protocol";
 export * from "./relay-auth";
 export * from "./relay-slot";
 export * from "./frag";
+export * from "./flow";
 export * from "./push-protocol";

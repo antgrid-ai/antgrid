@@ -127,6 +127,10 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   const MSG_WINDOW_MS = 10000;
   const messageTimes: number[] = [];
   let msgHead = 0;
+  /** Monotonic since start: frames the recipient's socket refused because it
+   *  was already backlogged. The only vantage point from which account fan-in
+   *  toward one bridge is visible. */
+  let backpressureDrops = 0;
 
   function recordMessage(): void {
     const now = Date.now();
@@ -161,7 +165,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         buckets[k] = n;
       }
       droppedByBucket.clear();
-      logger.warn("Routed frames dropped (rate limit)", {
+      logger.warn("Routed frames dropped", {
         total,
         windowMs: DROP_LOG_WINDOW_MS,
         buckets,
@@ -178,6 +182,12 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   interface ErrorOpts {
     ref?: string;
     serverTime?: string;
+    /** Routed-frame drops only. The route header carries no message id, so the
+     *  channel and the payload length are all the sender can be told; that is
+     *  exactly what it needs to un-charge the flow-control window it had
+     *  already committed to those bytes. */
+    channel?: "control" | "preview";
+    bytes?: number;
   }
   function sendError(
     ws: ServerWebSocket<WsData>,
@@ -560,7 +570,10 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     // learn liveness (no presence oracle).
     const target = connections.getByDeviceId(header.to);
     if (!target || target.ws.readyState !== 1 || !mayRoute(sender, target)) {
-      sendError(ws, "PEER_OFFLINE", "Recipient not connected", true);
+      sendError(ws, "PEER_OFFLINE", "Recipient not connected", true, {
+        channel: header.channel,
+        bytes: decoded.payload.length,
+      });
       return;
     }
 
@@ -572,7 +585,10 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     const key = `${pairKey(sender.deviceId, header.to)}|${header.channel}`;
     if (!routeRateLimiter.allow(key)) {
       recordDroppedFrame(key);
-      sendError(ws, "MESSAGE_RATE_LIMITED", "Message rate limit exceeded", true);
+      sendError(ws, "MESSAGE_RATE_LIMITED", "Message rate limit exceeded", true, {
+        channel: header.channel,
+        bytes: decoded.payload.length,
+      });
       return;
     }
 
@@ -585,7 +601,20 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       ts: Date.now(),
     };
     // Forward verbatim: the kind byte and sealed payload are opaque to us.
-    target.ws.send(encodeRouteFrame(outHeader, decoded.payload, decoded.kind));
+    // Bun returns 0 when it discarded the message — the socket closed under us,
+    // or the recipient is past its backpressure limit. Ignoring that turns a
+    // drop into a hole the peer can only observe as a frag abort or a tunnel
+    // timeout minutes later, so it is reported like any other routed drop.
+    const status = target.ws.send(encodeRouteFrame(outHeader, decoded.payload, decoded.kind));
+    if (status === 0) {
+      recordDroppedFrame(`${key}|backpressure`);
+      backpressureDrops++;
+      sendError(ws, "ROUTE_FAILED", "Recipient backlogged", true, {
+        channel: header.channel,
+        bytes: decoded.payload.length,
+      });
+      return;
+    }
     recordMessage();
   }
 
@@ -593,7 +622,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     const t = Date.now();
     const windowMs = config.pingIntervalMs + config.pongTimeoutMs;
     for (const live of connections.getAll()) {
-      if (liveness.isTimedOut(live.connectionId, t, windowMs)) {
+      if (liveness.isTimedOut(live.connectionId, t, windowMs, live.ws.getBufferedAmount())) {
         logger.info("Device timed out (no pong)", {
           connectionId: live.connectionId,
           deviceId: live.deviceId,
@@ -630,6 +659,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         return Response.json({
           activeConnections: connections.getConnectionCount(),
           messagesPerSec: Math.round(messagesPerSec * 100) / 100,
+          backpressureDrops,
           uptime: Math.floor((t - startTime) / 1000),
         });
       }
@@ -674,6 +704,13 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       return new Response("Not Found", { status: 404 });
     },
     websocket: {
+      // Bun's default `backpressureLimit` (16 MiB, measured — the docs' 1 MB
+      // line is stale) applies PER SOCKET, and a sender honouring
+      // SOCKET_INFLIGHT_BYTES keeps one peer well under it. The relay→bridge
+      // socket fans in every app of the account, though, so k uploading apps
+      // can hold k × that budget toward a single bridge; raising the limit only
+      // moves the drop, so it stays at the default and `backpressureDrops` in
+      // /metrics is the observable when fan-in actually bites.
       maxPayloadLength: MAX_FRAME_PAYLOAD,
       open(ws) {
         connections.incrementIpCount(ws.data.ip);

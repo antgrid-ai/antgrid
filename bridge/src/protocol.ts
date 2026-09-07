@@ -19,6 +19,7 @@ const FileTreeNodeSchema: z.ZodType<{
   size?: number;
   extension?: string;
   children?: any[];
+  truncated?: true;
 }> = z.lazy(() =>
   z.object({
     name: z.string(),
@@ -27,6 +28,9 @@ const FileTreeNodeSchema: z.ZodType<{
     size: z.number().optional(),
     extension: z.string().optional(),
     children: z.array(FileTreeNodeSchema).optional(),
+    // The directory's listing was cut at the tree's node budget — see
+    // MAX_TREE_NODES in file-tree.ts.
+    truncated: z.literal(true).optional(),
   }),
 );
 
@@ -741,6 +745,11 @@ const TreeFullMessage = BaseMessage.extend({
   type: z.literal("tree:full"),
   projectId: z.string(),
   root: FileTreeNodeSchema,
+  // Which revision of the watcher's tree this is. A resync push is the only
+  // full tree that still reaches an app unasked, and an app that cannot name
+  // the revision it holds cannot ask "still this one?" on the next resume —
+  // see `sinceSeq` below. Optional so a pre-seq bridge still parses.
+  seq: z.number().int().nonnegative().optional(),
   ...CheckoutScoped,
 });
 
@@ -1754,12 +1763,29 @@ const TerminalSnapshotMessage = BaseMessage.extend({
 
 const FileTreeSnapshotRequestMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot:request"),
+  /** The revision the caller's tree is already at. Matched against the
+   *  watcher's current seq: still equal means the caller is current and is
+   *  answered `file:tree:unchanged` instead of the whole tree. Only a caller
+   *  that can vouch the seq came from THIS agent process may send it — a
+   *  restarted agent counts from zero again, so a stale claim would be
+   *  confirmed rather than corrected (see file_service.dart). */
+  sinceSeq: z.number().int().nonnegative().optional(),
   ...CheckoutScoped,
 });
 
 const FileTreeSnapshotMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot"),
   tree: FileTreeNodeSchema,
+  seq: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+/** The cheap answer to a `sinceSeq` request the watcher has not moved past.
+ *  Its own type rather than a tree-less `file:tree:snapshot`: a snapshot whose
+ *  tree is sometimes absent puts a "when is this null?" question on every
+ *  future reader of the frame that normally carries the tree. */
+const FileTreeUnchangedMessage = BaseMessage.extend({
+  type: z.literal("file:tree:unchanged"),
   seq: z.number().int().nonnegative(),
   ...CheckoutScoped,
 });
@@ -2300,6 +2326,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   TerminalSnapshotMessage,
   FileTreeSnapshotRequestMessage,
   FileTreeSnapshotMessage,
+  FileTreeUnchangedMessage,
   PreviewSnapshotRequestMessage,
   PreviewSnapshotMessage,
   RequestMessage,
@@ -2467,6 +2494,7 @@ export type TerminalSnapshotRequest = z.infer<typeof TerminalSnapshotRequestMess
 export type TerminalSnapshot = z.infer<typeof TerminalSnapshotMessage>;
 export type FileTreeSnapshotRequest = z.infer<typeof FileTreeSnapshotRequestMessage>;
 export type FileTreeSnapshot = z.infer<typeof FileTreeSnapshotMessage>;
+export type FileTreeUnchanged = z.infer<typeof FileTreeUnchangedMessage>;
 export type PreviewSnapshotRequest = z.infer<typeof PreviewSnapshotRequestMessage>;
 export type PreviewSnapshot = z.infer<typeof PreviewSnapshotMessage>;
 export type PreviewUrlEntry = z.infer<typeof PreviewUrlEntrySchema>;
@@ -2532,7 +2560,8 @@ export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
   "agent:question-resolve",
   "terminal:input",
   "tunnel:http-request",
-  "tunnel:http-response",
+  "tunnel:http-start",
+  "tunnel:http-chunk",
   "tunnel:ws-open",
 ]);
 
@@ -2556,7 +2585,7 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "command:run", "command:output", "command:done",
   "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
-  "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "preview:snapshot:request", "preview:snapshot",
+  "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged", "preview:snapshot:request", "preview:snapshot",
   "session:result", "control:result",
 ]);
 
@@ -2650,7 +2679,7 @@ const KNOWN_TYPES = new Set<string>([
   "session:result", "session:updated",
   "client:focus-state",
   "terminal:snapshot:request", "terminal:snapshot",
-  "file:tree:snapshot:request", "file:tree:snapshot",
+  "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged",
   "preview:snapshot:request", "preview:snapshot",
   "request", "response",
   "agent:turn-start", "agent:session-reset", "agent:turn-end",
