@@ -103,6 +103,65 @@ class TerminalTab {
   }
 }
 
+/// How far one terminal has got towards showing the user its screen.
+///
+/// Two orthogonal facts are folded in here: whether the engine holds bytes, and
+/// whether a screen pull is outstanding. The paint decides how the pull reads —
+/// an outstanding pull over an engine that already holds current bytes is a
+/// routine refresh, not a wait.
+enum TerminalAttachStage {
+  /// No pull has gone out and nothing has painted.
+  cold,
+
+  /// A pull is outstanding and the engine is empty. The user is waiting.
+  awaitingScreen,
+
+  /// A pull is outstanding over an engine that already holds current bytes.
+  /// Routine: every re-establishment and every mobile focus resume re-pulls
+  /// every live tab. Never dimmed, never escalated.
+  refreshing,
+
+  /// The engine holds bytes and nothing is outstanding.
+  painted,
+
+  /// A pull over an empty engine went unanswered past its bound. Only ever
+  /// reachable for a terminal that has never painted.
+  failed,
+}
+
+/// Whether the checkout has enough to show anything at all.
+enum CheckoutAttachStatus {
+  /// No TerminalService has derived anything yet — the const default of a
+  /// TerminalState nobody produced. Renders the neutral empty copy: a stubbed
+  /// or absent state must not claim progress it cannot bound, because the
+  /// timers that bound it live in the service that does not exist.
+  unknown,
+  attaching,
+  ready,
+  failed,
+}
+
+class TerminalHydration {
+  const TerminalHydration({required this.stage, this.requestedAtMs});
+
+  final TerminalAttachStage stage;
+
+  /// Epoch ms this client's outstanding pull went out, for an elapsed readout.
+  /// An immutable stamp, never a ticking value: the seconds counter lives in a
+  /// widget ticker so a 1 Hz rebuild never reaches the terminal beside it.
+  final int? requestedAtMs;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is TerminalHydration &&
+          other.stage == stage &&
+          other.requestedAtMs == requestedAtMs);
+
+  @override
+  int get hashCode => Object.hash(stage, requestedAtMs);
+}
+
 class TerminalState {
   final Map<String, TerminalTab> tabs;
   final String? activeTerminalId;
@@ -123,6 +182,20 @@ class TerminalState {
   final String? gitCheckoutError;
   final bool? needsFirstRun;
 
+  /// Per-terminal attach stage, recomputed by `TerminalService._setState` on
+  /// every emission — never carried and never copied forward, so no mutation
+  /// site can strand a stale one.
+  final Map<String, TerminalHydration> hydration;
+
+  /// Whether this checkout has enough to show anything at all. Defaults to
+  /// [CheckoutAttachStatus.unknown] so a state nobody derived cannot claim
+  /// progress the timers that would bound it are not there to end.
+  final CheckoutAttachStatus attach;
+
+  /// True while the transport cannot carry a keystroke. Checkout-wide, because
+  /// it is a property of the transport and not of any one terminal.
+  final bool inputPaused;
+
   const TerminalState({
     this.tabs = const {},
     this.activeTerminalId,
@@ -138,6 +211,9 @@ class TerminalState {
     this.gitBranchesError,
     this.gitCheckoutError,
     this.needsFirstRun,
+    this.hydration = const {},
+    this.attach = CheckoutAttachStatus.unknown,
+    this.inputPaused = false,
   });
 
   TerminalTab? get activeTab =>
@@ -170,6 +246,9 @@ class TerminalState {
     bool clearGitCheckoutError = false,
     bool clearActiveTerminal = false,
     bool? needsFirstRun,
+    Map<String, TerminalHydration>? hydration,
+    CheckoutAttachStatus? attach,
+    bool? inputPaused,
   }) {
     return TerminalState(
       tabs: tabs ?? this.tabs,
@@ -192,6 +271,9 @@ class TerminalState {
           ? null
           : (gitCheckoutError ?? this.gitCheckoutError),
       needsFirstRun: needsFirstRun ?? this.needsFirstRun,
+      hydration: hydration ?? this.hydration,
+      attach: attach ?? this.attach,
+      inputPaused: inputPaused ?? this.inputPaused,
     );
   }
 }

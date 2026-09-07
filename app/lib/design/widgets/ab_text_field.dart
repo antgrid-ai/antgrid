@@ -340,7 +340,9 @@ class _AbTextFieldState extends State<AbTextField> {
 
     // Disabled-state contract: opacity 0.4, no interaction.
     if (!enabled) {
-      return IgnorePointer(child: Opacity(opacity: 0.4, child: box));
+      return IgnorePointer(
+        child: Opacity(opacity: AbTokens.opacityDisabled, child: box),
+      );
     }
     return box;
   }

@@ -56,6 +56,21 @@ class TerminalService {
   /// older agent strips the request key and answers screen-only, and a claim
   /// nothing retires would later admit ANOTHER device's erase.
   final Set<String> _awaitingHistoryIds = {};
+
+  /// Epoch ms of this client's outstanding screen pull per terminal.
+  ///
+  /// Deliberately separate from [_awaitingHistoryIds], which answers a
+  /// different question: membership there proves the engine was EMPTY when the
+  /// pull went out, and it is consumed by any snapshot that applies, including
+  /// another device's. This map is retired only where a screen actually
+  /// arrives.
+  final Map<String, int> _snapshotRequestedAtMs = {};
+  final Map<String, Timer> _snapshotDeadlines = {};
+  final Set<String> _snapshotFailedIds = {};
+  Timer? _checkoutAttachDeadline;
+  bool _sawAgentStatus = false;
+  bool _checkoutAttachFailed = false;
+  bool _hydrationPublishScheduled = false;
   bool _trackedUse = false;
 
   String? _clientId;
@@ -70,10 +85,30 @@ class TerminalService {
   /// Bounds optimistic terminal state when the one-shot start send is dropped.
   /// Injectable so tests do not wait for the production recovery window.
   final Duration terminalStartTimeout;
+
+  /// Bounds one terminal's screen pull. A request is not a promise of a reply —
+  /// an id the agent no longer knows, and a send dropped in a keyless window or
+  /// behind the machine's remote-access gate, are all answered with no frame at
+  /// all — so an unanswered pull over an empty engine has to end somewhere.
+  /// Injectable so tests drive a short window.
+  final Duration snapshotAttachTimeout;
+
+  /// Bounds the wait for the checkout's first `agent:status`, which is what
+  /// tells the app there are any terminals to attach to.
+  final Duration checkoutAttachTimeout;
   ReplyLatch? _branchesLatch;
   ReplyLatch? _checkoutLatch;
 
-  final _stateController = StreamController<TerminalState>.broadcast();
+  /// The checkout bound is armed on first subscription and dropped with the
+  /// last one: it exists for a surface that is waiting, so a service nobody
+  /// watches must not hold a live timer for the length of the timeout — the
+  /// test binding reports one outliving its widget tree as a leak, and a
+  /// service is built eagerly for every checkout whether or not anything reads
+  /// it.
+  late final _stateController = StreamController<TerminalState>.broadcast(
+    onListen: _armCheckoutAttachDeadline,
+    onCancel: _cancelCheckoutAttachDeadline,
+  );
   final StreamController<TerminalNotificationMessage> _notificationController =
       StreamController<TerminalNotificationMessage>.broadcast();
   final StreamController<NotificationPushMessage> _pushController =
@@ -93,6 +128,8 @@ class TerminalService {
     this.checkoutId = 'main',
     this.gitActionTimeout = const Duration(seconds: 15),
     this.terminalStartTimeout = const Duration(seconds: 15),
+    this.snapshotAttachTimeout = const Duration(seconds: 15),
+    this.checkoutAttachTimeout = const Duration(seconds: 30),
   }) {
     // Heavy tier — terminal:output + terminal:snapshot (HEAVY tier messages).
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
@@ -136,6 +173,28 @@ class TerminalService {
 
   static const _snapshotHydratorKey = 'terminal:snapshots';
 
+  /// Bounds the wait for the first `agent:status`, so a checkout that is never
+  /// answered stops claiming progress.
+  ///
+  /// Re-armed rather than merely cancelled wherever the attach is re-driven: a
+  /// fresh attempt clears the previous failure, and clearing it without a new
+  /// bound would leave the checkout attaching with nothing left to end it.
+  void _cancelCheckoutAttachDeadline() {
+    _checkoutAttachDeadline?.cancel();
+    _checkoutAttachDeadline = null;
+  }
+
+  void _armCheckoutAttachDeadline() {
+    _cancelCheckoutAttachDeadline();
+    if (_disposed || _sawAgentStatus) return;
+    _checkoutAttachDeadline = Timer(checkoutAttachTimeout, () {
+      _checkoutAttachDeadline = null;
+      if (_disposed || _sawAgentStatus) return;
+      _checkoutAttachFailed = true;
+      _publishHydration();
+    });
+  }
+
   Future<void> _rehydrateTerminals() async {
     if (_disposed) return;
     // Cleared first and unconditionally, because a request is not a promise of
@@ -145,6 +204,16 @@ class TerminalService {
     // conditional on one would strand a cutoff above every seq a respawned PTY
     // emits and leave the pane blank behind a live process.
     _snapshotSeq.clear();
+    // A checkout that was merely slow is not a broken one, and this path is a
+    // fresh attempt at the thing that timed out. The verdict is dropped and
+    // re-bounded together — a cleared failure with no deadline behind it would
+    // leave the checkout attaching with nothing left to end it. Skipped when
+    // neither is live, so a re-drive can never mint the first bound for a
+    // service nothing is listening to.
+    if (_checkoutAttachDeadline != null || _checkoutAttachFailed) {
+      _checkoutAttachFailed = false;
+      _armCheckoutAttachDeadline();
+    }
     // The geometry is invalidated on the same grounds as the cutoff above: a
     // reattach can hide a resize the agent never applied, and an
     // exit-and-respawn nothing on the wire reported (the seq reasoning in the
@@ -219,8 +288,96 @@ class TerminalService {
         state = state.copyWith(tabs: tabs);
       }
     }
+    // Recomputed on every emission rather than carried, because every mutation
+    // site funnels through here: a value carried on the state would be wiped by
+    // the field-by-field rebuild in _handleAgentStatus, and one carried on a tab
+    // by any of the copyWith sites.
+    state = state.copyWith(
+      hydration: _deriveHydration(state.tabs),
+      attach: _deriveAttach(state.tabs),
+    );
     _state = state;
     _stateController.add(state);
+  }
+
+  Map<String, TerminalHydration> _deriveHydration(
+    Map<String, TerminalTab> tabs,
+  ) {
+    return {
+      for (final id in tabs.keys)
+        id: TerminalHydration(
+          stage: _stageFor(id),
+          requestedAtMs: _snapshotRequestedAtMs[id],
+        ),
+    };
+  }
+
+  // The paint decides how an outstanding pull reads. A re-pull over an engine
+  // that already holds current bytes is routine — every re-establishment and
+  // every focus resume issues one for every live tab — and must never present
+  // as a wait or escalate to a failure.
+  TerminalAttachStage _stageFor(String id) {
+    final painted = _paintedTerminalIds.contains(id);
+    if (_snapshotFailedIds.contains(id)) return TerminalAttachStage.failed;
+    if (_snapshotRequestedAtMs.containsKey(id)) {
+      return painted
+          ? TerminalAttachStage.refreshing
+          : TerminalAttachStage.awaitingScreen;
+    }
+    return painted ? TerminalAttachStage.painted : TerminalAttachStage.cold;
+  }
+
+  // Checkout-wide failure means ONLY "no agent:status ever arrived", i.e. there
+  // are no tabs to show. One terminal that cannot be snapshotted — a PTY that
+  // exited, an id the agent no longer knows — is surfaced on that terminal's own
+  // pane and leaves the checkout usable.
+  CheckoutAttachStatus _deriveAttach(Map<String, TerminalTab> tabs) {
+    if (_checkoutAttachFailed) return CheckoutAttachStatus.failed;
+    if (!_sawAgentStatus) return CheckoutAttachStatus.attaching;
+    for (final entry in tabs.entries) {
+      // Only a wait that something will end may hold the checkout back. A
+      // terminal with no PTY behind it is snapshotted on purpose — a retained
+      // transcript is always already stopped — and the agent answers a screen
+      // it no longer has with no frame at all, so nothing arms a deadline for
+      // it and nothing would ever clear an "attaching" taken from it.
+      if (!_hasLivePty(entry.value)) continue;
+      final stage = _stageFor(entry.key);
+      if (stage == TerminalAttachStage.cold ||
+          stage == TerminalAttachStage.awaitingScreen) {
+        return CheckoutAttachStatus.attaching;
+      }
+    }
+    return CheckoutAttachStatus.ready;
+  }
+
+  /// Re-emit the current state so a hydration-only transition reaches the UI.
+  ///
+  /// Coalesced to one emission per microtask. Neither TerminalState nor
+  /// TerminalTab defines `==` and `terminalStateProvider` is a StreamProvider,
+  /// so every emission notifies every listener in the workspace; a burst of
+  /// discovered terminals would otherwise produce one full rebuild each.
+  void _publishHydration() {
+    if (_disposed || _hydrationPublishScheduled) return;
+    _hydrationPublishScheduled = true;
+    scheduleMicrotask(() {
+      _hydrationPublishScheduled = false;
+      if (_disposed) return;
+      _setState(_state);
+    });
+  }
+
+  /// Drops the bookkeeping for [terminalId]'s outstanding pull, reporting
+  /// whether anything was actually retired.
+  ///
+  /// The answer gates the re-emission: this runs on the live-output path, where
+  /// republishing per frame would push a full workspace rebuild behind every
+  /// byte the guest writes.
+  bool _retireSnapshotPull(String terminalId) {
+    final deadline = _snapshotDeadlines.remove(terminalId);
+    deadline?.cancel();
+    final hadRequest = _snapshotRequestedAtMs.remove(terminalId) != null;
+    final hadFailure = _snapshotFailedIds.remove(terminalId);
+    return deadline != null || hadRequest || hadFailure;
   }
 
   void _onHeavyJson(Map<String, dynamic> json) {
@@ -313,7 +470,15 @@ class TerminalService {
     // appended lands after the cursor is placed, so the blob goes on verbatim.
     if (!msg.composed) tab.ghostty.appendOutputBytes(_legacyAttachErase);
     tab.ghostty.appendOutputBytes(utf8.encode(msg.scrollback));
-    _paintedTerminalIds.add(msg.terminalId);
+    // Retired here and nowhere earlier. This method has three other exits — a
+    // tab that vanished between request and reply, a blob older than the cutoff,
+    // and a history blob aimed at another device's cold attach — and clearing on
+    // any of them would report our own outstanding pull as answered by a frame
+    // that painted nothing. Leaving it outstanding there is correct; the
+    // deadline owns it.
+    final retired = _retireSnapshotPull(msg.terminalId);
+    final firstPaint = _paintedTerminalIds.add(msg.terminalId);
+    if (retired || firstPaint) _publishHydration();
   }
 
   void _requestTerminalSnapshot(String terminalId) {
@@ -334,6 +499,45 @@ class TerminalService {
         'history': wantsHistory,
       }),
     );
+    _snapshotRequestedAtMs[terminalId] = DateTime.now().millisecondsSinceEpoch;
+    _snapshotFailedIds.remove(terminalId);
+    _snapshotDeadlines.remove(terminalId)?.cancel();
+    // Bounded only where an unanswered pull is actually a fault. A terminal
+    // whose process has exited has no screen left to serialize: the manager
+    // disposes the screen on exit unless the transcript is retained, and the
+    // handler answers a missing screen with a log line and NO frame. That pull
+    // is structurally unanswerable and must never read as a failure.
+    final tab = _state.tabs[terminalId];
+    if (tab != null && _hasLivePty(tab)) {
+      _snapshotDeadlines[terminalId] = Timer(snapshotAttachTimeout, () {
+        if (_disposed) return;
+        _snapshotDeadlines.remove(terminalId);
+        _snapshotRequestedAtMs.remove(terminalId);
+        // Never re-arm _snapshotSeq here — only _applySnapshot may write a
+        // cutoff. A cutoff armed on a request rather than a reply sits above
+        // every seq a respawned PTY emits: a blank pane behind a live process.
+        if (!_paintedTerminalIds.contains(terminalId)) {
+          _snapshotFailedIds.add(terminalId);
+        }
+        _publishHydration();
+      });
+    }
+    _publishHydration();
+  }
+
+  /// Re-drives ONE terminal's screen pull.
+  ///
+  /// Deliberately not `StreamTransport.refreshSnapshot()`, which re-drives every
+  /// hydrator on the stream — including a per-checkout `tree:full` for every
+  /// checkout — and would turn a user's tap into a multi-megabyte fan-out.
+  void retryAttach(String terminalId) {
+    if (_disposed || !_state.tabs.containsKey(terminalId)) return;
+    // Dropping the cutoff before the request is what lets a fresh reply paint
+    // at all, and is precedented: the reconnect re-drive clears every cutoff
+    // first and unconditionally, for the same reason.
+    _snapshotSeq.remove(terminalId);
+    _snapshotFailedIds.remove(terminalId);
+    _requestTerminalSnapshot(terminalId);
   }
 
   // --- Message dispatch ---
@@ -385,7 +589,14 @@ class TerminalService {
       terminalId: msg.terminalId,
     );
     tab.ghostty.appendOutputBytes(utf8.encode(msg.data));
-    _paintedTerminalIds.add(msg.terminalId);
+    // Live bytes answer the question an outstanding pull was asking. Without
+    // this, a terminal that starts streaming while its snapshot request is in
+    // flight — the common case for a busy TUI, and for a request the agent
+    // answers with nothing — waits out the whole bound and then reports a
+    // failure over a pane that is visibly live.
+    final retired = _retireSnapshotPull(msg.terminalId);
+    final firstPaint = _paintedTerminalIds.add(msg.terminalId);
+    if (retired || firstPaint) _publishHydration();
   }
 
   void _handleTerminalStarted(TerminalStartedMessage msg) {
@@ -500,6 +711,12 @@ class TerminalService {
   }
 
   void _handleAgentStatus(AgentStatusMessage msg) {
+    _sawAgentStatus = true;
+    // A checkout that was merely slow is not a broken one. The deadline fired
+    // before the frame arrived; the frame arriving is the answer.
+    _checkoutAttachFailed = false;
+    _checkoutAttachDeadline?.cancel();
+    _checkoutAttachDeadline = null;
     // Services list is now mirrored into ProjectStatus by ProjectStatusNotifier;
     // consumers read it from projectStatusProvider.
     final newTabs = <String, TerminalTab>{};
@@ -625,6 +842,13 @@ class TerminalService {
     _snapshotSeq.removeWhere((id, _) => !newTabs.containsKey(id));
     _paintedTerminalIds.removeWhere((id) => !newTabs.containsKey(id));
     _awaitingHistoryIds.removeWhere((id) => !newTabs.containsKey(id));
+    _snapshotRequestedAtMs.removeWhere((id, _) => !newTabs.containsKey(id));
+    _snapshotFailedIds.removeWhere((id) => !newTabs.containsKey(id));
+    _snapshotDeadlines.removeWhere((id, timer) {
+      if (newTabs.containsKey(id)) return false;
+      timer.cancel();
+      return true;
+    });
     for (final terminalId in discovered) {
       // Only the tabs that survived the rebuild: one dropped along the way has
       // nowhere for the reply to land.
@@ -649,6 +873,7 @@ class TerminalService {
     // user the history the new tab is about to be handed.
     _paintedTerminalIds.remove(terminalId);
     _awaitingHistoryIds.remove(terminalId);
+    _retireSnapshotPull(terminalId);
     final tab = TerminalTab(
       terminalId: terminalId,
       name: name,
@@ -877,6 +1102,7 @@ class TerminalService {
     _snapshotSeq.remove(terminalId);
     _paintedTerminalIds.remove(terminalId);
     _awaitingHistoryIds.remove(terminalId);
+    _retireSnapshotPull(terminalId);
     tab.ghostty.dispose();
     final tabs = Map<String, TerminalTab>.from(_state.tabs)..remove(terminalId);
     final isActive = _state.activeTerminalId == terminalId;
@@ -1031,8 +1257,16 @@ class TerminalService {
     for (final timer in _pendingTerminalTimers.values) {
       timer.cancel();
     }
+    for (final timer in _snapshotDeadlines.values) {
+      timer.cancel();
+    }
+    _checkoutAttachDeadline?.cancel();
+    _checkoutAttachDeadline = null;
     _resizeTimers.clear();
     _pendingTerminalTimers.clear();
+    _snapshotDeadlines.clear();
+    _snapshotRequestedAtMs.clear();
+    _snapshotFailedIds.clear();
     _resizeBaseDrivers.clear();
     _snapshotSeq.clear();
     _deletedTerminalIds.clear();
