@@ -5,7 +5,7 @@ import {
   CREDIT_BATCH_BYTES,
   MAX_SEND_QUEUE_BYTES,
   SEAL_OVERHEAD_BYTES,
-  WINDOW_RESYNC_CREDITS,
+  WINDOW_RESYNC_AGE_MS,
   WINDOW_STALL_WARN_MS,
   MAX_FRAME_PAYLOAD,
   MAX_TRANSFER_BYTES,
@@ -37,7 +37,7 @@ describe("flow-control constants", () => {
     expect(CHANNEL_WINDOW_BYTES).toBe(2_097_152);
     expect(SOCKET_INFLIGHT_BYTES).toBe(3_145_728);
     expect(CREDIT_BATCH_BYTES).toBe(524_288);
-    expect(WINDOW_RESYNC_CREDITS).toBe(2);
+    expect(WINDOW_RESYNC_AGE_MS).toBe(40_000);
     expect(MAX_SEND_QUEUE_BYTES).toBe(67_108_864);
     expect(WINDOW_STALL_WARN_MS).toBe(5_000);
   });

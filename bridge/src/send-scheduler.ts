@@ -3,7 +3,7 @@ import {
   MAX_SEND_QUEUE_BYTES,
   SEAL_OVERHEAD_BYTES,
   SOCKET_INFLIGHT_BYTES,
-  WINDOW_RESYNC_CREDITS,
+  WINDOW_RESYNC_AGE_MS,
 } from "antgrid-wire";
 import type { Channel } from "./message-bus";
 
@@ -61,8 +61,11 @@ export class SendScheduler {
   private credited: Record<Channel, number> = { control: 0, preview: 0 };
   /** The peer's raw cumulative figure, for stale/duplicate detection. */
   private lastCreditSeen: Record<Channel, number> = { control: 0, preview: 0 };
-  private chargedSinceCredit: Record<Channel, boolean> = { control: false, preview: false };
-  private nonAdvancing: Record<Channel, number> = { control: 0, preview: 0 };
+  /** `sent` as it stood when each credit arrived, oldest first. The resync
+   *  rule reads the newest one old enough to be conclusive (see `credit`). */
+  private anchors: Record<Channel, { at: number; sent: number }[]> = { control: [], preview: [] };
+  /** Test seam for the resync clock. */
+  now: () => number = Date.now;
   private draining = false;
 
   /** When the channel's head first failed to fit; cleared once it fits or the
@@ -125,10 +128,7 @@ export class SendScheduler {
         const n = this.sink.send(frame);
         // A frame the sink dropped never reached the peer, so crediting it back
         // would be impossible: leave it out of the accounting entirely.
-        if (n !== null) {
-          this.sent[next] += n;
-          this.chargedSinceCredit[next] = true;
-        }
+        if (n !== null) this.sent[next] += n;
       }
     } finally {
       this.draining = false;
@@ -141,7 +141,6 @@ export class SendScheduler {
    *  accounting would un-charge something never charged. */
   charge(ch: Channel, sealedBytes: number): void {
     this.sent[ch] += sealedBytes;
-    this.chargedSinceCredit[ch] = true;
   }
 
   /** The relay reported it discarded `bytes` of this sender's frames on `ch`.
@@ -149,39 +148,52 @@ export class SendScheduler {
    *  without this every drop shrinks the channel's window for the session. */
   uncharge(ch: Channel, bytes: number): void {
     this.sent[ch] = Math.max(0, this.sent[ch] - bytes);
+    // Nothing the peer counted can exceed what actually reached it.
+    this.credited[ch] = Math.min(this.credited[ch], this.sent[ch]);
+    // The anchors were taken in the old count and the discarded bytes may have
+    // been written before any of them; a later resync must not present the
+    // same bytes as lost a second time.
+    for (const a of this.anchors[ch]) a.sent = Math.max(0, a.sent - bytes);
   }
 
   /** Cumulative bytes the peer says it has consumed on `ch`. Returns true iff
-   *  the caller should drain (the window advanced, or it was resynced). */
+   *  the caller should drain: the window advanced, or a resync concluded that
+   *  bytes still uncredited were lost. */
   credit(ch: Channel, consumedTotal: number): boolean {
+    let moved = false;
     if (consumedTotal > this.lastCreditSeen[ch]) {
       this.lastCreditSeen[ch] = consumedTotal;
       this.credited[ch] = Math.min(consumedTotal, this.sent[ch]);
-      this.nonAdvancing[ch] = 0;
-      this.chargedSinceCredit[ch] = false;
-      return true;
+      moved = true;
     }
-    if (this.unacked(ch) === 0) {
-      this.nonAdvancing[ch] = 0;
-      this.chargedSinceCredit[ch] = false;
-      return false;
+    const now = this.now();
+    const lost = this.presumedLost(ch, now);
+    if (lost > 0) {
+      this.log?.(`window resync on ${ch}: ${lost} uncredited bytes presumed lost`);
+      this.uncharge(ch, lost);
+      moved = true;
     }
-    // The peer credits every liveness tick, so consecutive credits that do not
-    // advance while this sender charged nothing in between mean what it wrote
-    // never arrived — discarded somewhere no drop report covered. A false
-    // positive costs one extra window in flight, never data. Keep in lockstep
-    // with the Dart client's send_scheduler.dart: both peers must resync at
-    // the same credit count.
-    const chargedSince = this.chargedSinceCredit[ch];
-    this.chargedSinceCredit[ch] = false;
-    this.nonAdvancing[ch] += 1;
-    if (!chargedSince && this.nonAdvancing[ch] >= WINDOW_RESYNC_CREDITS) {
-      this.log?.(`window resync on ${ch}: ${this.unacked(ch)} uncredited bytes presumed lost`);
-      this.sent[ch] = this.credited[ch];
-      this.nonAdvancing[ch] = 0;
-      return true;
-    }
-    return false;
+    this.anchors[ch].push({ at: now, sent: this.sent[ch] });
+    return moved;
+  }
+
+  /** Bytes an anchor at least WINDOW_RESYNC_AGE_MS old saw written that the
+   *  peer has still not counted. The relay delivers a channel in order and the
+   *  peer credits every liveness tick, so a credit generated two ticks after a
+   *  write has counted it if it ever arrived; what is still missing was
+   *  discarded somewhere no drop report covered. Session frames keep both
+   *  counts moving on a channel, which is why this compares against what was
+   *  written rather than asking whether credits advance. A false positive
+   *  costs one extra window in flight, never data. Keep in lockstep with the
+   *  Dart client's send_scheduler.dart. */
+  private presumedLost(ch: Channel, now: number): number {
+    const anchors = this.anchors[ch];
+    let newestOld = -1;
+    for (let i = 0; i < anchors.length && now - anchors[i]!.at >= WINDOW_RESYNC_AGE_MS; i++) newestOld = i;
+    if (newestOld < 0) return 0;
+    // An older anchor can never say more than the newest conclusive one.
+    anchors.splice(0, newestOld);
+    return Math.max(0, anchors[0]!.sent - this.credited[ch]);
   }
 
   /** New session: zero every counter on both channels. Queues untouched. */
@@ -190,8 +202,7 @@ export class SendScheduler {
       this.sent[ch] = 0;
       this.credited[ch] = 0;
       this.lastCreditSeen[ch] = 0;
-      this.chargedSinceCredit[ch] = false;
-      this.nonAdvancing[ch] = 0;
+      this.anchors[ch] = [];
       delete this.blockedSince[ch];
     }
   }

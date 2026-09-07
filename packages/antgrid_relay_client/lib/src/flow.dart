@@ -22,9 +22,13 @@ const int kSocketInflightBytes = 3145728;
 /// of headroom between credits.
 const int kCreditBatchBytes = 524288;
 
-/// Non-advancing credits, with nothing charged in between, after which a sender
-/// concludes its uncredited bytes were lost in transit and resyncs its window.
-const int kWindowResyncCredits = 2;
+/// How old a credit-time anchor must be before bytes it saw written, and the
+/// peer has still not counted, are presumed lost. Two liveness ticks: the peer
+/// credits at least once per tick and the relay delivers a channel in order, so
+/// a credit generated this long after a write has counted it if it ever
+/// arrived. Time rather than a credit count, because byte-triggered credits
+/// land milliseconds apart on a fast link.
+const int kWindowResyncAgeMs = 40000;
 
 /// Per-channel cap on plaintext bytes waiting in the send queue. A message that
 /// would push past it is dropped whole, since a fragment set is never split.

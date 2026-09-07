@@ -20,9 +20,13 @@ export const SOCKET_INFLIGHT_BYTES = 3_145_728;
  *  window/4: the sender keeps ≥ 3/4 window of headroom between credits. */
 export const CREDIT_BATCH_BYTES = 524_288;
 
-/** Non-advancing credits (nothing charged in between) after which a sender
- *  concludes its uncredited bytes were lost in transit and resyncs. */
-export const WINDOW_RESYNC_CREDITS = 2;
+/** How old a credit-time anchor must be before bytes it saw written, and the
+ *  peer has still not counted, are presumed lost. Two liveness ticks: the peer
+ *  credits at least once per tick and the relay delivers a channel in order,
+ *  so a credit generated this long after a write has counted it if it ever
+ *  arrived. Time rather than a credit count, because byte-triggered credits
+ *  land milliseconds apart on a fast link. */
+export const WINDOW_RESYNC_AGE_MS = 40_000;
 
 /** Per-channel cap on plaintext bytes waiting in the send queue. A message
  *  that would push past it is dropped whole (fragment sets are never split).

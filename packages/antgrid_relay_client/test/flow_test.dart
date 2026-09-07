@@ -27,6 +27,15 @@ void main() {
     expect(kSocketInflightBytes, greaterThan(kChannelWindowBytes));
   });
 
+  test('a resync waits at least two liveness ticks', () {
+    // One tick is not proof: the credit that would have counted the bytes may
+    // itself still be on its way.
+    expect(
+      kWindowResyncAgeMs,
+      greaterThanOrEqualTo(2 * kPingSilenceSeconds * 1000),
+    );
+  });
+
   test('the send queue can hold a maximal transfer', () {
     // A message the fragmenter accepts must never be refused by the queue: it
     // would be dropped whole after the caller was told nothing.

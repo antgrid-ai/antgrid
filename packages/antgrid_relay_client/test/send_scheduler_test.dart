@@ -223,33 +223,75 @@ void main() {
     expect(wire.names, ['p1', 'p2']);
   });
 
-  test('two non-advancing credits with nothing charged since resync the '
-      'window', () async {
+  test('bytes a credit two ticks on still has not counted are presumed '
+      'lost', () async {
     final logs = <String>[];
-    s = SendScheduler(sink: wire.call, window: 1000, log: logs.add);
+    var clock = DateTime(2026, 1, 1);
+    Iterable<String> resyncs() =>
+        logs.where((l) => l.contains('window resync on preview'));
+    s = SendScheduler(
+      sink: wire.call,
+      window: 1000,
+      log: logs.add,
+      clock: () => clock,
+    );
     s.enqueue([_frame('preview', 900, name: 'p1')]);
     await _settle();
     s.enqueue([_frame('preview', 500, name: 'p2')]);
     await _settle();
     expect(wire.names, ['p1']);
 
-    expect(s.credit('preview', 0), isFalse, reason: 'bytes were charged since');
+    // The anchor: 928 bytes written, none counted. Not conclusive on its own.
+    expect(s.credit('preview', 0), isFalse);
+    clock = clock.add(const Duration(milliseconds: kWindowResyncAgeMs - 1));
+    expect(s.credit('preview', 0), isFalse);
     await _settle();
     expect(wire.names, ['p1']);
 
+    clock = clock.add(const Duration(milliseconds: 1));
     expect(s.credit('preview', 0), isTrue);
     expect(s.unacked('preview'), 0);
     await _settle();
     expect(wire.names, ['p1', 'p2']);
-    expect(logs.single, contains('window resync'));
+    expect(resyncs().single, contains('928'));
 
-    // A charge between two credits is proof the sender is still adding bytes,
-    // so the count must start over rather than presume those bytes lost.
-    s.credit('preview', 0);
-    s.charge('preview', 100);
+    // Only what the old anchor saw can be presumed lost: p2's bytes were
+    // written after it, and the credits that would count them are still due.
+    clock = clock.add(const Duration(milliseconds: 10));
     expect(s.credit('preview', 0), isFalse);
-    expect(s.unacked('preview'), greaterThan(0));
-    expect(logs, hasLength(1));
+    expect(s.unacked('preview'), 528);
+    expect(resyncs(), hasLength(1));
+
+    // A credit that counts the bytes in time leaves nothing to presume.
+    clock = clock.add(const Duration(milliseconds: kWindowResyncAgeMs));
+    expect(s.credit('preview', 1456), isTrue);
+    clock = clock.add(const Duration(milliseconds: kWindowResyncAgeMs));
+    expect(s.credit('preview', 1456), isFalse);
+    expect(resyncs(), hasLength(1));
+  });
+
+  test('a reported drop is not presumed lost a second time', () async {
+    final logs = <String>[];
+    var clock = DateTime(2026, 1, 1);
+    s = SendScheduler(
+      sink: wire.call,
+      window: 1000,
+      log: logs.add,
+      clock: () => clock,
+    );
+    s.enqueue([_frame('preview', 900, name: 'p1')]);
+    await _settle();
+    expect(s.credit('preview', 0), isFalse);
+
+    // The relay reports p1 discarded: the anchor must shrink with the sent
+    // total, or the resync would un-charge p1 again on top of the report.
+    s.uncharge('preview', 928);
+    s.enqueue([_frame('preview', 500, name: 'p2')]);
+    await _settle();
+    clock = clock.add(const Duration(milliseconds: kWindowResyncAgeMs));
+    expect(s.credit('preview', 0), isFalse);
+    expect(s.unacked('preview'), 528);
+    expect(logs, isEmpty);
   });
 
   test(

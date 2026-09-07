@@ -59,11 +59,16 @@ class SendScheduler {
     this.socketCap,
     this.maxQueuedBytes = kMaxSendQueueBytes,
     void Function(String)? log,
+    DateTime Function()? clock,
   }) : _sink = sink,
-       _log = log;
+       _log = log,
+       clock = clock ?? DateTime.now;
 
   final SchedulerSink _sink;
   final void Function(String)? _log;
+
+  /// Test seam for the resync clock.
+  DateTime Function() clock;
 
   /// Sealed bytes allowed in flight per channel; null disables the gate.
   int? window;
@@ -98,11 +103,12 @@ class SendScheduler {
   /// recognised even after [_credited] was clamped below it.
   final Map<String, int> _lastCreditSeen = {'control': 0, 'preview': 0};
 
-  final Map<String, bool> _chargedSinceCredit = {
-    'control': false,
-    'preview': false,
+  /// [_sent] as it stood when each credit arrived, oldest first. The resync
+  /// rule reads the newest one old enough to be conclusive (see [credit]).
+  final Map<String, List<({DateTime at, int sent})>> _anchors = {
+    'control': [],
+    'preview': [],
   };
-  final Map<String, int> _nonAdvancing = {'control': 0, 'preview': 0};
 
   bool _draining = false;
 
@@ -148,7 +154,6 @@ class SendScheduler {
   /// did and inflate the window.
   void charge(String ch, int sealedBytes) {
     _sent[ch] = _sent[ch]! + sealedBytes;
-    _chargedSinceCredit[ch] = true;
   }
 
   /// The relay reported it discarded [bytes] of this sender's frames on [ch].
@@ -157,48 +162,70 @@ class SendScheduler {
   /// rest of the session.
   void uncharge(String ch, int bytes) {
     _sent[ch] = max(0, _sent[ch]! - bytes);
+    // Nothing the peer counted can exceed what actually reached it.
+    _credited[ch] = min(_credited[ch]!, _sent[ch]!);
+    // The anchors were taken in the old count and the discarded bytes may have
+    // been written before any of them; a later resync must not present the
+    // same bytes as lost a second time.
+    final anchors = _anchors[ch]!;
+    for (var i = 0; i < anchors.length; i++) {
+      anchors[i] = (at: anchors[i].at, sent: max(0, anchors[i].sent - bytes));
+    }
     kick();
   }
 
   /// Accept the peer's cumulative consumed count for [ch]. Returns true when
   /// the window moved — because the credit advanced, or because a resync
-  /// concluded the uncredited bytes were lost.
+  /// concluded that bytes still uncredited were lost.
   ///
   /// Cumulative rather than incremental, so a credit lost in transit costs
   /// nothing: the next one carries the same ground truth.
   bool credit(String ch, int consumedTotal) {
+    var moved = false;
     if (consumedTotal > _lastCreditSeen[ch]!) {
       _lastCreditSeen[ch] = consumedTotal;
       _credited[ch] = min(consumedTotal, _sent[ch]!);
-      _nonAdvancing[ch] = 0;
-      _chargedSinceCredit[ch] = false;
+      moved = true;
+    }
+    final now = clock();
+    final lost = _presumedLost(ch, now);
+    if (lost > 0) {
+      _log?.call('window resync on $ch: $lost uncredited bytes presumed lost');
+      uncharge(ch, lost);
+      moved = true;
+    }
+    _anchors[ch]!.add((at: now, sent: _sent[ch]!));
+    if (moved) {
       _stallWarned.remove(ch);
       kick();
-      return true;
     }
-    if (unacked(ch) == 0) {
-      _nonAdvancing[ch] = 0;
-      _chargedSinceCredit[ch] = false;
-      return false;
+    return moved;
+  }
+
+  /// Bytes an anchor at least [kWindowResyncAgeMs] old saw written that the
+  /// peer has still not counted. The relay delivers a channel in order and the
+  /// peer credits every liveness tick, so a credit generated two ticks after a
+  /// write has counted it if it ever arrived; what is still missing was
+  /// discarded somewhere no drop report covered. Session frames keep both
+  /// counts moving on a channel, which is why this compares against what was
+  /// written rather than asking whether credits advance. A false positive
+  /// costs one extra window in flight, never data. Keep in lockstep with the
+  /// bridge's send-scheduler.ts.
+  int _presumedLost(String ch, DateTime now) {
+    final anchors = _anchors[ch]!;
+    var newestOld = -1;
+    for (
+      var i = 0;
+      i < anchors.length &&
+          now.difference(anchors[i].at).inMilliseconds >= kWindowResyncAgeMs;
+      i++
+    ) {
+      newestOld = i;
     }
-    // The peer credits every liveness tick, so consecutive credits that do not
-    // advance while this sender charged nothing in between mean what it wrote
-    // never arrived — discarded somewhere no drop report covered. A false
-    // positive costs one extra window in flight, never data.
-    final chargedSince = _chargedSinceCredit[ch]!;
-    _chargedSinceCredit[ch] = false;
-    _nonAdvancing[ch] = _nonAdvancing[ch]! + 1;
-    if (!chargedSince && _nonAdvancing[ch]! >= kWindowResyncCredits) {
-      _log?.call(
-        'window resync on $ch: ${unacked(ch)} uncredited bytes presumed lost',
-      );
-      _sent[ch] = _credited[ch]!;
-      _nonAdvancing[ch] = 0;
-      _stallWarned.remove(ch);
-      kick();
-      return true;
-    }
-    return false;
+    if (newestOld < 0) return 0;
+    // An older anchor can never say more than the newest conclusive one.
+    anchors.removeRange(0, newestOld);
+    return max(0, anchors[0].sent - _credited[ch]!);
   }
 
   /// Forget every counter on both channels — a new session credits from zero.
@@ -208,8 +235,7 @@ class SendScheduler {
       _sent[ch] = 0;
       _credited[ch] = 0;
       _lastCreditSeen[ch] = 0;
-      _nonAdvancing[ch] = 0;
-      _chargedSinceCredit[ch] = false;
+      _anchors[ch]!.clear();
     }
     blockedSince.clear();
     _stallWarned.clear();
@@ -334,10 +360,7 @@ class SendScheduler {
           // this frame's `done` pending forever.
           n = null;
         }
-        if (n != null) {
-          _sent[f.channel] = _sent[f.channel]! + n;
-          _chargedSinceCredit[f.channel] = true;
-        }
+        if (n != null) _sent[f.channel] = _sent[f.channel]! + n;
         if (!f.done.isCompleted) f.done.complete();
       }
     } finally {

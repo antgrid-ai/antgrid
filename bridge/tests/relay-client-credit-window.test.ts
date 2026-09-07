@@ -4,7 +4,7 @@
 // here is the count that goes on the wire.
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { encodeRouteFrame, FrameKind } from "antgrid-wire";
+import { encodeRouteFrame, FrameKind, WINDOW_RESYNC_AGE_MS } from "antgrid-wire";
 import { RelayClient } from "../src/relay-client";
 import { createMessage } from "../src/protocol";
 import { generateEphemeralKeypair, deriveSharedSecret } from "../src/key-exchange";
@@ -240,8 +240,8 @@ describe("RelayClient credit windows", () => {
     // Stale: below the highest cumulative figure already accepted.
     credit(0);
     expect(h.s.queued("preview").frames).toBe(2);
-    // An advancing credit in between keeps the two non-advancing ones from
-    // being consecutive; consecutive is the resync signal, exercised below.
+    // Repeats never move the window on their own; only age does, exercised
+    // below.
     credit(2);
     credit(2);
     expect(h.s.queued("preview").frames).toBe(2);
@@ -361,15 +361,20 @@ describe("RelayClient credit windows", () => {
     expect(stalled()).toHaveLength(1);
   });
 
-  it("resyncs a wedged channel after two non-advancing credits", () => {
+  it("resyncs a wedged channel once a credit two ticks on still counts nothing", () => {
     const h = establish();
     fillWindow(h);
+    let clock = 1_000;
+    h.s.now = () => clock;
     const credit = () =>
       injectSealed(h.client, h.phone, JSON.stringify({ type: "credit", channel: "preview", consumed: 0 }));
 
     credit();
+    clock += WINDOW_RESYNC_AGE_MS - 1;
+    credit();
     expect(h.s.queued("preview").frames).toBe(2);
 
+    clock += 1;
     credit();
     expect(h.s.queued("preview").frames).toBe(0);
     expect(h.s.unacked("preview")).toBeGreaterThan(0);

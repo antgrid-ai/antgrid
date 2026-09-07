@@ -400,7 +400,7 @@ Values live in code and move; these are the names to look up. Agent side is
 | `CHANNEL_WINDOW_BYTES` / `kChannelWindowBytes` | both | Sealed bytes in flight per channel before a credit is required |
 | `SOCKET_INFLIGHT_BYTES` / `kSocketInflightBytes` | both | Sealed bytes in flight per socket, both channels together |
 | `CREDIT_BATCH_BYTES` / `kCreditBatchBytes` | both | Consumed bytes between byte-triggered credits (every liveness tick otherwise) |
-| `WINDOW_RESYNC_CREDITS` / `kWindowResyncCredits` | both | Non-advancing credits before a sender resyncs its window |
+| `WINDOW_RESYNC_AGE_MS` / `kWindowResyncAgeMs` | both | Age of a credit-time anchor past which bytes it saw written, still uncredited, are presumed lost |
 | `MAX_SEND_QUEUE_BYTES` / `kMaxSendQueueBytes` | both | Per-channel cap on plaintext waiting to be sealed and sent |
 | `WINDOW_STALL_WARN_MS` / `kWindowStallWarnMs` | both | Gate-blocked time on a channel before it is logged once |
 
@@ -438,10 +438,14 @@ and never gated, which is what keeps liveness working while a channel is
 stalled; those sealed under the established keys are charged and counted like
 any other frame, so a relay drop report is exact for them too. The relay reports
 every routed frame it discards to the sender with the frame's `channel` and
-`bytes`, and the sender un-charges them; if a sender still sees
-`WINDOW_RESYNC_CREDITS` consecutive credits that do not advance while it has
-charged nothing new on that channel, it treats its uncredited bytes as lost and
-resyncs. Both sides reset their counters at establishment (the agent when it
+`bytes`, and the sender un-charges them. As a backstop for anything that path
+misses, a sender remembers how much it had written on a channel each time a
+credit arrived; when a credit `WINDOW_RESYNC_AGE_MS` (two liveness ticks) later
+still leaves some of that earlier total uncredited, those bytes had every chance
+to be counted (the relay delivers a channel in order and the peer credits every
+tick), so it treats exactly that shortfall as lost and un-charges it. Advancing
+credits alone prove nothing here: session frames keep both counts moving on any
+channel that carries them. Both sides reset their counters at establishment (the agent when it
 sends `established`, the phone when it receives it) and forget them at teardown.
 A channel gate-blocked for `WINDOW_STALL_WARN_MS` is logged once; a queue past
 `MAX_SEND_QUEUE_BYTES` drops whole messages.

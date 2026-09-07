@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { SEAL_OVERHEAD_BYTES } from "antgrid-wire";
+import { SEAL_OVERHEAD_BYTES, WINDOW_RESYNC_AGE_MS } from "antgrid-wire";
 import { SendScheduler, type QueuedAppFrame } from "../src/send-scheduler";
 import type { Channel } from "../src/message-bus";
 
@@ -204,31 +204,64 @@ describe("SendScheduler queueing and priority", () => {
     expect(wire.map((f) => f.type)).toEqual(["p1", "p2"]);
   });
 
-  it("resyncs a channel after non-advancing credits with nothing charged since", () => {
+  it("presumes bytes lost once a credit two ticks on still has not counted them", () => {
     const { s, wire, logs } = makeScheduler();
+    const resyncs = () => logs.filter((l) => l.includes("window resync on preview"));
+    let clock = 1_000;
+    s.now = () => clock;
     s.limits.window = 1000;
     s.enqueue([frame("preview", 900, { type: "p1" })]);
     s.drain();
     s.enqueue([frame("preview", 500, { type: "p2" })]);
     expect(s.drain()).toBe("blocked");
 
-    // Bytes were charged since the last credit, so this one proves nothing.
+    // The anchor: 928 bytes written, none counted. Not conclusive on its own.
+    expect(s.credit("preview", 0)).toBe(false);
+    clock += WINDOW_RESYNC_AGE_MS - 1;
     expect(s.credit("preview", 0)).toBe(false);
     expect(wire).toHaveLength(1);
 
+    clock += 1;
     expect(s.credit("preview", 0)).toBe(true);
     expect(s.unacked("preview")).toBe(0);
     s.drain();
     expect(wire.map((f) => f.type)).toEqual(["p1", "p2"]);
-    expect(logs.filter((l) => l.includes("window resync on preview"))).toHaveLength(1);
+    expect(resyncs()).toHaveLength(1);
+    expect(resyncs()[0]).toContain("928");
 
-    // A charge between two credits is proof the sender is still adding bytes,
-    // so the count must start over rather than presume those bytes lost.
-    s.credit("preview", 0);
-    s.charge("preview", 100);
+    // Only what the old anchor saw can be presumed lost: p2's bytes were
+    // written after it, and the credits that would count them are still due.
+    clock += 10;
     expect(s.credit("preview", 0)).toBe(false);
-    expect(s.unacked("preview")).toBeGreaterThan(0);
-    expect(logs.filter((l) => l.includes("window resync on preview"))).toHaveLength(1);
+    expect(s.unacked("preview")).toBe(528);
+    expect(resyncs()).toHaveLength(1);
+
+    // A credit that counts the bytes in time leaves nothing to presume.
+    clock += WINDOW_RESYNC_AGE_MS;
+    expect(s.credit("preview", 1456)).toBe(true);
+    clock += WINDOW_RESYNC_AGE_MS;
+    expect(s.credit("preview", 1456)).toBe(false);
+    expect(resyncs()).toHaveLength(1);
+  });
+
+  it("does not presume a reported drop lost a second time", () => {
+    const { s, logs } = makeScheduler();
+    let clock = 1_000;
+    s.now = () => clock;
+    s.limits.window = 1000;
+    s.enqueue([frame("preview", 900, { type: "p1" })]);
+    s.drain();
+    expect(s.credit("preview", 0)).toBe(false);
+
+    // The relay reports p1 discarded: the anchor must shrink with `sent`, or
+    // the resync would un-charge p1 again on top of the report.
+    s.uncharge("preview", 928);
+    s.enqueue([frame("preview", 500, { type: "p2" })]);
+    s.drain();
+    clock += WINDOW_RESYNC_AGE_MS;
+    expect(s.credit("preview", 0)).toBe(false);
+    expect(s.unacked("preview")).toBe(528);
+    expect(logs.filter((l) => l.includes("window resync"))).toHaveLength(0);
   });
 
   it("counts session bytes toward the gate without gating them", () => {
