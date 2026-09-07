@@ -16,6 +16,8 @@
 // invariant is observed through the stage a low-seq output frame produces —
 // a frame filtered by a cutoff never reaches the paint.
 
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/models/terminal_models.dart';
@@ -40,6 +42,17 @@ void main() {
   setUp(() {
     useInMemoryPrefs();
   });
+
+  /// A transport whose `terminal.snapshot` RPC is never answered.
+  ///
+  /// The discovery pull rides a correlated RPC, so a fake with no handler
+  /// reports the method as unimplemented and every pull below would resolve
+  /// — as a failure — before the case that is about the wait even begins.
+  /// Held open instead, the pull is outstanding exactly as it is against a
+  /// real bridge, and the cases that want a bound reach it through
+  /// `request`'s own timeout, which is what bounds the RPC arm in production.
+  FakeAgentTransport newTransport() => FakeAgentTransport()
+    ..requestHandler = (_, _) => Completer<Map<String, dynamic>>().future;
 
   Future<ProjectSession> newSession(FakeAgentTransport t) async {
     final cache = await CachedSessionsStore.open();
@@ -114,7 +127,7 @@ void main() {
 
   test('a discovered terminal reads awaitingScreen with a stamp until its '
       'snapshot lands', () async {
-    final t = FakeAgentTransport();
+    final t = newTransport();
     final session = await newSession(t);
     final svc = newService(session);
 
@@ -144,7 +157,7 @@ void main() {
   // screen that is real and current.
   test('a re-pull over a painted engine reads refreshing, not awaitingScreen',
       () async {
-    final t = FakeAgentTransport();
+    final t = newTransport();
     final session = await newSession(t);
     final svc = newService(session);
 
@@ -165,9 +178,14 @@ void main() {
 
   test('an unanswered pull over an empty engine reads failed, and later output '
       'revives it', () async {
-    final t = FakeAgentTransport();
+    final t = newTransport();
     final session = await newSession(t);
     final svc = newService(session, snapshotAttachTimeout: _attachBound);
+    // Never answered: the RPC arm's bound IS `request(timeout: …)`, so the
+    // fake has to actually hold the call open for the fake's own timer to
+    // fire — a null `requestHandler` fails instantly with a non-RPC error
+    // instead, which would reach `failed` for the wrong reason.
+    t.requestHandler = (_, _) => Completer<Map<String, dynamic>>().future;
 
     emitStatus(t, [terminalInfo('a')]);
     await settle();
@@ -194,9 +212,12 @@ void main() {
   // terminal the agent cannot snapshot is that terminal's problem; the rest of
   // the checkout is usable and must not be presented as broken.
   test('one failed terminal does not condemn the checkout', () async {
-    final t = FakeAgentTransport();
+    final t = newTransport();
     final session = await newSession(t);
     final svc = newService(session, snapshotAttachTimeout: _attachBound);
+    // Held open the same way as above, so 'b' actually reaches its bound
+    // instead of failing instantly on an unset handler.
+    t.requestHandler = (_, _) => Completer<Map<String, dynamic>>().future;
 
     emitStatus(t, [terminalInfo('a'), terminalInfo('b')]);
     await settle();
@@ -213,34 +234,41 @@ void main() {
   });
 
   // A terminal whose process has exited has no screen left to serialize: the
-  // agent answers the pull with a log line and no frame. It is snapshotted on
-  // purpose — a retained transcript is always already stopped — so that pull is
-  // structurally unanswerable and must never read as a fault.
-  test('an exited terminal arms no deadline', () async {
-    final t = FakeAgentTransport();
-    final session = await newSession(t);
-    final svc = newService(session, snapshotAttachTimeout: _attachBound);
+  // bridge answers the RPC `ok: true` with `snapshot: null` rather than a log
+  // line and no frame. It is snapshotted on purpose — a retained transcript is
+  // always already stopped — so that pull must read as neither a wait nor a
+  // fault.
+  test(
+    "an exited terminal's pull is answered snapshot: null and reads neither "
+    'failed nor awaitingScreen',
+    () async {
+      final t = newTransport();
+      final session = await newSession(t);
+      final svc = newService(session, snapshotAttachTimeout: _attachBound);
+      t.requestHandler = (_, _) => <String, dynamic>{'snapshot': null};
 
-    emitStatus(t, [terminalInfo('setup', running: false)]);
-    await settle();
-    await Future<void>.delayed(_pastBound);
+      emitStatus(t, [terminalInfo('setup', running: false)]);
+      await settle();
+      await Future<void>.delayed(_pastBound);
 
-    expect(stageOf(svc, 'setup'), isNot(TerminalAttachStage.failed));
-    expect(
-      svc.currentState.attach,
-      CheckoutAttachStatus.ready,
-      reason: 'a wait nothing will ever end must not hold the checkout back',
-    );
+      expect(stageOf(svc, 'setup'), isNot(TerminalAttachStage.failed));
+      expect(stageOf(svc, 'setup'), isNot(TerminalAttachStage.awaitingScreen));
+      expect(
+        svc.currentState.attach,
+        CheckoutAttachStatus.ready,
+        reason: 'a wait nothing will ever end must not hold the checkout back',
+      );
 
-    await svc.dispose();
-    await session.close();
-  });
+      await svc.dispose();
+      await session.close();
+    },
+  );
 
   // The common case for a busy TUI, and for a pull the agent answers with
   // nothing: without this the pane waits out the whole bound and then reports a
   // failure over output the user can see arriving.
   test('live output retires an outstanding pull', () async {
-    final t = FakeAgentTransport();
+    final t = newTransport();
     final session = await newSession(t);
     final svc = newService(session, snapshotAttachTimeout: _attachBound);
 
@@ -260,22 +288,28 @@ void main() {
 
   test('retryAttach re-sends exactly one snapshot request and clears the '
       'failure', () async {
-    final t = FakeAgentTransport();
+    final t = newTransport();
     final session = await newSession(t);
     final svc = newService(session, snapshotAttachTimeout: _attachBound);
+    t.requestHandler = (_, _) => Completer<Map<String, dynamic>>().future;
 
     emitStatus(t, [terminalInfo('a')]);
     await settle();
     await Future<void>.delayed(_pastBound);
     expect(stageOf(svc, 'a'), TerminalAttachStage.failed);
 
-    t.clearSent();
+    // `requests`, not `sent`: the pull is an RPC now, and this transport has
+    // no `clearRequests` — the retry's own call is everything past this mark.
+    final before = t.requests.length;
     svc.retryAttach('a');
     await settle();
 
-    final pulls = t.sent.where((m) => m['type'] == 'terminal:snapshot:request');
+    final pulls = t.requests
+        .skip(before)
+        .where((r) => r.method == 'terminal.snapshot')
+        .toList();
     expect(pulls, hasLength(1));
-    expect(pulls.first['terminalId'], 'a');
+    expect(pulls.first.params?['terminalId'], 'a');
     // A full hydrator re-drive would re-pull every checkout's tree as well,
     // turning one tap into a multi-megabyte fan-out.
     expect(t.requests.where((r) => r.method == 'state.snapshot'), isEmpty);
@@ -286,7 +320,7 @@ void main() {
   });
 
   test('a checkout that never sees agent:status reads failed', () async {
-    final t = FakeAgentTransport();
+    final t = newTransport();
     final session = await newSession(t);
     final svc = newService(session, checkoutAttachTimeout: _checkoutBound);
     // The bound belongs to a surface that is watching: it arms on the first
@@ -309,7 +343,7 @@ void main() {
   // the answer.
   test('a checkout that times out and THEN receives agent:status reads ready',
       () async {
-    final t = FakeAgentTransport();
+    final t = newTransport();
     final session = await newSession(t);
     final svc = newService(session, checkoutAttachTimeout: _checkoutBound);
     // The bound belongs to a surface that is watching: it arms on the first
@@ -338,7 +372,7 @@ void main() {
   });
 
   test('an agent:status cancels the checkout deadline', () async {
-    final t = FakeAgentTransport();
+    final t = newTransport();
     final session = await newSession(t);
     final svc = newService(session, checkoutAttachTimeout: _checkoutBound);
 
@@ -361,7 +395,7 @@ void main() {
   // it and fire against an id nothing holds.
   test('a tab that leaves agent:status takes its hydration record with it',
       () async {
-    final t = FakeAgentTransport();
+    final t = newTransport();
     final session = await newSession(t);
     final svc = newService(session, snapshotAttachTimeout: _attachBound);
 
@@ -388,7 +422,7 @@ void main() {
   // cannot stand in for the answer to this client's own outstanding pull.
   test("another device's cold history blob does not clear this client's "
       'outstanding pull', () async {
-    final t = FakeAgentTransport();
+    final t = newTransport();
     final session = await newSession(t);
     final svc = newService(session);
 
@@ -421,7 +455,7 @@ void main() {
   // Neither TerminalState nor TerminalTab defines `==` and the state rides a
   // StreamProvider, so every emission notifies every listener in the workspace.
   test('a burst of discovered terminals publishes once', () async {
-    final t = FakeAgentTransport();
+    final t = newTransport();
     final session = await newSession(t);
     final svc = newService(session);
 

@@ -208,7 +208,7 @@ void main() {
       ],
     });
     await tester.pump();
-    h.transport.sent.clear();
+    final before = h.transport.requests.length;
 
     expect(find.text("couldn't load this terminal"), findsOneWidget);
     expect(_dimmedTerminal, findsOneWidget);
@@ -218,17 +218,19 @@ void main() {
     await tester.tap(retry);
     await tester.pump();
 
-    final requests = h.transport.sent
-        .where((m) => m['type'] == 'terminal:snapshot:request')
+    final requests = h.transport.requests
+        .skip(before)
+        .where((r) => r.method == 'terminal.snapshot')
         .toList();
     expect(requests, hasLength(1));
-    expect(requests.single['terminalId'], 't1');
+    expect(requests.single.params?['terminalId'], 't1');
 
-    // The retry arms a fresh snapshot deadline, and the binding checks for a
-    // pending timer BEFORE any tearDown runs. Retired by letting it expire,
-    // not by disposing here: dispose() awaits real stream cancellations, and
-    // awaiting real async inside a testWidgets body wedges with no timeout.
-    await tester.pump(const Duration(seconds: 16));
+    // The checkout bound is armed for as long as something watches the state
+    // stream, and the binding checks for a pending timer BEFORE any tearDown
+    // runs. Retired by letting it expire, not by disposing here: dispose()
+    // awaits real stream cancellations, and awaiting real async inside a
+    // testWidgets body wedges with no timeout.
+    await tester.pump(const Duration(seconds: 31));
   });
 
   testWidgets(

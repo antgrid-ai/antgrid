@@ -1354,14 +1354,24 @@ class StreamTransport extends BufferedAgentTransport {
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
+    bool countsTowardHealth = true,
   }) async {
     try {
       final r = await super.request(method, params: params, timeout: timeout);
-      session.notifyRpcResult(timedOut: false);
+      // Both outcomes are gated, not just the timeout: an exempt call's
+      // SUCCESS resetting the run would let a pull that is re-driven on every
+      // re-establishment keep clearing the evidence of a link that is failing
+      // every other RPC — the same loop wearing the opposite sign.
+      if (countsTowardHealth) session.notifyRpcResult(timedOut: false);
       return r;
     } on RpcException catch (e) {
-      // ≥3 consecutive E_TIMEOUTs is a rekey trigger.
-      session.notifyRpcResult(timedOut: e.code == 'E_TIMEOUT');
+      // ≥3 consecutive E_TIMEOUTs is a rekey trigger. Skipped when the caller
+      // re-issues this same pull on every re-establishment — including the
+      // one a rekey itself causes — since folding those in makes the retry
+      // loop its own trigger (see the doc on [AgentTransport.request]).
+      if (countsTowardHealth) {
+        session.notifyRpcResult(timedOut: e.code == 'E_TIMEOUT');
+      }
       rethrow;
     }
   }

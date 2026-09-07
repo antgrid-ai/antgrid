@@ -19,8 +19,22 @@ class FakeAgentTransport implements AgentTransport {
   /// Optional responder for [request]. When null, `request` throws
   /// `UnimplementedError` (preserving the prior default). Set it to simulate a
   /// `state.snapshot` reply, e.g. `(_, __) => {'frames': [...]}`.
-  Map<String, dynamic> Function(String method, Map<String, dynamic>? params)?
+  ///
+  /// `FutureOr` so a test can hold a request in flight — return
+  /// `Completer<Map<String, dynamic>>().future` to simulate a call nothing ever
+  /// answers, exercising [request]'s own [timeout] bound (or, more often, the
+  /// caller's `_disposed`/generation guard once the SUT is torn down).
+  FutureOr<Map<String, dynamic>> Function(
+    String method,
+    Map<String, dynamic>? params,
+  )?
   requestHandler;
+
+  /// In-flight [request] calls: their completer plus the timer enforcing
+  /// [timeout]. Tracked so [dispose] can cancel every timer outright rather
+  /// than hoping the completing error propagates before the test ends.
+  final List<({Completer<Map<String, dynamic>> completer, Timer timer})>
+  _pendingRpcs = [];
 
   TransportState _state = TransportState.connected;
   bool _established = true;
@@ -121,19 +135,76 @@ class FakeAgentTransport implements AgentTransport {
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
+    bool countsTowardHealth = true,
   }) async {
     requests.add((method: method, params: params, timeout: timeout));
+    // Appended on the same ordinal as `send`, so an ordering assertion over
+    // `sent` (e.g. a declaration that must precede every pull it triggers)
+    // stays honest once a pull moves from a message to this RPC.
+    sent.add(<String, dynamic>{
+      'type': 'request',
+      'id': 'fake-r${requests.length}',
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'requestId': 'fake-r${requests.length}',
+      'method': method,
+      'params': ?params,
+    });
     final handler = requestHandler;
     if (handler == null) {
       throw UnimplementedError('FakeAgentTransport.request not implemented');
     }
-    return handler(method, params);
+    final completer = Completer<Map<String, dynamic>>();
+    final timer = Timer(timeout, () {
+      if (!completer.isCompleted) {
+        completer.completeError(
+          RpcException('E_TIMEOUT', 'request $method timed out'),
+        );
+      }
+    });
+    final entry = (completer: completer, timer: timer);
+    _pendingRpcs.add(entry);
+    unawaited(
+      Future<Map<String, dynamic>>.sync(
+        () async => await handler(method, params),
+      ).then(
+        (result) {
+          if (!completer.isCompleted) completer.complete(result);
+        },
+        onError: (Object error, StackTrace stack) {
+          if (completer.isCompleted) return;
+          completer.completeError(
+            error is RpcException
+                ? error
+                : RpcException('E_HANDLER', '$error'),
+            stack,
+          );
+        },
+      ),
+    );
+    try {
+      return await completer.future;
+    } finally {
+      timer.cancel();
+      _pendingRpcs.remove(entry);
+    }
   }
 
   @override
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    // Settle every outstanding RPC so its timer cannot outlive this test —
+    // a test that holds a request in flight (via `requestHandler` returning a
+    // Future nothing completes) would otherwise leave a live `Timer` running
+    // for up to its full [Duration] after the test body has moved on.
+    for (final pending in List.of(_pendingRpcs)) {
+      pending.timer.cancel();
+      if (!pending.completer.isCompleted) {
+        pending.completer.completeError(
+          RpcException('E_DISPOSED', 'transport disposed'),
+        );
+      }
+    }
     await _msgCtrl.close();
     await _stateCtrl.close();
     await _dropCtrl.close();

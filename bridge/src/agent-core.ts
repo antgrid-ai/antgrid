@@ -3774,6 +3774,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });
 
+  // `params` is z.unknown() on RequestMessage, so `...CheckoutScoped`'s default
+  // never runs on this path -- the "main" default has to live here instead.
+  const TerminalSnapshotRpcParams = z.object({
+    terminalId: z.string().min(1),
+    checkoutId: z.string().default("main"),
+    history: z.boolean().default(false),
+  });
+
   // Intercepted before the generic dispatchRpc registry — like sessions.list/
   // sessions.delete's own special-casing — because it needs `structured`
   // (StructuredAgentManager) in closure scope, which rpc/methods.ts's registry
@@ -3794,6 +3802,87 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
     const frames = (await structured?.getTranscriptSnapshot(parsed.data.sessionId)) ?? [];
     return createMessage("response", { requestId: msg.requestId, ok: true, result: { frames } });
+  }
+
+  // Correlated RPC twin of `terminal:snapshot:request` (see that case below,
+  // which stays untouched -- old apps and `resyncState`'s unsolicited push
+  // still need it). This is intercepted here rather than registered in
+  // rpc/methods.ts for the same reason session.transcriptSnapshot is: a
+  // MethodDef handler cannot see `manager`, `checkoutRuntimes`, `mainRuntime`,
+  // `internalTerminalId`, `prepareCheckoutRuntime` or `sessions`, all of which
+  // are closure-scoped here.
+  async function handleTerminalSnapshotRpc(msg: RpcRequest): Promise<AbMessage> {
+    const parsed = TerminalSnapshotRpcParams.safeParse(msg.params ?? {});
+    if (!parsed.success) {
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: {
+          code: "E_BAD_PARAMS",
+          message: parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; "),
+        },
+      });
+    }
+    const { terminalId, checkoutId, history } = parsed.data;
+    if (!manager) {
+      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
+    }
+    if (sessions?.isCheckoutDeleting(checkoutId) === true) {
+      log.warn("Refusing terminal.snapshot for checkout %s: its delete is in flight (project %s)", checkoutId, project.id);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "CHECKOUT_DELETING", message: "This session's workspace is being deleted." },
+      });
+    }
+    const checkout = await checkoutRuntimes.resolve(checkoutId);
+    if (!checkout) {
+      log.warn("Rejecting terminal.snapshot for unknown checkout %s (project %s)", checkoutId, project.id);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "UNKNOWN_CHECKOUT", message: "The requested checkout is not available." },
+      });
+    }
+    // Re-checked after the store lookup: a delete that started during that
+    // await would otherwise have this checkout re-prepared right here.
+    if (sessions?.isCheckoutDeleting(checkoutId) === true) {
+      log.warn("Refusing terminal.snapshot for checkout %s: its delete is in flight (project %s)", checkoutId, project.id);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "CHECKOUT_DELETING", message: "This session's workspace is being deleted." },
+      });
+    }
+    // Never `runtimeFor`/`terminalOwner`/`?? mainRuntime` -- see the guard this
+    // mirrors at the `terminal:snapshot:request` case below. `internalTerminalId`
+    // WRITES `runtime.configuredTerminalIds` and the module-level
+    // `terminalOwners`, so resolving the wrong runtime here would permanently
+    // corrupt `sendTerminalFrame`'s id rewrite for this terminal.
+    const runtime = checkoutId === "main" ? mainRuntime : await prepareCheckoutRuntime(checkout);
+    if (runtime.disposed) {
+      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
+    }
+    let snap: { text: string; seq: number } | null;
+    try {
+      snap = await manager.getAttachSnapshot(internalTerminalId(runtime, terminalId), { history });
+    } catch (err) {
+      log.warn("terminal.snapshot for terminal %s failed: %s", terminalId, err);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "E_HANDLER", message: "terminal snapshot failed" },
+      });
+    }
+    if (!snap) {
+      log.warn("terminal.snapshot requested for unknown terminal %s", terminalId);
+      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
+    }
+    return createMessage("response", {
+      requestId: msg.requestId,
+      ok: true,
+      result: { snapshot: { terminalId, scrollback: snap.text, seq: snap.seq, composed: true } },
+    });
   }
 
   function attachTransport(bus: MessageBus) {
@@ -3854,6 +3943,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         if (msg.method === "session.transcriptSnapshot") {
           void handleTranscriptSnapshotRequest(msg).then((res) => bus.publish(res, channel));
+          return;
+        }
+        if (msg.method === "terminal.snapshot") {
+          void handleTerminalSnapshotRpc(msg).then((res) => bus.publish(res, channel));
           return;
         }
         void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));
