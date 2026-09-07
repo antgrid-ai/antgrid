@@ -167,6 +167,13 @@ class MachineSession {
   final Map<String, int> _consumed = {'control': 0, 'preview': 0};
   final Map<String, int> _creditSent = {'control': 0, 'preview': 0};
 
+  /// Bumped wherever the send windows are zeroed. Inbound frames are decrypted
+  /// on an async chain, so one that arrived under the previous session can be
+  /// dispatched after the reset; a `credit` from it carries that session's
+  /// cumulative total, which would sit far ahead of everything the new session
+  /// will ever say and leave every real credit reading as stale.
+  int _sessionEpoch = 0;
+
   /// Every outbound app frame passes through here: one drain loop, sealed at
   /// dequeue, control ahead of preview. Session frames are written directly and
   /// so overtake any backlog — but they still land behind whatever is already
@@ -710,6 +717,7 @@ class MachineSession {
     // swapped before it confirmed, so nothing straddles the change in this
     // direction — where dropping them would strand every pending RPC until its
     // timeout.
+    _sessionEpoch++;
     _scheduler.resetWindows();
     _resetRxFlow();
     _scheduler.kick();
@@ -853,6 +861,10 @@ class MachineSession {
     if (msg.kind == FrameKind.handshake) return;
     final keys = _keys;
     if (keys == null) return; // pre-establishment: driver owns sealed frames
+    // Read with the keys rather than inside the chain below: a frame can
+    // wait there behind everything already queued on its channel, and the
+    // session it ARRIVED under is the only one its contents describe.
+    final epoch = _sessionEpoch;
     // Chained per channel, never fired independently: `open()` is async and the
     // platform AES-GCM implementation dispatches by payload size, so a small
     // frame otherwise overtakes a large one — a `{"type":6}` ping ahead of the
@@ -861,7 +873,7 @@ class MachineSession {
     // relay delivers a channel in order; this is what keeps that true through
     // decryption. Channels stay independent of each other.
     final ahead = _inboundTails[msg.channel] ?? Future<void>.value();
-    final next = ahead.then((_) => _decryptAndDispatch(msg, keys));
+    final next = ahead.then((_) => _decryptAndDispatch(msg, keys, epoch));
     // A rejection must not strand every frame queued behind it.
     final chained = next.catchError((Object _) {});
     _inboundTails[msg.channel] = chained;
@@ -879,6 +891,7 @@ class MachineSession {
   Future<void> _decryptAndDispatch(
     IncomingRouteMessage msg,
     SessionKeys keys,
+    int epoch,
   ) async {
     // Captured before the open: the nonce that identifies this frame is only
     // readable while the payload is still sealed, and the type that makes it
@@ -886,6 +899,7 @@ class MachineSession {
     // path is chained through `_inboundTails` and is genuinely async, so a
     // field would start mis-attributing under any concurrency.
     final frameId = _frameId(msg.payload, msg.kind);
+    var openedUnder = epoch;
     _noteConsumed(msg.channel, msg.payload.length);
     var plaintext = await E2eTransportDart(
       sendKey: keys.p2a,
@@ -903,6 +917,10 @@ class MachineSession {
           sendKey: current.p2a,
           recvKey: current.a2p,
         ).open(msg.payload);
+        // The live keys opened it, so the agent sealed it after the swap:
+        // whatever it reports belongs to the session those keys serve, not
+        // to the one this frame waited under.
+        if (plaintext != null) openedUnder = _sessionEpoch;
       }
     }
     // A candidate-key handshake frame during rekey (agent-ready/established) or
@@ -925,12 +943,17 @@ class MachineSession {
       _annotate(frameId, msgType: '__frag');
       return;
     }
-    _dispatchDecoded(plaintext, msg.channel, frameId);
+    _dispatchDecoded(plaintext, msg.channel, frameId, openedUnder);
   }
 
   /// [frameId] is absent for a reassembled message: it arrived as N frames with
   /// N ids, and no single one of them carried it.
-  void _dispatchDecoded(String plaintext, String channel, [String? frameId]) {
+  void _dispatchDecoded(
+    String plaintext,
+    String channel, [
+    String? frameId,
+    int? epoch,
+  ]) {
     Map<String, dynamic> json;
     try {
       json = jsonDecode(plaintext) as Map<String, dynamic>;
@@ -948,7 +971,7 @@ class MachineSession {
     // session/liveness frame; an `m` field is stream/app traffic.
     if (type is String) {
       _annotate(frameId, msgType: type);
-      _handleSessionFrame(json);
+      _handleSessionFrame(json, epoch);
       return;
     }
     if (!json.containsKey('m')) {
@@ -1150,7 +1173,7 @@ class MachineSession {
   }
 
   /// Takes the whole decoded frame, not just its type: `credit` carries fields.
-  void _handleSessionFrame(Map<String, dynamic> json) {
+  void _handleSessionFrame(Map<String, dynamic> json, [int? epoch]) {
     switch (json['type']) {
       case 'ping':
         unawaited(_sendSessionFrame({'type': 'pong'}).catchError((_) {}));
@@ -1172,6 +1195,12 @@ class MachineSession {
           );
           break;
         }
+        // A cumulative total only means anything against the session that
+        // produced it. This frame may have been decrypted after an
+        // establishment zeroed the windows, and banking the old session's much
+        // larger total would make every credit of the new one read as stale —
+        // the channel would then ride the resync floor for the rest of it.
+        if (epoch != null && epoch != _sessionEpoch) break;
         _scheduler.credit(channel as String, consumed);
         break;
       case 'session-takeover':
@@ -1198,6 +1227,14 @@ class MachineSession {
       sendKey: keys.p2a,
       recvKey: keys.a2p,
     ).seal(jsonEncode(obj));
+    if (!identical(keys, _keys)) {
+      // The same guard [_sealAndSend] applies, for the same two reasons: `seal`
+      // reads the key after its own awaits and a teardown zeroizes it in place,
+      // and a frame sealed under retired keys must not charge the window the
+      // establishment that retired them has just zeroed.
+      _dropped('tx', 'keys-rotated', channel: 'control', msgType: type);
+      return;
+    }
     relay.sendMessage(machineDeviceId, 'control', ct);
     // Exempt from the GATE, never from the accounting: a relay drop report
     // names only a channel and a byte count, so a frame written without being
