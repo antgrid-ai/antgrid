@@ -127,22 +127,30 @@ const MAX_RECENT_INSTRUCTIONS = 4;
 
 // The wire's `instructions` window: entry #1, then the newest
 // MAX_RECENT_INSTRUCTIONS, in chronological order — the whole list whenever it
-// holds five or fewer. `total` is `instructions.length` itself, so the caller
-// need not (and must not) pass anything else.
+// holds five or fewer. `total` comes off the same filtered list the window does,
+// so the caller need not (and must not) pass anything else.
 //
 // Filters empty text out first for the same defensive reason decision.ts's
-// instructionLines does: InstructionEntrySchema.text has no .min(1).
+// instructionLines does: InstructionEntrySchema.text has no .min(1). The window
+// is taken BEFORE the escape-and-clip pass below, so a session sitting at
+// MAX_INSTRUCTIONS walks five entries per emitStatus rather than fifty — each
+// of them up to MAX_INSTRUCTION_CHARS long, and emitStatus runs on every judged
+// event.
 function instructionsWindow(instructions: InstructionEntry[]): { total: number; items: string[] } {
-  const texts = instructions.map((e) => e.text).filter((t) => t !== "");
-  const window = [...texts.slice(0, 1), ...texts.slice(1).slice(-MAX_RECENT_INSTRUCTIONS)];
+  const kept = instructions.filter((e) => e.text !== "");
+  const window = [...kept.slice(0, 1), ...kept.slice(1).slice(-MAX_RECENT_INSTRUCTIONS)];
   return {
-    total: instructions.length,
+    // The KEPT count, not the raw array length: an entry the filter above
+    // dropped is one no item can point at, so counting it would print the app's
+    // "N more in between" line over nothing — and shift which entry it pins
+    // as #1.
+    total: kept.length,
     // previewForUser escapes control characters, so it must run BEFORE the
     // clip (see mintAskOptions) — and clipWithin, not clip, because this is a
     // wire bound (.max(120)) rather than a reading budget: clip alone can
     // return 121 chars and blank the whole handler:status frame at the app's
     // parser.
-    items: window.map((t) => clipWithin(previewForUser(oneLine(t)), 120)),
+    items: window.map((e) => clipWithin(previewForUser(oneLine(e.text)), 120)),
   };
 }
 
@@ -3350,8 +3358,11 @@ export class HandlerEngine {
       state: s.state,
       pendingEscalations: s.escalations.length,
       armedAt: s.armedAt,
-      // The first instruction. The list itself does not cross the wire — no
-      // client renders more than this one string.
+      // The first instruction, on its own field and unclipped: it names the
+      // session on the card headline, the wrap-up and the wrap-up push. The
+      // rest of the list travels beside it as `instructions` below, which is a
+      // clipped WINDOW rather than the list — so this stays the only entry any
+      // surface can render in full.
       goal: firstInstruction(s.instructions),
       // Copied, never the live arrays: handler:status is a REPLAY_TYPE, so the bus
       // holds this frame by reference until the next one — and escalate() pushes onto

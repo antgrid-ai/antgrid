@@ -288,9 +288,28 @@ class _AskedForHeader extends StatelessWidget {
     // it here while _PendingInstructionRow is still drawing the same
     // sentence at the tail of the list below — one instruction, shown twice,
     // in the window this sheet is likeliest to be open in.
+    //
+    // One entry hidden per outstanding sentence, matched NEWEST first, rather
+    // than every entry a pending sentence resembles: `engine.instruct` does not
+    // dedupe, so a sentence sent twice sits in the list twice, and hiding both
+    // would take the earlier one off the only surface that renders it. Matching
+    // from the newest end is also what keeps entry #1 in its pinned position
+    // when the user restates the sentence they opened the session with — the
+    // restatement is the newer entry, and it is the one the pending row is
+    // drawing.
+    final unmatched = [...pending];
+    final hidden = List<bool>.filled(askedFor.length, false);
+    for (var i = askedFor.length - 1; i >= 0; i--) {
+      final match = unmatched.indexWhere(
+        (sent) => _looksSentAs(sent, askedFor[i]),
+      );
+      if (match < 0) continue;
+      unmatched.removeAt(match);
+      hidden[i] = true;
+    }
     final visible = [
-      for (final item in askedFor)
-        if (!pending.any((sent) => _looksSentAs(sent, item))) item,
+      for (var i = 0; i < askedFor.length; i++)
+        if (!hidden[i]) askedFor[i],
     ];
     if (visible.isEmpty) return const SizedBox.shrink();
 

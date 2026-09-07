@@ -794,6 +794,32 @@ void main() {
       expect(find.textContaining('more in between'), findsNothing);
     });
 
+    testWidgets(
+      'a restated sentence hides one entry, not every copy of it',
+      (tester) async {
+        // `engine.instruct` does not dedupe, so re-sending the sentence the
+        // session was opened with leaves TWO identical entries in the list —
+        // and only the newer of them is the one the pending row is drawing.
+        // Hiding both would take entry #1 off the only surface that renders
+        // it, and leave the elision line pinned behind the wrong sentence.
+        final session = await _armedSession(const []);
+        await _pumpDrawer(tester, session);
+
+        await _sendInstruction(tester, 'ship the fix');
+        _emitStatus(
+          session,
+          const [],
+          instructions: (total: 2, items: ['ship the fix', 'ship the fix']),
+        );
+        await tester.pump();
+
+        // Once in this block as entry #1, once in the pending row below.
+        expect(find.text('ship the fix'), findsNWidgets(2));
+        expect(find.text('WHAT YOU ASKED FOR'), findsOneWidget);
+        expect(find.textContaining('more in between'), findsNothing);
+      },
+    );
+
     testWidgets('a pasted sentence long enough to be clipped still matches', (
       tester,
     ) async {

@@ -1403,9 +1403,10 @@ const HandlerSessionSnapshot = z.object({
   // elided BETWEEN position 0 and position 1 — always, since nothing between
   // position 1 and the end is ever missing — which is what makes a
   // non-contiguous window legible without a second count that could disagree
-  // with it. `total` is the RETAINED count (the store's array length), not a
-  // lifetime one: pushInstruction splices the oldest away past
-  // MAX_INSTRUCTIONS and nothing counts what it has already dropped. Optional
+  // with it. `total` is the RETAINED count — the entries `items` was windowed
+  // out of, so the two can never disagree — not a lifetime one: pushInstruction
+  // splices the oldest away past MAX_INSTRUCTIONS and nothing counts what it
+  // has already dropped. Optional
   // and appended LAST for the reason `observability` is: an older app still
   // parses the snapshot and every key it already reads keeps its position. A
   // bridge that HAS this field always sends it, including `{ total: 0, items:
