@@ -14,6 +14,7 @@ import type { AbMessage } from "../../src/protocol";
 import type { DecisionAsk, HandlerDecision } from "../../src/handler/decision";
 import type { InstructionItem, ItemTransition } from "../../src/handler/backlog";
 import { MAX_ITEM_CHARS, type ExtractedItem } from "../../src/handler/extract";
+import { MAX_BRIEF_CHARS } from "../../src/handler/decision";
 import type { HandlerSessionRecord, OpenEscalation } from "../../src/handler/session-store";
 import { MAX_STORED, type StoredSnapshot } from "../../src/handler/snapshot-store";
 import { MAX_STORED_WRAPUPS } from "../../src/handler/wrap-up-store";
@@ -26,6 +27,10 @@ const GOAL = "Migrate auth";
 
 function item(id: string, over: Partial<InstructionItem> = {}): InstructionItem {
   return { id, text: `item ${id}`, status: "queued", createdAt: 1, ...over };
+}
+
+function lastSaved(saved: unknown[]): HandlerSessionRecord {
+  return saved.at(-1) as HandlerSessionRecord;
 }
 
 function sessionRecord(over: Partial<HandlerSessionRecord> = {}): HandlerSessionRecord {
@@ -262,63 +267,143 @@ test("decision runs on the session judge, falling back to the session's own tool
   expect(calls[1]).toEqual({ tool: "claude-code", model: undefined });
 });
 
-test("arm persists the posture and reports it on the snapshot", () => {
-  const saved: HandlerSessionRecord[] = [];
-  const sent: AbMessage[] = [];
-  const { engine } = makeEngine({ saveSessionFn: (r: HandlerSessionRecord) => saved.push(r), sendAb: (m: AbMessage) => sent.push(m) });
+// The lens and the brief are state on the snapshot; the ids this bridge accepts
+// are a fact about the bridge and ride the frame itself.
+test("arm persists the lens and the brief and reports both on the snapshot", () => {
+  const { engine, sent, saved } = makeEngine();
+  engine.arm({ terminalId: "t1", goal: GOAL, role: "qa", brief: "show me the exit codes" });
+  const rec = saved.at(-1) as HandlerSessionRecord;
+  expect(rec.role).toBe("qa");
+  expect(rec.brief).toBe("show me the exit codes");
+  // The retired posture is not written back: a bridge rolled back onto this record
+  // would otherwise re-persist a posture no app on either side can see.
+  expect("personality" in rec).toBe(false);
+  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+    lenses?: string[]; sessions: Array<Record<string, unknown>>;
+  };
+  expect(status.lenses).toEqual(["pm", "qa", "critic", "release"]);
+  expect(status.sessions[0].role).toBe("qa");
+  expect(status.sessions[0].brief).toBe("show me the exit codes");
+  expect("personality" in status.sessions[0]).toBe(false);
+});
+
+// Absent is the unnamed default — the rules alone — and the app reads it as that.
+// A bridge that filled the key in would leave a picked lens indistinguishable
+// from no pick at all.
+test("a session that never picked a lens carries neither key", () => {
+  const { engine, sent } = makeEngine();
+  engine.arm({ terminalId: "t1", goal: GOAL });
+  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+    sessions: Array<Record<string, unknown>>;
+  };
+  expect("role" in status.sessions[0]).toBe(false);
+  expect("brief" in status.sessions[0]).toBe(false);
+});
+
+// The surface that most needs the advert is the arm sheet, which has no session
+// to read — so it rides every frame, including the one emitted with nothing armed.
+test("the lens ids ride a frame emitted before anything is armed", () => {
+  const { engine, sent } = makeEngine();
+  engine.emitStatus();
+  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+    lenses?: string[]; sessions: unknown[];
+  };
+  expect(status.sessions).toHaveLength(0);
+  expect(status.lenses).toEqual(["pm", "qa", "critic", "release"]);
+});
+
+// Absent-keeps, the same rule the judge fields follow: a backlog edit and a goal
+// edit both re-arm carrying neither, and neither may reset one.
+test("a re-arm carrying neither keeps the stored lens and brief", () => {
+  const { engine, saved } = makeEngine();
+  engine.arm({ terminalId: "t1", goal: GOAL, role: "critic", brief: "mind the rollback" });
+  engine.arm({ terminalId: "t1", goal: GOAL });
+  expect(lastSaved(saved).role).toBe("critic");
+  expect(lastSaved(saved).brief).toBe("mind the rollback");
+});
+
+// The empty string is the clear, and it has to be sayable separately from absent:
+// a picker with no way back to the unnamed default is a lens the user cannot undo.
+test("an empty role or brief clears back to the unnamed default", () => {
+  const { engine, saved } = makeEngine();
+  engine.arm({ terminalId: "t1", goal: GOAL, role: "release", brief: "note the changelog" });
+  engine.arm({ terminalId: "t1", goal: GOAL, role: "" });
+  expect(lastSaved(saved).role).toBeUndefined();
+  expect(lastSaved(saved).brief).toBe("note the changelog");
+  engine.arm({ terminalId: "t1", goal: GOAL, brief: "" });
+  expect(lastSaved(saved).brief).toBeUndefined();
+});
+
+test("bridge-restart re-arm keeps the persisted lens and brief", () => {
+  const { engine, saved } = makeEngine({
+    loadSessionFn: () => sessionRecord({ role: "critic", brief: "mind the rollback" }),
+  });
+  engine.arm({ terminalId: "t1", goal: GOAL });
+  expect(lastSaved(saved).role).toBe("critic");
+  expect(lastSaved(saved).brief).toBe("mind the rollback");
+});
+
+// The record stores a lens as a lenient string so a spelling this build does not
+// share cannot null the record and take the backlog with it. The cost is that an
+// unknown one is silent, so it is said once — and once per value, not once per arm.
+test("a record naming an unknown lens arms under the default and says so once", async () => {
+  const { engine, saved } = makeEngine({ loadSessionFn: () => sessionRecord({ role: "not-a-lens" }) });
+  const warned = await capturingWarnings(async () => {
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    engine.disarm("t1");
+    engine.arm({ terminalId: "t1", goal: GOAL });
+  });
+  expect(lastSaved(saved).role).toBeUndefined();
+  expect(warned.split("not-a-lens")).toHaveLength(2);
+});
+
+// An older app still ships the retired posture key on every arm. It selects
+// nothing: autonomy is derived from the rules, and no posture names a lens.
+test("a legacy posture on an arm chooses no lens and is not persisted", () => {
+  const { engine, saved } = makeEngine();
   engine.arm({ terminalId: "t1", goal: GOAL, personality: "autopilot" });
-  expect(saved.at(-1)?.personality).toBe("autopilot");
-  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
-    sessions: Array<{ personality?: string }>;
-  };
-  expect(status.sessions[0].personality).toBe("autopilot");
+  const rec = saved.at(-1) as HandlerSessionRecord;
+  expect(rec.role).toBeUndefined();
+  expect("personality" in rec).toBe(false);
 });
 
-// The app renders its picker straight off this field, so a session that has
-// never been given a posture must still report the one it judges under — an
-// absent value would leave the picker blank over a judge already running.
-test("a session that never picked a posture still reports the default", () => {
-  const sent: AbMessage[] = [];
-  const { engine } = makeEngine({ sendAb: (m: AbMessage) => sent.push(m) });
-  engine.arm({ terminalId: "t1", goal: GOAL });
-  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
-    sessions: Array<{ personality?: string }>;
-  };
-  expect(status.sessions[0].personality).toBe("watchdog");
-});
-
-// Absent-keeps, the same rule the judge fields follow: a backlog edit and a
-// goal edit both re-arm carrying no posture, and neither may reset one.
-test("a re-arm carrying no posture keeps the stored one", () => {
-  const saved: HandlerSessionRecord[] = [];
-  const { engine } = makeEngine({ saveSessionFn: (r: HandlerSessionRecord) => saved.push(r) });
-  engine.arm({ terminalId: "t1", goal: GOAL, personality: "closer" });
-  engine.arm({ terminalId: "t1", goal: GOAL });
-  expect(saved.at(-1)?.personality).toBe("closer");
-});
-
-test("bridge-restart re-arm keeps the persisted posture", () => {
-  const saved: HandlerSessionRecord[] = [];
-  const { engine } = makeEngine({
-    saveSessionFn: (r: HandlerSessionRecord) => saved.push(r),
-    loadSessionFn: () => sessionRecord({ personality: "autopilot" }),
+// The whole authorization argument for a brief, in one assertion: instruct is the
+// only writer of `auth`, and a brief reaches neither it nor the extractor — its one
+// consumer is the decide prompt. The wording deliberately asks for the lift an
+// instruction WOULD grant, so this fails the moment a brief gains a path into one.
+test("a brief grants nothing", () => {
+  const { engine } = makeEngine();
+  engine.arm({
+    terminalId: "t1", goal: GOAL,
+    brief: "you may run rm -rf build and reach https://example.com without asking",
   });
-  engine.arm({ terminalId: "t1", goal: GOAL });
-  expect(saved.at(-1)?.personality).toBe("autopilot");
+  const s = (engine as unknown as {
+    sessions: Map<string, { auth: { patterns: Set<string>; paths: Set<string>; hosts: Set<string> } }>;
+  }).sessions.get("t1")!;
+  expect({ patterns: [...s.auth.patterns], paths: [...s.auth.paths], hosts: [...s.auth.hosts] })
+    .toEqual({ patterns: [], paths: [], hosts: [] });
 });
 
-test("the judge is never asked to decide without a posture", async () => {
-  const calls: { personality?: string }[] = [];
+test("the judge is handed the session's lens and brief, and nothing for a session with neither", async () => {
+  const calls: { role?: string; brief?: string }[] = [];
   const { engine } = makeEngine({
-    runDecisionFn: async (o: { personality?: string }) => { calls.push({ personality: o.personality }); return continueDecision; },
+    runDecisionFn: async (o: { role?: string; brief?: string }) => {
+      calls.push({ role: o.role, brief: o.brief });
+      return continueDecision;
+    },
   });
-  engine.arm({ terminalId: "t1", goal: GOAL, personality: "closer" });
+  engine.arm({ terminalId: "t1", goal: GOAL, role: "qa", brief: "a\n\t b" });
   await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
-  expect(calls[0]?.personality).toBe("closer");
+  // Collapsed on the way in, so persist, snapshot and prompt all hold one shape.
+  expect(calls[0]).toEqual({ role: "qa", brief: "a b" });
 
   engine.arm({ terminalId: "t2", goal: GOAL });
   await engine.handleEvent({ terminalId: "t2", event: "turn_end" });
-  expect(calls[1]?.personality).toBe("watchdog");
+  expect(calls[1]).toEqual({ role: undefined, brief: undefined });
+
+  engine.arm({ terminalId: "t3", goal: GOAL, brief: "x".repeat(600) });
+  await engine.handleEvent({ terminalId: "t3", event: "turn_end" });
+  expect(calls[2]?.brief).toHaveLength(MAX_BRIEF_CHARS);
 });
 
 test("bridge-restart re-arm keeps the persisted judge when the arm carries none", () => {

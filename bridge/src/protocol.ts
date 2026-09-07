@@ -1017,16 +1017,6 @@ const BacklogWire = z.array(InstructionItemWire).refine(
 // stay in lockstep, or the hot path admits what the union rejects. Field-level
 // rules (BacklogWire) ride along through `.shape`; a whole-payload `.refine`
 // would have to be written on both.
-// How far Handler leans toward answering on the user's behalf: it moves where
-// the line between `handle` and `escalate` sits, and the tone of `notify`.
-// Nothing else — the evidence a transition must cite is the anti-inflation
-// guard, and a posture able to relax it would let a confident preset report
-// progress that never happened.
-//
-// A bounded preset, deliberately not a free-text guidance field: the value is
-// interpolated into the judge prompt, and a fixed set carries no injection.
-export const HandlerPersonalitySchema = z.enum(["watchdog", "closer", "autopilot"]);
-export type HandlerPersonality = z.infer<typeof HandlerPersonalitySchema>;
 
 // The judge's lens: what it LOOKS FOR and ASKS ABOUT, added on top of the rules.
 // A lens only adds questions — autonomy is derived from the rules, so no value
@@ -1036,6 +1026,13 @@ export type HandlerPersonality = z.infer<typeof HandlerPersonalitySchema>;
 // A bounded enum rather than free text because the value selects BRIDGE-AUTHORED
 // prompt text: nothing a sender types is interpolated by choosing one. The user's
 // own words travel separately as `brief`, fenced as user text.
+//
+// `brief` is therefore the ONE free-text field of this schema that reaches the
+// judge prompt, and it is defended in depth: the sanity cap below, a clip to the
+// prompt budget in the engine, a collapse to one line so it cannot forge a header,
+// a bullet naming it as the user's words, a standing sentence saying it authorises
+// nothing, and — mechanically, not by wording — no path from it to
+// authorizeInstruction (see the invariants on HandlerEngine.instruct).
 export const HandlerLensSchema = z.enum(["pm", "qa", "critic", "release"]);
 export type HandlerLens = z.infer<typeof HandlerLensSchema>;
 
@@ -1054,11 +1051,14 @@ export const HandlerConfigureWire = z.object({
   // tool / CLI default model); absent = leave the stored choice untouched.
   judgeTool: z.string().optional(),
   judgeModel: z.string().optional(),
-  // Absent = leave the session's stored posture untouched, the same
-  // absent-keeps rule judgeTool follows. There is no "clear to default": every
-  // preset is a real choice, and the default is only what a session that has
-  // never been given one judges as.
-  personality: HandlerPersonalitySchema.optional(),
+  // The retired posture key, still shipped by an app that predates the lens.
+  // Declared as a plain unbounded string, and read only to say once that it
+  // selected nothing: agent-core re-parses this whole payload before arming, so
+  // a value refused here — an unrecognised preset, or a length — would drop the
+  // goal, the backlog, the judge picks and the arm itself. It aliases to the
+  // unnamed default and never to a lens; a posture was an autonomy dial, and
+  // autonomy is derived from the rules.
+  personality: z.string().optional(),
   // The lens this session judges under. Absent = leave the stored lens
   // untouched, the same absent-keeps rule judgeTool follows; "" = back to the
   // unnamed default, which is the rules alone. An empty string rather than a
@@ -1365,11 +1365,6 @@ const HandlerSessionSnapshot = z.object({
   // handler/engine.ts). Optional and appended LAST: an older app still parses
   // the snapshot, and every key it reads keeps its position.
   observability: z.enum(["full", "escalate_only", "unsupported"]).optional(),
-  // The posture this session actually judges under, resolved by the bridge and
-  // so always present on a status frame — an app reading it never has to know
-  // what an absent value would have meant. Optional and appended LAST for the
-  // same reason `observability` is: an older app still parses the snapshot.
-  personality: HandlerPersonalitySchema.optional(),
   // Presence IS the capability signal, the way `observability`'s is and unlike
   // `wrapUps`, where absent and empty mean the same thing: this bridge accepts
   // handler:answer and an escalationId-bearing handler:instruct for this

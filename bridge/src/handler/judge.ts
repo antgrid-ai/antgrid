@@ -6,7 +6,7 @@ import {
   type HandlerDecision,
 } from "./decision";
 import type { InstructionItem } from "./backlog";
-import type { HandlerPersonality } from "../protocol";
+import type { HandlerLens } from "../protocol";
 import { buildExtractPrompt, parseExtractionOutput, type ExtractionResult } from "./extract";
 
 // Eval-only judge override (Task 16's e2e harness): the spawned agent process can't
@@ -122,7 +122,8 @@ export async function runDecision(opts: {
   askAnswer?: { question: string; answer: string; tapped: boolean };
   agentTool?: string;
   commands?: CapCommand[];
-  personality?: HandlerPersonality;
+  role?: HandlerLens;
+  brief?: string;
   retryIfShape?: (decision: HandlerDecision) => string | null;
   onTimeout?: () => void;
 }): Promise<HandlerDecision | null> {
@@ -137,8 +138,8 @@ export async function runDecision(opts: {
       openAsks: opts.openAsks, askRejections: opts.askRejections, askAnswer: opts.askAnswer,
       agentTool: opts.agentTool, commands: opts.commands,
       // The retry legs below append to this prompt rather than rebuilding one,
-      // so the posture rides through them with nothing further to do.
-      personality: opts.personality,
+      // so the lens and the brief ride through them with nothing further to do.
+      role: opts.role, brief: opts.brief,
     }),
     parse: (stdout) => {
       const r = parseDecisionFromOutput(stdout);

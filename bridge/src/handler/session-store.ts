@@ -3,7 +3,6 @@ import { z } from "zod";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { BacklogSchema } from "./backlog";
-import { HandlerPersonalitySchema } from "../protocol";
 
 // One tap-to-answer option on a quick-choice escalation. `text` is sent as
 // the USER's own reply through the ordinary reply transport, so it must be
@@ -164,10 +163,12 @@ export const HandlerSessionRecordSchema = z.object({
   // model).
   judgeTool: z.string().optional(),
   judgeModel: z.string().optional(),
-  // Per-session posture. Optional rather than defaulted so a record written
-  // before this field parses as itself — `version` stays 2, and the engine
-  // resolves the absent case to the preset a fresh session gets.
-  personality: HandlerPersonalitySchema.optional(),
+  // The retired posture. Kept on the schema, and as a lenient string, only so a
+  // record any bridge ever wrote still parses: this schema nulls the WHOLE record
+  // on one unreadable value and arm() then rebuilds an empty session, so a posture
+  // spelling this build does not know would cost the user their backlog. Read for
+  // the one line that says it selected nothing; never written again.
+  personality: z.string().optional(),
   // The session's lens, and the user's brief beneath it. Lenient strings rather
   // than the wire enum on purpose: loadHandlerSession turns ANY parse failure into
   // null and arm() then rebuilds an empty session — goal "", no backlog, no

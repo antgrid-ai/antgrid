@@ -2,9 +2,10 @@
 import { createHash } from "node:crypto";
 import {
   createMessage,
+  HandlerLensSchema,
   type AbMessage,
   type HandlerEntitlement,
-  type HandlerPersonality,
+  type HandlerLens,
 } from "../protocol";
 import { classifyDestructive, describeWarning, type FloorWarning } from "./destructive-floor";
 import {
@@ -40,7 +41,7 @@ import type { CapCommand } from "../structured/chat-session";
 import type { SessionAdapter } from "./session-adapter";
 import { handlerObservable, judgeCapable } from "../agents/registry";
 import { createEntitlementReader, type EntitlementReader } from "../entitlement";
-import { type DecisionAsk, type HandlerDecision, DEFAULT_PERSONALITY } from "./decision";
+import { normalizeBrief, type DecisionAsk, type HandlerDecision } from "./decision";
 import {
   LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS, TRANSIENT_CEILING, transientBackoffMs,
   defaultSchedule, TimerRegistry, type LifecycleDeps,
@@ -630,11 +631,13 @@ interface ArmedSession {
   escalations: OpenEscalation[];
   judgeTool?: string;
   judgeModel?: string;
-  // Absent until the user picks one. Resolved to DEFAULT_PERSONALITY at the two
-  // points that consume it — the status emit and the decide prompt — rather than
-  // defaulted here, so "never chosen" stays distinguishable on disk from a
-  // session the user deliberately set back to the default preset.
-  personality?: HandlerPersonality;
+  // Absent = the unnamed default: the judge's rules alone, with no lens section
+  // in its prompt. Never resolved to a named lens anywhere, so "never chosen"
+  // stays distinguishable on disk from a lens the user picked.
+  role?: HandlerLens;
+  // The user's own words for what else to look for, stored already collapsed and
+  // clipped so persist, snapshot and prompt all hold the one shape.
+  brief?: string;
   parkKind?: "limit" | "outage";
   parkedUntil?: number;
   selfResuming?: boolean;
@@ -821,6 +824,9 @@ export class HandlerEngine {
   // Undos in flight, by snapshot id. Two taps on one row must not run two undos:
   // the second would be acting on a tree the first already moved.
   private undoing = new Set<string>();
+  // Lens spellings off disk that this build cannot name, so the warn is one line
+  // per vocabulary gap rather than one per arm.
+  private unknownLenses = new Set<string>();
   private entitlement: EntitlementReader;
 
   constructor(private deps: HandlerEngineDeps) {
@@ -889,14 +895,33 @@ export class HandlerEngine {
     if (p.judgeModel !== undefined) s.judgeModel = p.judgeModel.trim() || undefined;
   }
 
-  // Absent leaves the stored posture alone, the same rule applyJudgeChoice
-  // follows. Zod has already bounded the value to the three presets, so unlike
-  // judgeTool there is nothing further to validate here.
-  private applyPersonality(
-    s: { personality?: HandlerPersonality },
-    p: { personality?: HandlerPersonality },
+  // Absent leaves the stored value alone, the same rule applyJudgeChoice follows.
+  // A role arrives already bounded to the lens table, so unlike judgeTool there is
+  // nothing to validate; "" is the clear back to the unnamed default, which is why
+  // it is a separate value from absent. A brief is normalized on the way in so the
+  // clipped, single-line form is what gets persisted and re-read.
+  private applyLens(
+    s: { role?: HandlerLens; brief?: string },
+    p: { role?: HandlerLens | ""; brief?: string },
   ): void {
-    if (p.personality !== undefined) s.personality = p.personality;
+    if (p.role !== undefined) s.role = p.role || undefined;
+    if (p.brief !== undefined) s.brief = normalizeBrief(p.brief);
+  }
+
+  // The record stores a lens as a lenient string so a vocabulary this build does
+  // not share cannot null the whole record and take the backlog with it — which
+  // makes this the one place an unrecognised spelling is answered. It resolves to
+  // the unnamed default, and says so once: a session judging under the rules alone
+  // when the user picked a lens is invisible from anywhere else.
+  private resolveLens(raw: string | undefined): HandlerLens | undefined {
+    if (raw === undefined) return undefined;
+    const parsed = HandlerLensSchema.safeParse(raw);
+    if (parsed.success) return parsed.data;
+    if (!this.unknownLenses.has(raw)) {
+      this.unknownLenses.add(raw);
+      log.warn("handler session names an unknown lens %s; judging under the default", JSON.stringify(raw));
+    }
+    return undefined;
   }
 
   // The session's stored judge: the live armed session if one exists, else the
@@ -977,7 +1002,7 @@ export class HandlerEngine {
     this.saveSession({
       version: 2, terminalId, armed, suspended, goal: s.goal, backlog: s.backlog,
       armedAt: s.armedAt, escalations: s.escalations,
-      judgeTool: s.judgeTool, judgeModel: s.judgeModel, personality: s.personality,
+      judgeTool: s.judgeTool, judgeModel: s.judgeModel, role: s.role, brief: s.brief,
       parkKind: s.parkKind, parkedUntil: s.parkedUntil, transientFailures: s.transientFailures,
       parkAwaitingJudge: s.parkAwaitingJudge, askAnswer: s.askAnswer,
     });
@@ -985,7 +1010,11 @@ export class HandlerEngine {
 
   arm(p: {
     terminalId: string; goal?: string; backlog?: InstructionItem[];
-    judgeTool?: string; judgeModel?: string; personality?: HandlerPersonality;
+    judgeTool?: string; judgeModel?: string; role?: HandlerLens | ""; brief?: string;
+    // The retired posture key an older app still sends. Typed so the caller's
+    // pass-through compiles, and read for nothing: a posture was an autonomy dial
+    // and autonomy comes from the rules, so no value here selects a lens.
+    personality?: string;
   }): void {
     // Entitlement first, ahead of every side effect below — the backlog clamp
     // records an activity row, and a refused arm must leave nothing behind.
@@ -1040,7 +1069,7 @@ export class HandlerEngine {
       // judged even if the agent has not moved.
       existing.lastJudgedContextHash = undefined;
       this.applyJudgeChoice(existing, p);
-      this.applyPersonality(existing, p);
+      this.applyLens(existing, p);
       this.persist(p.terminalId, existing, true);
       // Only when the goal actually moved: `handler:configure` is also the
       // backlog-edit and judge-pick path (see updateBacklog in the app), and a
@@ -1094,7 +1123,8 @@ export class HandlerEngine {
       judgeModel: stored.model,
       // Off the RECORD, not off `resumed`: a deliberate disarm keeps the pick
       // for the next arm, exactly as the judge fields above do.
-      personality: rec?.personality,
+      role: this.resolveLens(rec?.role),
+      brief: rec?.brief ? normalizeBrief(rec.brief) : undefined,
       // Carried across the restart the way the escalations above it are, and for
       // the sharper version of the same reason: the row this answers is already
       // retired, so dropping the answer here would leave the user believing they
@@ -1110,7 +1140,7 @@ export class HandlerEngine {
       auth: createAuthorization(),
     };
     this.applyJudgeChoice(s, p);
-    this.applyPersonality(s, p);
+    this.applyLens(s, p);
     this.sessions.set(p.terminalId, s);
     this.persist(p.terminalId, s, true);
     // "armed" either way: nothing is edited on this path — the goal is whatever the
@@ -2126,7 +2156,7 @@ export class HandlerEngine {
       const runDecisionFn = this.deps.runDecisionFn ?? defaultRunDecision;
       decision = await runDecisionFn({
         tool: s.judgeTool ?? tool, model: s.judgeModel, goal: s.goal,
-        personality: s.personality ?? DEFAULT_PERSONALITY,
+        role: s.role, brief: s.brief,
         backlogText: renderBacklog(s.backlog),
         context: ctx.text, transcriptPath: ctx.transcriptPath ?? transcriptPath,
         cwd: this.deps.projectPath(evt.terminalId),
@@ -3232,10 +3262,11 @@ export class HandlerEngine {
       // Re-derived on every emit rather than frozen at arm time: a slot's mode
       // and its judge pick both change under a live arm.
       observability: this.observabilityFor(terminalId),
-      // Resolved, never the raw field: the app renders the picker off this, and
-      // an absent value would leave it showing nothing while the judge runs
-      // under a posture all the same.
-      personality: s.personality ?? DEFAULT_PERSONALITY,
+      // Omitted when unset, the way every optional field on this snapshot is: an
+      // absent lens is the unnamed default, and a bridge that filled one in would
+      // leave the app unable to tell a picked lens from no pick at all.
+      ...(s.role ? { role: s.role } : {}),
+      ...(s.brief ? { brief: s.brief } : {}),
       // A constant, because it is a fact about THIS BRIDGE rather than about the
       // session: answerAsk exists here and instruct reads an escalationId, so an
       // app may act on a `nonBlocking` row. It has to be said on the wire because
@@ -3257,6 +3288,12 @@ export class HandlerEngine {
       // What an absent per-session judge resolves to for PTY slots — lets the
       // app label its picker "Default (claude-code)" instead of a bare Default.
       defaultTool: this.deps.tool(),
+      // A constant, for the reason `askAnswer` on a session snapshot is one: it is
+      // a fact about THIS BRIDGE — which lens ids it can print — and no session can
+      // say it, least of all the arm sheet, which has no session yet. Every frame
+      // carries it, including the one agent-core emits on a handshake with nothing
+      // armed, because that is the frame the sheet reads.
+      lenses: HandlerLensSchema.options,
       sessions,
       // Project-scoped, not per session: an undo offer outlives the session that
       // took it, and an app that restarted between the advert and the tap has no

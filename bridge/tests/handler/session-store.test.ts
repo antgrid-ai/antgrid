@@ -208,6 +208,17 @@ describe("session record round-trip", () => {
     expect(loaded?.role).toBe("not-a-lens");
   });
 
+  // The retired posture reaches this schema off any record an older bridge wrote,
+  // and refusing one would cost that session its backlog on the upgrade — the one
+  // failure this whole field exists to avoid.
+  it("loads a record naming a posture no build has ever defined", () => {
+    const abDir = tmpAbDir();
+    writeRaw(abDir, "t1", JSON.stringify({ ...record(), personality: "anything-at-all" }));
+    const loaded = loadHandlerSession(abDir, "proj", "t1");
+    expect(loaded).not.toBeNull();
+    expect(loaded?.backlog).toEqual([item("i1")]);
+  });
+
   // Same reason, for length: the prompt budget is the engine's to clip to, and a
   // bound on disk could only cost a session that was written under a looser one.
   it("loads a brief far longer than any prompt would print", () => {
