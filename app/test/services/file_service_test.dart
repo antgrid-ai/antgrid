@@ -819,6 +819,139 @@ void main() {
     });
   });
 
+  // Backgrounding declares focus for EVERY open project, and every checkout of
+  // each re-pulls on the resume edge — so on an idle project the answer used to
+  // be a byte-identical tree per checkout, per app switch.
+  group('focus-resume re-pull names the revision it holds', () {
+    Future<void> resume(ProjectSession session) async {
+      session.setLifecyclePaused(true);
+      await Future<void>.delayed(Duration.zero);
+      session.setLifecyclePaused(false);
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    List<Map<String, dynamic>> treeRequests(FakeAgentTransport t) => t.sent
+        .where((m) => m['type'] == 'file:tree:snapshot:request')
+        .toList();
+
+    test('a resume claims the snapshot seq; a hydrator run claims none',
+        () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+      await Future<void>.delayed(Duration.zero);
+      expect(treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+
+      t.emit('file:tree:snapshot', {
+        'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
+        'seq': 5,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      await resume(session);
+      expect(treeRequests(t).last['sinceSeq'], 5);
+
+      // A hydrator run means the transport re-established, and the agent behind
+      // it may be a new process counting from zero — a claim there could be
+      // confirmed by coincidence against a tree this app no longer holds.
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+      expect(treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('file:tree:unchanged keeps both the tree and the claim', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      t.emit('file:tree:snapshot', {
+        'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
+        'seq': 5,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      await resume(session);
+      t.emit('file:tree:unchanged', {'seq': 5});
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.root!.children.single.path, 'a.txt');
+      await resume(session);
+      expect(treeRequests(t).last['sinceSeq'], 5);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('only a contiguous tree:update advances the claim', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      t.emit('file:tree:snapshot', {
+        'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
+        'seq': 5,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      void update(int seq, String name) => t.emitJson({
+        'id': 'u$seq',
+        'timestamp': 0,
+        'type': 'tree:update',
+        'projectId': 'p',
+        'seq': seq,
+        'added': [_file(name, name)],
+        'modified': const <Map<String, dynamic>>[],
+        'removed': const <String>[],
+      });
+
+      update(6, 'b.txt');
+      await Future<void>.delayed(Duration.zero);
+      await resume(session);
+      expect(treeRequests(t).last['sinceSeq'], 6);
+
+      // A gap is the agent having suppressed and DROPPED updates while this app
+      // was backgrounded: the tree here is missing whatever those carried, so
+      // the claim must stay behind and buy a full tree on the next resume.
+      update(9, 'c.txt');
+      await Future<void>.delayed(Duration.zero);
+      await resume(session);
+      expect(treeRequests(t).last['sinceSeq'], 6);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a re-synced tree:full moves the claim with the tree it replaces',
+        () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      t.emit('file:tree:snapshot', {
+        'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
+        'seq': 5,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      t.emit('tree:full', {
+        'projectId': 'p',
+        'seq': 11,
+        'root': _rootNode(children: [_file('b.txt', 'b.txt')]),
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      await resume(session);
+      expect(treeRequests(t).last['sinceSeq'], 11);
+
+      await svc.dispose();
+      await session.close();
+    });
+  });
+
   group('git:diff bounded by tier-2 action', () {
     test('requestDiff whose content never arrives clears diffLoading after '
         'the timeout', () async {

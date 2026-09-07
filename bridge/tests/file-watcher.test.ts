@@ -44,6 +44,23 @@ describe("FileWatcher", () => {
     watcher.stop();
   });
 
+  it("passes replayOnly through to the sender", () => {
+    const seen: Array<{ force?: boolean; replayOnly?: boolean } | undefined> = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (_msg, opts) => seen.push(opts),
+      createConnState(),
+    );
+
+    // The watcher does not decide whether a tree reaches the wire; the sender
+    // it was handed does. A sender with no bus (this one) delivers regardless,
+    // which is the old behaviour rather than a break.
+    watcher.sendFullTree({ replayOnly: true });
+
+    expect(seen).toEqual([{ replayOnly: true }]);
+    watcher.stop();
+  });
+
   it("detects file additions", async () => {
     const messages: AbMessage[] = [];
     const watcher = new FileWatcher(
@@ -311,7 +328,7 @@ describe("FileWatcher pause", () => {
 
     const updates = emitted.filter((m) => m.type === "tree:update");
     expect(updates.length).toBe(0);
-    expect(connState.fileSeq).toBeGreaterThan(0);
+    expect(connState.fileSeq(tempDir)).toBeGreaterThan(0);
     fw.stop();
   });
 
@@ -378,6 +395,6 @@ describe("FileWatcher pause", () => {
     );
     const snap = fw.getTreeSnapshot();
     expect(snap.tree).toBeDefined();
-    expect(snap.seq).toBe(connState.fileSeq);
+    expect(snap.seq).toBe(connState.fileSeq(tempDir));
   });
 });

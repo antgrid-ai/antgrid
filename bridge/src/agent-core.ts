@@ -667,6 +667,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (force) republishAb(stamped); else sendAb(stamped);
   }
 
+  /** Stamps the checkout like [sendFromRuntime] but only seeds the replay
+   *  cache — see MessageBus.retain. */
+  function retainFromRuntime(runtime: CheckoutRuntime, msg: AbMessage): void {
+    retainAb({ ...msg, checkoutId: runtime.checkout.id } as AbMessage);
+  }
+
   function internalTerminalId(runtime: CheckoutRuntime, terminalId: string): string {
     if (sessions?.get(terminalId) || runtime.checkout.id === "main") return terminalId;
     const computed = runtime.configuredTerminalIds.get(terminalId)
@@ -1521,8 +1527,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (runtime.checkout.id !== checkoutIdOf(msg)) break;
         const fw = runtime.fileWatcher;
         if (!fw) break;
-        const { tree, seq } = fw.getTreeSnapshot();
-        sendFromRuntime(runtime, createMessage("file:tree:snapshot", { tree, seq }));
+        // A caller that names the revision it holds, and is still right about
+        // it, is told so instead of being sent the tree again. A phone
+        // foregrounding re-asks EVERY bound checkout at once and nothing else
+        // gates that, so on an idle project every one of those answers was a
+        // byte-identical megabyte. `currentSeq` reads the counter without
+        // walking the tree, so the confirmation costs no disk either.
+        if (msg.sinceSeq !== undefined && msg.sinceSeq === fw.currentSeq()) {
+          sendFromRuntime(runtime, createMessage("file:tree:unchanged", { seq: msg.sinceSeq }));
+        } else {
+          const { tree, seq } = fw.getTreeSnapshot();
+          sendFromRuntime(runtime, createMessage("file:tree:snapshot", { tree, seq }));
+        }
+        // Outside the branch above on purpose: staging, a branch move and a
+        // commit all change the decorations without touching a watched path,
+        // so an unchanged tree says nothing about the status drawn on it.
         // The app asks for this on every (re)connect and on a pull-to-refresh,
         // and the git decorations belong to the same picture as the tree —
         // answering with a tree alone left the changes list showing whatever
@@ -1642,6 +1661,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   /** Same wire as [sendAb] but bypasses the bus's payload-equality dedup. Only
    *  the explicit re-sync paths use it — see MessageBus.republish. */
   let republishAb: (msg: AbMessage) => void = (_m) => {};
+  /** Same bus as [sendAb] but caches for replay WITHOUT delivering — see
+   *  MessageBus.retain. */
+  let retainAb: (msg: AbMessage) => void = (_m) => {};
   let sendPlain: (data: object) => Promise<SendOutcome> = async () => "dropped";
   // Replay-cache eviction for torn-down chat sessions; bound with the bus in
   // attachTransport, like sendAb.
@@ -2665,7 +2687,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
     const fw = new FileWatcher(
       { id: project.id, path: runtime.checkout.path, name: project.name },
-      (msg, opts) => sendFromRuntime(runtime, msg, opts?.force),
+      (msg, opts) => {
+        if (opts?.replayOnly) retainFromRuntime(runtime, msg);
+        else sendFromRuntime(runtime, msg, opts?.force);
+      },
       connState,
       () => scheduleGitRefresh(runtime),
     );
@@ -2682,7 +2707,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // by this point it has already nulled `manager`. The delete path cannot:
     // [withCheckoutRuntimeLock] holds teardown behind this whole function.
     if (runtime.disposed || !manager) return;
-    fw.sendFullTree();
+    // Cached, not pushed. Nothing reads an open-time tree: every client pulls
+    // its own with `file:tree:snapshot:request`, and this one is built before
+    // any app has a stream bound to receive it — so the push was discarded on
+    // arrival while holding half the control channel's window (see
+    // MessageBus.retain).
+    fw.sendFullTree({ replayOnly: true });
     fw.startWatching();
 
     runtime.configController.watch((result, diff) => {
@@ -3479,7 +3509,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
     const fw = new FileWatcher(
       project,
-      (msg: AbMessage, opts) => (opts?.force ? republishAb(msg) : sendAb(msg)),
+      (msg: AbMessage, opts) => {
+        if (opts?.replayOnly) retainAb(msg);
+        else if (opts?.force) republishAb(msg);
+        else sendAb(msg);
+      },
       connState,
       () => scheduleGitRefresh(mainRuntime),
     );
@@ -3493,7 +3527,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     uploadManager.startSweeper();
     mainRuntime.uploadManager = uploadManager;
     await yieldToEventLoop();
-    fw.sendFullTree();
+    // Cached, not pushed. Nothing reads an open-time tree: every client pulls
+    // its own with `file:tree:snapshot:request`, and this one is built before
+    // any app has a stream bound to receive it — so the push was discarded on
+    // arrival while holding half the control channel's window (see
+    // MessageBus.retain).
+    fw.sendFullTree({ replayOnly: true });
     fw.startWatching();
 
     const mainSearcher = new FileSearcher(
@@ -3760,6 +3799,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function attachTransport(bus: MessageBus) {
     sendAb = (m) => bus.publish(m, "control");
     republishAb = (m) => bus.republish(m, "control");
+    retainAb = (m) => bus.retain(m, "control");
     dropSessionReplay = (sessionId) => bus.dropSessionReplay(sessionId);
     dropCheckoutReplay = (checkoutId) => bus.dropCheckoutReplay(checkoutId);
     // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.

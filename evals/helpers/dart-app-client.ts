@@ -401,8 +401,15 @@ export class DartAppClient {
     return done;
   }
 
-  waitForFileTree(streamId: string, timeoutMs = 10_000): Promise<DartEvent> {
-    return this.waitForStreamAbMessage(streamId, "tree:full", timeoutMs);
+  /** The open-time tree is retained for replay, never pushed — every client
+   *  pulls its own (see MessageBus.retain and `state-snapshot.ts`) — so ask for
+   *  it the way a `ProjectSession` does rather than await a push that no longer
+   *  comes. The waiter is armed BEFORE the pull so the fanned frame cannot land
+   *  in the gap between them. */
+  async waitForFileTree(streamId: string, timeoutMs = 10_000): Promise<DartEvent> {
+    const waiting = this.waitForStreamAbMessage(streamId, "tree:full", timeoutMs);
+    await this.pullStateSnapshot(streamId, timeoutMs);
+    return waiting;
   }
 
   waitForTreeUpdate(streamId: string, timeoutMs = 10_000): Promise<DartEvent> {

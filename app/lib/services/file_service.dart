@@ -121,17 +121,36 @@ class FileService {
     // Nothing self-corrects it — `_snapshotSeq` only ever advances on a full
     // snapshot, which only this pull asks for.
     _resumeSub = session.focusResumed.listen(
-      (_) =>
-          detached('FileService', 'tree re-pull on focus resume', _hydrateTree),
+      (_) => detached(
+        'FileService',
+        'tree re-pull on focus resume',
+        _repullTreeIfChanged,
+      ),
     );
   }
 
   static const _treeHydratorKey = 'file:tree';
   static const _syncHydratorKey = 'git:sync-state';
 
-  Future<void> _hydrateTree() => session.sendForCheckout(
+  /// A full pull that claims nothing. A hydrator run means the transport
+  /// re-established, and the agent behind it may be a NEW PROCESS whose
+  /// revision counter restarted at zero — a claim carried over from the old one
+  /// could then match by coincidence and have a stale tree confirmed.
+  Future<void> _hydrateTree() => _requestTree();
+
+  /// The focus-resume variant, which names the revision it holds so an
+  /// unchanged checkout is answered `file:tree:unchanged` instead of the whole
+  /// tree. Safe to claim here precisely because a resume re-establishes nothing
+  /// (see [MessageRouter.focusResumed]): the agent being asked is the one that
+  /// issued the seq. Backgrounding is what makes this worth doing — every open
+  /// project's every checkout re-pulls on the same edge, and on an idle project
+  /// each of those answers was a byte-identical tree.
+  Future<void> _repullTreeIfChanged() =>
+      _requestTree(sinceSeq: _snapshotSeq >= 0 ? _snapshotSeq : null);
+
+  Future<void> _requestTree({int? sinceSeq}) => session.sendForCheckout(
     checkoutId,
-    createAbMessage('file:tree:snapshot:request', {}),
+    createAbMessage('file:tree:snapshot:request', {'sinceSeq': ?sinceSeq}),
   );
 
   void _setState(FileTreeState state) {
@@ -148,12 +167,28 @@ class FileService {
       _setState(_state.copyWith(root: parsed.tree));
       return;
     }
+    if (parsed is FileTreeUnchangedMessage) {
+      // Nothing to apply — the agent is confirming the revision we claimed.
+      // Guarded anyway so a confirmation that raced an applied delta cannot
+      // walk the base backwards and re-admit an update already merged.
+      if (parsed.seq > _snapshotSeq) _snapshotSeq = parsed.seq;
+      return;
+    }
     if (parsed is TreeUpdateMessage) {
       final seq = parsed.seq;
       if (seq != null && _snapshotSeq >= 0 && seq <= _snapshotSeq) {
         return; // stale — drop
       }
       _mergeTreeUpdate(parsed);
+      // Only a CONTIGUOUS delta may advance the base. A gap means the agent
+      // suppressed updates while this app was backgrounded and dropped them
+      // (it keeps counting through a suppression window), so the tree here is
+      // missing whatever those carried. Leaving the base behind is exactly what
+      // makes the next resume ask for a full tree rather than have a stale one
+      // confirmed.
+      if (seq != null && _snapshotSeq >= 0 && seq == _snapshotSeq + 1) {
+        _snapshotSeq = seq;
+      }
       return;
     }
     if (parsed is TreeFullMessage) {
@@ -301,6 +336,11 @@ class FileService {
 
   void _handleTreeFull(TreeFullMessage msg) {
     final preserveExpanded = msg.projectId == _state.projectId;
+    // A re-sync push carries the revision it was built at, so the base moves
+    // with the tree it replaces. An agent too old to stamp one leaves the base
+    // where it was, which costs a full pull on the next resume and nothing else.
+    final seq = msg.seq;
+    if (seq != null && seq > _snapshotSeq) _snapshotSeq = seq;
     _setState(
       _state.copyWith(
         root: msg.root,

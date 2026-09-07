@@ -1011,6 +1011,21 @@ class FileTreeSnapshotMessage {
   });
 }
 
+/// The agent confirming the revision a `file:tree:snapshot:request` claimed:
+/// the tree has not moved, so none was sent. Carries no tree by design — see
+/// the schema note on `FileTreeUnchangedMessage` in the bridge's protocol.ts.
+class FileTreeUnchangedMessage {
+  final String id;
+  final int timestamp;
+  final int seq;
+
+  const FileTreeUnchangedMessage({
+    required this.id,
+    required this.timestamp,
+    required this.seq,
+  });
+}
+
 class PreviewSnapshotRequestMessage {
   final String id;
   final int timestamp;
@@ -1882,6 +1897,15 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         timestamp: timestamp,
         tree: tree,
         seq: seq,
+      );
+
+    case 'file:tree:unchanged':
+      final unchangedSeq = json['seq'];
+      if (unchangedSeq is! int) return null;
+      return FileTreeUnchangedMessage(
+        id: id,
+        timestamp: timestamp,
+        seq: unchangedSeq,
       );
 
     case 'preview:snapshot:request':
