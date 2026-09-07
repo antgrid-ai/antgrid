@@ -4946,8 +4946,8 @@ describe("answering an ask", () => {
   const lifted = (s: PrivateSession) =>
     ({ patterns: [...s.auth.patterns], paths: [...s.auth.paths], hosts: [...s.auth.hosts] });
   const statuses = (sent: AbMessage[]) => sent.filter((m) => m.type === "handler:status");
-  const escalateRows = (activity: unknown[]) =>
-    records(activity, "escalate") as { reason: string; detail?: string }[];
+  const answeredRows = (activity: unknown[]) =>
+    records(activity, "answered") as { reason: string; detail?: string }[];
 
   it("a tap parks the label, retires the row, and rests the session", () => {
     const { engine, sent, saved, activity } = armedWithAsk([ask()]);
@@ -4966,8 +4966,11 @@ describe("answering an ask", () => {
     const rec = saved.at(-1) as HandlerSessionRecord;
     expect(rec.escalations).toEqual([]);
     expect(rec.askAnswer?.answer).toBe("Go straight at production");
-    const rows = escalateRows(activity);
-    expect(rows[0]!.reason).toBe("you answered Handler's question");
+    const rows = answeredRows(activity);
+    expect(rows[0]!.reason).toBe("You answered Handler's question");
+    // Not an `escalate` row: the app titles those "Escalated:", and an answer
+    // filed as a stop is the round-1 defect this kind exists to close.
+    expect(records(activity, "escalate")).toHaveLength(0);
     expect(rows[0]!.detail).toBe("Go straight at production");
   });
 
@@ -5031,7 +5034,8 @@ describe("answering an ask", () => {
       expect(saved.length).toBe(beforeSaved);
       expect(session(engine).escalations).toEqual(c.rows);
       expect(session(engine).askAnswer).toBeUndefined();
-      expect(escalateRows(activity)).toEqual([]);
+      expect(answeredRows(activity)).toEqual([]);
+      expect(records(activity, "escalate")).toEqual([]);
     });
   }
 
@@ -5048,7 +5052,7 @@ describe("answering an ask", () => {
     const { engine, activity } = armedWithAsk([ask(), ask({ escalationId: "a2" })]);
     engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
     engine.answerAsk({ terminalId: "t1", escalationId: "a2", choiceId: "opt2" });
-    const replaced = escalateRows(activity).find((r) => r.reason === "your earlier answer was replaced");
+    const replaced = answeredRows(activity).find((r) => r.reason === "Your earlier answer was replaced");
     expect(replaced?.detail).toBe("Point it at staging for now");
     expect(session(engine).askAnswer!.answer).toBe("Go straight at production");
   });
@@ -5133,7 +5137,8 @@ describe("answering an ask", () => {
       // Extracted as work, and the standing ask is untouched by it.
       expect(session(engine).backlog).toHaveLength(1);
       expect(session(engine).escalations).toHaveLength(1);
-      expect(escalateRows(activity)).toEqual([]);
+      expect(answeredRows(activity)).toEqual([]);
+      expect(records(activity, "escalate")).toEqual([]);
     });
 
     it("an empty answer is dropped without retiring the question", async () => {
@@ -5214,8 +5219,8 @@ describe("answering an ask", () => {
       const { engine, activity } = armedWithAsk([ask(), ask({ escalationId: "a2" })], {
         runDecisionFn: async () => { judged.n++; return decide({}); },
       });
-      const synthesised = () => escalateRows(activity)
-        .filter((r) => r.reason.startsWith("no agent event was due"));
+      const synthesised = () => answeredRows(activity)
+        .filter((r) => r.reason.startsWith("Handler started a pass to relay your answer"));
       engine.answerAsk({ terminalId: "t1", escalationId: "a1", choiceId: "opt1" });
       await until(() => judged.n === 1);
       expect(judged.n).toBe(1);
@@ -5284,7 +5289,9 @@ describe("raising an ask", () => {
     return status.sessions[0]?.escalations ?? [];
   };
   const askRows = (activity: unknown[]) =>
-    records(activity, "escalate") as { reason: string; detail?: string }[];
+    records(activity, "asked") as { reason: string; detail?: string }[];
+  const rejectedRows = (activity: unknown[]) =>
+    records(activity, "ask_rejected") as { reason: string; detail?: string }[];
 
   // The backlog is supplied at arm time, so nothing is extracted and `i1` is the
   // one still-open item every ask below names.
@@ -5489,8 +5496,8 @@ describe("raising an ask", () => {
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
       expect(frames(sent)).toHaveLength(1);
-      expect(askRows(activity).map((r) => r.reason))
-        .toContain("question not raised: a question of yours is still unanswered");
+      expect(rejectedRows(activity).map((r) => r.reason))
+        .toContain("a question of yours is still unanswered");
     });
 
     it("refuses an ask that names no still-open item", async () => {
@@ -5500,8 +5507,8 @@ describe("raising an ask", () => {
       );
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(frames(sent)).toHaveLength(0);
-      expect(askRows(activity).map((r) => r.reason))
-        .toContain("question not raised: named no backlog item that is still open");
+      expect(rejectedRows(activity).map((r) => r.reason))
+        .toContain("named no backlog item that is still open");
     });
 
     it("raises a repeated question once, on whichever bound is reached first", async () => {
@@ -5516,8 +5523,8 @@ describe("raising an ask", () => {
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
       expect(frames(sent)).toHaveLength(1);
-      expect(askRows(activity).map((r) => r.reason))
-        .toContain("question not raised: a question of yours is still unanswered");
+      expect(rejectedRows(activity).map((r) => r.reason))
+        .toContain("a question of yours is still unanswered");
     });
 
     it("drops an unblocked id the record could not carry", async () => {
@@ -5684,8 +5691,10 @@ describe("raising an ask", () => {
       // Stripped in the SAME mutation. A promoted row that kept its options renders
       // live buttons that answerAsk then refuses, with nothing for the app to latch.
       expect(row.askOptions).toBeUndefined();
-      expect(askRows(activity).map((r) => r.reason))
-        .toEqual(["the work your question did not gate has finished"]);
+      // Still an `escalate` row, and the only ask-related one that is: the
+      // promotion is the moment the question becomes a stop.
+      expect((records(activity, "escalate") as { reason: string }[]).map((r) => r.reason))
+        .toEqual(["your question now holds the agent; the work it did not gate has finished"]);
       // No second push: the user was woken when the question was raised.
       expect(pushes).toHaveLength(0);
       expect((saved.at(-1) as HandlerSessionRecord).escalations[0]!.nonBlocking).toBeUndefined();
@@ -5716,7 +5725,8 @@ describe("raising an ask", () => {
       ]);
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
-      expect(askRows(activity)).toHaveLength(1);
+      // The promotion row is an `escalate`: the one moment an ask becomes a stop.
+      expect(records(activity, "escalate")).toHaveLength(1);
     });
   });
 });
@@ -5838,8 +5848,8 @@ describe("an ask survives a typed line", () => {
     expect(decided).toBe(0);
     expect((saved.at(-1) as HandlerSessionRecord).askAnswer?.answer)
       .toBe("(the user declined to answer)");
-    expect((records(activity, "escalate") as { reason: string }[]).map((r) => r.reason))
-      .toEqual(["you declined Handler's question"]);
+    expect((records(activity, "answered") as { reason: string }[]).map((r) => r.reason))
+      .toEqual(["You declined Handler's question"]);
     expect(statusOf(sent).state).toBe("watching");
   });
 

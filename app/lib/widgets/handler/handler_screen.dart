@@ -1134,6 +1134,15 @@ String _itemDecisionLabel(String decision) {
   ),
   'handle' => ('Auto-answered: ${r.reason}', null),
   'escalate' => ('Escalated: ${r.reason}', null),
+  // A question the agent kept working under, and what became of it. Never
+  // "Escalated": that word is the one the feature exists to avoid, and a bell
+  // beside it would file the question with the stops.
+  'asked' => ('Asked you: ${r.reason}', null),
+  'ask_rejected' => ('Question not raised: ${r.reason}', p.warning),
+  // The bridge writes these as whole sentences ("You answered Handler's
+  // question") because the row is the user's own act, not a verdict a label
+  // could prefix.
+  'answered' => (r.reason, null),
   // Skipped and failed read exactly like done, deliberately: a skip has to be
   // as visible as a completion, or "3 items skipped as moot" becomes the
   // summary an assistant that simply gave up would also write.
@@ -1186,6 +1195,10 @@ String _itemDecisionLabel(String decision) {
   'continue' => (AbIcons.eye, p.textMuted),
   'handle' => (AbIcons.send, p.accent),
   'escalate' => (AbIcons.bell, p.accent),
+  // The brief marker's glyph, not the bell: a conversation, not an alarm.
+  'asked' => (AbIcons.comment, p.accent),
+  'ask_rejected' => (AbIcons.comment, p.warning),
+  'answered' => (AbIcons.comment, p.textMuted),
   'item_done' => (AbIcons.check, p.success),
   'item_blocked' => (AbIcons.warning, p.warning),
   'item_failed' => (AbIcons.error, p.error),
@@ -1241,6 +1254,9 @@ Widget? _activitySubtitle(HandlerActivityRecord r, AbColors p) {
           ? null
           : Text('resuming around ${dayAwareTime(wake)}', style: sans);
     case 'escalate':
+    case 'asked':
+    case 'ask_rejected':
+    case 'answered':
     case 'item_done':
     case 'item_blocked':
     case 'item_skipped':

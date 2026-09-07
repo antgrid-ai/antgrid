@@ -462,6 +462,20 @@ describe("the lens in the decide prompt", () => {
     }
   });
 
+  // The judge's model of consequences is what its shape choice rests on. Observed
+  // live: a `handle` whose reason said "I escalate" closed the last item, and the
+  // wrap-up disarmed the session over the question the judge thought it raised.
+  it("tells the judge what each decision does and where a finished backlog ends", () => {
+    const p = build();
+    expect(p).toContain("`handle` sends `reply` to the agent and nothing to the user");
+    expect(p).toContain("never `reason`, never `reply`");
+    expect(p).toContain("close the last open item on a `handle` or a `continue`, the session ends there");
+    expect(p).toContain("recorded on every decision, an `escalate` included");
+    // Facts about the harness, not lens material: printed in the rules, above LENS.
+    const lensed = build("pm");
+    expect(at(lensed, "What each decision does after this pass")).toBeLessThan(at(lensed, "LENS"));
+  });
+
   // Ordering is the whole guard: printed above the rules a lens would read as one
   // more rule of equal standing, and printed below them it is framed by them.
   it("prints the lens below the rules it is subordinate to", () => {

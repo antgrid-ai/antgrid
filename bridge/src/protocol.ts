@@ -1475,6 +1475,7 @@ const HandlerActivityMessage = BaseMessage.extend({
     "instruction_dropped", "instruction_authorized", "instruction_amended",
     "floor_warning", "evidence_rejected",
     "wrapped_up", "parked", "resumed",
+    "asked", "ask_rejected", "answered",
   ]),
   reason: z.string(),
   detail: z.string().optional(),

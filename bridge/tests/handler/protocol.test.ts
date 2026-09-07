@@ -88,7 +88,8 @@ describe("handler wire", () => {
 
   test("activity accepts the item-outcome kinds; escalation accepts floorRule", () => {
     for (const decision of ["armed", "goal_edited", "item_done", "item_blocked",
-      "item_skipped", "item_failed", "evidence_rejected", "wrapped_up"] as const) {
+      "item_skipped", "item_failed", "evidence_rejected", "wrapped_up",
+      "asked", "ask_rejected", "answered"] as const) {
       const act = createMessage("handler:activity", {
         projectId: "p", recordId: "r", at: 1, terminalId: "t1", decision, reason: "done",
       });

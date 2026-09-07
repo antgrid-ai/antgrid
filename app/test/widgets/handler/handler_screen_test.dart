@@ -480,6 +480,9 @@ void main() {
     'wrapped_up',
     'parked',
     'resumed',
+    'asked',
+    'ask_rejected',
+    'answered',
   ];
 
   Future<void> pumpOneRow(WidgetTester tester, String decision) =>

@@ -1278,7 +1278,7 @@ export class HandlerEngine {
       // becomes a backlog item the judge DRIVES at the agent — where the judge is
       // supposed to relay it in its own words on the next pass.
       this.parkAskAnswer(p.terminalId, s, esc, text, false);
-      this.record(p.terminalId, "escalate", "you answered Handler's question", previewForUser(text));
+      this.record(p.terminalId, "answered", "You answered Handler's question", previewForUser(text));
       this.maybeRelayNow(p.terminalId, s);
       return granted;
     }
@@ -1341,10 +1341,10 @@ export class HandlerEngine {
       return;
     }
     this.parkAskAnswer(p.terminalId, s, esc, option.label, true);
-    // The existing `escalate` value rather than a new one: the activity kind is
-    // hand-mirrored into two more files and a value missing from either renders
-    // as an unknown row at runtime, never as a build error.
-    this.record(p.terminalId, "escalate", "you answered Handler's question", previewForUser(option.label));
+    // `answered` rows carry a whole sentence: the app prints the reason as the
+    // title with no "Escalated:" in front, because this row is the user's own
+    // act and the feed must not file it beside a stop.
+    this.record(p.terminalId, "answered", "You answered Handler's question", previewForUser(option.label));
     this.maybeRelayNow(p.terminalId, s);
   }
 
@@ -1361,7 +1361,7 @@ export class HandlerEngine {
     // At most one ask stands at a time, and a silent replace would drop the first
     // one with nothing anywhere saying so.
     if (s.askAnswer) {
-      this.record(terminalId, "escalate", "your earlier answer was replaced",
+      this.record(terminalId, "answered", "Your earlier answer was replaced",
         previewForUser(s.askAnswer.answer));
     }
     s.askAnswer = {
@@ -1427,7 +1427,7 @@ export class HandlerEngine {
     }
     // A pass nothing on the machine asked for is exactly the kind of thing a
     // future reader has to be able to find in the feed.
-    this.record(terminalId, "escalate", "no agent event was due, so Handler started a pass to relay your answer");
+    this.record(terminalId, "answered", "Handler started a pass to relay your answer, since no agent event was due");
     void this.handleEvent({ terminalId, event: "turn_end" }).catch(() => {});
   }
 
@@ -2805,17 +2805,16 @@ export class HandlerEngine {
       projectId: this.deps.projectId, terminalId, ...escalationWire(esc),
     }));
     s.escalations.push(esc);
-    // The existing `escalate` kind, not a new one: the row IS an escalation being
-    // raised, and a new activity value would be a fourth hand-mirrored enum
-    // (config.ts, protocol.ts, handler_state.dart) for nothing the feed cannot
-    // already say — the pass reads as "handle, then escalate".
-    this.record(terminalId, "escalate", ask.reasoning, previewForUser(question));
+    // Its own kind, though the row is stored as an escalation: the feed prefixes
+    // every `escalate` row "Escalated:", and a question whose whole point is that
+    // the agent kept working must not read as the stop it was designed not to be.
+    this.record(terminalId, "asked", ask.reasoning, previewForUser(question));
     s.askRejections = [];
   }
 
   private noteAskRejected(terminalId: string, s: ArmedSession, ask: DecisionAsk, why: string): void {
     s.askRejections = [...s.askRejections, `"${clip(ask.question, 80)}" — ${why}`].slice(-MAX_ASK_REJECTIONS);
-    this.record(terminalId, "escalate", `question not raised: ${why}`, previewForUser(ask.question));
+    this.record(terminalId, "ask_rejected", why, previewForUser(ask.question));
   }
 
   /**
@@ -2901,7 +2900,7 @@ export class HandlerEngine {
       // No second push. The user was already woken when the question was raised,
       // and a notification saying the same question now matters more is a second
       // interruption for a fact the row itself carries.
-      this.record(terminalId, "escalate", "the work your question did not gate has finished");
+      this.record(terminalId, "escalate", "your question now holds the agent; the work it did not gate has finished");
     }
     // Emitted here rather than left to the caller: this runs before the branches
     // that return early on a stale or parked event, and a promotion the app never
@@ -3169,7 +3168,7 @@ export class HandlerEngine {
       // answer transports start a pass because they carry something the agent may
       // need, and a decline carries nothing the agent could act on.
       this.parkAskAnswer(terminalId, s, esc, "(the user declined to answer)", false);
-      this.record(terminalId, "escalate", "you declined Handler's question", previewForUser(esc.question));
+      this.record(terminalId, "answered", "You declined Handler's question", previewForUser(esc.question));
       return;
     }
     // No new activity kind: the `escalate` row is the durable trace of the

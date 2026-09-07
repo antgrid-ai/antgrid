@@ -238,7 +238,7 @@ export function buildDecidePrompt(opts: {
     // "recording", not "making": a question IS a `handle` (see the framing line
     // above), so a rule phrased against escalating-versus-progress reads as a rule
     // against asking. Its actual job is narrower — keep `transitions` honest.
-    "- Escalating always trumps recording progress: if the next step on an item needs the user, escalate instead of transitioning it. This governs `transitions` only, and it is not a preference for escalating over asking — a question to the agent is a `handle`, and the rules below govern when to spend one.",
+    "- Escalating always trumps recording progress: if the next step on an item needs the user, escalate instead of transitioning it. This governs `transitions` only, and it is not a preference for escalating over asking — a question to the agent is a `handle`, and the rules below govern when to spend one. Transitions the evidence supports are recorded on every decision, an `escalate` included, so closing an item never requires a `handle`.",
     "- If you cannot answer with high confidence, escalate. A wrong auto-reply is the expensive failure. Measure that confidence against what you are positioned to know — whether a step serves the stated intent, whether the agent's own report closes an item — never against technical merit. Being unsure which approach is better is not this rule firing: that was never a question you were going to answer, so it is not one you escalate for either.",
     // Ordered against the confidence rule above, never merely beside it: missing
     // information is exactly that rule's trigger, so an unordered "ask the agent"
@@ -252,6 +252,12 @@ export function buildDecidePrompt(opts: {
     // escalation stalls it until a human returns: nothing re-raises one, and a
     // blocked agent emits no further event (see `onUserReply` in engine.ts).
     "- The two costs are not equal. A question to the agent spends one of a bounded run of consecutive auto-replies and is answered in seconds; the harness escalates on its own once that run is exhausted or you repeat yourself, so an unhelpful question is recoverable within this session. An escalation spends the user, who may be asleep, and the session does nothing until they answer — nothing re-raises it, and no further event arrives while the agent sits idle. Neither is free. The escalation is the expensive one. That is why `ask` is the only way to put a question to the user without stopping: it rides a reply that keeps the agent producing the events this supervision runs on.",
+    // The harness's side of the contract, stated because a judge that has to
+    // infer it infers wrong: observed live, a `handle` whose `reason` said "I
+    // escalate" closed the last item, and the session wrapped up over a question
+    // the judge believed it had raised. Nothing here is a rule about when to
+    // choose; it is what each choice does once made.
+    "- What each decision does after this pass, so that `reason` and `reply` are never asked to do a decision's work: `handle` sends `reply` to the agent and nothing to the user. `continue` sends nothing to anyone. `escalate` sends the agent nothing, wakes the user with `notify`, and holds the session for their answer. The user reads an `escalate`, an `ask`, and the wrap-up summary described next — never `reason`, never `reply`. When `transitions` close the last open item on a `handle` or a `continue`, the session ends there: the user gets a summary of the item outcomes and nothing else, and no further pass runs.",
     // Printed directly under the rule that prices the two resources, because it is
     // the only place the price is a live number rather than a standing asymmetry.
     // Tested with `!== undefined` and never for truthiness or `?.length`: the two

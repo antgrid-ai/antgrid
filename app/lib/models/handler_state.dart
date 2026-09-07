@@ -1081,7 +1081,8 @@ class HandlerActivityRecord {
   // 'continue' | 'handle' | 'escalate' | 'armed' | 'goal_edited' |
   // 'item_done' | 'item_blocked' | 'item_skipped' | 'item_failed' |
   // 'instruction_dropped' | 'instruction_authorized' | 'instruction_amended' |
-  // 'floor_warning' | 'evidence_rejected' | 'wrapped_up' | 'parked' | 'resumed'
+  // 'floor_warning' | 'evidence_rejected' | 'wrapped_up' | 'parked' | 'resumed' |
+  // 'asked' | 'ask_rejected' | 'answered'
   final String decision;
   final String reason;
   final String? detail;
