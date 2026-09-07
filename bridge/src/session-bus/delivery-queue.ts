@@ -48,7 +48,7 @@ export const MAX_QUEUED_LINES = 64;
  *  forever while the dialog that collected it reported success. `joined` is the
  *  same brief travelling the other way, to the LEAD, where it is context rather
  *  than a mandate to adopt. */
-export const DeliveryKindSchema = z.enum(["brief", "joined", "task", "wake", "answer", "cancel"]);
+export const DeliveryKindSchema = z.enum(["brief", "joined", "task", "wake", "answer", "cancel", "note"]);
 export type DeliveryKind = z.infer<typeof DeliveryKindSchema>;
 
 export const QueuedLineSchema = z.object({
@@ -83,9 +83,9 @@ export function emptyDeliveries(): DeliveryQueueState {
  *  machine, since the durable brief record lives on the peer — so losing one
  *  leaves the lead a machine it was never told the mandate for. A `brief` is
  *  that same mandate on the peer's own side and the only one it is ever given.
- *  A `wake` and an `answer` only narrate a state the task record already
- *  holds. */
-const EVICTABLE_KINDS: ReadonlySet<DeliveryKind> = new Set<DeliveryKind>(["wake", "answer"]);
+ *  A `wake`, an `answer` and a `note` only narrate something the task record
+ *  already holds. */
+const EVICTABLE_KINDS: ReadonlySet<DeliveryKind> = new Set<DeliveryKind>(["wake", "answer", "note"]);
 
 /** Append, or return the state unchanged when the id is already queued. The
  *  no-op is what makes a redelivered transition — the outbox retries until

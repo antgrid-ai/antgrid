@@ -21,7 +21,7 @@ import {
 } from "../src/session-bus/delivery-queue";
 import { lineForEvent } from "../src/session-bus/deliver-event";
 import { UNATTRIBUTED_TURN, turnOpenFor } from "../src/work-status";
-import { renderAnswer, renderCancel, renderTask, renderWake } from "../src/session-bus/delivery";
+import { renderAnswer, renderCancel, renderNote, renderTask, renderWake } from "../src/session-bus/delivery";
 import { briefScope, saveBrief } from "../src/session-bus/brief-store";
 import type { SessionBusEvent } from "../src/session-bus/coordinator";
 import type { TaskRecord } from "../src/session-bus/task-store";
@@ -347,6 +347,79 @@ describe("which events become a line, and what it says", () => {
       result: "the body",
     }));
     expect(l!.text).toContain("the body");
+  });
+
+  // A lead that withdrew a task has no reason to re-read it, and the peer has no
+  // transition left to ride: without this line its answer to the cancellation
+  // exists only as a row on a record nobody opens again.
+  test("a finding on a task that is already over reaches the lead as a note", () => {
+    const abDir = tempDir();
+    for (const state of ["canceled", "completed", "failed"] as const) {
+      const event: SessionBusEvent = {
+        kind: "message",
+        sessionId: SESSION,
+        taskId: "t-1",
+        task: task({ role: "lead", state }),
+        peer: PEER_REF,
+        envelope: envelope({ messageId: `msg-${state}` }),
+      };
+      const l = lineForEvent(event, deps(abDir));
+      expect(l).toMatchObject({ id: `msg-${state}`, sessionId: SESSION, kind: "note" });
+      expect(l!.text).toBe(renderNote({
+        peer: PEER_REF,
+        taskId: "t-1",
+        state,
+        summary: "a summary",
+        text: "the body",
+        artifacts: [],
+      }));
+    }
+  });
+
+  // The rule the note is an exception to, asserted so the exception stays one: a
+  // finding on live work is recorded and read, never delivered (5.2).
+  test("a finding on a task still running is delivered to nobody", () => {
+    const abDir = tempDir();
+    for (const state of ["submitted", "working", "input-required"] as const) {
+      const event: SessionBusEvent = {
+        kind: "message",
+        sessionId: SESSION,
+        taskId: "t-1",
+        task: task({ role: "lead", state }),
+        peer: PEER_REF,
+        envelope: envelope(),
+      };
+      expect(lineForEvent(event, deps(abDir))).toBeNull();
+    }
+  });
+
+  // A taskless finding names no task, so nothing tells it apart from chatter and
+  // it stays undelivered by design (§12, D4a).
+  test("a finding naming no task stays undelivered even when it is the only channel left", () => {
+    const abDir = tempDir();
+    const event: SessionBusEvent = {
+      kind: "message",
+      sessionId: SESSION,
+      taskId: null,
+      peer: PEER_REF,
+      envelope: envelope({ taskId: null }),
+    };
+    expect(lineForEvent(event, deps(abDir))).toBeNull();
+  });
+
+  // The peer's own side of a closed task: it was already told to stop by its
+  // cancel line, and the lead has no verb that would send it a note to mirror.
+  test("a note is a lead-side line only", () => {
+    const abDir = tempDir();
+    const event: SessionBusEvent = {
+      kind: "message",
+      sessionId: SESSION,
+      taskId: "t-1",
+      task: task({ role: "peer", state: "canceled" }),
+      peer: PEER_REF,
+      envelope: envelope(),
+    };
+    expect(lineForEvent(event, deps(abDir))).toBeNull();
   });
 
   test("a failed and an input-required task both wake the lead; working does not", () => {

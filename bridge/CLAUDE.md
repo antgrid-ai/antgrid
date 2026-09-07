@@ -306,6 +306,25 @@ is the spec; this is the set of invariants a future edit breaks silently.
   the state the task is in (`blocked()` in `coordinator.ts`, from the `from`/`to`
   the store returns), and `SessionView.openTasks` carries per-task state because
   it is the ONLY reading a peer gets of its own work.
+- **A terminal task can still be spoken about, and that is the one finding that
+  gets delivered.** Findings are recorded and left to be read because the terminal
+  transition is still coming and carries them (`lineForEvent` returns null for
+  every other `message`); once a task IS terminal that arrival is spent, so a
+  peer's answer to a cancellation would sit on a record the lead has no reason to
+  reopen. Hence the `note` kind. Two halves, and either alone leaves the hole:
+  `coordinator.report` refuses a terminal task by NAMING the finding route, and
+  `deliver-event` delivers a finding whose task is terminal. A peer told only
+  "already canceled" reaches for a taskless finding, which by design reaches
+  nobody. Delivered is not prompt: the note drains at the lead's next turn
+  boundary like every other line, so it buys "seen eventually", never "seen
+  soon". The card names no answering tool on purpose — `answer_peer` is refused
+  on a terminal task, so offering it sends the lead at a verb that cannot work.
+- **An artifact id from the other machine is a reference, not a handle.**
+  `coordinator.onFetch` answers a `session-bus:fetch`; nothing sends one, so the
+  requester half of cross-machine fetch does not exist. Every surface has to say
+  so — `publish_artifact`'s description, the wake and note cards, and the
+  `TaskResult.artifactIds` doc — because an id offered as fetchable that then is
+  not teaches the reader to distrust the whole list.
 - **A bus address is matched on machine + session; the project id is a LABEL.**
   `addressesSameSession` (`session-bus/address.ts`) is what `handleInbound`
   gates on, and the carrier matches a lead on its session id alone

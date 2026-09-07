@@ -254,7 +254,7 @@ const PEER_TOOLS: McpTool[] = [
   },
   {
     name: "antgrid_report_finding",
-    description: "Send the lead something worth knowing without ending the task — a discovery, a risk, a decision it should weigh in on.",
+    description: "Send the lead something worth knowing without ending the task — a discovery, a risk, a decision it should weigh in on. Name the taskId: this still works once a task is completed, failed or canceled, and it is then the only way to reach the lead about it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -268,7 +268,7 @@ const PEER_TOOLS: McpTool[] = [
   },
   {
     name: "antgrid_ask_lead",
-    description: "Ask the lead a question about a task and wait. The answer arrives in this session as a message; do not poll for it.",
+    description: "Ask the lead a question about a task and wait. The answer arrives in this session as a message; do not poll for it. Only a live task can be asked about — once one is closed, use antgrid_report_finding with its taskId instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -284,7 +284,7 @@ const PEER_TOOLS: McpTool[] = [
 const SHARED_TOOLS: McpTool[] = [
   {
     name: "antgrid_publish_artifact",
-    description: "Store a file-sized piece of evidence — a diff, a log, a transcript — and get back an id to attach to a task or a report. Content itself does not travel; the other machine fetches it by id.",
+    description: "Store a file-sized piece of evidence — a diff, a log, a transcript — and get back an id to attach to a task or a report. The bytes stay on this machine. The other side is shown the id, name and summary and cannot read the content, so put anything it must actually READ in the report text.",
     inputSchema: {
       type: "object",
       properties: {

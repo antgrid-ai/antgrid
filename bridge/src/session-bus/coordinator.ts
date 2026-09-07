@@ -119,7 +119,11 @@ export type SessionBusEvent =
   | { kind: "assigned"; sessionId: string; task: TaskRecord; envelope: BusEnvelope }
   | { kind: "transitioned"; sessionId: string; task: TaskRecord; state: TaskState; envelope: BusEnvelope }
   | { kind: "canceled"; sessionId: string; task: TaskRecord; reason: string }
-  | { kind: "message"; sessionId: string; taskId: string | null; peer: SessionMemberRef; envelope: BusEnvelope }
+  /** `task` is present whenever `taskId` names a record this bridge holds. It is
+   *  the record as it stood when the finding arrived, which is what lets the
+   *  delivery mapping tell a finding on live work — recorded, not delivered —
+   *  from the last word on a task that can never move again. */
+  | { kind: "message"; sessionId: string; taskId: string | null; task?: TaskRecord; peer: SessionMemberRef; envelope: BusEnvelope }
   | { kind: "expired"; sessionId: string; task: TaskRecord };
 
 export interface CoordinatorDeps {
@@ -411,7 +415,12 @@ export class SessionBusCoordinator {
     const s = this.stateFor(input.sessionId);
     const rec = taskFor(s.tasks, input.taskId);
     if (!rec) return unknownTask();
-    if (isTerminal(rec.state)) return refuse("TASK_TERMINAL", `this task is already ${rec.state}`);
+    if (isTerminal(rec.state)) {
+      return refuse(
+        "TASK_TERMINAL",
+        `this task is already ${rec.state}, so it can never move again — a finding naming this taskId still reaches the other session`,
+      );
+    }
 
     const now = this.now();
     const envelope = this.stamp(self, {
@@ -945,7 +954,8 @@ export class SessionBusCoordinator {
     const now = this.now();
     const s = this.stateFor(sessionId);
     let tasks = s.tasks;
-    if (taskId !== null && taskFor(tasks, taskId)) {
+    const rec = taskId === null ? undefined : taskFor(tasks, taskId);
+    if (taskId !== null && rec) {
       tasks = recordFinding(tasks, taskId, {
         at: now,
         messageId: envelope.messageId,
@@ -960,7 +970,14 @@ export class SessionBusCoordinator {
       tasks: withExchange(tasks, now),
       log: appendLog(s.log, { at: now, direction: "in", peer: from, envelope }),
     });
-    this.emit({ kind: "message", sessionId, taskId, peer: envelope.metadata.peer, envelope });
+    this.emit({
+      kind: "message",
+      sessionId,
+      taskId,
+      ...(rec === undefined ? {} : { task: rec }),
+      peer: envelope.metadata.peer,
+      envelope,
+    });
   }
 
   private onAck(sessionId: string, taskId: string, seq: number): void {
@@ -1054,7 +1071,10 @@ function blocked(o: Extract<OutboundOutcome, { kind: "blocked" }>): SessionBusRe
   if (o.reason === "illegal") {
     if (!o.from) return refuse("DUPLICATE_STATE", "this task cannot move to the state being reported");
     return isTerminal(o.from)
-      ? refuse("TASK_TERMINAL", `this task is already ${o.from}`)
+        ? refuse(
+            "TASK_TERMINAL",
+            `this task is already ${o.from}, so it can never move again — a finding naming this taskId still reaches the other session`,
+          )
       : refuse("DUPLICATE_STATE", `this task is already "${o.from}", so it cannot move to "${o.to}"`);
   }
   // Stop-and-wait: one transition per task is in flight at a time, so a second

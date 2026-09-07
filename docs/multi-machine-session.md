@@ -246,7 +246,7 @@ Two surfaces. Bridge-owned fields (§3.4) are never parameters. **Role is derive
 | `cancel-task` | reason; returns what the peer stopped and undid |
 | `answer-peer` | reply to an `ask-lead`; valid only when `waiting-on: lead` |
 | `list-artifacts` | handles and summaries, no content |
-| `get-artifact` | pull by reference; supports partial fetch |
+| `get-artifact` | reads an artifact THIS machine published, one chunk at a time. Cross-machine pull is specified and unbuilt: `coordinator.onFetch` answers a `session-bus:fetch`, nothing sends one, so a peer's artifact id is a reference and not a handle. |
 
 Terminal states wake the lead (§5.2), so there is no separate polling tool. Intermediate findings from a task still `working` surface through `list-tasks`, then `get-task`.
 
@@ -258,7 +258,7 @@ Terminal states wake the lead (§5.2), so there is no separate polling tool. Int
 |---|---|
 | `get-brief` | mission, ownership, prohibitions |
 | `report-finding` | `taskId`, summary, parts |
-| `publish-artifact` | stores locally, returns a handle (§6.3) |
+| `publish-artifact` | stores locally, returns a reference (§6.3); the bytes never leave the machine that published them |
 | `ask-lead` | question to the lead; moves the task to `input-required` (`waiting-on: lead`) and returns a pending id |
 | `open-task` | a self-assigned task with `origin: peer`, for something urgent found outside any assigned task; its terminal state wakes the lead like any other |
 | `report-complete` / `report-failure` | the peer reports; the bridge sets state |
@@ -311,6 +311,8 @@ Lead issues a Task to a peer. The MCP call returns a **request id** immediately.
 **A wake carries the report, and the store keeps it.** The card renders the payload the peer sent, not only the one-line summary on the envelope, and the same report is recorded on the task so `get-task` still answers once the card has left the lead's context. Both halves are needed: carrying the summary at both ends left a lead reading a title while the result sat unread on the other machine, and a task reporting itself complete with "no findings reported". The report's unanticipated-findings field travels the same way — it exists to surface what the instruction got wrong, which is the part a lead most needs and the first thing a summary drops. Artifacts the peer published are NAMED on the card and on the task as references held on the peer's machine, never as handles this side can fetch: nothing routes bridge-to-bridge (D7), and an id offered as fetchable that then is not teaches the reader to distrust the list.
 
 Wake is triggered by task state the bridge observes. A finding with no task cannot wake anyone and is poll-only; a peer that has something urgent to report outside its assigned work uses `open-task` (§4.5), which is what keeps the rule uniform.
+
+**A finding on a task that is already terminal wakes the lead — the one exception, and the rule is what creates it.** A finding waits to be read because the task's terminal state is still coming and will carry it. Once that state has arrived there is no such arrival left, so a peer's answer to a cancellation would reach the lead only if the lead thought to re-read a task it had closed. Delivered is not prompt — a note joins the same queue and drains at the lead's next turn boundary, so it buys "seen eventually", never "seen soon". The line is a NOTICE with nothing to answer: the state machine refuses `answer-peer` on a terminal task, and a card that named an answering tool would send the lead at a verb that cannot work. This is the route a peer is redirected to — `ask-lead` on a closed task is refused, and its refusal names the finding, because a peer told only "already canceled" reaches for a taskless finding, which reaches nobody.
 
 **Every delivered line is wrapped, never raw.** A brief, a task, a wake carrying a finding, or an answer to `ask-lead` reaches an agent as a prompt the bridge authored, not as the other agent's text pasted into a composer. The wrapper is a fixed template per delivery kind, owned by the bridge and versioned with the protocol, written the way a prompt engineer writes an instruction:
 
@@ -540,7 +542,7 @@ MCP is pull-shaped and cannot support unbidden push, which the live tier require
 A closed type list would limit the feature to problems already anticipated. The bus's needs are satisfied by the envelope alone.
 
 **D4a — Envelope reduced to routing metadata only.**
-`blocking`, `kind` and `size` were cut. Each was describing state that the Task lifecycle, the Part type, or the artifact reference already models better. The gain is not brevity: agent-asserted `blocking` is unreliable in a predictable direction (models over-declare), while task state is bridge-observed and cannot be inflated. The envelope is now entirely bridge-generated except `summary`. *Amended in v0.13:* the accepted cost — unsolicited findings cannot wake — is answered by the peer's `open-task`, which keeps state on a Task rather than reintroducing an envelope flag.
+`blocking`, `kind` and `size` were cut. Each was describing state that the Task lifecycle, the Part type, or the artifact reference already models better. The gain is not brevity: agent-asserted `blocking` is unreliable in a predictable direction (models over-declare), while task state is bridge-observed and cannot be inflated. The envelope is now entirely bridge-generated except `summary`. *Amended in v0.13:* the accepted cost — unsolicited findings cannot wake — is answered by the peer's `open-task`, which keeps state on a Task rather than reintroducing an envelope flag. *Amended again:* a finding on a task already in a terminal state does wake (§5.2). Still no envelope flag — the decision is made from state the bridge observes, and it is the same rule rather than a carve-out: a finding is silent because the terminal transition will carry it, which stops being true after that transition has happened.
 
 **D4b — A2A field names adopted directly.**
 Rather than maintaining our own names plus a mapping table, the envelope uses A2A's `Message` field names outright, with non-A2A fields under `metadata`. Costs nothing now and makes a future A2A binding a serialisation layer rather than a translation. Conformance is envelope-only; the payload follows MCP's structured-output pattern and is not A2A-compatible.

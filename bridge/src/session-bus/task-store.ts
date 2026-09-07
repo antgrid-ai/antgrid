@@ -103,8 +103,11 @@ export type TaskFinding = z.infer<typeof TaskFindingSchema>;
  *  place the result still exists.
  *
  *  `artifactIds` here are the PEER's, held on the peer's machine: they are
- *  recorded so the handle survives, never merged into the task's own
- *  `artifactIds`, which mean "bytes this bridge can serve". */
+ *  recorded so the reference survives, never merged into the task's own
+ *  `artifactIds`, which mean "bytes this bridge can serve". Nothing in this list
+ *  can be read from here: `coordinator.onFetch` answers a `session-bus:fetch`
+ *  but nothing sends one, so an id from the other machine NAMES evidence and
+ *  does not reach it. */
 export const TaskResultSchema = TaskFindingSchema.extend({
   state: TaskStateSchema,
   artifactIds: z.array(z.string().max(200)).max(MAX_TASK_ARTIFACTS).default([]),

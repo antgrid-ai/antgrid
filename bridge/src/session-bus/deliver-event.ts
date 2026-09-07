@@ -25,10 +25,12 @@ import {
   renderAnswer,
   renderCancel,
   renderJoined,
+  renderNote,
   renderTask,
   renderWake,
   type TaskArtifactHandle,
 } from "./delivery";
+import { isTerminal } from "./task-store";
 import { takeAskedQuestion } from "./api";
 
 export interface EventDeliveryDeps {
@@ -67,6 +69,11 @@ function envelopeOf(event: SessionBusEvent): BusEnvelope | null {
  * it was told to stop. Everything else — a finding, an expiry, an ack — is
  * recorded and readable, and interrupting a turn for it would spend the agent's
  * attention on something no decision waits on.
+ *
+ * The fifth is a finding on a task that is already terminal, and it is the
+ * exception that proves the rule: a finding waits to be read because the task's
+ * terminal state is still coming and will carry it, which is not true once that
+ * state has arrived.
  */
 export function lineForEvent(
   event: SessionBusEvent,
@@ -166,6 +173,36 @@ export function lineForEvent(
       sessionId: event.sessionId,
       kind: "cancel",
       text: renderCancel({ lead, taskId: event.task.taskId, reason: event.reason }),
+    };
+  }
+
+  // A peer's finding on work that is already over. Every other finding is
+  // recorded and left to be read (5.2) — the terminal transition is what wakes,
+  // and it carries the findings with it. A task that has already reached a
+  // terminal state has spent that wake, so this is the only delivery a peer's
+  // answer to a cancellation can ever get; without it the reply lands on disk
+  // and is found only by someone who thought to re-read a closed task.
+  if (event.kind === "message" && envelope && event.task && isTerminal(event.task.state)) {
+    // The lead's side only. A peer is told a task stopped by its own cancel
+    // line, and no lead verb sends a note back for this to mirror.
+    if (event.task.role !== "lead") return null;
+    return {
+      id: envelope.messageId,
+      sessionId: event.sessionId,
+      kind: "note",
+      text: renderNote({
+        peer: event.task.peer,
+        taskId: event.task.taskId,
+        // Narrowed by isTerminal above; the three terminal states are exactly
+        // the ones the template names.
+        state: event.task.state as "completed" | "failed" | "canceled",
+        summary: envelope.metadata.summary,
+        text: textOf(envelope.parts),
+        ...(envelope.metadata.unexpected === undefined
+          ? {}
+          : { unexpected: envelope.metadata.unexpected }),
+        artifacts: artifactsOf(envelope.parts),
+      }),
     };
   }
 

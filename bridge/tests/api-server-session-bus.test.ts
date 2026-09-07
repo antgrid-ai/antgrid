@@ -566,6 +566,46 @@ describe("session-bus routes", () => {
     }
   });
 
+  // The peer hit this in integration: its lead withdrew a task, it tried to
+  // answer through antgrid_ask_lead, and the refusal named the state and stopped
+  // there — so it reached for a taskless finding, the one channel that reaches
+  // nobody. A closed task cannot move, but it can still be spoken about.
+  test("a peer withdrawn from a task can still be heard about it", async () => {
+    const { lead, peer, stop } = pair();
+    try {
+      const assigned = await post(lead, "tasks", LEAD_SESSION, {
+        peer: PEER_SESSION, summary: "s", instruction: "i",
+      });
+      const taskId = assigned.body.taskId as string;
+      deliver(lead, peer);
+      expect((await post(lead, `tasks/${taskId}/cancel`, LEAD_SESSION, { reason: "no longer needed" })).status).toBe(200);
+      deliver(lead, peer);
+
+      const asked = await post(peer, "ask", PEER_SESSION, {
+        taskId, summary: "did the revert land?", question: "I had already reverted it — do you want it back?",
+      });
+      expect(asked.status).toBe(409);
+      expect(asked.body.code).toBe("TASK_TERMINAL");
+      // The refusal names the route that still works, which is the whole
+      // difference between a dead end and a redirection.
+      expect(asked.body.error).toContain("a finding naming this taskId");
+
+      const said = await post(peer, "findings", PEER_SESSION, {
+        taskId, summary: "I had already reverted the migration.", text: "The schema is back on 41.",
+      });
+      expect(said.status).toBe(200);
+      deliver(lead, peer);
+      const view = await get(lead, `tasks/${taskId}`, LEAD_SESSION);
+      expect(view.body.state).toBe("canceled");
+      expect(view.body.findings.at(-1)).toMatchObject({
+        summary: "I had already reverted the migration.",
+        text: "The schema is back on 41.",
+      });
+    } finally {
+      stop();
+    }
+  });
+
   test("a finding travels without moving the task's state", async () => {
     const { lead, peer, stop } = pair();
     try {
