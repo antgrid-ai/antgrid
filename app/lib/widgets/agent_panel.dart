@@ -115,9 +115,7 @@ class AgentPanel extends ConsumerWidget {
               // Branch pill folded into the overflow menu below: it lives
               // inside the breadcrumb on desktop, but on a phone-width row it
               // competes with the title for the one flexible slot.
-              const Expanded(
-                child: TitleBarBreadcrumb(showBranchPill: false),
-              ),
+              const Expanded(child: TitleBarBreadcrumb(showBranchPill: false)),
               const SizedBox(width: AbTokens.space6),
               const _SessionOverflowButton(),
             ],
@@ -651,7 +649,7 @@ class HandlerHeaderControl extends ConsumerWidget {
     }
 
     // This control composes no payload of its own — no backlog, no judge
-    // override, no posture. Everything the session needs is either already
+    // override, no lens. Everything the session needs is either already
     // stored on the bridge or extracted behind the handoff, so sending any of
     // those keys here would overwrite state this control never showed. The arm
     // sheet is where a payload can come from, and it sends only what the user

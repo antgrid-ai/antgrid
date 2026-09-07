@@ -28,13 +28,12 @@ HandlerEscalation _esc(String id, {required String urgency, required int at}) =>
 void main() {
   group('compareEscalations', () {
     test('urgent first, and oldest first inside each band', () {
-      final ordered =
-          [
-            _esc('normal-old', urgency: 'normal', at: 1),
-            _esc('urgent-new', urgency: 'high', at: 9),
-            _esc('normal-new', urgency: 'normal', at: 7),
-            _esc('urgent-old', urgency: 'high', at: 5),
-          ]..sort(compareEscalations);
+      final ordered = [
+        _esc('normal-old', urgency: 'normal', at: 1),
+        _esc('urgent-new', urgency: 'high', at: 9),
+        _esc('normal-new', urgency: 'normal', at: 7),
+        _esc('urgent-old', urgency: 'high', at: 5),
+      ]..sort(compareEscalations);
       expect(ordered.map((e) => e.escalationId), [
         'urgent-old',
         'urgent-new',
@@ -46,11 +45,10 @@ void main() {
     test('age never crosses the band', () {
       // The oldest row on the list still sorts under a `high` that arrived a
       // moment ago: one has been waiting, the other is holding the agent up.
-      final ordered =
-          [
-            _esc('ancient', urgency: 'normal', at: 1),
-            _esc('fresh', urgency: 'high', at: 9999),
-          ]..sort(compareEscalations);
+      final ordered = [
+        _esc('ancient', urgency: 'normal', at: 1),
+        _esc('fresh', urgency: 'high', at: 9999),
+      ]..sort(compareEscalations);
       expect(ordered.first.escalationId, 'fresh');
     });
 
@@ -58,11 +56,10 @@ void main() {
       // The unknown band is the safe one. Reading an unrecognised word as
       // urgent would let a bridge outrank the one value the app knows means
       // the agent is stopped.
-      final ordered =
-          [
-            _esc('invented', urgency: 'critical', at: 1),
-            _esc('known', urgency: 'high', at: 9),
-          ]..sort(compareEscalations);
+      final ordered = [
+        _esc('invented', urgency: 'critical', at: 1),
+        _esc('known', urgency: 'high', at: 9),
+      ]..sort(compareEscalations);
       expect(ordered.first.escalationId, 'known');
     });
   });
@@ -709,7 +706,10 @@ void main() {
 
     final mixed = HandlerState(
       defaultTool: 'claude',
-      sessions: {'t1': _session('t1', pending: 1), 't2': _session('t2', pending: 2)},
+      sessions: {
+        't1': _session('t1', pending: 1),
+        't2': _session('t2', pending: 2),
+      },
       escalations: [
         _esc('e1', urgency: 'normal', at: 1),
         HandlerEscalation(
@@ -799,39 +799,6 @@ void main() {
       // place would take away the only thing saying another session is waiting.
       expect(mixed.pendingEscalations, 3);
       expect(mixed.forTerminal('t1').pendingEscalations, 1);
-    });
-  });
-
-  group('personality on the wire', () {
-    Map<String, dynamic> wire({String? personality}) => {
-      'terminalId': 't1',
-      'state': 'watching',
-      'pendingEscalations': 0,
-      'armedAt': 1,
-      'goal': 'ship it',
-      'backlog': const [],
-      'personality': ?personality,
-    };
-
-    test('a reported posture round-trips', () {
-      for (final preset in HandlerPersonality.values) {
-        final s = HandlerSessionState.fromWire(
-          wire(personality: handlerPersonalityToWire(preset)),
-        )!;
-        expect(s.personality, preset);
-      }
-    });
-
-    test('a bridge that says nothing leaves it null', () {
-      // Never defaulted to watchdog here: the sheet supplies the default it
-      // shows, and a model that invents one cannot tell "not reported" from
-      // "reported as the default".
-      expect(HandlerSessionState.fromWire(wire())!.personality, isNull);
-    });
-
-    test('an unrecognised posture is null, not a confident guess', () {
-      expect(handlerPersonalityFromWire('yolo'), isNull);
-      expect(handlerPersonalityFromWire(42), isNull);
     });
   });
 
@@ -927,6 +894,27 @@ void main() {
           reason: '${handlerLensLabel(lens)} blurb describes the handle line',
         );
       }
+    });
+
+    test('a posture an old bridge still names is not a lens', () {
+      // A rolled-back bridge can still put a preset on the wire. It resolves
+      // to no lens rather than to one of the four: the presets moved a line a
+      // lens does not move, so mapping one would claim the session judges
+      // under something nobody chose — and the session itself must survive it.
+      final s = HandlerSessionState.fromWire({
+        'terminalId': 't1',
+        'state': 'watching',
+        'pendingEscalations': 0,
+        'armedAt': 1,
+        'goal': 'ship it',
+        'backlog': const [],
+        'personality': 'watchdog',
+      })!;
+      expect(s.roleId, isNull);
+      expect(s.role, isNull);
+      expect(s.brief, isNull);
+      expect(s.goal, 'ship it');
+      expect(s.runState, HandlerRunState.watching);
     });
   });
 

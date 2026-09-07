@@ -29,69 +29,6 @@ String handlerRunStateToWire(HandlerRunState s) {
   }
 }
 
-/// How far Handler leans toward answering on the user's behalf. Mirrors the
-/// bridge's `HandlerPersonalitySchema` (`bridge/src/protocol.ts`) and is carried
-/// on every session snapshot.
-///
-/// It moves one line only — where `handle` gives way to `escalate` — plus the
-/// tone of the notification. It has no bearing on what a backlog item must cite
-/// to close, which is why no surface may present it as a speed or quality dial.
-enum HandlerPersonality {
-  /// Escalate freely; handle only the unambiguous. What a session judges under
-  /// until someone picks otherwise.
-  watchdog,
-
-  /// Handle what the session itself settles; escalate genuine ambiguity.
-  closer,
-
-  /// Handle wherever it can; escalate only where it must.
-  autopilot,
-}
-
-/// The bridge resolves the default before sending, so a snapshot always names
-/// one. Null here means a bridge too old to have the field — rendered as
-/// "not reported", never as [HandlerPersonality.watchdog]: a picker showing a
-/// preset the far end has never heard of is a control over nothing.
-HandlerPersonality? handlerPersonalityFromWire(dynamic s) {
-  switch (s) {
-    case 'watchdog':
-      return HandlerPersonality.watchdog;
-    case 'closer':
-      return HandlerPersonality.closer;
-    case 'autopilot':
-      return HandlerPersonality.autopilot;
-    default:
-      return null;
-  }
-}
-
-/// The wire spelling, the one place the enum is turned back into the string
-/// `handler:configure` carries.
-String handlerPersonalityToWire(HandlerPersonality p) => switch (p) {
-  HandlerPersonality.watchdog => 'watchdog',
-  HandlerPersonality.closer => 'closer',
-  HandlerPersonality.autopilot => 'autopilot',
-};
-
-/// Picker label. Sentence case, matching every other control in the app.
-String handlerPersonalityLabel(HandlerPersonality p) => switch (p) {
-  HandlerPersonality.watchdog => 'Watchdog',
-  HandlerPersonality.closer => 'Closer',
-  HandlerPersonality.autopilot => 'Autopilot',
-};
-
-/// One line of what the preset actually does, shown under the picker. Phrased
-/// as policy rather than personality: the user is choosing where a threshold
-/// sits, and "cautious"/"bold" would describe a mood instead of a rule.
-String handlerPersonalityBlurb(HandlerPersonality p) => switch (p) {
-  HandlerPersonality.watchdog =>
-    'Answers only what is unambiguous. Anything with two reasonable readings comes to you.',
-  HandlerPersonality.closer =>
-    'Answers what the session itself settles. Genuine ambiguity still comes to you.',
-  HandlerPersonality.autopilot =>
-    'Answers wherever it can, treating your goal as standing authority. It still escalates whatever it is unsure of.',
-};
-
 /// What the judge looks for and asks about, added on top of the rules it
 /// already judges under. Mirrors the bridge's `HandlerLensSchema`
 /// (`bridge/src/protocol.ts`); the text behind each id is bridge-authored and
@@ -353,10 +290,6 @@ class HandlerSessionState {
   /// an agent, this describes a session (its live mode and its judge pick).
   final HandlerObservability? observability;
 
-  /// The posture this session judges under, as the bridge resolved it. Null
-  /// only from a bridge predating the field.
-  final HandlerPersonality? personality;
-
   /// Whether this bridge can be TOLD the answer to one of this session's asks —
   /// `handler:answer` for a tap, an escalationId-bearing `handler:instruct` for
   /// free text. False from a bridge that has neither.
@@ -399,7 +332,6 @@ class HandlerSessionState {
     this.parkKind,
     this.parkedUntil,
     this.observability,
-    this.personality,
     this.askAnswer = false,
     this.askAnswerPending = false,
     this.roleId,
@@ -444,7 +376,6 @@ class HandlerSessionState {
     parkKind: parkKind,
     parkedUntil: parkedUntil,
     observability: observability,
-    personality: personality,
     askAnswer: askAnswer,
     askAnswerPending: askAnswerPending,
     roleId: roleId,
@@ -518,7 +449,6 @@ class HandlerSessionState {
       parkKind: parkKind is String ? parkKind : null,
       parkedUntil: parkedUntil is num ? parkedUntil.toInt() : null,
       observability: handlerObservabilityFromWire(json['observability']),
-      personality: handlerPersonalityFromWire(json['personality']),
       askAnswer: askAnswer is bool ? askAnswer : false,
       askAnswerPending: askAnswerPending is bool ? askAnswerPending : false,
       roleId: role is String ? role : null,
@@ -1312,8 +1242,7 @@ class HandlerState {
   /// alone badges zero over a tab already rendering a NEEDS YOU card. A badge
   /// and the surface it points at must never be able to answer differently
   /// about what is waiting.
-  int get escalationBadgeCount =>
-      pendingEscalations > escalations.length
+  int get escalationBadgeCount => pendingEscalations > escalations.length
       ? pendingEscalations
       : escalations.length;
 

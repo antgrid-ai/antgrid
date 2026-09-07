@@ -63,15 +63,7 @@ class HandlerService {
   // UUIDs, so an unbounded map would accumulate an entry for every slot the
   // project ever opened, for the app's lifetime.
   static const _settingsCacheCap = 50;
-  final Map<
-    String,
-    ({
-      String? tool,
-      String? model,
-      HandlerPersonality? personality,
-      HandlerLensPick? lens,
-    })
-  >
+  final Map<String, ({String? tool, String? model, HandlerLensPick? lens})>
   _lastKnownSettings = {};
 
   // Records a clear (nulls) too — a status snapshot showing an armed session is
@@ -88,16 +80,10 @@ class HandlerService {
     String terminalId,
     String? tool,
     String? model,
-    HandlerPersonality? personality,
     HandlerLensPick? lens,
   ) {
     _lastKnownSettings.remove(terminalId);
-    _lastKnownSettings[terminalId] = (
-      tool: tool,
-      model: model,
-      personality: personality,
-      lens: lens,
-    );
+    _lastKnownSettings[terminalId] = (tool: tool, model: model, lens: lens);
     while (_lastKnownSettings.length > _settingsCacheCap) {
       _lastKnownSettings.remove(_lastKnownSettings.keys.first);
     }
@@ -309,7 +295,6 @@ class HandlerService {
         s.terminalId,
         s.judgeTool,
         s.judgeModel,
-        s.personality,
         // Read off the FRAME, not off the session: a bridge that never named
         // its lenses reports no role because it has none, and caching that as
         // "the default" would seed a picker with a fact nobody stated.
@@ -500,13 +485,11 @@ class HandlerService {
   /// appends to it, so never round-trip a stale copy back.
   ///
   /// [judgeTool]/[judgeModel] are this session's judge choice; `''` clears back
-  /// to default and a name sets it. [personality] is its posture, which has no
-  /// clear — every preset is a real choice, and the default is only what a
-  /// session that has never been given one runs under. Pass null (the default)
-  /// to leave the stored record untouched, for any caller that surfaces no
-  /// picker: the keys are omitted from the wire message, which the bridge reads
-  /// as "no change", so arming without opening the settings sheet never
-  /// rewrites what that sheet would have shown.
+  /// to default and a name sets it. Pass null (the default) to leave the
+  /// stored record untouched, for any caller that surfaces no picker: those
+  /// keys are omitted from the wire message, which the bridge reads as "no
+  /// change", so arming without opening the settings sheet never rewrites what
+  /// that sheet would have shown.
   ///
   /// [role] and [brief] are this session's lens and the note beneath it, as
   /// wire strings on the same terms the judge picks use: `''` clears back to
@@ -520,14 +503,12 @@ class HandlerService {
     List<HandlerInstructionItem>? backlog,
     String? judgeTool,
     String? judgeModel,
-    HandlerPersonality? personality,
     String? role,
     String? brief,
   }) {
     if (_disposed) return;
     if (judgeTool != null ||
         judgeModel != null ||
-        personality != null ||
         role != null ||
         brief != null) {
       // Optimistically mirror the bridge's apply rules ('' clears, a name sets,
@@ -543,7 +524,6 @@ class HandlerService {
         judgeModel != null
             ? (judgeModel.trim().isEmpty ? null : judgeModel.trim())
             : prev?.model,
-        personality ?? prev?.personality,
         // Sending either half makes the pick known, even from a cold cache:
         // this arm is what the bridge will hold. The brief is cached as typed
         // minus its edges — the bridge also collapses newlines and clips it to
@@ -590,9 +570,6 @@ class HandlerService {
         'backlog': ?backlog?.map((i) => i.toWire()).toList(),
         'judgeTool': ?judgeTool,
         'judgeModel': ?judgeModel,
-        'personality': ?(personality == null
-            ? null
-            : handlerPersonalityToWire(personality)),
         'role': ?role,
         'brief': ?brief,
       }),
@@ -766,20 +743,15 @@ class HandlerService {
   /// never staler than the armed entry and is fresher during the arm→snapshot
   /// round-trip. The armed fallback only matters if enough other terminals
   /// evicted this one's cache entry while it stayed armed.
-  ({
-    String? tool,
-    String? model,
-    HandlerPersonality? personality,
-    HandlerLensPick? lens,
-  })?
-  lastKnownSettings(String terminalId) {
+  ({String? tool, String? model, HandlerLensPick? lens})? lastKnownSettings(
+    String terminalId,
+  ) {
     final cached = _lastKnownSettings[terminalId];
     if (cached != null) return cached;
     final armed = _state.sessions[terminalId];
     if (armed != null &&
         (armed.judgeTool != null ||
             armed.judgeModel != null ||
-            armed.personality != null ||
             // An armed session on a machine that advertised lenses reports a
             // real one — the unnamed default included — so it is worth seeding
             // a picker from even when nothing else here was ever set.
@@ -787,7 +759,6 @@ class HandlerService {
       return (
         tool: armed.judgeTool,
         model: armed.judgeModel,
-        personality: armed.personality,
         lens: _state.lenses != null
             ? (roleId: armed.roleId, brief: armed.brief)
             : null,
@@ -904,10 +875,7 @@ class HandlerService {
     // tell that line apart from an unrelated one, which is the whole reason the
     // kind exists — so the dismiss rides along with it.
     if (escalation.kind == 'guard_blocked') _sendDismiss(escalation);
-    _dropRows(
-      escalation.terminalId,
-      (e) => _survivesReply(e, escalation),
-    );
+    _dropRows(escalation.terminalId, (e) => _survivesReply(e, escalation));
     return true;
   }
 
@@ -924,8 +892,7 @@ class HandlerService {
   bool _survivesReply(HandlerEscalation e, HandlerEscalation answered) =>
       e.nonBlocking ||
       e.kind == 'resolve_in_session' ||
-      (e.kind == 'guard_blocked' &&
-          e.escalationId != answered.escalationId);
+      (e.kind == 'guard_blocked' && e.escalationId != answered.escalationId);
 
   /// Optimistically drop every row on [terminalId] that [survives] rejects, and
   /// recompute the owning session's pending count so the header pill and tab
@@ -935,10 +902,7 @@ class HandlerService {
   /// Clearing wholesale instead would blank the pill over a session the bridge
   /// still reports as needs_you and flip it back a round trip later — the
   /// blank-over-a-blocked-agent flash this optimism exists to spare the user.
-  void _dropRows(
-    String terminalId,
-    bool Function(HandlerEscalation) survives,
-  ) {
+  void _dropRows(String terminalId, bool Function(HandlerEscalation) survives) {
     final sessions = Map<String, HandlerSessionState>.from(_state.sessions);
     final owner = sessions[terminalId];
     if (owner != null) {
