@@ -1385,8 +1385,14 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         attributes: attributes,
       );
 
-    case 'tunnel:http-response':
-      return TunnelHttpResponse.fromJson(json);
+    case 'tunnel:http-start':
+      return TunnelHttpStartMessage.fromJson(json);
+
+    case 'tunnel:http-chunk':
+      return TunnelHttpChunkMessage.fromJson(json);
+
+    case 'tunnel:http-end':
+      return TunnelHttpEndMessage.fromJson(json);
 
     case 'tunnel:ws-data':
       return TunnelWsDataMessage.fromJson(json);

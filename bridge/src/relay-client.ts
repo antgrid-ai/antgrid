@@ -38,7 +38,7 @@ import { prunePushToken } from "./push/prune";
 import { nextEpoch } from "./relay-epoch";
 import { StreamMux, type AttachStreamOpts, type StreamHandle } from "./stream-mux";
 import { netwatch, frameIdFor, isRemoteIngestArmed } from "./netwatch";
-import { SendScheduler, type QueuedAppFrame } from "./send-scheduler";
+import { SendScheduler, type QueuedAppFrame, type SendOutcome } from "./send-scheduler";
 
 export interface RelayClientOptions {
   url: string;
@@ -1334,17 +1334,19 @@ export class RelayClient {
   /** Send a AbMessage on the control channel. Always sealed; dropped (never
    *  plaintext) if the E2E session is not established. */
   send(msg: AbMessage): void {
-    this.sendAppEnvelope(CONTROL_STREAM_ID, msg, "control");
+    void this.sendAppEnvelope(CONTROL_STREAM_ID, msg, "control");
   }
 
   /** Send a AbMessage on a specific channel (control plane). */
   sendOnChannel(msg: AbMessage, channel: Channel): void {
-    this.sendAppEnvelope(CONTROL_STREAM_ID, msg, channel);
+    void this.sendAppEnvelope(CONTROL_STREAM_ID, msg, channel);
   }
 
-  /** Send a tunnel-protocol message on the preview channel (control plane). */
-  sendTunnel(data: object): void {
-    this.sendAppEnvelope(CONTROL_STREAM_ID, data, "preview");
+  /** Send a tunnel-protocol message on the preview channel (control plane).
+   *  The promise settles when the message left the send queue — see
+   *  {@link sendAppEnvelope}. */
+  sendTunnel(data: object): Promise<SendOutcome> {
+    return this.sendAppEnvelope(CONTROL_STREAM_ID, data, "preview");
   }
 
   /** Send a push:deliver control frame to the relay (blind FCM/APNs forward). A
@@ -1358,11 +1360,16 @@ export class RelayClient {
    * ENVELOPE json (so `s` survives fragmentation), and hand every fragment to
    * the send scheduler, which seals and writes them in order. Control-plane
    * traffic uses `CONTROL_STREAM_ID` (`s` omitted). Dropped — never sent in
-   * cleartext — when the session is not established. A too-large
-   * `tunnel:http-response` degrades to a sealed 413 so the phone's preview
-   * request fails fast instead of hanging.
+   * cleartext — when the session is not established.
+   *
+   * The returned promise settles when the message LEFT the queue: "sent" once
+   * every fragment was sealed and written, "dropped" the moment one is
+   * discarded. A caller that paces itself against this (the tunnel's chunk
+   * loop) is throttled by the credit window and nothing else; with an open
+   * window the frames are written inside the synchronous `drain()` below, so
+   * the promise is already resolved on return.
    */
-  private sendAppEnvelope(streamId: string, msg: unknown, channel: Channel): "queued" | "dropped" | "too-large" {
+  private sendAppEnvelope(streamId: string, msg: unknown, channel: Channel): Promise<SendOutcome> {
     const type = (msg as { type?: string } | null)?.type;
     if (!this.established) {
       // NEVER send app traffic in cleartext (the relay is zero-knowledge). During
@@ -1375,8 +1382,7 @@ export class RelayClient {
         dir: "tx", kind: "drop", transport: "relay", channel,
         msgType: type ?? "message", streamId, reason: "no-e2e-session",
       });
-      this.handleUndeliverableTunnel("dropped", channel, msg);
-      return "dropped";
+      return Promise.resolve("dropped");
     }
 
     const envelope =
@@ -1387,14 +1393,13 @@ export class RelayClient {
     if (!fragmented.ok) {
       log.warn("%s", fragmented.error.message);
       this.opts.onError?.(fragmented.error.code, fragmented.error.message);
-      const outcome = fragmented.error.code === "MESSAGE_TOO_LARGE" ? "too-large" : "dropped";
+      const outcome: SendOutcome = fragmented.error.code === "MESSAGE_TOO_LARGE" ? "too-large" : "dropped";
       netwatch.record({
         dir: "tx", kind: "drop", transport: "relay", channel,
         msgType: type ?? "message", streamId, reason: fragmented.error.code,
         detail: { bytes: Buffer.byteLength(json, "utf8") },
       });
-      this.handleUndeliverableTunnel(outcome, channel, msg);
-      return outcome;
+      return Promise.resolve(outcome);
     }
 
     const frames: QueuedAppFrame[] = fragmented.frames.map((plaintext) => ({
@@ -1404,6 +1409,20 @@ export class RelayClient {
       plaintextBytes: Buffer.byteLength(plaintext, "utf8"),
       type: type ?? "app",
     }));
+    // One settle per FRAGMENT, one resolution per message: the first drop wins
+    // and the rest are ignored, so a fragment set that half-lands still reports
+    // the message as undelivered.
+    let pending = frames.length;
+    let failed = false;
+    const settled = new Promise<SendOutcome>((resolve) => {
+      for (const f of frames) {
+        f.settle = (o) => {
+          if (failed) return;
+          if (o === "dropped") { failed = true; resolve("dropped"); return; }
+          if (--pending === 0) resolve("sent");
+        };
+      }
+    });
     if (!this.scheduler.enqueue(frames)) {
       log.warn("Send queue full on %s — dropping %s (%d frame(s))", channel, type ?? "message", frames.length);
       netwatch.record({
@@ -1411,45 +1430,10 @@ export class RelayClient {
         msgType: type ?? "message", streamId, reason: "send-queue-full",
         detail: { frames: frames.length, queued: this.scheduler.queued(channel).bytes },
       });
-      this.handleUndeliverableTunnel("dropped", channel, msg);
-      return "dropped";
+      return Promise.resolve("dropped");
     }
     this.drain();
-    return "queued";
-  }
-
-  /** A tunnel HTTP response has no re-sync path (unlike control), so an
-   *  undeliverable one must fail the phone's request fast: too-large → sealed
-   *  413; torn-down transport → loud warn (the request will time out). */
-  private handleUndeliverableTunnel(
-    outcome: "dropped" | "too-large",
-    channel: Channel,
-    msg: unknown,
-  ): void {
-    if (channel !== "preview") return;
-    const type = (msg as { type?: string } | null)?.type;
-    const requestId = (msg as { requestId?: string } | null)?.requestId;
-    if (type !== "tunnel:http-response" || typeof requestId !== "string") return;
-    if (outcome === "too-large") {
-      // Guarded against recursion: the 413 body is tiny (never too-large).
-      this.sendAppEnvelope(
-        CONTROL_STREAM_ID,
-        {
-          type: "tunnel:http-response",
-          requestId,
-          status: 413,
-          headers: {},
-          body: "Preview response too large to tunnel",
-          bodyEncoding: "utf8",
-        },
-        "preview",
-      );
-    } else {
-      log.warn(
-        "Tunnel response %s dropped (E2E session not established) — preview request will time out",
-        requestId,
-      );
-    }
+    return settled;
   }
 
   private messageFragKey(msg: unknown): string | undefined {
@@ -1869,7 +1853,7 @@ export class RelayClient {
     (c as unknown as { rateLimitBurst: RateLimitBurst | null }).rateLimitBurst = null;
     (c as unknown as { droppedFrames: number }).droppedFrames = 0;
     (c as unknown as { droppedFramesAt: number }).droppedFramesAt = 0;
-    (c as unknown as { mux: StreamMux }).mux = new StreamMux({ openStream: () => {}, closeStream: () => {}, sendEnvelope: () => {} });
+    (c as unknown as { mux: StreamMux }).mux = new StreamMux({ openStream: () => {}, closeStream: () => {}, sendEnvelope: () => Promise.resolve("sent") });
     (c as unknown as { initSendScheduler: () => void }).initSendScheduler();
     if (opts.creditBatchBytes !== undefined) {
       (c as unknown as { creditBatchBytes: number }).creditBatchBytes = opts.creditBatchBytes;

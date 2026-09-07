@@ -249,8 +249,9 @@ feature multiplexes bulk transfer over one session key.
 **Cipher swap (Dart only).** `E2eTransportDart.useAlgorithm` accepts any
 `AesGcm` so Flutter hosts can install a native-backed implementation — the
 default pure-Dart cipher runs at single-digit MB/s on the calling isolate, and a
-tunneled preview response is megabytes of it. Anything installed there MUST stay
-byte-compatible with node:crypto's `aes-256-gcm` and the framing above. The
+tunneled preview response is megabytes of it, decrypted a slice at a time.
+Anything installed there MUST stay byte-compatible with node:crypto's
+`aes-256-gcm` and the framing above. The
 handshake primitives are deliberately **not** swappable: they produce the
 transcript bytes the bridge verifies.
 
@@ -449,6 +450,15 @@ channel that carries them. Both sides reset their counters at establishment (the
 sends `established`, the phone when it receives it) and forget them at teardown.
 A channel gate-blocked for `WINDOW_STALL_WARN_MS` is logged once; a queue past
 `MAX_SEND_QUEUE_BYTES` drops whole messages.
+
+A tunneled HTTP response rides the preview window as `tunnel:http-start` (head
+plus the first body slice, `last` when that slice is the whole body),
+`tunnel:http-chunk` (1-based `seq`) and `tunnel:http-end` (`chunks`, optional
+`error`); the bridge reads the next slice only after the previous frame has left
+its queue, so the credit window is the only pacing and each stream holds at most
+one queued frame. `tunnel:http-cancel` (app→bridge) stops a stream. The shapes
+and `TUNNEL_CHUNK_BYTES` live in `bridge/src/tunnel-protocol.ts`, mirrored by
+hand in `app/lib/models/preview_models.dart`.
 
 ---
 

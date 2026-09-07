@@ -2536,7 +2536,8 @@ export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
   "agent:question-resolve",
   "terminal:input",
   "tunnel:http-request",
-  "tunnel:http-response",
+  "tunnel:http-start",
+  "tunnel:http-chunk",
   "tunnel:ws-open",
 ]);
 

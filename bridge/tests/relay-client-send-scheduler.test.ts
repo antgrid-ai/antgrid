@@ -58,14 +58,13 @@ function decode(frame: string | Uint8Array): { channel: string; text: string } {
   return { channel: header.channel ?? "control", text: Buffer.from(decoded.payload).toString("utf8") };
 }
 
-function tunnelResponse(requestId: string): object {
+function tunnelChunk(requestId: string): object {
   return {
-    type: "tunnel:http-response",
+    type: "tunnel:http-chunk",
     requestId,
-    status: 200,
-    headers: {},
-    body: "ok",
-    bodyEncoding: "utf8",
+    seq: 1,
+    data: "ok",
+    bodyEncoding: "base64",
   };
 }
 
@@ -74,7 +73,7 @@ describe("RelayClient send scheduler", () => {
     const { client, sent, s } = makeClient();
     s.hold = true;
 
-    for (const id of ["r1", "r2", "r3"]) client.sendTunnel(tunnelResponse(id));
+    for (const id of ["r1", "r2", "r3"]) void client.sendTunnel(tunnelChunk(id));
     expect(sent).toHaveLength(0);
 
     (client as any).lastSealedRecvAt = 0;
@@ -98,8 +97,8 @@ describe("RelayClient send scheduler", () => {
   it("writes the relay JSON heartbeat without touching the sealed queue", () => {
     const { client, sent, s } = makeClient();
     s.hold = true;
-    client.sendTunnel(tunnelResponse("r1"));
-    client.sendTunnel(tunnelResponse("r2"));
+    void client.sendTunnel(tunnelChunk("r1"));
+    void client.sendTunnel(tunnelChunk("r2"));
 
     (client as any).heartbeatTick();
 
@@ -110,7 +109,7 @@ describe("RelayClient send scheduler", () => {
   it("drops the queue when the socket closes", () => {
     const { client, sent, s } = makeClient();
     s.hold = true;
-    for (const id of ["r1", "r2", "r3"]) client.sendTunnel(tunnelResponse(id));
+    for (const id of ["r1", "r2", "r3"]) void client.sendTunnel(tunnelChunk(id));
     expect(s.queued("preview").frames).toBe(3);
 
     client.close();
@@ -139,13 +138,35 @@ describe("RelayClient send scheduler", () => {
   it("drops the queue when the peer goes offline, keeping the session", () => {
     const { client, s } = makeClient();
     s.hold = true;
-    client.sendTunnel(tunnelResponse("r1"));
-    client.sendTunnel(tunnelResponse("r2"));
+    void client.sendTunnel(tunnelChunk("r1"));
+    void client.sendTunnel(tunnelChunk("r2"));
     expect(s.queued("preview").frames).toBe(2);
 
     (client as any).handleTextMessage(JSON.stringify({ type: "peer-offline", peerId: PHONE_ID }));
 
     expect(s.queued("preview").frames).toBe(0);
     expect(client.hasEstablishedSession).toBe(true);
+  });
+
+  // The pacing contract the tunnel's chunk loop rides on: the promise says when
+  // the message LEFT the queue, and a cleared queue is a "dropped", not a hang.
+  it("settles a queued frame when the hold lifts, and dropped when the queue is cleared first", async () => {
+    const held = makeClient();
+    held.s.hold = true;
+    const sentPromise = held.client.sendTunnel(tunnelChunk("r1"));
+    let settled: string | undefined;
+    void sentPromise.then((o) => { settled = o; });
+    await Promise.resolve();
+    expect(settled).toBeUndefined();
+
+    held.s.hold = false;
+    (held.client as any).drain();
+    expect(await sentPromise).toBe("sent");
+
+    const cleared = makeClient();
+    cleared.s.hold = true;
+    const dropped = cleared.client.sendTunnel(tunnelChunk("r1"));
+    cleared.client.close();
+    expect(await dropped).toBe("dropped");
   });
 });

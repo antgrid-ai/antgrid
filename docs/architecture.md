@@ -12,7 +12,8 @@ App (Flutter) <--E2E encrypted--> Relay (WS router) <--E2E encrypted--> Agent (B
 
 The relay authenticates devices via a single signed `hello` frame (Ed25519
 proof-of-possession) but cannot decrypt payloads. Two WS channels: `control`
-(terminal, files, status) and `preview` (HTTP tunnel).
+(terminal, files, status) and `preview` (HTTP tunnel, streamed as start/chunk/end
+frames under the credit window).
 
 ## Checkout-scoped routing
 

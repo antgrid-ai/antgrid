@@ -1,8 +1,21 @@
 import { logger } from "./logger";
 const log = logger.child({ component: "tunnel-manager" });
-import { fetchLocalhost, isTlsOnlyPort } from "./localhost-fetch";
+import {
+  fetchLocalhost,
+  isTlsOnlyPort,
+  UpstreamBodyError,
+  type FetchLocalhostOpts,
+  type LocalhostFetchStream,
+} from "./localhost-fetch";
 import { createMessage, type AbMessage, type PortInfo, type PreviewUrlEntry } from "./protocol";
-import type { TunnelHttpRequest, TunnelWsClose, TunnelWsData, TunnelWsOpen } from "./tunnel-protocol";
+import type {
+  TunnelHttpCancel,
+  TunnelHttpRequest,
+  TunnelWsClose,
+  TunnelWsData,
+  TunnelWsOpen,
+} from "./tunnel-protocol";
+import type { SendOutcome } from "./send-scheduler";
 import type { ConnState } from "./conn-state";
 
 /** One upstream `ws://localhost:<port><path>` connection, keyed by tunnelId.
@@ -40,7 +53,8 @@ const WS_PREOPEN_TTL_MS = 5_000;
  *  refused rather than started mid-stream: a dev server handed a spliced
  *  message stream believes it holds a valid session and hangs, where a refused
  *  one gives the browser the close event its reconnect logic waits for.
- *  Outlives the app's 30s tunnel timeout so the refusal beats the give-up. */
+ *  Outlives the app's 30s head timeout (`kTunnelHeadTimeout`) so the refusal
+ *  beats the give-up. */
 const WS_POISON_TTL_MS = 35_000;
 const WS_PREOPEN_MAX_TUNNELS = 64;
 const WS_BUFFER_MAX_FRAMES = 64;
@@ -61,15 +75,40 @@ const WS_PREOPEN_WARN_INTERVAL_MS = 5_000;
  *  unbounded growth. */
 const WS_ABANDONED_MAX = 32;
 
-/** How long a sent response stays replayable. Must outlive the app's 30s tunnel
- *  timeout so a retry issued just before it gives up still finds the entry. */
+/** How long a sent response stays replayable. Must outlive the window a retry
+ *  can be issued in (the app's `kTunnelHeadTimeout` plus its `_retryGrace`) so
+ *  a retry issued just before it gives up still finds the entry. */
 const OUTBOX_TTL_MS = 35_000;
-/** Bodies past this are not retained. A retry for one re-fetches, which is safe
- *  in the case that produces them — a large GET is a static asset. The requests
+/** Streams past this are not retained, measured on the summed base64 `data` of
+ *  their frames (≈1.5 MiB raw). A retry for one re-fetches, which is safe in
+ *  the case that produces them — a large GET is a static asset. The requests
  *  where re-execution actually bites (a dev API route behind a GET) are small,
  *  and those are exactly the ones this keeps. */
 const OUTBOX_MAX_ENTRY_BYTES = 2 * 1024 * 1024;
 const OUTBOX_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+
+/** The slice-sizing and upstream-clock seams a test overrides; production
+ *  leaves every one of them at the module defaults. */
+export type TunnelFetchOpts = Pick<
+  FetchLocalhostOpts,
+  "headTimeoutMs" | "readIdleMs" | "chunkBytes" | "flushMs" | "maxBodyBytes"
+>;
+
+/** Resolves when [signal] aborts (already resolved if it fired first). Built
+ *  ONCE per streaming run and raced against every frame, so a 100 MB body
+ *  registers one abort listener rather than one per chunk. */
+function abortedPromise(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+}
+
+/** What one streaming run has emitted so far and whether it is still worth
+ *  retaining: any failure, cancel or undelivered frame clears both. */
+interface StreamState {
+  frames: object[];
+  bytes: number;
+  retain: boolean;
+}
 
 const WS_SUBPROTOCOL_HEADER = "sec-websocket-protocol";
 
@@ -132,26 +171,31 @@ export class TunnelManager {
   private projectId: string;
   private portLabels: Map<number, string>;
   private previewPorts: Set<number>;
-  private sendTunnel: (data: object) => void;
+  private sendTunnel: (data: object) => Promise<SendOutcome>;
   private sendEncrypted: (msg: AbMessage) => void;
   private relayHost: string;
   private connState: ConnState;
+  private fetchOpts: TunnelFetchOpts;
   private sentUrlDetails = new Map<number, PreviewUrlEntry>();
   /** Ports whose current entry was recorded while the stream was suppressed and
    *  so never reached the phone. Cleared on the send that delivers them. */
   private undelivered = new Set<number>();
-  /** Responses already emitted, keyed by requestId, so a retry replays rather
-   *  than re-runs. The relay drops a routed frame when the pair/channel budget
-   *  is exhausted and tells only the SENDER, so neither end can tell whether the
-   *  request or the response died — the app therefore retries with the original
-   *  requestId and this is what makes that safe. Insertion-ordered: the oldest
-   *  entry is the first eviction candidate. */
-  private outbox = new Map<string, { response: object; bytes: number; expiresAt: number }>();
+  /** Streams already emitted IN FULL, keyed by requestId, so a retry replays
+   *  rather than re-runs. The relay drops a routed frame when the pair/channel
+   *  budget is exhausted and tells only the SENDER, so neither end can tell
+   *  whether the request or the response died — the app therefore retries with
+   *  the original requestId and this is what makes that safe. `frames` is the
+   *  frame list in emit order (`[start]` for a single-slice body, else
+   *  `[start, chunk 1..N, end]`); a stream that failed or was cancelled is
+   *  never here. Insertion-ordered: the oldest entry is the first eviction
+   *  candidate. */
+  private outbox = new Map<string, { frames: object[]; bytes: number; expiresAt: number }>();
   private outboxBytes = 0;
-  /** Requests currently being fetched. A retry can arrive while the original is
-   *  still upstream (the app cannot see that), and awaiting it here is what
-   *  stops the duplicate from becoming a second upstream request. */
-  private inflight = new Map<string, Promise<void>>();
+  /** Requests currently being streamed. A retry can arrive while the original
+   *  is still upstream (the app cannot see that), and awaiting it here is what
+   *  stops the duplicate from becoming a second upstream request; the abort is
+   *  what stops the run itself (app cancel, peer loss, checkout stop). */
+  private inflight = new Map<string, { run: Promise<void>; abort: AbortController }>();
   /** Live WS relays, keyed by tunnelId — see [WsUpstream]. */
   private wsTunnels = new Map<string, WsUpstream>();
   /** Async sealing can put the first data frame ahead of its open frame. Keep
@@ -175,12 +219,14 @@ export class TunnelManager {
     projectId: string;
     portLabels: Map<number, string>;
     previewPorts: Set<number>;
-    sendTunnel: (data: object) => void;
+    sendTunnel: (data: object) => Promise<SendOutcome>;
     sendEncrypted: (msg: AbMessage) => void;
     relayHost: string;
     connState: ConnState;
     wsPreopenTtlMs?: number;
     wsAbandonedMax?: number;
+    /** Test seam: slice sizing and the upstream clocks. */
+    fetchOpts?: TunnelFetchOpts;
   }) {
     this.projectId = opts.projectId;
     this.portLabels = opts.portLabels;
@@ -191,6 +237,7 @@ export class TunnelManager {
     this.connState = opts.connState;
     this.wsPreopenTtlMs = opts.wsPreopenTtlMs ?? WS_PREOPEN_TTL_MS;
     this.wsAbandonedMax = opts.wsAbandonedMax ?? WS_ABANDONED_MAX;
+    this.fetchOpts = opts.fetchOpts ?? {};
   }
 
   onPortsUpdate(ports: PortInfo[]): void {
@@ -261,78 +308,209 @@ export class TunnelManager {
 
   async onHttpRequest(msg: TunnelHttpRequest): Promise<void> {
     // Deliberately NOT gated on [stopped], unlike the WS handlers: an HTTP
-    // request the app is waiting on costs it a 30s timeout if dropped, and
+    // request the app is waiting on costs it a head timeout if dropped, and
     // serving one holds nothing open afterwards.
+    // A LOOP, not one await: two duplicates waiting on the same prior run both
+    // resume when it ends, and without the re-check both would stream this id
+    // at once with independent seq spaces — harmless when a response was one
+    // whole body, a spliced or truncated body once it is chunks. [runInflight]
+    // registers its entry before invoking the run, so the second waiter's
+    // re-check sees it.
+    for (;;) {
+      const prior = this.inflight.get(msg.requestId);
+      if (!prior) break;
+      await prior.run.catch(() => {});
+    }
     // Outbox first, before anything can reach the dev server: this is the whole
     // safety property of the app's retry.
-    const inflight = this.inflight.get(msg.requestId);
-    if (inflight) await inflight.catch(() => {});
     const stored = this.readOutbox(msg.requestId);
-    if (stored) {
-      this.sendTunnel(stored);
-      return;
-    }
+    await this.runInflight(msg.requestId, (abort) =>
+      stored
+        ? this.replayStream(stored.frames, abort)
+        : this.streamResponse(msg, abort));
+  }
 
-    const run = this.fetchAndRespond(msg);
-    this.inflight.set(msg.requestId, run);
+  private async runInflight(
+    requestId: string,
+    fn: (abort: AbortController) => Promise<void>,
+  ): Promise<void> {
+    const abort = new AbortController();
+    // `run` is assigned synchronously below, before any waiter can resume, so
+    // a third request joining mid-registration awaits the real run.
+    const entry = { abort, run: Promise.resolve() };
+    this.inflight.set(requestId, entry);
+    entry.run = fn(abort);
     try {
-      await run;
+      await entry.run;
     } finally {
-      this.inflight.delete(msg.requestId);
+      if (this.inflight.get(requestId) === entry) this.inflight.delete(requestId);
     }
   }
 
-  private async fetchAndRespond(msg: TunnelHttpRequest): Promise<void> {
+  /** App-side cancel: the browser went away, the app detected a gap, or it is
+   *  no longer waiting on this id. Stops the fetch and the frames; sends
+   *  nothing. Idempotent, and a no-op for an id with no live run. */
+  onHttpCancel(msg: TunnelHttpCancel): void {
+    this.inflight.get(msg.requestId)?.abort.abort();
+  }
+
+  /** The peer is gone or was just re-established: every in-flight HTTP run
+   *  exits through its own cancelled path — the fetch aborted, the upstream
+   *  connection closed, nothing retained — instead of streaming the rest of a
+   *  body into a relay that will drop it or an app that will ignore it. The
+   *  relay client's queue clear only reaches a run that happens to be parked on
+   *  a settle at that instant; this reaches the rest. WS tunnels are left
+   *  alone: they survive a rekey today and the app re-opens them on loss. */
+  abortHttpStreams(): void {
+    for (const entry of this.inflight.values()) entry.abort.abort();
+  }
+
+  private async streamResponse(msg: TunnelHttpRequest, abort: AbortController): Promise<void> {
+    const { requestId, checkoutId } = msg;
     const safePath = msg.path.startsWith("/") ? msg.path : `/${msg.path}`;
     const url = `${msg.scheme ?? "http"}://localhost:${msg.port}${safePath}`;
+    const st: StreamState = { frames: [], bytes: 0, retain: true };
+    const cancelled = abortedPromise(abort.signal).then(() => "cancelled" as const);
+
+    let head: LocalhostFetchStream;
     try {
-      const result = await fetchLocalhost({
+      head = await fetchLocalhost({
         url,
         method: msg.method,
         headers: msg.headers,
         body: msg.body,
         acceptEncodings: msg.acceptEncodings,
-      });
-
-      this.emitResponse(msg.requestId, result.body, {
-        type: "tunnel:http-response" as const,
-        requestId: msg.requestId,
-        status: result.status,
-        headers: result.headers,
-        setCookies: result.setCookies,
-        body: result.body,
-        bodyEncoding: result.bodyEncoding,
-        checkoutId: msg.checkoutId,
+        signal: abort.signal,
+        ...this.fetchOpts,
       });
     } catch (err) {
-      const body = `Proxy error: ${err instanceof Error ? err.message : String(err)}`;
+      if (abort.signal.aborted) return;
+      const text = `Proxy error: ${err instanceof Error ? err.message : String(err)}`;
       // The 502 reaches only the previewing device, so without this a tunnel
       // failure is diagnosable exclusively from the phone's screen.
-      log.warn("Tunnel fetch failed for %s: %s", url, body);
-      this.emitResponse(msg.requestId, body, {
-        type: "tunnel:http-response" as const,
-        requestId: msg.requestId,
+      log.warn("Tunnel fetch failed for %s: %s", url, text);
+      // A head failure is a real, replayable answer — not an error end: the
+      // headers never went out, so there is nothing incomplete to abort.
+      await this.emit(st, {
+        type: "tunnel:http-start",
+        requestId,
         status: 502,
         headers: {},
-        body,
-        bodyEncoding: "utf8" as const,
-        checkoutId: msg.checkoutId,
-      });
+        data: Buffer.from(text, "utf8").toString("base64"),
+        bodyEncoding: "base64",
+        last: true,
+        checkoutId,
+      }, abort, cancelled);
+      this.retain(requestId, st);
+      return;
+    }
+
+    const it = head.slices;
+    let seq = 0;
+    try {
+      const first = await it.next();
+      const start = {
+        type: "tunnel:http-start",
+        requestId,
+        status: head.status,
+        headers: head.headers,
+        setCookies: head.setCookies,
+        data: first.done ? "" : first.value.data,
+        bodyEncoding: first.done ? "base64" : first.value.bodyEncoding,
+        ...(first.done || first.value.last ? { last: true as const } : {}),
+        checkoutId,
+      };
+      if (await this.emit(st, start, abort, cancelled) !== "sent") return;
+      if (start.last) { this.retain(requestId, st); return; }
+      for (;;) {
+        // Read-side pacing: the next slice is pulled only once the previous
+        // frame left the send queue, so a stream holds at most one queued frame
+        // and the credit window is the only thing setting the rate.
+        const next = await it.next();
+        if (next.done) break;
+        seq++;
+        const chunk = {
+          type: "tunnel:http-chunk",
+          requestId,
+          seq,
+          data: next.value.data,
+          bodyEncoding: next.value.bodyEncoding,
+          checkoutId,
+        };
+        if (await this.emit(st, chunk, abort, cancelled) !== "sent") return;
+      }
+      if (await this.emit(st, { type: "tunnel:http-end", requestId, chunks: seq, checkoutId }, abort, cancelled) !== "sent") return;
+      this.retain(requestId, st);
+    } catch (err) {
+      // Our own cancel: the app has already forgotten the id.
+      if (abort.signal.aborted) return;
+      const reason = err instanceof UpstreamBodyError
+        ? err.message
+        : `upstream read failed: ${err instanceof Error ? err.message : String(err)}`;
+      log.warn("Tunnel stream %s ended with error after %d chunk(s): %s", requestId, seq, reason);
+      st.retain = false;
+      await this.emit(st, { type: "tunnel:http-end", requestId, chunks: seq, error: reason, checkoutId }, abort, cancelled);
+    } finally {
+      // Cancels the upstream read on every exit path.
+      await it.return(undefined).catch(() => {});
     }
   }
 
-  /** Send a response and retain it for replay. */
-  private emitResponse(requestId: string, body: string, response: object): void {
-    const bytes = Buffer.byteLength(body);
-    if (bytes <= OUTBOX_MAX_ENTRY_BYTES) {
-      this.evictOutbox(bytes);
-      this.outbox.set(requestId, { response, bytes, expiresAt: Date.now() + OUTBOX_TTL_MS });
-      this.outboxBytes += bytes;
+  /** Hand one frame to the send path and wait for it to leave the queue. */
+  private async emit(
+    st: StreamState,
+    frame: object,
+    abort: AbortController,
+    cancelled: Promise<"cancelled">,
+  ): Promise<SendOutcome | "cancelled"> {
+    // Checked BEFORE sendTunnel: a cancelled run must not enqueue one more
+    // frame. The app has re-keyed a lost-start recovery under a fresh id by
+    // now, so a frame that goes out anyway is a window of link wasted — and
+    // under a shared id would have been spliced into the fresh run's body.
+    if (abort.signal.aborted) { st.retain = false; return "cancelled"; }
+    const outcome = await Promise.race([this.sendTunnel(frame), cancelled]);
+    // The frame handed over just now may still go out; the app discards it as
+    // unknown and answers it with one cancel.
+    if (outcome === "cancelled") { st.retain = false; return outcome; }
+    if (outcome !== "sent") {
+      // "dropped", "too-large" and "gated" all end the stream: the app sees a
+      // hole it cannot fill and nothing partial is worth replaying.
+      const type = (frame as { type?: string }).type;
+      log.warn("Tunnel stream %s aborted: frame %s %s", (frame as { requestId?: string }).requestId, type, outcome);
+      st.retain = false;
+      st.frames = [];
+      return outcome;
     }
-    this.sendTunnel(response);
+    const data = (frame as { data?: unknown }).data;
+    const len = typeof data === "string" ? data.length : 0;
+    if (st.retain && st.bytes + len <= OUTBOX_MAX_ENTRY_BYTES) {
+      st.frames.push(frame);
+      st.bytes += len;
+    } else {
+      st.retain = false;
+      st.frames = [];
+    }
+    return "sent";
   }
 
-  private readOutbox(requestId: string): object | undefined {
+  /** Re-send a completed stream, paced and cancellable exactly like a live one.
+   *  Never re-retained — the entry it came from is still the retention. */
+  private async replayStream(frames: object[], abort: AbortController): Promise<void> {
+    const cancelled = abortedPromise(abort.signal).then(() => "cancelled" as const);
+    for (const frame of frames) {
+      if (abort.signal.aborted) return;
+      if (await Promise.race([this.sendTunnel(frame), cancelled]) !== "sent") return;
+    }
+  }
+
+  private retain(requestId: string, st: StreamState): void {
+    if (!st.retain) return;
+    this.evictOutbox(st.bytes);
+    this.outbox.set(requestId, { frames: st.frames, bytes: st.bytes, expiresAt: Date.now() + OUTBOX_TTL_MS });
+    this.outboxBytes += st.bytes;
+  }
+
+  private readOutbox(requestId: string): { frames: object[] } | undefined {
     const entry = this.outbox.get(requestId);
     if (!entry) return undefined;
     if (entry.expiresAt <= Date.now()) {
@@ -340,7 +518,7 @@ export class TunnelManager {
       this.outboxBytes -= entry.bytes;
       return undefined;
     }
-    return entry.response;
+    return entry;
   }
 
   /** Drop expired entries, then the oldest, until [incoming] fits. */
@@ -366,7 +544,7 @@ export class TunnelManager {
     if (this.stopped) {
       // Refuse rather than drop: this manager will never relay again, and the
       // browser's socket only reconnects once it sees a close.
-      this.sendTunnel({
+      void this.sendTunnel({
         type: "tunnel:ws-close",
         tunnelId: msg.tunnelId,
         reason: "tunnel manager stopped",
@@ -380,7 +558,7 @@ export class TunnelManager {
       // is what gets the browser a close event it can reconnect from. The
       // tombstone is deliberately LEFT in place: frames still in flight behind
       // this open must not start a second, tail-only buffer for the same id.
-      this.sendTunnel({
+      void this.sendTunnel({
         type: "tunnel:ws-close",
         tunnelId: msg.tunnelId,
         reason: "buffered frames were dropped before the tunnel opened",
@@ -470,12 +648,36 @@ export class TunnelManager {
         : event.data instanceof ArrayBuffer
           ? Buffer.from(event.data).toString("base64")
           : Buffer.from(event.data as Uint8Array).toString("base64");
-      this.sendTunnel({
+      void this.sendTunnel({
         type: "tunnel:ws-data",
         tunnelId,
         data,
         ...(binary ? { binary: true } : {}),
         checkoutId,
+      }).then((outcome) => {
+        if (outcome === "sent" || entry.abandoned) return;
+        // "gated" = mobile access is switched off on this machine. Today's
+        // semantics for that are "the frame is dropped, the tunnel stays": the
+        // close a teardown would send is gated too, so the app could never
+        // learn of it and would hold a mute browser socket for the life of the
+        // page.
+        if (outcome === "gated") return;
+        // A newer tunnel may own this id after a park.
+        if (this.wsTunnels.get(tunnelId) !== entry) return;
+        // A WS stream with a hole in it is worse than a closed one (the same
+        // rule the inbound overflow path applies), and the page's reconnect
+        // gives it a fresh tunnel.
+        log.warn("Closing WS tunnel %s: upstream frame %s", tunnelId, outcome);
+        // Report FIRST — the same ordering, and for the same reason, as the
+        // inbound overflow path below.
+        this.teardownWs(
+          tunnelId,
+          outcome === "too-large" ? 1009 : 1001,
+          outcome === "too-large"
+            ? "upstream message too large to tunnel"
+            : "tunnel frame could not be delivered",
+        );
+        this.releaseUpstream(entry);
       });
     });
     // Both endings free the park slot first: a socket that ERRORS while parked
@@ -511,7 +713,7 @@ export class TunnelManager {
       return new WebSocket(url, wsOptions as unknown as string[]);
     } catch (err) {
       log.warn("Refusing WS tunnel %s: upstream connection was rejected: %s", msg.tunnelId, err);
-      this.sendTunnel({
+      void this.sendTunnel({
         type: "tunnel:ws-close",
         tunnelId: msg.tunnelId,
         reason: "upstream connection could not be opened",
@@ -568,7 +770,7 @@ export class TunnelManager {
     // runs for this id. Anything still in flight would otherwise land in
     // [bufferPreopenFrame] and hold one of the 64 slots for a full TTL.
     this.poisonPreopen(tunnelId);
-    this.sendTunnel({
+    void this.sendTunnel({
       type: "tunnel:ws-close",
       tunnelId,
       ...(code !== undefined ? { code } : {}),
@@ -750,6 +952,9 @@ export class TunnelManager {
     this.sentUrlDetails.clear();
     this.outbox.clear();
     this.outboxBytes = 0;
+    // Aborted before the map is cleared, or a run in flight would keep reading
+    // its upstream and shipping frames a stopped manager can no longer own.
+    this.abortHttpStreams();
     this.inflight.clear();
     for (const [tunnelId, entry] of this.wsTunnels) {
       // Delete BEFORE closing so the socket's own close event finds nothing
@@ -758,7 +963,7 @@ export class TunnelManager {
       // session deleted mid-handshake would otherwise leave the app's tunnel
       // entry and the browser's socket waiting on a close that never comes.
       this.wsTunnels.delete(tunnelId);
-      this.sendTunnel({
+      void this.sendTunnel({
         type: "tunnel:ws-close",
         tunnelId,
         reason: "tunnel manager stopped",

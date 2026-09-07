@@ -21,6 +21,7 @@ import { FileUploadManager } from "./file-upload";
 import { FileSearcher } from "./file-search";
 import { PortDetector } from "./port-detector";
 import { TunnelManager } from "./tunnel-manager";
+import type { SendOutcome } from "./send-scheduler";
 import { type DeviceIdentity } from "./device";
 import { displayStartupBanner } from "./banner";
 import { generateEphemeralKeypair, type EphemeralKeypair } from "./key-exchange";
@@ -227,7 +228,13 @@ export interface AgentCore {
    *  and are sent through this hook directly. Pass `null` to clear it (the
    *  promotion controller does this on teardown so a dead relay closure
    *  isn't retained). */
-  setPlainHook(fn: ((data: object) => void) | null): void;
+  setPlainHook(fn: ((data: object) => Promise<SendOutcome>) | null): void;
+  /** Abort every in-flight tunneled HTTP response, on every checkout runtime
+   *  and on main. Driven from the transport's peer-online/peer-offline hooks:
+   *  a body in flight across a peer loss or a (re)establishment is dead by
+   *  construction, and the relay client's queue clear only reaches a run that
+   *  happens to be parked on a send at that instant. WS tunnels are untouched. */
+  abortTunnelStreams(): void;
   /** Wire a provider that returns the Ed25519 pubkey (standard base64) of the
    *  phone currently paired on the transport, or null when there is no relay
    *  peer (e.g. local/loopback transport, or pre-handshake). The mobile-access
@@ -757,6 +764,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
           log.error("tunnel:http-request handler failed: %s", err)
         );
+        break;
+      case "tunnel:http-cancel":
+        runtime.tunnelManager.onHttpCancel(msg);
         break;
       case "tunnel:ws-open":
         runtime.tunnelManager.onWsOpen(msg);
@@ -1632,7 +1642,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   /** Same wire as [sendAb] but bypasses the bus's payload-equality dedup. Only
    *  the explicit re-sync paths use it — see MessageBus.republish. */
   let republishAb: (msg: AbMessage) => void = (_m) => {};
-  let sendPlain: (data: object) => void = (_d) => {};
+  let sendPlain: (data: object) => Promise<SendOutcome> = async () => "dropped";
   // Replay-cache eviction for torn-down chat sessions; bound with the bus in
   // attachTransport, like sendAb.
   let dropSessionReplay: (sessionId: string) => void = (_s) => {};
@@ -3753,7 +3763,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     dropSessionReplay = (sessionId) => bus.dropSessionReplay(sessionId);
     dropCheckoutReplay = (checkoutId) => bus.dropCheckoutReplay(checkoutId);
     // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.
-    sendPlain = (data) => busPlainHook?.(data);
+    sendPlain = (data) => busPlainHook?.(data) ?? Promise.resolve("dropped");
     bus.setInboundHandler((msg, channel, source) => {
       // Mobile-access gate: the single chokepoint through which both RPC
       // requests and plain Ab messages enter the core dispatch. Drops EVERY
@@ -3857,9 +3867,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   }
 
   // Plaintext (tunnel) sender wired by the caller after transport construction.
-  let busPlainHook: ((data: object) => void) | null = null;
-  function setPlainHook(fn: ((data: object) => void) | null) {
+  let busPlainHook: ((data: object) => Promise<SendOutcome>) | null = null;
+  function setPlainHook(fn: ((data: object) => Promise<SendOutcome>) | null) {
     busPlainHook = fn;
+  }
+
+  function abortTunnelStreams(): void {
+    for (const runtime of checkoutRuntimes.values()) runtime.tunnelManager?.abortHttpStreams();
+    tunnelManager?.abortHttpStreams();
   }
 
   return {
@@ -3907,6 +3922,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     handleTunnelMessage,
     onHandshakeComplete,
     setPlainHook,
+    abortTunnelStreams,
     setPeerPubkeyProvider,
     setPeerCheckoutRoutingProvider,
     connState,

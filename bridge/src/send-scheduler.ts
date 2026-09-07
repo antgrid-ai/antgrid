@@ -7,6 +7,15 @@ import {
 } from "antgrid-wire";
 import type { Channel } from "./message-bus";
 
+/** What became of a message handed to the send path. "sent" = every frame of
+ *  it was sealed and written; "dropped" = at least one never will be (no
+ *  session, queue cleared, stream detached, sink refused); "too-large" = the
+ *  fragmenter refused it, decided synchronously at enqueue; "gated" = the
+ *  stream's outbound authorization (`mayDeliver`, the remote-access switch)
+ *  refused it before it reached the scheduler — the peer is fine, this
+ *  machine is not talking to it. Only StreamHandle.sendTunnel produces it. */
+export type SendOutcome = "sent" | "dropped" | "too-large" | "gated";
+
 /** One frame waiting to be sealed and written: either a whole envelope or one
  *  fragment of one. Plaintext, because sealing happens at dequeue — a frame
  *  queued across a rekey must go out under the keys live at that moment. */
@@ -18,6 +27,11 @@ export interface QueuedAppFrame {
   plaintextBytes: number;
   /** Diagnostic message type, carried through to netwatch. */
   type: string;
+  /** Fires exactly once when the frame LEAVES the queue: right after the sink
+   *  wrote it ("sent") or when clear()/dropStream()/the sink dropped it. Runs
+   *  inside drain(): it may only resolve a promise, never call back into the
+   *  scheduler — a synchronous re-entry would hit the guard and return "idle". */
+  settle?: (outcome: "sent" | "dropped") => void;
 }
 
 export interface SchedulerSink {
@@ -129,6 +143,7 @@ export class SendScheduler {
         // A frame the sink dropped never reached the peer, so crediting it back
         // would be impossible: leave it out of the accounting entirely.
         if (n !== null) this.sent[next] += n;
+        frame.settle?.(n !== null ? "sent" : "dropped");
       }
     } finally {
       this.draining = false;
@@ -216,6 +231,7 @@ export class SendScheduler {
       this.queuedBytes[ch] = 0;
       delete this.blockedSince[ch];
     }
+    for (const f of dropped) f.settle?.("dropped");
     return dropped;
   }
 
@@ -236,6 +252,7 @@ export class SendScheduler {
       this.queues[ch] = kept;
       if (kept.length === 0) delete this.blockedSince[ch];
     }
+    for (const f of dropped) f.settle?.("dropped");
     return dropped;
   }
 

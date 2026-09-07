@@ -165,14 +165,13 @@ function establish(): Harness {
   return { client, sent, phone, s, agentEd, phoneEd };
 }
 
-function tunnelResponse(requestId: string): object {
+function tunnelChunk(requestId: string): object {
   return {
-    type: "tunnel:http-response",
+    type: "tunnel:http-chunk",
     requestId,
-    status: 200,
-    headers: {},
-    body: "x".repeat(BODY),
-    bodyEncoding: "utf8",
+    seq: 1,
+    data: "x".repeat(BODY),
+    bodyEncoding: "base64",
   };
 }
 
@@ -186,7 +185,7 @@ function envelope(bytes: number): string {
 /** Fill the preview window: five bodies queued, three of which fit. */
 function fillWindow(h: Harness): { at: number; written: Buffer[] } {
   const at = h.sent.length;
-  for (let i = 0; i < 5; i++) h.client.sendTunnel(tunnelResponse(`r${i}`));
+  for (let i = 0; i < 5; i++) void h.client.sendTunnel(tunnelChunk(`r${i}`));
   const written = h.sent.slice(at) as Buffer[];
   expect(written).toHaveLength(3);
   expect(h.s.queued("preview").frames).toBe(2);

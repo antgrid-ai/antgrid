@@ -278,3 +278,48 @@ describe("SendScheduler queueing and priority", () => {
     expect(wire.map((f) => f.type)).toEqual(["c1"]);
   });
 });
+
+describe("SendScheduler settle callbacks", () => {
+  it("reports sent on drain and dropped on clear and dropStream", () => {
+    const { s } = makeScheduler();
+    const seen: string[] = [];
+    const settling = (label: string, f: QueuedAppFrame): QueuedAppFrame =>
+      ({ ...f, settle: (o) => seen.push(`${label}:${o}`) });
+
+    s.enqueue([settling("a", frame("preview", 10))]);
+    s.drain();
+    expect(seen).toEqual(["a:sent"]);
+
+    seen.length = 0;
+    s.hold = true;
+    s.enqueue([settling("b", frame("preview", 10))]);
+    s.clear();
+    expect(seen).toEqual(["b:dropped"]);
+
+    seen.length = 0;
+    s.enqueue([settling("c", frame("preview", 10, { streamId: "s-c" }))]);
+    s.enqueue([settling("d", frame("preview", 10, { streamId: "s-d" }))]);
+    s.dropStream("s-c");
+    expect(seen).toEqual(["c:dropped"]);
+  });
+
+  // A settle may only resolve a promise, so its continuation is a microtask
+  // that runs after drain() returned — this pins that a re-entrancy flag is not
+  // needed to write the frame that continuation enqueues.
+  it("writes a frame enqueued from a settle continuation", async () => {
+    const { s, wire } = makeScheduler();
+    let resolveFirst: () => void = () => {};
+    const first = new Promise<void>((r) => { resolveFirst = r; });
+    void first.then(() => {
+      s.enqueue([frame("preview", 10, { type: "f2" })]);
+      s.drain();
+    });
+
+    s.enqueue([{ ...frame("preview", 10, { type: "f1" }), settle: () => resolveFirst() }]);
+    s.drain();
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(wire.map((f) => f.type)).toEqual(["f1", "f2"]);
+  });
+});

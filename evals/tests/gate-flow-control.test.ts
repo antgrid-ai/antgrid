@@ -16,11 +16,9 @@ import { firstProjectStream } from "../support/stream";
  * the window must still cross it, and a client that stops crediting must stop
  * the sender rather than let it flood.
  *
- * Both rows drive the `control` channel. The preview channel is not reachable
- * from this client — v3 serves the preview tunnel per-project and the machine
- * control plane drops preview traffic, so there is no stream-scoped sealed
- * preview send to aim at (see the header of sealed-preview-http.test.ts). The
- * shared channel makes the first row stricter, not weaker: the small verb's
+ * Both rows drive the `control` channel; the preview window is exercised end to
+ * end, with its own pacing and cancel rows, by gate-tunnel-streaming.test.ts.
+ * The shared channel makes the first row stricter, not weaker: the small verb's
  * reply queues behind the flood in the same FIFO rather than beside it.
  *
  * Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown.
