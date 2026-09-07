@@ -827,6 +827,10 @@ export class HandlerEngine {
   // Lens spellings off disk that this build cannot name, so the warn is one line
   // per vocabulary gap rather than one per arm.
   private unknownLenses = new Set<string>();
+  // Whether this engine has already said that a retired posture selected nothing.
+  // One engine is one project, and a fleet of records written under the old
+  // vocabulary would otherwise log a line per slot on every arm.
+  private legacyPostureNoted = false;
   private entitlement: EntitlementReader;
 
   constructor(private deps: HandlerEngineDeps) {
@@ -895,6 +899,13 @@ export class HandlerEngine {
     if (p.judgeModel !== undefined) s.judgeModel = p.judgeModel.trim() || undefined;
   }
 
+  // A brief is looked-for material, never a grant: `s.auth` is written only by
+  // authorizeInstruction, whose sole callers are the two instruct paths, and a
+  // brief arrives through arm(), which touches none of them. So a brief naming a
+  // command an instruction WOULD lift moves no floor — pinned as "a brief grants
+  // nothing" rather than left as prose here — and its one consumer stays the
+  // decide prompt.
+  //
   // Absent leaves the stored value alone, the same rule applyJudgeChoice follows.
   // A role arrives already bounded to the lens table, so unlike judgeTool there is
   // nothing to validate; "" is the clear back to the unnamed default, which is why
@@ -922,6 +933,18 @@ export class HandlerEngine {
       log.warn("handler session names an unknown lens %s; judging under the default", JSON.stringify(raw));
     }
     return undefined;
+  }
+
+  // A posture was an autonomy dial; autonomy now comes from the rules, so no
+  // value here names a lens — not even the one whose blurb sounded closest,
+  // which would be the dial coming back under another name. Said out loud
+  // because the effect is otherwise invisible: a user who picked "autopilot"
+  // and a user who picked nothing get byte-identical prompts.
+  private noteLegacyPosture(value: string, source: "handler:configure" | "session record"): void {
+    if (this.legacyPostureNoted) return;
+    this.legacyPostureNoted = true;
+    log.warn("handler posture %s from %s reads as the default lens; postures were replaced by lenses",
+      JSON.stringify(value), source);
   }
 
   // The session's stored judge: the live armed session if one exists, else the
@@ -1011,9 +1034,10 @@ export class HandlerEngine {
   arm(p: {
     terminalId: string; goal?: string; backlog?: InstructionItem[];
     judgeTool?: string; judgeModel?: string; role?: HandlerLens | ""; brief?: string;
-    // The retired posture key an older app still sends. Typed so the caller's
-    // pass-through compiles, and read for nothing: a posture was an autonomy dial
-    // and autonomy comes from the rules, so no value here selects a lens.
+    // The retired posture key an older app still sends. Accepted so its whole
+    // frame — goal, backlog, judge picks and the arm itself — is never refused at
+    // agent-core.ts's re-parse over a key this bridge no longer honours, and read
+    // only for the one line noteLegacyPosture writes.
     personality?: string;
   }): void {
     // Entitlement first, ahead of every side effect below — the backlog clamp
@@ -1069,6 +1093,7 @@ export class HandlerEngine {
       // judged even if the agent has not moved.
       existing.lastJudgedContextHash = undefined;
       this.applyJudgeChoice(existing, p);
+      if (p.personality !== undefined) this.noteLegacyPosture(p.personality, "handler:configure");
       this.applyLens(existing, p);
       this.persist(p.terminalId, existing, true);
       // Only when the goal actually moved: `handler:configure` is also the
@@ -1097,6 +1122,7 @@ export class HandlerEngine {
     // anyone re-armed. `armed` still counts on its own — a hard kill leaves the
     // record as it stood, with no exit handler to run.
     const rec = this.loadSession(p.terminalId);
+    if (rec?.personality !== undefined) this.noteLegacyPosture(rec.personality, "session record");
     const resumed = rec && (rec.armed || rec.suspended) ? rec : null;
     // A genuinely new session on this slot is the moment the previous one's undo
     // offers stop meaning anything — and the only such moment. Disarm is NOT one:
@@ -1140,6 +1166,7 @@ export class HandlerEngine {
       auth: createAuthorization(),
     };
     this.applyJudgeChoice(s, p);
+    if (p.personality !== undefined) this.noteLegacyPosture(p.personality, "handler:configure");
     this.applyLens(s, p);
     this.sessions.set(p.terminalId, s);
     this.persist(p.terminalId, s, true);

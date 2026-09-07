@@ -219,6 +219,21 @@ describe("session record round-trip", () => {
     expect(loaded?.backlog).toEqual([item("i1")]);
   });
 
+  // The three spellings that were actually written to disk. Named one by one
+  // rather than covered by the arbitrary-string case above, because the edit this
+  // guards against is a cleanup narrowing the field back to the enum it used to
+  // be: that reads as tidying, parses these three, and wipes the backlog of every
+  // session on the machine the first time a fourth spelling turns up.
+  for (const posture of ["watchdog", "closer", "autopilot"]) {
+    it(`loads a record written under the ${posture} posture`, () => {
+      const abDir = tmpAbDir();
+      writeRaw(abDir, "t1", JSON.stringify({ ...record(), personality: posture }));
+      const loaded = loadHandlerSession(abDir, "proj", "t1");
+      expect(loaded?.personality).toBe(posture);
+      expect(loaded?.backlog).toEqual([item("i1")]);
+    });
+  }
+
   // Same reason, for length: the prompt budget is the engine's to clip to, and a
   // bound on disk could only cost a session that was written under a looser one.
   it("loads a brief far longer than any prompt would print", () => {
