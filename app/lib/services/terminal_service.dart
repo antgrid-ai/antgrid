@@ -105,15 +105,15 @@ class TerminalService {
   ReplyLatch? _branchesLatch;
   ReplyLatch? _checkoutLatch;
 
-  /// The checkout bound is armed on first subscription and dropped with the
-  /// last one: it exists for a surface that is waiting, so a service nobody
-  /// watches must not hold a live timer for the length of the timeout — the
-  /// test binding reports one outliving its widget tree as a leak, and a
-  /// service is built eagerly for every checkout whether or not anything reads
-  /// it.
+  /// Every attach bound is armed on first subscription and dropped with the
+  /// last one: a bound exists to tell a surface that is waiting that its wait
+  /// ended badly, so a service nobody watches must not hold a live timer for
+  /// the length of the timeout — the test binding reports one outliving its
+  /// widget tree as a leak, and a service is built eagerly for every checkout
+  /// whether or not anything reads it.
   late final _stateController = StreamController<TerminalState>.broadcast(
     onListen: _armCheckoutAttachDeadline,
-    onCancel: _cancelCheckoutAttachDeadline,
+    onCancel: _dropAttachBounds,
   );
   final StreamController<TerminalNotificationMessage> _notificationController =
       StreamController<TerminalNotificationMessage>.broadcast();
@@ -188,6 +188,22 @@ class TerminalService {
   void _cancelCheckoutAttachDeadline() {
     _checkoutAttachDeadline?.cancel();
     _checkoutAttachDeadline = null;
+  }
+
+  /// Drops the checkout bound and every per-terminal one when the last watcher
+  /// goes away.
+  ///
+  /// The pulls themselves are left outstanding — a reply that still lands is
+  /// still painted — but nothing is left counting down towards a verdict no
+  /// surface would read. A watcher that comes back re-arms the checkout bound
+  /// through [_stateController]'s `onListen`, and the per-terminal bounds
+  /// return with the re-drive that any reattach already performs.
+  void _dropAttachBounds() {
+    _cancelCheckoutAttachDeadline();
+    for (final timer in _snapshotDeadlines.values) {
+      timer.cancel();
+    }
+    _snapshotDeadlines.clear();
   }
 
   void _armCheckoutAttachDeadline() {

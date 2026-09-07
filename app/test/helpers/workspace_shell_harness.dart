@@ -6,11 +6,13 @@ import 'package:antgrid/models/command_models.dart';
 import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/models/preferences_models.dart';
 import 'package:antgrid/models/preview_models.dart';
+import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/app_shell.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/window/window_chrome.dart';
@@ -29,18 +31,31 @@ import 'test_store_overrides.dart';
 /// the compound `<machineUuid>.<projectId>` shape.
 const testAgentDeviceId = 'agent-123.test-project';
 
+/// Distinguishes "no [SessionTarget] override" (fall back to the
+/// `withProject`-derived default) from an explicit `target: null` (the
+/// "route mounted, nothing focused yet" window) — `null` itself is a
+/// meaningful value here, so it can't double as the "unset" marker.
+const _unset = Object();
+
 /// Pumps the real [AppShell] (which renders WorkspaceShell once paired), with
 /// a fake window chrome since WorkspaceShell mounts `WindowTitleBar` directly.
 ///
 /// Pass [transport] to drive the wire from the test (inspect `sent`, `emit`
-/// replies); it must come through this parameter rather than [extraOverrides],
-/// because Riverpod 3 asserts on a family overridden twice in one container.
+/// replies), [terminalStates] to drive CheckoutReadiness through a specific
+/// attach-status sequence, and [target] for a [SessionTarget] other than the
+/// default local project (e.g. a remote one, to exercise the ladder, or
+/// `null` for the "route mounted, nothing focused yet" window with
+/// `withProject: true`) — all three must come through these parameters rather
+/// than [extraOverrides]: Riverpod 3 asserts on ANY provider overridden twice
+/// in one container, not only a family one.
 ///
 /// Returns the container so a test can read what the shell publishes.
 Future<ProviderContainer> pumpWorkspaceShell(
   WidgetTester tester, {
   bool withProject = true,
   AgentTransport Function(String projectId)? transport,
+  Stream<TerminalState>? terminalStates,
+  Object? target = _unset,
   List<Override> extraOverrides = const [],
 }) async {
   useInMemoryPrefs();
@@ -62,8 +77,36 @@ Future<ProviderContainer> pumpWorkspaceShell(
         selectedRegistrationIdProvider.overrideWith(
           (ref) => withProject ? testAgentDeviceId : null,
         ),
+        // CheckoutReadiness (workspace_shell.dart's boot-overlay gate) reads
+        // selectedTargetProvider directly, for the isLocal flag the bare
+        // registration-id string above can't carry — so it must stay in sync
+        // with the override above or the shell never leaves its boot screen.
+        // `isLocal: true` (not a RemoteTarget) is deliberate here even though
+        // the id carries a compound machine.project shape: these tests dial no
+        // real supervisor (the wire is faked directly via
+        // agentTransportForProvider below), so a target that sends readiness
+        // through the relay ladder would park on `reachingMachine` forever —
+        // the same reason CheckoutReadiness itself skips that ladder for local
+        // targets. Matches this harness's pre-existing behaviour, under which
+        // every `isRemoteTarget`-gated read here already saw `false`.
+        selectedTargetProvider.overrideWith(
+          () => ValueController(
+            identical(target, _unset)
+                ? (withProject ? const LocalProject(testAgentDeviceId) : null)
+                : target as SessionTarget?,
+          ),
+        ),
+        // Defaults to `attach: ready`, not the bare const default (`unknown`,
+        // which CheckoutReadiness reads as `loadingScreen`): most callers need
+        // the workspace actually mounted, and a static single-value stream
+        // never advances the way a live TerminalService would. A test driving
+        // a specific attach sequence passes [terminalStates] instead.
         terminalStateProvider.overrideWith(
-          (ref) => Stream.value(const TerminalState()),
+          (ref) =>
+              terminalStates ??
+              Stream.value(
+                const TerminalState(attach: CheckoutAttachStatus.ready),
+              ),
         ),
         fileTreeStateProvider.overrideWith(
           (ref) => Stream.value(const FileTreeState()),
