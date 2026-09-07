@@ -1,6 +1,18 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { readHostFile, hostFilePath } from "../host-discovery";
-import { openStandaloneWindow } from "./open-window";
+import {
+  CAPTURE_TTL_MS,
+  CaptureArms,
+  clock,
+  deferExitForDisarm,
+  handOffViewerLink,
+  paint,
+  parseJson,
+  postControl,
+  replayGaps,
+  shedCount,
+  sseEvents,
+} from "./watch-transport";
 import { NETWATCH_BODY_MAX_CHARS, type NetwatchEvent } from "../netwatch";
 
 export interface NetwatchCliOptions {
@@ -50,55 +62,6 @@ export interface NetwatchCliOptions {
   open?: boolean;
 }
 
-/**
- * Dead-man switch on an armed capture, and the heartbeat that holds it open.
- *
- * Both endpoints disarm themselves when the window lapses — the app for a
- * remote capture, this host for body recording — so a watcher killed with
- * SIGKILL, or a laptop that closes mid-session, cannot leave either one
- * recording indefinitely. The heartbeat is well inside the window so a single
- * dropped re-arm costs nothing.
- */
-const CAPTURE_TTL_MS = 300_000;
-
-/** The renewal cadence a window of `ttlMs` demands. The window an arm actually
- *  gets is the host's to decide (it clamps), so the cadence is derived from the
- *  answer rather than fixed — a capture shortened behind the watcher's back
- *  would otherwise lapse under re-arms that believed they were early. */
-function heartbeatFor(ttlMs: number): number {
-  return Math.max(1_000, Math.floor(ttlMs * 0.4));
-}
-
-/** One control verb at the loopback plane. `error` is null on success — the
- *  caller decides whether a failure is fatal (arming) or worth only a note (the
- *  disarm on the way out). */
-async function postControl(
-  host: { controlPort: number; token: string },
-  verb: Record<string, unknown>,
-): Promise<{ error: string | null; reply?: Record<string, unknown> }> {
-  let res: Response;
-  try {
-    res = await fetch(`http://127.0.0.1:${host.controlPort}/control`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${host.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ id: `netwatch-${Date.now()}`, ...verb }),
-    });
-  } catch (err) {
-    return { error: (err as Error).message };
-  }
-  if (!res.ok) return { error: `HTTP ${res.status}` };
-  let body: { ok: boolean; error?: { message?: string } } & Record<string, unknown>;
-  try {
-    body = (await res.json()) as typeof body;
-  } catch {
-    // A 200 whose body is not JSON — a host shutting down mid-response. The
-    // disarm on the way out calls this from a SIGINT handler, so a throw here
-    // would take the exit with it.
-    return { error: "malformed reply" };
-  }
-  return body.ok ? { error: null, reply: body } : { error: body.error?.message ?? "refused" };
-}
-
 /** Arm or disarm the connected app's capture. Reports the window the host
  *  actually armed, for the reason setLocalBodies does: the host clamps, and a
  *  heartbeat pacing itself off the request rather than the grant would let the
@@ -107,11 +70,11 @@ async function setRemoteCapture(
   host: { controlPort: number; token: string },
   enabled: boolean,
 ): Promise<{ error: string | null; ttlMs: number }> {
-  const { error, reply } = await postControl(host, {
-    type: "netwatch:remote",
-    enabled,
-    ...(enabled ? { ttlMs: CAPTURE_TTL_MS } : {}),
-  });
+  const { error, reply } = await postControl(
+    host,
+    { type: "netwatch:remote", enabled, ...(enabled ? { ttlMs: CAPTURE_TTL_MS } : {}) },
+    "netwatch",
+  );
   const armed = reply?.ttlMs;
   return { error, ttlMs: typeof armed === "number" && armed > 0 ? armed : CAPTURE_TTL_MS };
 }
@@ -124,7 +87,11 @@ async function setLocalBodies(
   host: { controlPort: number; token: string },
   bodies: boolean,
 ): Promise<{ error: string | null; ttlMs: number }> {
-  const { error, reply } = await postControl(host, { type: "netwatch:local", bodies, ttlMs: CAPTURE_TTL_MS });
+  const { error, reply } = await postControl(
+    host,
+    { type: "netwatch:local", bodies, ttlMs: CAPTURE_TTL_MS },
+    "netwatch",
+  );
   const armed = reply?.ttlMs;
   return { error, ttlMs: typeof armed === "number" && armed > 0 ? armed : CAPTURE_TTL_MS };
 }
@@ -158,7 +125,7 @@ async function runNetwatchUi(
     return 1;
   }
 
-  const { error, reply } = await postControl(host, { type: "netwatch:ui" });
+  const { error, reply } = await postControl(host, { type: "netwatch:ui" }, "netwatch");
   if (error !== null || typeof reply?.url !== "string") {
     console.error(`antgrid watch: could not mint a viewer link — ${error ?? "malformed reply"}`);
     console.error("host.json may be stale; the host writes a fresh one on every start.");
@@ -172,46 +139,13 @@ async function runNetwatchUi(
   else if (opts.relay) url += ";f=relay";
   if (opts.limit !== undefined) url += `;n=${opts.limit}`;
 
-  const seconds = Math.round((typeof reply.expiresInMs === "number" ? reply.expiresInMs : 120_000) / 1000);
-  if (opts.open === false) {
-    console.error(`# capture viewer for ${host.agentVersion} (pid ${host.pid}) — single-use, lapses in ${seconds}s`);
-    console.log(url);
-    return 0;
-  }
-
-  const how = openStandaloneWindow(url);
-  if (how === "failed") {
-    console.error("antgrid watch: could not launch a browser. Open this yourself:");
-    console.log(url);
-    return 0;
-  }
-  console.error(
-    `# capture viewer for ${host.agentVersion} (pid ${host.pid}) opened in ` +
-      `${how === "window" ? "its own window" : "your browser"}`,
-  );
-  // Deliberately not printed on the success path: the link is a credential, and
-  // a scrollback is the one place it would outlive its own two minutes.
-  console.error(`# the link was single-use and lapses in ${seconds}s — run this again for another`);
-  return 0;
-}
-
-const COLOR = {
-  dim: "\u001b[2m",
-  red: "\u001b[31m",
-  yellow: "\u001b[33m",
-  cyan: "\u001b[36m",
-  green: "\u001b[32m",
-  reset: "\u001b[0m",
-};
-
-function paint(text: string, color: keyof typeof COLOR, enabled: boolean): string {
-  return enabled ? `${COLOR[color]}${text}${COLOR.reset}` : text;
-}
-
-function clock(at: number): string {
-  const d = new Date(at);
-  const p = (n: number, w = 2) => String(n).padStart(w, "0");
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+  return handOffViewerLink({
+    url,
+    label: `capture viewer for ${host.agentVersion} (pid ${host.pid})`,
+    expiresInMs: reply.expiresInMs,
+    open: opts.open !== false,
+    command: "antgrid watch",
+  });
 }
 
 function bytes(n: number | undefined): string {
@@ -312,39 +246,6 @@ export function renderEvent(event: NetwatchEvent, color = false, showOrigin = fa
   const line = detail ? `${row}  ${paint(detail, drop ? "yellow" : "dim", color)}` : row;
   const body = bodyLine(event, color);
   return body ? `${line}\n${body}` : line;
-}
-
-function parseJson<T>(raw: string): T | null {
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
-/** Parses an SSE byte stream into whole events. */
-async function* sseEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<{ event?: string; data: string }> {
-  const decoder = new TextDecoder();
-  const reader = body.getReader();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) return;
-    buffer += decoder.decode(value, { stream: true });
-    let split: number;
-    while ((split = buffer.indexOf("\n\n")) !== -1) {
-      const block = buffer.slice(0, split);
-      buffer = buffer.slice(split + 2);
-      if (block.startsWith(":")) continue; // keepalive
-      let name: string | undefined;
-      const data: string[] = [];
-      for (const line of block.split("\n")) {
-        if (line.startsWith("event:")) name = line.slice(6).trim();
-        else if (line.startsWith("data:")) data.push(line.slice(5).trim());
-      }
-      if (data.length > 0) yield { event: name, data: data.join("\n") };
-    }
-  }
 }
 
 /** Where an event was captured. The bridge stamps nothing, so a missing
@@ -690,41 +591,20 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
     `http://127.0.0.1:${host.controlPort}/netwatch` +
     `?limit=${limit}&follow=${follow ? "1" : "0"}`;
 
-  let heartbeat: ReturnType<typeof setInterval> | null = null;
-  let heartbeatMs = heartbeatFor(CAPTURE_TTL_MS);
-  // What is actually armed, not what was asked for: a run that arms the app and
-  // then fails to arm bodies still owes the app a disarm, and one that armed
-  // neither must not send two on the way out.
-  let remoteArmed = false;
-  let bodiesArmed = false;
-  const stopCaptures = async (): Promise<void> => {
-    if (heartbeat) clearInterval(heartbeat);
-    heartbeat = null;
-    // Not fatal: each window lapses on its own, so a failed disarm costs one
-    // more capture window, never a stuck one.
-    const note = (what: string, err: string): void => {
-      if (!opts.json) console.error(paint(`# could not disarm ${what} (${err}); it lapses on its own`, "dim", color));
-    };
-    if (remoteArmed) {
-      remoteArmed = false;
-      const { error: err } = await setRemoteCapture(host, false);
-      if (err) note("the app's capture", err);
-    }
-    if (bodiesArmed) {
-      bodiesArmed = false;
-      const { error } = await setLocalBodies(host, false);
-      if (error) note("body capture", error);
-    }
-  };
+  const arms = new CaptureArms((what, err) => {
+    if (!opts.json) console.error(paint(`# could not disarm ${what} (${err}); it lapses on its own`, "dim", color));
+  });
 
   if (opts.remote) {
-    const { error: err, ttlMs: remoteTtlMs } = await setRemoteCapture(host, true);
+    const { error: err } = await arms.arm({
+      what: "the app's capture",
+      set: (enabled) => setRemoteCapture(host, enabled),
+    });
     if (err) {
       console.error(`antgrid watch: could not arm the app's capture — ${err}`);
       console.error("An app must be connected to this machine over the relay for --remote to reach anything.");
       return 1;
     }
-    remoteArmed = true;
     // A remote capture is not retrospective: the app installs its tap on
     // receipt, so nothing before this line exists on that side. Say so, rather
     // than let an empty first screen read as a broken connection.
@@ -733,14 +613,16 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
     }
   }
   if (opts.bodies) {
-    const { error, ttlMs } = await setLocalBodies(host, true);
+    const { error, ttlMs } = await arms.arm({
+      what: "body capture",
+      set: (enabled) => setLocalBodies(host, enabled),
+    });
     if (error) {
       console.error(`antgrid watch: could not arm body capture — ${error}`);
-      await stopCaptures();
+      await arms.stop();
       return 1;
     }
-    bodiesArmed = true;
-    heartbeatMs = Math.min(heartbeatMs, heartbeatFor(ttlMs));
+    arms.pace(ttlMs);
     // Same non-retrospection as a remote arm, and the same reason for saying
     // it: the replayed frames above the live marker were recorded unarmed and
     // carry no plaintext, which is a gap in the capture rather than in the
@@ -749,12 +631,7 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
       console.error(paint("# bodies armed — loopback frames from now carry their plaintext, truncated per frame", "dim", color));
     }
   }
-  if (remoteArmed || bodiesArmed) {
-    heartbeat = setInterval(() => {
-      if (remoteArmed) void setRemoteCapture(host, true);
-      if (bodiesArmed) void setLocalBodies(host, true);
-    }, heartbeatMs);
-  }
+  arms.start();
 
   let res: Response;
   try {
@@ -762,12 +639,12 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
   } catch (err) {
     console.error(`antgrid watch: cannot reach host on 127.0.0.1:${host.controlPort} — ${(err as Error).message}`);
     console.error("host.json may be stale; the host writes a fresh one on every start.");
-    await stopCaptures();
+    await arms.stop();
     return 1;
   }
   if (!res.ok || !res.body) {
     console.error(`antgrid watch: host refused the capture stream (HTTP ${res.status}).`);
-    await stopCaptures();
+    await arms.stop();
     return 1;
   }
 
@@ -796,21 +673,7 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
     for (const [key, n] of ranked) console.error(paint(`#   ${key} ${n}`, "dim", color));
   };
 
-  // Ctrl-C must still print the tally — the counts are most of why you ran it —
-  // and must still disarm, which is a round trip, so the exit is deferred until
-  // it settles. Bounded: a host that has stopped answering must not hold the
-  // terminal, and each capture's own TTL covers the disarm that never lands.
-  const onSigint = (): void => {
-    summary();
-    // `.catch` before `.then`, not after: this handler has already displaced
-    // SIGINT's default, so a rejected disarm (postControl's `res.json()` on a
-    // half-shut host, say) that skipped the exit would strand the terminal with
-    // no second Ctrl-C able to help it.
-    void Promise.race([stopCaptures(), new Promise((r) => setTimeout(r, 1500))])
-      .catch(() => {})
-      .then(() => process.exit(0));
-  };
-  process.on("SIGINT", onSigint);
+  const detachInterrupt = deferExitForDisarm(arms, summary);
 
   // The heartbeat is what holds an armed capture open, so ANY exit from this
   // loop must clear it — a throw out of the SSE parser or a broken pipe on
@@ -822,27 +685,19 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
       if (frame.event === "replayed") {
         replaying = false;
         if (!opts.json) {
-          const meta = parseJson<{ evicted?: number; buffered?: number; replayed?: number }>(frame.data);
-          const notes: string[] = [];
-          if (meta && (meta.evicted ?? 0) > 0) notes.push(`${meta.evicted} older events already evicted`);
-          // A short replay is not the same blind spot as an eviction and has its
-          // own remedy (raise --limit), so it has to say which one happened.
-          if (meta && (meta.replayed ?? 0) < (meta.buffered ?? 0)) {
-            notes.push(`${(meta.buffered ?? 0) - (meta.replayed ?? 0)} buffered events not replayed — raise --limit`);
-          }
+          const notes = replayGaps(frame.data, "events");
           const note = notes.length > 0 ? ` (${notes.join("; ")})` : "";
           console.error(paint(`# --- live ---${note}`, "dim", color));
         }
         continue;
       }
       if (frame.event === "shed") {
-        // The host dropped live events because THIS reader could not keep up —
-        // a gap in what reached the screen, not in what crossed the wire, and
+        // A gap in what reached the screen, not in what crossed the wire, and
         // saying which is the whole reason the host counts them.
-        const meta = parseJson<{ dropped?: number }>(frame.data);
-        drops += meta?.dropped ?? 0;
+        const dropped = shedCount(frame.data);
+        drops += dropped;
         if (!opts.json) {
-          console.error(paint(`# ${meta?.dropped ?? 0} events dropped — this reader is behind the capture`, "yellow", color));
+          console.error(paint(`# ${dropped} events dropped — this reader is behind the capture`, "yellow", color));
         }
         continue;
       }
@@ -891,8 +746,8 @@ export async function runNetwatchCli(opts: NetwatchCliOptions): Promise<number> 
       }
     }
   } finally {
-    process.off("SIGINT", onSigint);
-    await stopCaptures();
+    detachInterrupt();
+    await arms.stop();
   }
   if (replaying) console.error("antgrid watch: stream ended before replay completed.");
   summary();

@@ -318,6 +318,36 @@ program
     process.exit(await runNetwatchCli({ ...opts, limit }));
   });
 
+// antgrid calls subcommand — the headless model calls this machine spawns on the
+// user's own provider accounts: session titles, and the handler's decisions and
+// extractions. Same attachment as `watch` (host.json's port and bearer, an
+// already-running host, a ring that was recording before anyone attached), and
+// the same loopback-only reach: everything it asks for is a ControlRequest verb
+// answered in this process, so no prompt it can arm ever leaves the machine.
+program
+  .command("calls")
+  .description("Stream headless model calls from the running host (cost and retry-budget debugging)")
+  .option("--json", "Emit the raw records instead of the rendered attempts")
+  .option("--export <file>", "Append the records to a file as JSONL (metadata only, never prompt text)")
+  .option("--limit <n>", "Buffered records to replay before following (default 600; a call is three)")
+  .option("--no-follow", "Print the buffered snapshot and exit")
+  .option("--dir <path>", "ANTGRID_DIR of the target host (debug builds use ~/.antgrid-dev)")
+  .option("--purpose <kind>", "Show only title, decision or extraction calls")
+  .option("--prompts", "Record the prompt parts the bridge authored while this runs (scaffold, goal, a count for the backlog, a digest for the transcript)")
+  .option("--context", "Also record the transcript and PTY scrollback the prompt was built from, and the model's answer — anything the user typed or the agent read")
+  .action(async (opts: { json?: boolean; export?: string; limit?: string; follow?: boolean; dir?: string; purpose?: string; prompts?: boolean; context?: boolean }) => {
+    const { runModelwatchCli } = await import("./cli/modelwatch");
+    const limit = opts.limit === undefined ? undefined : Number(opts.limit);
+    // Zero is admitted for the reason it is on `watch`: `limit=0` on the stream
+    // means "no replay, live tail only", which is how you watch the NEXT call
+    // without a screenful of history in front of it.
+    if (limit !== undefined && (!Number.isFinite(limit) || limit < 0)) {
+      console.error("antgrid calls: --limit must be zero or a positive number");
+      process.exit(1);
+    }
+    process.exit(await runModelwatchCli({ ...opts, limit }));
+  });
+
 // antgrid phones subcommand — inspect and drop local phone records. Whether a
 // phone may drive this machine is one machine-wide switch (mobile-access), not
 // anything this CLI manages.

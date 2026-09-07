@@ -220,3 +220,103 @@ machine an app-side frame belongs to: the app's recorder is process-wide, so an
 app connected to two machines that are BOTH watching reports every frame to both
 — same account, same user, and the events carry types and sizes, never payloads,
 but the reading is confusing rather than wrong.
+
+**Model-call watcher:** `antgrid calls` (`bridge/src/cli/modelwatch.ts`) is the
+sibling command, over the same plumbing, watching a different thing: the headless
+agent CLIs the bridge spawns on *your own provider accounts*. Three calls exist —
+a session title, and the handler's decision and extraction — and all three funnel
+through `runHeadless` (`bridge/src/agents/headless.ts`), which is where the
+recorder is tapped. It attaches to the already-running host exactly as `watch`
+does (`GET /modelwatch`, the `host.json` bearer, a ring that has been recording
+since the host started), so the call worth reading about is normally already in
+it by the time you attach.
+
+```bash
+antgrid calls                        # replay the ring, then follow
+antgrid calls --purpose decision     # only the handler's judge calls
+antgrid calls --json > calls.jsonl   # the raw records
+antgrid calls --no-follow            # buffered snapshot, then exit
+antgrid calls --limit 0              # no replay; watch what happens next
+```
+
+```
+20:40:06.095  9f8e7d6c  title        #1  codex→claude-code  default   3.1s/45.0s   named
+20:40:12.480  abc123de  decision     #1  claude-code        default  28.4s/45.0s   shape-rejected  16.6s left for the retry  quote not found in RECENT CONTEXT
+20:40:41.220  abc123de  decision    ↳#2  claude-code        default   7.2s/16.6s   retried-parsed
+20:41:07.900  deadbeef  extraction   #1  claude-code        default  19.8s/20.0s   timeout         200ms left for the retry — unreachable  no output
+```
+
+**A row is an attempt, not a record.** The recorder writes three per attempt —
+the spawn starts, the spawn exits with its timings, and the *caller* says what it
+made of the answer, which the spawn cannot know — and the rendered view folds
+them into one row on the call id they share. `--json` does not fold: it prints
+the records as recorded, for a reader piping them somewhere else.
+
+**The retry budget is the number this exists for.** A judge gets two attempts
+against ONE budget (`runWithRetry` in `bridge/src/handler/judge.ts`), so what the
+first attempt leaves is the whole of what the second gets — which is why the two
+rows above share a call id, why the retry is indented under the attempt it
+retried, and why attempt #1's leftover is literally attempt #2's budget column. A
+first attempt that leaves a few hundred milliseconds has dispatched a retry that
+was already dead: no vendor CLI has ever finished in that (each loads twelve to
+twenty-three thousand tokens of its own preamble before reading the prompt), so
+anything under five seconds is called unreachable on the row and counted in the
+closing tally. Nothing else on the machine would ever say so.
+
+The other columns answer questions that are equally unanswerable elsewhere. The
+agent **asked for** is shown beside the one that **actually ran** when they differ
+(`codex→claude-code`): a title needs no repo access and therefore borrows
+whichever agent is installed, which bills a vendor this session never chose. And
+`default` in the model column is not a missing value — it is a call that passed no
+`--model` at all and so ran on whatever that CLI defaults to on this machine,
+which for a three-word naming task is the largest single cost lever there is.
+
+**Prompt text is never recorded unless armed, and the arms are separate.**
+Metadata is always in the ring — that is what makes a call diagnosable hours
+later — but nothing the user typed and nothing the agent read is, until a run
+asks for it:
+
+```bash
+antgrid calls --prompts   # the parts WE wrote: scaffold, handler goal,
+                          # a count for the backlog, a digest for the transcript
+antgrid calls --context   # ...and the transcript and PTY scrollback themselves,
+                          # plus the model's answer, which quotes them back
+```
+
+`--context` is a second flag rather than a stronger setting of the first because
+what it admits is not ours. A decision prompt is built around thousands of
+characters of transcript and PTY scrollback, which can hold a pasted key, an
+`.env` the agent opened, or a password typed at a prompt — there is no list of
+types that could make it safe the way `BODY_REDACTED_MESSAGE_TYPES` makes a frame
+body safe, which is the whole reason `bridge/src/modelwatch.ts` gives it its own
+switch. It implies `--prompts`: transcript text and the model's answer are
+admitted only while both arms are up, so arming it alone would arm the dangerous
+capture and record nothing through it. For the same reason the capture viewer may
+arm the prompt parts and may **not** arm the context arm — it is refused at that
+route with `CONTEXT_ARM_FORBIDDEN` and is reachable only from this CLI.
+
+Both arms carry the **dead-man TTL** `--bodies` does, renewed while the watcher
+runs and clamped host-side, and both need a live stream (`--no-follow` refuses
+them, since arming records the future). The two ceilings differ, because what the
+arms admit does: `prompts` may be held for up to an hour, `context` for five
+minutes. A run renews well inside either, so the shorter one costs a live watcher
+nothing — what it bounds is the run that is no longer there. One thing these arms
+do that netwatch's does not: a disarm — on exit, on `Ctrl-C`, or when the window
+simply lapses — **purges the text already in the ring**. That ring is sized to
+hold days rather than seconds, so without the purge an excerpt admitted during a
+one-minute window would still be readable a week later by a reader who armed
+nothing.
+
+**Nothing leaves the machine.** `modelwatch:arm` and `modelwatch:ui` are
+`ControlRequest` verbs answered in this process on the loopback plane; they add no
+AbMessage type, so a phone — which speaks AbMessage over the relay and cannot name
+a `ControlRequest` at all — has no way to reach either. There is no outbound
+direction and no `--remote` analogue, by construction rather than by omission. The
+durable feed the recorder also writes (`<ANTGRID_DIR>/model-calls.jsonl`, machine
+level, one rolled generation) holds metadata only, always, armed or not, and
+`--export` writes the same — literally the same field list, `MODEL_CALL_LOG_FIELDS`
+in `bridge/src/modelwatch-log.ts`, so the two cannot drift apart as fields are
+added. An export file is written to be pasted into a bug report, and it outlives
+the run, the window and the arm's own TTL. `--json` is the mode that withholds
+nothing: it goes to a pipe the operator is watching, not to a file they attach to
+a ticket a week later.
