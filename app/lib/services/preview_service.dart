@@ -711,6 +711,10 @@ class _WsOutboundQueue {
   /// streaming into a wedged tunnel would otherwise grow it without limit.
   static const _maxQueuedFrames = 64;
   static const _maxQueuedBytes = 1024 * 1024;
+  /// A send resolves at hand-off to the socket, so this bounds the wait for
+  /// the channel ahead of this frame. Hitting it aborts the tunnel, which is
+  /// the right surface for a preview channel that has stopped draining: a WS
+  /// tunnel with a hole in it is worse than one the browser can re-open.
   static const _sendTimeout = Duration(seconds: 10);
 
   /// How long the close frame waits its turn. Ordering matters least here:

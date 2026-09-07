@@ -13,6 +13,7 @@ import 'models/connection_state.dart';
 import 'models/relay_message.dart';
 import 'models/stream_envelope.dart';
 import 'relay_service.dart';
+import 'send_scheduler.dart';
 
 /// Liveness constants; mirror `bridge/src/relay-client.ts`.
 /// Spec: docs/protocol/e2e-handshake.md §"Sealed liveness".
@@ -81,13 +82,23 @@ class MachineSession {
   /// [StreamTransport.refreshSnapshot] for why a pull is retried at all.
   final Duration snapshotTimeout;
 
+  /// Silence after which liveness sends a sealed `ping`, and the period the
+  /// liveness timer itself runs at. Injectable so a test need not wait out the
+  /// real interval.
+  final Duration pingSilence;
+
   MachineSession({
     required this.relay,
     required this.machineDeviceId,
     required SessionHandshaker handshaker,
     this.projectStartMessageBuilder,
     this.snapshotTimeout = const Duration(seconds: 5),
-  }) : _handshaker = handshaker {
+    this.pingSilence = const Duration(seconds: kPingSilenceSeconds),
+    int? channelWindowBytes,
+    int? socketInflightBytes,
+  }) : _handshaker = handshaker,
+       _channelWindowBytes = channelWindowBytes,
+       _socketInflightBytes = socketInflightBytes {
     // [ready] is observation-optional: failReady/dispose may completeError
     // before any awaiter attaches (see the getter doc). ignore() pre-registers
     // a swallowing listener so that never trips the unhandled-error zone hook;
@@ -136,6 +147,26 @@ class MachineSession {
   /// channel → the decrypt-and-dispatch chain currently draining for it. See
   /// [_onRouted]; an entry lives only while that channel has work in flight.
   final Map<String, Future<void>> _inboundTails = {};
+
+  /// Sealed bytes allowed in flight per channel and across the socket before
+  /// the agent must credit them. Null on both leaves the queue ungated.
+  final int? _channelWindowBytes;
+  final int? _socketInflightBytes;
+
+  /// Every outbound app frame passes through here: one drain loop, sealed at
+  /// dequeue, control ahead of preview. Session frames are written directly and
+  /// so overtake any backlog — but they still land behind whatever is already
+  /// inside the socket's own sink, and nothing in this stack can read that
+  /// sink, so the scheduler's accounting is the only bound on it there is.
+  late final SendScheduler _scheduler = SendScheduler(
+    sink: _sealAndSend,
+    window: _channelWindowBytes,
+    socketCap: _socketInflightBytes,
+  );
+
+  /// Test-only seam: park the send gate, shrink its limits, release it. Not
+  /// part of the supported API.
+  SendScheduler get debugScheduler => _scheduler;
 
   /// projectId → streamId, learned from `agent:projects` / `stream-ready`.
   final Map<String, String> _projectStreamIds = {};
@@ -300,7 +331,15 @@ class MachineSession {
       c.future.ignore();
       return c;
     });
-    await sendOnStream(kControlStreamId, startMessage, 'control');
+    // Bounded by the same deadline as the wait below: the send resolves only
+    // once the frame reaches the socket, so a control channel that cannot drain
+    // would otherwise hold a bind past the "never 2x timeout" bound above and
+    // pin the caller's in-flight guard behind it.
+    await sendOnStream(
+      kControlStreamId,
+      startMessage,
+      'control',
+    ).timeout(_remainingUntil(deadline));
     // The waiter is shared by every concurrent bind of this project, so one
     // caller's deadline must not evict it: `.timeout()` leaves the completer
     // itself pending, and dropping the map entry would strand the other callers
@@ -308,21 +347,27 @@ class MachineSession {
     return waiter.future.timeout(_remainingUntil(deadline));
   }
 
-  /// Wrap [message] as a sealed `{s, m}` envelope and send it (fragmenting past
-  /// the threshold). Dropped when no keys are installed (pre-establishment /
-  /// mid-reconnect) — the bridge replays durable state via `state.snapshot`.
+  /// Wrap [message] as a sealed `{s, m}` envelope and queue it (fragmenting
+  /// past the threshold). Dropped when no keys are installed (pre-establishment
+  /// / mid-reconnect) — the bridge replays durable state via `state.snapshot`.
+  ///
+  /// Resolves when the message's last frame has been handed to the socket or
+  /// dropped, never when it has merely been copied into a buffer this layer
+  /// cannot measure. A caller that cannot wait for the channel ahead of it must
+  /// impose its own timeout.
   Future<void> sendOnStream(
     String streamId,
     Map<String, dynamic> message,
     String channel,
   ) async {
     final type = message['type'] is String ? message['type'] as String : null;
-    final keys = _keys;
-    if (keys == null) {
+    if (_keys == null) {
       // The phone-side mirror of the bridge's `no-e2e-session` drop. Usually
       // benign (the bridge replays durable state on establishment), but it is
       // also where a session that never comes back shows up first, and nothing
-      // else on this path observes it.
+      // else on this path observes it. Dropped rather than queued: the snapshot
+      // pull on the next establishment is the reconnect contract, not a backlog
+      // of messages the peer has since moved past.
       _dropped(
         'tx',
         'no-e2e-session',
@@ -337,56 +382,48 @@ class MachineSession {
       'm': message,
     };
     final plaintext = jsonEncode(envelope);
-    final t = E2eTransportDart(sendKey: keys.p2a, recvKey: keys.a2p);
     final bytes = utf8ByteLength(plaintext);
+    if (bytes > kMaxTransferBytes) {
+      _dropped(
+        'tx',
+        'message-too-large',
+        channel: channel,
+        streamId: streamId,
+        msgType: type,
+        detail: {'bytes': bytes},
+      );
+      if (!_fragSendErrors.isClosed) {
+        _fragSendErrors.add(
+          FragSendError(
+            'MESSAGE_TOO_LARGE',
+            '${message['type'] ?? 'message'} exceeds kMaxTransferBytes',
+          ),
+        );
+      }
+      return;
+    }
+    final List<String> frames;
     try {
       if (bytes <= kFragThreshold) {
-        final sealed = await t.seal(plaintext);
-        relay.sendMessage(machineDeviceId, channel, sealed);
-        _annotate(_frameId(sealed), msgType: type, streamId: streamId);
-        return;
-      }
-      if (bytes > kMaxTransferBytes) {
-        _dropped(
-          'tx',
-          'message-too-large',
-          channel: channel,
-          streamId: streamId,
-          msgType: type,
-          detail: {'bytes': bytes},
-        );
-        if (!_fragSendErrors.isClosed) {
-          _fragSendErrors.add(
-            FragSendError(
-              'MESSAGE_TOO_LARGE',
-              '${message['type'] ?? 'message'} exceeds kMaxTransferBytes',
-            ),
-          );
-        }
-        return;
-      }
-      final path = message['path'] as String?;
-      final hint = type == 'file:content' && path != null
-          ? FragHint('file:content', path)
-          : null;
-      // Fragment the ENVELOPE JSON so `s` survives reassembly; the id is unique
-      // per (machine, stream, counter) — the agent reassembles by bare id.
-      final id = '$machineDeviceId-$streamId-${_fragCounter++}';
-      for (final fragment in buildFragments(plaintext, id, hint)) {
-        final sealed = await t.seal(fragment);
-        relay.sendMessage(machineDeviceId, channel, sealed);
-        // Each fragment is sealed on its own, so one message leaves as N frames
-        // with N unrelated ids. Naming every one with the parent type is what
-        // keeps a large transfer from reading as a burst of anonymous frames.
-        _annotate(_frameId(sealed), msgType: type, streamId: streamId);
+        frames = [plaintext];
+      } else {
+        final path = message['path'] as String?;
+        final hint = type == 'file:content' && path != null
+            ? FragHint('file:content', path)
+            : null;
+        // Fragment the ENVELOPE JSON so `s` survives reassembly; the id is
+        // unique per (machine, stream, counter) — the agent reassembles by bare
+        // id.
+        final id = '$machineDeviceId-$streamId-${_fragCounter++}';
+        frames = buildFragments(plaintext, id, hint);
       }
     } catch (e) {
-      // The type alone, as everywhere else a drop names an error: the try above
-      // wraps `seal` and `buildFragments`, and a FormatException/ArgumentError
-      // out of either prints the plaintext it choked on. `detail` is shipped to
-      // the bridge by NetwatchUploader and written into an operator's export
-      // file — the app's event has no `body` field precisely so a capture
-      // carries no payload, and this is the one door left open to it.
+      // The type alone, as everywhere else a drop names an error: a
+      // FormatException or ArgumentError out of the fragmenter prints the
+      // plaintext it choked on. `detail` is shipped to the bridge by
+      // NetwatchUploader and written into an operator's export file — the app's
+      // event has no `body` field precisely so a capture carries no payload,
+      // and this is the one door left open to it.
       _dropped(
         'tx',
         'seal-failed',
@@ -395,6 +432,90 @@ class MachineSession {
         msgType: type,
         detail: {'error': '${e.runtimeType}'},
       );
+      return;
+    }
+    final queued = [
+      for (final p in frames)
+        QueuedAppFrame(
+          channel: channel,
+          streamId: streamId,
+          plaintext: p,
+          plaintextBytes: utf8ByteLength(p),
+          msgType: type,
+        ),
+    ];
+    if (!_scheduler.enqueue(queued)) {
+      _dropped(
+        'tx',
+        'send-queue-full',
+        channel: channel,
+        streamId: streamId,
+        msgType: type,
+        detail: {'frames': frames.length},
+      );
+      return;
+    }
+    // A fragment set leaves in order, so the last frame's hand-off is the
+    // message's.
+    await queued.last.done.future;
+  }
+
+  /// Seal one queued frame under the keys live at THIS moment and write it.
+  /// Returns the sealed length that reached the wire, or null if nothing did.
+  Future<int?> _sealAndSend(QueuedAppFrame f) async {
+    final keys = _keys;
+    if (keys == null) {
+      _dropped(
+        'tx',
+        'no-e2e-session',
+        channel: f.channel,
+        streamId: f.streamId,
+        msgType: f.msgType,
+      );
+      return null;
+    }
+    try {
+      final sealed = await E2eTransportDart(
+        sendKey: keys.p2a,
+        recvKey: keys.a2p,
+      ).seal(f.plaintext);
+      if (!identical(keys, _keys)) {
+        // `seal` holds the key by reference and reads it after its own awaits,
+        // and a teardown or rekey swap zeroizes those bytes in place meanwhile.
+        // Whatever came out is either under an all-zero key or under keys the
+        // agent has already retired — not worth a wire write.
+        _dropped(
+          'tx',
+          'keys-rotated',
+          channel: f.channel,
+          streamId: f.streamId,
+          msgType: f.msgType,
+        );
+        return null;
+      }
+      relay.sendMessage(machineDeviceId, f.channel, sealed);
+      // Each fragment is sealed on its own, so one message leaves as N frames
+      // with N unrelated ids. Naming every one with the parent type is what
+      // keeps a large transfer from reading as a burst of anonymous frames.
+      // After the send, not before: the tap records the wire event inside
+      // sendMessage, and this names the event it just made.
+      _annotate(_frameId(sealed), msgType: f.msgType, streamId: f.streamId);
+      return sealed.length;
+    } catch (e) {
+      // The type alone, as everywhere else a drop names an error: an exception
+      // out of `seal` prints the plaintext it choked on. `detail` is shipped to
+      // the bridge by NetwatchUploader and written into an operator's export
+      // file — the app's event has no `body` field precisely so a capture
+      // carries no payload, and this is the one door left open to it.
+      _dropped(
+        'tx',
+        'seal-failed',
+        channel: f.channel,
+        streamId: f.streamId,
+        msgType: f.msgType,
+        detail: {'error': '${e.runtimeType}'},
+      );
+      return null;
     }
   }
 
@@ -412,7 +533,14 @@ class MachineSession {
     }
   }
 
-  void removeStream(String streamId) => _streams.remove(streamId);
+  /// Detach [streamId]'s transport and drop whatever of its traffic is still
+  /// queued: a detached stream's backlog must not occupy a window the rest of
+  /// the session needs, and anything awaiting one of those frames must not be
+  /// left waiting on a stream that no longer exists.
+  void removeStream(String streamId) {
+    _streams.remove(streamId);
+    _scheduler.dropStream(streamId);
+  }
 
   /// The relay dropped a routed frame on this socket (`MESSAGE_RATE_LIMITED`).
   ///
@@ -471,6 +599,19 @@ class MachineSession {
     // actions surface the failure for the user to retry.
     for (final s in _streams.values) {
       s.failAllPending(code: 'E_SESSION_DOWN', message: 'relay session down');
+    }
+    // Whatever the send gate was still holding dies with the keys it would have
+    // been sealed under. Their futures complete rather than fail: the callers
+    // are fire-and-forget, so an error would land in no handler at all.
+    for (final f in _scheduler.clear()) {
+      _dropped(
+        'tx',
+        'queue-dropped',
+        channel: f.channel,
+        streamId: f.streamId,
+        msgType: f.msgType,
+        detail: {'why': 'session-down'},
+      );
     }
     // Re-arm only from the completed state: a second blip before the first
     // establishment would otherwise orphan whoever is already awaiting.
@@ -535,6 +676,13 @@ class MachineSession {
     _startLiveness();
     if (!_readyCompleter.isCompleted) _readyCompleter.complete();
     if (!_established$.isClosed) _established$.add(null);
+    // A new session credits from zero. The QUEUE deliberately survives a rekey:
+    // frames dequeued from here on seal under the new keys, and the agent
+    // swapped before it confirmed, so nothing straddles the change in this
+    // direction — where dropping them would strand every pending RPC until its
+    // timeout.
+    _scheduler.resetWindows();
+    _scheduler.kick();
     // Re-pull durable state on every (re)establish so late subscribers
     // (a ControlPlaneClient, a just-bound project stream) replay it.
     for (final s in _streams.values) {
@@ -546,10 +694,7 @@ class MachineSession {
 
   void _startLiveness() {
     _livenessTimer?.cancel();
-    _livenessTimer = Timer.periodic(
-      const Duration(seconds: kPingSilenceSeconds),
-      (_) => _checkLiveness(),
-    );
+    _livenessTimer = Timer.periodic(pingSilence, (_) => _checkLiveness());
   }
 
   void _stopLiveness() {
@@ -560,8 +705,8 @@ class MachineSession {
 
   void _checkLiveness() {
     if (_disposed || !_established || _handshakeInFlight) return;
-    final silentFor = DateTime.now().difference(_lastRecv).inSeconds;
-    if (silentFor < kPingSilenceSeconds) return;
+    final silentFor = DateTime.now().difference(_lastRecv);
+    if (silentFor < pingSilence) return;
     if (_missedPongs >= kMaxMissedPongs) {
       // Session declared dead at the E2E layer → rekey on the live socket.
       _stopLiveness();
@@ -963,6 +1108,9 @@ class MachineSession {
     }
     _streamReadyWaiters.clear();
     _inboundTails.clear();
+    // No drop records: the capture tap is read off the socket this dispose is
+    // tearing down.
+    _scheduler.clear();
     await _established$.close();
     await _takeovers.close();
     await _sessionDown.close();
@@ -1006,6 +1154,11 @@ class StreamTransport extends BufferedAgentTransport {
 
   /// Migrate this transport onto [newStreamId] after a host-restart re-advert.
   /// Called by [MachineSession] only, which owns the `_streams` re-keying.
+  ///
+  /// Frames already queued for the dead id keep it and still go out: the host
+  /// answers `stream-invalid`, which re-drives the bind. Cheaper than rewriting
+  /// the envelope of every frame built before the re-point, and it exercises
+  /// the self-heal that has to work anyway.
   void _retarget(String newStreamId) => streamId = newStreamId;
 
   void noteFramesDropped() {

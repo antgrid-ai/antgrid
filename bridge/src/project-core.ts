@@ -656,6 +656,8 @@ export class ProjectCore {
     try { this.promotion?.stop(); } catch {}
     if (this.deps.mode === "remote" && this.streamHandle) {
       // Publish over the bus so the disconnecting notice rides this core's stream.
+      // Best-effort: a notice still queued in the relay client when the socket
+      // closes is dropped, and the phone learns of the shutdown by liveness.
       try { this.bus?.publish(createMessage("agent:disconnecting", { reason }), "control"); } catch {}
       await new Promise((resolve) => setTimeout(resolve, 200));
     }

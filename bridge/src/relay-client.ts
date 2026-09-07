@@ -36,6 +36,7 @@ import { prunePushToken } from "./push/prune";
 import { nextEpoch } from "./relay-epoch";
 import { StreamMux, type AttachStreamOpts, type StreamHandle } from "./stream-mux";
 import { netwatch, frameIdFor, isRemoteIngestArmed } from "./netwatch";
+import { SendScheduler, type QueuedAppFrame } from "./send-scheduler";
 
 export interface RelayClientOptions {
   url: string;
@@ -245,6 +246,10 @@ export class RelayClient {
   private busUnsub: (() => void) | null = null;
   private readonly mux: StreamMux;
   private fragReassembler!: FragReassembler;
+  /** Declared without an initialiser on purpose: `forTest` builds the client
+   *  with `Object.create(prototype)`, where class-field initialisers never run.
+   *  Both constructors install it through {@link initSendScheduler}. */
+  private scheduler!: SendScheduler;
   private fragSweep: ReturnType<typeof setInterval> | null = null;
   private outboundFrameDiagnostics: OutboundFrameDiagnostic[] = [];
   private rateLimitBurst: RateLimitBurst | null = null;
@@ -325,9 +330,15 @@ export class RelayClient {
     this.epoch = opts.abDir ? nextEpoch(opts.abDir) : Math.floor(Date.now() / 1000);
     this.mux = new StreamMux({
       openStream: (id) => this.sendJson({ type: "stream-open", streamId: id }),
-      closeStream: (id) => this.sendJson({ type: "stream-close", streamId: id }),
+      closeStream: (id) => {
+        // A detached stream's backlog must not sit in the send queue occupying
+        // room the streams that are still live need.
+        this.recordQueueDrop("stream-detached", this.scheduler.dropStream(id));
+        this.sendJson({ type: "stream-close", streamId: id });
+      },
       sendEnvelope: (id, msg, channel) => this.sendAppEnvelope(id, msg, channel),
     });
+    this.initSendScheduler();
     this.initFragReassembler();
     this.startFragSweep();
   }
@@ -335,6 +346,48 @@ export class RelayClient {
   /** Attach a project's bus as a multiplexed stream on this machine socket. */
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle {
     return this.mux.attach(bus, opts);
+  }
+
+  /**
+   * Outbound app frames go through one queue per channel so that per-channel
+   * order is the queue's order and nothing else, and so a frame is sealed only
+   * once it is actually being written — under whatever session is live at that
+   * moment, not the one that was live when the caller handed it over.
+   */
+  private initSendScheduler(): void {
+    this.scheduler = new SendScheduler({
+      send: (f) => {
+        const est = this.established;
+        if (!est) {
+          netwatch.record({
+            dir: "tx", kind: "drop", transport: "relay", channel: f.channel,
+            msgType: f.type, streamId: f.streamId, reason: "no-e2e-session",
+          });
+          return null;
+        }
+        const sealed = est.transport.seal(f.plaintext);
+        return this.sendPayload(sealed, f.channel, FrameKind.sealed, f.type, f.streamId)
+          ? sealed.length
+          : null;
+      },
+    }, (m) => log.warn(m));
+  }
+
+  /** The single place a queued frame reaches the wire. */
+  private drain(): void {
+    this.scheduler.drain();
+  }
+
+  private recordQueueDrop(reason: string, frames: QueuedAppFrame[]): void {
+    if (frames.length === 0) return;
+    for (const f of frames) {
+      netwatch.record({
+        dir: "tx", kind: "drop", transport: "relay", channel: f.channel,
+        msgType: f.type, streamId: f.streamId, reason: "queue-dropped",
+        detail: { why: reason },
+      });
+    }
+    log.info("Dropped %d queued frame(s): %s", frames.length, reason);
   }
 
   private initFragReassembler(): void {
@@ -578,6 +631,10 @@ export class RelayClient {
           log.debug("Ignoring peer-offline for %s — scoped at another machine", msg.peerId);
           break;
         }
+        // A phone whose socket drops always tears its own session down, so its
+        // return is a fresh handshake — a retained backlog would only sit ahead
+        // of the adverts and snapshot the phone needs first.
+        this.recordQueueDrop("peer-offline", this.scheduler.clear());
         // Keep _peerId + the established session for push fallback and a quick
         // reconnect; suppress the heavy stream until the phone returns.
         this.mux.notifyPeerOffline();
@@ -1119,10 +1176,18 @@ export class RelayClient {
         old.transport.zeroize();
       }
       this.startLiveness();
+      // Dropped rather than re-sealed under the promoted keys: the phone
+      // captures its own key set when a frame arrives and swaps several awaits
+      // after `established` reaches its socket, so anything written right
+      // behind the ack races that swap — and FIFO would put a stale backlog
+      // ahead of the adverts and snapshot the phone re-syncs from anyway.
+      this.recordQueueDrop("rekey", this.scheduler.clear());
+      this.scheduler.resetWindows();
       this.sendSessionFrame({ type: "established", attemptId }, this.established.transport);
       log.info("E2E session established (attempt %s)", attemptId);
       this.opts.onHandshakeComplete?.({ checkoutRouting: this.peerCheckoutRouting });
       this.mux.notifyPeerOnline();
+      this.drain();
       return;
     }
 
@@ -1186,13 +1251,14 @@ export class RelayClient {
 
   /**
    * Wrap `msg` in the `{ s?, m }` stream envelope, fragment the
-   * ENVELOPE json (so `s` survives fragmentation), seal each fragment under the
-   * established session keys, and send. Control-plane traffic uses
-   * `CONTROL_STREAM_ID` (`s` omitted). Dropped — never sent in cleartext — when
-   * the session is not established. A too-large `tunnel:http-response` degrades
-   * to a sealed 413 so the phone's preview request fails fast instead of hanging.
+   * ENVELOPE json (so `s` survives fragmentation), and hand every fragment to
+   * the send scheduler, which seals and writes them in order. Control-plane
+   * traffic uses `CONTROL_STREAM_ID` (`s` omitted). Dropped — never sent in
+   * cleartext — when the session is not established. A too-large
+   * `tunnel:http-response` degrades to a sealed 413 so the phone's preview
+   * request fails fast instead of hanging.
    */
-  private sendAppEnvelope(streamId: string, msg: unknown, channel: Channel): "sent" | "dropped" | "too-large" {
+  private sendAppEnvelope(streamId: string, msg: unknown, channel: Channel): "queued" | "dropped" | "too-large" {
     const type = (msg as { type?: string } | null)?.type;
     if (!this.established) {
       // NEVER send app traffic in cleartext (the relay is zero-knowledge). During
@@ -1227,12 +1293,25 @@ export class RelayClient {
       return outcome;
     }
 
-    for (const frame of fragmented.frames) {
-      this.sendPayload(
-        this.established.transport.seal(frame), channel, FrameKind.sealed, type ?? "app", streamId,
-      );
+    const frames: QueuedAppFrame[] = fragmented.frames.map((plaintext) => ({
+      channel,
+      streamId,
+      plaintext,
+      plaintextBytes: Buffer.byteLength(plaintext, "utf8"),
+      type: type ?? "app",
+    }));
+    if (!this.scheduler.enqueue(frames)) {
+      log.warn("Send queue full on %s — dropping %s (%d frame(s))", channel, type ?? "message", frames.length);
+      netwatch.record({
+        dir: "tx", kind: "drop", transport: "relay", channel,
+        msgType: type ?? "message", streamId, reason: "send-queue-full",
+        detail: { frames: frames.length, queued: this.scheduler.queued(channel).bytes },
+      });
+      this.handleUndeliverableTunnel("dropped", channel, msg);
+      return "dropped";
     }
-    return "sent";
+    this.drain();
+    return "queued";
   }
 
   /** A tunnel HTTP response has no re-sync path (unlike control), so an
@@ -1299,20 +1378,22 @@ export class RelayClient {
     this.bus = null;
   }
 
+  /** Returns whether the frame reached the socket; the scheduler charges only
+   *  what actually went out. */
   private sendPayload(
     data: Buffer | string,
     channel: Channel = "control",
     kind: FrameKind = FrameKind.sealed,
     diagnosticType = "transport",
     streamId?: string,
-  ): void {
+  ): boolean {
     if (!this._peerId) {
       log.warn("Cannot send payload — not paired");
       netwatch.record({
         dir: "tx", kind: "drop", transport: "relay", channel,
         msgType: diagnosticType, streamId, reason: "not-paired",
       });
-      return;
+      return false;
     }
     if (this.ws?.readyState !== WebSocket.OPEN) {
       // Recorded because nothing else observes it: this return logs nothing at
@@ -1323,7 +1404,7 @@ export class RelayClient {
         msgType: diagnosticType, streamId, reason: "socket-not-open",
         detail: { readyState: this.ws?.readyState ?? -1 },
       });
-      return;
+      return false;
     }
 
     const payloadBytes = typeof data === "string" ? Buffer.from(data, "utf8") : data;
@@ -1344,6 +1425,7 @@ export class RelayClient {
       bytes: payloadBytes.length,
       frameId: frameIdFor(payloadBytes, kind === FrameKind.sealed),
     });
+    return true;
   }
 
   private recordOutboundFrame(type: string, channel: Channel, bytes: number): void {
@@ -1491,6 +1573,11 @@ export class RelayClient {
   private tearDownEstablished(): void {
     this.peerCheckoutRouting = false;
     if (!this.established) return;
+    // The choke point for every session end (reconnect, cross-device hello,
+    // liveness death): queued frames would otherwise be sealed under a session
+    // the peer has already forgotten.
+    this.recordQueueDrop("session-torn-down", this.scheduler.clear());
+    this.scheduler.resetWindows();
     zeroizeSessionKeys(this.established.sessionKeys);
     this.established.transport.zeroize();
     this.established = null;
@@ -1609,6 +1696,9 @@ export class RelayClient {
   }
 
   private cleanup(): void {
+    // Frames enqueued in the close→redial gap would be sealed under keys the
+    // redial discards.
+    this.recordQueueDrop("socket-closed", this.scheduler.clear());
     this.stopHeartbeat();
     this.awaitingPong = false;
     this.stopHalfOpenTimer();
@@ -1645,7 +1735,10 @@ export class RelayClient {
       identity: { deviceId: opts.deviceId ?? "test-device", deviceName: "test", createdAt: "", ed25519PrivateKey: opts.agentEd25519PrivB64 },
       halfOpenMs: opts.halfOpenMs,
     };
-    (c as unknown as { sendPayload: (p: string | Buffer, ...rest: unknown[]) => void }).sendPayload = (p) => opts.sendPayload(p);
+    (c as unknown as { sendPayload: (p: string | Buffer, ...rest: unknown[]) => boolean }).sendPayload = (p) => {
+      opts.sendPayload(p);
+      return true;
+    };
     (c as unknown as { _peerId: string })._peerId = opts.peerId;
     (c as unknown as { established: E2eAttempt | null }).established = null;
     (c as unknown as { pending: E2eAttempt | null }).pending = null;
@@ -1655,6 +1748,7 @@ export class RelayClient {
     (c as unknown as { droppedFrames: number }).droppedFrames = 0;
     (c as unknown as { droppedFramesAt: number }).droppedFramesAt = 0;
     (c as unknown as { mux: StreamMux }).mux = new StreamMux({ openStream: () => {}, closeStream: () => {}, sendEnvelope: () => {} });
+    (c as unknown as { initSendScheduler: () => void }).initSendScheduler();
     (c as unknown as { initFragReassembler: () => void }).initFragReassembler();
     if (opts.phoneEd25519PubB64) {
       (c as unknown as { phoneEd25519ByDeviceId: Map<string, string> }).phoneEd25519ByDeviceId.set(opts.peerId, opts.phoneEd25519PubB64);
