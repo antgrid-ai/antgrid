@@ -123,16 +123,20 @@ class TerminalScreen extends ConsumerWidget {
       // itself has given up. A per-terminal failure never escalates this;
       // only the checkout-wide verdict does.
       if (readiness == CheckoutReadiness.stalled) {
+        // Retry re-pulls this checkout's durable state rather than re-dialling
+        // the machine: `stalled` is only reachable with the supervisor already
+        // connected, so the connection is not what failed, and re-establishing
+        // it would re-pull every checkout's tree to fix one workspace's
+        // missing tabs. No in-flight label — the re-ask clears the verdict
+        // synchronously, so this arm is gone before one could paint.
         return AbEmptyState.error(
           title: "couldn't reach the agent",
           action: AbButton(
             label: 'Retry',
             onTap: () => detached(
               'TerminalScreen',
-              'retry agent connection failed',
-              () => ref
-                  .read(machineConnectionProvider.notifier)
-                  .retryAgentConnection(),
+              'retry checkout attach failed',
+              terminalService.retryCheckoutAttach,
             ),
           ),
         );

@@ -20,6 +20,7 @@ import '../providers/sessions.dart';
 import '../providers/session_workspace_state.dart';
 import '../providers/visible_surface.dart';
 import '../services/terminal_service.dart';
+import '../util/detached.dart';
 import 'terminal_detail_view.dart';
 import 'terminal_view_wrapper.dart';
 import 'workspace_tab_bar.dart';
@@ -236,14 +237,35 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
       case CheckoutAttachStatus.attaching:
         return const AbEmptyState.compact(title: 'attaching terminals…');
       case CheckoutAttachStatus.failed:
-        // No Retry: a checkout-wide failure means no `agent:status` ever
-        // arrived, so there is no per-terminal pull for one to re-drive, and a
-        // button that provably cannot act is worse than none. New Terminal
-        // stays — opening a shell is the only way forward this surface has.
+        // Retry re-asks for the checkout's status, not one terminal's screen:
+        // a checkout-wide failure means no `agent:status` ever arrived, so
+        // there is no per-terminal pull to name. New Terminal stays — opening
+        // a shell works whether or not the re-ask lands.
         return AbEmptyState.error(
           title: "Couldn't load terminals",
           subtitle: 'the agent has not answered yet',
-          action: _newTerminalButton(service, tabs),
+          // Wrapped, not a Row: the empty state centres its action inside the
+          // pane's own padding, and two buttons do not fit a pinned split at
+          // its narrowest.
+          action: Wrap(
+            spacing: AbTokens.space8,
+            alignment: WrapAlignment.center,
+            children: [
+              // No in-flight label: the re-ask clears the verdict
+              // synchronously, so this arm is gone before one could paint.
+              AbButton(
+                label: 'Retry',
+                color: context.antgrid.accent,
+                onTap: () => detached(
+                  'TerminalListView',
+                  'retry checkout attach failed',
+                  service.retryCheckoutAttach,
+                ),
+                compact: true,
+              ),
+              _newTerminalButton(service, tabs),
+            ],
+          ),
         );
       case CheckoutAttachStatus.unknown:
       case CheckoutAttachStatus.ready:

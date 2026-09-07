@@ -783,6 +783,40 @@ class TerminalService {
     _requestTerminalSnapshot(terminalId);
   }
 
+  /// Re-drives the whole checkout's attach after its checkout-wide verdict
+  /// came back failed.
+  ///
+  /// Reached only from an explicit tap on a workspace whose terminals never
+  /// arrived, because it is the expensive lever: [retryAttach] re-asks for ONE
+  /// terminal's screen, and with no tabs at all it has no id to name. This
+  /// re-asks for the frame the tabs themselves are built from.
+  ///
+  /// The bound is re-armed only over a live subscription, the same rule
+  /// [_rehydrateTerminals] follows. A bound exists to tell a surface that is
+  /// waiting that its wait ended badly, so a service nobody watches must not
+  /// hold a live timer for the length of the timeout — and this is a public
+  /// method, so the mounted surface the tap usually comes from is not proof
+  /// that anything is reading.
+  Future<void> retryCheckoutAttach() async {
+    if (_disposed) return;
+    _checkoutAttachFailed = false;
+    if (_stateController.hasListener) _armCheckoutAttachDeadline();
+    _publishHydration();
+    final transport = session.transport;
+    if (transport is StreamTransport) {
+      await transport.refreshDurableState();
+      return;
+    }
+    // No relay stream to re-pull on: re-running the hydrator is the only
+    // re-drive this transport has, and registering under the live key runs it
+    // now rather than adding a second one.
+    await session.hydrateCheckout(
+      checkoutId,
+      _snapshotHydratorKey,
+      _rehydrateTerminals,
+    );
+  }
+
   // --- Message dispatch ---
 
   void _onStatusJson(Map<String, dynamic> json) {

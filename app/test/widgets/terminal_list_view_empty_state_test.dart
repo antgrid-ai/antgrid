@@ -22,7 +22,7 @@ import '../helpers/prefs_test_mock.dart';
 /// service through `serviceWhenReady`, which gates on a RESOLVED session and so
 /// cannot be satisfied by a stubbed façade alone — with the terminal state
 /// pinned to [attach] and no ad-hoc tabs.
-Future<void> _pumpEmptyList(
+Future<ProjectSession> _pumpEmptyList(
   WidgetTester tester,
   CheckoutAttachStatus attach,
 ) async {
@@ -57,6 +57,7 @@ Future<void> _pumpEmptyList(
   );
   await tester.pump();
   await tester.pump();
+  return session;
 }
 
 void main() {
@@ -78,20 +79,30 @@ void main() {
       );
     });
 
-    testWidgets('reports a failed attach and still offers New Terminal', (
+    testWidgets('reports a failed attach and offers both ways forward', (
       tester,
     ) async {
-      await _pumpEmptyList(
+      final session = await _pumpEmptyList(
         tester,
         CheckoutAttachStatus.failed,
       );
 
       expect(find.text("Couldn't load terminals"), findsOneWidget);
       expect(find.text('the agent has not answered yet'), findsOneWidget);
-      // Never strand the user: opening a shell is the only way forward this
-      // surface has, so the failure state keeps the action.
+      expect(find.text('Retry'), findsOneWidget);
+      // Opening a shell works whether or not the re-ask lands, so the failure
+      // state keeps it beside Retry.
       expect(find.text('New Terminal'), findsOneWidget);
       expect(find.text('No terminals'), findsNothing);
+
+      // The pane renders off the stubbed provider above, so the tap is
+      // asserted where it actually lands: the real per-project service, whose
+      // verdict is still the constructor default until Retry moves it.
+      final service = session.servicesForCheckout('main').terminalService;
+      expect(service.currentState.attach, CheckoutAttachStatus.unknown);
+      await tester.tap(find.text('Retry'));
+      await tester.pump();
+      expect(service.currentState.attach, CheckoutAttachStatus.attaching);
     });
 
     testWidgets('renders the neutral empty state once the checkout is ready', (

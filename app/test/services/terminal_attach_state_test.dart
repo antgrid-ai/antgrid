@@ -452,6 +452,93 @@ void main() {
     await session.close();
   });
 
+  test(
+    'a failed checkout clears its verdict and re-arms its bound on '
+    'retryCheckoutAttach',
+    () async {
+      final t = newTransport();
+      final session = await newSession(t);
+      final svc = newService(session, checkoutAttachTimeout: _checkoutBound);
+      // The bound belongs to a surface that is watching: it arms on the first
+      // subscription, which is what `terminalStateProvider` supplies in the
+      // app.
+      final sub = svc.stateStream.listen((_) {});
+      addTearDown(sub.cancel);
+
+      await Future<void>.delayed(_pastBound);
+      expect(svc.currentState.attach, CheckoutAttachStatus.failed);
+
+      await svc.retryCheckoutAttach();
+      await settle();
+
+      expect(
+        svc.currentState.attach,
+        CheckoutAttachStatus.attaching,
+        reason: 'the failure must clear, and no agent:status has landed yet',
+      );
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test(
+    'the re-armed bound fails the checkout again if the retry is never '
+    'answered',
+    () async {
+      final t = newTransport();
+      final session = await newSession(t);
+      final svc = newService(session, checkoutAttachTimeout: _checkoutBound);
+      final sub = svc.stateStream.listen((_) {});
+      addTearDown(sub.cancel);
+
+      await Future<void>.delayed(_pastBound);
+      expect(svc.currentState.attach, CheckoutAttachStatus.failed);
+
+      await svc.retryCheckoutAttach();
+      await settle();
+      expect(svc.currentState.attach, CheckoutAttachStatus.attaching);
+
+      await Future<void>.delayed(_pastBound);
+
+      expect(
+        svc.currentState.attach,
+        CheckoutAttachStatus.failed,
+        reason: 'a re-armed bound with nothing answering it must still end',
+      );
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  // FakeAgentTransport is not a StreamTransport, so this exercises the
+  // hydrator-rerun arm rather than `refreshDurableState` — the same arm a
+  // local project's TerminalService always takes.
+  test('a retry over a non-relay transport re-runs the checkout hydrator',
+      () async {
+    final t = newTransport();
+    final session = await newSession(t);
+    final svc = newService(session);
+
+    emitStatus(t, [terminalInfo('a')]);
+    await settle();
+
+    final before = t.requests.length;
+    await svc.retryCheckoutAttach();
+    await settle();
+
+    final pulls = t.requests
+        .skip(before)
+        .where((r) => r.method == 'terminal.snapshot')
+        .toList();
+    expect(pulls, isNotEmpty);
+    expect(pulls.first.params?['terminalId'], 'a');
+
+    await svc.dispose();
+    await session.close();
+  });
+
   // Neither TerminalState nor TerminalTab defines `==` and the state rides a
   // StreamProvider, so every emission notifies every listener in the workspace.
   test('a burst of discovered terminals publishes once', () async {

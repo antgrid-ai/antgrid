@@ -1427,6 +1427,24 @@ class StreamTransport extends BufferedAgentTransport {
     redriveHydrators();
   }
 
+  /// Re-pull the durable state alone, leaving the tier-3 hydrators as they are.
+  ///
+  /// [refreshSnapshot] exists for a (re)establishment, where the view-state the
+  /// snapshot does not carry is stale too. A user asking one checkout to try
+  /// attaching again is not that: the hydrator replay re-asks every checkout
+  /// for its whole `tree:full`, so routing a tap through it would answer one
+  /// stalled workspace with megabytes for all of them. This carries the frame
+  /// that tap is actually after — the bridge recomputes each checkout's
+  /// `agent:status` while serving the pull, so the reply is no older than the
+  /// tap.
+  ///
+  /// Shares [_fetchSnapshot]'s generation stamp, so a pull already airborne is
+  /// superseded rather than duplicated. The returned future completes when the
+  /// FIRST round trip settles, not when the snapshot lands: the retries run
+  /// detached, exactly as they do for [refreshSnapshot].
+  Future<void> refreshDurableState() =>
+      _fetchSnapshot(timeout: session.snapshotTimeout);
+
   /// Round trips a pull gets before it is given up on, the first included.
   /// Each retry doubles the previous wait, so the last one gives a slow reply
   /// four times the room the first did.
