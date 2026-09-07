@@ -64,6 +64,7 @@ import 'storage/cached_sessions_store.dart';
 import 'storage/drawer_collapsed_store.dart';
 import 'storage/drawer_order_store.dart';
 import 'storage/first_run_store.dart';
+import 'storage/pending_forgets_store.dart';
 import 'storage/project_store.dart';
 import 'storage/recent_agents_store.dart';
 import 'storage/update_handoff_store.dart';
@@ -167,6 +168,9 @@ Future<void> main() async {
     openAppSettingsPrefs(),
     UpdateHandoffStore.open(),
   ).wait;
+  // Opened separately from the record above, which is already at the arity
+  // `Future.wait` on records supports.
+  final pendingForgetsStore = await PendingForgetsStore.open();
   final initialAppSettings = AppSettings.fromPrefs(prefs);
 
   // Consumed unconditionally, never behind Windows' `--after-update` argument:
@@ -203,6 +207,7 @@ Future<void> main() async {
     retry: noProviderRetry,
     overrides: [
       projectStoreProvider.overrideWithValue(projectStore),
+      pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
       recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
       drawerOrderStoreProvider.overrideWithValue(drawerOrderStore),
       drawerCollapsedStoreProvider.overrideWithValue(drawerCollapsedStore),

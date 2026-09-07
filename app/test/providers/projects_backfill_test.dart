@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/providers/projects.dart';
+import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -83,9 +84,13 @@ void main() {
     () async {
       final store = await ProjectStore.open();
       await store.upsert(_project('p1'));
+      final pendingForgets = await PendingForgetsStore.open();
 
       final container = ProviderContainer(
-        overrides: [projectStoreProvider.overrideWithValue(store)],
+        overrides: [
+          projectStoreProvider.overrideWithValue(store),
+          pendingForgetsStoreProvider.overrideWithValue(pendingForgets),
+        ],
       );
       addTearDown(container.dispose);
 
@@ -109,6 +114,63 @@ void main() {
           .firstWhere((p) => p.projectId == 'p2');
       expect(backfilled.displayName, 'grisb-training');
       expect(backfilled.hostDeviceUuid, 'host-1');
+    },
+  );
+
+  test(
+    'backfillFromHost never resurrects a project pending forget, even while '
+    'the host still reports it — the delete-then-2s-poll race',
+    () async {
+      final store = await ProjectStore.open();
+      final pendingForgets = await PendingForgetsStore.open();
+      // Simulates ProjectsNotifier.remove having just deleted 'p1' locally and
+      // recorded it as pending before the host confirmed the forget.
+      await pendingForgets.add('p1');
+
+      final container = ProviderContainer(
+        overrides: [
+          projectStoreProvider.overrideWithValue(store),
+          pendingForgetsStoreProvider.overrideWithValue(pendingForgets),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(projectsProvider.notifier).backfillFromHost(
+        const [KnownProject(projectId: 'p1', path: '/tmp/p1', running: false)],
+        hostUuid: 'host-1',
+      );
+
+      expect(container.read(projectsProvider), isEmpty);
+      // No live host to retry against (peekHost fails in a test environment),
+      // so the tombstone survives for the next attempt.
+      expect(pendingForgets.read(), contains('p1'));
+    },
+  );
+
+  test(
+    'backfillFromHost drops a pending id the host no longer reports, without '
+    'resurrecting it',
+    () async {
+      final store = await ProjectStore.open();
+      final pendingForgets = await PendingForgetsStore.open();
+      await pendingForgets.add('p1');
+
+      final container = ProviderContainer(
+        overrides: [
+          projectStoreProvider.overrideWithValue(store),
+          pendingForgetsStoreProvider.overrideWithValue(pendingForgets),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      // The host's own catalog no longer names 'p1' — its forget landed on
+      // its own (e.g. between app launches), so nothing to retry.
+      await container
+          .read(projectsProvider.notifier)
+          .backfillFromHost(const [], hostUuid: 'host-1');
+
+      expect(container.read(projectsProvider), isEmpty);
+      expect(pendingForgets.read(), isEmpty);
     },
   );
 }

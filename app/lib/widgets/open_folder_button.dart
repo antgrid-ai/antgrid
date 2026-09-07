@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../config/storage_scope.dart';
 import '../design/widgets/ab_button.dart';
 import '../launcher/project_id.dart';
 import '../models/ab_project.dart';
@@ -32,7 +33,9 @@ Future<String> _resolveLocalHostUuid(ProviderContainer ref) async {
 
   // Fall back to a persisted anonymous UUID so the project is still
   // correctly identified as local even when the user isn't signed in.
-  final prefs = SharedPreferencesAsync();
+  final prefs = SharedPreferencesAsync(
+    options: desktopSharedPreferencesOptions,
+  );
   final existing = await prefs.getString(kLocalHostUuidKey);
   if (existing != null) return existing;
   final fresh = const Uuid().v4();

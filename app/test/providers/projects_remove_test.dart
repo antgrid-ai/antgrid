@@ -9,6 +9,7 @@ import 'package:antgrid/project/project_status_cache.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/projects.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -64,9 +65,12 @@ void main() {
       await cachedSessions.put('p1', [_session('a')]);
       await cachedSessions.put('p2', [_session('b')]);
 
+      final pendingForgets = await PendingForgetsStore.open();
+
       final container = ProviderContainer(
         overrides: [
           projectStoreProvider.overrideWithValue(projectStore),
+          pendingForgetsStoreProvider.overrideWithValue(pendingForgets),
           cachedSessionsStoreProvider.overrideWithValue(cachedSessions),
           projectStatusCacheProvider.overrideWithValue(statusCache),
           // Real registry whose onEvict WRITES a status file — this reproduces
