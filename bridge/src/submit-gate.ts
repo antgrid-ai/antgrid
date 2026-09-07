@@ -16,6 +16,102 @@
 export const SUBMIT_READY_TIMEOUT_MS = 15_000;
 
 /**
+ * Whether the guest looks like it is reading, from its output alone.
+ *
+ * Bracketed paste on its own is not the answer, measured: Claude Code announces
+ * DECSET 2004 about 700ms into startup, clears it ~600ms later and announces it
+ * again when the real composer mounts. A line written against that FIRST
+ * announcement is buffered unread and arrives welded to its own CR — the exact
+ * failure {@link SubmitGate} exists to prevent, reached by trusting the wrong
+ * half of a two-phase startup.
+ *
+ * What separates the two phases is PAINT. The pre-TUI phase emits nothing but
+ * private-mode sets and terminal queries; a mounted TUI puts characters on the
+ * grid. So readiness is: the guest has drawn its interface while the mode that
+ * says how it wants input encoded is on.
+ *
+ * Evidence rather than proof, like the mode it refines — an agent that paints a
+ * loading spinner before attaching its reader would still be believed, and the
+ * gate's bound is what covers being wrong.
+ */
+export class GuestReadiness {
+  private state: ScanState = "text";
+  private painted = false;
+
+  /**
+   * Feed one output chunk plus the guest's CURRENT bracketed-paste state, and
+   * learn whether it now looks ready.
+   *
+   * The mode is asked for rather than parsed here so the answer comes from the
+   * same latch the paste decision is taken from; this module only adds the half
+   * that latch cannot see.
+   */
+  observe(bracketedPaste: boolean, chunk: string): boolean {
+    // A guest that turned the mode off is between interfaces: whatever it
+    // painted belonged to the one that is gone, and a sequence split across the
+    // boundary belongs to neither.
+    if (!bracketedPaste) {
+      this.painted = false;
+      this.state = "text";
+      return false;
+    }
+    if (this.painted) return false;
+    if (!this.scan(chunk)) return false;
+    this.painted = true;
+    return true;
+  }
+
+  /**
+   * Did this chunk put anything on the grid?
+   *
+   * A state machine rather than a regex because a PTY splits wherever it likes,
+   * and a startup burst is where it splits most: `ESC [ ?2004h ESC [ ?203` /
+   * `1h` would otherwise read as the printable text `1h` and call a guest that
+   * has drawn nothing ready. Only the STATE crosses the boundary, so a long OSC
+   * title cannot grow an unbounded carry.
+   */
+  private scan(chunk: string): boolean {
+    let state = this.state;
+    for (let i = 0; i < chunk.length; i++) {
+      const c = chunk[i]!;
+      switch (state) {
+        case "text": {
+          if (c === "\x1b") { state = "esc"; break; }
+          const code = c.charCodeAt(0);
+          // C0 and DEL move the cursor or ring a bell; neither is a glyph.
+          if (code >= 0x20 && code !== 0x7f) {
+            this.state = "text";
+            return true;
+          }
+          break;
+        }
+        case "esc":
+          if (c === "\x1b") break;
+          state = c === "[" ? "csi" : c === "]" ? "osc" : "text";
+          break;
+        case "csi":
+          // Parameter and intermediate bytes run below 0x40; the first byte at
+          // or above it ends the sequence.
+          if (c >= "@" && c <= "~") state = "text";
+          break;
+        case "osc":
+          if (c === "\x07") state = "text";
+          else if (c === "\x1b") state = "oscEsc";
+          break;
+        case "oscEsc":
+          state = c === "\\" ? "text" : "osc";
+          break;
+      }
+    }
+    this.state = state;
+    return false;
+  }
+}
+
+/** Where the paint scanner is in the guest's byte stream. */
+type ScanState = "text" | "esc" | "csi" | "osc" | "oscEsc";
+
+/**
  * Holds an agent's submits until its TUI is reading.
  *
  * A PTY write lands in a buffer whether or not the guest is reading, and a guest
@@ -31,9 +127,8 @@ export const SUBMIT_READY_TIMEOUT_MS = 15_000;
  * exists because argv never races this; everything arriving afterwards has to
  * wait for the guest instead.
  *
- * Readiness is the guest ANNOUNCING an input mode: a TUI sets those as it takes
- * over the terminal, which is the same act as attaching its reader. That is
- * evidence rather than proof, hence the bound.
+ * Readiness is decided by {@link GuestReadiness}, which is evidence rather than
+ * proof — hence the bound.
  */
 export class SubmitGate {
   private readonly ready = new Set<string>();

@@ -7,7 +7,7 @@ import type { GracefulExitAsk } from "./agents/types";
 import { ScrollbackBuffer } from "./scrollback";
 import { submitPlan } from "./pty-submit";
 import { BRACKETED_PASTE, TerminalModeTracker } from "./terminal-modes";
-import { SubmitGate } from "./submit-gate";
+import { GuestReadiness, SubmitGate } from "./submit-gate";
 import { MAX_ATTACH_BLOB, TerminalScreen } from "./terminal-screen";
 import { logger } from "./logger";
 const log = logger.child({ component: "terminal-manager" });
@@ -190,6 +190,10 @@ export class TerminalManager {
     this.scrollbacks.set(terminalId, scrollback);
     const modes = new TerminalModeTracker();
     this.modeTrackers.set(terminalId, modes);
+    // Captured, never mapped: it is asked one question about one guest's output
+    // and has nothing any other caller wants, so it lives and dies with the
+    // handler below rather than in a map something has to remember to clear.
+    const readiness = new GuestReadiness();
     // A fresh guest occupies this id, whatever the last one announced. Held
     // submits are released here rather than at the previous exit so a respawn
     // reusing a retained slot cannot inherit the dead run's readiness.
@@ -233,11 +237,13 @@ export class TerminalManager {
         if (msg.type === "terminal:output") {
           scrollback.append(msg.data);
           modes.feed(msg.data);
-          // The guest configured how its INPUT is encoded, which is the same act
-          // as attaching its reader — the only announcement of readiness a PTY
-          // offers. Read off the same tracker the paste decision is taken from,
-          // so the two can never disagree about the guest.
-          if (modes.isSet(BRACKETED_PASTE)) this.submitGate.markReady(terminalId);
+          // The guest has drawn its interface with input encoding configured,
+          // which is as close to "reading" as a PTY ever says. The mode comes off
+          // the same tracker the paste decision is taken from, so the two can
+          // never disagree about the guest.
+          if (readiness.observe(modes.isSet(BRACKETED_PASTE), msg.data)) {
+            this.submitGate.markReady(terminalId);
+          }
           // BEFORE the suppression drop. This placement is what makes a
           // suppressed window recoverable at all: a socket drop and a
           // backgrounded app both stop the outbound frame below, and only an
