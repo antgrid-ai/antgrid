@@ -86,6 +86,40 @@ describe("runDecision", () => {
     expect(timedOut).toBe(1);
   });
 
+  // The sibling above scripts a hung judge with EMPTY stdout, where `r1.value` is
+  // already null and returning it is indistinguishable from returning null. This
+  // is the case the invariant actually exists for: an attempt that answered, and
+  // then hung on the way out. Null reads upstream as "the judge could not run"
+  // and parks the session, so a decision the caller's own shape gate would have
+  // escalated with its text attached must survive the timeout leg intact.
+  it("keeps a shape-rejected decision when the attempt that produced it also timed out", async () => {
+    const calls: string[][] = [];
+    const spawn = ((cmd: string[]) => {
+      calls.push(cmd);
+      let close!: () => void;
+      let resolveExit!: (code: number) => void;
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(GOOD));
+            close = () => c.close();
+          },
+        }),
+        exited: new Promise<number>((r) => { resolveExit = r; }),
+        kill() { close(); resolveExit(1); },
+      };
+    }) as unknown as typeof Bun.spawn;
+    let timedOut = 0;
+    const d = await runDecision({
+      tool: "claude-code", goal: GOAL, backlogText: "", context: "C",
+      cwd: ".", timeoutMs: 50, spawn, onTimeout: () => { timedOut += 1; },
+      retryIfShape: () => "reply names no terminal",
+    });
+    expect(d?.decision).toBe("continue");
+    expect(calls.length).toBe(1); // still no retry leg after a timeout
+    expect(timedOut).toBe(1);
+  });
+
   // The retry inherits whatever the first attempt left of the budget, so a hung
   // one spends the rest of it — and returns the same null a failed spawn does.
   // Leaving the hook silent there is what makes the budget unmeasurable from the

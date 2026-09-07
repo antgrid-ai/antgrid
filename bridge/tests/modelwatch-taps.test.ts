@@ -1,5 +1,5 @@
 // bridge/tests/modelwatch-taps.test.ts
-import { beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 
 import { runHeadless } from "../src/agents/headless";
@@ -13,8 +13,13 @@ import {
 
 // The suite shares one module cache across spec files, so an arm left standing
 // by any file — this one included — would decide whether the next file's calls
-// carry prompt text, and the whole suite would pass or fail on file order.
+// carry prompt text, and the whole suite would pass or fail on file order. The
+// `afterEach` is what makes that true of the LAST test here: `beforeEach` only
+// protects this file from its predecessors, and the arms below outlive it by ten
+// seconds of wall clock, which is long enough to reach the handler and title
+// suites that spawn judges of their own.
 beforeEach(() => { __resetModelwatchForTest(); });
+afterEach(() => { __resetModelwatchForTest(); });
 
 const GOOD_DECISION = JSON.stringify({ decision: "continue", confidence: 0.9, reason: "ok" });
 const GOOD_EXTRACTION = JSON.stringify({ items: [{ ref: "r1", text: "run the tests" }] });

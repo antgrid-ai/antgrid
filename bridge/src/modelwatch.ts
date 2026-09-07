@@ -347,18 +347,28 @@ export function capturePrompt(parts: {
   context?: string;
 }): ModelCallPrompt | undefined {
   if (!promptCaptureEnabled) return undefined;
-  const out: ModelCallPrompt = {};
-  if (parts.scaffold !== undefined) out.scaffold = truncate(parts.scaffold);
-  if (parts.goal !== undefined) out.goal = truncate(parts.goal);
-  if (parts.backlogText !== undefined) out.backlogChars = parts.backlogText.length;
-  if (parts.context !== undefined) {
-    out.context = {
-      sha256: createHash("sha256").update(parts.context).digest("hex"),
-      chars: parts.context.length,
-    };
-    if (sessionTextArmed()) out.contextText = truncate(parts.context);
+  try {
+    const out: ModelCallPrompt = {};
+    if (parts.scaffold !== undefined) out.scaffold = truncate(parts.scaffold);
+    if (parts.goal !== undefined) out.goal = truncate(parts.goal);
+    if (parts.backlogText !== undefined) out.backlogChars = parts.backlogText.length;
+    if (parts.context !== undefined) {
+      out.context = {
+        sha256: createHash("sha256").update(parts.context).digest("hex"),
+        chars: parts.context.length,
+      };
+      if (sessionTextArmed()) out.contextText = truncate(parts.context);
+    }
+    return out;
+  } catch {
+    // These two helpers are the only recorder calls a tap makes OUTSIDE its own
+    // guard: they run while the caller is still building runHeadless's argument,
+    // so they sit outside both `noteCall` and runHeadless's try. A throw here
+    // would reject the caller's promise, and HandlerEngine reads that as the
+    // provider being down — parking a session over a judge that would have
+    // answered. Losing the capture is the right side of that trade.
+    return undefined;
   }
-  return out;
 }
 
 /**
@@ -375,7 +385,13 @@ export function capturePrompt(parts: {
  */
 export function captureStdout(text: string): string | undefined {
   if (!sessionTextArmed()) return undefined;
-  return truncate(text);
+  try {
+    return truncate(text);
+  } catch {
+    // Same reason as capturePrompt's: built into the event by the tap, ahead of
+    // the guard that would have contained it.
+    return undefined;
+  }
 }
 
 export type ModelwatchSubscriber = (event: ModelCallEvent) => void;
