@@ -342,6 +342,47 @@ describe("antgrid calls rendering", () => {
     expect(err).toContain("on the CLI's default model 1");
   });
 
+  it("prints every token count the vendor reported, not just the cheap half", async () => {
+    fake = startFakeHost({
+      events: [
+        rec({
+          phase: "end",
+          exitCode: 0,
+          actualModel: "claude-opus-5[1m]",
+          usage: {
+            inputTokens: 901, cacheReadTokens: 15_232, cacheWriteTokens: 7_243,
+            outputTokens: 12, reasoningTokens: 400,
+            money: { unit: "USD", amount: 0.081095 },
+            modelsBilled: 2,
+          },
+        }),
+      ],
+    });
+    const { out } = await run({ dir: fake.dir, follow: false });
+
+    // Cache creation is billed at a higher rate than a cache read, so a single
+    // `cache` cell would show the cheaper half of these 22475 tokens and drop the
+    // dearer one entirely.
+    expect(out[0]).toContain("cache r 15.2k");
+    expect(out[0]).toContain("cache w 7.2k");
+    // The counts are the total over every model this ONE call billed, while the
+    // model cell names only the one that answered — it spent 2 of those 901
+    // input tokens, and this is what says so on the row.
+    expect(out[0]).toContain("2 models");
+    // Whether reasoning is also inside `out` is the vendor's choice, so it is
+    // its own cell rather than folded into the output count.
+    expect(out[0]).toContain("reasoning 400");
+  });
+
+  it("leaves out a reasoning cell the vendor reported as zero", async () => {
+    fake = startFakeHost({
+      events: [rec({ phase: "end", exitCode: 0, usage: { outputTokens: 12, reasoningTokens: 0 } })],
+    });
+    const { out } = await run({ dir: fake.dir, follow: false });
+    expect(out[0]).toContain("out 12");
+    expect(out[0]).not.toContain("reasoning");
+  });
+
   it("prints a call that was running when the reader attached exactly once", async () => {
     // The case someone runs this command for: attach while a judge is mid-spawn.
     // Its `start` is in the replay and its `end` and verdict arrive live, so a

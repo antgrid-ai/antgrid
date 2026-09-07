@@ -20,9 +20,8 @@ import {
 // Eval-only judge override (Task 16's e2e harness): the spawned agent process can't
 // have fakes injected in-process, so swap the CLI for a scripted bun script. Gated
 // on ANTGRID_EVAL_TEST like the /test/open-pairing-window hook — inert in production.
-function resolveCmd(cmd: string[], prompt: string): string[] {
-  const script = process.env.ANTGRID_EVAL_TEST === "1" ? process.env.ANTGRID_TEST_JUDGE_SCRIPT : undefined;
-  return script ? ["bun", script, prompt] : cmd;
+function judgeScript(): string | undefined {
+  return process.env.ANTGRID_EVAL_TEST === "1" ? process.env.ANTGRID_TEST_JUDGE_SCRIPT : undefined;
 }
 
 // Shared retry-once shape: build prompt → spawn → parse. A parse failure OR a
@@ -104,11 +103,16 @@ async function runWithRetry<T>(opts: {
   // Output is parsed whatever the exit code says: a judge answers in JSON, so a
   // failed run cannot masquerade as a verdict the way a one-line refusal can
   // masquerade as a title (see runHeadless).
+  // The usage flags describe the vendor's binary, so they travel only when that
+  // binary is what runs: appending one to the scripted stand-in would move the
+  // prompt out of the argv position the script reads it from.
+  const scripted = judgeScript();
   const run = (p: string, timeoutMs: number, attempt: number) => runHeadless(
-    resolveCmd(judge.command.cmd(p, opts.model), p),
+    scripted ? ["bun", scripted, p] : judge.command.cmd(p, opts.model),
     {
       cwd: opts.cwd, timeoutMs, spawn,
       env: judge.command.env, scratchEnv: judge.command.scratchEnv,
+      usage: scripted ? undefined : judge.command.usage,
       call: {
         callId, purpose: opts.purpose, attempt,
         requestedTool: opts.tool, actualTool: opts.tool, reach: judge.tier,

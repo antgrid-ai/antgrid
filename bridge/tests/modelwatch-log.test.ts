@@ -166,9 +166,9 @@ describe("the durable record is an allow-list", () => {
     expect(parsed.requestedTool).toBe("cursor-agent");
   });
 
-  it("omits usage until a wave names its fields here", () => {
-    // The allow-list's whole purpose stated as an assertion: Wave 4 fills this
-    // envelope in, and until someone decides field by field what of it belongs
+  it("omits usage until someone names its fields here", () => {
+    // The allow-list's whole purpose stated as an assertion: the ring carries a
+    // usage envelope, and until someone decides field by field what of it belongs
     // on disk, none of it arrives there by default.
     modelwatch.record(everyField);
     expect(readFileSync(modelCallLogPath(abDir), "utf8")).not.toContain("inputTokens");

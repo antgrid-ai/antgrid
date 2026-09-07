@@ -6,6 +6,7 @@
 import type { HookCommand } from "../hook-command";
 import type { HookInvocation, HookPath, HookPost } from "./hook-posts";
 import type { AbMessage } from "../protocol";
+import type { ModelCallEvent } from "../modelwatch";
 import type { StructuredDriver } from "../structured/structured-manager";
 import type { HandlerEvent } from "../handler/engine";
 
@@ -292,7 +293,105 @@ export interface HeadlessCommand {
    * absence costs a borrowed spawn, a wrong claim costs the user's history.
    */
   noHistory: "flag" | "ephemeral-store" | "stateless";
+  /**
+   * How this argv is asked for what the call actually cost, and how to read the
+   * answer. Absent = nobody has run this CLI's usage flag and captured what it
+   * emits, so the call is spawned exactly as it is today and its record carries
+   * timings and no numbers.
+   *
+   * Absence is the default and costs nothing, which is the same rule the rest of
+   * this record is under: a usage descriptor written from a vendor's docs rather
+   * than from a capture would put invented numbers on the machine's own spend
+   * ledger, and there is nothing downstream that could tell them from measured
+   * ones. Add an entry only from a real run of the installed binary — see
+   * ./usage-envelope.ts, where each reader's paths are annotated with what they
+   * were measured at.
+   */
+  usage?: HeadlessUsageCapture;
 }
+
+/** The vendor-tagged numbers, as the recorder holds them. Aliased off the event
+ *  rather than restated so a field added there cannot go unread here. */
+export type HeadlessUsageTokens = NonNullable<ModelCallEvent["usage"]>;
+
+/**
+ * What one vendor's envelope yielded.
+ *
+ * Every field is optional and independently so. The vendors report different
+ * subsets — codex has no cost and no model name anywhere in its stream, opencode
+ * suppresses the model outright under its json flag — and each one's FAILED run
+ * drops fields its successful run carries rather than zeroing them: claude's
+ * error envelope has no timing fields, copilot's has no `tokenDetails` and no
+ * `currentModel` key at all.
+ */
+export interface HeadlessUsageReading {
+  /**
+   * The assistant's own answer, lifted out of the envelope — set only where the
+   * flag REWROTE stdout, and unset when the envelope carried no answer at all,
+   * which hands the caller back the raw output it already had.
+   *
+   * It is what the existing parsers must be given in place of that raw output,
+   * and neither of them degrades gracefully without it. A title comes off the
+   * LAST non-empty line, which under an envelope is the wrapper: too long for
+   * the length check, so every title silently becomes null. A judge's decision
+   * is found by scanning for the first parseable `{…}`, which is now the
+   * envelope itself — it parses, fails the schema, and the real answer inside a
+   * JSON string is never reached, so the judge burns its retry and fail-closed
+   * escalates on a run whose answer was correct and present.
+   */
+  text?: string;
+  usage?: HeadlessUsageTokens;
+  /** What the VENDOR says ran, which is the only way to know: a claude envelope
+   *  has no scalar model field, and the requested one is what the caller already
+   *  knew. Absent where the CLI never reports one. */
+  actualModel?: string;
+  /** Vendor-reported model time, which separates the API call from process
+   *  startup — see `ModelCallEvent.apiMs`. */
+  apiMs?: number;
+  /**
+   * The run failed by the envelope's own account, whatever it exited with.
+   *
+   * The field the length heuristics were standing in for: a refusal short enough
+   * to pass for a title ("Invalid API key · Please run /login") is six words and
+   * clears every check `parseTitleFromOutput` makes. Where a vendor states its
+   * own verdict, that guess becomes a check.
+   */
+  failed?: boolean;
+}
+
+/**
+ * Where a vendor's usage envelope arrives, and what it costs to ask for it.
+ *
+ * Two shapes rather than one because the difference is not cosmetic. A
+ * "side-file" flag is free: stdout was byte-identical to a run without it, so
+ * nothing downstream changes. A "stdout" flag REWRITES the channel every caller
+ * parses, so declaring one without the unwrapper in the same change silently
+ * breaks session naming and the handler's judge — measured on all three of the
+ * CLIs that have one.
+ */
+export type HeadlessUsageCapture =
+  | {
+    from: "stdout";
+    /**
+     * The argv with this vendor's flag placed where the run that measured the
+     * envelope put it. A function rather than a list to append, because the
+     * position is part of what was verified: claude's prompt must stay ahead of
+     * its variadic `--allowedTools` while the flag goes after it, and codex and
+     * opencode take their prompt as the LAST element, so a flag appended past
+     * it has never been run.
+     */
+    argv: (cmd: readonly string[]) => string[];
+    read: (stdout: string) => HeadlessUsageReading | null;
+  }
+  | {
+    from: "side-file";
+    /** As above, plus the path the runner picked for the file. It need not be
+     *  inside `scratchEnv`'s directory — measured: copilot writes wherever it is
+     *  pointed — so the runner owns the file's lifetime rather than racing the
+     *  scratch home's disposal. */
+    argv: (cmd: readonly string[], path: string) => string[];
+    read: (contents: string) => HeadlessUsageReading | null;
+  };
 
 /**
  * What the CALLER needs from a headless spawn, which is not the same question

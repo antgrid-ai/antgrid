@@ -271,6 +271,78 @@ whichever agent is installed, which bills a vendor this session never chose. And
 `--model` at all and so ran on whatever that CLI defaults to on this machine,
 which for a three-word naming task is the largest single cost lever there is.
 
+**The token and cost cell is vendor-reported, and it is not there for every
+agent.** Where the row shows
+`in 901 · cache r 15.2k · cache w 7.2k · out 12 · 0.081095 USD · 2 models`, every
+one of those numbers came out of an envelope the CLI itself emitted for that
+call, asked for by a flag on the same spawn. Cache reads and cache writes are
+separate cells because they are separately priced. Which agents report what, and
+all of it measured against the installed binaries rather than read off anyone's
+docs:
+
+| Agent | Tokens | Cost | Model that ran | How |
+|---|---|---|---|---|
+| `claude-code` | in / cache r / cache w / out / reasoning | US dollars, list price | yes | `--output-format json` rewrites stdout |
+| `codex` | in / cache r / cache w / out / reasoning | none | no | `--json` rewrites stdout |
+| `opencode` | in / cache r / cache w / out / reasoning | none | no | `--format json` rewrites stdout |
+| `github-copilot` | in / cache r / cache w / out / reasoning | nano AI credits | yes | `--usage-output-file`, a side file; stdout untouched |
+| everything else | nothing | nothing | nothing | no captured envelope |
+
+That last row is five of the nine agents, and their absence is deliberate rather
+than pending. `cursor-agent` and `mistral-vibe` declare no headless argv at all,
+`kimi` and `antigravity` neither; `kilo` HAS a `--format json` flag whose event
+shape was read out of the shipped binary, but no successful run has ever been
+captured on a machine with credentials for it, and a descriptor written from a
+schema would put invented numbers on the machine's own spend ledger. A row with
+no numbers means nobody has measured that vendor — never that the call was free.
+
+**Never add two rows' tokens together — and within one row, only where that
+vendor's own arithmetic says you may.** The counts are vendor-tagged in the ring
+for this reason, and they do not mean the same measurement:
+
+- `in` and `cache r` are DISJOINT for `claude-code` — measured, 2 input tokens
+  beside 15232 cache reads — so the prompt is their sum there. For `codex` it is
+  unmeasured whether `in` already contains `cache r`, and its capture (16666
+  against 12544) is consistent with either reading, so adding the two may
+  double-count by the whole cached figure. `opencode` and `github-copilot` both
+  reported zero cache traffic on their captures, which settles nothing either.
+- `reasoning` is ALREADY INSIDE `out` for `claude-code`, which reports thinking
+  as a breakdown of its output, and is NOT for `codex` or `opencode`, which
+  report it as a sibling. The cell is printed only when it is non-zero, and on a
+  reasoning model it is the difference between the output spend shown and the
+  output spend billed.
+
+- `claude-code`'s four counts are summed ACROSS MODELS, because a single headless
+  call can bill two — a one-word prompt measured here billed a background
+  `claude-haiku-4-5` alongside the `claude-opus-5` that answered. The cost is the
+  cross-model total too, which is why the tokens are: the vendor's own top-level
+  token block describes only one of the models, and putting it beside that cost
+  would be one row describing two different sets of API calls. The model column
+  names the one that spent the most, and the `2 models` cell is the row saying
+  out loud that the counts beside it are not that model's alone: on the measured
+  capture the named model spent 2 of the 901 input tokens.
+- `opencode` structurally undercounts by one call per row: it auto-titles each
+  new session, every spawn is a new session, and that call emits no usage event.
+  Its `cost` field is a zero we refuse to record — an OAuth provider carries no
+  price metadata, and a zero there would assert the call was free.
+- `github-copilot` bills in nano AI credits (`273860000` is 0.27386 credits), and
+  its legacy premium-request count is a different currency. The unit is printed
+  beside the amount for that reason and is never folded into anything.
+- Neither `codex` nor `opencode` reports which model answered. Codex never echoes
+  it back, and opencode's shipped binary suppresses the model banner precisely
+  when the json format is asked for.
+
+A missing cell is always "the vendor did not say", never zero: each of these
+CLIs drops fields from its FAILED envelope rather than zeroing them.
+
+**These flags are the one part of the watcher that changes what the CLI does.**
+Three of the four rewrite stdout, so the bridge unwraps the answer before naming
+a session or parsing a judge's decision (`unwrapEnvelope` in
+`bridge/src/agents/usage-envelope.ts`) — and an envelope it does not recognise
+costs the numbers and nothing else. `ANTGRID_MODELWATCH_USAGE=0` is the switch
+that drops the flags entirely, for the machine whose CLI moved on and no longer
+takes the one that was verified against it.
+
 **Prompt text is never recorded unless armed, and the arms are separate.**
 Metadata is always in the ring — that is what makes a call diagnosable hours
 later — but nothing the user typed and nothing the agent read is, until a run
@@ -316,7 +388,14 @@ durable feed the recorder also writes (`<ANTGRID_DIR>/model-calls.jsonl`, machin
 level, one rolled generation) holds metadata only, always, armed or not, and
 `--export` writes the same — literally the same field list, `MODEL_CALL_LOG_FIELDS`
 in `bridge/src/modelwatch-log.ts`, so the two cannot drift apart as fields are
-added. An export file is written to be pasted into a bug report, and it outlives
+added. The token counts and the cost are NOT among those fields and stay in the
+ring alone: the list is indexed by event key, `usage` is nested under one, and a
+flat column whose meaning changes with the vendor on the row is exactly the
+misreading the table above exists to prevent. What the envelopes DO add to the
+durable feed is the model that actually ran and the vendor-reported API time,
+both of which a human had already named there.
+
+An export file is written to be pasted into a bug report, and it outlives
 the run, the window and the arm's own TTL. `--json` is the mode that withholds
 nothing: it goes to a pipe the operator is watching, not to a file they attach to
 a ticket a week later.

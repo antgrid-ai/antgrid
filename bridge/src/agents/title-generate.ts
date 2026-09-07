@@ -1,6 +1,7 @@
 import { logger } from "../logger";
 import { capturePrompt } from "../modelwatch";
 import { headlessScratchCwd, logBorrow, resolveHeadless, runHeadless } from "./headless";
+import { unwrapEnvelope } from "./usage-envelope";
 import { agentSpec } from "./registry";
 
 const log = logger.child({ component: "title-generate" });
@@ -35,7 +36,16 @@ const PROMPT_HEAD =
  * them append anything after the reply.
  */
 export function parseTitleFromOutput(stdout: string): string | null {
-  const lines = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  const envelope = unwrapEnvelope(stdout);
+  // A vendor that states its own verdict turns the length heuristic below from a
+  // guess into a check. It is only a guess where nothing else is available: a
+  // refusal is short ("Invalid API key · Please run /login" is six words) and
+  // clears every test this makes, and with the `self` rank outranking the
+  // first-message re-read that string is the session's name for good. The
+  // heuristic stays, because for a CLI with no envelope it is still the only
+  // defence there is.
+  if (envelope?.failed) return null;
+  const lines = (envelope?.text ?? stdout).split("\n").map((l) => l.trim()).filter(Boolean);
   let line = lines[lines.length - 1];
   if (!line) return null;
   // Models wrap titles in quotes/backticks or label them despite instructions.
@@ -177,6 +187,7 @@ export async function generateTitleFromContext(context: string, opts: {
     spawn: opts.spawn,
     env: picked.command.env,
     scratchEnv: picked.command.scratchEnv,
+    usage: picked.command.usage,
     // Requested and actual are both recorded because they routinely differ
     // here: `need: "none"` takes whichever installed agent can serve it and
     // registry order puts Claude first, so on a machine with Claude installed
@@ -200,7 +211,10 @@ export async function generateTitleFromContext(context: string, opts: {
   // key · Please run /login" clears every one of parseTitleFromOutput's checks
   // and reads as a title. With the `self` rank outranking the first-message
   // re-read, that error string would be the session's name for good.
-  if (!result || result.code !== 0) return { ok: false, reason: "failed", ...ref };
+  // `vendorFailed` is the same rejection one layer up, for a CLI whose envelope
+  // never reaches the parser: copilot writes its verdict to a side file and
+  // leaves stdout as plain text.
+  if (!result || result.code !== 0 || result.vendorFailed) return { ok: false, reason: "failed", ...ref };
   const title = parseTitleFromOutput(result.stdout);
   // An unparseable answer is a failed attempt, not an absent capability: the
   // spawn worked and the model rambled, which the next turn may not repeat.

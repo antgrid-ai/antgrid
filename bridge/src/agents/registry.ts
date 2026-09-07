@@ -32,6 +32,9 @@ import { claudeForkHandoff, claudeNativeForkArgs } from "./claude-code/fork";
 import { codexForkHandoff, codexNativeForkArgs } from "./codex/fork";
 import { opencodeForkHandoff, opencodeNativeForkArgs } from "./opencode/fork";
 import { terminalForkHandoff } from "./fork-handoff";
+import {
+  readClaudeCodeUsage, readCodexUsage, readCopilotUsage, readOpencodeUsage,
+} from "./usage-envelope";
 
 import { pickHeadlessFrom, type AgentKey, type AgentSpec } from "./types";
 
@@ -93,6 +96,16 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
         // and one per agent pause buries the sessions the user actually started
         // under /resume. Valid only with --print, which this argv already uses.
         noHistory: "flag",
+        usage: {
+          from: "stdout",
+          // AFTER the variadic --allowedTools value, which is where the run that
+          // captured the envelope put it and is the harder of the two positions:
+          // it parsed with the tools list intact and the prompt still ahead of
+          // every variadic flag, so a placement before --allowedTools would be
+          // safe too. It is also where this argv already appends --model.
+          argv: (cmd) => [...cmd, "--output-format", "json"],
+          read: readClaudeCodeUsage,
+        },
       },
     },
     transcript: readClaudeTranscript,
@@ -151,6 +164,14 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
         // user's own work rather than at whichever bookkeeping pass ran most
         // recently.
         noHistory: "flag",
+        usage: {
+          from: "stdout",
+          // Immediately BEFORE the prompt, which is this argv's last element and
+          // is positional: that is where the run that captured the envelope put
+          // it, and a flag after a positional prompt has never been run here.
+          argv: (cmd) => [...cmd.slice(0, -1), "--json", ...cmd.slice(-1)],
+          read: readCodexUsage,
+        },
       },
     },
     transcript: readCodexTranscript,
@@ -220,6 +241,16 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
         // remote config is the live risk if a team serves model settings that way.
         env: { OPENCODE_DB: ":memory:" },
         noHistory: "ephemeral-store",
+        usage: {
+          from: "stdout",
+          // Before the positional prompt, as codex's is, and for the same
+          // reason: that is the argv that was run.
+          argv: (cmd) => [...cmd.slice(0, -1), "--format", "json", ...cmd.slice(-1)],
+          // Tokens only. The reader takes no cost and no model name from this
+          // stream, and neither omission is a gap to fill later — see it for
+          // the measured reasons.
+          read: readOpencodeUsage,
+        },
       },
     },
     transcript: readOpencodeTranscript,
@@ -304,6 +335,16 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
         // where the same move would take the credentials with it.
         scratchEnv: ["COPILOT_HOME"],
         noHistory: "ephemeral-store",
+        usage: {
+          // The only vendor whose usage costs stdout nothing: with this flag the
+          // output was byte-identical to a run without it, so no parser here
+          // sees any difference. Copilot ALSO ships `--output-format json`,
+          // which would rewrite stdout the way the other three vendors' flags
+          // do — it is not the flag to reach for.
+          from: "side-file",
+          argv: (cmd, path) => [...cmd, "--usage-output-file", path],
+          read: readCopilotUsage,
+        },
       },
     },
   },
@@ -366,6 +407,16 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
           ["kilo", "run", "--agent", "plan", ...(model ? ["--model", model] : []), prompt],
         env: { KILO_DB: ":memory:" },
         noHistory: "ephemeral-store",
+        // No usage descriptor. `kilo run --format json` exists and its event
+        // shape was read out of the shipped binary, but no successful run has
+        // ever been captured: this machine has no Kilo Gateway credentials, so
+        // every model routes through a 401 and no step_finish part — the only
+        // usage carrier — has been seen on the wire. A descriptor written from
+        // that schema would be the guess this field exists to refuse. Two
+        // further things the capture would have to settle: the cost field
+        // carries NO currency unit anywhere in the envelope, and `metrics.source`
+        // is literally "provider" | "computed", so kilo itself says when a
+        // number was computed locally rather than returned by the provider.
       },
     },
   },

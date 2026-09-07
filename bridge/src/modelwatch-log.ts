@@ -89,16 +89,29 @@ export function modelCallLogRolledPath(abDir: string = resolveAbDir()): string {
  *
  * Every field is named here by hand. Nothing is spread from a `ModelCallEvent`
  * and nothing is deleted out of a copy of one, because the two differ entirely
- * in what happens to a field NOBODY HAS WRITTEN YET. Under a deny-list, the
- * vendor usage envelopes Wave 4 adds — and whatever a wave after it adds —
- * reach the disk the moment they exist, and staying safe depends on someone
- * remembering to extend a list of exclusions in a file they are not editing.
- * Under this shape a new field is simply absent until a human names it here.
+ * in what happens to a field NOBODY HAS WRITTEN YET. Under a deny-list, a field
+ * added to the event reaches the disk the moment it exists, and staying safe
+ * depends on someone remembering to extend a list of exclusions in a file they
+ * are not editing. Under this shape a new field is simply absent until a human
+ * names it here.
  *
- * `usage` is the first exercise of that rule and is deliberately NOT listed: it
- * is declared on the event and populated by nothing, so Wave 4 names its numeric
- * sub-fields one at a time when it fills them in. That absence is the mechanism
- * working, not an oversight.
+ * `usage` is the first exercise of that rule and STAYS unlisted now that the
+ * vendor envelopes fill it in. Two reasons, and the first is structural: this
+ * list is also the export allow-list `exportable` (cli/modelwatch.ts) reads, and
+ * both index a `ModelCallEvent` BY KEY — so only a top-level event key can be
+ * named here. `usage` is an object, and naming it whole is the nested-wholesale
+ * admission this shape exists to refuse; a flattened `usageInputTokens` names no
+ * key any event has and would silently write nothing at all. The second is that
+ * the numbers are not comparable line to line: the four token counts mean a
+ * different measurement per vendor (a cross-model sum for one, a per-step sum
+ * that structurally undercounts by one call for another), and `money` arrives in
+ * dollars, in nano AI credits, or not at all. They stay in the ring, where
+ * `antgrid calls` renders each beside the tool that reported it.
+ *
+ * What the envelopes DO put on disk is the two fields a human had already named
+ * for them: `actualModel` — which nothing else on the machine can answer, since
+ * a vendor may bill a model the caller never asked for — and `apiMs`, the model
+ * time that separates the API call from process startup.
  *
  * The excluded text fields, each with its reason:
  *
@@ -355,8 +368,8 @@ let detach: (() => void) | null = null;
  * to be got right in a file nobody reads again.
  *
  * It also means the file records exactly what the ring records. A second tap
- * would carry its own field list, and the two would drift the first time a wave
- * added something to one of them.
+ * would carry its own field list, and the two would drift the first time someone
+ * added a field to one of them.
  *
  * Idempotent: the module self-registers at import, and every entry point that
  * can reach a model call reaches this module through the spawn path.

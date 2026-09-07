@@ -328,16 +328,31 @@ function usageNote(a: Attempt): string | null {
   const u = a.usage;
   if (!u) return null;
   const parts: string[] = [];
-  const inTok = tokens(u.inputTokens);
-  const outTok = tokens(u.outputTokens);
-  const cached = tokens(u.cacheReadTokens);
-  if (inTok) parts.push(`in ${inTok}`);
-  if (cached) parts.push(`cache ${cached}`);
-  if (outTok) parts.push(`out ${outTok}`);
+  const push = (label: string, n: number | undefined): void => {
+    const t = tokens(n);
+    if (t) parts.push(`${label} ${t}`);
+  };
+  push("in", u.inputTokens);
+  // Read and write are separate cells because they are separately priced:
+  // creating a cache entry costs more per token than reading one, so a single
+  // `cache` figure would show the cheaper half of the traffic and silently drop
+  // the dearer.
+  push("cache r", u.cacheReadTokens);
+  push("cache w", u.cacheWriteTokens);
+  push("out", u.outputTokens);
+  // Only when there were any: most calls spend none, and whether these are also
+  // counted inside `out` is the vendor's choice (see ModelCallEvent.usage), so
+  // the cell appears exactly on the rows where that distinction is worth money.
+  if (u.reasoningTokens) push("reasoning", u.reasoningTokens);
   // Tagged with its unit and never folded into anything: the vendors report
   // dollars, nothing at all, and fractional premium requests, so there is no
   // sum of two of these that means anything.
   if (u.money) parts.push(`${u.money.amount} ${field(u.money.unit, 20)}`);
+  // The counts above are the total across every model this ONE call billed,
+  // while the model cell can name only the one that answered. Printed so the
+  // row says so rather than leaving a background model's tokens attributed to
+  // the model beside them.
+  if (u.modelsBilled) parts.push(`${u.modelsBilled} models`);
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
