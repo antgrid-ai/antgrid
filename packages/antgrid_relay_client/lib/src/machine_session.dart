@@ -7,12 +7,14 @@ import 'agent_transport.dart';
 import 'buffered_agent_transport.dart';
 import 'e2e/key_schedule.dart';
 import 'e2e/transport.dart';
+import 'flow.dart';
 import 'frag.dart';
 import 'frame.dart';
 import 'models/connection_state.dart';
 import 'models/relay_message.dart';
 import 'models/stream_envelope.dart';
 import 'relay_service.dart';
+import 'send_scheduler.dart';
 
 /// Liveness constants; mirror `bridge/src/relay-client.ts`.
 /// Spec: docs/protocol/e2e-handshake.md §"Sealed liveness".
@@ -77,14 +79,19 @@ class MachineSession {
   final Map<String, dynamic> Function(String projectId)?
   projectStartMessageBuilder;
 
-  /// Base wait for the state half of a `state.snapshot` pull. Each retry
-  /// doubles it — see [StreamTransport.refreshSnapshot] for the split and for
-  /// why a pull is retried at all.
+  /// Base wait for a `state.snapshot` pull. Each retry doubles it — see
+  /// [StreamTransport.refreshSnapshot] for why a pull is retried at all.
   final Duration snapshotTimeout;
 
-  /// Base wait for the tree half. Its own, and much longer: the reply is every
-  /// checkout's whole file tree, and nothing the terminal needs waits on it.
-  final Duration treeSnapshotTimeout;
+  /// Silence after which liveness sends a sealed `ping`, and the period the
+  /// liveness timer itself runs at. Injectable so a test need not wait out the
+  /// real interval.
+  final Duration pingSilence;
+
+  /// Bytes consumed on a channel between the credits this side volunteers. A
+  /// tick credits both channels regardless, so this only decides how promptly a
+  /// bulk transfer's window reopens.
+  final int creditBatchBytes;
 
   MachineSession({
     required this.relay,
@@ -92,8 +99,13 @@ class MachineSession {
     required SessionHandshaker handshaker,
     this.projectStartMessageBuilder,
     this.snapshotTimeout = const Duration(seconds: 5),
-    this.treeSnapshotTimeout = const Duration(seconds: 30),
-  }) : _handshaker = handshaker {
+    this.pingSilence = const Duration(seconds: kPingSilenceSeconds),
+    int? channelWindowBytes,
+    int? socketInflightBytes,
+    this.creditBatchBytes = kCreditBatchBytes,
+  }) : _handshaker = handshaker,
+       _channelWindowBytes = channelWindowBytes ?? kChannelWindowBytes,
+       _socketInflightBytes = socketInflightBytes ?? kSocketInflightBytes {
     // [ready] is observation-optional: failReady/dispose may completeError
     // before any awaiter attaches (see the getter doc). ignore() pre-registers
     // a swallowing listener so that never trips the unhandled-error zone hook;
@@ -108,6 +120,7 @@ class MachineSession {
   StreamSubscription<IncomingRouteMessage>? _msgSub;
   StreamSubscription<AppState>? _stateSub;
   StreamSubscription<bool>? _presenceSub;
+  StreamSubscription<ErrorMessage>? _errorSub;
   Timer? _fragSweep;
   Timer? _livenessTimer;
 
@@ -142,6 +155,39 @@ class MachineSession {
   /// channel → the decrypt-and-dispatch chain currently draining for it. See
   /// [_onRouted]; an entry lives only while that channel has work in flight.
   final Map<String, Future<void>> _inboundTails = {};
+
+  /// Sealed bytes allowed in flight per channel and across the socket before
+  /// the agent must credit them.
+  final int _channelWindowBytes;
+  final int _socketInflightBytes;
+
+  /// Cumulative sealed payload bytes received on each channel this session, and
+  /// how much of that has already been credited back to the agent. Both reset at
+  /// establishment, which is the same instant the agent's send windows reset.
+  final Map<String, int> _consumed = {'control': 0, 'preview': 0};
+  final Map<String, int> _creditSent = {'control': 0, 'preview': 0};
+
+  /// Bumped wherever the send windows are zeroed. Inbound frames are decrypted
+  /// on an async chain, so one that arrived under the previous session can be
+  /// dispatched after the reset; a `credit` from it carries that session's
+  /// cumulative total, which would sit far ahead of everything the new session
+  /// will ever say and leave every real credit reading as stale.
+  int _sessionEpoch = 0;
+
+  /// Every outbound app frame passes through here: one drain loop, sealed at
+  /// dequeue, control ahead of preview. Session frames are written directly and
+  /// so overtake any backlog — but they still land behind whatever is already
+  /// inside the socket's own sink, and nothing in this stack can read that
+  /// sink, so the scheduler's accounting is the only bound on it there is.
+  late final SendScheduler _scheduler = SendScheduler(
+    sink: _sealAndSend,
+    window: _channelWindowBytes,
+    socketCap: _socketInflightBytes,
+  );
+
+  /// Test-only seam: park the send gate, shrink its limits, release it. Not
+  /// part of the supported API.
+  SendScheduler get debugScheduler => _scheduler;
 
   /// projectId → streamId, learned from `agent:projects` / `stream-ready`.
   final Map<String, String> _projectStreamIds = {};
@@ -236,6 +282,7 @@ class MachineSession {
     _msgSub = relay.messageStream.listen(_onRouted);
     _stateSub = relay.stateStream.listen(_onState);
     _presenceSub = relay.peerPresenceStream.listen(_onPresence);
+    _errorSub = relay.errorStream.listen(_onRelayError);
     _fragSweep = Timer.periodic(
       const Duration(seconds: 2),
       (_) => _reassembler.sweep(),
@@ -306,7 +353,15 @@ class MachineSession {
       c.future.ignore();
       return c;
     });
-    await sendOnStream(kControlStreamId, startMessage, 'control');
+    // Bounded by the same deadline as the wait below: the send resolves only
+    // once the frame reaches the socket, so a control channel that cannot drain
+    // would otherwise hold a bind past the "never 2x timeout" bound above and
+    // pin the caller's in-flight guard behind it.
+    await sendOnStream(
+      kControlStreamId,
+      startMessage,
+      'control',
+    ).timeout(_remainingUntil(deadline));
     // The waiter is shared by every concurrent bind of this project, so one
     // caller's deadline must not evict it: `.timeout()` leaves the completer
     // itself pending, and dropping the map entry would strand the other callers
@@ -314,21 +369,27 @@ class MachineSession {
     return waiter.future.timeout(_remainingUntil(deadline));
   }
 
-  /// Wrap [message] as a sealed `{s, m}` envelope and send it (fragmenting past
-  /// the threshold). Dropped when no keys are installed (pre-establishment /
-  /// mid-reconnect) — the bridge replays durable state via `state.snapshot`.
+  /// Wrap [message] as a sealed `{s, m}` envelope and queue it (fragmenting
+  /// past the threshold). Dropped when no keys are installed (pre-establishment
+  /// / mid-reconnect) — the bridge replays durable state via `state.snapshot`.
+  ///
+  /// Resolves when the message's last frame has been handed to the socket or
+  /// dropped, never when it has merely been copied into a buffer this layer
+  /// cannot measure. A caller that cannot wait for the channel ahead of it must
+  /// impose its own timeout.
   Future<void> sendOnStream(
     String streamId,
     Map<String, dynamic> message,
     String channel,
   ) async {
     final type = message['type'] is String ? message['type'] as String : null;
-    final keys = _keys;
-    if (keys == null) {
+    if (_keys == null) {
       // The phone-side mirror of the bridge's `no-e2e-session` drop. Usually
       // benign (the bridge replays durable state on establishment), but it is
       // also where a session that never comes back shows up first, and nothing
-      // else on this path observes it.
+      // else on this path observes it. Dropped rather than queued: the snapshot
+      // pull on the next establishment is the reconnect contract, not a backlog
+      // of messages the peer has since moved past.
       _dropped(
         'tx',
         'no-e2e-session',
@@ -343,56 +404,48 @@ class MachineSession {
       'm': message,
     };
     final plaintext = jsonEncode(envelope);
-    final t = E2eTransportDart(sendKey: keys.p2a, recvKey: keys.a2p);
     final bytes = utf8ByteLength(plaintext);
+    if (bytes > kMaxTransferBytes) {
+      _dropped(
+        'tx',
+        'message-too-large',
+        channel: channel,
+        streamId: streamId,
+        msgType: type,
+        detail: {'bytes': bytes},
+      );
+      if (!_fragSendErrors.isClosed) {
+        _fragSendErrors.add(
+          FragSendError(
+            'MESSAGE_TOO_LARGE',
+            '${message['type'] ?? 'message'} exceeds kMaxTransferBytes',
+          ),
+        );
+      }
+      return;
+    }
+    final List<String> frames;
     try {
       if (bytes <= kFragThreshold) {
-        final sealed = await t.seal(plaintext);
-        relay.sendMessage(machineDeviceId, channel, sealed);
-        _annotate(_frameId(sealed), msgType: type, streamId: streamId);
-        return;
-      }
-      if (bytes > kMaxTransferBytes) {
-        _dropped(
-          'tx',
-          'message-too-large',
-          channel: channel,
-          streamId: streamId,
-          msgType: type,
-          detail: {'bytes': bytes},
-        );
-        if (!_fragSendErrors.isClosed) {
-          _fragSendErrors.add(
-            FragSendError(
-              'MESSAGE_TOO_LARGE',
-              '${message['type'] ?? 'message'} exceeds kMaxTransferBytes',
-            ),
-          );
-        }
-        return;
-      }
-      final path = message['path'] as String?;
-      final hint = type == 'file:content' && path != null
-          ? FragHint('file:content', path)
-          : null;
-      // Fragment the ENVELOPE JSON so `s` survives reassembly; the id is unique
-      // per (machine, stream, counter) — the agent reassembles by bare id.
-      final id = '$machineDeviceId-$streamId-${_fragCounter++}';
-      for (final fragment in buildFragments(plaintext, id, hint)) {
-        final sealed = await t.seal(fragment);
-        relay.sendMessage(machineDeviceId, channel, sealed);
-        // Each fragment is sealed on its own, so one message leaves as N frames
-        // with N unrelated ids. Naming every one with the parent type is what
-        // keeps a large transfer from reading as a burst of anonymous frames.
-        _annotate(_frameId(sealed), msgType: type, streamId: streamId);
+        frames = [plaintext];
+      } else {
+        final path = message['path'] as String?;
+        final hint = type == 'file:content' && path != null
+            ? FragHint('file:content', path)
+            : null;
+        // Fragment the ENVELOPE JSON so `s` survives reassembly; the id is
+        // unique per (machine, stream, counter) — the agent reassembles by bare
+        // id.
+        final id = '$machineDeviceId-$streamId-${_fragCounter++}';
+        frames = buildFragments(plaintext, id, hint);
       }
     } catch (e) {
-      // The type alone, as everywhere else a drop names an error: the try above
-      // wraps `seal` and `buildFragments`, and a FormatException/ArgumentError
-      // out of either prints the plaintext it choked on. `detail` is shipped to
-      // the bridge by NetwatchUploader and written into an operator's export
-      // file — the app's event has no `body` field precisely so a capture
-      // carries no payload, and this is the one door left open to it.
+      // The type alone, as everywhere else a drop names an error: a
+      // FormatException or ArgumentError out of the fragmenter prints the
+      // plaintext it choked on. `detail` is shipped to the bridge by
+      // NetwatchUploader and written into an operator's export file — the app's
+      // event has no `body` field precisely so a capture carries no payload,
+      // and this is the one door left open to it.
       _dropped(
         'tx',
         'seal-failed',
@@ -401,6 +454,90 @@ class MachineSession {
         msgType: type,
         detail: {'error': '${e.runtimeType}'},
       );
+      return;
+    }
+    final queued = [
+      for (final p in frames)
+        QueuedAppFrame(
+          channel: channel,
+          streamId: streamId,
+          plaintext: p,
+          plaintextBytes: utf8ByteLength(p),
+          msgType: type,
+        ),
+    ];
+    if (!_scheduler.enqueue(queued)) {
+      _dropped(
+        'tx',
+        'send-queue-full',
+        channel: channel,
+        streamId: streamId,
+        msgType: type,
+        detail: {'frames': frames.length},
+      );
+      return;
+    }
+    // A fragment set leaves in order, so the last frame's hand-off is the
+    // message's.
+    await queued.last.done.future;
+  }
+
+  /// Seal one queued frame under the keys live at THIS moment and write it.
+  /// Returns the sealed length that reached the wire, or null if nothing did.
+  Future<int?> _sealAndSend(QueuedAppFrame f) async {
+    final keys = _keys;
+    if (keys == null) {
+      _dropped(
+        'tx',
+        'no-e2e-session',
+        channel: f.channel,
+        streamId: f.streamId,
+        msgType: f.msgType,
+      );
+      return null;
+    }
+    try {
+      final sealed = await E2eTransportDart(
+        sendKey: keys.p2a,
+        recvKey: keys.a2p,
+      ).seal(f.plaintext);
+      if (!identical(keys, _keys)) {
+        // `seal` holds the key by reference and reads it after its own awaits,
+        // and a teardown or rekey swap zeroizes those bytes in place meanwhile.
+        // Whatever came out is either under an all-zero key or under keys the
+        // agent has already retired — not worth a wire write.
+        _dropped(
+          'tx',
+          'keys-rotated',
+          channel: f.channel,
+          streamId: f.streamId,
+          msgType: f.msgType,
+        );
+        return null;
+      }
+      relay.sendMessage(machineDeviceId, f.channel, sealed);
+      // Each fragment is sealed on its own, so one message leaves as N frames
+      // with N unrelated ids. Naming every one with the parent type is what
+      // keeps a large transfer from reading as a burst of anonymous frames.
+      // After the send, not before: the tap records the wire event inside
+      // sendMessage, and this names the event it just made.
+      _annotate(_frameId(sealed), msgType: f.msgType, streamId: f.streamId);
+      return sealed.length;
+    } catch (e) {
+      // The type alone, as everywhere else a drop names an error: an exception
+      // out of `seal` prints the plaintext it choked on. `detail` is shipped to
+      // the bridge by NetwatchUploader and written into an operator's export
+      // file — the app's event has no `body` field precisely so a capture
+      // carries no payload, and this is the one door left open to it.
+      _dropped(
+        'tx',
+        'seal-failed',
+        channel: f.channel,
+        streamId: f.streamId,
+        msgType: f.msgType,
+        detail: {'error': '${e.runtimeType}'},
+      );
+      return null;
     }
   }
 
@@ -418,7 +555,14 @@ class MachineSession {
     }
   }
 
-  void removeStream(String streamId) => _streams.remove(streamId);
+  /// Detach [streamId]'s transport and drop whatever of its traffic is still
+  /// queued: a detached stream's backlog must not occupy a window the rest of
+  /// the session needs, and anything awaiting one of those frames must not be
+  /// left waiting on a stream that no longer exists.
+  void removeStream(String streamId) {
+    _streams.remove(streamId);
+    _scheduler.dropStream(streamId);
+  }
 
   /// The relay dropped a routed frame on this socket (`MESSAGE_RATE_LIMITED`).
   ///
@@ -429,6 +573,19 @@ class MachineSession {
     for (final s in _streams.values) {
       s.noteFramesDropped();
     }
+  }
+
+  /// A relay error naming a channel and a byte count is a report that a frame
+  /// this session had already charged to its send window was discarded before
+  /// the agent saw it. Those bytes can never turn up in a credit, so without
+  /// giving them back every drop shrinks that channel's window for the rest of
+  /// the session. Errors that name no frame are somebody else's business — the
+  /// app fans them out to the streams through [noteFramesDropped].
+  void _onRelayError(ErrorMessage e) {
+    final channel = e.channel;
+    final bytes = e.bytes;
+    if (bytes == null || (channel != 'control' && channel != 'preview')) return;
+    _scheduler.uncharge(channel!, bytes);
   }
 
   // --- socket / presence transitions ---------------------------------------
@@ -478,6 +635,20 @@ class MachineSession {
     for (final s in _streams.values) {
       s.failAllPending(code: 'E_SESSION_DOWN', message: 'relay session down');
     }
+    // Whatever the send gate was still holding dies with the keys it would have
+    // been sealed under. Their futures complete rather than fail: the callers
+    // are fire-and-forget, so an error would land in no handler at all.
+    for (final f in _scheduler.clear()) {
+      _dropped(
+        'tx',
+        'queue-dropped',
+        channel: f.channel,
+        streamId: f.streamId,
+        msgType: f.msgType,
+        detail: {'why': 'session-down'},
+      );
+    }
+    _resetRxFlow();
     // Re-arm only from the completed state: a second blip before the first
     // establishment would otherwise orphan whoever is already awaiting.
     if (_keysReady.isCompleted) _armKeysReady();
@@ -541,6 +712,15 @@ class MachineSession {
     _startLiveness();
     if (!_readyCompleter.isCompleted) _readyCompleter.complete();
     if (!_established$.isClosed) _established$.add(null);
+    // A new session credits from zero. The QUEUE deliberately survives a rekey:
+    // frames dequeued from here on seal under the new keys, and the agent
+    // swapped before it confirmed, so nothing straddles the change in this
+    // direction — where dropping them would strand every pending RPC until its
+    // timeout.
+    _sessionEpoch++;
+    _scheduler.resetWindows();
+    _resetRxFlow();
+    _scheduler.kick();
     // Re-pull durable state on every (re)establish so late subscribers
     // (a ControlPlaneClient, a just-bound project stream) replay it.
     for (final s in _streams.values) {
@@ -548,14 +728,51 @@ class MachineSession {
     }
   }
 
+  // --- inbound flow control -------------------------------------------------
+
+  void _resetRxFlow() {
+    for (final ch in const ['control', 'preview']) {
+      _consumed[ch] = 0;
+      _creditSent[ch] = 0;
+    }
+  }
+
+  /// Count sealed payload bytes the agent charged to its window. Every kind-0
+  /// frame that arrives on a live session counts, whether or not it decrypted:
+  /// the agent charged it either way, so skipping the ones that failed would
+  /// leak its window a frame at a time and let a single corrupt frame wedge a
+  /// channel for the session.
+  void _noteConsumed(String channel, int bytes) {
+    final total = _consumed[channel];
+    // A channel this session keeps no window for; the agent keeps none either.
+    if (total == null) return;
+    _consumed[channel] = total + bytes;
+    if (total + bytes - _creditSent[channel]! >= creditBatchBytes) {
+      _sendCredit(channel);
+    }
+  }
+
+  /// Hand the agent this channel's cumulative consumed count. Cumulative rather
+  /// than incremental so a credit lost in transit costs nothing — the next one
+  /// carries the same ground truth.
+  void _sendCredit(String channel) {
+    if (!_established) return;
+    final consumed = _consumed[channel]!;
+    _creditSent[channel] = consumed;
+    unawaited(
+      _sendSessionFrame({
+        'type': 'credit',
+        'channel': channel,
+        'consumed': consumed,
+      }).catchError((_) {}),
+    );
+  }
+
   // --- liveness -------------------------------------------------------------
 
   void _startLiveness() {
     _livenessTimer?.cancel();
-    _livenessTimer = Timer.periodic(
-      const Duration(seconds: kPingSilenceSeconds),
-      (_) => _checkLiveness(),
-    );
+    _livenessTimer = Timer.periodic(pingSilence, (_) => _checkLiveness());
   }
 
   void _stopLiveness() {
@@ -565,9 +782,21 @@ class MachineSession {
   }
 
   void _checkLiveness() {
-    if (_disposed || !_established || _handshakeInFlight) return;
-    final silentFor = DateTime.now().difference(_lastRecv).inSeconds;
-    if (silentFor < kPingSilenceSeconds) return;
+    if (_disposed || !_established) return;
+    // Unconditional, both channels, every tick. A credit the relay discarded
+    // would otherwise wedge the agent's window until the session ended, and
+    // there is no state here that could go stale: the count is cumulative. It
+    // doubles as the proof of life the agent's own liveness timers read, which
+    // on a slow uplink is what keeps a session up while bulk drains.
+    for (final ch in const ['control', 'preview']) {
+      _sendCredit(ch);
+    }
+    // The flush above is deliberately ahead of this: a rekey keeps the old keys
+    // live until the new ones confirm, so skipping it would stretch the
+    // lost-credit floor by a whole handshake.
+    if (_handshakeInFlight) return;
+    final silentFor = DateTime.now().difference(_lastRecv);
+    if (silentFor < pingSilence) return;
     if (_missedPongs >= kMaxMissedPongs) {
       // Session declared dead at the E2E layer → rekey on the live socket.
       _stopLiveness();
@@ -632,6 +861,10 @@ class MachineSession {
     if (msg.kind == FrameKind.handshake) return;
     final keys = _keys;
     if (keys == null) return; // pre-establishment: driver owns sealed frames
+    // Read with the keys rather than inside the chain below: a frame can
+    // wait there behind everything already queued on its channel, and the
+    // session it ARRIVED under is the only one its contents describe.
+    final epoch = _sessionEpoch;
     // Chained per channel, never fired independently: `open()` is async and the
     // platform AES-GCM implementation dispatches by payload size, so a small
     // frame otherwise overtakes a large one — a `{"type":6}` ping ahead of the
@@ -640,7 +873,7 @@ class MachineSession {
     // relay delivers a channel in order; this is what keeps that true through
     // decryption. Channels stay independent of each other.
     final ahead = _inboundTails[msg.channel] ?? Future<void>.value();
-    final next = ahead.then((_) => _decryptAndDispatch(msg, keys));
+    final next = ahead.then((_) => _decryptAndDispatch(msg, keys, epoch));
     // A rejection must not strand every frame queued behind it.
     final chained = next.catchError((Object _) {});
     _inboundTails[msg.channel] = chained;
@@ -658,6 +891,7 @@ class MachineSession {
   Future<void> _decryptAndDispatch(
     IncomingRouteMessage msg,
     SessionKeys keys,
+    int epoch,
   ) async {
     // Captured before the open: the nonce that identifies this frame is only
     // readable while the payload is still sealed, and the type that makes it
@@ -665,10 +899,30 @@ class MachineSession {
     // path is chained through `_inboundTails` and is genuinely async, so a
     // field would start mis-attributing under any concurrency.
     final frameId = _frameId(msg.payload, msg.kind);
-    final plaintext = await E2eTransportDart(
+    var openedUnder = epoch;
+    _noteConsumed(msg.channel, msg.payload.length);
+    var plaintext = await E2eTransportDart(
       sendKey: keys.p2a,
       recvKey: keys.a2p,
     ).open(msg.payload);
+    if (plaintext == null) {
+      final current = _keys;
+      if (current != null && !identical(current, keys)) {
+        // This chain captured the keys as the frame arrived and a rekey swaps
+        // them several awaits later, so everything the agent writes right
+        // behind `established` — the adverts a fresh session needs first — is
+        // sealed under the new set and would otherwise be read under the
+        // retired one.
+        plaintext = await E2eTransportDart(
+          sendKey: current.p2a,
+          recvKey: current.a2p,
+        ).open(msg.payload);
+        // The live keys opened it, so the agent sealed it after the swap:
+        // whatever it reports belongs to the session those keys serve, not
+        // to the one this frame waited under.
+        if (plaintext != null) openedUnder = _sessionEpoch;
+      }
+    }
     // A candidate-key handshake frame during rekey (agent-ready/established) or
     // garbage → decrypt-or-drop.
     if (plaintext == null) {
@@ -689,12 +943,17 @@ class MachineSession {
       _annotate(frameId, msgType: '__frag');
       return;
     }
-    _dispatchDecoded(plaintext, msg.channel, frameId);
+    _dispatchDecoded(plaintext, msg.channel, frameId, openedUnder);
   }
 
   /// [frameId] is absent for a reassembled message: it arrived as N frames with
   /// N ids, and no single one of them carried it.
-  void _dispatchDecoded(String plaintext, String channel, [String? frameId]) {
+  void _dispatchDecoded(
+    String plaintext,
+    String channel, [
+    String? frameId,
+    int? epoch,
+  ]) {
     Map<String, dynamic> json;
     try {
       json = jsonDecode(plaintext) as Map<String, dynamic>;
@@ -712,7 +971,7 @@ class MachineSession {
     // session/liveness frame; an `m` field is stream/app traffic.
     if (type is String) {
       _annotate(frameId, msgType: type);
-      _handleSessionFrame(type);
+      _handleSessionFrame(json, epoch);
       return;
     }
     if (!json.containsKey('m')) {
@@ -913,13 +1172,36 @@ class MachineSession {
     }
   }
 
-  void _handleSessionFrame(String type) {
-    switch (type) {
+  /// Takes the whole decoded frame, not just its type: `credit` carries fields.
+  void _handleSessionFrame(Map<String, dynamic> json, [int? epoch]) {
+    switch (json['type']) {
       case 'ping':
         unawaited(_sendSessionFrame({'type': 'pong'}).catchError((_) {}));
         break;
       case 'pong':
         _missedPongs = 0;
+        break;
+      case 'credit':
+        // Hand-validated, like every other sealed session frame: these are bare
+        // objects that never pass through the envelope schemas.
+        final channel = json['channel'];
+        final consumed = json['consumed'];
+        if ((channel != 'control' && channel != 'preview') ||
+            consumed is! int ||
+            consumed < 0) {
+          developer.log(
+            'dropping malformed credit frame',
+            name: 'antgrid.relay',
+          );
+          break;
+        }
+        // A cumulative total only means anything against the session that
+        // produced it. This frame may have been decrypted after an
+        // establishment zeroed the windows, and banking the old session's much
+        // larger total would make every credit of the new one read as stale —
+        // the channel would then ride the resync floor for the rest of it.
+        if (epoch != null && epoch != _sessionEpoch) break;
+        _scheduler.credit(channel as String, consumed);
         break;
       case 'session-takeover':
         // The agent is switching to another device and is about to drop our
@@ -945,7 +1227,20 @@ class MachineSession {
       sendKey: keys.p2a,
       recvKey: keys.a2p,
     ).seal(jsonEncode(obj));
+    if (!identical(keys, _keys)) {
+      // The same guard [_sealAndSend] applies, for the same two reasons: `seal`
+      // reads the key after its own awaits and a teardown zeroizes it in place,
+      // and a frame sealed under retired keys must not charge the window the
+      // establishment that retired them has just zeroed.
+      _dropped('tx', 'keys-rotated', channel: 'control', msgType: type);
+      return;
+    }
     relay.sendMessage(machineDeviceId, 'control', ct);
+    // Exempt from the GATE, never from the accounting: a relay drop report
+    // names only a channel and a byte count, so a frame written without being
+    // charged would have its report give back bytes some other frame is still
+    // holding, and the window would grow past what the agent can absorb.
+    _scheduler.charge('control', ct.length);
     // Liveness frames are the cheapest signal that a session is alive at all —
     // a capture where ping goes out and pong never comes back is the whole
     // diagnosis for a silently dead socket.
@@ -960,6 +1255,7 @@ class MachineSession {
     await _msgSub?.cancel();
     await _stateSub?.cancel();
     await _presenceSub?.cancel();
+    await _errorSub?.cancel();
     for (final s in List<StreamTransport>.of(_streams.values)) {
       await s.dispose();
     }
@@ -969,6 +1265,9 @@ class MachineSession {
     }
     _streamReadyWaiters.clear();
     _inboundTails.clear();
+    // No drop records: the capture tap is read off the socket this dispose is
+    // tearing down.
+    _scheduler.clear();
     await _established$.close();
     await _takeovers.close();
     await _sessionDown.close();
@@ -1012,6 +1311,11 @@ class StreamTransport extends BufferedAgentTransport {
 
   /// Migrate this transport onto [newStreamId] after a host-restart re-advert.
   /// Called by [MachineSession] only, which owns the `_streams` re-keying.
+  ///
+  /// Frames already queued for the dead id keep it and still go out: the host
+  /// answers `stream-invalid`, which re-drives the bind. Cheaper than rewriting
+  /// the envelope of every frame built before the re-point, and it exercises
+  /// the self-heal that has to work anyway.
   void _retarget(String newStreamId) => streamId = newStreamId;
 
   void noteFramesDropped() {
@@ -1086,72 +1390,59 @@ class StreamTransport extends BufferedAgentTransport {
   /// not carry (session list, config, the reopened file, the transcript). This
   /// is the per-stream reconciliation checkpoint.
   ///
-  /// The pull is two round trips, split by weight. The state pull carries
-  /// every durable frame but the file tree, and for a relay app it is the ONLY
-  /// carrier of a checkout's `agent:status` — the frame its terminal tabs are
-  /// built from: `terminal:started` is not durable, the bridge republishes a
-  /// checkout's status on nothing an app can trigger short of starting a
-  /// session that is already running, and the next establishment is the only
-  /// other re-pull. The tree pull carries `tree:full` alone: it is the one
-  /// unbounded frame (every checkout's whole tree), and while it rode in the
-  /// same all-or-nothing reply a slow link or one lost fragment cost the
-  /// terminal its tab — a running session opened afterwards sat on "waiting
-  /// for agent" with nothing left to deliver it. On its own, a slow tree costs
-  /// the explorer, for a while.
+  /// The pull carries every durable frame but the file tree, and for a relay
+  /// app it is the ONLY carrier of a checkout's `agent:status` — the frame its
+  /// terminal tabs are built from: `terminal:started` is not durable, the
+  /// bridge republishes a checkout's status on nothing an app can trigger
+  /// short of starting a session that is already running, and the next
+  /// establishment is the only other re-pull. `tree:full` is left out on
+  /// purpose, and not pulled separately either: it is the one unbounded frame
+  /// (every checkout's whole tree, megabytes for a project with several
+  /// worktrees), and the hydrators below already ask the bridge for each
+  /// checkout's tree on every establishment — pulling it here as well sent the
+  /// same megabytes two and three times over on every connect, and on a slow
+  /// uplink that backlog starved the bridge's relay pongs until the relay
+  /// closed its socket, so the session dropped and the whole cycle re-ran.
+  /// While the tree rode in this reply at all, a slow link or one lost
+  /// fragment cost the terminal its tab — a running session opened afterwards
+  /// sat on "waiting for agent" with nothing left to deliver it.
   ///
-  /// Both are retried on timeout, since a reply that lands after the wait is
-  /// discarded like any late RPC response. Only the state pull's first attempt
-  /// is awaited: the hydrators do not depend on the snapshot having landed (a
+  /// The pull is retried on timeout, since a reply that lands after the wait
+  /// is discarded like any late RPC response. Only the first attempt is
+  /// awaited: the hydrators do not depend on the snapshot having landed (a
   /// bundle built before it reads the frames live when they arrive), so they
-  /// must not wait out a bad link's retries, let alone the tree.
+  /// must not wait out a bad link's retries.
   Future<void> refreshSnapshot() async {
     await _fetchSnapshot(timeout: session.snapshotTimeout);
     redriveHydrators();
   }
 
-  /// Round trips one pull gets before it is given up on, the first included.
-  /// Each retry doubles the previous wait, so the last one gives a
-  /// multi-megabyte reply four times the room the first did.
+  /// Round trips a pull gets before it is given up on, the first included.
+  /// Each retry doubles the previous wait, so the last one gives a slow reply
+  /// four times the room the first did.
   static const _kSnapshotAttempts = 3;
 
-  /// Stamps each pull, per half, so the retries of a superseded one stop: a
+  /// Stamps each pull so the retries of a superseded one stop: a
   /// (re)establish or a second bind starts a fresh pull on the live keys, and
   /// [dispose] ends them all.
-  final _snapshotGen = <_SnapshotPull, int>{};
+  int _snapshotGen = 0;
 
   Future<void> _fetchSnapshot({required Duration timeout}) async {
-    final state = _fetch(_SnapshotPull.state, timeout);
-    // The control plane's bus never publishes a tree; asking would spend a
-    // round trip on an empty answer.
-    if (streamId != kControlStreamId) {
-      unawaited(_fetch(_SnapshotPull.tree, session.treeSnapshotTimeout));
-    }
-    await state;
+    final gen = ++_snapshotGen;
+    if (await _pullSnapshot(timeout, attempt: 1)) return;
+    unawaited(_retrySnapshot(gen, timeout));
   }
 
-  Future<void> _fetch(_SnapshotPull pull, Duration timeout) async {
-    final gen = (_snapshotGen[pull] ?? 0) + 1;
-    _snapshotGen[pull] = gen;
-    if (await _pullSnapshot(pull, timeout, attempt: 1)) return;
-    unawaited(_retrySnapshot(pull, gen, timeout));
-  }
-
-  Future<void> _retrySnapshot(
-    _SnapshotPull pull,
-    int gen,
-    Duration timeout,
-  ) async {
+  Future<void> _retrySnapshot(int gen, Duration timeout) async {
     for (var attempt = 2; attempt <= _kSnapshotAttempts; attempt++) {
       timeout *= 2;
-      if (gen != _snapshotGen[pull] ||
-          outbound.isClosed ||
-          !session.isEstablished) {
+      if (gen != _snapshotGen || outbound.isClosed || !session.isEstablished) {
         return;
       }
-      if (await _pullSnapshot(pull, timeout, attempt: attempt)) return;
+      if (await _pullSnapshot(timeout, attempt: attempt)) return;
     }
     developer.log(
-      '${pull.label} gave up after $_kSnapshotAttempts attempts on stream '
+      'state.snapshot gave up after $_kSnapshotAttempts attempts on stream '
       '$streamId; its frames stay as they were until the next establishment',
       name: 'antgrid.relay',
     );
@@ -1161,24 +1452,21 @@ class StreamTransport extends BufferedAgentTransport {
   /// reply landed, or it failed in a way no retry changes (a pre-RPC agent, a
   /// send that never left) — and false only on a timeout, the one failure a
   /// slower second try can turn around.
-  Future<bool> _pullSnapshot(
-    _SnapshotPull pull,
-    Duration timeout, {
-    required int attempt,
-  }) async {
+  Future<bool> _pullSnapshot(Duration timeout, {required int attempt}) async {
     const method = 'state.snapshot';
-    final params = pull.params;
+    const params = <String, dynamic>{
+      'types': ['*'],
+      'exclude': _kHeavyReplayTypes,
+    };
     try {
-      // Only the state pull's first attempt counts toward the session's
-      // consecutive-timeout rekey trigger, as the lone pull always did. A
-      // retry re-asks a question already counted, and letting it count too
-      // made the chain itself the trigger: three waits on a slow link forced
-      // a rekey, the re-establish started a fresh chain, and the loop
-      // re-requested a multi-megabyte reply forever over a link that could
-      // not carry it. The tree pull never counts: it is the heavy half, and a
-      // link too slow for it is not a dead session. A pull that lands still
-      // clears the counter — the session has just proven itself.
-      final counts = pull == _SnapshotPull.state && attempt == 1;
+      // Only the first attempt counts toward the session's consecutive-timeout
+      // rekey trigger. A retry re-asks a question already counted, and letting
+      // it count too made the chain itself the trigger: three waits on a slow
+      // link forced a rekey, the re-establish started a fresh chain, and the
+      // loop re-requested the reply forever over a link that could not carry
+      // it. A pull that lands still clears the counter — the session has just
+      // proven itself.
+      final counts = attempt == 1;
       final snap = counts
           ? await request(method, params: params, timeout: timeout)
           : await super.request(method, params: params, timeout: timeout);
@@ -1197,12 +1485,8 @@ class StreamTransport extends BufferedAgentTransport {
           fresh.add(InboundMessage('control', m));
         }
       }
-      // Each half replaces only its own frames: the tree landing must not
-      // drop the status that landed before it, and vice versa. (A bridge that
-      // predates `exclude` answers the state pull with the tree in it too —
-      // harmless, the tree pull's answer simply supersedes those.)
       snapshotCache
-        ..removeWhere((m) => pull.carries(m.json['type']))
+        ..clear()
         ..addAll(fresh);
       if (!outbound.isClosed) {
         for (final m in fresh) {
@@ -1214,7 +1498,7 @@ class StreamTransport extends BufferedAgentTransport {
       // Leave the existing cache untouched either way.
       if (e.code != 'E_TIMEOUT') return true;
       developer.log(
-        '${pull.label} timed out after ${timeout.inMilliseconds}ms on stream '
+        'state.snapshot timed out after ${timeout.inMilliseconds}ms on stream '
         '$streamId (attempt $attempt of $_kSnapshotAttempts)',
         name: 'antgrid.relay',
       );
@@ -1224,9 +1508,7 @@ class StreamTransport extends BufferedAgentTransport {
 
   @override
   Future<void> dispose() async {
-    for (final pull in _SnapshotPull.values) {
-      _snapshotGen[pull] = (_snapshotGen[pull] ?? 0) + 1;
-    }
+    _snapshotGen++;
     failAllPending();
     clearHydrators();
     snapshotCache.clear();
@@ -1237,33 +1519,7 @@ class StreamTransport extends BufferedAgentTransport {
   }
 }
 
-/// Durable frames the state pull leaves to the tree pull. The only unbounded
-/// durable frame the bridge caches — see [StreamTransport.refreshSnapshot].
+/// Durable frames the snapshot pull leaves out: the only unbounded ones the
+/// bridge caches, each delivered by a per-checkout hydrator instead — see
+/// [StreamTransport.refreshSnapshot].
 const _kHeavyReplayTypes = <String>['tree:full'];
-
-/// The two round trips a durable-state pull is split into, by weight.
-enum _SnapshotPull {
-  /// Every durable frame but the tree: `agent:status`, `git:status`, the
-  /// handler and capability snapshots, the control plane's adverts.
-  state,
-
-  /// `tree:full` alone — every checkout's whole file tree.
-  tree;
-
-  Map<String, dynamic> get params => switch (this) {
-    state => {
-      'types': ['*'],
-      'exclude': _kHeavyReplayTypes,
-    },
-    tree => {'types': _kHeavyReplayTypes},
-  };
-
-  String get label => switch (this) {
-    state => 'state.snapshot',
-    tree => 'state.snapshot[tree]',
-  };
-
-  /// Whether a frame of [type] is this half's to replace in the cache.
-  bool carries(Object? type) =>
-      (type is String && _kHeavyReplayTypes.contains(type)) == (this == tree);
-}

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -7,12 +8,11 @@ import 'package:antgrid/services/preview_proxy_server.dart';
 
 import '../helpers/free_port.dart';
 
-TunnelHttpResponse _ok() => const TunnelHttpResponse(
+TunnelHttpResponse _ok() => TunnelHttpResponse(
   requestId: 'x',
   status: 200,
-  headers: {'content-type': 'text/plain'},
-  body: 'ok',
-  bodyEncoding: 'utf8',
+  headers: const {'content-type': 'text/plain'},
+  body: Stream.value(utf8.encode('ok')),
 );
 
 void main() {
@@ -109,8 +109,7 @@ void main() {
         requestId: 'x',
         status: 302,
         headers: {'location': 'http://localhost:$targetPort/landed'},
-        body: '',
-        bodyEncoding: 'utf8',
+        body: const Stream.empty(),
       ),
     );
     final bound = await proxy.start(allowFallback: true);
@@ -137,8 +136,7 @@ void main() {
         requestId: 'x',
         status: 302,
         headers: {'location': 'https://localhost:$port/login'},
-        body: '',
-        bodyEncoding: 'utf8',
+        body: const Stream.empty(),
       ),
     );
     final bound = await proxy.start();
@@ -155,15 +153,14 @@ void main() {
     final port = await freePort();
     final proxy = PreviewProxyServer(
       targetPort: port,
-      onRequest: (_) async => const TunnelHttpResponse(
+      onRequest: (_) async => TunnelHttpResponse(
         requestId: 'x',
         status: 200,
         headers: {'content-type': 'text/plain'},
         // A sign-in response sets the session and clears its handoff cookie in
         // one shot — both must survive to the WebView, not just the last.
         setCookies: ['session=xyz; Path=/; HttpOnly', 'csrf=123; Path=/'],
-        body: 'ok',
-        bodyEncoding: 'utf8',
+        body: Stream.value(utf8.encode('ok')),
       ),
     );
     final bound = await proxy.start();
@@ -185,7 +182,7 @@ void main() {
     final proxy = PreviewProxyServer(
       targetPort: port,
       targetScheme: 'https',
-      onRequest: (_) async => const TunnelHttpResponse(
+      onRequest: (_) async => TunnelHttpResponse(
         requestId: 'x',
         status: 200,
         headers: {'content-type': 'text/plain'},
@@ -196,8 +193,7 @@ void main() {
           '.Session=xyz; path=/; secure; httponly',
           'handoff=; path=/; Secure; SameSite=None',
         ],
-        body: 'ok',
-        bodyEncoding: 'utf8',
+        body: Stream.value(utf8.encode('ok')),
       ),
     );
     final bound = await proxy.start();
@@ -222,7 +218,7 @@ void main() {
     final proxy = PreviewProxyServer(
       targetPort: port,
       targetScheme: 'https',
-      onRequest: (_) async => const TunnelHttpResponse(
+      onRequest: (_) async => TunnelHttpResponse(
         requestId: 'x',
         status: 200,
         headers: {'content-type': 'text/plain'},
@@ -230,8 +226,7 @@ void main() {
           '__Host-bff=abc; Path=/; Secure; HttpOnly; SameSite=None',
           '__Secure-rt=def; Path=/; Secure',
         ],
-        body: 'ok',
-        bodyEncoding: 'utf8',
+        body: Stream.value(utf8.encode('ok')),
       ),
     );
     final bound = await proxy.start();
@@ -248,13 +243,12 @@ void main() {
     final port = await freePort();
     final proxy = PreviewProxyServer(
       targetPort: port,
-      onRequest: (_) async => const TunnelHttpResponse(
+      onRequest: (_) async => TunnelHttpResponse(
         requestId: 'x',
         status: 200,
         headers: {'content-type': 'text/plain'},
         setCookies: ['sid=1; Path=/; Secure'],
-        body: 'ok',
-        bodyEncoding: 'utf8',
+        body: Stream.value(utf8.encode('ok')),
       ),
     );
     final bound = await proxy.start();
@@ -317,37 +311,34 @@ void main() {
     );
   });
 
-  test(
-    'inflates a gzip-base64 body before serving it to the WebView',
-    () async {
-      final port = await freePort();
-      const source = 'body { color: red; }\n';
-      final proxy = PreviewProxyServer(
-        targetPort: port,
-        onRequest: (_) async => TunnelHttpResponse(
-          requestId: 'x',
-          status: 200,
-          headers: const {'content-type': 'text/css'},
-          body: base64Encode(gzip.encode(utf8.encode(source))),
-          bodyEncoding: kTunnelGzipEncoding,
-        ),
-      );
-      final bound = await proxy.start();
-      addTearDown(() async => proxy.stop());
-
-      final raw = await _get(bound);
-
-      expect(raw, contains(source));
-      // The WebView is handed plain bytes, so no encoding header may claim
-      // otherwise — a stale content-encoding makes WebKit gunzip twice.
-      expect(raw.toLowerCase(), isNot(contains('content-encoding')));
-    },
-  );
-
-  test('keeps the utf-8 charset shelf only stamps for a String body', () async {
+  test('serves the decoded bytes without claiming an encoding', () async {
     final port = await freePort();
-    // Non-ASCII under a charset-less text type: the case where the byte body
-    // the gzip path serves would otherwise reach the WebView as latin-1.
+    const source = 'body { color: red; }\n';
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      onRequest: (_) async => TunnelHttpResponse(
+        requestId: 'x',
+        status: 200,
+        headers: const {'content-type': 'text/css'},
+        body: Stream.value(utf8.encode(source)),
+      ),
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    final raw = await _get(bound);
+
+    expect(raw, contains(source));
+    // The WebView is handed plain bytes, so no encoding header may claim
+    // otherwise — a stale content-encoding makes WebKit gunzip twice.
+    expect(raw.toLowerCase(), isNot(contains('content-encoding')));
+  });
+
+  test('restates utf-8 for charset-less text on the byte path', () async {
+    final port = await freePort();
+    // Non-ASCII under a charset-less text type: every body is bytes now, so
+    // shelf stamps no charset of its own and this would reach the WebView as
+    // latin-1 without the restatement.
     const source = '<p>héllo wörld ☃</p>';
     final proxy = PreviewProxyServer(
       targetPort: port,
@@ -355,8 +346,7 @@ void main() {
         requestId: 'x',
         status: 200,
         headers: const {'content-type': 'text/html'},
-        body: base64Encode(gzip.encode(utf8.encode(source))),
-        bodyEncoding: kTunnelGzipEncoding,
+        body: Stream.value(utf8.encode(source)),
       ),
     );
     final bound = await proxy.start();
@@ -381,8 +371,7 @@ void main() {
         requestId: 'x',
         status: 200,
         headers: const {'content-type': 'text/html; charset=iso-8859-1'},
-        body: base64Encode(gzip.encode(utf8.encode('<p>plain</p>'))),
-        bodyEncoding: kTunnelGzipEncoding,
+        body: Stream.value(utf8.encode('<p>plain</p>')),
       ),
     );
     final bound = await proxy.start();
@@ -404,8 +393,7 @@ void main() {
         requestId: 'x',
         status: 200,
         headers: const {'content-type': 'application/wasm'},
-        body: base64Encode(gzip.encode(utf8.encode(' asm binary'))),
-        bodyEncoding: kTunnelGzipEncoding,
+        body: Stream.value(utf8.encode(' asm binary')),
       ),
     );
     final bound = await proxy.start();
@@ -415,6 +403,206 @@ void main() {
 
     expect(raw.toLowerCase(), contains('content-type: application/wasm'));
     expect(raw.toLowerCase(), isNot(contains('charset')));
+  });
+
+  // dart:io buffers an outgoing response until 8 KiB is pending or the body
+  // ends, so a slice has to clear that buffer to be observable at all. A
+  // production slice is 192 KiB raw and always does.
+  final slice = List<int>.filled(16 * 1024, 0x61);
+
+  test('streams the body as chunks arrive', () async {
+    final port = await freePort();
+    final controller = StreamController<List<int>>();
+    addTearDown(() async => controller.close());
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      onRequest: (_) async => TunnelHttpResponse(
+        requestId: 'x',
+        status: 200,
+        headers: const {'content-type': 'text/plain'},
+        body: controller.stream,
+      ),
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    final socket = await Socket.connect('localhost', bound);
+    addTearDown(() async => socket.destroy());
+    socket.write('GET / HTTP/1.1\r\nHost: localhost:$bound\r\n\r\n');
+    await socket.flush();
+
+    var received = 0;
+    final done = Completer<void>();
+    socket.cast<List<int>>().listen((bytes) {
+      received += bytes.length;
+      if (received >= slice.length && !done.isCompleted) done.complete();
+    }, onError: (_) {});
+
+    controller.add(slice);
+    // The point of the stream: the client has bytes while the body is still
+    // open, not only once it closes.
+    await done.future.timeout(const Duration(seconds: 5));
+    expect(controller.isClosed, isFalse);
+  });
+
+  // Deliberately uncaught in the proxy: dart:io must destroy the connection
+  // without the terminating chunk, so the browser sees an incomplete transfer
+  // rather than a complete-looking truncated bundle it would cache.
+  test('a body error aborts the connection without a terminating chunk',
+      () async {
+    final port = await freePort();
+    final controller = StreamController<List<int>>();
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      onRequest: (_) async => TunnelHttpResponse(
+        requestId: 'x',
+        status: 200,
+        headers: const {'content-type': 'text/plain'},
+        body: controller.stream,
+      ),
+    );
+    // shelf_io only installs its own guard when it is started from the root
+    // error zone, which a test never is, so the deliberate stream error
+    // surfaces here instead of in its log line. Binding inside a guarded zone
+    // is what puts it back where production has it.
+    final started = Completer<int>();
+    final reported = <Object>[];
+    unawaited(runZonedGuarded(() async {
+      started.complete(await proxy.start());
+    }, (error, _) => reported.add(error)));
+    final bound = await started.future;
+    addTearDown(() async => proxy.stop());
+
+    final client = HttpClient();
+    addTearDown(() => client.close(force: true));
+    final request = await client.getUrl(Uri.parse('http://localhost:$bound/'));
+    final pendingResponse = request.close();
+    controller.add(slice);
+    final response = await pendingResponse;
+
+    final reading = expectLater(
+      response.fold<int>(0, (n, chunk) => n + chunk.length),
+      throwsA(anyOf(isA<HttpException>(), isA<SocketException>())),
+    );
+    controller.addError(
+      const TunnelStreamException('x', 'chunk 2 arrived, expected 1'),
+    );
+    await controller.close();
+    await reading;
+    expect(reported, contains(isA<TunnelStreamException>()));
+  });
+
+  test('a client disconnect cancels the body stream', () async {
+    final port = await freePort();
+    final cancelled = Completer<void>();
+    final controller = StreamController<List<int>>(
+      onCancel: () {
+        if (!cancelled.isCompleted) cancelled.complete();
+      },
+    );
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      onRequest: (_) async => TunnelHttpResponse(
+        requestId: 'x',
+        status: 200,
+        headers: const {'content-type': 'text/plain'},
+        body: controller.stream,
+      ),
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    final socket = await Socket.connect('localhost', bound);
+    socket.write('GET / HTTP/1.1\r\nHost: localhost:$bound\r\n\r\n');
+    await socket.flush();
+    socket.listen((_) {}, onError: (_) {});
+    controller.add(slice);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    socket.destroy();
+
+    // dart:io only learns the socket is dead on its next write, so the cancel
+    // lags a slice.
+    for (var i = 0; i < 40 && !cancelled.isCompleted; i++) {
+      controller.add(slice);
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+    }
+    await cancelled.future.timeout(const Duration(seconds: 2));
+  });
+
+  test('set-cookie and location are rewritten off the head of a streaming '
+      'body', () async {
+    final blocker = await ServerSocket.bind('localhost', 0);
+    addTearDown(() async => blocker.close());
+    final targetPort = blocker.port;
+    final controller = StreamController<List<int>>();
+    addTearDown(() async => controller.close());
+    final proxy = PreviewProxyServer(
+      targetPort: targetPort,
+      targetScheme: 'https',
+      onRequest: (_) async => TunnelHttpResponse(
+        requestId: 'x',
+        status: 302,
+        headers: {'location': 'http://localhost:$targetPort/landed'},
+        setCookies: const ['sid=1; Path=/; Secure'],
+        // Never completes: every head rewrite must be done off the start
+        // frame alone, with no body byte to wait for.
+        body: controller.stream,
+      ),
+    );
+    final bound = await proxy.start(allowFallback: true);
+    addTearDown(() async => proxy.stop());
+
+    final socket = await Socket.connect('localhost', bound);
+    addTearDown(() async => socket.destroy());
+    socket.write('GET / HTTP/1.1\r\nHost: localhost:$bound\r\n\r\n');
+    await socket.flush();
+
+    final head = StringBuffer();
+    final gotHead = Completer<void>();
+    socket
+        .cast<List<int>>()
+        .transform(const Utf8Decoder(allowMalformed: true))
+        .listen((s) {
+          head.write(s);
+          if (head.toString().contains('\r\n\r\n') && !gotHead.isCompleted) {
+            gotHead.complete();
+          }
+        }, onError: (_) {});
+    controller.add(slice);
+    await gotHead.future.timeout(const Duration(seconds: 5));
+
+    expect(
+      head.toString(),
+      contains('location: http://localhost:$bound/landed'),
+    );
+    expect(head.toString().toLowerCase(), isNot(contains('; secure')));
+    expect(head.toString(), contains('sid=1'));
+  });
+
+  // A response the dev server sent without a content-type keeps dart:io's own
+  // default rather than gaining one from the tunnel: nothing on the byte path
+  // may name a type the origin did not.
+  test('a body with no content-type gains no tunnel-invented type', () async {
+    final port = await freePort();
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      onRequest: (_) async => TunnelHttpResponse(
+        requestId: 'x',
+        status: 200,
+        headers: const {},
+        body: Stream.value(utf8.encode('<p>hi</p>')),
+      ),
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    final raw = await _get(bound);
+
+    expect(
+      raw.toLowerCase(),
+      isNot(contains('content-type: application/octet-stream')),
+    );
+    expect(raw, contains('<p>hi</p>'));
   });
 }
 

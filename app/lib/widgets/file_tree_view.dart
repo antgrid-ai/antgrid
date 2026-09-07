@@ -129,7 +129,13 @@ class FileTreeView extends StatelessWidget {
       child: ListView.builder(
         itemCount: flatList.length,
         itemBuilder: (context, index) {
-          final (node, depth) = flatList[index];
+          final (:node, :depth, :truncationNotice) = flatList[index];
+          if (truncationNotice) {
+            return _TruncationRow(
+              key: ValueKey(('truncated', node.path)),
+              depth: depth,
+            );
+          }
           final isDirectory = node.type == FileNodeType.directory;
           return _FileTreeRow(
             // Typed, because one path can produce two rows: replacing a file
@@ -163,23 +169,36 @@ class FileTreeView extends StatelessWidget {
   }
 }
 
-/// Flatten the tree into a list of (node, depth) pairs for rendering.
+/// One rendered row. A [truncationNotice] row stands in for the entries the
+/// bridge did not send: it carries the directory that was CUT, at the depth
+/// that directory's children occupy.
+typedef _TreeRow = ({FileNode node, int depth, bool truncationNotice});
+
+/// Flatten the tree into a list of rows for rendering.
 /// When filterQuery is active, show ALL matching files regardless of
 /// directory expand state.
-List<(FileNode, int)> _flattenVisibleNodes(
+List<_TreeRow> _flattenVisibleNodes(
   FileNode root,
   Set<String> expandedPaths,
   String? filterQuery,
 ) {
-  final result = <(FileNode, int)>[];
+  final result = <_TreeRow>[];
   final query = filterQuery?.toLowerCase().trim();
 
   if (query != null && query.isNotEmpty) {
+    // A filter walks the whole tree, so it can only search what arrived; the
+    // notice rows below are anchored to a directory row the filter does not
+    // render, and there is nowhere honest to put them here.
     _flattenFiltered(root, 0, query, result);
   } else {
     // Root node itself is the project directory; show its children at depth 0
     for (final child in root.children) {
       _flattenNormal(child, 0, expandedPaths, result);
+    }
+    // The root has no row of its own to hang this off, and it is the directory
+    // the node budget cuts first on a wide repo.
+    if (root.truncated) {
+      result.add((node: root, depth: 0, truncationNotice: true));
     }
   }
 
@@ -190,14 +209,18 @@ void _flattenNormal(
   FileNode node,
   int depth,
   Set<String> expandedPaths,
-  List<(FileNode, int)> result,
+  List<_TreeRow> result,
 ) {
-  result.add((node, depth));
+  result.add((node: node, depth: depth, truncationNotice: false));
 
   if (node.type == FileNodeType.directory &&
       expandedPaths.contains(node.path)) {
     for (final child in node.children) {
       _flattenNormal(child, depth + 1, expandedPaths, result);
+    }
+    // After the children, where the missing ones would have been.
+    if (node.truncated) {
+      result.add((node: node, depth: depth + 1, truncationNotice: true));
     }
   }
 }
@@ -206,11 +229,11 @@ void _flattenFiltered(
   FileNode node,
   int depth,
   String query,
-  List<(FileNode, int)> result,
+  List<_TreeRow> result,
 ) {
   if (node.type == FileNodeType.file) {
     if (node.name.toLowerCase().contains(query)) {
-      result.add((node, 0));
+      result.add((node: node, depth: 0, truncationNotice: false));
     }
     return;
   }
@@ -244,12 +267,12 @@ void _flattenFiltered(
 ///
 /// [collapsedPaths] hides a folder's descendants without dropping the folder
 /// itself, which then carries the rollup of what it hides.
-List<(FileNode, int)> _flattenChangesOnly(
+List<_TreeRow> _flattenChangesOnly(
   Map<String, List<GitFileStatusEntry>> entriesByPath,
   Set<String> dirsWithConflicts,
   Set<String> collapsedPaths,
 ) {
-  final result = <(FileNode, int)>[];
+  final result = <_TreeRow>[];
 
   bool holdsConflict(FileNode node) => node.type == FileNodeType.directory
       ? dirsWithConflicts.contains(node.path)
@@ -264,7 +287,7 @@ List<(FileNode, int)> _flattenChangesOnly(
       ...node.children.where((c) => !holdsConflict(c)),
     ];
     for (final child in children) {
-      result.add((child, depth));
+      result.add((node: child, depth: depth, truncationNotice: false));
       if (child.type == FileNodeType.directory &&
           !collapsedPaths.contains(child.path)) {
         walk(child, depth + 1);
@@ -363,6 +386,47 @@ List<GitFileStatusEntry> _descendantEntries(
 
   walk(dir);
   return out;
+}
+
+/// Stands in for entries the bridge never sent. Its directory's listing stopped
+/// at the walk's node budget or its depth cap, so what is above this row is a
+/// prefix of that directory, not the whole of it — without a row saying so the
+/// explorer renders a partial repo that looks complete.
+///
+/// No count: the bridge reports only THAT it cut, and deriving a number from
+/// the entries it skipped would count the ignored ones it never intended to
+/// send.
+class _TruncationRow extends StatelessWidget {
+  final int depth;
+
+  const _TruncationRow({super.key, required this.depth});
+
+  @override
+  Widget build(BuildContext context) {
+    return AbListRow(
+      density: AbRowDensity.sm,
+      leading: Padding(
+        padding: EdgeInsets.only(left: depth * AbTokens.space16),
+        child: Text(
+          '\u22ef ',
+          style: TextStyle(
+            fontSize: AbTokens.fontXxs,
+            color: context.antgrid.textMuted,
+          ),
+        ),
+      ),
+      // Sans, not the mono every other row uses: this is a notice about the
+      // listing, not an entry in it.
+      title: Text(
+        'more items not shown',
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontXs,
+          color: context.antgrid.textMuted,
+        ),
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
 }
 
 /// One row of the tree.

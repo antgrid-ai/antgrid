@@ -6,9 +6,11 @@
 // and stop retrying once the reply lands, once the failure is one a retry
 // cannot change, or once the transport is gone.
 //
-// It is also two pulls, split by weight: the file tree — the one unbounded
-// frame — travels in a round trip of its own, so a slow or lost tree can cost
-// the explorer but never the terminal's status.
+// It also leaves the file tree out — the one unbounded frame — and does not
+// pull it in a round trip of its own either: the per-checkout hydrators ask
+// for it, and a second carrier sent the same megabytes again on every connect,
+// enough on a slow uplink to starve the bridge's relay pongs and drop the
+// socket the pull had just come up on.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -41,7 +43,6 @@ void main() {
       machineDeviceId: 'machine-1',
       handshaker: handshaker,
       snapshotTimeout: _baseTimeout,
-      treeSnapshotTimeout: _baseTimeout,
     );
     session.start();
     await session.ensureEstablished();
@@ -187,7 +188,7 @@ void main() {
     expect(await snapshotRequestIds(), hasLength(1));
   });
 
-  group('the pull is split by weight', () {
+  group('the tree is left to the hydrators', () {
     const stream = 's-42';
 
     Map<String, dynamic> reply(
@@ -210,86 +211,50 @@ void main() {
       'root': <String, Object?>{},
     };
 
-    test('a project stream asks for the tree in a round trip of its own; the '
-        'control plane, which has none, does not', () async {
+    test('a project stream pulls the durable state with the tree excluded, '
+        'and never asks for the tree in a round trip of its own', () async {
       session.streamFor(kControlStreamId);
       session.streamFor(stream);
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
       final sent = await snapshotRequests(stream: stream);
-      expect(sent, hasLength(2));
-      final state = sent.where((r) => !isTreePull(r.params)).single;
-      expect(state.params, {
+      expect(sent, hasLength(1));
+      expect(sent.single.params, {
         'types': ['*'],
         'exclude': ['tree:full'],
       });
-      expect(sent.where((r) => isTreePull(r.params)), hasLength(1));
+      await injectControl(reply(sent.single.id, [status]), stream: stream);
 
-      // The control transport pulled state alone.
+      // Nothing follows the landed pull — in particular no tree pull on the
+      // longer cadence the tree used to get.
+      await Future<void>.delayed(_baseTimeout * 9);
+      final later = await snapshotRequests(stream: stream);
+      expect(later, hasLength(1));
+      expect(later.where((r) => isTreePull(r.params)), isEmpty);
+
+      // The control plane's pull (unanswered here, so it ran its chain) never
+      // asked for the tree either.
       final control = await snapshotRequests();
-      expect(control, hasLength(1));
-      expect(isTreePull(control.single.params), isFalse);
+      expect(control, isNotEmpty);
+      expect(control.where((r) => isTreePull(r.params)), isEmpty);
     });
 
-    test('the status lands, and stays, whatever the tree does', () async {
+    test('a tree an older bridge folds into the reply is delivered and cached '
+        'like any other frame', () async {
       final transport = session.streamFor(stream);
       final seen = <String>[];
       transport.messages.listen((m) => seen.add(m.json['type'] as String));
       await Future<void>.delayed(const Duration(milliseconds: 10));
       final sent = await snapshotRequests(stream: stream);
-      final stateId = sent.where((r) => !isTreePull(r.params)).single.id;
-      final treeId = sent.where((r) => isTreePull(r.params)).single.id;
-
-      await injectControl(reply(stateId, [status]), stream: stream);
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-      expect(seen, ['agent:status'], reason: 'no waiting on the tree');
-
-      await injectControl(reply(treeId, [tree]), stream: stream);
+      // A bridge that predates `exclude` answers with the tree in it too.
+      await injectControl(reply(sent.single.id, [status, tree]), stream: stream);
       await Future<void>.delayed(const Duration(milliseconds: 10));
       expect(seen, ['agent:status', 'tree:full']);
 
-      // A late subscriber is served both halves from the cache: the tree
-      // landing replaced only the tree.
       final replayed = <String>[];
       transport.messages.listen((m) => replayed.add(m.json['type'] as String));
       await Future<void>.delayed(Duration.zero);
       expect(replayed, unorderedEquals(['agent:status', 'tree:full']));
-    });
-
-    test(
-      'a slow tree is retried alone, and never re-asks for the status',
-      () async {
-        session.streamFor(stream);
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-        final first = await snapshotRequests(stream: stream);
-        final stateId = first.where((r) => !isTreePull(r.params)).single.id;
-        await injectControl(reply(stateId, [status]), stream: stream);
-
-        // Past the tree's first wait: a second tree request, no second state
-        // one.
-        await Future<void>.delayed(_baseTimeout);
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-        final sent = await snapshotRequests(stream: stream);
-        expect(sent.where((r) => isTreePull(r.params)), hasLength(2));
-        expect(sent.where((r) => !isTreePull(r.params)), hasLength(1));
-      },
-    );
-
-    test('tree timeouts never force a rekey', () async {
-      session.streamFor(stream);
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-      final stateId = (await snapshotRequests(
-        stream: stream,
-      )).where((r) => !isTreePull(r.params)).single.id;
-      await injectControl(reply(stateId, [status]), stream: stream);
-
-      // Every tree attempt times out: waits of 1x, 2x, 4x the base.
-      await Future<void>.delayed(_baseTimeout * 9);
-      final sent = await snapshotRequests(stream: stream);
-      expect(sent.where((r) => isTreePull(r.params)), hasLength(3));
-      // A rekey would re-establish and start a fresh state pull on every
-      // stream — the one state request is the proof none happened.
-      expect(sent.where((r) => !isTreePull(r.params)), hasLength(1));
     });
   });
 }

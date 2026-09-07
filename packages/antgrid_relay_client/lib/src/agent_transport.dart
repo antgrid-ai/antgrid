@@ -56,6 +56,11 @@ abstract class AgentTransport {
 
   /// Send a JSON-encodable message on the named channel.
   /// Defaults to `control`; preview/HTTP-tunnel callers pass `preview`.
+  ///
+  /// Completes when the message has been handed to the socket, or dropped —
+  /// never when a peer has received it. A relay transport writes it behind
+  /// whatever is already outbound on that channel, so a caller that cannot
+  /// wait out the traffic ahead of it must impose its own timeout.
   Future<void> send(Map<String, dynamic> message, {String channel = 'control'});
 
   /// Issue a request/response RPC against the agent. Returns the decoded

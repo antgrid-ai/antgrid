@@ -26,7 +26,10 @@ function makeTransport() {
   const transport: StreamMuxTransport = {
     openStream: (id) => opened.push(id),
     closeStream: (id) => closed.push(id),
-    sendEnvelope: (id, msg, channel) => sent.push({ streamId: id, msg, channel }),
+    sendEnvelope: (id, msg, channel) => {
+      sent.push({ streamId: id, msg, channel });
+      return Promise.resolve("sent");
+    },
   };
   return { transport, opened, closed, sent };
 }
@@ -60,7 +63,7 @@ describe("StreamMux (unit, stub transport)", () => {
     expect(sent).toEqual([{ streamId: handle.streamId, msg, channel: "control" }]);
   });
 
-  test("mayDeliver gates outbound bus AND tunnel frames, and is re-read on every send", () => {
+  test("mayDeliver gates outbound bus AND tunnel frames, and is re-read on every send", async () => {
     // The outbound half of the machine mobile-access gate. Read live, not
     // captured: flipping the switch back on must resume the SAME stream — the
     // whole point of gating at the send rather than detaching.
@@ -71,16 +74,19 @@ describe("StreamMux (unit, stub transport)", () => {
     const handle = mux.attach(bus, { mayDeliver: () => allowed });
 
     bus.publish(createMessage("pong", {}), "control");
-    handle.sendTunnel({ t: "tunnel:http-response" });
+    // "gated", NOT "dropped": the one consumer that awaits this must be able to
+    // tell a closed machine switch from a cleared queue — a WS tunnel survives
+    // the first and not the second.
+    expect(await handle.sendTunnel({ t: "tunnel:http-start" })).toBe("gated");
     expect(sent).toEqual([]);
 
     allowed = true;
     const msg = createMessage("pong", {});
     bus.publish(msg, "control");
-    handle.sendTunnel({ t: "tunnel:http-response" });
+    expect(await handle.sendTunnel({ t: "tunnel:http-start" })).toBe("sent");
     expect(sent).toEqual([
       { streamId: handle.streamId, msg, channel: "control" },
-      { streamId: handle.streamId, msg: { t: "tunnel:http-response" }, channel: "preview" },
+      { streamId: handle.streamId, msg: { t: "tunnel:http-start" }, channel: "preview" },
     ]);
   });
 

@@ -12,6 +12,12 @@ class FileNode {
   final String? extension;
   final List<FileNode> children;
 
+  /// The bridge stopped listing this directory early — [children] is a
+  /// complete, ordered prefix of it, not the whole of it. Set by the node
+  /// budget and the depth cap in the bridge's file-tree walk; it must survive
+  /// every rebuild below, or a tree:update silently repairs a partial tree.
+  final bool truncated;
+
   const FileNode({
     required this.name,
     required this.path,
@@ -19,6 +25,7 @@ class FileNode {
     this.size,
     this.extension,
     this.children = const [],
+    this.truncated = false,
   });
 
   static FileNode? fromJson(Map<String, dynamic> json) {
@@ -69,6 +76,7 @@ class FileNode {
       size: json['size'] as int?,
       extension: json['extension'] as String?,
       children: children,
+      truncated: json['truncated'] == true,
     );
   }
 }
