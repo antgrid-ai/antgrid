@@ -80,14 +80,17 @@ describe("RelayClient send scheduler", () => {
     (client as any).lastSealedRecvAt = 0;
     (client as any).checkLiveness();
 
-    expect(sent).toHaveLength(1);
-    expect(decode(sent[0]!)).toEqual({ channel: "control", text: JSON.stringify({ type: "ping" }) });
+    // A tick writes both channels' credits beside the ping; every one of them
+    // is a session frame, so all of them precede the held queue.
+    const session = sent.map((f) => decode(f));
+    expect(session.map((d) => d.channel)).toEqual(session.map(() => "control"));
+    expect(session.map((d) => JSON.parse(d.text).type)).toContain("ping");
 
     s.hold = false;
     (client as any).drain();
 
-    expect(sent).toHaveLength(4);
-    const drained = sent.slice(1).map((f) => decode(f));
+    expect(sent).toHaveLength(session.length + 3);
+    const drained = sent.slice(session.length).map((f) => decode(f));
     expect(drained.map((d) => d.channel)).toEqual(["preview", "preview", "preview"]);
     expect(drained.map((d) => JSON.parse(d.text).m.requestId)).toEqual(["r1", "r2", "r3"]);
   });

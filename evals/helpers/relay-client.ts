@@ -21,6 +21,7 @@ import {
   normalizeRelayHost,
   TRANSFER_TIMEOUT_MS,
   GLOBAL_REASSEMBLY_BUDGET,
+  CREDIT_BATCH_BYTES,
 } from "antgrid-wire";
 import { FragReassembler } from "../../bridge/src/frag-reassembler";
 
@@ -147,6 +148,15 @@ export class RelayClient {
    *  out sealed pongs, so the "swallow pongs" lever lives at the endpoint. */
   private swallowPongs = false;
   private rekeyInFlight = false;
+
+  // --- Per-channel flow control (receiver half; see docs/protocol/e2e-handshake.md §8.8) ---
+  // Cumulative sealed payload bytes taken off each channel since this session
+  // was established, and how much of that the agent has been told about. An
+  // eval client that never credits wedges the agent's window after one
+  // CHANNEL_WINDOW_BYTES, with liveness still green.
+  private rxConsumed: Record<"control" | "preview", number> = { control: 0, preview: 0 };
+  private rxCredited: Record<"control" | "preview", number> = { control: 0, preview: 0 };
+  private creditsPaused = false;
 
   private fragReassembler = new FragReassembler({
     timeoutMs: TRANSFER_TIMEOUT_MS,
@@ -404,6 +414,7 @@ export class RelayClient {
     if (this.established) {
       const pt = this.established.transport.open(payload);
       if (pt !== null) {
+        this.noteConsumed(channel, payload.length);
         this.onSealedPlaintext(pt, channel, false);
         return;
       }
@@ -415,9 +426,32 @@ export class RelayClient {
         return;
       }
     }
+    // The agent charged these bytes to its window the moment it wrote them, so
+    // a frame nothing could open is still consumed — leaving it uncounted would
+    // shrink that window for the rest of the session.
+    if (this.established) this.noteConsumed(channel, payload.length);
     // Undecryptable now: most likely a candidate agent-ready racing ahead of key
     // derivation — buffer for replay once the transport is installed.
     this.pendingEncrypted.push(new Uint8Array(payload));
+  }
+
+  private noteConsumed(channel: "control" | "preview", bytes: number): void {
+    this.rxConsumed[channel] += bytes;
+    if (this.rxConsumed[channel] - this.rxCredited[channel] >= CREDIT_BATCH_BYTES) this.sendCredit(channel);
+  }
+
+  /** `consumed` is cumulative, so a lost or reordered credit costs nothing —
+   *  the next one carries the whole total. */
+  private sendCredit(channel: "control" | "preview"): void {
+    const ctx = this.established;
+    if (!ctx || !this._pairedPeerId || this.creditsPaused) return;
+    this.rxCredited[channel] = this.rxConsumed[channel];
+    this.sendSealedFrame({ type: "credit", channel, consumed: this.rxConsumed[channel] }, ctx.transport, "control");
+  }
+
+  private resetRxFlow(): void {
+    this.rxConsumed = { control: 0, preview: 0 };
+    this.rxCredited = { control: 0, preview: 0 };
   }
 
   private onSealedPlaintext(plaintext: string, channel: "control" | "preview", fromPending: boolean): void {
@@ -460,14 +494,29 @@ export class RelayClient {
           this.dropEstablishedAttemptId = null;
           return;
         }
+        // Counters are per session on both sides: the agent zeroes its window
+        // as it sends this, so anything carried over would credit bytes it no
+        // longer has charged.
+        this.resetRxFlow();
         this.deliver(obj);
         return;
       case "ping": {
         // Answer sealed under whichever context is currently confirmed.
         const ctx = this.established;
-        if (ctx) this.sendSealedFrame({ type: "pong" }, ctx.transport, "control");
+        if (ctx) {
+          this.sendSealedFrame({ type: "pong" }, ctx.transport, "control");
+          // The agent's liveness tick is this client's only clock: re-sending
+          // both cumulative credits here is what heals one the relay dropped,
+          // for two ~60-byte frames per tick.
+          this.sendCredit("control");
+          this.sendCredit("preview");
+        }
         return;
       }
+      case "credit":
+        // The agent credits this client's own sends. Nothing here writes more
+        // than a window ahead of a reply, so there is no window to release.
+        return;
       case "pong":
         this.missedPongs = 0;
         return;
@@ -971,6 +1020,26 @@ export class RelayClient {
    *  phone-side liveness starves and rekeys. */
   setSwallowPongs(v: boolean): void {
     this.swallowPongs = v;
+  }
+
+  /** Test lever: while true this client emits no `credit` frame, so the agent's
+   *  send window on a channel closes after CHANNEL_WINDOW_BYTES and stays
+   *  closed. Liveness is unaffected — session frames bypass the gate — so the
+   *  session survives the stall. Releasing flushes both cumulative totals at
+   *  once, which is all the agent needs to resume. */
+  setCreditsPaused(v: boolean): void {
+    this.creditsPaused = v;
+    if (!v) {
+      this.sendCredit("control");
+      this.sendCredit("preview");
+    }
+  }
+
+  /** Cumulative sealed payload bytes taken off `channel` since this session was
+   *  established — the receiver-side view of what the agent charged to its
+   *  window. */
+  consumedBytes(channel: "control" | "preview"): number {
+    return this.rxConsumed[channel];
   }
 
   // --- Waiters ---

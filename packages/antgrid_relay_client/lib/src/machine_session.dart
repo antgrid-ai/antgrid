@@ -7,6 +7,7 @@ import 'agent_transport.dart';
 import 'buffered_agent_transport.dart';
 import 'e2e/key_schedule.dart';
 import 'e2e/transport.dart';
+import 'flow.dart';
 import 'frag.dart';
 import 'frame.dart';
 import 'models/connection_state.dart';
@@ -87,6 +88,11 @@ class MachineSession {
   /// real interval.
   final Duration pingSilence;
 
+  /// Bytes consumed on a channel between the credits this side volunteers. A
+  /// tick credits both channels regardless, so this only decides how promptly a
+  /// bulk transfer's window reopens.
+  final int creditBatchBytes;
+
   MachineSession({
     required this.relay,
     required this.machineDeviceId,
@@ -96,9 +102,10 @@ class MachineSession {
     this.pingSilence = const Duration(seconds: kPingSilenceSeconds),
     int? channelWindowBytes,
     int? socketInflightBytes,
+    this.creditBatchBytes = kCreditBatchBytes,
   }) : _handshaker = handshaker,
-       _channelWindowBytes = channelWindowBytes,
-       _socketInflightBytes = socketInflightBytes {
+       _channelWindowBytes = channelWindowBytes ?? kChannelWindowBytes,
+       _socketInflightBytes = socketInflightBytes ?? kSocketInflightBytes {
     // [ready] is observation-optional: failReady/dispose may completeError
     // before any awaiter attaches (see the getter doc). ignore() pre-registers
     // a swallowing listener so that never trips the unhandled-error zone hook;
@@ -113,6 +120,7 @@ class MachineSession {
   StreamSubscription<IncomingRouteMessage>? _msgSub;
   StreamSubscription<AppState>? _stateSub;
   StreamSubscription<bool>? _presenceSub;
+  StreamSubscription<ErrorMessage>? _errorSub;
   Timer? _fragSweep;
   Timer? _livenessTimer;
 
@@ -149,9 +157,15 @@ class MachineSession {
   final Map<String, Future<void>> _inboundTails = {};
 
   /// Sealed bytes allowed in flight per channel and across the socket before
-  /// the agent must credit them. Null on both leaves the queue ungated.
-  final int? _channelWindowBytes;
-  final int? _socketInflightBytes;
+  /// the agent must credit them.
+  final int _channelWindowBytes;
+  final int _socketInflightBytes;
+
+  /// Cumulative sealed payload bytes received on each channel this session, and
+  /// how much of that has already been credited back to the agent. Both reset at
+  /// establishment, which is the same instant the agent's send windows reset.
+  final Map<String, int> _consumed = {'control': 0, 'preview': 0};
+  final Map<String, int> _creditSent = {'control': 0, 'preview': 0};
 
   /// Every outbound app frame passes through here: one drain loop, sealed at
   /// dequeue, control ahead of preview. Session frames are written directly and
@@ -261,6 +275,7 @@ class MachineSession {
     _msgSub = relay.messageStream.listen(_onRouted);
     _stateSub = relay.stateStream.listen(_onState);
     _presenceSub = relay.peerPresenceStream.listen(_onPresence);
+    _errorSub = relay.errorStream.listen(_onRelayError);
     _fragSweep = Timer.periodic(
       const Duration(seconds: 2),
       (_) => _reassembler.sweep(),
@@ -553,6 +568,19 @@ class MachineSession {
     }
   }
 
+  /// A relay error naming a channel and a byte count is a report that a frame
+  /// this session had already charged to its send window was discarded before
+  /// the agent saw it. Those bytes can never turn up in a credit, so without
+  /// giving them back every drop shrinks that channel's window for the rest of
+  /// the session. Errors that name no frame are somebody else's business — the
+  /// app fans them out to the streams through [noteFramesDropped].
+  void _onRelayError(ErrorMessage e) {
+    final channel = e.channel;
+    final bytes = e.bytes;
+    if (bytes == null || (channel != 'control' && channel != 'preview')) return;
+    _scheduler.uncharge(channel!, bytes);
+  }
+
   // --- socket / presence transitions ---------------------------------------
 
   /// Session keys are per-CONNECTION, so only the socket dying invalidates
@@ -613,6 +641,7 @@ class MachineSession {
         detail: {'why': 'session-down'},
       );
     }
+    _resetRxFlow();
     // Re-arm only from the completed state: a second blip before the first
     // establishment would otherwise orphan whoever is already awaiting.
     if (_keysReady.isCompleted) _armKeysReady();
@@ -682,12 +711,53 @@ class MachineSession {
     // direction — where dropping them would strand every pending RPC until its
     // timeout.
     _scheduler.resetWindows();
+    _resetRxFlow();
     _scheduler.kick();
     // Re-pull durable state on every (re)establish so late subscribers
     // (a ControlPlaneClient, a just-bound project stream) replay it.
     for (final s in _streams.values) {
       unawaited(s.refreshSnapshot());
     }
+  }
+
+  // --- inbound flow control -------------------------------------------------
+
+  void _resetRxFlow() {
+    for (final ch in const ['control', 'preview']) {
+      _consumed[ch] = 0;
+      _creditSent[ch] = 0;
+    }
+  }
+
+  /// Count sealed payload bytes the agent charged to its window. Every kind-0
+  /// frame that arrives on a live session counts, whether or not it decrypted:
+  /// the agent charged it either way, so skipping the ones that failed would
+  /// leak its window a frame at a time and let a single corrupt frame wedge a
+  /// channel for the session.
+  void _noteConsumed(String channel, int bytes) {
+    final total = _consumed[channel];
+    // A channel this session keeps no window for; the agent keeps none either.
+    if (total == null) return;
+    _consumed[channel] = total + bytes;
+    if (total + bytes - _creditSent[channel]! >= creditBatchBytes) {
+      _sendCredit(channel);
+    }
+  }
+
+  /// Hand the agent this channel's cumulative consumed count. Cumulative rather
+  /// than incremental so a credit lost in transit costs nothing — the next one
+  /// carries the same ground truth.
+  void _sendCredit(String channel) {
+    if (!_established) return;
+    final consumed = _consumed[channel]!;
+    _creditSent[channel] = consumed;
+    unawaited(
+      _sendSessionFrame({
+        'type': 'credit',
+        'channel': channel,
+        'consumed': consumed,
+      }).catchError((_) {}),
+    );
   }
 
   // --- liveness -------------------------------------------------------------
@@ -704,7 +774,19 @@ class MachineSession {
   }
 
   void _checkLiveness() {
-    if (_disposed || !_established || _handshakeInFlight) return;
+    if (_disposed || !_established) return;
+    // Unconditional, both channels, every tick. A credit the relay discarded
+    // would otherwise wedge the agent's window until the session ended, and
+    // there is no state here that could go stale: the count is cumulative. It
+    // doubles as the proof of life the agent's own liveness timers read, which
+    // on a slow uplink is what keeps a session up while bulk drains.
+    for (final ch in const ['control', 'preview']) {
+      _sendCredit(ch);
+    }
+    // The flush above is deliberately ahead of this: a rekey keeps the old keys
+    // live until the new ones confirm, so skipping it would stretch the
+    // lost-credit floor by a whole handshake.
+    if (_handshakeInFlight) return;
     final silentFor = DateTime.now().difference(_lastRecv);
     if (silentFor < pingSilence) return;
     if (_missedPongs >= kMaxMissedPongs) {
@@ -804,10 +886,25 @@ class MachineSession {
     // path is chained through `_inboundTails` and is genuinely async, so a
     // field would start mis-attributing under any concurrency.
     final frameId = _frameId(msg.payload, msg.kind);
-    final plaintext = await E2eTransportDart(
+    _noteConsumed(msg.channel, msg.payload.length);
+    var plaintext = await E2eTransportDart(
       sendKey: keys.p2a,
       recvKey: keys.a2p,
     ).open(msg.payload);
+    if (plaintext == null) {
+      final current = _keys;
+      if (current != null && !identical(current, keys)) {
+        // This chain captured the keys as the frame arrived and a rekey swaps
+        // them several awaits later, so everything the agent writes right
+        // behind `established` — the adverts a fresh session needs first — is
+        // sealed under the new set and would otherwise be read under the
+        // retired one.
+        plaintext = await E2eTransportDart(
+          sendKey: current.p2a,
+          recvKey: current.a2p,
+        ).open(msg.payload);
+      }
+    }
     // A candidate-key handshake frame during rekey (agent-ready/established) or
     // garbage → decrypt-or-drop.
     if (plaintext == null) {
@@ -851,7 +948,7 @@ class MachineSession {
     // session/liveness frame; an `m` field is stream/app traffic.
     if (type is String) {
       _annotate(frameId, msgType: type);
-      _handleSessionFrame(type);
+      _handleSessionFrame(json);
       return;
     }
     if (!json.containsKey('m')) {
@@ -1052,13 +1149,30 @@ class MachineSession {
     }
   }
 
-  void _handleSessionFrame(String type) {
-    switch (type) {
+  /// Takes the whole decoded frame, not just its type: `credit` carries fields.
+  void _handleSessionFrame(Map<String, dynamic> json) {
+    switch (json['type']) {
       case 'ping':
         unawaited(_sendSessionFrame({'type': 'pong'}).catchError((_) {}));
         break;
       case 'pong':
         _missedPongs = 0;
+        break;
+      case 'credit':
+        // Hand-validated, like every other sealed session frame: these are bare
+        // objects that never pass through the envelope schemas.
+        final channel = json['channel'];
+        final consumed = json['consumed'];
+        if ((channel != 'control' && channel != 'preview') ||
+            consumed is! int ||
+            consumed < 0) {
+          developer.log(
+            'dropping malformed credit frame',
+            name: 'antgrid.relay',
+          );
+          break;
+        }
+        _scheduler.credit(channel as String, consumed);
         break;
       case 'session-takeover':
         // The agent is switching to another device and is about to drop our
@@ -1085,6 +1199,11 @@ class MachineSession {
       recvKey: keys.a2p,
     ).seal(jsonEncode(obj));
     relay.sendMessage(machineDeviceId, 'control', ct);
+    // Exempt from the GATE, never from the accounting: a relay drop report
+    // names only a channel and a byte count, so a frame written without being
+    // charged would have its report give back bytes some other frame is still
+    // holding, and the window would grow past what the agent can absorb.
+    _scheduler.charge('control', ct.length);
     // Liveness frames are the cheapest signal that a session is alive at all —
     // a capture where ping goes out and pong never comes back is the whole
     // diagnosis for a silently dead socket.
@@ -1099,6 +1218,7 @@ class MachineSession {
     await _msgSub?.cancel();
     await _stateSub?.cancel();
     await _presenceSub?.cancel();
+    await _errorSub?.cancel();
     for (final s in List<StreamTransport>.of(_streams.values)) {
       await s.dispose();
     }

@@ -25,6 +25,8 @@ import {
   buildHelloSigBody,
   normalizeRelayHost,
   CONTROL_STREAM_ID,
+  CREDIT_BATCH_BYTES,
+  WINDOW_STALL_WARN_MS,
   type HelloMessage,
   type RouteHeader,
 } from "antgrid-wire";
@@ -122,6 +124,9 @@ interface RateLimitBurst {
   errors: number;
   timer: ReturnType<typeof setTimeout>;
   outboundAtOnset: string;
+  /** The relay error code that opened the burst, so the summary says which
+   *  ceiling was hit (rate limiter vs recipient backpressure). */
+  code: string;
 }
 
 /** The current E2E session (confirmed keys) or a half-open candidate attempt. */
@@ -250,6 +255,14 @@ export class RelayClient {
    *  with `Object.create(prototype)`, where class-field initialisers never run.
    *  Both constructors install it through {@link initSendScheduler}. */
   private scheduler!: SendScheduler;
+  /** Inbound half of the credit windows: cumulative sealed payload bytes this
+   *  side has consumed per channel, and how much of that has been credited
+   *  back to the peer. Installed with the scheduler for the same reason. */
+  private rxFlow!: { consumed: Record<Channel, number>; credited: Record<Channel, number> };
+  /** Consumed bytes between byte-triggered credits; a test seam shrinks it. */
+  private creditBatchBytes!: number;
+  /** One stall log per stalled channel, cleared when a credit advances. */
+  private stallWarned!: Partial<Record<Channel, true>>;
   private fragSweep: ReturnType<typeof setInterval> | null = null;
   private outboundFrameDiagnostics: OutboundFrameDiagnostic[] = [];
   private rateLimitBurst: RateLimitBurst | null = null;
@@ -355,6 +368,9 @@ export class RelayClient {
    * moment, not the one that was live when the caller handed it over.
    */
   private initSendScheduler(): void {
+    this.stallWarned = {};
+    this.creditBatchBytes = CREDIT_BATCH_BYTES;
+    this.resetRxFlow();
     this.scheduler = new SendScheduler({
       send: (f) => {
         const est = this.established;
@@ -375,7 +391,60 @@ export class RelayClient {
 
   /** The single place a queued frame reaches the wire. */
   private drain(): void {
-    this.scheduler.drain();
+    if (this.scheduler.drain() === "blocked") this.noteWindowStall();
+  }
+
+  /** A peer that stops crediting is alive and silent, which every other
+   *  observable reads as a healthy socket. Nothing was dropped, so this is a
+   *  log and not a netwatch record; once per stall so a wedged channel does
+   *  not bury the rest of the log. */
+  private noteWindowStall(): void {
+    const now = Date.now();
+    for (const ch of ["control", "preview"] as const) {
+      const since = this.scheduler.blockedSince[ch];
+      if (since === undefined || now - since < WINDOW_STALL_WARN_MS) continue;
+      if (this.stallWarned[ch]) continue;
+      this.stallWarned[ch] = true;
+      const queued = this.scheduler.queued(ch);
+      log.warn(
+        "Send gate stalled on %s for %ds: unacked=%d totalUnacked=%d queued=%d frame(s)/%d bytes",
+        ch, Math.round((now - since) / 1000), this.scheduler.unacked(ch),
+        this.scheduler.totalUnacked(), queued.frames, queued.bytes,
+      );
+    }
+  }
+
+  /** A new session forgets both halves of the accounting, the stall flags
+   *  included: a flag carried across would suppress the first real stall
+   *  warning of the session that follows. */
+  private resetRxFlow(): void {
+    this.stallWarned = {};
+    this.rxFlow = {
+      consumed: { control: 0, preview: 0 },
+      credited: { control: 0, preview: 0 },
+    };
+  }
+
+  /** Count what the peer charged its window for. Credits go out in batches so
+   *  a busy channel costs one small frame per {@link creditBatchBytes} rather
+   *  than one per received frame. */
+  private noteConsumed(channel: Channel, bytes: number): void {
+    this.rxFlow.consumed[channel] += bytes;
+    if (this.rxFlow.consumed[channel] - this.rxFlow.credited[channel] >= this.creditBatchBytes) {
+      this.sendCredit(channel);
+    }
+  }
+
+  /** Cumulative, so a credit lost in transit costs nothing: the next one
+   *  carries the same ground truth and releases the whole backlog. */
+  private sendCredit(channel: Channel): void {
+    const est = this.established;
+    if (!est) return;
+    this.rxFlow.credited[channel] = this.rxFlow.consumed[channel];
+    this.sendSessionFrame(
+      { type: "credit", channel, consumed: this.rxFlow.consumed[channel] },
+      est.transport,
+    );
   }
 
   private recordQueueDrop(reason: string, frames: QueuedAppFrame[]): void {
@@ -666,7 +735,7 @@ export class RelayClient {
     }
   }
 
-  private handleErrorFrame(msg: { code: string; message: string; retryable: boolean; ref?: string; serverTime?: string }): void {
+  private handleErrorFrame(msg: { code: string; message: string; retryable: boolean; ref?: string; serverTime?: string; channel?: string; bytes?: number }): void {
     // A stream-open rejection (ref === a live streamId: STREAM_LIMIT_EXCEEDED
     // from a current relay, or the retired SESSION_LIMIT_EXCEEDED from an older
     // one): the socket and every other stream stay live, so it
@@ -677,8 +746,16 @@ export class RelayClient {
     // Only socket-affecting errors decide reconnect on the next close.
     this.lastError = { code: msg.code, retryable: msg.retryable };
 
-    if (msg.code === "MESSAGE_RATE_LIMITED") {
-      this.handleMessageRateLimited(msg.message);
+    // The relay discarded a frame this side already charged its window for.
+    // Those bytes can never reach the peer's consumed total, so without the
+    // un-charge every drop shrinks that channel for the rest of the session.
+    if ((msg.channel === "control" || msg.channel === "preview") && typeof msg.bytes === "number") {
+      this.scheduler.uncharge(msg.channel, msg.bytes);
+      this.drain();
+    }
+
+    if (msg.code === "MESSAGE_RATE_LIMITED" || msg.code === "ROUTE_FAILED") {
+      this.handleDroppedFrameError(msg.code, msg.message);
       return;
     }
 
@@ -798,9 +875,12 @@ export class RelayClient {
     // Make-before-break: at most two live receive contexts. Try the established
     // session first; during a pending rekey also try the candidate keys so the
     // new attempt's app:ready can be opened.
-    if (this.established) {
-      const pt = this.established.transport.open(payload);
+    const est = this.established;
+    const sealedBytes = bytes ?? payload.length;
+    if (est) {
+      const pt = est.transport.open(payload);
       if (pt !== null) {
+        this.noteConsumed(channel, sealedBytes);
         this.recordSealedRecv();
         this.onSealedPlaintext(pt, channel, frameId, bytes);
         return;
@@ -809,10 +889,15 @@ export class RelayClient {
     if (this.pending) {
       const pt = this.pending.transport.open(payload);
       if (pt !== null) {
+        // Candidate keys precede the peer's window reset by definition, so the
+        // sender never charged these bytes and crediting them would inflate it.
         this.onSealedPlaintext(pt, channel, frameId, bytes);
         return;
       }
     }
+    // Undecryptable, but the sender charged it: a frame this side cannot read
+    // must never be able to leak the peer's window.
+    if (est) this.noteConsumed(channel, sealedBytes);
     log.warn("Failed to open sealed frame (len=%d), dropping", payload.length);
     netwatch.record({
       dir: "rx", kind: "drop", transport: "relay", channel,
@@ -851,7 +936,7 @@ export class RelayClient {
           dir: "rx", kind: "sealed", transport: "relay", channel,
           msgType: (obj as { type: string }).type, frameId, bytes,
         });
-        this.handleSessionFrame(obj as { type: string; attemptId?: string; confirm?: string });
+        this.handleSessionFrame(obj as { type: string; attemptId?: string; confirm?: string; channel?: unknown; consumed?: unknown });
         return;
       }
       if ("m" in (obj as object)) {
@@ -962,7 +1047,7 @@ export class RelayClient {
 
   // --- E2E session frames ---
 
-  private handleSessionFrame(obj: { type: string; attemptId?: string; confirm?: string; capabilities?: { checkoutRouting?: boolean } }): void {
+  private handleSessionFrame(obj: { type: string; attemptId?: string; confirm?: string; capabilities?: { checkoutRouting?: boolean }; channel?: unknown; consumed?: unknown }): void {
     switch (obj.type) {
       case "app:ready":
         this.handleAppReady(obj);
@@ -974,6 +1059,24 @@ export class RelayClient {
       case "pong":
         // Liveness reset done in handleSealedFrame's recordSealedRecv.
         return;
+      case "credit": {
+        // Hand-validated like every other session frame: these never carry a
+        // Zod schema, and a malformed `consumed` would corrupt the window.
+        const ch = obj.channel;
+        const consumed = obj.consumed;
+        if (
+          (ch !== "control" && ch !== "preview") ||
+          typeof consumed !== "number" || !Number.isSafeInteger(consumed) || consumed < 0
+        ) {
+          log.warn("Dropping malformed credit frame");
+          return;
+        }
+        if (this.scheduler.credit(ch, consumed)) {
+          delete this.stallWarned[ch];
+          this.drain();
+        }
+        return;
+      }
       default:
         log.warn("Dropping unexpected sealed session frame (type=%s)", obj.type);
     }
@@ -1183,6 +1286,7 @@ export class RelayClient {
       // ahead of the adverts and snapshot the phone re-syncs from anyway.
       this.recordQueueDrop("rekey", this.scheduler.clear());
       this.scheduler.resetWindows();
+      this.resetRxFlow();
       this.sendSessionFrame({ type: "established", attemptId }, this.established.transport);
       log.info("E2E session established (attempt %s)", attemptId);
       this.opts.onHandshakeComplete?.({ checkoutRouting: this.peerCheckoutRouting });
@@ -1358,7 +1462,13 @@ export class RelayClient {
   private sendSessionFrame(obj: object, transport: E2eTransport | undefined): void {
     if (!transport) return;
     const type = (obj as { type?: string }).type ?? "session";
-    this.sendPayload(transport.seal(JSON.stringify(obj)), "control", FrameKind.sealed, type);
+    const sealed = transport.seal(JSON.stringify(obj));
+    if (!this.sendPayload(sealed, "control", FrameKind.sealed, type)) return;
+    // Exempt from the gate, not from the accounting: a relay drop report names
+    // only a channel and a length, so bytes written outside the window would
+    // un-charge something that was never charged. Frames sealed under the
+    // candidate keys precede the peer's reset and stay uncounted on both ends.
+    if (transport === this.established?.transport) this.scheduler.charge("control", sealed.length);
   }
 
   /** Attach a MessageBus as the CONTROL PLANE (s omitted). Streams attach via
@@ -1494,7 +1604,10 @@ export class RelayClient {
     return `total=${totalFrames} frame(s),${formatDiagnosticBytes(totalBytes)};${truncated} byType=[${byType}${elided}]`;
   }
 
-  private handleMessageRateLimited(message: string): void {
+  /** A relay that discards routed frames discards them in bursts, and one
+   *  `log.error` per frame buries the outbound sample that says which sender
+   *  caused it. Coalesce the burst and report the sample taken at its onset. */
+  private handleDroppedFrameError(code: string, message: string): void {
     const now = Date.now();
     if (this.rateLimitBurst && now - this.rateLimitBurst.startedAt < RATE_LIMIT_BURST_MS) {
       this.rateLimitBurst.errors++;
@@ -1504,15 +1617,15 @@ export class RelayClient {
 
     const outboundAtOnset = this.formatOutboundRateDiagnostic(now);
     log.error(
-      `Relay rate limit: device=${this.opts.identity.deviceId} peer=${this._peerId ?? "unpaired"} ` +
-      `message="${message}" recentOutbound(${RATE_DIAGNOSTIC_WINDOW_MS}ms)={${outboundAtOnset}}`,
+      `Relay dropped frames: device=${this.opts.identity.deviceId} peer=${this._peerId ?? "unpaired"} ` +
+      `code=${code} message="${message}" recentOutbound(${RATE_DIAGNOSTIC_WINDOW_MS}ms)={${outboundAtOnset}}`,
     );
 
     const timer = setTimeout(() => this.finishRateLimitBurst(), RATE_LIMIT_BURST_MS);
     timer.unref?.();
-    this.rateLimitBurst = { startedAt: now, errors: 1, timer, outboundAtOnset };
+    this.rateLimitBurst = { startedAt: now, errors: 1, timer, outboundAtOnset, code };
 
-    this.opts.onError?.("MESSAGE_RATE_LIMITED", message);
+    this.opts.onError?.(code, message);
   }
 
   private finishRateLimitBurst(): void {
@@ -1523,8 +1636,8 @@ export class RelayClient {
     if (burst.errors <= 1) return;
 
     log.error(
-      `Relay rate-limit burst summary: device=${this.opts.identity.deviceId} ` +
-      `rejectedFrames=${burst.errors} duplicateCallbacksSuppressed=${burst.errors - 1} ` +
+      `Relay dropped-frame burst summary: device=${this.opts.identity.deviceId} ` +
+      `code=${burst.code} rejectedFrames=${burst.errors} duplicateCallbacksSuppressed=${burst.errors - 1} ` +
       `durationMs=${Date.now() - burst.startedAt} ` +
       `outboundAtOnset(${RATE_DIAGNOSTIC_WINDOW_MS}ms)={${burst.outboundAtOnset}}`,
     );
@@ -1578,6 +1691,7 @@ export class RelayClient {
     // the peer has already forgotten.
     this.recordQueueDrop("session-torn-down", this.scheduler.clear());
     this.scheduler.resetWindows();
+    this.resetRxFlow();
     zeroizeSessionKeys(this.established.sessionKeys);
     this.established.transport.zeroize();
     this.established = null;
@@ -1637,6 +1751,11 @@ export class RelayClient {
 
   private checkLiveness(): void {
     if (!this.established) return;
+    // Unconditional, every tick: a credit the relay dropped is re-sent within
+    // one silence window carrying the same cumulative ground truth, and since
+    // it is a sealed frame under the established keys it also refreshes the
+    // peer's liveness while bulk drains on a slow uplink.
+    for (const ch of ["control", "preview"] as const) this.sendCredit(ch);
     // Recent sealed traffic → healthy.
     if (Date.now() - this.lastSealedRecvAt < PING_SILENCE_MS) return;
     if (this.missedPongs >= MAX_MISSED_PONGS) {
@@ -1728,6 +1847,9 @@ export class RelayClient {
     /** Test seam: overrides the half-open handshake-attempt expiry so rekey/expiry
      *  tests don't wait out the real 30s default. */
     halfOpenMs?: number;
+    /** Test seam: shrinks the consumed-byte threshold that triggers a credit so
+     *  a window test does not have to push 512 KiB through the receive path. */
+    creditBatchBytes?: number;
   }): RelayClient {
     const c = Object.create(RelayClient.prototype) as RelayClient;
     (c as unknown as { opts: Partial<RelayClientOptions> }).opts = {
@@ -1749,6 +1871,9 @@ export class RelayClient {
     (c as unknown as { droppedFramesAt: number }).droppedFramesAt = 0;
     (c as unknown as { mux: StreamMux }).mux = new StreamMux({ openStream: () => {}, closeStream: () => {}, sendEnvelope: () => {} });
     (c as unknown as { initSendScheduler: () => void }).initSendScheduler();
+    if (opts.creditBatchBytes !== undefined) {
+      (c as unknown as { creditBatchBytes: number }).creditBatchBytes = opts.creditBatchBytes;
+    }
     (c as unknown as { initFragReassembler: () => void }).initFragReassembler();
     if (opts.phoneEd25519PubB64) {
       (c as unknown as { phoneEd25519ByDeviceId: Map<string, string> }).phoneEd25519ByDeviceId.set(opts.peerId, opts.phoneEd25519PubB64);

@@ -1,6 +1,8 @@
 import {
+  CHANNEL_WINDOW_BYTES,
   MAX_SEND_QUEUE_BYTES,
   SEAL_OVERHEAD_BYTES,
+  SOCKET_INFLIGHT_BYTES,
   WINDOW_RESYNC_CREDITS,
 } from "antgrid-wire";
 import type { Channel } from "./message-bus";
@@ -43,8 +45,8 @@ export type DrainResult = "idle" | "held" | "blocked";
 export class SendScheduler {
   /** Mutable on purpose: tests shrink them. A null limit is no gate at all. */
   readonly limits = {
-    window: null as number | null,
-    socketCap: null as number | null,
+    window: CHANNEL_WINDOW_BYTES as number | null,
+    socketCap: SOCKET_INFLIGHT_BYTES as number | null,
     maxQueuedBytes: MAX_SEND_QUEUE_BYTES,
   };
   /** Test seam: drain() returns "held" and writes nothing while true. */

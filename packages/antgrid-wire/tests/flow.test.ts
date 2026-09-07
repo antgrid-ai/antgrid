@@ -9,6 +9,7 @@ import {
   WINDOW_STALL_WARN_MS,
   MAX_FRAME_PAYLOAD,
   MAX_TRANSFER_BYTES,
+  ErrorMessage,
 } from "../src/index";
 
 describe("flow-control constants", () => {
@@ -39,5 +40,31 @@ describe("flow-control constants", () => {
     expect(WINDOW_RESYNC_CREDITS).toBe(2);
     expect(MAX_SEND_QUEUE_BYTES).toBe(67_108_864);
     expect(WINDOW_STALL_WARN_MS).toBe(5_000);
+  });
+
+  it("carries the channel and length a sender un-charges a relay drop from", () => {
+    const drop = ErrorMessage.parse({
+      type: "error",
+      code: "MESSAGE_RATE_LIMITED",
+      message: "Message rate limit exceeded",
+      retryable: true,
+      channel: "preview",
+      bytes: 4096,
+    });
+
+    expect(drop.channel).toBe("preview");
+    expect(drop.bytes).toBe(4096);
+  });
+
+  it("parses an error that names no discarded frame", () => {
+    const plain = ErrorMessage.parse({
+      type: "error",
+      code: "AUTH_FAILED",
+      message: "bad signature",
+      retryable: false,
+    });
+
+    expect(plain.channel).toBeUndefined();
+    expect(plain.bytes).toBeUndefined();
   });
 });

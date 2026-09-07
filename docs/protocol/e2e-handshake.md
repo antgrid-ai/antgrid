@@ -278,7 +278,7 @@ forwards route frames opaquely.
 Within `kind=0`, sealed plaintext is one of two shapes and the split is
 unambiguous: **session frames are bare `{ type, … }` objects**
 (`handshake:agent-ready`, `app:ready`, `established`, `ping`, `pong`,
-`session-takeover`), while app traffic is **always** wrapped in a stream
+`session-takeover`, `credit`), while app traffic is **always** wrapped in a stream
 envelope `{ s?, m }`. A top-level `type` is therefore never app traffic, and
 `s` absent or `"0"` is the machine control plane.
 
@@ -351,7 +351,12 @@ re-drive would have nothing to send.
 Any structurally valid route frame counts as liveness, even if its sealed
 payload later fails to decrypt: the socket demonstrably delivered real bytes,
 and sealed binary traffic (terminal output, file data) must count the same as an
-explicit `pong`.
+explicit `pong`. The phone diverges here: it advances `_lastRecv` only for
+frames it actually decrypted, so a run of undecryptable frames looks like
+silence to it and to nothing else — `TODO(app)`: count undecryptable frames
+toward `_lastRecv` too. The `credit` frames of §8.8 refresh liveness on both sides like any
+other sealed frame, which is what keeps a session alive while bulk drains on a
+slow uplink.
 
 ### 8.6 Key lifetime and zeroization
 
@@ -392,9 +397,54 @@ Values live in code and move; these are the names to look up. Agent side is
 | `appReadyRetransmit` | phone | Sealed `app:ready` retransmit interval |
 | `_kMaxInitialHandshakeAttempts` | phone (supervisor) | Attempts before the initial connect is surfaced as failed |
 | `backoffBaseMs` / `backoffCapMs` | phone (supervisor) | Per-rung exponential retry backoff |
+| `CHANNEL_WINDOW_BYTES` / `kChannelWindowBytes` | both | Sealed bytes in flight per channel before a credit is required |
+| `SOCKET_INFLIGHT_BYTES` / `kSocketInflightBytes` | both | Sealed bytes in flight per socket, both channels together |
+| `CREDIT_BATCH_BYTES` / `kCreditBatchBytes` | both | Consumed bytes between byte-triggered credits (every liveness tick otherwise) |
+| `WINDOW_RESYNC_CREDITS` / `kWindowResyncCredits` | both | Non-advancing credits before a sender resyncs its window |
+| `MAX_SEND_QUEUE_BYTES` / `kMaxSendQueueBytes` | both | Per-channel cap on plaintext waiting to be sealed and sent |
+| `WINDOW_STALL_WARN_MS` / `kWindowStallWarnMs` | both | Gate-blocked time on a channel before it is logged once |
 
 The two sides' liveness constants must stay in lockstep — the Dart copies are
-declared as a hand-mirror of the bridge's.
+declared as a hand-mirror of the bridge's. The flow-control constants live in
+`packages/antgrid-wire/src/flow.ts` and are hand-mirrored in
+`packages/antgrid_relay_client/lib/src/flow.dart`.
+
+### 8.8 Per-channel flow control
+
+Each direction of a session carries a **cumulative credit window per channel**
+(`control`, `preview`) and one in-flight cap per socket. A sender may have at
+most `CHANNEL_WINDOW_BYTES` of sealed payload in flight on a channel beyond what
+the peer has credited, and at most `SOCKET_INFLIGHT_BYTES` across both channels;
+neither side can read its socket buffer, so this self-accounting is the only
+bound on what a liveness frame is written behind. App frames queue per channel
+in FIFO order and are sealed only when dequeued (a frame queued across a rekey
+goes out under the keys live at that moment); a channel whose window is full
+does not block the other.
+
+The receiver counts the sealed payload bytes of every kind-0 frame the
+established keys opened or nothing opened — decrypt failures included, so a bad
+frame can never leak the sender's window — and returns a sealed
+`credit { channel, consumed }` session frame once `CREDIT_BATCH_BYTES` have
+arrived since the last credit, and unconditionally for both channels on every
+liveness tick. `consumed` is the cumulative total since establishment: a credit
+that does not exceed the last accepted one does not advance, so a duplicated,
+reordered or lost credit is harmless and the next tick heals it. Because a
+credit is a sealed frame under the established keys it also refreshes the peer's
+liveness — on a slow uplink that is what keeps the session alive while bulk
+drains.
+
+Session frames (`ping`, `pong`, `credit`, the handshake set) are never queued
+and never gated, which is what keeps liveness working while a channel is
+stalled; those sealed under the established keys are charged and counted like
+any other frame, so a relay drop report is exact for them too. The relay reports
+every routed frame it discards to the sender with the frame's `channel` and
+`bytes`, and the sender un-charges them; if a sender still sees
+`WINDOW_RESYNC_CREDITS` consecutive credits that do not advance while it has
+charged nothing new on that channel, it treats its uncredited bytes as lost and
+resyncs. Both sides reset their counters at establishment (the agent when it
+sends `established`, the phone when it receives it) and forget them at teardown.
+A channel gate-blocked for `WINDOW_STALL_WARN_MS` is logged once; a queue past
+`MAX_SEND_QUEUE_BYTES` drops whole messages.
 
 ---
 
