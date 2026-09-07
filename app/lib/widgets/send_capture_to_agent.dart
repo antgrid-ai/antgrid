@@ -95,7 +95,10 @@ Future<bool> sendCaptureToAgent({
   }
   if (body.isEmpty) return false;
 
-  termSvc.sendToAgentTerminal(body);
+  if (!termSvc.sendToAgentTerminal(body)) {
+    if (context.mounted) showSendRefusedSnackBar(context);
+    return false;
+  }
   container.read(switchToAgentProvider)?.call();
   // The capture was composed over the preview, so the keyboard is still there.
   // Hand it to the terminal the message just landed in, or the user has to

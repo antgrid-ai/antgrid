@@ -10,6 +10,7 @@ import '../design/widgets/ab_loading.dart';
 import '../models/command_models.dart';
 import '../providers/providers.dart';
 import '../services/command_service.dart';
+import '../util/detached.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
 
@@ -107,7 +108,10 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
       (s) => s.terminalService,
     );
     if (svc == null) return;
-    svc.sendToAgentTerminal(message);
+    if (!svc.sendToAgentTerminal(message)) {
+      if (context.mounted) showSendRefusedSnackBar(context);
+      return;
+    }
     ref.read(switchToAgentProvider)?.call();
     ref.read(focusAgentInputProvider)?.call();
     showSentToAgentSnackBar(context);
@@ -118,7 +122,11 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
     if (current == null) return;
     final outputText = current.output.value;
     if (outputText.isEmpty) return;
-    _sendTextToAgent(outputText);
+    detached(
+      'CommandOutputOverlay',
+      'send full output to agent',
+      () => _sendTextToAgent(outputText),
+    );
   }
 
   void _scheduleScroll() {

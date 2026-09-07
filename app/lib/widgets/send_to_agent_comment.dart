@@ -40,6 +40,16 @@ void showSentToAgentSnackBar(BuildContext context) {
   );
 }
 
+/// Counterpart to [showSentToAgentSnackBar] for a send the transport refused.
+///
+/// Nothing was buffered, so this is the user's only notice that the text they
+/// captured is gone — every surface that hands text to the agent's terminal
+/// owes the same sentence, or the same failure reads differently depending on
+/// where it happened.
+void showSendRefusedSnackBar(BuildContext context) {
+  showAbSnackBar(context, "couldn't send — the session is reconnecting");
+}
+
 Future<String?> _showBottomSheet(
   BuildContext context,
   String selectedText,

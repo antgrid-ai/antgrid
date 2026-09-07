@@ -18,6 +18,7 @@ import '../design/widgets/ab_search_field.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../models/file_tree_models.dart';
 import '../providers/providers.dart';
+import '../util/detached.dart';
 import 'code_syntax.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
@@ -216,11 +217,21 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
       (s) => s.terminalService,
     );
     if (svc == null) return;
-    svc.sendToAgentTerminal(message);
+    if (!svc.sendToAgentTerminal(message)) {
+      if (context.mounted) showSendRefusedSnackBar(context);
+      return;
+    }
     ref.read(focusAgentInputProvider)?.call();
     controller.cancelSelection();
     setState(() => _hasSelection = false);
     showSentToAgentSnackBar(context);
+  }
+
+  /// `SendToAgentButton.onPressed` is a `VoidCallback`; passing the async
+  /// `_onSendToAgent` there directly would discard its future the same way an
+  /// unawaited call would, so the boundary is here instead.
+  void _handleSendToAgent() {
+    detached('FileContentViewer', 'send selection to agent', _onSendToAgent);
   }
 
   @override
@@ -495,7 +506,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                       child: const AbLoading(),
                     ),
                   if (showSendButton)
-                    SendToAgentButton(onPressed: _onSendToAgent),
+                    SendToAgentButton(onPressed: _handleSendToAgent),
                 ],
               );
             },

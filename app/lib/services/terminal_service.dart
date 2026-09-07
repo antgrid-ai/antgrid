@@ -73,6 +73,12 @@ class TerminalService {
   bool _hydrationPublishScheduled = false;
   bool _trackedUse = false;
 
+  /// True while `session.transport.isEstablished` reads false — the only
+  /// truthful synchronous read of "a send will actually leave". Synced by
+  /// [_syncInputPaused], never toggled directly, so every writer folds into
+  /// the same emission gate.
+  bool _inputPaused = false;
+
   String? _clientId;
   void setClientId(String id) => _clientId = id;
 
@@ -197,6 +203,13 @@ class TerminalService {
 
   Future<void> _rehydrateTerminals() async {
     if (_disposed) return;
+    // The re-establish edge, and the only one there is: nothing publishes a
+    // transport transition the pane could listen for — `sessionDownEvents`
+    // fires from retry exhaustion, not a live socket loss, and StreamTransport
+    // never emits `disconnected`. So the refusal latch is cleared by the same
+    // hydrator re-drive that reopens the pulls, which is exactly what a
+    // recovered send would have needed anyway.
+    _syncInputPaused();
     // Cleared first and unconditionally, because a request is not a promise of
     // a reply: an id the agent no longer knows is answered with a log line and
     // no frame, and a send in a keyless window vanishes. Only the tabs whose
@@ -295,6 +308,7 @@ class TerminalService {
     state = state.copyWith(
       hydration: _deriveHydration(state.tabs),
       attach: _deriveAttach(state.tabs),
+      inputPaused: _inputPaused,
     );
     _state = state;
     _stateController.add(state);
@@ -348,6 +362,19 @@ class TerminalService {
       }
     }
     return CheckoutAttachStatus.ready;
+  }
+
+  /// The only truthful synchronous read of "a send will actually leave" —
+  /// `transport.currentState` stays `connected` across a relay session-down
+  /// window where a send silently drops (see `AgentTransport.isEstablished`).
+  /// Idempotent against its own no-op case so a poll tick that finds nothing
+  /// changed costs no emission.
+  void _syncInputPaused() {
+    if (_disposed) return;
+    final paused = !session.transport.isEstablished;
+    if (paused == _inputPaused) return;
+    _inputPaused = paused;
+    _publishHydration();
   }
 
   /// Re-emit the current state so a hydration-only transition reaches the UI.
@@ -900,6 +927,11 @@ class TerminalService {
     // matched against whichever query is pending by the time it lands.
     tab.ghostty.attachExternalTransport(
       writeBytes: (bytes) {
+        // sendInput's refusal is surfaced as pane chrome (inputPaused, the
+        // hydration strip), not through this return value: `false` here
+        // becomes KeyEventResult.ignored, so the keystroke would escape into
+        // the app's global shortcut layer, and the IME/soft-keyboard path
+        // discards the bool entirely — the platform this bug bites hardest.
         sendInput(terminalId, utf8.decode(bytes, allowMalformed: true));
         return true;
       },
@@ -932,7 +964,18 @@ class TerminalService {
 
   // --- Outbound messages ---
 
-  void sendInput(String terminalId, String data) {
+  /// Sends a keystroke, reporting whether the frame actually left.
+  ///
+  /// False means the transport could not carry it and NOTHING was buffered.
+  /// A delayed keystroke replayed against a prompt that has moved on can
+  /// confirm something the user never saw, so a refusal is dropped, not
+  /// queued, and the pane says so instead. Callers that report success to the
+  /// user must honour this.
+  bool sendInput(String terminalId, String data) {
+    if (!session.transport.isEstablished) {
+      _syncInputPaused();
+      return false;
+    }
     // terminal_used = the user actually typed into / drove a terminal. Fire on
     // input, not on terminal:started — the latter replays automatically on
     // every session re-warm, which has nothing to do with user engagement.
@@ -951,14 +994,18 @@ class TerminalService {
         'data': data,
       }),
     );
+    return true;
   }
 
-  void sendToAgentTerminal(String text) {
+  /// Forwards to the running agent tab, reporting the same refusal
+  /// [sendInput] does — false both when there is no running agent tab and
+  /// when the transport refused the send.
+  bool sendToAgentTerminal(String text) {
     final agentTabs = _state.tabs.values.where(
       (tab) => tab.isAgent && tab.sessionState == TerminalSessionState.running,
     );
-    if (agentTabs.isEmpty) return;
-    sendInput(agentTabs.first.terminalId, text);
+    if (agentTabs.isEmpty) return false;
+    return sendInput(agentTabs.first.terminalId, text);
   }
 
   /// Queues a debounced `terminal:resize`, reporting whether it was QUEUED.

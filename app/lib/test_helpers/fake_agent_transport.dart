@@ -57,6 +57,11 @@ class FakeAgentTransport implements AgentTransport {
     if (value) redriveHydrators();
   }
 
+  /// Moves [isEstablished] WITHOUT the hydrator re-drive, so a test can prove
+  /// a recovery path carries its own sync rather than inheriting one from the
+  /// re-drive that usually accompanies it.
+  void setEstablishedQuietly(bool value) => _established = value;
+
   final Map<String, Future<void> Function()> _hydrators = {};
 
   @override
