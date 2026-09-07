@@ -618,6 +618,182 @@ void main() {
     await session.close();
   });
 
+  group('the lens and the brief on an arm', () {
+    Map<String, dynamic> armFrame(FakeAgentTransport t) =>
+        t.sent.firstWhere((m) => m['type'] == 'handler:configure');
+
+    /// One armed session, with whatever lens the bridge resolved for it, on a
+    /// frame that either advertises lenses or says nothing about them.
+    void statusWithLens(
+      FakeAgentTransport t, {
+      List<String>? lenses,
+      String? role,
+      String? brief,
+    }) => t.emit('handler:status', {
+      'projectId': 'p',
+      'lenses': ?lenses,
+      'sessions': [
+        {..._session('t1', const []), 'role': ?role, 'brief': ?brief},
+      ],
+    });
+
+    test('a lens and a brief ride the arm together', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+
+      svc.arm(terminalId: 't1', role: 'qa', brief: 'show me');
+
+      final sent = armFrame(t);
+      expect(sent['role'], 'qa');
+      expect(sent['brief'], 'show me');
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('clearing a lens is a value, not an absence', () async {
+      // The bridge reads an absent key as "keep", so a clear has to be said
+      // out loud — and only the half the user actually touched is said, or a
+      // lens change would take an untouched brief down with it.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+
+      svc.arm(terminalId: 't1', role: '');
+
+      final sent = armFrame(t);
+      expect(sent['role'], '');
+      expect(sent.containsKey('brief'), isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('clearing a brief is a value too', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+
+      svc.arm(terminalId: 't1', brief: '');
+
+      final sent = armFrame(t);
+      expect(sent['brief'], '');
+      expect(sent.containsKey('role'), isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('an arm that names neither sends neither', () async {
+      // A one-tap arm from a surface with no lens control must not rewrite what
+      // the bridge holds — the same rule goal and backlog already keep.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+
+      svc.arm(terminalId: 't1');
+
+      final sent = armFrame(t);
+      expect(sent.containsKey('role'), isFalse);
+      expect(sent.containsKey('brief'), isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a frame that advertises lenses makes the pick known', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+
+      statusWithLens(
+        t,
+        lenses: const ['pm', 'qa', 'critic', 'release'],
+        role: 'pm',
+        brief: 'watch the migrations',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.lensesAdvertised, isTrue);
+      final pick = svc.lastKnownSettings('t1')?.lens;
+      expect(pick?.roleId, 'pm');
+      expect(pick?.brief, 'watch the migrations');
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a bridge that never advertised leaves the pick unknown', () async {
+      // Not a pick naming the default: a session with no lens on a bridge that
+      // has none is not one running the unnamed default, and seeding a picker
+      // from it would put the default on screen as a live fact.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+
+      statusWithLens(t);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.lensesAdvertised, isFalse);
+      expect(svc.currentState.sessions.containsKey('t1'), isTrue);
+      expect(svc.lastKnownSettings('t1')?.lens, isNull);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('the cache mirrors a clear before the snapshot round-trips', () async {
+      // Reopening a sheet in this window must seed the CLEARED lens: a stale
+      // seed committed by the next touched edit would silently restore it.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+
+      statusWithLens(
+        t,
+        lenses: const ['pm', 'qa', 'critic', 'release'],
+        role: 'pm',
+        brief: 'watch the migrations',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      svc.arm(terminalId: 't1', role: '', brief: '   ');
+
+      final pick = svc.lastKnownSettings('t1')?.lens;
+      expect(pick, isNotNull);
+      expect(pick?.roleId, isNull);
+      // Whitespace clears it, as normalizeBrief does on the bridge.
+      expect(pick?.brief, isNull);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('an arm that touches one half keeps the other', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+
+      statusWithLens(
+        t,
+        lenses: const ['pm', 'qa', 'critic', 'release'],
+        role: 'pm',
+        brief: 'watch the migrations',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      svc.arm(terminalId: 't1', brief: 'and the changelog');
+
+      final pick = svc.lastKnownSettings('t1')?.lens;
+      expect(pick?.roleId, 'pm');
+      expect(pick?.brief, 'and the changelog');
+
+      await svc.dispose();
+      await session.close();
+    });
+  });
+
   group('quick-choice answers', () {
     const choices = [
       {'choiceId': 'approve', 'label': 'Approve', 'text': 'ship it'},

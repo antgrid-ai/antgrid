@@ -278,6 +278,13 @@ class HandlerStatusMessage {
   /// What an absent per-session judge tool resolves to for PTY slots (the
   /// project's agent tool); chat slots resolve from their own session entry.
   final String? defaultTool;
+
+  /// The lens ids this bridge accepts. Presence is the capability advert (see
+  /// `HandlerState.lenses`, handler_state.dart) and absence is a bridge that
+  /// has none, so this stays NULLABLE where the other collections here degrade
+  /// to empty: an empty list would be a bridge offering no lens, which is a
+  /// different fact.
+  final List<String>? lenses;
   final List<Map<String, dynamic>> sessions;
 
   /// Every snapshot the project still knows about, replayed like the
@@ -303,6 +310,7 @@ class HandlerStatusMessage {
     required this.timestamp,
     required this.projectId,
     this.defaultTool,
+    this.lenses,
     required this.sessions,
     this.snapshots = const [],
     this.wrapUps = const [],
@@ -1939,6 +1947,16 @@ Object? parseAbMessage(Map<String, dynamic> json) {
             if (w is Map<String, dynamic>) wrapUps.add(w);
           }
         }
+        // Null unless the bridge actually named a list, and every entry kept as
+        // it came: an id this build cannot name still says the far end takes
+        // one, and the offer is narrowed to what both ends know at the picker.
+        final lensesJson = json['lenses'];
+        final lenses = lensesJson is List
+            ? <String>[
+                for (final l in lensesJson)
+                  if (l is String) l,
+              ]
+            : null;
         return HandlerStatusMessage(
           id: id,
           timestamp: timestamp,
@@ -1946,6 +1964,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
           defaultTool: json['defaultTool'] is String
               ? json['defaultTool'] as String
               : null,
+          lenses: lenses,
           sessions: sessions,
           snapshots: snapshots,
           wrapUps: wrapUps,

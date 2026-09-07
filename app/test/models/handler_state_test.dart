@@ -1,3 +1,4 @@
+import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -831,6 +832,128 @@ void main() {
     test('an unrecognised posture is null, not a confident guess', () {
       expect(handlerPersonalityFromWire('yolo'), isNull);
       expect(handlerPersonalityFromWire(42), isNull);
+    });
+  });
+
+  group('the lens on the wire', () {
+    Map<String, dynamic> wire({String? role, String? brief}) => {
+      'terminalId': 't1',
+      'state': 'watching',
+      'pendingEscalations': 0,
+      'armedAt': 1,
+      'goal': 'ship it',
+      'backlog': const [],
+      'role': ?role,
+      'brief': ?brief,
+    };
+
+    test('every lens this build knows round-trips', () {
+      for (final lens in HandlerLens.values) {
+        final s = HandlerSessionState.fromWire(
+          wire(role: handlerLensToWire(lens)),
+        )!;
+        expect(s.roleId, handlerLensToWire(lens));
+        expect(s.role, lens);
+      }
+    });
+
+    test('no role is the unnamed default, said as absence', () {
+      // Never resolved to a lens here: the default is the rules alone, and a
+      // model that named it would make the absence unreadable.
+      final s = HandlerSessionState.fromWire(wire())!;
+      expect(s.roleId, isNull);
+      expect(s.role, isNull);
+    });
+
+    test('a lens this build cannot name is kept as itself', () {
+      // A newer bridge's id must reach the bar as the string it sent: shown as
+      // the default it would claim the session judges under something it does
+      // not, and one tap on the default would look like a no-op.
+      final s = HandlerSessionState.fromWire(wire(role: 'ship-it'))!;
+      expect(s.roleId, 'ship-it');
+      expect(s.role, isNull);
+      expect(handlerLensFromWire('ship-it'), isNull);
+      expect(handlerLensFromWire(42), isNull);
+    });
+
+    test('a brief is what it says, or nothing', () {
+      expect(HandlerSessionState.fromWire(wire())!.brief, isNull);
+      // Empty is nothing rather than a brief that says nothing — the bridge
+      // omits the key once it clears, and a surface marking one would claim a
+      // brief the judge never prints.
+      expect(HandlerSessionState.fromWire(wire(brief: ''))!.brief, isNull);
+      expect(
+        HandlerSessionState.fromWire(
+          wire(brief: 'watch the migrations'),
+        )!.brief,
+        'watch the migrations',
+      );
+    });
+
+    test('a copy carries the lens and the brief', () {
+      // copyWith is how the service rewrites run state and escalations; a lens
+      // dropped there would vanish from the bar on the next frame.
+      final s = HandlerSessionState.fromWire(
+        wire(role: 'qa', brief: 'show the failing case'),
+      )!;
+      final moved = s.copyWith(runState: HandlerRunState.handling);
+      expect(moved.roleId, 'qa');
+      expect(moved.brief, 'show the failing case');
+    });
+
+    test('no lens copy names the line it must not move', () {
+      // The presets this replaced were about where handling gave way to
+      // escalating. A tripwire, not a ban on the words: copy drifting back to
+      // describing that line is the failure this whole change exists to end,
+      // and the bridge's own lens table is pinned the same way.
+      final gating = RegExp('escalat|handl', caseSensitive: false);
+      expect(gating.hasMatch(handlerLensDefaultLabel), isFalse);
+      expect(gating.hasMatch(handlerLensBlurb(null)), isFalse);
+      for (final lens in HandlerLens.values) {
+        expect(
+          gating.hasMatch(handlerLensBlurb(lens)),
+          isFalse,
+          reason: '${handlerLensLabel(lens)} blurb describes the handle line',
+        );
+      }
+    });
+  });
+
+  group('the lenses a bridge advertises', () {
+    Map<String, dynamic> status({Object? lenses}) => {
+      'type': 'handler:status',
+      'id': 'm1',
+      'timestamp': 1,
+      'projectId': 'p',
+      'sessions': const [],
+      'lenses': ?lenses,
+    };
+
+    test('a named list is carried, entry by entry', () {
+      final msg =
+          parseAbMessage(status(lenses: ['pm', 'qa'])) as HandlerStatusMessage;
+      expect(msg.lenses, ['pm', 'qa']);
+    });
+
+    test('a bridge that never said stays null, not empty', () {
+      // Presence IS the capability signal, so the two cannot be folded: empty
+      // would be a bridge offering no lens, which is a different fact and
+      // would leave a picker enabled with nothing in it.
+      expect((parseAbMessage(status()) as HandlerStatusMessage).lenses, isNull);
+      final malformed =
+          parseAbMessage(status(lenses: 'pm')) as HandlerStatusMessage;
+      expect(malformed.lenses, isNull);
+    });
+
+    test('the project state carries it, narrowing included', () {
+      // Project-wide like defaultTool: the arm sheet reads it with no session
+      // named, which is exactly what forTerminal(null) leaves.
+      const state = HandlerState.initial();
+      expect(state.lenses, isNull);
+      final advertised = state.copyWith(lenses: const ['pm', 'release']);
+      expect(advertised.lenses, ['pm', 'release']);
+      expect(advertised.forTerminal(null).lenses, ['pm', 'release']);
+      expect(advertised.forTerminal('t1').lenses, ['pm', 'release']);
     });
   });
 

@@ -92,6 +92,80 @@ String handlerPersonalityBlurb(HandlerPersonality p) => switch (p) {
     'Answers wherever it can, treating your goal as standing authority. It still escalates whatever it is unsure of.',
 };
 
+/// What the judge looks for and asks about, added on top of the rules it
+/// already judges under. Mirrors the bridge's `HandlerLensSchema`
+/// (`bridge/src/protocol.ts`); the text behind each id is bridge-authored and
+/// never travels on the wire, which is why a lens is an id and not free text.
+///
+/// A lens adds questions and nothing else. It never moves the line between
+/// handling and escalating — the bridge's RULES own that line — so no surface
+/// may present one as an autonomy or a speed dial.
+enum HandlerLens { pm, qa, critic, release }
+
+/// Null for anything this build cannot name, and for the absence that IS the
+/// unnamed default. Callers keep the raw wire string beside the result: an id a
+/// newer bridge added has to render as itself, never as the default.
+HandlerLens? handlerLensFromWire(dynamic s) => switch (s) {
+  'pm' => HandlerLens.pm,
+  'qa' => HandlerLens.qa,
+  'critic' => HandlerLens.critic,
+  'release' => HandlerLens.release,
+  _ => null,
+};
+
+/// The wire spelling, the one place the enum is turned back into the string
+/// `handler:configure` carries.
+String handlerLensToWire(HandlerLens l) => switch (l) {
+  HandlerLens.pm => 'pm',
+  HandlerLens.qa => 'qa',
+  HandlerLens.critic => 'critic',
+  HandlerLens.release => 'release',
+};
+
+/// Picker label. PM and QA stay uppercase — they are how the roles are written,
+/// not sentences that happen to start with an abbreviation.
+String handlerLensLabel(HandlerLens l) => switch (l) {
+  HandlerLens.pm => 'PM',
+  HandlerLens.qa => 'QA',
+  HandlerLens.critic => 'Critic',
+  HandlerLens.release => 'Release manager',
+};
+
+/// The default has no role name on purpose: it is the rules alone, so it is
+/// offered as what it does rather than as a fifth role.
+const String handlerLensDefaultLabel = 'Intent and completion';
+
+/// One line of what the judge additionally asks under a lens, shown beneath the
+/// picker; null is the unnamed default. Every line here describes QUESTIONS —
+/// one promising more or less autonomy would describe a dial this is not.
+String handlerLensBlurb(HandlerLens? l) => switch (l) {
+  null =>
+    "Judges each pause against your goal and the backlog — whether a step serves the intent, and whether an item's evidence closes it.",
+  HandlerLens.pm =>
+    'Asks which backlog item a step serves and what remains before an item counts as finished; reports what you will be able to see or do.',
+  HandlerLens.qa =>
+    'Asks the agent to run what proves an item and show the result, and names what is still unverified.',
+  HandlerLens.critic =>
+    'Asks what the agent ruled out and what breaks if it is wrong — one probe per stop, at a close or before an irreversible step.',
+  HandlerLens.release =>
+    'Asks whether the tests ran and the docs, migrations and changelog exist, and reports what still stands between the work and a release.',
+};
+
+/// What the bridge will print of a brief, mirrored by hand from
+/// `MAX_BRIEF_CHARS` (`bridge/src/handler/decision.ts`). The bridge clips in
+/// UTF-16 code units and never refuses on length, so a field counting anything
+/// else can only cost an emoji-heavy brief its tail.
+const int handlerMaxBriefChars = 500;
+
+/// A session's lens and brief as a surface seeds from them.
+///
+/// A null pick means this app has NOT been told — a cold cache, or a machine
+/// that never advertised lenses — and renders with nothing selected. A null
+/// [HandlerLensPick.roleId] INSIDE a pick is the unnamed default, which is a
+/// real answer. The raw wire string is what is carried, so an id this build
+/// cannot name is shown as itself rather than collapsed into the default.
+typedef HandlerLensPick = ({String? roleId, String? brief});
+
 /// How much of the Handler an armed session can actually get. Mirrors the
 /// bridge's `HandlerObservability` (`bridge/src/handler/engine.ts`), carried on
 /// each session snapshot.
@@ -271,6 +345,19 @@ class HandlerSessionState {
   /// that failed or is still waiting on the agent's next event.
   final bool askAnswerPending;
 
+  /// The lens this session judges under, as the bridge resolved it. Kept as the
+  /// raw wire string — [role] resolves it — so an id a newer bridge added is
+  /// never quietly rendered as the default.
+  ///
+  /// State, not capability: absent is the unnamed default rather than a bridge
+  /// that cannot do lenses. What a machine ACCEPTS is [HandlerState.lenses].
+  final String? roleId;
+
+  /// The user's brief beneath the lens, non-empty or null: the bridge omits an
+  /// empty one, and an empty string on a surface would read as a brief that
+  /// says nothing rather than as no brief at all.
+  final String? brief;
+
   const HandlerSessionState({
     required this.terminalId,
     required this.runState,
@@ -287,9 +374,15 @@ class HandlerSessionState {
     this.personality,
     this.askAnswer = false,
     this.askAnswerPending = false,
+    this.roleId,
+    this.brief,
   });
 
   int get backlogTotal => backlog.length;
+
+  /// The lens as this build knows it. Null for the unnamed default AND for an
+  /// id it cannot name — [roleId] is what tells those two apart.
+  HandlerLens? get role => handlerLensFromWire(roleId);
 
   /// Whether everything standing on this session is a question the agent is
   /// working past. A `guard_blocked` report parses as blocking, so a session
@@ -326,6 +419,8 @@ class HandlerSessionState {
     personality: personality,
     askAnswer: askAnswer,
     askAnswerPending: askAnswerPending,
+    roleId: roleId,
+    brief: brief,
   );
 
   static HandlerSessionState? fromWire(dynamic json) {
@@ -377,6 +472,11 @@ class HandlerSessionState {
     // a wrong-typed flag would be a far larger failure than losing the feature.
     final askAnswer = json['askAnswer'];
     final askAnswerPending = json['askAnswerPending'];
+    // Lenient like everything else here, and kept raw: a role this build cannot
+    // name still belongs on the bar as itself, and neither it nor a malformed
+    // brief is worth losing the armed session over.
+    final role = json['role'];
+    final brief = json['brief'];
     return HandlerSessionState(
       terminalId: terminalId,
       runState: runState,
@@ -393,6 +493,8 @@ class HandlerSessionState {
       personality: handlerPersonalityFromWire(json['personality']),
       askAnswer: askAnswer is bool ? askAnswer : false,
       askAnswerPending: askAnswerPending is bool ? askAnswerPending : false,
+      roleId: role is String ? role : null,
+      brief: brief is String && brief.isNotEmpty ? brief : null,
     );
   }
 }
@@ -1100,6 +1202,16 @@ class HandlerState {
   /// What an absent per-session judge tool resolves to for PTY slots — the
   /// project's agent tool. Chat slots resolve from their own session entry.
   final String? defaultTool;
+
+  /// The lens ids this project's bridge says it accepts, or null from one that
+  /// never said. PRESENCE is the capability signal, the way a session's
+  /// `observability` is: null leaves the lens controls inert, and a surface
+  /// offers only the ids it also knows, so it can never send one this bridge
+  /// would refuse.
+  ///
+  /// Project-level rather than per session because the surface that needs it
+  /// most is the arm sheet, where no session snapshot exists yet.
+  final List<String>? lenses;
   final Map<String, HandlerSessionState> sessions; // keyed by terminalId
   final List<HandlerEscalation> escalations;
   final List<HandlerActivityRecord> activity;
@@ -1133,6 +1245,7 @@ class HandlerState {
 
   const HandlerState({
     this.defaultTool,
+    this.lenses,
     required this.sessions,
     required this.escalations,
     required this.activity,
@@ -1145,6 +1258,7 @@ class HandlerState {
 
   const HandlerState.initial()
     : defaultTool = null,
+      lenses = null,
       sessions = const {},
       escalations = const [],
       activity = const [],
@@ -1235,6 +1349,9 @@ class HandlerState {
     if (terminalId == null) {
       return HandlerState.initial().copyWith(
         defaultTool: defaultTool,
+        // Project-wide like [defaultTool]: what the bridge accepts does not
+        // narrow to a session, and the arm sheet reads it with none named.
+        lenses: lenses,
         // Carried for the same reason [defaultTool] is: it describes the
         // project, not the session this narrowing failed to name.
         entitlement: entitlement,
@@ -1262,6 +1379,7 @@ class HandlerState {
 
   HandlerState copyWith({
     String? defaultTool,
+    List<String>? lenses,
     Map<String, HandlerSessionState>? sessions,
     List<HandlerEscalation>? escalations,
     List<HandlerActivityRecord>? activity,
@@ -1274,6 +1392,7 @@ class HandlerState {
   }) {
     return HandlerState(
       defaultTool: defaultTool ?? this.defaultTool,
+      lenses: lenses ?? this.lenses,
       sessions: sessions ?? this.sessions,
       escalations: escalations ?? this.escalations,
       activity: activity ?? this.activity,

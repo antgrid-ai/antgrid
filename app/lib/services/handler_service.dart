@@ -65,7 +65,12 @@ class HandlerService {
   static const _settingsCacheCap = 50;
   final Map<
     String,
-    ({String? tool, String? model, HandlerPersonality? personality})
+    ({
+      String? tool,
+      String? model,
+      HandlerPersonality? personality,
+      HandlerLensPick? lens,
+    })
   >
   _lastKnownSettings = {};
 
@@ -76,17 +81,22 @@ class HandlerService {
   // silently re-seeded (and re-armed) the stale tool.
   //
   // Re-inserts so a refreshed entry counts as most-recent, evicts oldest at cap.
+  // [lens] carries the third state the others cannot: null means this machine
+  // never advertised any lens, which is not the same as a session running the
+  // unnamed default (a pick whose roleId is null).
   void _rememberSettings(
     String terminalId,
     String? tool,
     String? model,
     HandlerPersonality? personality,
+    HandlerLensPick? lens,
   ) {
     _lastKnownSettings.remove(terminalId);
     _lastKnownSettings[terminalId] = (
       tool: tool,
       model: model,
       personality: personality,
+      lens: lens,
     );
     while (_lastKnownSettings.length > _settingsCacheCap) {
       _lastKnownSettings.remove(_lastKnownSettings.keys.first);
@@ -300,6 +310,10 @@ class HandlerService {
         s.judgeTool,
         s.judgeModel,
         s.personality,
+        // Read off the FRAME, not off the session: a bridge that never named
+        // its lenses reports no role because it has none, and caching that as
+        // "the default" would seed a picker with a fact nobody stated.
+        msg.lenses != null ? (roleId: s.roleId, brief: s.brief) : null,
       );
     }
     // Replace wholesale (welcome-replay safe) rather than merge — the
@@ -360,6 +374,7 @@ class HandlerService {
       sessions: sessions,
       escalations: escalations,
       defaultTool: msg.defaultTool,
+      lenses: msg.lenses,
       snapshots: snapshots,
       wrapUps: wrapUps,
       pendingUndo: pendingUndo,
@@ -492,6 +507,13 @@ class HandlerService {
   /// picker: the keys are omitted from the wire message, which the bridge reads
   /// as "no change", so arming without opening the settings sheet never
   /// rewrites what that sheet would have shown.
+  ///
+  /// [role] and [brief] are this session's lens and the note beneath it, as
+  /// wire strings on the same terms the judge picks use: `''` clears back to
+  /// the unnamed default (or to no brief), a value sets one, and null omits
+  /// the key. A caller that surfaces no lens control, or whose control the
+  /// user never touched, must pass null for both — sending a value it only
+  /// inferred is how an arm silently drops the lens the bridge already holds.
   void arm({
     required String terminalId,
     String? goal,
@@ -499,15 +521,22 @@ class HandlerService {
     String? judgeTool,
     String? judgeModel,
     HandlerPersonality? personality,
+    String? role,
+    String? brief,
   }) {
     if (_disposed) return;
-    if (judgeTool != null || judgeModel != null || personality != null) {
+    if (judgeTool != null ||
+        judgeModel != null ||
+        personality != null ||
+        role != null ||
+        brief != null) {
       // Optimistically mirror the bridge's apply rules ('' clears, a name sets,
       // an omitted field keeps its old value) so [lastKnownSettings] is right
       // immediately: reopening the sheet before the status snapshot round-trips
       // would otherwise seed it with the pre-arm values — and committing those
       // stale ones silently reverts this arm's choice.
       final prev = lastKnownSettings(terminalId);
+      final prevLens = prev?.lens;
       _rememberSettings(
         terminalId,
         judgeTool != null ? (judgeTool.isEmpty ? null : judgeTool) : prev?.tool,
@@ -515,6 +544,20 @@ class HandlerService {
             ? (judgeModel.trim().isEmpty ? null : judgeModel.trim())
             : prev?.model,
         personality ?? prev?.personality,
+        // Sending either half makes the pick known, even from a cold cache:
+        // this arm is what the bridge will hold. The brief is cached as typed
+        // minus its edges — the bridge also collapses newlines and clips it to
+        // its prompt budget, and the next status frame is what corrects that.
+        role == null && brief == null
+            ? prevLens
+            : (
+                roleId: role != null
+                    ? (role.isEmpty ? null : role)
+                    : prevLens?.roleId,
+                brief: brief != null
+                    ? (brief.trim().isEmpty ? null : brief.trim())
+                    : prevLens?.brief,
+              ),
       );
     }
     // Mirrors the condition the bridge queues an arm-time extraction on: a goal
@@ -550,6 +593,8 @@ class HandlerService {
         'personality': ?(personality == null
             ? null
             : handlerPersonalityToWire(personality)),
+        'role': ?role,
+        'brief': ?brief,
       }),
     );
   }
@@ -721,7 +766,12 @@ class HandlerService {
   /// never staler than the armed entry and is fresher during the arm→snapshot
   /// round-trip. The armed fallback only matters if enough other terminals
   /// evicted this one's cache entry while it stayed armed.
-  ({String? tool, String? model, HandlerPersonality? personality})?
+  ({
+    String? tool,
+    String? model,
+    HandlerPersonality? personality,
+    HandlerLensPick? lens,
+  })?
   lastKnownSettings(String terminalId) {
     final cached = _lastKnownSettings[terminalId];
     if (cached != null) return cached;
@@ -729,15 +779,27 @@ class HandlerService {
     if (armed != null &&
         (armed.judgeTool != null ||
             armed.judgeModel != null ||
-            armed.personality != null)) {
+            armed.personality != null ||
+            // An armed session on a machine that advertised lenses reports a
+            // real one — the unnamed default included — so it is worth seeding
+            // a picker from even when nothing else here was ever set.
+            _state.lenses != null)) {
       return (
         tool: armed.judgeTool,
         model: armed.judgeModel,
         personality: armed.personality,
+        lens: _state.lenses != null
+            ? (roleId: armed.roleId, brief: armed.brief)
+            : null,
       );
     }
     return null;
   }
+
+  /// Whether this machine named the lenses it accepts. False leaves every lens
+  /// control inert: an app that offered one anyway would take a pick the far
+  /// end strips off the frame in silence.
+  bool get lensesAdvertised => _state.lenses != null;
 
   /// The terminal's own CLI (chat slots report one; PTY slots may not) — the
   /// app-side half of the bridge's deps.tool(terminalId) resolution, used to
