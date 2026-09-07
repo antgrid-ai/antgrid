@@ -593,7 +593,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     const t = Date.now();
     const windowMs = config.pingIntervalMs + config.pongTimeoutMs;
     for (const live of connections.getAll()) {
-      if (liveness.isTimedOut(live.connectionId, t, windowMs)) {
+      if (liveness.isTimedOut(live.connectionId, t, windowMs, live.ws.getBufferedAmount())) {
         logger.info("Device timed out (no pong)", {
           connectionId: live.connectionId,
           deviceId: live.deviceId,

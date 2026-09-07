@@ -12,6 +12,13 @@ export interface LivenessAges {
   authenticatedInboundAgeMs: number;
 }
 
+/** Outbound bytes still queued for a socket beyond which its inbound traffic
+ * stops counting as liveness. An authenticated frame proves the peer is up
+ * and sending; that it is also READING is proved by our sends draining. A
+ * backlog this deep, held for a whole window with no pong, is a reader that
+ * stopped, whatever its uplink is still saying. */
+export const INBOUND_LIVENESS_MAX_BACKLOG_BYTES = 1_048_576;
+
 /** Per-socket relay liveness. Device ids are deliberately absent: a late
  * callback from a superseded socket must be unable to refresh its successor. */
 export class ConnectionLivenessTracker {
@@ -46,7 +53,14 @@ export class ConnectionLivenessTracker {
     if (state) state.authenticatedInboundAt = now;
   }
 
-  isTimedOut(connectionId: string, now: number, windowMs: number): boolean {
+  /** `outboundBacklogBytes` is what we still hold unsent for the socket at
+   * this moment (Bun's `getBufferedAmount()`). */
+  isTimedOut(
+    connectionId: string,
+    now: number,
+    windowMs: number,
+    outboundBacklogBytes = 0,
+  ): boolean {
     const state = this.state.get(connectionId);
     if (!state) return false;
     const duplexAt = Math.max(
@@ -54,7 +68,16 @@ export class ConnectionLivenessTracker {
       state.protocolPongAt ?? 0,
       state.applicationPingAt ?? 0,
     );
-    return now - duplexAt > windowMs;
+    if (now - duplexAt <= windowMs) return false;
+    // A pong is answered in order behind whatever the peer already queued on
+    // the same TCP stream, so a bridge pushing a multi-megabyte reply up a
+    // slow link answers late while being as alive as a socket gets. Its
+    // routed frames arriving is that proof; a bounded backlog on our side is
+    // the proof it still reads.
+    return (
+      outboundBacklogBytes > INBOUND_LIVENESS_MAX_BACKLOG_BYTES ||
+      now - state.authenticatedInboundAt > windowMs
+    );
   }
 
   ages(connectionId: string, now: number): LivenessAges | undefined {

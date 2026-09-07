@@ -19,6 +19,7 @@ const FileTreeNodeSchema: z.ZodType<{
   size?: number;
   extension?: string;
   children?: any[];
+  truncated?: true;
 }> = z.lazy(() =>
   z.object({
     name: z.string(),
@@ -27,6 +28,9 @@ const FileTreeNodeSchema: z.ZodType<{
     size: z.number().optional(),
     extension: z.string().optional(),
     children: z.array(FileTreeNodeSchema).optional(),
+    // The directory's listing was cut at the tree's node budget — see
+    // MAX_TREE_NODES in file-tree.ts.
+    truncated: z.literal(true).optional(),
   }),
 );
 
