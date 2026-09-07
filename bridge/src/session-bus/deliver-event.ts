@@ -88,6 +88,8 @@ export function lineForEvent(
       id: envelope.messageId,
       sessionId: event.sessionId,
       kind: "task",
+      taskId: event.task.taskId,
+      taskState: event.task.state,
       text: renderTask({
         lead,
         taskId: event.task.taskId,
@@ -116,6 +118,8 @@ export function lineForEvent(
         id: envelope.messageId,
         sessionId: event.sessionId,
         kind: "wake",
+        taskId: event.task.taskId,
+        taskState: event.task.state,
         text: renderWake({
           peer: event.task.peer,
           taskId: event.task.taskId,
@@ -148,6 +152,8 @@ export function lineForEvent(
       id: envelope.messageId,
       sessionId: event.sessionId,
       kind: "answer",
+      taskId: event.task.taskId,
+      taskState: event.task.state,
       text: renderAnswer({
         lead,
         taskId: event.task.taskId,
@@ -172,6 +178,8 @@ export function lineForEvent(
       id: `${event.task.taskId}:canceled`,
       sessionId: event.sessionId,
       kind: "cancel",
+      taskId: event.task.taskId,
+      taskState: event.task.state,
       text: renderCancel({ lead, taskId: event.task.taskId, reason: event.reason }),
     };
   }
@@ -190,6 +198,8 @@ export function lineForEvent(
       id: envelope.messageId,
       sessionId: event.sessionId,
       kind: "note",
+      taskId: event.task.taskId,
+      taskState: event.task.state,
       text: renderNote({
         peer: event.task.peer,
         taskId: event.task.taskId,

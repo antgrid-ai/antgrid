@@ -430,7 +430,11 @@ export class ProjectCore {
       // agent that cannot attribute its turn-starts records them under
       // UNATTRIBUTED_TURN, and a delivery submitted against one lands mid-turn.
       isTurnOpen: (sessionId) => turnOpenFor(this._work.activeTurns, sessionId),
-      inject: (line) => this.core?.injectBusLine(line.sessionId, line.text) ?? false,
+      inject: (line) => this.core?.injectBusLine(
+        line.sessionId,
+        line.text,
+        line.taskId && line.taskState ? { taskId: line.taskId, state: line.taskState } : undefined,
+      ) ?? false,
     });
     const bus = new MessageBus();
     this.bus = bus;

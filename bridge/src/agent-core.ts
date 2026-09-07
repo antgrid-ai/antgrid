@@ -38,6 +38,7 @@ import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from
 import { sameAddress } from "./session-bus/address";
 import { lineForEvent, lineForJoin, type JoinInput } from "./session-bus/deliver-event";
 import { neutralizeFenced } from "./session-bus/delivery";
+import { stampTaskState } from "./session-bus/state-stamp";
 import type { QueuedLine } from "./session-bus/delivery-queue";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, SessionMemberOrphanWire, SessionMemberRecordWire, SessionMemberReleaseWire, SessionMembershipCreateWire, type AbMessage, type RpcRequest, type SessionEntry, type SessionMemberOf, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
@@ -231,7 +232,7 @@ export interface AgentCore {
    *  adapter a Handler auto-reply uses. False means it did not go in — the
    *  session has no live agent — so the caller's queue keeps the line for the
    *  next boundary rather than reporting a delivery that never happened. */
-  injectBusLine(sessionId: string, text: string): boolean;
+  injectBusLine(sessionId: string, text: string, task?: { taskId: string; state: string }): boolean;
   /** The owner's work reduction moved: re-emit `session:updated` so the
    *  `workStatus` stamped on each entry (from
    *  {@link BuildAgentCoreOptions.sessionWorkStatusFor}) is current. No-op
@@ -1068,8 +1069,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  `injectReply` returns nothing, so "delivered" has to be decided here: a
    *  session with no live agent swallows the submit, and a queue told the line
    *  went in would drop the only wake its lead is ever getting (D11). */
-  function injectBusLine(sessionId: string, text: string): boolean {
+  function injectBusLine(sessionId: string, text: string, task?: { taskId: string; state: string }): boolean {
     if (!sessions?.get(sessionId)?.running) return false;
+    // Read at DELIVERY and never written back: the stamp is about this delivery
+    // instant, so a line redelivered after a retry re-reads the state rather
+    // than carrying an older reading of it.
+    if (task) text = stampTaskState(text, task, sessionBus.task(sessionId, task.taskId)?.state);
     // The last boundary before another machine's words become keystrokes. The
     // renderer already neutralized them, so a difference here is an upstream bug
     // rather than an expected input — hence the warn.

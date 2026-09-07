@@ -58,6 +58,13 @@ export const QueuedLineSchema = z.object({
   sessionId: z.string().min(1).max(200),
   kind: DeliveryKindSchema,
   text: z.string().max(MAX_DELIVERY_CHARS),
+  /** The task this line was rendered from, and that task's state at the moment
+   *  it was rendered. A queued line is a FROZEN render, and the turn boundary it
+   *  waits for can outlast the state it describes — a card can ask a lead to
+   *  answer a peer whose task has since completed. Read again at delivery, these
+   *  two say so. Absent for a brief or a join, which name no task. */
+  taskId: z.string().min(1).max(300).optional(),
+  taskState: z.string().min(1).max(40).optional(),
   queuedAt: z.number(),
 });
 export type QueuedLine = z.infer<typeof QueuedLineSchema>;
