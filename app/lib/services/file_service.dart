@@ -573,6 +573,7 @@ class FileService {
       size: node.size,
       extension: node.extension,
       children: node.children.map(_cloneNode).toList(),
+      truncated: node.truncated,
     );
   }
 
@@ -590,6 +591,7 @@ class FileService {
       size: root.size,
       extension: root.extension,
       children: newChildren,
+      truncated: root.truncated,
     );
   }
 
@@ -617,6 +619,7 @@ class FileService {
       size: current.size,
       extension: current.extension,
       children: newChildren,
+      truncated: current.truncated,
     );
   }
 
@@ -652,6 +655,7 @@ class FileService {
       size: parent.size,
       extension: parent.extension,
       children: newChildren,
+      truncated: parent.truncated,
     );
   }
 

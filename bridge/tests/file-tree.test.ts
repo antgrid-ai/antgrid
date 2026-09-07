@@ -173,6 +173,47 @@ describe("file-tree", () => {
       expect(tree.truncated).toBeUndefined();
       expect(JSON.stringify(tree)).not.toContain("truncated");
     });
+
+    // The depth guard drops children without the parent ever learning why, so
+    // the cap has to mark its own cut or it is the one truncation nothing
+    // reports — on the wire or in the app.
+    it("marks the directory the depth cap cut", () => {
+      let dir = tempDir;
+      for (let i = 0; i < 12; i++) {
+        dir = join(dir, `level${i}`);
+        mkdirSync(dir);
+        writeFileSync(join(dir, "file.txt"), "deep");
+      }
+
+      let node = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []))!;
+      let deepest = node;
+      while (true) {
+        const next = node.children?.find((c) => c.type === "directory");
+        if (!next) break;
+        node = next;
+        deepest = node;
+      }
+
+      expect(deepest.children).toEqual([]);
+      expect(deepest.truncated).toBe(true);
+    });
+
+    it("does not mark a capped directory whose entries were all ignored", () => {
+      let dir = tempDir;
+      for (let i = 0; i < 10; i++) {
+        dir = join(dir, `level${i}`);
+        mkdirSync(dir);
+      }
+      mkdirSync(join(dir, "node_modules"));
+
+      let node = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []))!;
+      for (let i = 0; i < 10; i++) {
+        node = node.children!.find((c) => c.name === `level${i}`)!;
+      }
+
+      expect(node.children).toEqual([]);
+      expect(node.truncated).toBeUndefined();
+    });
   });
 
   describe("readFile", () => {

@@ -187,6 +187,15 @@ function walk(
     entries.sort();
     const children: FileTreeNode[] = [];
     let truncated = false;
+    // The depth guard at the top of this function drops every child of a
+    // directory sitting at the cap and cannot say WHY it returned null, so the
+    // cut is marked here, where the cap is still in view. An ignored entry is
+    // not a cut — it was never going to be sent.
+    if (depth === MAX_DEPTH) {
+      truncated = entries.some((entry) =>
+        !rules.ignores(relative(projectRoot, join(absPath, entry)).replace(/\\/g, "/")),
+      );
+    }
     for (const entry of entries) {
       if (budget.left <= 0) {
         truncated = true;

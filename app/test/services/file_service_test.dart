@@ -118,6 +118,63 @@ void main() {
     await session.close();
   });
 
+  // Every rebuild site in the merge path reconstructs nodes field by field, so
+  // a flag left off one of them quietly repairs a partial tree on the first
+  // file save — and the explorer goes back to looking complete.
+  test('a tree:update preserves a truncation it did not touch', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    t.emitJson({
+      'id': 'tf-cut',
+      'timestamp': 0,
+      'type': 'tree:full',
+      'projectId': 'p',
+      'root': {
+        ..._rootNode(
+          children: [
+            {
+              'name': 'big',
+              'path': 'big',
+              'type': 'directory',
+              'children': [_file('a.txt', 'big/a.txt')],
+              'truncated': true,
+            },
+          ],
+        ),
+        'truncated': true,
+      },
+      'seq': 5,
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.root!.truncated, isTrue);
+    expect(svc.currentState.root!.children[0].truncated, isTrue);
+
+    t.emitJson({
+      'id': 'u-cut',
+      'timestamp': 0,
+      'type': 'tree:update',
+      'projectId': 'p',
+      'seq': 6,
+      'added': [_file('b.txt', 'big/b.txt')],
+      'modified': const <Map<String, dynamic>>[],
+      'removed': const <String>[],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    final big = svc.currentState.root!.children.firstWhere(
+      (c) => c.path == 'big',
+    );
+    expect(big.children.map((c) => c.path), contains('big/b.txt'));
+    expect(big.truncated, isTrue);
+    expect(svc.currentState.root!.truncated, isTrue);
+
+    await svc.dispose();
+    await session.close();
+  });
+
   test('fresh tree:update applied after snapshot', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
