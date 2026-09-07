@@ -654,6 +654,13 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       if (!m.peer) return refuse("NOT_PEER", "only the session a task was assigned to can start it");
       const rec = deps.coordinator.task(m.sessionId, taskId);
       if (!rec || rec.role !== "peer") return unknownTask();
+      // Refused here rather than left to the report below, which is the only
+      // other thing that could catch it: opening is the one verb whose SUCCESS
+      // asserts the work is live, so a withdrawn task answering "now marked as
+      // being worked" tells a peer the opposite of the truth at the exact moment
+      // it is deciding whether to keep going. A peer cancelled mid-turn reaches
+      // this before its cancel card does.
+      if (isTerminal(rec.state)) return refuse("TASK_TERMINAL", `this task is already ${rec.state}`);
       const sent = deps.coordinator.report(
         { sessionId: m.sessionId, taskId, summary: `started: ${rec.title}`, parts: [{ kind: "text", text: rec.title }] },
         "working",

@@ -641,7 +641,14 @@ export async function callSessionBusTool(
       if (!taskPath) return toolError("Missing required argument: taskId");
       const r = await api("POST", `${taskPath}/cancel`, body({ reason: argStr(args, "reason") }));
       if (!r.ok) return toolError(busError(r));
-      return toolText(`Task ${taskId} withdrawn. The peer has been told to stop.`);
+      // Never "has been told", for the same reason assign never says "delivered":
+      // a cancel is a queued card, and a peer mid-turn is precisely the peer that
+      // cannot read one -- which is the case cancellation exists for.
+      return toolText(
+        `Task ${taskId} withdrawn. The peer is told at its next turn boundary, so one mid-turn `
+        + `keeps working until then and anything it already did is not undone. Its next `
+        + `state-moving call on this task is refused.`,
+      );
     }
 
     case "antgrid_answer_peer": {

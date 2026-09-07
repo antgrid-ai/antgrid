@@ -566,6 +566,30 @@ describe("session-bus routes", () => {
     }
   });
 
+  // Reported from integration: open answered "now marked as being worked" on a
+  // task the lead had already withdrawn. Opening is the one verb whose SUCCESS
+  // asserts the work is live, so its refusal is what stops a peer being told the
+  // opposite of the truth — and a peer cancelled mid-turn reaches this before
+  // its cancel card does.
+  test("a peer cannot open a task its lead already withdrew", async () => {
+    const { lead, peer, stop } = pair();
+    try {
+      const assigned = await post(lead, "tasks", LEAD_SESSION, {
+        peer: PEER_SESSION, summary: "s", instruction: "i",
+      });
+      const taskId = assigned.body.taskId as string;
+      deliver(lead, peer);
+      expect((await post(lead, `tasks/${taskId}/cancel`, LEAD_SESSION, { reason: "no longer needed" })).status).toBe(200);
+      deliver(lead, peer);
+
+      const opened = await post(peer, `tasks/${taskId}/open`, PEER_SESSION, {});
+      expect(opened.status).toBe(409);
+      expect(opened.body.code).toBe("TASK_TERMINAL");
+    } finally {
+      stop();
+    }
+  });
+
   // The peer hit this in integration: its lead withdrew a task, it tried to
   // answer through antgrid_ask_lead, and the refusal named the state and stopped
   // there — so it reached for a taskless finding, the one channel that reaches
