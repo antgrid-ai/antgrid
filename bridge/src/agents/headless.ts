@@ -3,6 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { logger } from "../logger";
+import {
+  captureStdout, modelwatch,
+  type ModelCallContext, type ModelCallEvent, type ModelCallPhase,
+} from "../modelwatch";
 import { killChildTree, stripInheritedCertOverrides } from "../terminal-session";
 import { detectInstalledTools } from "../tool-detector";
 import { AGENTS, agentSpec } from "./registry";
@@ -111,18 +115,43 @@ export async function runHeadless(
     /** Env vars to point at a directory created for this spawn and deleted
      *  after it — see HeadlessCommand.scratchEnv. */
     scratchEnv?: string[];
+    /**
+     * Why this call is being made, for the modelwatch record. Everything in it
+     * is the caller's word because none of it is knowable here: this function
+     * is handed an argv and a budget and nothing about who wants the answer.
+     *
+     * Optional by design rather than by omission. A caller that supplies none
+     * is not recorded and behaves exactly as it did before the recorder
+     * existed, which is what keeps the parameter additive instead of a second
+     * thing every existing call site has to get right.
+     */
+    call?: ModelCallContext;
   },
 ): Promise<HeadlessResult | null> {
   const spawn = opts.spawn ?? Bun.spawn;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let abandonTimer: ReturnType<typeof setTimeout> | undefined;
+  // Hoisted out of the try only so the catch below can report it: that path is
+  // reached both by a spawn that never ran and by a stdout read the timeout's
+  // tree kill broke, and only this flag tells the two apart.
+  let timedOut = false;
   const scratch = makeScratchHome(opts.scratchEnv);
+  const call = opts.call;
+  // The argv is never recorded, here or anywhere downstream: the prompt is one
+  // of its elements, so `cmd` verbatim would put the whole prompt in the ring
+  // past both capture arms. `cmd[0]` is the only part that is safe to name, and
+  // the caller already names it as `actualTool`.
+  if (call) noteCall(() => callEvent(call, "start", {
+    promptChars: call.promptChars, prompt: call.prompt,
+  }));
+  // Started here rather than at the top so `wallMs` measures the child and not
+  // the scratch-home setup that precedes it.
+  const startedAt = Date.now();
   try {
     const proc = spawn(cmd, {
       cwd: opts.cwd, stdout: "pipe", stderr: "ignore",
       env: headlessEnv({ ...opts.env, ...scratch?.env }),
     });
-    let timedOut = false;
     // Resolves only if the timeout fires AND the tree kill fails to end the
     // reads below. Nothing here is racing the happy path: on it, this promise
     // is simply never settled and both awaits win outright.
@@ -147,8 +176,26 @@ export async function runHeadless(
       new Response(proc.stdout).text(), abandoned.then(() => ""),
     ]);
     const code = await Promise.race([proc.exited, abandoned]);
-    return { stdout, code: timedOut ? null : code, timedOut };
-  } catch {
+    const result: HeadlessResult = { stdout, code: timedOut ? null : code, timedOut };
+    // `opts.timeoutMs` rather than the context's own budget: what makes a record
+    // readable is the bound THIS attempt was actually held to, and a caller
+    // splitting one budget across retries hands the second spawn what is left.
+    if (call) noteCall(() => callEvent(call, "end", {
+      wallMs: Date.now() - startedAt,
+      exitCode: result.code, timedOut: result.timedOut, budgetMs: opts.timeoutMs,
+      stdoutChars: result.stdout.length, stdout: captureStdout(result.stdout),
+    }));
+    return result;
+  } catch (err) {
+    // The one leg the caller cannot name for itself: upstream this null is the
+    // same value as an unparseable answer, so a machine where the CLI is not on
+    // PATH at all looks identical to one whose judge talks nonsense. `timedOut`
+    // separates a spawn that never started from a read the tree kill cut short.
+    if (call) noteCall(() => callEvent(call, "end", {
+      wallMs: Date.now() - startedAt,
+      exitCode: null, timedOut, budgetMs: opts.timeoutMs,
+      stdoutChars: 0, outcome: "spawn-failed", outcomeDetail: spawnErrorCode(err),
+    }));
     return null;
   } finally {
     // Must be `finally`, not a tail call: killing the process mid-read rejects
@@ -158,6 +205,52 @@ export async function runHeadless(
     clearTimeout(abandonTimer);
     scratch?.dispose();
   }
+}
+
+/**
+ * Build and record one model-call event, or do neither.
+ *
+ * The event is BUILT inside the guard, not merely recorded inside it: the
+ * capture helpers run during the build, and they are the part a future arm or
+ * redaction rule will grow. `Modelwatch.push` already swallows a subscriber's
+ * throw, which is not the hazard here — every call to this sits inside
+ * `runHeadless`'s own try, whose catch means "the spawn failed" and answers
+ * null, so an unguarded throw would report a model call that ran perfectly as
+ * one that never happened. In the catch block itself it would escape and reject
+ * the caller's promise outright. The observer must never break the observed.
+ */
+function noteCall(build: () => Omit<ModelCallEvent, "seq" | "at">): void {
+  try {
+    modelwatch.record(build());
+  } catch { /* an observer must never fail a spawn */ }
+}
+
+/** The attribution every record of this call carries, plus whatever this phase
+ *  adds. Copied through from the caller rather than derived, because nothing
+ *  about the ids, the tools, the reach or the requested model is visible from
+ *  an argv. */
+function callEvent(
+  call: ModelCallContext, phase: ModelCallPhase, extra: Partial<ModelCallEvent>,
+): Omit<ModelCallEvent, "seq" | "at"> {
+  return {
+    callId: call.callId, phase, purpose: call.purpose, attempt: call.attempt,
+    requestedTool: call.requestedTool, actualTool: call.actualTool, reach: call.reach,
+    requestedModel: call.requestedModel,
+    terminalId: call.terminalId, conversationId: call.conversationId, projectId: call.projectId,
+    ...extra,
+  };
+}
+
+/**
+ * A failed spawn's error CODE, never its message.
+ *
+ * The message is the runtime's text rather than ours, and it is free to quote
+ * the command it could not run — which is the argv, whose tail is the prompt.
+ * A code (`ENOENT`, `EACCES`) answers the same question and cannot carry one.
+ */
+function spawnErrorCode(err: unknown): string | undefined {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" ? code : undefined;
 }
 
 /**

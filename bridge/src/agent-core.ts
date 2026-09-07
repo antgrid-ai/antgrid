@@ -37,6 +37,7 @@ import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
 import { detectInstalledTools } from "./tool-detector";
+import { modelwatch } from "./modelwatch";
 import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
@@ -49,7 +50,7 @@ import { SessionNamer } from "./session-namer";
 import { antigravityCliHome } from "./agents/antigravity/title";
 import { AntigravityTitleWatcher } from "./agents/antigravity/title-watcher";
 import { resolveStructuredTitle } from "./agents/title-dispatch";
-import { buildTitleContext, generateTitleFromContext } from "./agents/title-generate";
+import { buildTitleContext, generateTitleFromContext, type TitleGeneration } from "./agents/title-generate";
 import { TitleAttempts, type TitleOutcome } from "./agents/title-attempts";
 import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
@@ -3608,10 +3609,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // title thrown away for reasons unrelated to generating it, which releases
     // the claim without spending the budget.
     let outcome: TitleOutcome = "abandoned";
+    // Held out here so the record below can name the call the verdict belongs
+    // to: the two exits after a successful spawn settle as `abandoned`, and
+    // those are the calls that were paid for and their answer thrown away.
+    let result: TitleGeneration | undefined;
     try {
       // No cwd: a naming spawn runs in a throwaway directory of its own
       // (headlessScratchCwd), never this session's checkout.
-      const result = await generateTitleFromContext(context, { tool });
+      result = await generateTitleFromContext(context, { tool, terminalId: target.terminalId });
       if (!result.ok) {
         outcome = result.reason;
         return;
@@ -3631,6 +3636,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       namer?.onStructuredTitle(target.terminalId, result.title, "self");
     } finally {
       titleAttempts.settle(target.terminalId, key, outcome);
+      // After the settle and inside a catch of its own: that call decides
+      // whether this session may ever be named again, and an observer must
+      // never be what breaks it. `abandoned` is recorded like any other verdict
+      // — it is the one outcome nothing else counts, and the only place the
+      // spawn's own records can be told a paid-for answer was discarded.
+      try {
+        if (result) modelwatch.record({
+          callId: result.callId, phase: "outcome", purpose: "title", attempt: 1,
+          requestedTool: tool, actualTool: result.actualTool, reach: result.reach,
+          terminalId: target.terminalId, outcome,
+        });
+      } catch { /* an observer must never fail a naming run */ }
     }
   }
 

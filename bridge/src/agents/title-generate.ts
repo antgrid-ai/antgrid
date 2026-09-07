@@ -1,4 +1,5 @@
 import { logger } from "../logger";
+import { capturePrompt } from "../modelwatch";
 import { headlessScratchCwd, logBorrow, resolveHeadless, runHeadless } from "./headless";
 import { agentSpec } from "./registry";
 
@@ -46,10 +47,6 @@ export function parseTitleFromOutput(stdout: string): string | null {
   // reject rather than truncate mid-sentence into a nonsense name.
   if (line.length > MAX_TITLE_LEN || line.split(" ").length > 12) return null;
   return line;
-}
-
-function buildPrompt(context: string): string {
-  return PROMPT_HEAD + context.slice(0, MAX_CONTEXT_CHARS);
 }
 
 /**
@@ -110,8 +107,28 @@ export async function buildTitleContext(opts: {
  * retry would re-read a transcript to reach the same refusal.
  */
 export type TitleGeneration =
-  | { ok: true; title: string }
-  | { ok: false; reason: "unavailable" | "failed" };
+  | ({ ok: true; title: string } & TitleCallRef)
+  | ({ ok: false; reason: "unavailable" | "failed" } & TitleCallRef);
+
+/**
+ * What the caller needs to record the OUTCOME of a naming call against the
+ * spawn's own records.
+ *
+ * `callId` is the join. The tools travel with it because a naming call is
+ * routinely served by a borrowed CLI, and the caller — which sits above this
+ * function and only ever names a session's own agent — would otherwise file
+ * every borrowed call under the vendor that did not run it.
+ */
+export interface TitleCallRef {
+  callId: string;
+  /** The CLI that served the call. On the `unavailable` reason nothing ran at
+   *  all, so it is the requested tool: there is no second vendor to name, and
+   *  the reason itself is what says so. */
+  actualTool: string;
+  /** The headless entry that served it, or `"none"` when no installed agent
+   *  declares one — the `unavailable` case has no reach to name. */
+  reach: string;
+}
 
 /**
  * Name a session by asking a headless CLI, rather than waiting to see whether
@@ -133,30 +150,59 @@ export async function generateTitleFromContext(context: string, opts: {
   tool: string;
   model?: string;
   timeoutMs?: number;
+  /** Which session is being named. Attribution for the modelwatch record only —
+   *  nothing about the call itself depends on it, which is why it is optional. */
+  terminalId?: string;
   spawn?: typeof Bun.spawn;
   /** Test seam; production reads PATH via detectInstalledTools(). */
   installedTools?: string[];
 }): Promise<TitleGeneration> {
+  const callId = crypto.randomUUID();
   // `need: "none"` — the conversation is inlined into the prompt, so this asks
   // for the tightest argv the agent has rather than one that can reach the repo.
   const picked = resolveHeadless(opts.tool, "none", opts.installedTools);
-  if (!picked) return { ok: false, reason: "unavailable" };
+  if (!picked) {
+    return { ok: false, reason: "unavailable", callId, actualTool: opts.tool, reach: "none" };
+  }
   logBorrow("none", opts.tool, picked.tool);
-  const result = await runHeadless(picked.command.cmd(buildPrompt(context), opts.model), {
+  // Sliced once and then both sent and digested: a digest taken over the whole
+  // transcript would identify text the model was never shown.
+  const excerpt = context.slice(0, MAX_CONTEXT_CHARS);
+  const prompt = PROMPT_HEAD + excerpt;
+  const budgetMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const ref: TitleCallRef = { callId, actualTool: picked.tool, reach: picked.reach };
+  const result = await runHeadless(picked.command.cmd(prompt, opts.model), {
     cwd: headlessScratchCwd(),
-    timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    timeoutMs: budgetMs,
     spawn: opts.spawn,
     env: picked.command.env,
     scratchEnv: picked.command.scratchEnv,
+    // Requested and actual are both recorded because they routinely differ
+    // here: `need: "none"` takes whichever installed agent can serve it and
+    // registry order puts Claude first, so on a machine with Claude installed
+    // every borrowed title is billed to the Claude account. logBorrow says so
+    // in one log line; this is what makes it countable.
+    call: {
+      callId, purpose: "title", attempt: 1,
+      requestedTool: opts.tool, actualTool: picked.tool, reach: picked.reach,
+      requestedModel: opts.model,
+      terminalId: opts.terminalId,
+      budgetMs,
+      promptChars: prompt.length,
+      // The scaffold is ours and safe verbatim; the excerpt is the user's
+      // session talking back, so it goes through the context arm rather than
+      // being inlined as prompt text.
+      prompt: capturePrompt({ scaffold: PROMPT_HEAD, context: excerpt }),
+    },
   });
   // A timeout or a non-zero exit discards the output rather than parsing it.
   // These CLIs print their refusals to STDOUT and they are short: "Invalid API
   // key · Please run /login" clears every one of parseTitleFromOutput's checks
   // and reads as a title. With the `self` rank outranking the first-message
   // re-read, that error string would be the session's name for good.
-  if (!result || result.code !== 0) return { ok: false, reason: "failed" };
+  if (!result || result.code !== 0) return { ok: false, reason: "failed", ...ref };
   const title = parseTitleFromOutput(result.stdout);
   // An unparseable answer is a failed attempt, not an absent capability: the
   // spawn worked and the model rambled, which the next turn may not repeat.
-  return title ? { ok: true, title } : { ok: false, reason: "failed" };
+  return title ? { ok: true, title, ...ref } : { ok: false, reason: "failed", ...ref };
 }

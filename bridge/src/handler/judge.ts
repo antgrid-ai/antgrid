@@ -1,5 +1,11 @@
 // bridge/src/handler/judge.ts
+import { randomUUID } from "node:crypto";
+
 import { runHeadless } from "../agents/headless";
+import {
+  capturePrompt, modelwatch,
+  type ModelCallEvent, type ModelCallPurpose,
+} from "../modelwatch";
 import type { CapCommand } from "../structured/chat-session";
 import {
   buildDecidePrompt, buildRetryPrompt, buildShapeRetryPrompt, parseDecisionFromOutput, pickJudge,
@@ -7,7 +13,9 @@ import {
 } from "./decision";
 import type { InstructionItem } from "./backlog";
 import type { HandlerPersonality } from "../protocol";
-import { buildExtractPrompt, parseExtractionOutput, type ExtractionResult } from "./extract";
+import {
+  buildExtractPrompt, parseExtractionOutput, renderAmendable, type ExtractionResult,
+} from "./extract";
 
 // Eval-only judge override (Task 16's e2e harness): the spawned agent process can't
 // have fakes injected in-process, so swap the CLI for a scripted bun script. Gated
@@ -37,9 +45,17 @@ function resolveCmd(cmd: string[], prompt: string): string[] {
 // that shape is a kept invariant rather than a description of live behaviour —
 // which is what means adding such a caller needs no change here.
 async function runWithRetry<T>(opts: {
+  // Which of the two callers this is. Nothing here can tell them apart — they
+  // differ only in the prompt they build and the shape they parse — and the
+  // recorder needs the answer to file a call under the work it was doing.
+  purpose: ModelCallPurpose;
   tool: string; model?: string; cwd: string; timeoutMs: number;
   spawn?: typeof Bun.spawn; transcriptPath?: string;
   makePrompt: (transcriptPath?: string) => string;
+  // The prompt as the parts it is BUILT FROM, never the built string: the
+  // recorder's redaction is per-part (see ModelCallPrompt), and the joined
+  // prompt is the one artifact no per-part policy can be written about.
+  promptParts: { goal?: string; backlogText?: string; context?: string };
   parse: (stdout: string) => { value: T | null; error?: string };
   // Re-ask once when the parsed value is well-formed JSON but breaks a caller
   // rule the prompt states (a non-null string is that rejection's reason).
@@ -60,32 +76,74 @@ async function runWithRetry<T>(opts: {
   // escalate-only, and a sealed entry is never promoted into one just because
   // the agent can answer a question (see AgentSpec.headless).
   const judge = pickJudge(opts.tool);
-  if (!judge) return null;
+  // Minted before the first spawn and shared by both attempts, because a retry
+  // that carries its own id is indistinguishable in the record from two
+  // unrelated calls that happened to land together.
+  const callId = randomUUID();
+  // What the CALLER made of an attempt's answer, which the spawn that produced
+  // it cannot know: every exit below names its leg here, and so does the
+  // rejection that causes the retry — if the retry then answers well, this is
+  // the only record that the first answer was ever wrong.
+  const note = (attempt: number, outcome: string, extra?: Partial<ModelCallEvent>) => {
+    try {
+      modelwatch.record({
+        callId, phase: "outcome", purpose: opts.purpose, attempt,
+        // A `need: "repo"` call is never borrowed — pickJudge gates the judge
+        // per tool — so the two tools are equal here by construction rather
+        // than by omission. `unavailable` is the reach of a call no entry
+        // served: naming a tier would be naming one that never ran.
+        requestedTool: opts.tool, actualTool: opts.tool,
+        reach: judge?.tier ?? "unavailable",
+        requestedModel: opts.model,
+        outcome, ...extra,
+      });
+    } catch { /* an observer must never fail a judge call */ }
+  };
+  if (!judge) { note(1, "no-judge"); return null; }
   const path = judge.tier === "readonly" ? opts.transcriptPath : undefined;
   // Output is parsed whatever the exit code says: a judge answers in JSON, so a
   // failed run cannot masquerade as a verdict the way a one-line refusal can
   // masquerade as a title (see runHeadless).
-  const run = (p: string, timeoutMs: number) => runHeadless(
+  const run = (p: string, timeoutMs: number, attempt: number) => runHeadless(
     resolveCmd(judge.command.cmd(p, opts.model), p),
     {
       cwd: opts.cwd, timeoutMs, spawn,
       env: judge.command.env, scratchEnv: judge.command.scratchEnv,
+      call: {
+        callId, purpose: opts.purpose, attempt,
+        requestedTool: opts.tool, actualTool: opts.tool, reach: judge.tier,
+        requestedModel: opts.model, budgetMs: timeoutMs, promptChars: p.length,
+        // The same parts on both attempts. All a retry prompt adds is our own
+        // re-ask and the reason for it, and that reason is already the previous
+        // attempt's outcome rather than something worth holding twice.
+        prompt: capturePrompt(opts.promptParts),
+      },
     },
   );
 
   const prompt = opts.makePrompt(path);
   const started = Date.now();
-  const out1 = await run(prompt, opts.timeoutMs);
-  if (out1 === null) return null;
+  const out1 = await run(prompt, opts.timeoutMs, 1);
+  if (out1 === null) { note(1, "spawn-failed"); return null; }
+  // Measured the moment the attempt returns rather than at the retry below, so
+  // the parse and the caller's shape gate are not billed to what the retry gets
+  // — and so every exit from here can report it. It is the number a SHARED
+  // budget turns into a question: a first attempt that leaves the retry a few
+  // hundred milliseconds has made it structurally unreachable, and nothing else
+  // on this machine would ever say so.
+  const remaining = opts.timeoutMs - (Date.now() - started);
   const r1 = opts.parse(out1.stdout);
   const shapeError = r1.value ? opts.retryIf?.(r1.value) ?? null : null;
-  if (r1.value && !shapeError) return r1.value;
+  if (r1.value && !shapeError) { note(1, "parsed", { remainingMs: remaining }); return r1.value; }
   // A shape-rejected value always beats null on the way out: null means "the
   // judge could not run" to every caller, and a caller that parks on an outage
   // would silently swallow a decision its own guards would have escalated with
   // the text attached. Null still comes back where it always did — a first
   // attempt whose output would not parse at all.
-  if (out1.timedOut) { opts.onTimeout?.(); return r1.value; } // hung judge with unusable output: no retry
+  if (out1.timedOut) {
+    note(1, "timeout", { remainingMs: remaining, outcomeDetail: shapeError ?? r1.error });
+    opts.onTimeout?.(); return r1.value; // hung judge with unusable output: no retry
+  }
 
   // Budget spent by the first attempt is gone; the retry runs only within what
   // remains. If none is left, fail closed rather than start a full second timeout.
@@ -95,17 +153,29 @@ async function runWithRetry<T>(opts: {
   // undifferentiated outage, and a first attempt that ate the whole budget or a
   // retry that hung are timeouts however the individual spawns exited. A spawn
   // that FAILED (`out2 === null`) is not one and keeps its silence.
-  const remaining = opts.timeoutMs - (Date.now() - started);
-  if (remaining <= 0) { opts.onTimeout?.(); return r1.value; }
+  if (remaining <= 0) {
+    note(1, "budget-exhausted", { remainingMs: remaining, outcomeDetail: shapeError ?? r1.error });
+    opts.onTimeout?.(); return r1.value;
+  }
+  // Why the first answer is being re-asked, recorded before the retry replaces
+  // it. A shape rejection reaches the caller's gate and is persisted nowhere,
+  // so on the leg where the retry then answers well this is the only trace that
+  // the judge broke a rule the prompt states.
+  note(1, shapeError ? "shape-rejected" : "unparsed", {
+    remainingMs: remaining, outcomeDetail: shapeError ?? r1.error,
+  });
   const retryPrompt = shapeError
     ? buildShapeRetryPrompt(prompt, shapeError)
     : buildRetryPrompt(prompt, r1.error ?? "invalid output");
-  const out2 = await run(retryPrompt, remaining);
-  if (out2 === null) return r1.value;
+  const out2 = await run(retryPrompt, remaining, 2);
+  if (out2 === null) { note(2, "spawn-failed"); return r1.value; }
   if (out2.timedOut) opts.onTimeout?.();
   // Exactly one retry: the second answer is final even if it breaks the same
   // rule, and the caller's own gate escalates it from there.
-  return opts.parse(out2.stdout).value ?? r1.value;
+  const r2 = opts.parse(out2.stdout);
+  note(2, r2.value ? "retried-parsed" : out2.timedOut ? "timeout" : "retried-unparsed",
+    { outcomeDetail: r2.error });
+  return r2.value ?? r1.value;
 }
 
 export async function runDecision(opts: {
@@ -123,9 +193,11 @@ export async function runDecision(opts: {
   onTimeout?: () => void;
 }): Promise<HandlerDecision | null> {
   return runWithRetry<HandlerDecision>({
+    purpose: "decision",
     tool: opts.tool, model: opts.model, cwd: opts.cwd,
     timeoutMs: opts.timeoutMs ?? 45_000, spawn: opts.spawn, transcriptPath: opts.transcriptPath,
     retryIf: opts.retryIfShape, onTimeout: opts.onTimeout,
+    promptParts: { goal: opts.goal, backlogText: opts.backlogText, context: opts.context },
     makePrompt: (path) => buildDecidePrompt({
       goal: opts.goal, backlogText: opts.backlogText, context: opts.context, transcriptPath: path,
       floorWarnings: opts.floorWarnings, evidenceRejections: opts.evidenceRejections,
@@ -155,8 +227,18 @@ export async function runExtraction(opts: {
   timeoutMs?: number; spawn?: typeof Bun.spawn;
 }): Promise<ExtractionResult | null> {
   return runWithRetry<ExtractionResult>({
+    purpose: "extraction",
     tool: opts.tool, model: opts.model, cwd: opts.cwd,
     timeoutMs: opts.timeoutMs ?? 20_000, spawn: opts.spawn,
+    // The instruction rides in `goal`: it is the user's own sentence to the
+    // handler, the same register that part is written for, and there is no
+    // transcript or working-tree excerpt on this path for `context` to name.
+    // The backlog is re-rendered rather than counted from the list, because
+    // what belongs in the record is the size of what the prompt CARRIED and
+    // renderAmendable shows only the items an amendment can still reach.
+    promptParts: {
+      goal: opts.text, backlogText: renderAmendable(opts.backlog ?? []) ?? undefined,
+    },
     makePrompt: () => buildExtractPrompt(opts.text, opts.backlog ?? []),
     parse: (stdout) => {
       const r = parseExtractionOutput(stdout);

@@ -221,14 +221,19 @@ describe("generateSessionTitle", () => {
 // "unavailable" (see TitleAttemptState), so which one a given failure produces
 // decides whether a session can still be named later. Pinned here because the
 // two are one `ok: false` to the type system and nothing else would catch a
-// swap.
+// swap. Every arm also carries the attribution the caller records its outcome
+// against, and `actualTool` is pinned because it is the only thing that names a
+// borrow — an outcome filed under the vendor that did not run is worse than none.
 describe("failure reasons", () => {
   test("no installed agent can serve the call is 'unavailable'", async () => {
     const { spawn, calls } = fakeSpawn("Add retry to uploader");
     const r = await generateTitleFromContext("ctx", {
       tool: "kimi", spawn, installedTools: [],
     });
-    expect(r).toEqual({ ok: false, reason: "unavailable" });
+    expect(r).toEqual({
+      ok: false, reason: "unavailable",
+      callId: expect.any(String), actualTool: "kimi", reach: "none",
+    });
     // Nothing ran: the refusal is the machine's, not this attempt's.
     expect(calls.length).toBe(0);
   });
@@ -238,7 +243,10 @@ describe("failure reasons", () => {
     const r = await generateTitleFromContext("ctx", {
       tool: "claude-code", spawn, installedTools: ["claude-code"],
     });
-    expect(r).toEqual({ ok: false, reason: "failed" });
+    expect(r).toEqual({
+      ok: false, reason: "failed",
+      callId: expect.any(String), actualTool: "claude-code", reach: "readonly",
+    });
   });
 
   test("a clean exit with unusable output is 'failed', not a title", async () => {
@@ -249,7 +257,10 @@ describe("failure reasons", () => {
     const r = await generateTitleFromContext("ctx", {
       tool: "claude-code", spawn, installedTools: ["claude-code"],
     });
-    expect(r).toEqual({ ok: false, reason: "failed" });
+    expect(r).toEqual({
+      ok: false, reason: "failed",
+      callId: expect.any(String), actualTool: "claude-code", reach: "readonly",
+    });
   });
 
   test("a usable title comes back as ok", async () => {
@@ -257,6 +268,9 @@ describe("failure reasons", () => {
     const r = await generateTitleFromContext("ctx", {
       tool: "claude-code", spawn, installedTools: ["claude-code"],
     });
-    expect(r).toEqual({ ok: true, title: "Add retry to uploader" });
+    expect(r).toEqual({
+      ok: true, title: "Add retry to uploader",
+      callId: expect.any(String), actualTool: "claude-code", reach: "readonly",
+    });
   });
 });
