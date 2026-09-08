@@ -77,12 +77,24 @@ class ConfigService {
     this.requestTimeout = const Duration(seconds: 15),
   }) {
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
-    // Tier-3: re-read the config on every (re)establishment so a reconnect
-    // refreshes it (the reconciliation checkpoint). Deliberately a plain send,
-    // NOT read(): config:read-result updates state via _handleReadResult with
-    // or without a tracked _read, so the re-drive neither arms (and leaks) the
-    // caller-timeout timer nor supersedes a settings-screen read() in flight.
-    session.hydrateCheckout(checkoutId, 'config:read', _redriveRead);
+  }
+
+  static const _readHydratorKey = 'config:read';
+
+  /// Registers the config re-read. Deliberately a plain send, NOT read():
+  /// config:read-result updates state via _handleReadResult with or without a
+  /// tracked _read, so the re-drive neither arms (and leaks) the
+  /// caller-timeout timer nor supersedes a settings-screen read() in flight.
+  /// Only the checkout on screen carries this — see
+  /// [ProjectSession.setActiveCheckouts].
+  void activate() {
+    if (_disposed) return;
+    session.hydrateCheckout(checkoutId, _readHydratorKey, _redriveRead);
+  }
+
+  void deactivate() {
+    if (_disposed) return;
+    session.unhydrateCheckout(checkoutId, _readHydratorKey);
   }
 
   Future<void> _redriveRead() async {
@@ -107,7 +119,7 @@ class ConfigService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    session.unhydrateCheckout(checkoutId, 'config:read');
+    session.unhydrateCheckout(checkoutId, _readHydratorKey);
     _failPending(StateError('ConfigService disposed'));
     await _statusSub?.cancel();
     _statusSub = null;

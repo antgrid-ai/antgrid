@@ -57,6 +57,11 @@ class ProjectSession {
   late final CheckoutServices _mainCheckoutServices;
   final Map<String, CheckoutServices> _checkoutServices = {};
   Set<String> _pendingCheckoutSweep = const {};
+
+  /// Checkouts whose bundles carry the heavy hydrators. Remembered rather than
+  /// derived from [_checkoutServices]: the session list can build a bundle for
+  /// an id already named here, and it has to come up active.
+  Set<String> _activeCheckouts = const {};
   final StreamController<CheckoutServices> _checkoutBundlesController =
       StreamController<CheckoutServices>.broadcast();
   FileService get fileService => _mainCheckoutServices.fileService;
@@ -125,9 +130,11 @@ class ProjectSession {
       this,
       cache: cachedSessionsStore,
     );
-    // Eager, not lazy-on-focus: the notification aggregators in providers.dart
-    // fan in over [checkoutServiceBundles], so an isolated session that has
-    // never been focused would produce no notifications at all.
+    // Eager construction, not lazy-on-focus: the notification aggregators in
+    // providers.dart fan in over [checkoutServiceBundles], so an isolated
+    // session that has never been focused would produce no notifications at
+    // all. Only the per-checkout PULLS are focus-gated — see
+    // [CheckoutServices.activate].
     _checkoutSessionSub = sessionsService.stateStream.listen((state) {
       final live = <String>{'main'};
       for (final entry in state.sessions) {
@@ -334,12 +341,32 @@ class ProjectSession {
     if (existing != null) return existing;
     final bundle = CheckoutServices(this, checkoutId);
     _checkoutServices[checkoutId] = bundle;
+    if (_activeCheckouts.contains(checkoutId)) bundle.activate();
     _checkoutBundlesController.add(bundle);
     return bundle;
   }
 
   CheckoutServices? existingServicesForCheckout(String checkoutId) =>
       _checkoutServices[checkoutId];
+
+  Set<String> get activeCheckouts => Set.unmodifiable(_activeCheckouts);
+
+  /// Activates the bundle for every id in [ids] (building it through
+  /// [servicesForCheckout] if it doesn't exist yet) and deactivates every
+  /// other bundle this session holds. A project switched away from keeps its
+  /// last active set — nothing here reacts to focus leaving the project.
+  void setActiveCheckouts(Set<String> ids) {
+    _activeCheckouts = Set<String>.from(ids);
+    for (final id in _activeCheckouts) {
+      servicesForCheckout(id).activate();
+    }
+    // Snapshot first: `servicesForCheckout` above inserts into the map this
+    // iterates.
+    for (final entry in _checkoutServices.entries.toList()) {
+      if (_activeCheckouts.contains(entry.key)) continue;
+      entry.value.deactivate();
+    }
+  }
 
   /// Releases bundles whose session is gone. Deferred by one emission: the
   /// providers that read a bundle are driven by the SAME session list, so
@@ -355,6 +382,11 @@ class ProjectSession {
       // Symmetric with the bridge's own dropCheckoutReplay: a removed worktree
       // must not keep seeding a bundle that a stale id could still recreate.
       _router.dropCheckoutReplay(id);
+      // A dead id lingering here would come back activated: servicesForCheckout
+      // activates on creation for anything this set names.
+      if (_activeCheckouts.contains(id)) {
+        _activeCheckouts = {..._activeCheckouts}..remove(id);
+      }
     }
     // Union, not just the bundle map: a checkout can leave durable frames the
     // router retains without ever getting a bundle (an archived session still
@@ -458,6 +490,12 @@ class CheckoutServices {
   late final PreviewService previewService;
   late final UploadService uploadService;
 
+  // Plain field, NOT `late final`: checkout_scoped_service_reads_test.dart
+  // scrapes every `late final <Type> <name>;` in this class as a
+  // checkout-variable SERVICE.
+  bool _active = false;
+  bool get isActive => _active;
+
   CheckoutServices(ProjectSession session, this.checkoutId) {
     fileService = FileService.fromSession(session, checkoutId: checkoutId);
     terminalService = TerminalService.fromSession(
@@ -475,6 +513,33 @@ class CheckoutServices {
       checkoutId: checkoutId,
     );
     uploadService = UploadService.fromSession(session, checkoutId: checkoutId);
+  }
+
+  /// Registers the pulls that cost a round trip per checkout — the tree, the
+  /// config, the preview and terminal snapshots — and subscribes the
+  /// focus-resume re-pulls that drive the same set again on every foreground.
+  /// A hydrator fires the moment it is registered on an established transport,
+  /// so this is the pull as well as the re-drive. Only the checkout on screen
+  /// carries them: a project with nine managed checkouts put nine trees on the
+  /// wire at once at every bind, which stalled the relay's window.
+  void activate() {
+    if (_active) return;
+    _active = true;
+    fileService.activate();
+    terminalService.activate();
+    configService.activate();
+    previewService.activate();
+  }
+
+  /// Leaves every service's state intact — switching back renders the last
+  /// tree while [activate]'s re-pull refreshes it.
+  void deactivate() {
+    if (!_active) return;
+    _active = false;
+    fileService.deactivate();
+    terminalService.deactivate();
+    configService.deactivate();
+    previewService.deactivate();
   }
 
   Future<void> dispose() => Future.wait([

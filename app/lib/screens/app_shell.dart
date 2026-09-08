@@ -199,6 +199,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     // survives the picker/workspace swap keeps the chain fresh; this is the
     // nearest one.
     ref.watch(agentFocusBinderProvider);
+    ref.watch(checkoutActivationBinderProvider);
     final routed = _buildAgentRouting();
     // Mounted here rather than inside WorkspaceShell because the OS bar is
     // hidden process-wide (initDesktopWindowChrome): any full-window route
