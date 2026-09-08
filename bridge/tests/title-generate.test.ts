@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -214,6 +214,143 @@ describe("generateSessionTitle", () => {
     expect(await generateSessionTitle({
       tool: "claude-code", cwd: tmp(), fallbackContext: "do a thing", spawn,
     })).toBeNull();
+  });
+});
+
+// AgentSpec.cheapNamingModel (agents/types.ts): the model a naming call defaults
+// to per SERVING agent, not per requested one. Pinned against the real registry
+// entries rather than a fixture — the position `model` lands in is exactly what
+// each agent's own `cmd` was verified against (see registry.ts), so a fixture
+// would only prove this file's own fake cmd, not the shipped one.
+describe("cheapNamingModel", () => {
+  // Every entry here also declares a usage descriptor, which appends its own
+  // flag (an --output-format/--json/--format json, or copilot's random-pathed
+  // --usage-output-file) to the same argv this pins — off for this block so
+  // what is asserted is --model's position, not modelwatch's unrelated flags.
+  // ANTGRID_NAMING_MODEL is cleared for the same reason it exists: an operator
+  // who exported it would otherwise turn this whole block red, and the cases
+  // that need a value set one themselves.
+  //
+  // Both are SAVED and restored, never deleted: bun loads a workspace's test
+  // files into one process and both switches are read per spawn, so a plain
+  // delete would silently revoke, partway through the run, the setting the
+  // operator asked for.
+  const prior: Record<string, string | undefined> = {};
+  const swap = (name: string, value?: string) => {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  };
+  beforeEach(() => {
+    prior.usage = process.env.ANTGRID_MODELWATCH_USAGE;
+    prior.naming = process.env.ANTGRID_NAMING_MODEL;
+    process.env.ANTGRID_MODELWATCH_USAGE = "0";
+    delete process.env.ANTGRID_NAMING_MODEL;
+  });
+  afterEach(() => {
+    swap("ANTGRID_MODELWATCH_USAGE", prior.usage);
+    swap("ANTGRID_NAMING_MODEL", prior.naming);
+  });
+
+  // kimi declares no headless entry at all, so it has no cheapNamingModel of its
+  // own either — a "haiku" in this argv could only have come from claude-code,
+  // the agent that actually served the borrowed call.
+  test("a borrowed call gets the serving agent's model, never the requested agent's", async () => {
+    const { spawn, calls } = fakeSpawn("Something useful\n");
+    await generateTitleFromContext("ctx", {
+      tool: "kimi", spawn, installedTools: ["claude-code"],
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(expect.arrayContaining(["--model", "haiku"]));
+  });
+
+  test("an explicit opts.model wins over the serving agent's default", async () => {
+    const { spawn, calls } = fakeSpawn("Something useful\n");
+    await generateTitleFromContext("ctx", {
+      tool: "claude-code", model: "claude-opus-5", spawn, installedTools: ["claude-code"],
+    });
+    expect(calls[0]).toEqual(expect.arrayContaining(["--model", "claude-opus-5"]));
+    expect(calls[0]).not.toContain("haiku");
+  });
+
+  // A caller names a model and a tool together, so the pairing is void the
+  // moment the call borrows: a claude slug reaching `codex exec -m` is not
+  // rejected locally — it reaches the API and comes back 400. kimi declares no
+  // headless entry, which is what makes this call borrow at all.
+  test("a caller's model is dropped on a borrow, not forwarded to the other vendor", async () => {
+    const { spawn, calls } = fakeSpawn("Something useful\n");
+    await generateTitleFromContext("ctx", {
+      tool: "kimi", model: "haiku", spawn, installedTools: ["codex"],
+    });
+    expect(calls[0]![0]).toBe("codex");
+    expect(calls[0]).not.toContain("haiku");
+    // Not merely dropped — replaced by the entry the SERVING vendor verified.
+    expect(calls[0]!.slice(-3, -1)).toEqual(["-m", "gpt-5.4-mini"]);
+  });
+
+  // Every entry here was verified against ONE account, and what an account can
+  // reach is account-specific. The switch is what a user whose vendor moved
+  // underneath them can reach without a new build — naming refuses a session for
+  // good after two failures, so there has to be one.
+  test("ANTGRID_NAMING_MODEL=0 spawns naming with no --model at all", async () => {
+    process.env.ANTGRID_NAMING_MODEL = "0";
+    const { spawn, calls } = fakeSpawn("Something useful\n");
+    await generateTitleFromContext("ctx", {
+      tool: "claude-code", spawn, installedTools: ["claude-code"],
+    });
+    expect(calls[0]).not.toContain("--model");
+    expect(calls[0]).not.toContain("haiku");
+    // The switch drops the flag, nothing else: the rest of the verified argv is
+    // untouched.
+    expect(calls[0]![0]).toBe("claude");
+    expect(calls[0]).toContain("--no-session-persistence");
+  });
+
+  // Off-only. A slug here could not know which vendor ends up serving a borrowed
+  // call, which is the mismatch the whole resolution exists to prevent, so any
+  // value but "0" leaves the declared default in place rather than replacing it.
+  test("ANTGRID_NAMING_MODEL is an off switch, never a substitute slug", async () => {
+    process.env.ANTGRID_NAMING_MODEL = "some-other-model";
+    const { spawn, calls } = fakeSpawn("Something useful\n");
+    await generateTitleFromContext("ctx", {
+      tool: "claude-code", spawn, installedTools: ["claude-code"],
+    });
+    expect(calls[0]!.slice(-2)).toEqual(["--model", "haiku"]);
+    expect(calls[0]).not.toContain("some-other-model");
+  });
+
+  // github-copilot has a verified readonly entry but no cheapNamingModel —
+  // nobody has found a string its account accepts (see registry.ts) — so its
+  // argv carries no --model and nothing else about it moves either.
+  test("an agent with no declared model spawns its bare verified argv", async () => {
+    const { spawn, calls } = fakeSpawn("Something useful\n");
+    await generateTitleFromContext("ctx", {
+      tool: "github-copilot", spawn, installedTools: ["github-copilot"],
+    });
+    expect(calls[0]).toEqual(["copilot", "-p", expect.stringContaining("ctx"), "--silent"]);
+  });
+
+  // Each agent's `cmd` places --model at a different, independently-verified
+  // spot in the argv (immediately after --allowedTools' value for claude,
+  // immediately before the positional prompt for codex and opencode). The
+  // default must reach that exact spot, not merely appear somewhere in the argv.
+  test("the default model lands where that agent's cmd places --model", async () => {
+    const claude = fakeSpawn("t\n");
+    await generateTitleFromContext("ctx", {
+      tool: "claude-code", spawn: claude.spawn, installedTools: ["claude-code"],
+    });
+    expect(claude.calls[0]!.slice(-2)).toEqual(["--model", "haiku"]);
+
+    const codex = fakeSpawn("t\n");
+    await generateTitleFromContext("ctx", {
+      tool: "codex", spawn: codex.spawn, installedTools: ["codex"],
+    });
+    expect(codex.calls[0]!.slice(-3, -1)).toEqual(["-m", "gpt-5.4-mini"]);
+
+    const opencode = fakeSpawn("t\n");
+    await generateTitleFromContext("ctx", {
+      tool: "opencode", spawn: opencode.spawn, installedTools: ["opencode"],
+    });
+    expect(opencode.calls[0]!.slice(-3, -1)).toEqual(["--model", "openai/gpt-5.4-mini"]);
   });
 });
 

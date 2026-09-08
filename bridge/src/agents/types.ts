@@ -649,6 +649,42 @@ export interface AgentSpec {
    * than guessing this one's flags. Add an entry only after running it.
    */
   headless?: Partial<Record<HeadlessReach, HeadlessCommand>>;
+  /**
+   * The cheap model a NAMING call should ask this vendor's CLI for, when the
+   * caller supplies none of its own.
+   *
+   * A property of the VENDOR, not of a reach: unlike `headless`, which is keyed
+   * per {@link HeadlessReach} because an argv's shape differs by how far it may
+   * reach, the set of models an account can name is one fact about the CLI
+   * regardless of which entry serves the call. Keying it under `headless` would
+   * duplicate the same string across every reach an agent declares, and drift
+   * the moment only one of them was re-verified.
+   *
+   * Absence is the honest answer, never a default, exactly as `headless` itself
+   * documents: the set of models an ACCOUNT can reach is account-specific, not a
+   * vendor constant, and a wrong string is not a no-op — it 404s or exits 1
+   * before any API call, turning every title for that vendor into a permanent
+   * failure. Add an entry only from a real run of `picked.command.cmd(prompt,
+   * model)` against the installed CLI, on this exact argv shape, with the VENDOR
+   * ITSELF naming the model that served the call — the usage envelope where one
+   * carries the name, and otherwise the CLI's own banner or run log (neither
+   * codex's nor opencode's JSON stream names a model, so theirs must be read out
+   * of band; see `readCodexUsage` and `readOpencodeUsage` in
+   * ./usage-envelope.ts). Exit 0 is not that evidence: a
+   * vendor that silently falls back to its default on an unrecognised string
+   * would pass it. Pair the run with a negative control — a nonsense model on
+   * the same argv — proving the CLI rejects what it cannot serve.
+   *
+   * Escape hatch, for the account this was never measured on:
+   * `ANTGRID_NAMING_MODEL=0` (./title-generate.ts) drops the flag machine-wide
+   * without a new build.
+   *
+   * Read by `generateTitleFromContext` (./title-generate.ts) off `picked.tool` —
+   * the agent that ACTUALLY SERVES a borrowed naming call — never off the
+   * session's own `tool`: naming borrows across vendors, and a Claude model name
+   * handed to codex fails the call outright.
+   */
+  cheapNamingModel?: string;
   /** Returns messages AND, only when the source is a followable file, its path.
    *  Never synthesize a path: a "transcript"-tier judge has no verified
    *  read-only restriction, so it gets no file hint it could not follow. */

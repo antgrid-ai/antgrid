@@ -79,6 +79,14 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     // NOT `--bare`, which looks made for this (skips hooks, plugins, memory):
     // it also forces ANTHROPIC_API_KEY-only auth and never reads OAuth or the
     // keychain, so it fails closed for every subscription user.
+    //
+    // `haiku` — an alias, not a dated snapshot, so it survives the next Haiku
+    // release rather than 404ing when this one is retired. Measured against the
+    // exact readonly argv below: a single `claude-haiku-4-5-20251001` key in
+    // `modelUsage`, `is_error: false`, at ~22% of an unpinned call's cost — see
+    // title-generate.ts for why this must be read off the tool that actually
+    // serves the call rather than the one requested.
+    cheapNamingModel: "haiku",
     headless: {
       readonly: {
         // The prompt goes BEFORE --allowedTools, not last. --allowedTools is
@@ -148,6 +156,14 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     driver: createCodexDriver,
     // codex offers no sandbox tighter than read-only, so there is no sealed
     // entry to write: `--sandbox read-only` is the floor.
+    //
+    // "gpt-5.4-mini", the lowest-priority tier in this account's own
+    // ~/.codex/models_cache.json, verified against the readonly argv below: the
+    // CLI's own plain-mode banner echoed "model: gpt-5.4-mini" and the call
+    // completed. A dated, account-scoped slug rather than an alias — codex has
+    // none — so it is the likeliest of the declared entries to need re-verifying
+    // first if a title call starts failing for this vendor.
+    cheapNamingModel: "gpt-5.4-mini",
     headless: {
       readonly: {
         // --skip-git-repo-check because a project need not be a git repo:
@@ -212,6 +228,14 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     },
     hooks: opencodeHooks,
     driver: createOpencodeDriver,
+    // "openai/gpt-5.4-mini" — the `provider/model` form this CLI's own `--model`
+    // requires, verified against the transcript argv below via the run's own
+    // log (`modelID=gpt-5.4-mini`, and a counter-run with no --model logging
+    // `gpt-5.6-terra-fast` for the same call, proving the flag is not ignored).
+    // The account's free tiers (`opencode/*-free`) are not candidates however
+    // cheap: their availability is not something a naming call can rely on, and
+    // a throttled call produces no title at all.
+    cheapNamingModel: "openai/gpt-5.4-mini",
     headless: {
       // "transcript", not "readonly": --agent plan selects opencode's built-in
       // restricted Plan agent (edits denied by default; non-interactive `run`
@@ -311,6 +335,15 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
       ),
     // No `update`: github-copilot ships no self-updater (IDE-bound), so a
     // request for one fails soft via updateSpecFor → null.
+    //
+    // No `cheapNamingModel`, and its absence is measured rather than unexamined:
+    // `--model` is inert on this account (`model_picker_enabled: false` on every
+    // catalog entry), so EVERY candidate — including the model this CLI itself
+    // resolves to with no flag, and Claude Haiku 4.5 in three spellings — is
+    // refused locally, exit 1, before any API call. Declaring one would turn
+    // every borrowed title for this vendor into a permanent hard failure.
+    // `COPILOT_MODEL` reaches the same resolver and fails identically, so it is
+    // not a way around this either.
     headless: {
       // "readonly", not "sealed": -p reads the working tree with no flag asking
       // it to. Measured — it answered a "read package.json" prompt even under

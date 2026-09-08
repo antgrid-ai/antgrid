@@ -141,6 +141,45 @@ export interface TitleCallRef {
 }
 
 /**
+ * `ANTGRID_NAMING_MODEL=0` spawns naming with no `--model` at all, whatever the
+ * registry declares and whatever the caller asked for.
+ *
+ * The same hazard `usageCaptureEnabled` (./headless) answers, one layer up and
+ * with a worse blast radius. Every entry was verified against one account, and
+ * the set of models an ACCOUNT can reach is account-specific: a user whose
+ * claude points at Bedrock or Vertex (headlessEnv inherits the host's whole
+ * environment, so `CLAUDE_CODE_USE_BEDROCK` reaches this spawn), or whose
+ * account-scoped codex slug was retired, gets a 404 or a local exit 1 on every
+ * naming call — and TitleAttempts refuses a session for good after two. Nothing
+ * downstream can parse its way out of that, so the switch is what such a user
+ * can reach without a new build. Read per spawn, so it applies to a running host.
+ *
+ * OFF-ONLY, never a substitute slug: a value here could not know which vendor
+ * ends up serving a borrowed call, which is the exact mismatch the resolution
+ * below exists to prevent.
+ */
+function namingModelEnabled(): boolean {
+  return process.env.ANTGRID_NAMING_MODEL !== "0";
+}
+
+/**
+ * Which model string a naming call asks for, given who was requested and who
+ * actually answered.
+ *
+ * Resolved off the SERVING agent, never the requested one: naming borrows
+ * across vendors, and a model name verified for one CLI means nothing to
+ * another — a Claude model name handed to codex fails the call outright. A
+ * caller's own model is subject to the same rule rather than exempt from it: it
+ * can only have been chosen for the tool the caller named, so a borrow drops it
+ * and takes the serving agent's own verified entry instead.
+ */
+function namingModel(requested: string, serving: string, callerModel?: string): string | undefined {
+  if (!namingModelEnabled()) return undefined;
+  if (callerModel && requested === serving) return callerModel;
+  return agentSpec(serving)?.cheapNamingModel;
+}
+
+/**
  * Name a session by asking a headless CLI, rather than waiting to see whether
  * the agent names it for us.
  *
@@ -158,6 +197,10 @@ export interface TitleCallRef {
  */
 export async function generateTitleFromContext(context: string, opts: {
   tool: string;
+  /** Explicit override, honoured only when this call is NOT borrowed — a caller
+   *  can only have chosen a model for the tool it named. Absent is the common
+   *  case: the model is then looked up off the tool that actually serves the
+   *  call, not this one, since naming may borrow across vendors. */
   model?: string;
   timeoutMs?: number;
   /** Which session is being named. Attribution for the modelwatch record only —
@@ -175,13 +218,14 @@ export async function generateTitleFromContext(context: string, opts: {
     return { ok: false, reason: "unavailable", callId, actualTool: opts.tool, reach: "none" };
   }
   logBorrow("none", opts.tool, picked.tool);
+  const model = namingModel(opts.tool, picked.tool, opts.model);
   // Sliced once and then both sent and digested: a digest taken over the whole
   // transcript would identify text the model was never shown.
   const excerpt = context.slice(0, MAX_CONTEXT_CHARS);
   const prompt = PROMPT_HEAD + excerpt;
   const budgetMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const ref: TitleCallRef = { callId, actualTool: picked.tool, reach: picked.reach };
-  const result = await runHeadless(picked.command.cmd(prompt, opts.model), {
+  const result = await runHeadless(picked.command.cmd(prompt, model), {
     cwd: headlessScratchCwd(),
     timeoutMs: budgetMs,
     spawn: opts.spawn,
@@ -196,7 +240,7 @@ export async function generateTitleFromContext(context: string, opts: {
     call: {
       callId, purpose: "title", attempt: 1,
       requestedTool: opts.tool, actualTool: picked.tool, reach: picked.reach,
-      requestedModel: opts.model,
+      requestedModel: model,
       terminalId: opts.terminalId,
       budgetMs,
       promptChars: prompt.length,

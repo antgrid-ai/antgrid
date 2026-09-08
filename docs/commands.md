@@ -287,6 +287,21 @@ whichever agent is installed, which bills a vendor this session never chose. And
 `default` in the model column is not a missing value — it is a call that passed no
 `--model` at all and so ran on whatever that CLI defaults to on this machine,
 which for a three-word naming task is the largest single cost lever there is.
+It means exactly that on every row — no `--model` was passed — but only **title**
+rows consult a per-agent default: a title call passes one for the agents that
+declare `AgentSpec.cheapNamingModel` (`bridge/src/agents/registry.ts`), read off
+the agent that **actually ran**, since a borrowed call's model has to match
+whichever CLI serves it and not the one the session asked for. So `default` on a
+title row means either that nobody has verified a model string that vendor's
+account accepts, or that `ANTGRID_NAMING_MODEL=0` is set. On a `decision` or
+`extraction` row it means only that the supervised session set no judge model —
+it says nothing about whether a model is known for that vendor.
+
+`ANTGRID_NAMING_MODEL=0` drops that flag, for the account whose provider does not
+serve the model this machine's build was measured against. It is the naming
+equivalent of `ANTGRID_MODELWATCH_USAGE=0` below and is needed for the same
+reason: a model string an account cannot reach fails the call outright, and after
+two failures a session is never named again.
 
 **The token and cost cell is vendor-reported, and it is not there for every
 agent.** Where the row shows

@@ -208,6 +208,29 @@ describe("runDecision", () => {
     expect(calls[0].join(" ")).toContain("codex");
     expect(calls[0].join(" ")).toContain("/x");
   });
+
+  // AgentSpec.cheapNamingModel is a NAMING field and must stay one. It names the
+  // cheapest model a vendor will answer on, chosen for a 3-to-6 word task where a
+  // weak answer costs a session title; a judge decides whether a supervised agent
+  // keeps running, and downgrading that silently would be invisible in every
+  // suite here — the verdict shape parses identically whatever model produced it.
+  // The judge is also never borrowed (pickJudge gates per tool), so it has no
+  // serving-vs-requested question to answer and no reason to consult the field.
+  it("passes no --model when the session set none, whatever the agent declares", async () => {
+    const { spawn, calls } = fakeSpawn([GOOD]);
+    await runDecision({ tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+    expect(calls[0]).not.toContain("--model");
+    expect(calls[0]).not.toContain("haiku");
+  });
+
+  // The session's own judgeModel is the ONLY thing that puts one there.
+  it("passes the session's judgeModel when it set one", async () => {
+    const { spawn, calls } = fakeSpawn([GOOD]);
+    await runDecision({
+      tool: "claude-code", model: "claude-opus-5", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn,
+    });
+    expect(calls[0]).toEqual(expect.arrayContaining(["--model", "claude-opus-5"]));
+  });
 });
 
 // The registry declares the override; this is the wiring that has to apply it.

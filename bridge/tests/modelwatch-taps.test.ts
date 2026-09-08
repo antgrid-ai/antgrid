@@ -181,9 +181,47 @@ describe("a naming call, recorded against the session it names", () => {
     expect(events()[0]).toMatchObject({
       purpose: "title", attempt: 1, terminalId: "t-42",
       requestedTool: "claude-code", actualTool: "claude-code",
+      // claude-code's own registry entry (AgentSpec.cheapNamingModel), applied
+      // with no caller override — see the borrow case below for why this must
+      // be read off the SERVING agent rather than the one requested.
+      requestedModel: "haiku",
     });
     expect(ends()[0]!.exitCode).toBe(0);
     expect(ends()[0]!.timedOut).toBe(false);
+  });
+
+  /**
+   * The field this whole shape exists to make observable: naming borrows across
+   * vendors, so the model recorded (and sent) must be the SERVING agent's, never
+   * the requested one's. kimi has no `cheapNamingModel` of its own — it has no
+   * headless entry at all — so a "haiku" here could only have come from
+   * claude-code, the agent that actually ran.
+   */
+  it("records the serving agent's cheap model on a borrow, not the requested agent's", async () => {
+    const { spawn, calls } = scriptedSpawn([{ stdout: "Ship the parser\n" }]);
+    const result = await generateTitleFromContext("do a thing", {
+      tool: "kimi", spawn, installedTools: ["claude-code"],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(calls[0]).toEqual(expect.arrayContaining(["--model", "haiku"]));
+    for (const e of events()) {
+      expect(e.requestedTool).toBe("kimi");
+      expect(e.actualTool).toBe("claude-code");
+      expect(e.requestedModel).toBe("haiku");
+    }
+  });
+
+  it("an explicit caller model overrides the serving agent's default", async () => {
+    const { spawn, calls } = scriptedSpawn([{ stdout: "Ship the parser\n" }]);
+    const result = await generateTitleFromContext("do a thing", {
+      tool: "claude-code", model: "claude-opus-5", spawn, installedTools: ["claude-code"],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(calls[0]).toEqual(expect.arrayContaining(["--model", "claude-opus-5"]));
+    expect(calls[0]).not.toContain("haiku");
+    expect(events()[0]!.requestedModel).toBe("claude-opus-5");
   });
 
   /**
