@@ -92,7 +92,7 @@ class _FileTreeViewState extends State<FileTreeView> {
   final _measureKey = GlobalKey();
   final _selectedRowKey = GlobalKey();
   double? _rowExtent;
-  List<(FileNode, int)> _lastFlatList = const [];
+  List<_TreeRow> _lastFlatList = const [];
 
   @override
   void didUpdateWidget(FileTreeView oldWidget) {
@@ -135,7 +135,8 @@ class _FileTreeViewState extends State<FileTreeView> {
     if (extent == null) return;
     _rowExtent = extent;
     final index = _lastFlatList.indexWhere(
-      (entry) => entry.$1.path == widget.selectedFilePath,
+      (entry) =>
+          !entry.truncationNotice && entry.node.path == widget.selectedFilePath,
     );
     if (index < 0) return;
     final position = _scrollController.position;
