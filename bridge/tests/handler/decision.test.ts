@@ -65,6 +65,60 @@ describe("decision schema", () => {
     });
     expect(r.success).toBe(false);
   });
+
+  // Optional and nested so a judge that omits it gets today's card unchanged —
+  // the button says "Approve" and only the draft describes it. Asserted on the
+  // PARSED value, not merely `.success`: a non-strict z.object silently strips an
+  // undeclared key, so a schema missing `approve` entirely would still say
+  // success here with the object gone.
+  it("accepts a notify carrying an approve label and cost, and keeps it", () => {
+    const r = HandlerDecisionSchema.safeParse({
+      decision: "escalate", confidence: 0.5, reason: "needs the user",
+      notify: {
+        title: "t", body: "b", draftReply: "d", urgency: "normal",
+        approve: { label: "Drop the pricing page", cost: "FAQ and clean build ship now" },
+      },
+    });
+    expect(r.success).toBe(true);
+    expect(r.success && r.data.notify?.approve).toEqual({
+      label: "Drop the pricing page", cost: "FAQ and clean build ship now",
+    });
+  });
+
+  it("accepts a notify with no approve at all", () => {
+    const r = HandlerDecisionSchema.safeParse({
+      decision: "escalate", confidence: 0.5, reason: "needs the user",
+      notify: { title: "t", body: "b", draftReply: "d", urgency: "normal" },
+    });
+    expect(r.success).toBe(true);
+  });
+
+  // A cosmetic button label must never be able to silence the card that stops
+  // the session: `approve` is decoration, and a judge writing only half of it,
+  // or writing a string instead of an object, must not fail the WHOLE decision
+  // and reroute an escalate into onJudgeUnavailable's generic park.
+  it("degrades a half-filled or malformed approve rather than refusing the decision", () => {
+    for (const approve of [
+      { label: "Drop the pricing page" },
+      { cost: "FAQ and clean build ship now" },
+      "Drop it",
+      42,
+      null,
+    ]) {
+      const r = HandlerDecisionSchema.safeParse({
+        decision: "escalate", confidence: 0.5, reason: "needs the user",
+        notify: { title: "t", body: "b", draftReply: "d", urgency: "normal", approve },
+      });
+      expect(r.success, JSON.stringify(approve)).toBe(true);
+
+      const out = JSON.stringify({
+        decision: "escalate", confidence: 0.5, reason: "needs the user",
+        notify: { title: "t", body: "b", draftReply: "d", urgency: "normal", approve },
+      });
+      expect(parseDecisionFromOutput(out).decision?.decision, JSON.stringify(approve))
+        .toBe("escalate");
+    }
+  });
 });
 
 describe("pickJudge tiers", () => {
@@ -776,6 +830,18 @@ describe("the third move in the decide prompt", () => {
     expect(line).toContain("That is why `ask` is the only way to put a question to the user without stopping");
   });
 
+  // The app collapses `reasoning` behind a "Why" disclosure on both the escalate
+  // and the ask arm of the same card, so a judge that puts anything needed to
+  // choose an option in `ask.reasoning` alone hands the user a card with no way
+  // to pick from what is visible by default.
+  it("tells the judge ask.reasoning is read behind the same Why disclosure as reason", () => {
+    const line = build().split("\n").find((l) => l.includes("There is a third move"))!;
+    expect(line).toContain("`ask.question` is what the user reads to answer");
+    expect(line).toContain("`ask.reasoning` is shown to them the same way `reason` is");
+    expect(line).toContain("\"Why\" disclosure");
+    expect(line).toContain("never required in order to pick");
+  });
+
   it("puts ask on the contract line with options and with no draft to prefill", () => {
     const contract = build().split("\n").at(-1)!;
     expect(contract).toContain('"ask":{"question":"...","reasoning":"..."');
@@ -796,6 +862,24 @@ describe("the third move in the decide prompt", () => {
     expect(contract).toContain('"reason":"why you decided this, for the record"');
     expect(contract).toContain('"body":"the question the user must answer, its first sentence first"');
     expect(contract).toContain('"draftReply":"the reply to send if they approve"');
+  });
+
+  // The button says what it does, and the contract line is where the judge
+  // learns that field exists at all — before `ask`, since it belongs to notify.
+  it("names notify.approve on the contract line before ask", () => {
+    const contract = build().split("\n").at(-1)!;
+    expect(contract).toContain('"approve":{"label":"what the one-tap does","cost":"what taking it commits to"}');
+    expect(contract.indexOf('"approve":')).toBeLessThan(contract.indexOf('"ask":'));
+  });
+
+  // Same line as the existing choice-forwarding rule, so the ordering
+  // assertions above it (`:296`-ish) keep passing unmodified.
+  it("names notify.approve.label and .cost on the choice-forwarding line", () => {
+    const p = build();
+    const rule = p.split("\n").find((l) => l.includes("Ask the agent for the options it sees"));
+    expect(rule!).toContain("`notify.approve.label`");
+    expect(rule!).toContain("`notify.approve.cost`");
+    expect(rule!).toContain("never \"Approve\"");
   });
 
   // The same absent-vs-empty discipline the floor warnings and the refused

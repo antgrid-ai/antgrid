@@ -81,7 +81,10 @@ void main() {
 
     expect(find.text('Handler has a question'), findsOneWidget);
     expect(find.textContaining('Migrate the schema now'), findsOneWidget);
-    expect(find.textContaining('Both are defensible'), findsOneWidget);
+    // Behind the same "Why" disclosure the card uses: the composer for the
+    // answer must not sit below a block the judge was told is read afterward.
+    expect(find.textContaining('Both are defensible'), findsNothing);
+    expect(find.text('Why'), findsOneWidget);
     // The one thing this widget exists to guarantee: the draft on the row is
     // the judge's own words, and the text in this field is what mints a
     // session-long authorization lift.
@@ -176,5 +179,36 @@ void main() {
         .where((l) => !l.trimLeft().startsWith('//'))
         .join('\n');
     expect(code.contains('draftReply'), isFalse);
+  });
+
+  testWidgets('the Why opens the reasoning on tap', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    await _open(tester, _ask);
+
+    await tester.tap(find.text('Why'));
+    await tester.pump();
+    expect(find.textContaining('Both are defensible'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('an ask with no reasoning draws no Why row', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    await _open(
+      tester,
+      const HandlerEscalation(
+        escalationId: 'ask-2',
+        terminalId: 't1',
+        question: 'Ship it?',
+        reasoning: '',
+        draftReply: '',
+        urgency: 'normal',
+        at: 1,
+        nonBlocking: true,
+      ),
+    );
+
+    expect(find.text('Why'), findsNothing);
+    expect(find.textContaining('Ship it?'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
   });
 }

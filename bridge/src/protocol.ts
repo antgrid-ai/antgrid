@@ -1099,10 +1099,12 @@ export const HandlerInstructWire = z.object({
   // Present = this frame ANSWERS the standing ask with this id and is NOT a new
   // instruction. Optional because the schema is a plain non-strict z.object and
   // an older bridge strips it — which is only safe because the app never sends
-  // it to a session whose snapshot did not advertise `askAnswer`. When it IS
-  // present and names nothing, instruct fails CLOSED rather than falling through
-  // to today's path: an answer silently promoted to an authorizing, extracting
-  // instruction is exactly the laundering the ask shape exists to prevent.
+  // it to a session whose snapshot did not advertise the capability the frame
+  // relies on: `askAnswer` for an ask answered here alone, `escalationAnswer` for
+  // the `delivered` note below. When it IS present and names nothing, instruct
+  // fails CLOSED rather than falling through to today's path: an answer silently
+  // promoted to an authorizing, extracting instruction is exactly the laundering
+  // the ask shape exists to prevent.
   escalationId: z.string().max(64).optional(),
   // Present = the sender ALREADY typed this text into the session, and this frame
   // is a note so the judge learns its question was answered. Absent = the words
@@ -1174,8 +1176,15 @@ const HandlerAnswerMessage = BaseMessage.extend({
 // here rather than on the enclosing object.
 const EscalationChoiceWire = z.object({
   choiceId: z.string().min(1).max(40),
-  label: z.string().min(1).max(40),
+  // Non-empty refined on top of `.min(1)`: a whitespace-only label is truthy but
+  // draws a blank button on the card that stops the session.
+  label: z.string().min(1).max(40).regex(/^[^\x00-\x1f\x7f]+$/).refine((t) => t.trim().length > 0),
   text: z.string().min(1).max(400).regex(/^[^\x00-\x1f\x7f]+$/).refine((t) => t.trim().length > 0),
+  // What taking this chip commits to, one clause, shown under the button. New and
+  // optional, so no bound any row already on disk was written under moves and an app
+  // that predates it renders exactly what it renders today.
+  cost: z.string().min(1).max(160).regex(/^[^\x00-\x1f\x7f]+$/)
+    .refine((t) => t.trim().length > 0).optional(),
 });
 
 const uniqueChoiceIds = (cs: { choiceId: string }[]): boolean =>

@@ -570,15 +570,23 @@ class HandlerEscalationChoice {
   /// refuse.
   final String text;
 
+  /// What taking this one-tap commits to, judge-authored for the approve
+  /// chip and engine-authored for reject. Optional: an older bridge, or one
+  /// the judge left blank, draws the card exactly as it did before this
+  /// field existed.
+  final String? cost;
+
   const HandlerEscalationChoice({
     required this.choiceId,
     required this.label,
     required this.text,
+    this.cost,
   });
 
   static const _maxChoiceId = 40;
   static const _maxLabel = 40;
   static const _maxText = 400;
+  static const _maxCost = 160;
 
   /// The wire's own rule. A control character would render as an unreadable
   /// chip and, on the PTY path, submit an extra line past the answer.
@@ -589,6 +597,7 @@ class HandlerEscalationChoice {
     final choiceId = json['choiceId'];
     final label = json['label'];
     final text = json['text'];
+    final cost = json['cost'];
     if (choiceId is! String ||
         label is! String ||
         text is! String ||
@@ -596,6 +605,11 @@ class HandlerEscalationChoice {
         choiceId.length > _maxChoiceId ||
         label.isEmpty ||
         label.length > _maxLabel ||
+        // Whitespace-only or a control character draws a blank or garbled
+        // button — reject the entry, not degrade it: a chip with no readable
+        // label cannot be drawn at all, so there is nothing to fall back to.
+        label.trim().isEmpty ||
+        !_printable.hasMatch(label) ||
         text.length > _maxText ||
         // Whitespace alone is dropped by every consumer of [text] — the send
         // path refuses to submit a bare newline into a session — so it would
@@ -608,6 +622,13 @@ class HandlerEscalationChoice {
       choiceId: choiceId,
       label: label,
       text: text,
+      // Degraded, unlike label/text: a malformed cost is a missing sub-line, and
+      // rejecting the entry for one would cost the user the whole card (listFromWire
+      // returns null on any bad entry). The two required fields keep the reject-the-row
+      // polarity because without either the chip cannot be drawn at all.
+      cost: cost is String && cost.trim().isNotEmpty && cost.length <= _maxCost
+          ? cost
+          : null,
     );
   }
 

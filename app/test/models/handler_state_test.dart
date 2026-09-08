@@ -270,6 +270,17 @@ void main() {
           approve,
           {'choiceId': 'reject', 'label': 'x' * 41, 'text': 'no'},
         ],
+        // A whitespace-only or control-character label draws a blank or
+        // garbled button — the judge now authors this label, so the wire's
+        // own tightening must be mirrored here, not only on `text`.
+        [
+          approve,
+          {'choiceId': 'reject', 'label': '   ', 'text': 'no'},
+        ],
+        [
+          approve,
+          {'choiceId': 'reject', 'label': 'Reject\x01', 'text': 'no'},
+        ],
         [
           approve,
           {'choiceId': 'reject', 'label': 'Reject', 'text': 'x' * 401},
@@ -332,6 +343,31 @@ void main() {
       // Still answerable in the user's own words — the draft is what the reply
       // sheet opens on.
       expect(e.draftReply, isNotEmpty);
+    });
+
+    test('reads a choice cost, and drops a malformed one without losing the card', () {
+      final withCost = {...approve, 'cost': 'Runs the merge now.'};
+      final e = HandlerEscalation.fromWire(
+        't1',
+        escalationWire(choices: [withCost, reject]),
+      )!;
+      expect(e.choices, hasLength(2));
+      expect(e.choices![0].cost, 'Runs the merge now.');
+      // reject carries no cost at all — absence, not a dropped field.
+      expect(e.choices![1].cost, isNull);
+
+      for (final badCost in <Object>['x' * 161, '   ', 7]) {
+        final withBadCost = {...approve, 'cost': badCost};
+        final degraded = HandlerEscalation.fromWire(
+          't1',
+          escalationWire(choices: [withBadCost, reject]),
+        )!;
+        // A malformed cost is a missing sub-line, not a reason to drop the
+        // whole chip — unlike label/text, which keep reject-the-row polarity.
+        expect(degraded.choices, hasLength(2), reason: '$badCost');
+        expect(degraded.choices![0].cost, isNull, reason: '$badCost');
+        expect(degraded.choices![0].label, 'Approve', reason: '$badCost');
+      }
     });
   });
 

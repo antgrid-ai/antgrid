@@ -108,6 +108,23 @@ export const HandlerDecisionSchema = z.object({
     body: z.string(),
     draftReply: z.string(),
     urgency: z.enum(["normal", "high"]),
+    // What the one-tap SAYS it does, and what taking it commits to. Optional and
+    // nested so a judge that omits it gets today's card unchanged. The label NAMES
+    // the draft and never replaces it: the draft is still rendered verbatim beside
+    // the button, which is what keeps a label that misdescribes it readable as a lie
+    // rather than acted on as the truth.
+    //
+    // Both sub-fields are individually optional, and the whole thing degrades to
+    // undefined on ANY parse failure (`.catch`), rather than failing the decision
+    // it sits inside. This object is cosmetic — quickChoicesFor's own fallbacks
+    // already answer a missing label or cost with the engine's literal — so a judge
+    // that writes `approve:{label:"..."}` alone, or a bare string, must not cost the
+    // whole `escalate` its `onJudgeUnavailable` park in place of the very escalation
+    // it was raising.
+    approve: z.object({
+      label: z.string().optional(),
+      cost: z.string().optional(),
+    }).optional().catch(undefined),
   }).optional(),
   // A question for the USER raised on a pass that is ALSO replying to the agent.
   // Its own object, never a re-reading of `notify`: notify's sub-fields are
@@ -358,7 +375,7 @@ export function buildDecidePrompt(opts: {
     // does not gate is still running. Above it the third move would read as a
     // cheaper escalation; here it reads as what it is, the branch of the test where
     // the user is the only one who can answer and the session need not stop.
-    "- There is a third move between answering the agent and waking the user, and it is the only one that does both at once: on a `handle`, fill `ask` with a question for the USER while `reply` keeps the agent working. Use it only when both halves hold — the question is one only the user can settle (intent, authorization, preference), AND there is work already on the backlog that their answer does not gate. Name that work in `ask.unblocked` as backlog ids copied exactly from the list above. If everything left waits on the answer there is no such work, and this was an escalation. `ask.options` is optional and holds 2 to 4 things the USER may pick between, each with a `cost` saying what picking it commits to; at most one may carry `recommended`. A tap on one sends the AGENT nothing — the pick comes back to you, and passing it on is yours to do.",
+    "- There is a third move between answering the agent and waking the user, and it is the only one that does both at once: on a `handle`, fill `ask` with a question for the USER while `reply` keeps the agent working. Use it only when both halves hold — the question is one only the user can settle (intent, authorization, preference), AND there is work already on the backlog that their answer does not gate. Name that work in `ask.unblocked` as backlog ids copied exactly from the list above. If everything left waits on the answer there is no such work, and this was an escalation. `ask.options` is optional and holds 2 to 4 things the USER may pick between, each with a `cost` saying what picking it commits to; at most one may carry `recommended`. A tap on one sends the AGENT nothing — the pick comes back to you, and passing it on is yours to do. `ask.question` is what the user reads to answer, the same way `notify.body` is for an escalate; `ask.reasoning` is shown to them the same way `reason` is — behind the same \"Why\" disclosure, read afterward and never required in order to pick. Put anything the user needs to choose in `ask.question` itself or in each option's own `cost`, never only in `ask.reasoning`.",
     "- `ask` is read on a `handle` alone. On `continue` or `escalate` it is discarded, because neither of those sends the agent anything: the session would sit behind a question you had told the user was not holding it up, with no further event arriving to raise it again.",
     "- One question at a time. While a question of yours is still open it is listed for you below and a second `ask` is discarded rather than queued, so make the one you send the one you most need answered. The exact same question is discarded too even once it starts standing further down — never repeat or reword one just because it moved. An `ask` beside a reply that only marks time is worse than the escalation it avoided: the user reads a question over a session going nowhere, and nothing in the harness can check your claim that the rest of the work is independent except the ids you named.",
     // The half a judge would otherwise have to infer from the absence of a rule.
@@ -373,7 +390,7 @@ export function buildDecidePrompt(opts: {
     // mine" and the raw question gets forwarded. Enumerating first is what turns it
     // into something WHAT THE USER ASKED FOR can decide — and failing that, into a
     // choice the user can make without reconstructing the session.
-    "- When what stops the agent is a choice between ways of doing something, neither pick on technical grounds nor forward the open question. Ask the agent for the options it sees and what each costs. Then decide against WHAT THE USER ASKED FOR if it separates them; escalate if it does not, carrying the options, their costs and the one you would take. Put them in `notify.body`, and make `notify.draftReply` the option you would take, written as the instruction that would send it — the user is offered it as a one-tap chip. A short choice can be answered in seconds; an open engineering question makes the user rebuild the whole session first.",
+    "- When what stops the agent is a choice between ways of doing something, neither pick on technical grounds nor forward the open question. Ask the agent for the options it sees and what each costs. Then decide against WHAT THE USER ASKED FOR if it separates them; escalate if it does not, carrying the options, their costs and the one you would take. Put them in `notify.body`, and make `notify.draftReply` the option you would take, written as the instruction that would send it — the user is offered it as a one-tap chip. A short choice can be answered in seconds; an open engineering question makes the user rebuild the whole session first. Name that option on the button too: `notify.approve.label` is what the one-tap SAYS it does — \"Drop the pricing page\", never \"Approve\" — in at most a handful of words, and `notify.approve.cost` is the single clause saying what taking it commits to (\"the FAQ and a clean build ship now; pricing lands separately\"). The draft itself is still shown verbatim beside the button, so the label names it and never stands in for it.",
     // Printed against the safety rule below because it is the same guardrail from
     // the other side: the rule above sends the judge to the agent more often, and
     // the cheapest way for a blocked agent to answer "are you still blocked?" is to
@@ -549,7 +566,7 @@ export function buildDecidePrompt(opts: {
     // schema's: a contract line offering one would have a judge write it, and a
     // judge-authored draft on the row is the one artifact a reply composer could
     // prefill into the channel that mints authorization.
-    '{"decision":"continue|handle|escalate","confidence":0.0,"reason":"why you decided this, for the record","reply":"(when handle, and only if action is omitted) text to send the agent","action":{"kind":"slash_command|none","value":"/verb <args>"},"notify":{"title":"...","body":"the question the user must answer, its first sentence first","draftReply":"the reply to send if they approve","urgency":"normal|high"},"ask":{"question":"...","reasoning":"...","unblocked":["backlog id the answer does not gate"],"options":[{"label":"the answer as the user would give it","cost":"what picking this commits to","recommended":true}]},"transitions":[{"id":"...","status":"queued|active|done|blocked|skipped|failed","evidence":"verbatim quote","outcome":"..."}]}',
+    '{"decision":"continue|handle|escalate","confidence":0.0,"reason":"why you decided this, for the record","reply":"(when handle, and only if action is omitted) text to send the agent","action":{"kind":"slash_command|none","value":"/verb <args>"},"notify":{"title":"...","body":"the question the user must answer, its first sentence first","draftReply":"the reply to send if they approve","urgency":"normal|high","approve":{"label":"what the one-tap does","cost":"what taking it commits to"}},"ask":{"question":"...","reasoning":"...","unblocked":["backlog id the answer does not gate"],"options":[{"label":"the answer as the user would give it","cost":"what picking this commits to","recommended":true}]},"transitions":[{"id":"...","status":"queued|active|done|blocked|skipped|failed","evidence":"verbatim quote","outcome":"..."}]}',
   ].join("\n");
 }
 

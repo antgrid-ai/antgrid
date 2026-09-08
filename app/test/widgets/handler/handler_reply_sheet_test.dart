@@ -37,14 +37,23 @@ Future<String?> _open(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('shows question + reasoning and the draft prefilled', (
+  testWidgets('shows the question and the draft, with the Why collapsed', (
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
     await _open(tester);
     expect(find.textContaining('bun or vitest'), findsOneWidget);
-    expect(find.textContaining('Affects CI wiring'), findsOneWidget);
     expect(find.text('use bun'), findsOneWidget); // prefilled field
+    // The judge is promised its reasoning is read afterward and never in
+    // order to answer. This sheet is where the answer is composed, so an
+    // always-open block here would push the field below the question it is
+    // meant to sit under and make that promise false where it counts.
+    expect(find.textContaining('Affects CI wiring'), findsNothing);
+    expect(find.text('Why'), findsOneWidget);
+
+    await tester.tap(find.text('Why'));
+    await tester.pump();
+    expect(find.textContaining('Affects CI wiring'), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });
 

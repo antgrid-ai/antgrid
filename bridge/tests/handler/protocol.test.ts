@@ -164,6 +164,39 @@ describe("handler wire", () => {
     // of a chip the user did not read.
     expect(send([choice(), choice({ label: "Approve with tests", text: "yes, and run the suite" })]))
       .toBeNull();
+    // A whitespace-only label is truthy against `.min(1)` alone and would draw a
+    // blank button on the card that stops the session.
+    expect(send([choice({ label: "   " }), other])).toBeNull();
+  });
+
+  // The button says what it does, `cost` says what it commits to. New and
+  // optional, so an older row (and an older app reading it) is unaffected.
+  test("a choice's cost is optional, bounded, and control-char free", () => {
+    const base = {
+      projectId: "p", escalationId: "e1", terminalId: "t1", question: "q",
+      reasoning: "r", draftReply: "ship it", urgency: "normal", at: 1,
+    } as const;
+    const other = { choiceId: "reject", label: "Reject", text: "no" };
+    const send = (choices: unknown) => parseMessage(JSON.stringify({
+      ...createMessage("handler:escalation", base), choices,
+    })) as any;
+    const withCost = send([
+      { choiceId: "approve", label: "Drop the pricing page", text: "ship it", cost: "FAQ ships now" },
+      other,
+    ]);
+    expect(withCost).toBeTruthy();
+    expect(withCost.choices[0].cost).toBe("FAQ ships now");
+    // An older bridge never sends it, and an app that predates it must render
+    // exactly what it renders today.
+    const withoutCost = send([{ choiceId: "approve", label: "Approve", text: "ship it" }, other]);
+    expect(withoutCost).toBeTruthy();
+    expect(withoutCost.choices[0].cost).toBeUndefined();
+    expect(send([
+      { choiceId: "approve", label: "Approve", text: "ship it", cost: "ships now\r" }, other,
+    ])).toBeNull();
+    expect(send([
+      { choiceId: "approve", label: "Approve", text: "ship it", cost: "   " }, other,
+    ])).toBeNull();
   });
 
   test("escalation carries the ask fields, and survives their absence", () => {

@@ -7,7 +7,7 @@ import { z } from "zod";
 import {
   loadHandlerSession, saveHandlerSession, normalizeInstruction, pushInstruction,
   MAX_INSTRUCTION_CHARS, MAX_INSTRUCTIONS,
-  OpenEscalationSchema, HandlerSessionRecordSchema,
+  OpenEscalationSchema, HandlerSessionRecordSchema, EscalationChoiceSchema,
   type HandlerSessionRecord,
 } from "../../src/handler/session-store";
 
@@ -304,6 +304,40 @@ describe("question and reasoning stay unbounded on the record", () => {
       draftReply: "", urgency: "normal", at: 1,
     });
     expect(parsed.success).toBe(true);
+  });
+});
+
+// The button says what it does, `cost` says what it commits to.
+describe("an escalation choice's cost", () => {
+  const base = { choiceId: "approve", label: "Drop the pricing page", text: "drop it" };
+
+  it("round-trips with a cost", () => {
+    const parsed = EscalationChoiceSchema.safeParse({ ...base, cost: "FAQ ships now" });
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.cost).toBe("FAQ ships now");
+  });
+
+  it("round-trips with no cost at all — an app that predates it renders unchanged", () => {
+    const parsed = EscalationChoiceSchema.safeParse(base);
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.cost).toBeUndefined();
+  });
+
+  it("refuses a control character in cost", () => {
+    expect(EscalationChoiceSchema.safeParse({ ...base, cost: "ships now\r" }).success).toBe(false);
+  });
+
+  it("refuses a whitespace-only cost", () => {
+    expect(EscalationChoiceSchema.safeParse({ ...base, cost: "   " }).success).toBe(false);
+  });
+
+  it("refuses a whitespace-only label", () => {
+    expect(EscalationChoiceSchema.safeParse({ ...base, label: "   " }).success).toBe(false);
+  });
+
+  it("still accepts every label ever persisted", () => {
+    expect(EscalationChoiceSchema.safeParse({ ...base, label: "Approve" }).success).toBe(true);
+    expect(EscalationChoiceSchema.safeParse({ ...base, label: "Reject" }).success).toBe(true);
   });
 });
 

@@ -7,6 +7,7 @@ import '../../design/widgets/ab_button.dart';
 import '../../models/handler_state.dart';
 import 'handler_ask_footer.dart';
 import 'handler_layout.dart';
+import 'handler_why.dart';
 
 /// Worn by the tapped choice while its answer is in flight.
 const handlerChoiceSendingLabel = 'Sending…';
@@ -19,7 +20,7 @@ const handlerCustomReplyLabel = 'Custom reply…';
 /// almost everything below.
 ///
 /// A QUICK-CHOICE row carries [HandlerEscalation.choices]. Every choice renders
-/// the `text` it would send beside its label rather than behind it: the label is
+/// the `text` it would send below its label rather than behind it: the label is
 /// the judge's summary of a reply the judge also composed, that reply is typed
 /// verbatim into the session, and a one-tap the user cannot read is one they
 /// cannot refuse. For the same reason no choice is styled as the recommended
@@ -29,14 +30,11 @@ const handlerCustomReplyLabel = 'Custom reply…';
 /// [HandlerEscalation.nonBlocking]; both are required, because the bridge
 /// strips the options in the same mutation that promotes an ask to blocking, so
 /// either one alone is a row mid-frame and never a row to put buttons on.
-/// Neither rule above survives the crossing, and both are reversed on purpose:
-/// the wire DOES state a preference and a cost here, because a tap sends the
-/// agent nothing and there is no session to protect from the judge's opinion;
-/// and there is no `text` to render beside the label, because the label IS the
-/// whole payload — the bridge resolves the words from its own row. The
-/// read-before-you-tap floor is carried by the required `cost` line instead,
-/// and the verbatim mono caption stays on the quick-choice arm alone, where it
-/// is telling the truth about a string that lands in the session.
+/// Both arms carry an optional `cost` line and a judge-authored label, so the
+/// read-before-you-tap floor does not distinguish them — what does is the
+/// `text`: a quick choice has one to render beneath the label, verbatim and in
+/// mono, because a tap sends it into the session; an ask has none, because the
+/// label IS the whole payload and a tap sends nothing.
 class HandlerDecisionCard extends StatefulWidget {
   const HandlerDecisionCard({
     super.key,
@@ -187,14 +185,14 @@ class _HandlerDecisionCardState extends State<HandlerDecisionCard> {
                     ),
                   ),
                 ],
-                const SizedBox(height: AbTokens.space2),
-                Text(
-                  e.reasoning,
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontXs,
-                    color: p.textMuted,
-                  ),
-                ),
+                // Justification for reading afterward, not input to the
+                // decision. Collapsed, never removed: the escalate path's
+                // `reason` is the only place a stopped session explains
+                // itself.
+                if (e.reasoning.trim().isNotEmpty) ...[
+                  const SizedBox(height: AbTokens.space2),
+                  HandlerWhyDisclosure(escalation: e),
+                ],
                 if (e.nonBlocking)
                   Text(
                     handlerAskLatencyNote,
@@ -255,26 +253,37 @@ class _ChoiceRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
-    return Row(
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
       children: [
         AbButton(
           label: pending ? handlerChoiceSendingLabel : choice.label,
+          // Needs a bounded width, which a Column gives and a Row does not —
+          // the judge's own words replace a fixed literal here and may run
+          // long enough to want more than one line.
+          wrapLabel: true,
           onTap: onTap,
         ),
-        const SizedBox(width: AbTokens.space8),
-        Expanded(
-          child: Text(
-            choice.text,
-            // Mono: this is verbatim what lands in the session, not chrome.
-            style: AbTokens.monoStyle(
+        if (choice.cost != null) ...[
+          const SizedBox(height: AbTokens.space2),
+          Text(
+            choice.cost!,
+            style: AbTokens.sansStyle(
               fontSize: AbTokens.fontXs,
               color: p.textMuted,
             ),
-            // Deliberately unbounded. The wire caps `text` at 400 characters
-            // and an ellipsis at three lines hides most of that on a phone —
-            // a one-tap the user cannot read is one they cannot refuse, which
-            // is the whole reason this text is beside the label at all.
+          ),
+        ],
+        const SizedBox(height: AbTokens.space2),
+        Text(
+          choice.text,
+          // Mono, and still deliberately unbounded: this is verbatim what
+          // lands in the session. The label names it; it does not replace it,
+          // and a one-tap the user cannot read is one they cannot refuse.
+          style: AbTokens.monoStyle(
+            fontSize: AbTokens.fontXs,
+            color: p.textMuted,
           ),
         ),
       ],
@@ -285,10 +294,10 @@ class _ChoiceRow extends StatelessWidget {
 /// One tap-to-answer option on an ask: the answer itself on the button, what
 /// choosing it costs underneath.
 ///
-/// Stacked rather than side by side, unlike [_ChoiceRow]. There the label names
-/// a reply that is shown in full beside it; here the label IS the answer and
-/// runs to a sentence, so it takes the full width and the cost — the thing the
-/// user weighs it against — sits directly under it.
+/// [_ChoiceRow] stacks the same way, but for a different reason: there the
+/// label names a reply shown in full beneath it; here the label IS the
+/// answer and runs to a sentence, so it takes the full width and the cost —
+/// the thing the user weighs it against — sits directly under it.
 ///
 /// The cost is sans, never mono: nothing on this row reaches a session, and the
 /// mono face on this screen is what says a string is verbatim wire data.

@@ -2534,7 +2534,7 @@ test("opencode decide context reads the db but hands the judge no path", async (
 describe("quick-choice escalations", () => {
   const DRAFT = "Yes, reuse the existing migration table.";
 
-  interface Choice { choiceId: string; label: string; text: string }
+  interface Choice { choiceId: string; label: string; text: string; cost?: string }
 
   function escalatingWith(draftReply: string) {
     return {
@@ -2704,6 +2704,81 @@ describe("quick-choice escalations", () => {
     expect(quickChoicesFor({ draftReply: "yes\rrm -rf /", projectPath: "/proj" })).toBeUndefined();
     expect(quickChoicesFor({ draftReply: "y".repeat(401), projectPath: "/proj" })).toBeUndefined();
     expect(quickChoicesFor({ draftReply: "y".repeat(400), projectPath: "/proj" })).toHaveLength(2);
+  });
+
+  // The button says what it does: the judge's own label and cost land on
+  // the approve chip, and the draft it names stays exactly where it was.
+  it("puts the judge's own words on the approve button and its cost beneath", () => {
+    const choices = quickChoicesFor({
+      draftReply: DRAFT, projectPath: "/proj",
+      approve: { label: "Drop the pricing page", cost: "FAQ and clean build ship now" },
+    })!;
+    expect(choices[0]).toEqual({
+      choiceId: "approve", label: "Drop the pricing page", text: DRAFT,
+      cost: "FAQ and clean build ship now",
+    });
+  });
+
+  it("falls back to Approve when the judge names nothing", () => {
+    const choices = quickChoicesFor({ draftReply: DRAFT, projectPath: "/proj" })!;
+    expect(choices[0]!.label).toBe("Approve");
+    expect(choices[0]!.cost).toBeUndefined();
+  });
+
+  it("falls back to Approve on a whitespace-only label", () => {
+    // " " is truthy — the trim-then-fallback order is what keeps this from
+    // drawing a blank button on the card that stops the session.
+    const choices = quickChoicesFor({
+      draftReply: DRAFT, projectPath: "/proj",
+      approve: { label: "   ", cost: "" },
+    })!;
+    expect(choices[0]!.label).toBe("Approve");
+    expect(choices[0]!.cost).toBeUndefined();
+  });
+
+  it("clips an over-long label and cost rather than dropping the chip", () => {
+    const choices = quickChoicesFor({
+      draftReply: DRAFT, projectPath: "/proj",
+      approve: { label: "x".repeat(100), cost: "y".repeat(300) },
+    })!;
+    expect(choices).toHaveLength(2);
+    expect(choices[0]!.label.length).toBeLessThanOrEqual(40);
+    expect(choices[0]!.label.endsWith("…")).toBe(true);
+    expect(choices[0]!.cost!.length).toBeLessThanOrEqual(160);
+    expect(choices[0]!.cost!.endsWith("…")).toBe(true);
+  });
+
+  it("keeps the reject chip engine-authored", () => {
+    // Nothing about the judge's approve label may bleed into the one chip that
+    // has to mean the same thing on every card.
+    const choices = quickChoicesFor({
+      draftReply: DRAFT, projectPath: "/proj",
+      approve: { label: "Drop the pricing page", cost: "FAQ and clean build ship now" },
+    })!;
+    expect(choices[1]).toEqual({
+      choiceId: "reject", label: "Reject",
+      text: "Do not proceed. Wait for my instructions.",
+    });
+  });
+
+  // End-to-end: the judge's `notify.approve` reaches the wire through escalate,
+  // not only through quickChoicesFor called directly.
+  it("wires notify.approve through escalate onto the emitted choices", async () => {
+    const { engine, sent } = makeEngine({
+      runDecisionFn: async () => decide({
+        decision: "escalate",
+        notify: {
+          title: "Handler", body: "Drop the pricing page?", draftReply: DRAFT, urgency: "normal",
+          approve: { label: "Drop the pricing page", cost: "FAQ and clean build ship now" },
+        },
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    expect(choicesOf(sent)![0]).toEqual({
+      choiceId: "approve", label: "Drop the pricing page", text: DRAFT,
+      cost: "FAQ and clean build ship now",
+    });
   });
 
   // A tap answers through the ordinary reply transport and mints nothing.

@@ -49,8 +49,15 @@ export function pushInstruction(list: InstructionEntry[], text: string, at: numb
 // from it (see quickChoicesFor in engine.ts).
 export const EscalationChoiceSchema = z.object({
   choiceId: z.string().min(1).max(40),
-  label: z.string().min(1).max(40),
+  // Non-empty refined on top of `.min(1)`: a whitespace-only label is truthy but
+  // draws a blank button on the card that stops the session.
+  label: z.string().min(1).max(40).regex(/^[^\x00-\x1f\x7f]+$/).refine((t) => t.trim().length > 0),
   text: z.string().min(1).max(400).regex(/^[^\x00-\x1f\x7f]+$/).refine((t) => t.trim().length > 0),
+  // What taking this chip commits to, one clause, shown under the button. New and
+  // optional, so no bound any row already on disk was written under moves and an app
+  // that predates it renders exactly what it renders today.
+  cost: z.string().min(1).max(160).regex(/^[^\x00-\x1f\x7f]+$/)
+    .refine((t) => t.trim().length > 0).optional(),
 });
 export type EscalationChoice = z.infer<typeof EscalationChoiceSchema>;
 

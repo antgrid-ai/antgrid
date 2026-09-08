@@ -484,11 +484,28 @@ const REJECT_CHOICE_TEXT = "Do not proceed. Wait for my instructions.";
 /**
  * The quick-choice card for an escalation the engine has already built.
  *
- * Minted here rather than asked of the judge: the judge could propose a richer set,
- * but its labels are Assistant output reaching a one-tap control, and nothing
- * about authorization may derive from Assistant output (authorization.ts). The
- * one thing the judge does contribute is the draft it already composed, which the
- * [Approve] choice sends VERBATIM — so the app must render `text`, not only `label`.
+ * Minted here rather than fully asked of the judge: the fixed two-choice shape
+ * and the reject chip's text stay engine-authored, and nothing about
+ * authorization may ever derive from Assistant output (authorization.ts). The
+ * judge contributes only the approve label and its cost (`notify.approve`),
+ * and the widening survives on three things, stated here so a later change
+ * can check them:
+ *
+ * - Authorization is untouched. `authorizeInstruction` has exactly one call
+ *   site (HandlerEngine.instruct); a `choices` tap answers through
+ *   `answerWithChoice -> reply -> terminal:input`, takes no lift, and every
+ *   numbered clause below still holds verbatim.
+ * - The judge already authors `text` — the draft it composed, which the
+ *   [Approve] choice sends VERBATIM, so the app must render `text`, not only
+ *   `label`. A label adds no capability, only a new way to MISDESCRIBE text
+ *   that is rendered verbatim, in mono, deliberately unelided, directly beside
+ *   the button — that rendering is the existing design's own answer to
+ *   divergence and is non-negotiable: the label names the draft, it never
+ *   replaces it.
+ * - No `recommended` emphasis on a quick choice, ever. `HandlerDecisionCard`'s
+ *   class doc refuses it on purpose ("the wire states an order, not a
+ *   preference"): an ask's tap sends the agent nothing, so a wrong emphasis
+ *   there costs a sentence in a prompt; a quick choice's tap reaches a shell.
  *
  * A tap carries NO authorization lift. Its instruction still answers through the
  * ordinary reply transport (terminal:input / agent:prompt), exactly as before:
@@ -569,14 +586,18 @@ const REJECT_CHOICE_TEXT = "Do not proceed. Wait for my instructions.";
  *    session-long egress grant becomes visible exactly where this feature made
  *    it more likely.
  *
- * WHAT CHANGED, AND WHAT DID NOT. quickChoicesFor itself is not edited by either
- * the ask feature or the tap-answer feature. `choices` keeps its exact semantics
- * and its exact transport (answerWithChoice -> reply -> terminal:input /
- * agent:prompt); the [Approve] chip still answers that way and still takes no
- * lift. What changed lives entirely in instruct's DELIVERED arm and the decision
- * prompt's tapped-blocking section — this function mints the same chip it always
- * did, and the bridge now accepts one additional, note-only frame beside a tap,
- * not a different one. If a future change ever routes askOptions through
+ * WHAT CHANGED, AND WHAT DID NOT. `choices`' TRANSPORT is not edited by any of
+ * the ask feature, the tap-answer feature, or the approve label/cost widening:
+ * a tap still answers through answerWithChoice -> reply -> terminal:input /
+ * agent:prompt, still takes no lift, and `text` is still what actually lands in
+ * the session. What DID move is who writes the [Approve] chip's `label` and
+ * `cost` — the judge now supplies both (`notify.approve`), clipped per-field
+ * here rather than engine-literal — which is the widening the three points
+ * above exist to defend; `choiceId`, the reject chip and the two-choice shape
+ * stay engine-authored. Beside that, this bridge now ALSO accepts one
+ * additional, note-only frame beside a tap: instruct's DELIVERED arm and the
+ * decision prompt's tapped-blocking section, covered separately below. If a
+ * future change ever routes askOptions through
  * `choices`, or gives an askOption a `text`, or gives an ask tap a path into
  * instruct, or lets a `choiceId` reach instruct's grant arm, or lets the note
  * bank text the FRAME carried rather than text this row holds, every numbered
@@ -589,6 +610,7 @@ export function quickChoicesFor(p: {
   draftReply: string;
   projectPath: string;
   open?: readonly OpenEscalation[];
+  approve?: { label?: string; cost?: string };
 }): EscalationChoice[] | undefined {
   // An option-based agent prompt is answered by the chat resolve RPC alone, and a
   // chip's only transport is injected text (terminal:input / agent:prompt), which
@@ -620,11 +642,25 @@ export function quickChoicesFor(p: {
   // they are about to send.
   const floor = classifyDestructive(draft, p.projectPath);
   if (floor.hard.length > 0 || floor.warnings.length > 0) return undefined;
+  // Per-field and clipped, never a safeParse over the finished object: a label the
+  // judge over-ran must cost its own words, not the whole card. Trimmed before the
+  // fallback, because " " is truthy and would draw a blank button on the card that
+  // stops the session. Falls back to the engine's own literal, so a judge that says
+  // nothing gets exactly today's chip.
+  const label = clipWithin(previewForUser(oneLine(p.approve?.label ?? "")), 40).trim() || "Approve";
+  const cost = clipWithin(previewForUser(oneLine(p.approve?.cost ?? "")), 160).trim();
   // Validated against the wire rule itself rather than a second copy of its bounds:
   // an over-long or control-char draft is one the app could not offer as a chip, and
   // it falls back to the free-text sheet instead.
-  const approve = EscalationChoiceSchema.safeParse({ choiceId: "approve", label: "Approve", text: draft });
+  const approve = EscalationChoiceSchema.safeParse({
+    choiceId: "approve", label, text: draft, ...(cost ? { cost } : {}),
+  });
   if (!approve.success) return undefined;
+  // No `cost` on reject: its one clause and REJECT_CHOICE_TEXT would say the same
+  // thing twice on the card whose reported defect was repeated text. Approve
+  // needs both — the label alone cannot carry a judge-authored draft's actual
+  // content — reject does not, because there is nothing for a second sentence
+  // to add to "do not proceed".
   return [approve.data, { choiceId: "reject", label: "Reject", text: REJECT_CHOICE_TEXT }];
 }
 
@@ -3304,6 +3340,7 @@ export class HandlerEngine {
       promptId,
       choices: quickChoicesFor({
         kind, floorRule, draftReply, projectPath: this.deps.projectPath(terminalId), open: s.escalations,
+        approve: decision.notify?.approve,
       }),
       at: this.now(),
     };

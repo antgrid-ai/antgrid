@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 
-import '../../design/ab_colors.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_adaptive_sheet.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_dialog.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../models/handler_state.dart';
+import 'handler_why.dart';
 
 /// What the ask sheet came back with.
 ///
@@ -76,7 +76,6 @@ class _HandlerAskFormState extends State<_HandlerAskForm> {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.antgrid;
     final e = widget.escalation;
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -110,14 +109,15 @@ class _HandlerAskFormState extends State<_HandlerAskForm> {
                   fontWeight: FontWeight.w600,
                 ),
               ),
-              const SizedBox(height: AbTokens.space8),
-              Text(
-                e.reasoning,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: p.textMuted,
-                ),
-              ),
+              // Behind a disclosure, exactly as on the card: the judge is told
+              // its reasoning is read afterward and never in order to answer,
+              // and this sheet is where the answer is actually composed. An
+              // always-open block here would push the field the user came for
+              // below the fold and make that promise false where it counts.
+              if (e.reasoning.trim().isNotEmpty) ...[
+                const SizedBox(height: AbTokens.space8),
+                HandlerWhyDisclosure(escalation: e),
+              ],
               const SizedBox(height: AbTokens.space12),
               AbTextField(
                 controller: _controller,

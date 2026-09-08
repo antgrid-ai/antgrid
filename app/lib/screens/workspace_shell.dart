@@ -58,6 +58,7 @@ import '../util/detached.dart';
 import '../utils/notification_routing.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/agent_panel.dart';
+import '../widgets/handler/handler_why.dart' show handlerFallbackQuestion;
 import '../widgets/mobile_bottom_nav.dart';
 import '../widgets/operational_error_toaster.dart';
 import '../widgets/projects_drawer.dart';
@@ -545,7 +546,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // notification), identical to the agent-notification paths, so an
     // escalation from ANY warm project is surfaced — not just the focused one.
     final title = handlerEscalationTitle(esc);
-    final body = esc.question.isNotEmpty ? esc.question : 'Agent needs you';
+    final body = esc.question.isNotEmpty
+        ? esc.question
+        : handlerFallbackQuestion;
     _onAgentNotification(
       title: title,
       body: body,
