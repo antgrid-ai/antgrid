@@ -96,17 +96,15 @@ void main() {
       );
     });
 
-    test('a seeded goal is named, and only when one exists', () {
-      const seeded =
-          'Handler starts from what you asked for when you opened this '
-          'session, and queues that as your backlog.';
+    test('the seeded goal is not described here at all', () {
+      // It used to be, as a paragraph saying a backlog would appear from
+      // something typed on another screen. The sheet now shows that sentence
+      // itself, directly above the composer asking what to add beyond it, so
+      // the paragraph had become the same fact stated twice in a row.
+      expect(handlerArmExplainerBody(agentObservable: true), base);
       expect(
         handlerArmExplainerBody(agentObservable: true),
-        isNot(contains(seeded)),
-      );
-      expect(
-        handlerArmExplainerBody(agentObservable: true, hasOpeningPrompt: true),
-        '$base\n\n$seeded',
+        isNot(contains('starts from what you asked for')),
       );
     });
 
@@ -127,16 +125,6 @@ void main() {
         handlerArmExplainerBody(agentObservable: true, judgeCapable: true),
         base,
       );
-    });
-
-    test('the judge caveat reads after the seeded goal', () {
-      final body = handlerArmExplainerBody(
-        agentObservable: true,
-        judgeCapable: false,
-        hasOpeningPrompt: true,
-      );
-      expect(body, contains('queues that as your backlog'));
-      expect(body, endsWith(escalateOnlyNotice));
     });
 
     test('an unwatchable agent does not stack a second caveat', () {
@@ -163,7 +151,6 @@ void main() {
       final body = handlerArmExplainerBody(
         agentObservable: false,
         agentLabel: 'Claude Code',
-        hasOpeningPrompt: true,
       );
       expect(body, endsWith(unwatchableNotice('Claude Code')));
     });
@@ -179,8 +166,8 @@ void main() {
       });
 
       test('the standing explanation is the only thing dropped', () {
-        // Coverage is per-agent and the goal is per-session: neither is retired
-        // by having read the explanation once.
+        // Coverage is per-agent: it is not retired by having read the
+        // explanation once.
         expect(
           handlerArmExplainerBody(
             agentObservable: false,
@@ -204,27 +191,12 @@ void main() {
         );
       });
 
-      test('a seeded goal names Handler, having lost its antecedent', () {
+      test('a seeded goal adds nothing back to this copy', () {
+        // The goal is shown on the sheet as itself, so a repeat arm over a
+        // covered agent still says nothing here — goal or no goal.
         expect(
-          handlerArmExplainerBody(
-            agentObservable: true,
-            hasOpeningPrompt: true,
-            explain: false,
-          ),
-          'Handler starts from what you asked for when you opened this '
-          'session, and queues that as your backlog.',
-        );
-      });
-
-      test('an unwatchable agent still withholds the goal', () {
-        expect(
-          handlerArmExplainerBody(
-            agentObservable: false,
-            agentLabel: 'Claude Code',
-            hasOpeningPrompt: true,
-            explain: false,
-          ),
-          unwatchableNotice('Claude Code'),
+          handlerArmExplainerBody(agentObservable: true, explain: false),
+          isNull,
         );
       });
     });
@@ -932,7 +904,7 @@ void main() {
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('an arm over a remembered prompt says the goal is seeded', (
+    testWidgets('an arm over a remembered prompt shows the goal it seeds', (
       tester,
     ) async {
       final (transport, container, context) = await pumpArm(tester);
@@ -950,10 +922,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      // The sentence itself, verbatim — the sheet no longer describes it as
+      // something typed elsewhere, it shows it.
       expect(
-        find.textContaining(
-          'Handler starts from what you asked for when you opened this session',
-        ),
+        find.text('Your backlog starts with: fix the flaky login test'),
         findsOneWidget,
       );
       await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
@@ -977,10 +949,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(
-        find.textContaining('Handler starts from what you asked for'),
-        findsNothing,
-      );
+      expect(find.textContaining('Your backlog starts with'), findsNothing);
       // A first arm still gets the standing explanation — the other half of
       // what handlerArmedOnce gates on this sheet.
       expect(

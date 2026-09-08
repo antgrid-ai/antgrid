@@ -306,6 +306,26 @@ void main() {
       expect(find.text(handlerLensParkedBlurb), findsNothing);
     });
 
+    testWidgets('the live lens reads no quieter than a warning does', (
+      tester,
+    ) async {
+      // The chips name roles — PM, QA, CRITIC — and nothing else, so what each
+      // one asks the agent exists ONLY in this line. It used to render muted on
+      // the reasoning that a working control needs no commentary, which set the
+      // definition of the chosen option at the contrast floor and made the row
+      // undecidable without leaving the sheet.
+      await _pump(tester, value: _value(lens: (roleId: 'qa', brief: null)));
+      final live = tester.widget<Text>(
+        find.text(handlerLensBlurb(HandlerLens.qa)),
+      );
+
+      await _pump(tester, value: _value(lens: null));
+      final warning = tester.widget<Text>(find.text(handlerLensUnsetBlurb));
+
+      expect(live.style?.color, warning.style?.color);
+      expect(live.style?.color, kDefaultPalette.textSecondary);
+    });
+
     testWidgets('a judge that cannot run headless parks the lens', (
       tester,
     ) async {

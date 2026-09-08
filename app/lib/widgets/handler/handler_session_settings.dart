@@ -340,11 +340,6 @@ class HandlerLensControl extends ConsumerWidget {
               : appliesNextPass
               ? '${handlerLensBlurb(handlerLensFromWire(pick.roleId))} Takes effect on the next pass.'
               : handlerLensBlurb(handlerLensFromWire(pick.roleId)),
-          // Every line but the plain description of a live lens is load-bearing
-          // rather than an aside under a control that is working.
-          color: unreported || parked || pick == null || unknownId
-              ? p.textSecondary
-              : p.textMuted,
         ),
         // This is the one class of surface where the warning is actionable;
         // everywhere else it appears it only diagnoses.
@@ -705,11 +700,17 @@ class _Head extends StatelessWidget {
 }
 
 /// The explanatory line under a control.
+///
+/// One tint for every state it can carry. A live lens used to be muted, on the
+/// reasoning that a working control needs no commentary — but this line is not
+/// commentary: five chips reading PM, QA, CRITIC and the rest name roles and
+/// nothing else, so what each one asks the agent exists ONLY here. Setting the
+/// definition of the chosen option at the contrast floor is what made the row
+/// undecidable without leaving the sheet.
 class _Caption extends StatelessWidget {
-  const _Caption({required this.text, required this.color});
+  const _Caption({required this.text});
 
   final String text;
-  final Color color;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -721,7 +722,10 @@ class _Caption extends StatelessWidget {
     ),
     child: Text(
       text,
-      style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: color),
+      style: AbTokens.sansStyle(
+        fontSize: AbTokens.fontXs,
+        color: context.antgrid.textSecondary,
+      ),
     ),
   );
 }
