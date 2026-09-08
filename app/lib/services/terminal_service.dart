@@ -135,7 +135,7 @@ class TerminalService {
   /// widget tree as a leak, and a service is built eagerly for every checkout
   /// whether or not anything reads it.
   late final _stateController = StreamController<TerminalState>.broadcast(
-    onListen: _armCheckoutAttachDeadline,
+    onListen: _resumeAttachBounds,
     onCancel: _dropAttachBounds,
   );
   final StreamController<TerminalNotificationMessage> _notificationController =
@@ -216,11 +216,11 @@ class TerminalService {
   /// Drops the checkout bound and every per-terminal one when the last watcher
   /// goes away.
   ///
-  /// The pulls themselves are left outstanding — a reply that still lands is
-  /// still painted — but nothing is left counting down towards a verdict no
-  /// surface would read. A watcher that comes back re-arms the checkout bound
-  /// through [_stateController]'s `onListen`, and the per-terminal bounds
-  /// return with the re-drive that any reattach already performs.
+  /// The pulls are disowned along with their bounds: on the RPC arm the
+  /// request's own timeout IS the bound and this service cannot cancel it,
+  /// so disowning the reply is the only reachable half of the same rule —
+  /// nothing may stamp a verdict onto a service no surface is reading.
+  /// [_resumeAttachBounds] undoes both halves when a watcher comes back.
   void _dropAttachBounds() {
     _cancelCheckoutAttachDeadline();
     for (final timer in _snapshotDeadlines.values) {
@@ -233,6 +233,30 @@ class TerminalService {
     // surface is reading.
     for (final terminalId in _snapshotRequestedAtMs.keys.toList()) {
       _abandonSnapshotPull(terminalId);
+    }
+  }
+
+  /// The `onCancel` counterpart: re-arms the checkout bound AND re-opens the
+  /// pulls [_dropAttachBounds] disowned.
+  ///
+  /// Disowning is not free on the RPC arm — the reply it discards is the only
+  /// one that pull will ever get, and nothing else re-issues it: a focus swap
+  /// between checkouts drops the last subscriber without re-establishing the
+  /// transport or raising `focusResumed`, so neither hydrator re-drive runs.
+  /// Without this the tab comes back at [TerminalAttachStage.cold] — dimmed,
+  /// captioned "attaching to terminal", offering no Retry — and holds the
+  /// checkout at [CheckoutAttachStatus.attaching] for as long as it is open.
+  void _resumeAttachBounds() {
+    _armCheckoutAttachDeadline();
+    if (_disposed) return;
+    for (final entry in _state.tabs.entries) {
+      // Only the tabs a pull could still reach, and only those left with
+      // neither a screen nor anything outstanding — a re-pull over a painted
+      // or in-flight tab is the churn `_stageFor`'s `refreshing` arm exists to
+      // keep off screen.
+      if (!_hasLivePty(entry.value)) continue;
+      if (_stageFor(entry.key) != TerminalAttachStage.cold) continue;
+      _requestTerminalSnapshot(entry.key);
     }
   }
 
@@ -658,19 +682,20 @@ class TerminalService {
     );
     _stampSnapshotPull(terminalId);
     _snapshotDeadlines.remove(terminalId)?.cancel();
-    // Bounded only where an unanswered pull is actually a fault. A terminal
-    // whose process has exited has no screen left to serialize: the manager
-    // disposes the screen on exit unless the transcript is retained, and the
-    // handler answers a missing screen with a log line and NO frame. That pull
-    // is structurally unanswerable and must never read as a failure.
-    final tab = _state.tabs[terminalId];
-    if (tab != null && _hasLivePty(tab)) {
-      _snapshotDeadlines[terminalId] = Timer(snapshotAttachTimeout, () {
-        if (_disposed) return;
-        _snapshotDeadlines.remove(terminalId);
-        _failSnapshotPull(terminalId);
-      });
-    }
+    // Bounded unconditionally, exactly as the RPC arm is by its own request
+    // timeout. A terminal whose process has exited may have no screen left to
+    // serialize — the manager disposes it on exit unless the transcript is
+    // retained, and the handler answers a missing screen with a log line and
+    // NO frame — but leaving that pull unbounded is worse than calling it
+    // failed: the stamp pins the pane at `awaitingScreen` forever, dimmed
+    // behind "attaching to terminal" with a counter that never stops and no
+    // Retry. `_deriveAttach` skips a tab with no live PTY, so this can never
+    // hold the CHECKOUT back either way.
+    _snapshotDeadlines[terminalId] = Timer(snapshotAttachTimeout, () {
+      if (_disposed) return;
+      _snapshotDeadlines.remove(terminalId);
+      _failSnapshotPull(terminalId);
+    });
   }
 
   /// The RPC arm's pull. Every `await` re-checks [_disposed] and the
@@ -1403,8 +1428,12 @@ class TerminalService {
     _snapshotSeq.remove(terminalId);
     _paintedTerminalIds.remove(terminalId);
     _awaitingHistoryIds.remove(terminalId);
+    // The generation counter deliberately OUTLIVES the tab: ad-hoc ids are
+    // reused (`terminal_list_view.dart` mints the lowest free number), and
+    // resetting it to zero lets the pull just disowned here match the
+    // generation a recreated same-id tab issues — painting the deleted
+    // terminal's screen into the new one. One int per id is not worth that.
     _abandonSnapshotPull(terminalId);
-    _snapshotGeneration.remove(terminalId);
     tab.ghostty.dispose();
     final tabs = Map<String, TerminalTab>.from(_state.tabs)..remove(terminalId);
     final isActive = _state.activeTerminalId == terminalId;

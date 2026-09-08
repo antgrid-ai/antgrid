@@ -359,6 +359,18 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         .setTerminalZoom(current + delta);
   }
 
+  /// Types [text] into this pane's terminal, saying so when the transport
+  /// refuses it.
+  ///
+  /// The keyboard's own writes go through the engine's transport (which has
+  /// the strip beside it to explain a pause), but these are one-shot lines the
+  /// user composed elsewhere — an uploaded file's path, a quick-action key —
+  /// and a dropped one leaves no trace on screen at all.
+  void _typeIntoTerminal(String text) {
+    if (widget.terminalService.sendInput(widget.tab.terminalId, text)) return;
+    if (mounted) showSendRefusedSnackBar(context);
+  }
+
   /// The one pipeline every attach gesture goes through. Its upload service is
   /// resolved from THIS terminal's own session and checkout rather than from a
   /// focused-* provider: the file has to be staged into the tree the terminal
@@ -391,8 +403,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
           onProgress: onProgress,
         )).path;
       },
-      insert: (text) =>
-          widget.terminalService.sendInput(widget.tab.terminalId, text),
+      // Routed through the shared refusal so a staged upload whose path the
+      // transport could not carry says so: the bytes are on the machine but
+      // the line the user needs was dropped, not queued, and silence there
+      // reads as a finished attach.
+      insert: _typeIntoTerminal,
       onError: (message) {
         if (mounted) showAbSnackBar(context, message);
       },
@@ -780,10 +795,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       (s) => s.terminalService,
     );
     if (svc == null) return;
-    // Bool return ignored deliberately: a refusal here needs no snackbar of
-    // its own — this pane already shows the input-paused strip that explains
-    // it, which is what the off-pane call sites have no equivalent of.
-    svc.sendToAgentTerminal(message);
+    // The input-paused strip explains WHY a send is refused, but it cannot
+    // stand in for the outcome of this one: the selection is dropped, not
+    // queued, and "sent to agent" over a send that never left is the one thing
+    // no surface may say. The selection is kept so the user can retry it.
+    if (!svc.sendToAgentTerminal(message)) {
+      if (context.mounted) showSendRefusedSnackBar(context);
+      return;
+    }
     ref.read(switchToAgentProvider)?.call();
     ref.read(focusAgentInputProvider)?.call();
     setState(() => _selectedText = null);
@@ -1443,8 +1462,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       onUploadError: (m) {
         if (mounted) showAbSnackBar(context, m);
       },
-      onSendInput: (data) =>
-          widget.terminalService.sendInput(widget.tab.terminalId, data),
+      onSendInput: _typeIntoTerminal,
       onZoomOut: () => _stepZoom(-0.1),
       onZoomIn: () => _stepZoom(0.1),
       onZoomReset: () =>

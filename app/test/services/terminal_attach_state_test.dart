@@ -18,6 +18,7 @@
 
 import 'dart:async';
 
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/models/terminal_models.dart';
@@ -124,6 +125,12 @@ void main() {
 
   TerminalAttachStage stageOf(TerminalService svc, String id) =>
       svc.currentState.hydration[id]!.stage;
+
+  /// Snapshot pulls seen on the wire. The session builds a main-checkout
+  /// service of its own, so only the DELTA across an action taken on one
+  /// instance says anything about that instance.
+  int pullCount(FakeAgentTransport t) =>
+      t.requests.where((r) => r.method == 'terminal.snapshot').length;
 
   test('a discovered terminal reads awaitingScreen with a stamp until its '
       'snapshot lands', () async {
@@ -564,6 +571,129 @@ void main() {
     expect(emissions.last.hydration.keys, hasLength(6));
 
     await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+  // The RPC arm's bound is the request's own timeout, so a departing watcher
+  // can only disown the reply — and that reply is the ONLY one that pull will
+  // ever get. A focus swap between checkouts drops the last watcher without
+  // re-establishing the transport or resuming focus, so neither re-drive runs
+  // and nothing else would re-issue it.
+  test('a watcher that returns re-opens the pull its departure disowned',
+      () async {
+    final t = newTransport();
+    final session = await newSession(t);
+    final svc = newService(session);
+    final first = svc.stateStream.listen((_) {});
+    await settle();
+
+    emitStatus(t, [terminalInfo('a')]);
+    await settle();
+    expect(stageOf(svc, 'a'), TerminalAttachStage.awaitingScreen);
+
+    // The drop publishes nothing on purpose — nobody is reading — so the
+    // tab's return to `cold` is not observable in `currentState` here. What
+    // the departure did is only legible in what the return has to do.
+    await first.cancel();
+    await settle();
+
+    final before = pullCount(t);
+    final second = svc.stateStream.listen((_) {});
+    await settle();
+
+    expect(
+      pullCount(t),
+      before + 1,
+      reason: 'without a re-issue the tab comes back cold — dimmed, captioned attaching, offering no Retry — and holds the checkout there for as long as it is open',
+    );
+    expect(stageOf(svc, 'a'), TerminalAttachStage.awaitingScreen);
+
+    await second.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  // The legacy arm is the only pull with no request timeout behind it, and the
+  // stamp it leaves is what the pane counts up from. An unanswerable pull —
+  // the bridge answers a screen it no longer has with a log line and no frame
+  // — is better called failed than left counting forever.
+  test('the legacy arm bounds a pull for a terminal with no live PTY',
+      () async {
+    final t = newTransport()
+      ..requestHandler = (_, _) =>
+          throw RpcException('E_UNKNOWN_METHOD', 'old bridge');
+    final session = await newSession(t);
+    final svc = newService(session, snapshotAttachTimeout: _attachBound);
+
+    emitStatus(t, [terminalInfo('a', running: false)]);
+    await settle();
+    await settle();
+    expect(stageOf(svc, 'a'), TerminalAttachStage.awaitingScreen);
+
+    await Future<void>.delayed(_pastBound);
+
+    expect(stageOf(svc, 'a'), TerminalAttachStage.failed);
+    expect(
+      svc.currentState.attach,
+      CheckoutAttachStatus.ready,
+      reason: 'a terminal with no PTY behind it never held the checkout back, '
+          'and calling its pull failed must not start',
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  // Ad-hoc ids are reused — terminal_list_view.dart mints the lowest free
+  // number — so a generation counter reset on removal lets the pull that
+  // removal disowned match the generation the recreated tab issues.
+  test("a recreated terminal does not paint the deleted one's reply", () async {
+    final held = <Completer<Map<String, dynamic>>>[];
+    final t = FakeAgentTransport()
+      ..requestHandler = (_, _) {
+        final c = Completer<Map<String, dynamic>>();
+        held.add(c);
+        return c.future;
+      };
+    final session = await newSession(t);
+    final svc = newService(session);
+
+    emitStatus(t, [terminalInfo('a')]);
+    await settle();
+    // Both services on this transport pulled; which completer belongs to which
+    // is not observable, and answering both is enough — only `svc` is asserted
+    // on, and only `svc` deletes anything.
+    final stale = List.of(held);
+    expect(stale, isNotEmpty);
+
+    svc.deleteTerminal('a');
+    await settle();
+    // Reported running again, which is what lifts the local suppression and
+    // builds a fresh controller under the same id.
+    emitStatus(t, [terminalInfo('a')]);
+    await settle();
+
+    for (final c in stale) {
+      c.complete({
+        'snapshot': {
+          'terminalId': 'a',
+          'scrollback': 'THE DELETED SCREEN',
+          'seq': 50,
+          'composed': true,
+        },
+      });
+    }
+    await settle();
+    await settle();
+
+    expect(
+      stageOf(svc, 'a'),
+      TerminalAttachStage.awaitingScreen,
+      reason: 'accepting the stale reply reads painted, not refreshing: the '
+          'apply puts the deleted screen on the engine AND retires the fresh '
+          'pull that was still owed one',
+    );
+
     await svc.dispose();
     await session.close();
   });
