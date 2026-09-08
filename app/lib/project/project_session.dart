@@ -15,6 +15,7 @@ import '../services/search_service.dart';
 import '../services/sessions_service.dart';
 import '../services/terminal_service.dart';
 import '../services/upload_service.dart';
+import '../services/pending_reply.dart';
 import '../storage/cached_sessions_store.dart';
 import '../util/device_id.dart';
 import 'fragment_recovery.dart';
@@ -71,8 +72,21 @@ class ProjectSession {
   StreamSubscription? _fragAbortSub;
   StreamSubscription? _fragSendErrSub;
   StreamSubscription? _streamReadySub;
+  StreamSubscription? _sessionDownSub;
+  StreamSubscription<TransportState>? _transportStateSub;
   StreamSubscription? _checkoutSessionSub;
   bool _closed = false;
+
+  /// Tracked replies registered via [newPending]. Untyped so one registry can
+  /// hold every service's `PendingReply<T>` regardless of `T` — Dart's
+  /// generics are covariant, so each still narrows correctly for its owner.
+  final _pendingReplies = <PendingReply<dynamic>>{};
+
+  /// Whether the transport carrying this project is currently unusable — a
+  /// local socket teardown, or (relay) a dropped machine session between
+  /// `sessionDownEvents` and the next `streamReadyEvents` for this project.
+  /// Drives [newPending]'s immediate-fail path; see [_markDown]/[_markUp].
+  bool _down;
 
   ProjectSession({
     required this.projectId,
@@ -84,7 +98,15 @@ class ProjectSession {
   }) : _onClose = onClose,
        wireProjectId = mode == ProjectSessionMode.relay
            ? baseProjectId(projectId)
-           : projectId {
+           : projectId,
+       // Derived, not assumed false: production always builds a session over
+       // an already-established transport (see `defaultProjectSessionFactory`
+       // and `LocalTransport.connect`), but every test harness constructs one
+       // directly, sometimes over a transport that starts down.
+       _down = transport is StreamTransport
+           ? !transport.isEstablished
+           : (transport.currentState == TransportState.disconnected ||
+                 transport.currentState == TransportState.error) {
     _router = MessageRouter(transport: transport);
     // Main's SLICE, not the whole tier. This notifier is the PROJECT's
     // status, and an isolated session's worktree runs its own copy of
@@ -150,7 +172,79 @@ class ProjectSession {
           .listen((_) {
             _router.resyncFocusState();
             sessionsService.resyncFocus();
+            _markUp();
           });
+      // The machine session dropping is the relay-side "down": a stream that
+      // loses its session cannot answer anything until the next handshake
+      // rebinds this project, which is exactly what the streamReadyEvents
+      // listener above reports back as "up".
+      _sessionDownSub = session.sessionDownEvents.listen((_) => _markDown());
+    } else {
+      // Local transport (and every test double that is neither this nor a
+      // StreamTransport, e.g. FakeAgentTransport/DemoTransport): the socket's
+      // own lifecycle IS the down/up signal, with no separate session layer.
+      _transportStateSub = transport.stateChanges.listen((s) {
+        switch (s) {
+          case TransportState.disconnected:
+          case TransportState.error:
+            _markDown();
+          case TransportState.connected:
+            _markUp();
+          case TransportState.connecting:
+            break;
+        }
+      });
+    }
+  }
+
+  /// Constructs a [PendingReply] tracked in this session's down/up registry.
+  /// Every service that awaits a wire reply should register through here
+  /// rather than building a bare [PendingReply] directly: when the transport
+  /// carrying this project goes down, every tracked reply is failed with
+  /// [SessionDownException] immediately instead of quietly waiting out its own
+  /// timer against a channel nothing will ever answer on.
+  ///
+  /// If the session is ALREADY down when this is called, the reply is still
+  /// registered and returned — the caller's own map/field insertion (which
+  /// normally follows right after this returns) is what a synchronous fail
+  /// here would race ahead of, leaving a dead entry the owner never recorded.
+  /// The fail is deferred to a microtask instead, so it reaches the reply only
+  /// once the caller has finished registering it — see [_pendingReplies].
+  PendingReply<T> newPending<T>({
+    required Duration timeout,
+    void Function()? onTimeout,
+    void Function()? onAbandon,
+    Object Function()? timeoutError,
+  }) {
+    final pending = PendingReply<T>(
+      timeout: timeout,
+      onTimeout: onTimeout,
+      onAbandon: onAbandon,
+      timeoutError: timeoutError,
+    );
+    _pendingReplies.add(pending);
+    pending.future.whenComplete(() => _pendingReplies.remove(pending)).ignore();
+    if (_down) {
+      scheduleMicrotask(() => pending.fail(const SessionDownException()));
+    }
+    return pending;
+  }
+
+  void _markDown() {
+    if (_down) return;
+    _down = true;
+    _failAllPending(const SessionDownException());
+  }
+
+  void _markUp() {
+    _down = false;
+  }
+
+  void _failAllPending(SessionDownException error) {
+    final replies = _pendingReplies.toList();
+    _pendingReplies.clear();
+    for (final p in replies) {
+      p.fail(error);
     }
   }
 
@@ -320,18 +414,33 @@ class ProjectSession {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    // A `newPending` issued after close (a stray late call from a service
+    // mid-teardown) must fail immediately through the down path rather than
+    // arming a live timer against a session nothing will ever reconnect.
+    _down = true;
     // Services own disjoint state; dispose them concurrently so focus-switch
-    // teardown latency is bounded by the slowest, not the sum.
+    // teardown latency is bounded by the slowest, not the sum. Each already
+    // fails its own in-flight replies with its own dispose-specific message
+    // (e.g. "FileService disposed") — the registry's own fail below runs
+    // AFTER, so it only ever catches a reply none of them cleaned up, rather
+    // than racing ahead of a more specific message with a generic one.
     await Future.wait([
       if (_fragAbortSub != null) _fragAbortSub!.cancel(),
       if (_fragSendErrSub != null) _fragSendErrSub!.cancel(),
       if (_streamReadySub != null) _streamReadySub!.cancel(),
+      if (_sessionDownSub != null) _sessionDownSub!.cancel(),
+      if (_transportStateSub != null) _transportStateSub!.cancel(),
       if (_checkoutSessionSub != null) _checkoutSessionSub!.cancel(),
       sessionsService.dispose(),
       handlerService.dispose(),
       agentSessionService.dispose(),
       for (final bundle in _checkoutServices.values) bundle.dispose(),
     ]);
+    // A session torn down with a reply in flight that outlives every
+    // service's own cleanup (a future PendingReply site that forgets to
+    // implement dispose) fails it now rather than leaving it to time out
+    // against a transport nobody will reconnect.
+    _failAllPending(const SessionDownException());
     status.dispose();
     await _checkoutBundlesController.close();
     await _router.dispose();

@@ -753,9 +753,9 @@ class FileService {
   /// `docs/architecture.md`), so it cannot relativize the path itself.
   Future<FileResolvePathResultMessage> resolveTerminalPath(String rawPath) {
     final requestId = const Uuid().v4();
-    final pending = PendingReply<FileResolvePathResultMessage>(
+    final pending = session.newPending<FileResolvePathResultMessage>(
       timeout: const Duration(seconds: 8),
-      onTimeout: () => _pendingResolves.remove(requestId),
+      onAbandon: () => _pendingResolves.remove(requestId),
     );
     _pendingResolves[requestId] = pending;
     session.sendForCheckout(
@@ -1396,10 +1396,11 @@ class FileService {
       latch.settle();
     }
     _commitFilesLatches.clear();
-    for (final pending in _pendingResolves.values) {
+    final resolves = _pendingResolves.values.toList();
+    _pendingResolves.clear();
+    for (final pending in resolves) {
       pending.fail(StateError('FileService disposed'));
     }
-    _pendingResolves.clear();
     session.unhydrateCheckout(checkoutId, 'file:selected');
     session.unhydrateCheckout(checkoutId, _treeHydratorKey);
     session.unhydrateCheckout(checkoutId, _syncHydratorKey);

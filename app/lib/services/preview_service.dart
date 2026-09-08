@@ -625,10 +625,10 @@ class PreviewService {
     // head timer runs, and removing the original key would leave the entry in
     // the map forever with nothing left to complete it.
     late final _InFlightRequest entry;
-    final pending = PendingReply<TunnelHttpResponse>(
+    final pending = session.newPending<TunnelHttpResponse>(
       timeout: timeout,
+      onAbandon: () => _pendingRequests.remove(entry.requestId),
       onTimeout: () {
-        _pendingRequests.remove(entry.requestId);
         _statsTimedOut++;
         // The bridge may still be fetching for an id nothing will read.
         _sendCancel(entry.requestId);

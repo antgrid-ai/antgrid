@@ -33,6 +33,7 @@ import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
 import '../providers/demo_mode.dart';
 import '../providers/device_provisioning.dart' show localDeviceUuidProvider;
+import '../providers/local_transport_fault.dart';
 import '../providers/new_session_picker.dart'
     show newSessionStartInFlightProvider;
 import '../providers/notification_route_apply.dart';
@@ -1151,9 +1152,16 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // during the refresh is what flashed the launch-error screen for a beat
     // before the workspace appeared. Gate on !isLoading so the error screen
     // shows only once the latest attempt has actually failed.
+    // A fault ranks like a transport error: it fires from a LIVE local
+    // transport whose socket then tore down (see local_transport_fault.dart),
+    // which `transportAsync` itself has no way to observe — it stays healthy
+    // AsyncData throughout.
+    final localFault = activeProjectId == null
+        ? null
+        : ref.watch(localTransportFaultProvider(activeProjectId));
     final transportError = transportAsync.isLoading
         ? null
-        : transportAsync.error;
+        : (transportAsync.error ?? localFault);
     final sessionError = (sessionAsync == null || sessionAsync.isLoading)
         ? null
         : sessionAsync.error;
@@ -1409,6 +1417,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       onRetry: activeProjectId == null
           ? null
           : () {
+              // Cleared before anything else: a fault leaves the transport
+              // provider in healthy AsyncData, so a rebuild that read it back
+              // would land straight back on this same blocking screen.
+              ref
+                  .read(localTransportFaultProvider(activeProjectId).notifier)
+                  .clear();
               // Drop the static dedupe entry too: any prior failure has
               // settled by the time this screen renders, so it's already
               // gone, but invalidating the providers also guarantees fresh
@@ -3138,6 +3152,28 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
             'in the title bar — then Retry.',
         retryLabel: 'retry',
       );
+    }
+    // A working transport whose socket tore down AFTER the handshake — see
+    // local_transport_fault.dart. Distinct from the handshake exceptions
+    // below, which only ever fire before a session existed at all.
+    if (e is LocalTransportFault) {
+      return e.closeCode == 4409
+          ? (
+              headline: 'another antgrid window took over this project',
+              tip:
+                  'Another running instance of Antgrid opened this same '
+                  'project folder and took ownership of the local agent. '
+                  'Close the other window and Retry.',
+              retryLabel: 'retry',
+            )
+          : (
+              headline: 'connection to the local bridge dropped',
+              tip:
+                  'The socket to the local agent closed unexpectedly '
+                  '(close code ${e.closeCode}). Retry to reconnect; if it '
+                  'persists, open the log folder and check host.log.',
+              retryLabel: 'retry',
+            );
     }
     if (e is LocalTransportHandshakeException && e.closeCode == 4409) {
       return (
