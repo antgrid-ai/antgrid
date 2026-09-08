@@ -63,7 +63,7 @@ class WorktreeSetupNudgeSeen extends AsyncNotifier<Set<String>> {
   /// key has exactly one reader and one writer, both on a cold user-driven path.
   @override
   Future<Set<String>> build() async {
-    final stored = await SharedPreferencesAsync().getStringList(_key);
+    final stored = await _prefs().getStringList(_key);
     return stored?.toSet() ?? const <String>{};
   }
 
@@ -72,8 +72,11 @@ class WorktreeSetupNudgeSeen extends AsyncNotifier<Set<String>> {
     if (current.contains(entryId)) return;
     final next = {...current, entryId};
     state = AsyncData(next);
-    await SharedPreferencesAsync().setStringList(_key, next.toList());
+    await _prefs().setStringList(_key, next.toList());
   }
+
+  SharedPreferencesAsync _prefs() =>
+      SharedPreferencesAsync(options: desktopSharedPreferencesOptions);
 }
 
 final worktreeSetupNudgeSeenProvider =

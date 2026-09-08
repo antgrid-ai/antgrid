@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -7,12 +5,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../config/storage_scope.dart';
 import '../design/widgets/ab_button.dart';
 import '../launcher/project_id.dart';
 import '../models/ab_project.dart';
 import '../providers/agent_transport.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/projects.dart';
+import '../util/path_basename.dart';
 
 bool _isDesktopPlatform() =>
     defaultTargetPlatform == TargetPlatform.windows ||
@@ -33,7 +33,9 @@ Future<String> _resolveLocalHostUuid(ProviderContainer ref) async {
 
   // Fall back to a persisted anonymous UUID so the project is still
   // correctly identified as local even when the user isn't signed in.
-  final prefs = SharedPreferencesAsync();
+  final prefs = SharedPreferencesAsync(
+    options: desktopSharedPreferencesOptions,
+  );
   final existing = await prefs.getString(kLocalHostUuidKey);
   if (existing != null) return existing;
   final fresh = const Uuid().v4();
@@ -98,7 +100,7 @@ Future<String?> registerPickedFolder(
   final project = AbProject(
     projectId: id,
     folder: folder,
-    displayName: _basename(folder),
+    displayName: pathBasename(folder),
     hostDeviceUuid: hostUuid,
     hostMachineName: '',
     lastOpenedAt: DateTime.now(),
@@ -120,13 +122,4 @@ class OpenFolderButton extends ConsumerWidget {
       onTap: () => openFolderPicker(ref.container),
     );
   }
-}
-
-/// Last non-empty path segment. Avoids pulling in `package:path` for one call.
-String _basename(String folder) {
-  final parts = folder
-      .split(Platform.pathSeparator)
-      .where((s) => s.isNotEmpty)
-      .toList();
-  return parts.isEmpty ? folder : parts.last;
 }

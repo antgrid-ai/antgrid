@@ -3,7 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../launcher/host_control_client.dart';
 import '../models/ab_project.dart';
 import '../project/project_session_registry.dart';
+import '../storage/pending_forgets_store.dart';
 import '../storage/project_store.dart';
+import '../util/path_basename.dart';
 import 'agent_transport.dart';
 import 'control_plane.dart';
 import 'entry_cleanup.dart';
@@ -15,12 +17,25 @@ final projectStoreProvider = Provider<ProjectStore>((_) {
   throw StateError('projectStoreProvider must be overridden in main()');
 });
 
+/// Synchronous handle to the pending-forgets tombstone. Opened alongside
+/// [projectStoreProvider] in `main()` — see [PendingForgetsStore].
+final pendingForgetsStoreProvider = Provider<PendingForgetsStore>((_) {
+  throw StateError('pendingForgetsStoreProvider must be overridden in main()');
+});
+
 class ProjectsNotifier extends Notifier<List<AbProject>> {
   late final ProjectStore _store;
+  late final PendingForgetsStore _pendingForgets;
+  final Set<String> _removing = {};
+  int _hostCatalogGeneration = 0;
+
+  /// Capture before fetching the host catalog; deletion invalidates older polls.
+  int get hostCatalogGeneration => _hostCatalogGeneration;
 
   @override
   List<AbProject> build() {
     _store = ref.watch(projectStoreProvider);
+    _pendingForgets = ref.watch(pendingForgetsStoreProvider);
     return _store.list();
   }
 
@@ -53,7 +68,68 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
     if (changed) state = _store.list();
   }
 
+  /// Registers every project the local bridge knows about but this store
+  /// doesn't — the gap that opens when a session is started from another
+  /// device's remote-control view of THIS machine: the bridge's seen-catalog
+  /// picks it up (so a phone controlling this desktop lists it), but nothing
+  /// ever ran the local "Open folder…" upsert that would land it here, so the
+  /// desktop app's own drawer never showed it. [known] is this machine's full
+  /// catalog (`HostControlClient.phonesList().knownProjects`, warm cores ∪
+  /// seen-catalog hints); [hostUuid] is this device's own host identity
+  /// ([localDeviceUuidProvider]).
+  Future<void> backfillFromHost(
+    List<KnownProject> known, {
+    required String hostUuid,
+    int? generation,
+  }) async {
+    final expectedGeneration = generation ?? _hostCatalogGeneration;
+    if (expectedGeneration != _hostCatalogGeneration) return;
+    // Retry-and-guard for anything the app deleted locally but couldn't
+    // confirm the host forgot (see [PendingForgetsStore]). `known` was just
+    // fetched live, so a pending id absent from it is already forgotten
+    // (nothing to retry); one still present gets a fresh forget attempt.
+    // Either way it is captured in [pending] BEFORE the merge below, so this
+    // same call can never re-add a row it is in the middle of retiring.
+    final pending = _pendingForgets.read();
+    for (final id in pending) {
+      if (expectedGeneration != _hostCatalogGeneration) return;
+      if (_removing.contains(id)) continue;
+      final stillKnown = known.any((p) => p.projectId == id);
+      if (!stillKnown || await _forgetOnHost(id)) {
+        if (expectedGeneration != _hostCatalogGeneration) return;
+        await _pendingForgets.remove(id);
+      }
+    }
+    for (final p in missingLocalProjects(
+      locals: _store.list(),
+      known: known,
+      hostUuid: hostUuid,
+    )) {
+      if (expectedGeneration != _hostCatalogGeneration) return;
+      if (pending.contains(p.projectId) ||
+          _removing.contains(p.projectId) ||
+          _pendingForgets.read().contains(p.projectId)) {
+        continue;
+      }
+      await upsert(p);
+    }
+  }
+
   Future<void> remove(String id) async {
+    if (!_removing.add(id)) return;
+    _hostCatalogGeneration++;
+    try {
+      // Persist before the local row disappears. The poll must neither restore
+      // it during cleanup nor retry the host forget before eviction settles.
+      await _pendingForgets.add(id);
+      await _remove(id);
+    } finally {
+      _removing.remove(id);
+      _hostCatalogGeneration++;
+    }
+  }
+
+  Future<void> _remove(String id) async {
     // Only stop active sessions when the project is already warm — warming a
     // cold project just to stop sessions would block on the relay connect +
     // E2E handshake (3-5s if the agent is offline), which is exactly what
@@ -90,7 +166,9 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
     // is reopened — same projectId, same store on disk. This also destroys the
     // project's isolated working directories, which is why every caller of
     // `remove` must confirm first — see `projectForget`'s contract.
-    await _forgetOnHost(id);
+    if (await _forgetOnHost(id)) {
+      await _pendingForgets.remove(id);
+    }
     // If the removed project was active, clear the selection so the App
     // doesn't sit on a workspace shell with no transport.
     final selected = ref.read(selectedRegistrationIdProvider);
@@ -107,22 +185,26 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
   /// host live (it was spawned when the project opened), so this connects. When
   /// no host is running (remote-only user, or it already exited) we skip rather
   /// than boot one — that would add delete latency AND leave a host the
-  /// teardown-on-close must then reap. Worst case the on-disk store lingers until
-  /// a later delete that coincides with a live host.
-  Future<void> _forgetOnHost(String id) async {
+  /// teardown-on-close must then reap. Returns whether the host actually
+  /// confirmed the forget; a caller that got `false` back must keep the id in
+  /// [PendingForgetsStore] so [backfillFromHost] both retries it later and
+  /// refuses to resurrect it meanwhile.
+  Future<bool> _forgetOnHost(String id) async {
     HostControlClient? client;
     try {
       final host = await ref
           .read(hostControllerProvider)
           .peekHost()
           .timeout(const Duration(seconds: 5));
-      if (host == null) return; // no live host — nothing to reach.
+      if (host == null) return false; // no live host — nothing to reach.
       client = HostControlClient(port: host.controlPort, token: host.token);
       await client.projectForget(id).timeout(const Duration(seconds: 5));
+      return true;
     } catch (_) {
       // Host down, slow, or version-skewed (no project:forget verb) — the
-      // on-disk store survives until the host next runs, but the app-side delete
-      // stands. Nothing actionable here.
+      // on-disk store survives until a retry reaches a live host. Nothing
+      // actionable here.
+      return false;
     } finally {
       client?.close();
     }
@@ -158,3 +240,26 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
 final projectsProvider = NotifierProvider<ProjectsNotifier, List<AbProject>>(
   ProjectsNotifier.new,
 );
+
+/// Pure helper behind [ProjectsNotifier.backfillFromHost]: [known] entries
+/// whose id isn't already in [locals], turned into rows ready to [upsert].
+/// A hint with no `path` is skipped — nothing to open it with.
+List<AbProject> missingLocalProjects({
+  required List<AbProject> locals,
+  required List<KnownProject> known,
+  required String hostUuid,
+}) {
+  final existing = {for (final p in locals) p.projectId};
+  return [
+    for (final p in known)
+      if (!existing.contains(p.projectId) && p.path != null)
+        AbProject(
+          projectId: p.projectId,
+          folder: p.path!,
+          displayName: p.label ?? pathBasename(p.path!),
+          hostDeviceUuid: hostUuid,
+          hostMachineName: '',
+          lastOpenedAt: DateTime.tryParse(p.lastActiveAt ?? '') ?? DateTime.now(),
+        ),
+  ];
+}

@@ -18,6 +18,8 @@ import '../providers/control_plane.dart';
 import '../providers/device_revocation.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/connection_identity.dart';
+import '../providers/device_provisioning.dart';
+import '../providers/projects.dart';
 import '../providers/relay_connection.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
@@ -760,6 +762,27 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
               .setLocalSessionStatuses(sessionStatuses);
         } catch (_) {
           // Host went away between peek and list — ignore; next tick retries.
+        }
+        // Same 2s cadence as the status poll above — a project opened by a
+        // remote-control session on THIS machine (landing in the bridge's
+        // seen-catalog with no local "Open folder…" ever run) must reach the
+        // drawer in step with its work status, not up to 15s behind it; a
+        // throttled version of this call is what made the two show up
+        // separately.
+        try {
+          final hostUuid = await ref.read(localDeviceUuidProvider.future);
+          if (!mounted) return;
+          final projects = ref.read(projectsProvider.notifier);
+          final generation = projects.hostCatalogGeneration;
+          final known = await client.phonesList();
+          if (!mounted || hostUuid == null) return;
+          await projects.backfillFromHost(
+            known.knownProjects,
+            hostUuid: hostUuid,
+            generation: generation,
+          );
+        } catch (_) {
+          // Best-effort — retried on the next tick.
         }
       } finally {
         client.close();

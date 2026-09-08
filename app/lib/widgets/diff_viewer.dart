@@ -408,8 +408,10 @@ class _DiffViewerState extends State<DiffViewer> {
         // its own axis: the horizontal viewport's at depth 0, the list's one
         // viewport boundary further in at depth 1.
         //
-        // Vertical stays visible and horizontal fades with use, which is how
-        // re_editor builds the file viewer's pair.
+        // Both stay visible rather than fading with use (unlike re_editor's
+        // own default pair) — a diff this wide gives no other cue that a line
+        // runs off screen, so the thumb should read as "there's more here" at
+        // a glance, not only once the pointer happens to find it.
         //
         // SelectionArea makes every line's code text (never the gutter/marker
         // columns — see [_buildGutter]/[_buildMarker]) selectable and
@@ -436,6 +438,7 @@ class _DiffViewerState extends State<DiffViewer> {
               thickness: _scrollbarThickness,
               radius: _scrollbarRadius,
               crossAxisMargin: _scrollbarMargin,
+              thumbVisibility: true,
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 controller: _horizontal,

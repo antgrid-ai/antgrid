@@ -424,4 +424,42 @@ void main() {
       }
     },
   );
+
+  testWidgets(
+    'a visible context panel keeps an icon toggle that hides it',
+    (tester) async {
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        var toggled = 0;
+        await pumpAt(
+          tester,
+          1400,
+          extraOverrides: [
+            contextPanelControlProvider.overrideWith(
+              () => ValueController((hidden: false, toggle: () => toggled++)),
+            ),
+          ],
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(WindowTitleBarContents.contextPanelSlotKey),
+            matching: find.byType(AbIconButton),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(WindowTitleBarContents.contextPanelSlotKey),
+            matching: find.byTooltip('Hide context panel'),
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(find.byTooltip('Hide context panel'));
+        await tester.pump();
+        expect(toggled, 1);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
 }
