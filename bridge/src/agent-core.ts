@@ -713,6 +713,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       : null;
     if (!terminalId) { sendAb(msg); return; }
     const { runtime, externalId } = terminalOwner(terminalId);
+    const session = msg.type === "terminal:notification" ? sessions?.get(terminalId) : undefined;
+    const tool = session?.tool ?? (session?.command ? undefined : runtime.config.agent?.tool);
+    if (session && msg.type === "terminal:notification" && tool === "codex") {
+      // Codex's TUI is configured to emit approvals only. Use the hook's wire
+      // channel so mobile push and the work-status reducer also see the prompt,
+      // without a second terminal notification producing a duplicate toast.
+      sendFromRuntime(runtime, createMessage("notification:push", {
+        notificationType: "permission_request",
+        message: msg.body ?? msg.title ?? "Codex needs approval",
+        sessionId: session.id,
+        sessionTitle: session.name,
+        projectId: project.id,
+      }));
+      return;
+    }
     sendFromRuntime(runtime, { ...msg, terminalId: externalId } as AbMessage);
   }
 

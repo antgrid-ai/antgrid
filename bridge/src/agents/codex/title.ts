@@ -64,8 +64,8 @@ export async function resolveCodexThreadTitle(threadId: string, codexHome: strin
 }
 
 /**
- * Synchronous existence check for a Codex thread, for the resume pre-flight in
- * SessionManager.start() (which is sync). Mirrors resolveCodexThreadTitle's
+ * Synchronous existence check for local availability hints.
+ * Mirrors resolveCodexThreadTitle's
  * newest-state_<N>.sqlite selection. Returns true/false when the DB can be
  * queried, or null when undeterminable (DB missing/locked/schema drift) so the
  * caller can fall back to an optimistic resume rather than refusing.
@@ -84,7 +84,7 @@ export function codexThreadExistsSync(threadId: string, codexHome: string): bool
   let db: Database | null = null;
   try {
     db = new Database(dbPath, { readonly: true });
-    // Fail fast instead of blocking: start() calls this synchronously on the
+    // Fail fast instead of blocking: availability checks run synchronously on the
     // event loop, so a wait on codex's write lock would stall the bridge.
     // SQLITE_BUSY → caught below → null → optimistic resume.
     db.exec("PRAGMA busy_timeout = 0");

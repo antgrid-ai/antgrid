@@ -17,11 +17,9 @@ export function resumeArgv(tool: string, agentSessionId: string): string[] {
 }
 
 /**
- * Best-effort, SYNCHRONOUS pre-flight: would resuming this stored id land in a
- * real conversation? Returns true unless the agent can POSITIVELY confirm the
- * session is gone — a false negative silently starts a fresh conversation, so we
- * only refuse when sure. Kept sync (existsSync / bun:sqlite are) so
- * SessionManager.start() can stay sync.
+ * Best-effort local-store availability hint for mode switching and fork checks.
+ * Launches pass saved identities directly to the provider: this hint must never
+ * erase an identity or select a fresh conversation.
  *
  * The transcript-path check sits AHEAD of the per-agent dispatch because it is
  * keyed on the shape of the args, not on the tool: whichever agent posted a
