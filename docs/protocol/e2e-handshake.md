@@ -92,7 +92,7 @@ one is not caught by the `AbMessageSchema` union.
 | | `confirm` | base64 string | `tag_a` = HMAC-SHA256(k_confirm, "agent-finished") |
 | `app:ready` | `attemptId` | string | |
 | | `confirm` | base64 string | `tag_p` = HMAC-SHA256(k_confirm, "phone-finished") |
-| | `capabilities` | object, optional | `{ checkoutRouting?: true }` — see below |
+| | `capabilities` | object, optional | `{ checkoutRouting?: true, pullsTree?: true }` — see below |
 | `established` | `attemptId` | string | Agent's ack; the phone's terminal event |
 
 `app:ready.capabilities` is load-bearing, not decorative: it reaches the agent
@@ -100,7 +100,12 @@ as `onHandshakeComplete(capabilities)` and sets `peerCheckoutRouting`, which
 decides whether this app may be routed checkout-scoped frames at all. An app
 that does not advertise `checkoutRouting` is refused a project holding a managed
 session rather than shown main's workspace beside an isolated agent (root
-`CLAUDE.md`, "Checkout-scoped routing").
+`CLAUDE.md`, "Checkout-scoped routing"). `pullsTree` is the opposite kind of
+flag — a bandwidth hint, never a gate: an app that advertises it pulls each
+checkout's file tree itself (`file:tree:snapshot:request`), so the agent skips
+the `tree:full` push in its re-sync and falls back to pushing for any client
+that stays silent. Both flags are `=== true` checks on the agent side; a wrong
+type reads as absent.
 
 Messages 3–5 are sealed with the session transport keys (§7). Messages 3 and 4
 are sealed under **candidate** keys — the session is not confirmed yet. The

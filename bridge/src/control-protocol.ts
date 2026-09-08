@@ -148,7 +148,11 @@ export interface ConnectInfo {
 
 export type ControlResponse =
   | { id: string; ok: true; type: "project:list"; projects: ProjectSummary[] }
-  | { id: string; ok: true; type: "project:resolve"; projectId: string; repoPath: string; selectedPath: string; label: string; isGitRepository: boolean }
+  | {
+      id: string; ok: true; type: "project:resolve"; projectId: string; repoPath: string;
+      selectedPath: string; label: string; isGitRepository: boolean;
+      kind: "primary" | "managed-checkout" | "linked-worktree" | "plain"; checkoutId?: string;
+    }
   | { id: string; ok: true; type: "tools:list"; tools: ToolSummary[]; agents?: AgentDescriptor[] }
   | { id: string; ok: true; type: "project:open"; running: boolean; connect: ConnectInfo | null }
   | { id: string; ok: true; type: "project:start"; running: boolean; connect: ConnectInfo | null }

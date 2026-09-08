@@ -145,9 +145,9 @@ class UploadService {
   }
 
   Future<Map<String, dynamic>> _await(String key) {
-    final pending = PendingReply<Map<String, dynamic>>(
+    final pending = session.newPending<Map<String, dynamic>>(
       timeout: _kStepTimeout,
-      onTimeout: () => _pending.remove(key),
+      onAbandon: () => _pending.remove(key),
       timeoutError: () =>
           const UploadException('TIMEOUT', 'No reply from the agent'),
     );
@@ -275,10 +275,11 @@ class UploadService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    for (final p in _pending.values) {
+    final pending = _pending.values.toList();
+    _pending.clear();
+    for (final p in pending) {
       p.fail(const UploadException('OFFLINE', 'Session closed'));
     }
-    _pending.clear();
     _requestIdByUpload.clear();
     await _statusSub?.cancel();
     _statusSub = null;

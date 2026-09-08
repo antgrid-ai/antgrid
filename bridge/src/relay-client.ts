@@ -58,7 +58,7 @@ export interface RelayClientOptions {
   onPeerOnline?: (peerId: string) => void;
   onPeerOffline?: (peerId: string) => void;
   /** The E2E session established (phone's app:ready confirm verified). */
-  onHandshakeComplete?: (capabilities: { checkoutRouting: boolean }) => void;
+  onHandshakeComplete?: (capabilities: { checkoutRouting: boolean; pullsTree: boolean }) => void;
   onMessage?: (msg: AbMessage) => void;
   onTunnelMessage?: (msg: unknown) => void;
   onDisconnected?: () => void;
@@ -234,8 +234,9 @@ export class RelayClient {
   private established: E2eAttempt | null = null;
   private pending: E2eAttempt | null = null;
   /** Capability is session-scoped: a reconnect/rekey must not inherit the
-   * previous app's routing guarantee. */
+   * previous app's routing guarantee (also covers {@link peerAdvertisedPullsTree}). */
   private peerCheckoutRouting = false;
+  private peerAdvertisedPullsTree = false;
   private halfOpenTimer: ReturnType<typeof setTimeout> | null = null;
   // Sealed-liveness bookkeeping.
   private lastSealedRecvAt = 0;
@@ -284,6 +285,14 @@ export class RelayClient {
   /** Whether the currently established app can route checkout-scoped frames. */
   get peerSupportsCheckoutRouting(): boolean {
     return this.established !== null && this.peerCheckoutRouting;
+  }
+
+  /** Whether the established app pulls its own file tree. True with no session —
+   *  there is then no app the push could reach. Polarity is deliberately the
+   *  opposite of {@link peerSupportsCheckoutRouting}, which fail-closes because
+   *  it gates delivery; this only decides whether a duplicate push is worth it. */
+  get peerPullsTree(): boolean {
+    return this.established === null || this.peerAdvertisedPullsTree;
   }
 
   /** The bare device id this client authenticates as (machine deviceUuid). */
@@ -1047,7 +1056,7 @@ export class RelayClient {
 
   // --- E2E session frames ---
 
-  private handleSessionFrame(obj: { type: string; attemptId?: string; confirm?: string; capabilities?: { checkoutRouting?: boolean }; channel?: unknown; consumed?: unknown }): void {
+  private handleSessionFrame(obj: { type: string; attemptId?: string; confirm?: string; capabilities?: { checkoutRouting?: boolean; pullsTree?: boolean }; channel?: unknown; consumed?: unknown }): void {
     switch (obj.type) {
       case "app:ready":
         this.handleAppReady(obj);
@@ -1245,7 +1254,7 @@ export class RelayClient {
     log.info("E2E handshake keys derived (attempt %s), waiting for app:ready", attemptId);
   }
 
-  private handleAppReady(obj: { attemptId?: string; confirm?: string; capabilities?: { checkoutRouting?: boolean } }): void {
+  private handleAppReady(obj: { attemptId?: string; confirm?: string; capabilities?: { checkoutRouting?: boolean; pullsTree?: boolean } }): void {
     const attemptId = obj.attemptId;
     if (!attemptId) return;
     const tag = Buffer.from(obj.confirm ?? "", "base64");
@@ -1268,6 +1277,7 @@ export class RelayClient {
       const old = this.established;
       this.established = this.pending;
       this.peerCheckoutRouting = obj.capabilities?.checkoutRouting === true;
+      this.peerAdvertisedPullsTree = obj.capabilities?.pullsTree === true;
       // Self-correct the address to the promoted session's peer (already equal
       // to it for same-device rekey; makes a presence flap during the pending
       // window harmless).
@@ -1289,7 +1299,7 @@ export class RelayClient {
       this.resetRxFlow();
       this.sendSessionFrame({ type: "established", attemptId }, this.established.transport);
       log.info("E2E session established (attempt %s)", attemptId);
-      this.opts.onHandshakeComplete?.({ checkoutRouting: this.peerCheckoutRouting });
+      this.opts.onHandshakeComplete?.({ checkoutRouting: this.peerCheckoutRouting, pullsTree: this.peerAdvertisedPullsTree });
       this.mux.notifyPeerOnline();
       this.drain();
       return;
@@ -1669,6 +1679,7 @@ export class RelayClient {
 
   private tearDownEstablished(): void {
     this.peerCheckoutRouting = false;
+    this.peerAdvertisedPullsTree = false;
     if (!this.established) return;
     // The choke point for every session end (reconnect, cross-device hello,
     // liveness death): queued frames would otherwise be sealed under a session
@@ -1799,8 +1810,13 @@ export class RelayClient {
   }
 
   private cleanup(): void {
-    // Frames enqueued in the close→redial gap would be sealed under keys the
-    // redial discards.
+    // Cleared rather than carried across the redial, even though the outbox is
+    // plaintext and could be re-sealed: after lazy hydration the backlog at a
+    // drop is small, tier-3 view state (trees, snapshots, session list) is
+    // re-pulled by the app's hydrators on the next establishment, and tier-2
+    // replies are failed fast by the app's pending registry the moment the
+    // session drops — so replaying it would only put stale bytes ahead of the
+    // re-sync.
     this.recordQueueDrop("socket-closed", this.scheduler.clear());
     this.stopHeartbeat();
     this.awaitingPong = false;

@@ -416,16 +416,21 @@ enum RecentSessionDeleteOutcome { deleted, accepted, offline, failed }
 ///
 /// What the members share is having no useful second act: `E_SEND_FAILED` and
 /// `E_UNKNOWN` never left the device, `E_SESSION_DOWN` and `E_DISPOSED` lost
-/// the machine mid-request. All four collapse to a plain failure the user can
-/// retry. The last two are here because a two-minute delete window makes an
-/// ordinary reconnect land inside one, and unclassified they reach the refusal
-/// ladder, which prints their developer strings ("relay session down") at the
-/// user as though the bridge had answered.
+/// the machine mid-request, and `E_SUPERSEDED`/`E_SOCKET_CLOSED` are
+/// `LocalTransport`'s own post-ready teardown codes (another app took over
+/// the project, or the loopback socket closed for any other reason). All six
+/// collapse to a plain failure the user can retry. The two session-loss codes
+/// are here because a two-minute delete window makes an ordinary reconnect
+/// land inside one, and unclassified they reach the refusal ladder, which
+/// prints their developer strings ("relay session down") at the user as
+/// though the bridge had answered.
 const _kTransportRpcCodes = {
   'E_SEND_FAILED',
   'E_UNKNOWN',
   'E_SESSION_DOWN',
   'E_DISPOSED',
+  'E_SUPERSEDED',
+  'E_SOCKET_CLOSED',
 };
 
 /// Delete a recent session.

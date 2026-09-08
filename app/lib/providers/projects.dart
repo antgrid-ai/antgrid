@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../launcher/host_control_client.dart';
 import '../models/ab_project.dart';
+import '../models/session_target.dart';
 import '../project/project_session_registry.dart';
 import '../storage/pending_forgets_store.dart';
 import '../storage/project_store.dart';
@@ -28,6 +29,13 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
   late final PendingForgetsStore _pendingForgets;
   final Set<String> _removing = {};
   int _hostCatalogGeneration = 0;
+
+  /// Ids [reconcileWithHost] has folded away (dropped as a duplicate, or
+  /// retired by a rekey) plus any [backfillFromHost] itself has caught as an
+  /// alias. The host catalog still names these forever — a forget is never
+  /// sent for them — so without this memo the alias row would resurrect on
+  /// the very next backfill tick and on every app restart.
+  final Set<String> _foldedIds = {};
 
   /// Capture before fetching the host catalog; deletion invalidates older polls.
   int get hostCatalogGeneration => _hostCatalogGeneration;
@@ -81,6 +89,7 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
     List<KnownProject> known, {
     required String hostUuid,
     int? generation,
+    Future<ResolvedLocalProject> Function(String folder)? resolve,
   }) async {
     final expectedGeneration = generation ?? _hostCatalogGeneration;
     if (expectedGeneration != _hostCatalogGeneration) return;
@@ -111,8 +120,126 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
           _pendingForgets.read().contains(p.projectId)) {
         continue;
       }
+      if (_foldedIds.contains(p.projectId)) continue;
+      if (resolve != null) {
+        // The host catalog still names a folded alias forever (nobody ever
+        // forgets it) — resolve it ONCE and memoize so a stale row doesn't
+        // reappear on the next tick or after every restart. One git spawn per
+        // alias per app process, not one per tick.
+        final ResolvedLocalProject resolved;
+        try {
+          resolved = await resolve(p.folder);
+        } catch (_) {
+          continue;
+        }
+        if (expectedGeneration != _hostCatalogGeneration) return;
+        if (resolved.projectId != p.projectId) {
+          _foldedIds.add(p.projectId);
+          continue;
+        }
+      }
       await upsert(p);
     }
+  }
+
+  /// One-time-per-host reconciliation for rows this app minted before a host
+  /// resolver existed to fold managed-checkout folders onto their primary
+  /// repository's id: for every LOCAL row, re-resolve its folder and either
+  /// drop it (a survivor with the resolved id already exists) or rekey it (no
+  /// survivor — the row itself just needs a new id). [resolve] is injected —
+  /// not a `HostControlClient` — so callers control spawn behaviour (the
+  /// widget seam may spawn a host; the poll in `app_shell.dart` must not) and
+  /// tests can substitute a fake.
+  ///
+  /// Never touches a row hosted elsewhere, never stops live sessions (only
+  /// evicts the warm registry entry — the survivor reopens the same
+  /// worktree), and never calls `_forgetOnHost`/`PendingForgetsStore` (forget
+  /// destroys the managed worktree and session store on the host; the
+  /// resolved-away row's checkout is still in active use by the survivor).
+  /// Generation-guarded exactly like [backfillFromHost] — captures
+  /// [generation] once and re-checks it before starting work on each row,
+  /// bailing without bumping it itself. Once a row's fold actually begins
+  /// (the store row is about to be removed) it runs to completion regardless
+  /// of a concurrent generation bump: a mid-fold abort would delete the row
+  /// without ever reinserting it under its resolved id, which is worse than
+  /// the stale-catalog race the guard exists to avoid.
+  ///
+  /// Returns `true` iff the sweep ran to completion; `false` iff it bailed
+  /// early on a generation mismatch — callers gate one-time-per-host bookkeeping
+  /// (`app_shell.dart`'s `_reconciledPort`) on that, so an aborted sweep is
+  /// retried on the next tick instead of being mistaken for a finished one.
+  /// Idempotent: a row already folded is gone from the store, so a second run
+  /// sees nothing left to do for it.
+  Future<bool> reconcileWithHost({
+    required Future<ResolvedLocalProject> Function(String folder) resolve,
+    required String hostUuid,
+    int? generation,
+  }) async {
+    final expectedGeneration = generation ?? _hostCatalogGeneration;
+    for (final row in _store.list()) {
+      if (expectedGeneration != _hostCatalogGeneration) return false;
+      if (!row.isLocalFor(hostUuid)) continue;
+      if (_removing.contains(row.projectId)) continue;
+
+      final ResolvedLocalProject resolved;
+      try {
+        resolved = await resolve(row.folder);
+      } catch (_) {
+        continue;
+      }
+      if (expectedGeneration != _hostCatalogGeneration) return false;
+      if (resolved.projectId == row.projectId) continue;
+
+      AbProject? survivor;
+      for (final p in _store.list()) {
+        if (p.projectId == resolved.projectId) {
+          survivor = p;
+          break;
+        }
+      }
+      final wasSelected =
+          ref.read(selectedRegistrationIdProvider) == row.projectId;
+
+      // Atomic from here: evict the warm registry entry (never the live
+      // sessions — see doc above), remove the old row and purge its
+      // per-entry caches, then land the row in its final state (dropped or
+      // rekeyed). No generation re-check inside this block — see doc above.
+      await ref
+          .read(projectSessionRegistryProvider.notifier)
+          .forceEvictAndSettle(row.projectId);
+      await _store.remove(row.projectId);
+      state = _store.list();
+      await purgeEntryState(ref, row.projectId);
+      _foldedIds.add(row.projectId);
+
+      if (survivor != null) {
+        // DROP: the resolved id already has a row — this one was a duplicate.
+        if (wasSelected) {
+          ref
+              .read(selectedTargetProvider.notifier)
+              .set(LocalProject(survivor.projectId));
+        }
+      } else {
+        // REKEY: no existing row to fold onto — reinsert this one under its
+        // resolved id. Cache handling is delete (above), not move: nothing
+        // carries the old cached sessions/status over to the new id.
+        final rekeyed = AbProject(
+          projectId: resolved.projectId,
+          folder: resolved.repoPath,
+          displayName: pathBasename(resolved.repoPath),
+          hostDeviceUuid: row.hostDeviceUuid,
+          hostMachineName: row.hostMachineName,
+          lastOpenedAt: row.lastOpenedAt,
+        );
+        await upsert(rekeyed);
+        if (wasSelected) {
+          ref
+              .read(selectedTargetProvider.notifier)
+              .set(LocalProject(rekeyed.projectId));
+        }
+      }
+    }
+    return true;
   }
 
   Future<void> remove(String id) async {
