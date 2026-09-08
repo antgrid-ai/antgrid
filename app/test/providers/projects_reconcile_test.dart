@@ -2,7 +2,6 @@
 // app-minted duplicate row onto the primary project a host resolver now
 // names for the same repository, and the backfillFromHost guard that keeps
 // a folded alias id from resurrecting via the host's seen-catalog.
-import 'dart:async';
 import 'dart:io';
 
 import 'package:antgrid/launcher/host_control_client.dart';
