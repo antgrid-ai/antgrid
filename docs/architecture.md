@@ -33,6 +33,16 @@ itself never crosses the wire. An app must advertise the `checkoutRouting` capab
 managed session, rather than shown main's workspace beside an isolated agent.
 `WORKTREE_SESSIONS_SUPPORTED` (`bridge/src/worktree-capability.ts`) is the kill switch.
 
+Tree state flows pull-first. The app registers one tree hydrator per *active*
+checkout (`CheckoutServices.activate`, `app/lib/project/project_session.dart`) and
+advertises `pullsTree` on both hellos, so the bridge's re-sync
+(`everyClientPullsTrees` in `bridge/src/agent-core.ts`) skips its `tree:full` push
+whenever every attached client pulls; a client that does not advertise it still gets
+the push. The app's capability literals live in the relay-client package
+(`connection_handshake.dart`, `local_transport.dart`) and are mirrored by hand against
+`AppReadyMessage.capabilities` in `bridge/src/protocol.ts` — Zod strips a key the
+schema does not declare, and the fail direction is a silent return of the flood.
+
 ## Shared packages (`packages/`)
 
 - **`antgrid_relay_client`** — pure Dart relay/crypto client, no Flutter.
