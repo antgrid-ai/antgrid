@@ -13,13 +13,16 @@ beforeEach(async () => {
 });
 afterEach(async () => { await listener.stop(); });
 
-async function openWs(token = "secret-token", appPid = 12345): Promise<WebSocket> {
+async function openWs(token = "secret-token", appPid = 12345, capabilities?: object): Promise<WebSocket> {
   const ws = new WebSocket(`ws://127.0.0.1:${listener.port}`);
   await new Promise<void>((resolve, reject) => {
     ws.onopen = () => resolve();
     ws.onerror = (e) => reject(e);
   });
-  ws.send(JSON.stringify({ type: "hello", token, appPid, appVersion: "test" }));
+  ws.send(JSON.stringify({
+    type: "hello", token, appPid, appVersion: "test",
+    ...(capabilities ? { capabilities } : {}),
+  }));
   return ws;
 }
 
@@ -106,6 +109,31 @@ describe("LocalListener handshake", () => {
     });
 
     bus.publish(createMessage('terminal:output', { terminalId: 's', data: 'must not arrive' }), 'control');
+  });
+
+  test("ownerPullsTree is true with no owner attached", () => {
+    expect(listener.ownerPullsTree).toBe(true);
+  });
+
+  test("ownerPullsTree reflects a present pullsTree capability", async () => {
+    const ws = await openWs("secret-token", 1, { checkoutRouting: true, pullsTree: true });
+    await nextMessage(ws);
+    expect(listener.ownerPullsTree).toBe(true);
+    ws.close();
+  });
+
+  test("ownerPullsTree is false when the capability is absent", async () => {
+    const ws = await openWs("secret-token", 1, { checkoutRouting: true });
+    await nextMessage(ws);
+    expect(listener.ownerPullsTree).toBe(false);
+    ws.close();
+  });
+
+  test("ownerPullsTree is false for a wrong-typed capability", async () => {
+    const ws = await openWs("secret-token", 1, { pullsTree: "yes" });
+    await nextMessage(ws);
+    expect(listener.ownerPullsTree).toBe(false);
+    ws.close();
   });
 });
 

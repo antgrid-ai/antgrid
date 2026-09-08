@@ -532,6 +532,7 @@ export class HostServer {
     return {
       attachStream: (bus, opts) => client.attachStream(bus, opts),
       currentPeerPubkey: () => client.currentPeerPubkey(),
+      peerPullsTree: () => client.peerPullsTree,
       sendPushDeliver: (m) => client.sendPushDeliver(m),
       // The LIVE socket's id, like every member beside it — not the inbound
       // auth's. The credential swap above is gated on nothing being live, so a
@@ -1907,6 +1908,7 @@ export class HostServer {
       },
       currentPeerPubkey: () => client.currentPeerPubkey(),
       currentPeerSupportsCheckoutRouting: () => client.peerSupportsCheckoutRouting,
+      currentPeerPullsTree: () => client.peerPullsTree,
       // client.deviceId, NOT the one from identityFor(): a local core is handed a fresh
       // randomUUID(), which addresses no machine the phone knows.
       machineDeviceId: () => client.deviceId,

@@ -311,7 +311,7 @@ class LocalTransport extends BufferedAgentTransport {
         'token': token,
         'appPid': appPid,
         'appVersion': appVersion,
-        'capabilities': {'checkoutRouting': true},
+        'capabilities': {'checkoutRouting': true, 'pullsTree': true},
       }),
     );
 
