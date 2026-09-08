@@ -49,6 +49,7 @@ import '../providers/ui_attention_providers.dart';
 import '../providers/visible_surface.dart';
 import '../services/app_settings_service.dart';
 import '../services/local_notification_service.dart';
+import '../services/pending_reply.dart' show SessionDownException;
 import '../services/push_background_handler.dart'
     show decodePush, pushDataOf, pushDedupKey, routeOfPush;
 import '../services/push_identity.dart';
@@ -770,9 +771,20 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     List<SessionEntry> list;
     try {
       list = await svc.requestList();
+    } on SessionDownException {
+      // The transport went down mid-load — an owner takeover, a host restart,
+      // a relay stream drop. Nothing is wrong with the project and there is
+      // nothing to tell the user: `SessionsService`'s `sessions:list` hydrator
+      // re-runs the moment the transport re-establishes and refills the panel.
+      // Latching the banner here would outlive that recovery, because the only
+      // thing that clears it is a user tap (`ab_banner.dart`).
+      if (mounted && ref.read(selectedRegistrationIdProvider) == triggeredFor) {
+        ref.read(pendingActiveSessionIdProvider.notifier).set(null);
+        ref.read(pendingSessionStartSuppressedIdProvider.notifier).set(null);
+      }
+      return;
     } catch (e) {
-      // Transport switched / service stopped mid-flight is benign — the
-      // next project-open will retry. But a genuine error here means the
+      // A genuine error here means the
       // workspace is going to render with an empty sessions list and
       // unresponsive "+ new session" — surface it inline so the user has
       // an actionable next step instead of staring at a blank panel.
@@ -797,6 +809,16 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     }
     if (!mounted) return;
     if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
+
+    // A load that succeeded retires the notice an earlier failed load left
+    // behind. Nothing else retires it — the banner is cleared only by a user
+    // tap — so without this a project that has fully recovered keeps offering
+    // "switch projects and back to retry" over a panel that already reloaded.
+    // Scoped to this screen's own code so a relay notice (license, auth) that
+    // a successful session list says nothing about is left alone.
+    if (ref.read(relayErrorBannerProvider)?.code == 'SESSIONS') {
+      ref.read(relayErrorBannerProvider.notifier).set(null);
+    }
 
     // 1. Pending session-id (from a cross-project session-row click).
     final pendingId = ref.read(pendingActiveSessionIdProvider);
