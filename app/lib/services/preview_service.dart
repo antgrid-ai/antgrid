@@ -707,6 +707,21 @@ class PreviewService {
     );
   }
 
+  /// Resolves an address-bar navigation through the tab's actual origin,
+  /// including an ephemeral proxy port when the target is remote.
+  Uri? existingTabNavigationUrl(
+    int port, {
+    required String scheme,
+    required String path,
+  }) {
+    final tab = _tabByPort(port);
+    if (tab == null || tab.scheme != scheme || tab.currentUrl == null) {
+      return null;
+    }
+    final origin = Uri.parse(tab.currentUrl!).origin;
+    return Uri.parse('$origin$path');
+  }
+
   /// Confirmed retry after a [SelectPortResult.portInUse]: binds a random
   /// local port and rewrites the forwarded Host to `localhost:<port>`.
   Future<void> selectPortWithFallback(
@@ -819,7 +834,10 @@ class PreviewService {
     final server = _proxyServers.remove(port);
     await server?.stop();
 
-    final tabs = [for (final t in _state.tabs) if (t.port != port) t];
+    final tabs = [
+      for (final t in _state.tabs)
+        if (t.port != port) t,
+    ];
     final wasActive = _state.activeTabId == port;
     _setState(
       _state.copyWith(

@@ -102,6 +102,36 @@ void main() {
   });
 
   group('PreviewService.fromSession', () {
+    test('explicit navigation preserves paths on an existing local tab', () async {
+      final session = await _newSession(_LocalFakeTransport());
+      addTearDown(session.close);
+      final svc = session.previewService;
+      await svc.openTab(3000, scheme: 'https', path: '/dashboard');
+      expect(
+        svc.existingTabNavigationUrl(3000, scheme: 'https', path: '/login?q=1#form').toString(),
+        'https://localhost:3000/login?q=1#form',
+      );
+      expect(svc.existingTabNavigationUrl(3000, scheme: 'https', path: '/').toString(),
+          'https://localhost:3000/');
+      expect(svc.existingTabNavigationUrl(3000, scheme: 'http', path: '/'), isNull);
+      expect(svc.existingTabNavigationUrl(4000, scheme: 'https', path: '/'), isNull);
+      await svc.openTab(3000, scheme: 'https');
+      expect(svc.currentState.activeTab!.currentUrl, 'https://localhost:3000/dashboard');
+    });
+
+    test('explicit navigation uses the existing fallback proxy origin', () async {
+      final occupied = await ServerSocket.bind('localhost', 0);
+      addTearDown(occupied.close);
+      final session = await _newSession(FakeAgentTransport());
+      addTearDown(session.close);
+      final svc = session.previewService;
+      await svc.selectPortWithFallback(occupied.port, scheme: 'https');
+      final proxyPort = svc.currentState.activeTab!.localProxyPort;
+      expect(proxyPort, isNot(occupied.port));
+      expect(svc.existingTabNavigationUrl(occupied.port, scheme: 'https', path: '/login?q=1#form').toString(),
+          'http://localhost:$proxyPort/login?q=1#form');
+    });
+
     test('preview:snapshot (heavy) populates state.ports', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);

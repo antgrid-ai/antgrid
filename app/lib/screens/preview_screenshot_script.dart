@@ -32,7 +32,23 @@
 /// (canvas-encoding taints, fetch is blocked) stays un-inlined; `<video>`
 /// pixels and `<iframe>` content are not captured; an element scrolled
 /// internally renders from its own top, since a static clone has no scroll
-/// position to restore.
+/// position to restore; and a CLOSED shadow root (`attachShadow({mode:
+/// 'closed'})`) is invisible to script by spec, so it captures as empty —
+/// unlike an open one, which [cloneWithStyles] walks explicitly (see
+/// `childNodesFor`), because a shadow host's rendered content lives entirely
+/// in its shadow tree, not its light-DOM children. That is what a page built
+/// on web components (Fluent UI's, which the Aspire dashboard uses
+/// throughout) needs to capture as anything but a blank rectangle.
+///
+/// A resolved `<slot>` is unwrapped to its content rather than kept as a
+/// `<slot>` element (see [cloneSlotContent]) — measured against the Aspire
+/// dashboard's actual data grid (a `<table>` styled as a CSS grid, its rows
+/// reached through one of these), keeping the `<slot>` tag around — even
+/// with its real computed `display:contents` copied over — collapses every
+/// descendant's layout to 0x0 in Chromium once it's outside a live shadow
+/// tree, which is what made the whole grid capture as a blank rectangle even
+/// though the shadow-DOM walk above was finding and cloning its rows just
+/// fine.
 ///
 /// Only the current viewport is captured (not the full scrollable page) —
 /// matching "screenshot what you're looking at", not a full-page stitch —
@@ -156,13 +172,38 @@ const String kScreenshotCaptureScript = '''
   }
 
   function cloneWithStyles(node) {
+    if (node.nodeType === 1 && node.tagName === 'SLOT') {
+      return cloneSlotContent(node);
+    }
     var clone = node.cloneNode(false);
+    var isGridContainer = false;
+    var containerRect = null;
     if (node.nodeType === 1) {
       var tag = node.tagName;
       if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK') {
         return document.createDocumentFragment();
       }
       serializeStyles(clone, node);
+      var display = getComputedStyle(node).getPropertyValue('display');
+      if (display === 'grid' || display === 'inline-grid') {
+        // Neutralize CSS Grid before rasterization rather than reproducing it
+        // — see [appendGridItem]: a grid container nested inside another one
+        // renders as a blank rectangle once handed to the <img>-based
+        // rasterizer, even though the identical markup lays out correctly
+        // live in the DOM (confirmed against the Aspire dashboard, whose
+        // "table styled as a grid" data grid sits inside three more grid
+        // ancestors). Direct children are repositioned as absolute boxes
+        // using their own already-resolved geometry instead.
+        isGridContainer = true;
+        containerRect = node.getBoundingClientRect();
+        appendStyle(
+          clone,
+          (display === 'inline-grid' ? 'display:inline-block;' : 'display:block;') +
+            (getComputedStyle(node).getPropertyValue('position') === 'static'
+              ? 'position:relative;'
+              : '')
+        );
+      }
       if (tag === 'HEAD') headClone = clone;
       if (tag === 'IMG') {
         // srcset/sizes would have the rasterizer re-pick a candidate against
@@ -193,16 +234,126 @@ const String kScreenshotCaptureScript = '''
         clone.setAttribute('checked', 'checked');
       }
     }
-    var kids = node.childNodes;
+    var kids = childNodesFor(node);
     for (var j = 0; j < kids.length; j++) {
       var child = kids[j];
-      if (child.nodeType === 1) {
+      if (isGridContainer) {
+        appendGridItem(clone, child, containerRect);
+      } else if (child.nodeType === 1) {
         clone.appendChild(cloneWithStyles(child));
       } else if (child.nodeType === 3) {
         clone.appendChild(document.createTextNode(child.textContent));
       }
     }
     return clone;
+  }
+
+  // Appends [extra] CSS declarations to an already-serialized style
+  // attribute. Relies on plain CSS cascade order — a later declaration of
+  // the same property in one style attribute wins — so this is a cheap
+  // override with no need to parse or replace what's already there.
+  function appendStyle(el, extra) {
+    el.setAttribute('style', (el.getAttribute('style') || '') + extra);
+  }
+
+  // Clones one grid-container's direct child ([node] in [cloneWithStyles])
+  // and appends it positioned as an absolute box, using geometry already
+  // resolved by the LIVE page's real grid algorithm — see the grid-container
+  // branch above for why the rasterizer is never asked to redo that layout
+  // itself. Neither a `<slot>` nor any other `display:contents` element
+  // (a `<tbody>`/`<tr>` in a "table styled as a grid", the exact shape the
+  // Aspire dashboard's data grid uses) is itself a grid item — both
+  // generate no box of their own, so each is resolved to its real content
+  // first (assigned/fallback nodes for a slot, plain children otherwise),
+  // recursively, since either can nest inside the other.
+  function appendGridItem(parentClone, child, containerRect) {
+    if (child.nodeType === 3) {
+      parentClone.appendChild(document.createTextNode(child.textContent));
+      return;
+    }
+    if (child.nodeType !== 1) return;
+    if (child.tagName === 'SLOT') {
+      var resolved = resolvedSlotNodes(child);
+      for (var i = 0; i < resolved.length; i++) {
+        appendGridItem(parentClone, resolved[i], containerRect);
+      }
+      return;
+    }
+    if (getComputedStyle(child).getPropertyValue('display') === 'contents') {
+      var innerKids = childNodesFor(child);
+      for (var k = 0; k < innerKids.length; k++) {
+        appendGridItem(parentClone, innerKids[k], containerRect);
+      }
+      return;
+    }
+    var childClone = cloneWithStyles(child);
+    if (childClone.nodeType === 1) {
+      var r = child.getBoundingClientRect();
+      // getBoundingClientRect is always the border-box size, but the style
+      // serializeStyles already wrote (further up the same attribute) keeps
+      // whatever box-sizing the live element had — 'content-box' by default.
+      // Without forcing border-box here too, a `width`/`height` override on
+      // a content-box element (border+padding stacking on top of it) renders
+      // wider/taller than measured, which is what put a real element's own
+      // scroll container (`<fluent-tabs>`, border+padding, no live overflow)
+      // 8px over its own bounds and gave it a phantom scrollbar.
+      appendStyle(
+        childClone,
+        'position:absolute;' +
+          'box-sizing:border-box;' +
+          'left:' + (r.left - containerRect.left) + 'px;' +
+          'top:' + (r.top - containerRect.top) + 'px;' +
+          'width:' + r.width + 'px;' +
+          'height:' + r.height + 'px;'
+      );
+    }
+    parentClone.appendChild(childClone);
+  }
+
+  // A slot's assigned nodes, or its own (fallback) children when nothing is
+  // assigned — same content a real, attached `<slot>` would render. Shared
+  // by [cloneSlotContent] and [appendGridItem], the two places that need to
+  // know what a `<slot>` actually stands in for rather than the slot element
+  // itself.
+  function resolvedSlotNodes(node) {
+    var assigned = typeof node.assignedNodes === 'function'
+      ? node.assignedNodes({ flatten: true })
+      : [];
+    return assigned.length ? assigned : node.childNodes;
+  }
+
+  // A cloned <slot> is unwrapped down to its resolved content rather than
+  // kept as a <slot> element — even styled `display:contents` (matching its
+  // real computed style), a bare <slot> tag outside any shadow tree collapses
+  // CSS Grid/Flexbox sizing for everything beneath it in Chromium: measured
+  // against the Aspire dashboard's grid-as-table layout, a data grid's whole
+  // row area renders at 0x0 (fully blank) with the <slot> kept, and at its
+  // real size the moment the tag is dropped and its children spliced in
+  // directly. Falls back to the slot's own children (its default content)
+  // when nothing is assigned, same as a real unslotted <slot> renders.
+  function cloneSlotContent(node) {
+    var kids = resolvedSlotNodes(node);
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < kids.length; i++) {
+      var child = kids[i];
+      if (child.nodeType === 1) {
+        frag.appendChild(cloneWithStyles(child));
+      } else if (child.nodeType === 3) {
+        frag.appendChild(document.createTextNode(child.textContent));
+      }
+    }
+    return frag;
+  }
+
+  // What actually paints for [node]. A shadow host's visible markup lives in
+  // its shadow tree, not its light-DOM children — those are only reachable
+  // through whichever `<slot>` projects them, which [cloneSlotContent]
+  // resolves when that slot is itself walked as a child here. Only an OPEN
+  // shadow root is script-visible at all; a closed one has no fix from here
+  // (see the module doc).
+  function childNodesFor(node) {
+    if (node.shadowRoot) return node.shadowRoot.childNodes;
+    return node.childNodes;
   }
 
   function absolute(url, base) {

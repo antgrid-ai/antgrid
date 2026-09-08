@@ -101,6 +101,22 @@ const double _kBackOverscrollThreshold = 48.0;
 /// drops that stored preference back to unchosen (see `_PanelModeNames` there).
 enum _PanelMode { normal, contextHidden, contextExpanded }
 
+/// Downgrades a stored/observed panel-mode name away from `contextExpanded`
+/// before it can seed anything other than the session that actually chose
+/// it — `normal` unchanged otherwise.
+///
+/// `contextExpanded` has no collapsed agent stub and no restore affordance
+/// but its own toggle (`_buildPanels`'s `contextExpanded` case) — a mode
+/// meant to be an explicit, momentary choice for the session that made it,
+/// not a layout to inherit. Without this, expanding the context panel in one
+/// session persists into `ProjectPreferences.panelMode` via [_updatePrefs],
+/// and every *other* uninitialized session in the project — notably a
+/// freshly started one — seeds itself from that same project default
+/// (`_applyPrefs`'s else-branch, and the `activeSessionUiKeyProvider`
+/// listener in `build()`) and opens with its agent panel already gone.
+String? _seedablePanelModeName(String? name) =>
+    name == _PanelMode.contextExpanded.name ? _PanelMode.normal.name : name;
+
 /// Root layout orchestrator.
 ///
 /// Mobile (< kCompactBreakpoint): two-page [PageView] — agent page | workspace
@@ -645,7 +661,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         _restoreSessionUi(saved);
       } else {
         final selectedView = _selectedView;
-        final panelMode = _panelMode?.name;
+        final panelMode = _seedablePanelModeName(_panelMode?.name);
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
           final current = ref.read(sessionWorkspaceStateProvider(key));
@@ -697,8 +713,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         workspaceViewIndex: _selectedView.index,
         // Null while unchosen, which copyWith reads as "leave alone" — so a
         // split-drag or tab switch never pins the derived default as if the
-        // user had picked it.
-        panelMode: _panelMode?.name,
+        // user had picked it. `contextExpanded` is downgraded to `normal`
+        // rather than passed straight through — see [_seedablePanelModeName]
+        // — so expanding THIS session's context panel can never become the
+        // project-wide default a different, freshly started session opens
+        // into with its agent panel already gone.
+        panelMode: _seedablePanelModeName(_panelMode?.name),
       ),
     );
   }
@@ -1007,7 +1027,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           selectedView: idx >= 0 && idx < WorkspaceView.values.length
               ? WorkspaceView.values[idx]
               : WorkspaceView.files,
-          panelMode: prefs.panelMode,
+          panelMode: _seedablePanelModeName(prefs.panelMode),
         );
         ref
             .read(sessionWorkspaceStateProvider(next).notifier)

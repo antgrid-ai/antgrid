@@ -733,7 +733,14 @@ class TerminalService {
       (tab) => tab.isAgent && tab.sessionState == TerminalSessionState.running,
     );
     if (agentTabs.isEmpty) return;
-    sendInput(agentTabs.first.terminalId, text);
+    // Terminals submit on CR, not bare LF (see `_sanitizePaste` in
+    // terminal_view_wrapper.dart) — normalize embedded newlines and append a
+    // trailing CR. Unlike a clipboard paste, this is an explicit "Send"
+    // action the user already confirmed in a dialog, so it must land in the
+    // agent outright rather than sit in the prompt waiting on a manual Enter.
+    final normalized = text.replaceAll('\r\n', '\r').replaceAll('\n', '\r');
+    final data = normalized.endsWith('\r') ? normalized : '$normalized\r';
+    sendInput(agentTabs.first.terminalId, data);
   }
 
   /// Queues a debounced `terminal:resize`, reporting whether it was QUEUED.

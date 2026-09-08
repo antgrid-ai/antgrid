@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'ab_colors.dart';
 
-enum AbThemePreset { antgrid, light, zinc, slate, onyx, midnight, custom }
+enum AbThemePreset { zinc, antgrid, light, slate, onyx, midnight, custom }
 
 /// Antgrid — refined dark IDE palette (Vercel/Linear class).
 /// Six-step surface ramp, off-white accent, muted agent-state palette.
@@ -259,6 +259,16 @@ const Map<AbThemePreset, AbColors> kPresets = {
 
 /// Default palette used when no preference is set yet.
 const AbColors kDefaultPalette = _zinc;
+
+extension AbThemePresetUI on AbThemePreset {
+  /// Display label shown in the theme picker. `zinc` is the palette that
+  /// ships as [kDefaultPalette], so it reads as "Default" rather than the
+  /// internal preset name.
+  String get label => switch (this) {
+    AbThemePreset.zinc => 'DEFAULT',
+    _ => name.toUpperCase(),
+  };
+}
 
 /// Build a palette from three user-picked colors. All other tokens are
 /// derived: background layers + borders lighten HSL of [bg]; text colors

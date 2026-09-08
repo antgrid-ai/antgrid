@@ -6,6 +6,7 @@ import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/open_checkout.dart';
 import 'package:antgrid/providers/projects.dart';
+import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 
 import '../helpers/prefs_test_mock.dart';
@@ -27,9 +28,11 @@ void main() {
   }) async {
     useInMemoryPrefs();
     projectStore = await ProjectStore.open();
+    final pendingForgets = await PendingForgetsStore.open();
     final container = ProviderContainer(
       overrides: [
         projectStoreProvider.overrideWithValue(projectStore),
+        pendingForgetsStoreProvider.overrideWithValue(pendingForgets),
         localDeviceUuidProvider.overrideWith((_) async => deviceUuid),
       ],
     );

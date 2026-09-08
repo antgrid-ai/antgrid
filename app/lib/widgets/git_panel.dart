@@ -1495,6 +1495,13 @@ class _HistoryListState extends State<_HistoryList> {
   }
 
   void _onScroll() {
+    // A hovered row's tooltip is a fixed-position overlay entry — it has no
+    // idea the list under it just moved, since a scroll carries no pointer
+    // event to tell it the target left the cursor. Left alone it lingers
+    // over the row's new (scrolled) position until its own show timer
+    // expires, reading as the tooltip sliding toward the list's edge and
+    // popping off.
+    Tooltip.dismissAllToolTips();
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
     if (position.pixels >= position.maxScrollExtent - 400) {
