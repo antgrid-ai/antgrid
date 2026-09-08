@@ -854,6 +854,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             // on. An older bridge's non-strict schema strips it, which is why the
             // app sends it only to a session that advertised `askAnswer`.
             escalationId: parsed.data.escalationId,
+            // Forwarded rather than dropped, same as above: present, this marks
+            // the frame as a NOTE beside an answer already in the session rather
+            // than the answer itself. An older bridge's non-strict schema strips
+            // it, which is why the app gates both fields on `escalationAnswer`,
+            // not on `askAnswer`.
+            delivered: parsed.data.delivered,
+            // Identity of the tapped option, resolved bridge-side against the row
+            // it names. Dropping it here would silently downgrade a tap into a
+            // sentence the user is recorded as having composed.
+            choiceId: parsed.data.choiceId,
           });
         } else {
           // Rejected WITHOUT disarming, for the same reason a malformed arm is: a

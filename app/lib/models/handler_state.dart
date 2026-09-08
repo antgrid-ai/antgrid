@@ -322,6 +322,13 @@ class HandlerSessionState {
   /// that failed or is still waiting on the agent's next event.
   final bool askAnswerPending;
 
+  /// This bridge banks an answer to a BLOCKING escalation for its judge when the
+  /// frame says the words were already delivered into the session. Capability, the
+  /// way [askAnswer] is: a bridge without it reads the same `escalationId` as an
+  /// ordinary instruction and mints a session-long authorization grant out of the
+  /// user's answer.
+  final bool escalationAnswer;
+
   /// The lens this session judges under, as the bridge resolved it. Kept as the
   /// raw wire string — [role] resolves it — so an id a newer bridge added is
   /// never quietly rendered as the default.
@@ -352,6 +359,7 @@ class HandlerSessionState {
     this.observability,
     this.askAnswer = false,
     this.askAnswerPending = false,
+    this.escalationAnswer = false,
     this.roleId,
     this.brief,
   });
@@ -422,6 +430,7 @@ class HandlerSessionState {
     observability: observability,
     askAnswer: askAnswer,
     askAnswerPending: askAnswerPending,
+    escalationAnswer: escalationAnswer,
     roleId: roleId,
     brief: brief,
   );
@@ -475,6 +484,7 @@ class HandlerSessionState {
     // a wrong-typed flag would be a far larger failure than losing the feature.
     final askAnswer = json['askAnswer'];
     final askAnswerPending = json['askAnswerPending'];
+    final escalationAnswer = json['escalationAnswer'];
     // Lenient like everything else here, and kept raw: a role this build cannot
     // name still belongs on the bar as itself, and neither it nor a malformed
     // brief is worth losing the armed session over.
@@ -534,6 +544,7 @@ class HandlerSessionState {
       observability: handlerObservabilityFromWire(json['observability']),
       askAnswer: askAnswer is bool ? askAnswer : false,
       askAnswerPending: askAnswerPending is bool ? askAnswerPending : false,
+      escalationAnswer: escalationAnswer is bool ? escalationAnswer : false,
       roleId: role is String ? role : null,
       brief: brief is String && brief.isNotEmpty ? brief : null,
     );

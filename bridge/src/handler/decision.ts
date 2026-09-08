@@ -218,10 +218,13 @@ export function buildDecidePrompt(opts: {
   // never cached: each section asserts a state that the very next event can end.
   openAsks?: string[];
   askRejections?: string[];
-  // The user's answer to a standing question, parked until a `handle` relays it.
+  // The user's answer to a standing question, parked until this pass reads it.
   // Projected down to what the judge can act on — the escalationId is routing and
   // the timestamp is bookkeeping, and neither belongs in a prompt.
-  askAnswer?: { question: string; answer: string; tapped: boolean };
+  // `blocking` says which question: absent = an ask, which reached nobody but the
+  // judge; true = the row that stopped the session, whose answer went straight into
+  // the session and which the judge must therefore NOT relay.
+  askAnswer?: { question: string; answer: string; tapped: boolean; blocking?: true };
   // The agent being SUPERVISED, never the judge running this prompt — a
   // per-session judge pick can point at a different CLI entirely.
   agentTool?: string;
@@ -430,19 +433,35 @@ export function buildDecidePrompt(opts: {
     // is one value and not a list: an answer of "" is still the user having
     // answered, and dropping the section on it would leave the judge asking again.
     ...(answered !== undefined
-      ? [
-        "",
-        "THE USER HAS ANSWERED A QUESTION YOU PUT TO THEM. This is their answer to YOU — the agent has not seen it and will not unless you pass it on:",
-        `- you asked: ${answered.question}`,
-        answered.tapped
-          ? `- they chose: ${answered.answer}`
-          : `- they answered, in their own words: ${answered.answer}`,
-        // The closing citation clause is not decoration: checkCitation grounds
-        // every `evidence` quote against the RECENT CONTEXT block alone, and this
-        // answer is provably not in it, so a judge that cited it would collect an
-        // unverified-evidence rejection it has no way to diagnose.
-        "It reached you and not the agent deliberately: the agent was working when it arrived, and a line copied from it would have landed in the middle of unrelated work. If it changes what the agent should do, say it yourself in this pass's `reply`, in your own words, at a point the agent can act on — that is a `handle`. If it changes nothing, say so in `reason` and let the agent continue. Do not ask this question again and do not reword it. Do not cite it as `evidence` for a transition: it is the user speaking, not the session's own record, and the harness grounds every quote against the RECENT CONTEXT block alone.",
-      ]
+      ? answered.blocking
+        ? answered.tapped
+          ? [
+            "",
+            "THE USER HAS ANSWERED THE QUESTION THAT STOPPED THIS SESSION, BY TAPPING ONE OF THE OPTIONS ON THE CARD. The agent already has the words behind that option — tapping it sent them straight into the session — so this section is here so that YOU know it was asked and answered:",
+            `- you asked: ${answered.question}`,
+            `- they chose: ${answered.answer}`,
+            "That line is the option's own words, not a sentence the user composed: the harness put it on the button and they endorsed it by tapping. Read it as their decision and nothing more — they did not qualify it, and it says only what it says. Do not ask this question again and do not reword it: it has been answered, and a second copy of it is you asking them to decide the same thing twice. Do not send those words to the agent again either: it already has them, and a `reply` restating them lands as a second instruction on top of the one the tap just gave. Decide what happens NEXT in light of it — `continue` if the agent is already acting on it, and `handle` only if something further is needed that the option's words did not already say. If they declined, the agent is waiting on the user and there is nothing further to relay: say so in `reason` and let it wait. Do not cite it as `evidence` for a transition: it is the user speaking, not the session's own record, and the harness grounds every quote against the RECENT CONTEXT block alone.",
+          ]
+          : [
+            "",
+            "THE USER HAS ANSWERED THE QUESTION THAT STOPPED THIS SESSION. The agent already has their words — they were typed straight into the session — so this section is here so that YOU know it was asked and answered:",
+            `- you asked: ${answered.question}`,
+            `- they answered, in their own words: ${answered.answer}`,
+            "Do not ask this question again and do not reword it. It has been answered, and a second copy of it is the user answering the same thing twice. Do not repeat their answer back to the agent either: it already has it, and a `reply` restating it lands as a second instruction on top of the one they just gave. Decide what happens NEXT in light of it — `continue` if the agent is already acting on it, and `handle` only if something further is needed that their line did not already say. Do not cite it as `evidence` for a transition: it is the user speaking, not the session's own record, and the harness grounds every quote against the RECENT CONTEXT block alone.",
+          ]
+        : [
+          "",
+          "THE USER HAS ANSWERED A QUESTION YOU PUT TO THEM. This is their answer to YOU — the agent has not seen it and will not unless you pass it on:",
+          `- you asked: ${answered.question}`,
+          answered.tapped
+            ? `- they chose: ${answered.answer}`
+            : `- they answered, in their own words: ${answered.answer}`,
+          // The closing citation clause is not decoration: checkCitation grounds
+          // every `evidence` quote against the RECENT CONTEXT block alone, and this
+          // answer is provably not in it, so a judge that cited it would collect an
+          // unverified-evidence rejection it has no way to diagnose.
+          "It reached you and not the agent deliberately: the agent was working when it arrived, and a line copied from it would have landed in the middle of unrelated work. If it changes what the agent should do, say it yourself in this pass's `reply`, in your own words, at a point the agent can act on — that is a `handle`. If it changes nothing, say so in `reason` and let the agent continue. Do not ask this question again and do not reword it. Do not cite it as `evidence` for a transition: it is the user speaking, not the session's own record, and the harness grounds every quote against the RECENT CONTEXT block alone.",
+        ]
       : []),
     // Two statements, never an empty header: an absent catalog is a real answer
     // (a PTY session has none and cannot get one), and announcing a "complete

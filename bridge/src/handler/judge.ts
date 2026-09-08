@@ -119,7 +119,7 @@ export async function runDecision(opts: {
   replyBudget?: number;
   openAsks?: string[];
   askRejections?: string[];
-  askAnswer?: { question: string; answer: string; tapped: boolean };
+  askAnswer?: { question: string; answer: string; tapped: boolean; blocking?: true };
   agentTool?: string;
   commands?: CapCommand[];
   role?: HandlerLens;

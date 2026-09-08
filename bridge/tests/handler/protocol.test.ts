@@ -351,6 +351,28 @@ describe("handler wire", () => {
     } as never)))).toBeNull();
   });
 
+  test("status advertises that a BLOCKING escalation's answer can be banked", () => {
+    // A second, independent capability flag from `askAnswer`: this one gates
+    // handler:instruct's `delivered` note, not handler:answer's tap.
+    const session = {
+      terminalId: "t1", state: "needs_you" as const, pendingEscalations: 1,
+      armedAt: 1, goal: "g", backlog, escalations: [],
+    };
+    const msg = createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [{ ...session, escalationAnswer: true }],
+    } as never);
+    expect((parseMessage(JSON.stringify(msg)) as any).sessions[0].escalationAnswer).toBe(true);
+
+    const bare = parseMessage(JSON.stringify(createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [session],
+    } as never))) as any;
+    expect(bare.sessions[0].escalationAnswer).toBeUndefined();
+
+    expect(parseMessage(JSON.stringify(createMessage("handler:status", {
+      snapshots: [], projectId: "p", sessions: [{ ...session, escalationAnswer: false }],
+    } as never)))).toBeNull();
+  });
+
   // The record the app reads hours later, when the session that produced it is
   // gone from `sessions` and nothing else on the frame names it.
   const wrapUp = {
@@ -827,5 +849,34 @@ describe("handler:instruct answers an ask by naming it", () => {
     expect(parsed.success).toBe(true);
     expect(parsed.success && "escalationId" in parsed.data).toBe(false);
     expect(parsed.success && parsed.data.text).toBe("use staging");
+  });
+
+  test("delivered and choiceId round-trip, and both are absent for an ordinary instruction", () => {
+    expect(send({ escalationId: "e1", delivered: true, choiceId: "approve" }))
+      .toMatchObject({ delivered: true, choiceId: "approve" });
+    const plain = send({ escalationId: "e1" });
+    expect(plain.delivered).toBeUndefined();
+    expect(plain.choiceId).toBeUndefined();
+  });
+
+  test("a choiceId is bounded exactly like EscalationChoiceSchema's own", () => {
+    expect(send({ escalationId: "e1", delivered: true, choiceId: "c".repeat(40) })).toBeTruthy();
+    expect(send({ escalationId: "e1", delivered: true, choiceId: "c".repeat(41) })).toBeNull();
+    expect(send({ escalationId: "e1", delivered: true, choiceId: "" })).toBeNull();
+  });
+
+  test("delivered rejects anything but the literal true", () => {
+    expect(send({ escalationId: "e1", delivered: false })).toBeNull();
+    expect(send({ escalationId: "e1", delivered: "true" })).toBeNull();
+  });
+
+  test("a bridge that predates delivered/choiceId strips both and still parses", () => {
+    const old = HandlerInstructWire.omit({ delivered: true, choiceId: true });
+    const parsed = old.safeParse({
+      terminalId: "t1", text: "use staging", escalationId: "e1", delivered: true, choiceId: "approve",
+    });
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && "delivered" in parsed.data).toBe(false);
+    expect(parsed.success && "choiceId" in parsed.data).toBe(false);
   });
 });

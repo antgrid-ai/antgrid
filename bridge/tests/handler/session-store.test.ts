@@ -167,6 +167,33 @@ describe("session record round-trip", () => {
     expect(loaded?.escalations[0].askOptions?.[1].recommended).toBe(true);
     expect(loaded?.askAnswer?.answer).toBe("Point it at staging for now");
     expect(loaded?.askAnswer?.tapped).toBe(true);
+    expect(loaded?.askAnswer?.blocking).toBeUndefined();
+  });
+
+  it("round-trips a BLOCKING escalation's answer, and a record written before it stays an ask", () => {
+    // `blocking` distinguishes an answer that already reached the agent (relaying
+    // it would be a second copy) from an ask's answer (which still has to be
+    // relayed) — losing it on a restart would relay an answer the agent already
+    // has, straight back at it.
+    const abDir = tmpAbDir();
+    saveHandlerSession(abDir, "proj", record({
+      askAnswer: {
+        escalationId: "e1", question: "Handler has a question",
+        answer: "Yes, reuse the existing migration table.", tapped: true, blocking: true, at: 3,
+      },
+    }));
+    const loaded = loadHandlerSession(abDir, "proj", "t1");
+    expect(loaded?.askAnswer?.blocking).toBe(true);
+
+    // Absent is every record on disk today, and it must read as an ASK's answer —
+    // the conservative direction, since a wrongly-relayed instruction costs a
+    // duplicate line while a wrongly-withheld one costs the answer outright.
+    saveHandlerSession(abDir, "proj", record({
+      askAnswer: {
+        escalationId: "a1", question: "Which database?", answer: "staging", tapped: true, at: 3,
+      },
+    }));
+    expect(loadHandlerSession(abDir, "proj", "t1")?.askAnswer?.blocking).toBeUndefined();
   });
 
   it("reads a record written before the ask fields existed as a stopped session", () => {

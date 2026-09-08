@@ -489,11 +489,12 @@ const REJECT_CHOICE_TEXT = "Do not proceed. Wait for my instructions.";
  * one thing the judge does contribute is the draft it already composed, which the
  * [Approve] choice sends VERBATIM — so the app must render `text`, not only `label`.
  *
- * A tap carries NO authorization lift. It answers through the ordinary reply
- * transport (terminal:input / agent:prompt), never through handler:instruct:
- * - `instruct` is the single feed point for authorization and it also queues an
- *   extraction, so a tap would mint a backlog item no terminal status can ever
- *   resolve and the session could never wrap up.
+ * A tap carries NO authorization lift. Its instruction still answers through the
+ * ordinary reply transport (terminal:input / agent:prompt), exactly as before:
+ * - `instruct`'s GRANT arm (no `delivered`) is the single feed point for
+ *   authorization and it also queues an extraction, so a tap reaching THAT arm
+ *   would mint a backlog item no terminal status can ever resolve and the
+ *   session could never wrap up.
  * - A lift minted by tapping a label the judge wrote is the laundering path that
  *   instruction-scoped authorization closes: a compromised agent composes an
  *   escalation whose [Approve] chip silences every later advisory row.
@@ -501,6 +502,17 @@ const REJECT_CHOICE_TEXT = "Do not proceed. Wait for my instructions.";
  * repeat (post-Phase-5 the advisory floor records rather than escalates), while
  * over-lifting costs a session-wide grant the user never read. The real lift stays
  * one control away, in the user's own words, through the PA bar.
+ *
+ * What DID change: this bridge now ALSO accepts a second, note-only frame beside
+ * a tap's ordinary reply — `handler:instruct{delivered:true, choiceId}` — so it
+ * can bank which option was tapped for the judge's next pass, the same way a
+ * typed blocking answer already banks its text (see instruct). That frame reaches
+ * instruct's DELIVERED arm, never its grant arm: it takes no authorizeInstruction
+ * call, queues no extraction, and starts no pass of its own. What it banks is
+ * never the frame's own `text` — it is resolved against THIS bridge's own
+ * persisted `choices` row, so what reaches the judge is the option the card
+ * actually offered, framed as a choice the judge itself authored ("- they
+ * chose:"), never as a sentence the user composed.
  *
  * WHY AN `ask` OPTION IS OUTSIDE ALL OF THE ABOVE, mechanically rather than by
  * assertion. An `ask` (see raiseAsk) carries `askOptions`, a DIFFERENT field on a
@@ -556,13 +568,19 @@ const REJECT_CHOICE_TEXT = "Do not proceed. Wait for my instructions.";
  *    session-long egress grant becomes visible exactly where this feature made
  *    it more likely.
  *
- * NOTHING THIS FUNCTION COVERS CHANGED. quickChoicesFor is not edited by the ask
- * feature. `choices` keeps its exact semantics and its exact transport
- * (answerWithChoice -> reply -> terminal:input / agent:prompt). The [Approve]
- * chip still answers that way and still takes no lift. If a future change ever
- * routes askOptions through `choices`, or gives an askOption a `text`, or gives
- * an ask tap a path into instruct, every numbered clause above stops holding at
- * once and this comment is the record of what was being relied on.
+ * WHAT CHANGED, AND WHAT DID NOT. quickChoicesFor itself is not edited by either
+ * the ask feature or the tap-answer feature. `choices` keeps its exact semantics
+ * and its exact transport (answerWithChoice -> reply -> terminal:input /
+ * agent:prompt); the [Approve] chip still answers that way and still takes no
+ * lift. What changed lives entirely in instruct's DELIVERED arm and the decision
+ * prompt's tapped-blocking section — this function mints the same chip it always
+ * did, and the bridge now accepts one additional, note-only frame beside a tap,
+ * not a different one. If a future change ever routes askOptions through
+ * `choices`, or gives an askOption a `text`, or gives an ask tap a path into
+ * instruct, or lets a `choiceId` reach instruct's grant arm, or lets the note
+ * bank text the FRAME carried rather than text this row holds, every numbered
+ * clause above stops holding at once and this comment is the record of what was
+ * being relied on.
  */
 export function quickChoicesFor(p: {
   kind?: EscalationKind;
@@ -1311,25 +1329,71 @@ export class HandlerEngine {
    * from their own words — "clear out the build dir" reads as a chore and is also
    * a session-long permission — so it is recorded here rather than left implicit.
    */
-  instruct(p: { terminalId: string; text: string; escalationId?: string }): GrantSummary | null {
+  instruct(
+    p: { terminalId: string; text: string; escalationId?: string; delivered?: true; choiceId?: string },
+  ): GrantSummary | null {
     const s = this.sessions.get(p.terminalId);
     // Free text ANSWERING a standing ask, per the answer transport: the frame names
     // the row it answers, and everything below this branch is left byte for byte as
     // it was for an ordinary instruction.
     if (p.escalationId !== undefined) {
-      const esc = s?.escalations.find((e) => e.escalationId === p.escalationId && e.nonBlocking);
-      // Fails CLOSED. Falling through here would authorize and extract a sentence
-      // the user sent as an ANSWER, on a window an agent can influence:
-      // reconcileAsks retires an ask by clearing `nonBlocking`, driven by agent
-      // events. Same reason a duplicate Send must not become a second instruction.
-      // The resync is what takes the row off the sender's list.
-      if (!s || !esc) {
-        log.warn("handler instruct ignored: %s is not a standing ask on %s", p.escalationId, p.terminalId);
+      const esc = s?.escalations.find((e) => e.escalationId === p.escalationId);
+      // Both directions fail CLOSED, and the two must not be collapsed. A frame
+      // claiming delivery against a nonBlocking row is an app that raced
+      // reconcileAsks the other way; a frame claiming none against a blocking row
+      // would authorize and extract a sentence the user sent as an ANSWER. A
+      // choiceId on a channel that put nothing into the session is an app that
+      // got the shape wrong. The resync is what takes the row off the sender's
+      // list either way.
+      const answerable = esc !== undefined
+        && (p.choiceId === undefined || p.delivered === true)
+        && (p.delivered === true
+          ? (!esc.nonBlocking && (esc.kind === undefined || esc.kind === "reply"))
+          : esc.nonBlocking === true);
+      if (!s || !esc || !answerable) {
+        log.warn("handler instruct ignored: %s is not an answerable question on %s",
+          p.escalationId, p.terminalId);
         this.emitStatus();
         return null;
       }
       const text = p.text.trim();
       if (!text) return null;
+      if (p.delivered) {
+        // Tapped when the frame names a choice; typed-but-delivered when it names
+        // none. A choiceId that matches nothing on this row fails closed below
+        // rather than falling back to `text` — the refusal three lines down is
+        // the only outcome for a mismatch. When it IS tapped, the words never
+        // come from `p.text`: a `choices` entry is judge-authored (the draft) or
+        // engine-authored (REJECT_CHOICE_TEXT), and handler:instruct is the single
+        // channel that mints lifts, so nothing a tapped frame carries may become
+        // the record of what the user chose. Same rule handler:answer states,
+        // reached from the other verb.
+        const choice = p.choiceId === undefined
+          ? undefined
+          : esc.choices?.find((c) => c.choiceId === p.choiceId);
+        if (p.choiceId !== undefined && choice === undefined) {
+          log.warn("handler instruct ignored: %s names no choice on %s", p.choiceId, p.escalationId);
+          this.emitStatus();
+          return null;
+        }
+        const answer = choice?.text ?? text;
+        // The user answered the question that STOPPED this session. Their words
+        // already reached the agent — the app sends this note beside the ordinary
+        // reply, never instead of it — so nothing here relays anything and nothing
+        // here starts a pass: the agent's own turn_end is the pass that reads it.
+        //
+        // Deliberately no authorizeInstruction. The lift belongs to the channel
+        // that carries the words, and the reply transport has never taken one;
+        // minting one here would widen authorization on the strength of a routing
+        // note, which is a separate decision with its own argument to make.
+        //
+        // Deliberately no queueExtraction, for the reason the ask arm states: an
+        // answer routed through the extractor becomes a backlog item the judge then
+        // drives at an agent that already acted on it.
+        this.parkAskAnswer(p.terminalId, s, esc, answer, choice !== undefined, true);
+        this.record(p.terminalId, "answered", "You answered Handler's question", previewForUser(answer));
+        return null;
+      }
       // UNMOVED, and this ordering is the whole security property: the lift is
       // taken on the raw payload, before extraction, at the single feed point.
       const granted = authorizeInstruction(s.auth, text, this.deps.projectPath(p.terminalId));
@@ -1438,6 +1502,7 @@ export class HandlerEngine {
    */
   private parkAskAnswer(
     terminalId: string, s: ArmedSession, esc: OpenEscalation, answer: string, tapped: boolean,
+    delivered = false,
   ): void {
     // A parked answer is by definition unrelayed — the handle branch clears it the
     // moment one reaches the agent — so this is a real answer about to be lost.
@@ -1449,6 +1514,8 @@ export class HandlerEngine {
     }
     s.askAnswer = {
       escalationId: esc.escalationId, question: esc.question, answer, tapped, at: this.now(),
+      // From the caller's channel, never from `esc`: see HandlerInstructWire.delivered.
+      ...(delivered ? { blocking: true as const } : {}),
     };
     s.escalations = s.escalations.filter((e) => e !== esc);
     // Without this the answer is discarded with no row, no log and no push.
@@ -1952,6 +2019,19 @@ export class HandlerEngine {
       || (e.kind === "resolve_in_session"
         && (resolved === undefined || (e.promptId !== undefined && e.promptId !== resolved))));
     const cleared = kept.length < s.escalations.length;
+    // Identity, matching `kept`'s own filter over the same array — two rows
+    // sharing an escalationId (an older bridge's collision, say) must not vanish
+    // from this count the way a Set of ids would let them.
+    //
+    // `resolve_in_session` excluded on purpose: that row is retired by a RESOLVE
+    // on the agent's own permission/question prompt, not by a line typed into
+    // this session, and its `question` is a notify body ("Agent requests
+    // permission: ...") rather than prose a "Your reply answered" sentence reads
+    // naturally against. Excluding the whole kind also keeps an id-less legacy
+    // sibling — dropped by the SAME resolve for a prompt it does not name, per
+    // the kept-filter above — from inflating this count for an answer the user
+    // gave to only one of them.
+    const dropped = s.escalations.filter((e) => !kept.includes(e) && e.kind !== "resolve_in_session");
     // A human line is a fresh attempt, so the failure series that led here is
     // over. Without this the counters stay at their ceiling — only a judged turn
     // clears transientFailures — and the very next failure would page again
@@ -1967,8 +2047,38 @@ export class HandlerEngine {
     s.transientFailures = 0;
     s.limitParks = 0;
     if (!unparked && !cleared) return;
+    // Paired with the hash clear above, and scoped to the case that needs it. This
+    // method runs straight off agent-core's switch, not on the engine's chain, so a
+    // pass suspended in its judge call re-banks the hash it computed on return and
+    // undoes that clear — leaving a human's own submitted line unjudged with no
+    // further event coming to raise it.
+    //
+    // Below the early return on purpose: `guard.reset` above has already dropped
+    // the circular-reply hashes, so bumping on EVERY submitted keystroke would let
+    // a re-judged unmoved context resend a reply the guard would otherwise have
+    // refused. Confined to the pass that just retired a question or ended a park,
+    // re-judging is exactly what is wanted.
+    s.promptGen = (s.promptGen ?? 0) + 1;
     s.escalations = kept;
     s.state = restingState(s);
+    // The ask path was given `asked`/`answered`/`ask_rejected` precisely so a
+    // question and its resolution both read as themselves. This path retired a
+    // question and said nothing at all: the feed jumped from "Escalated:" to the
+    // next verdict, with no row anywhere saying the user had answered.
+    //
+    // Gated on `resolved === undefined`: a chat resolve names the permission or
+    // question prompt it answers, and that answer has nothing to do with any
+    // OTHER blocking row this same submit happens to clear underneath it — the
+    // bare "\r" sentinel is a resolve, never a line the user typed at a question,
+    // and a feed row here would tell them their tap answered something they never
+    // saw an answer box for.
+    if (resolved === undefined && dropped.length > 0) {
+      this.record(terminalId, "answered",
+        dropped.length === 1
+          ? "Your reply answered Handler's question"
+          : `Your reply answered ${dropped.length} of Handler's questions`,
+        previewForUser(dropped[0]!.question));
+    }
     this.persist(terminalId, s, true);
     this.emitStatus();
   }
@@ -2293,6 +2403,7 @@ export class HandlerEngine {
           question: judgedAnswer.question,
           answer: judgedAnswer.answer,
           tapped: judgedAnswer.tapped,
+          blocking: judgedAnswer.blocking,
         },
         // The SUPERVISED agent, not the judge: `tool:` above is `s.judgeTool ?? tool`,
         // and a per-session judge pick can name a different CLI entirely.
@@ -3395,11 +3506,20 @@ export class HandlerEngine {
       // reading only the row would answer through the reply transport, into a PTY
       // the session never stopped.
       askAnswer: true as const,
+      // A constant, for the same reason askAnswer is one: a fact about THIS BRIDGE,
+      // not about the session.
+      escalationAnswer: true as const,
       // Derived from the parked answer rather than stored beside it: a second flag
       // could say a relay is still owed after the handle branch dropped the answer
       // it named. Omitted when nothing is parked, the way every optional field on
       // this snapshot is — absent and false mean one thing here.
-      ...(s.askAnswer ? { askAnswerPending: true } : {}),
+      //
+      // A blocking answer went into the session through the reply transport, so
+      // nothing is queued for relay and the judge is told NOT to relay it. Raising
+      // the chip on one would promise the user a delivery that is neither pending
+      // nor owed — and in the cases where no agent event follows, it would never
+      // clear.
+      ...(s.askAnswer && !s.askAnswer.blocking ? { askAnswerPending: true } : {}),
     }));
     const wrapUps = this.wrapUps();
     const entitlement = this.entitlementForApp();

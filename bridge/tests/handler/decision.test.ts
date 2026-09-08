@@ -803,6 +803,47 @@ describe("the third move in the decide prompt", () => {
     expect(typed).not.toContain("- they chose:");
   });
 
+  // A BLOCKING escalation's answer is a different fact from an ask's: it already
+  // reached the agent, so the section must tell the judge the words are already
+  // there and never invite a `reply` that repeats them.
+  it("tells the judge a stopped session's answer was a tap, and never calls it their own words", () => {
+    const tapped = build({ askAnswer: { ...ANSWER, blocking: true } });
+    expect(tapped).toContain("THE USER HAS ANSWERED THE QUESTION THAT STOPPED THIS SESSION, BY TAPPING");
+    expect(tapped).toContain(`- you asked: ${QUESTION}`);
+    expect(tapped).toContain("- they chose: Go straight at production");
+    expect(tapped).not.toContain("in their own words");
+    expect(tapped).not.toContain("THE USER HAS ANSWERED A QUESTION YOU PUT TO THEM");
+    // The dangerous string: it tells the judge the agent hasn't seen the answer,
+    // which for a tap is false — the reply transport already delivered it.
+    expect(tapped).not.toContain("the agent has not seen it");
+    // The option's own words, endorsed by a tap — not a sentence the user composed.
+    expect(tapped).toContain("not a sentence the user composed");
+    // The agent already has it: a `reply` restating it is a second instruction on
+    // top of the one the tap already gave.
+    expect(tapped).toContain("Do not send those words to the agent again either");
+  });
+
+  it("tells the judge a stopped session's typed answer was already delivered", () => {
+    const typed = build({ askAnswer: { ...ANSWER, tapped: false, blocking: true } });
+    expect(typed).toContain("THE USER HAS ANSWERED THE QUESTION THAT STOPPED THIS SESSION.");
+    expect(typed).not.toContain("BY TAPPING");
+    expect(typed).toContain(`- you asked: ${QUESTION}`);
+    expect(typed).toContain("- they answered, in their own words: Go straight at production");
+    expect(typed).not.toContain("THE USER HAS ANSWERED A QUESTION YOU PUT TO THEM");
+    expect(typed).not.toContain("the agent has not seen it");
+    expect(typed).toContain("Do not repeat their answer back to the agent either");
+  });
+
+  it("leaves the ask's own answer section exactly as it is", () => {
+    // The two other arms must not have drifted while the third was added: an ask
+    // answer (no `blocking`) still reads as "reached YOU, not the agent" and still
+    // carries the citation-refusal clause the ask section always has.
+    const tapped = build({ askAnswer: ANSWER });
+    expect(tapped).toContain("THE USER HAS ANSWERED A QUESTION YOU PUT TO THEM");
+    expect(tapped).toContain("the agent has not seen it and will not unless you pass it on");
+    expect(tapped).not.toContain("STOPPED THIS SESSION");
+  });
+
   it("tells the judge to relay it in its own words and never to cite it", () => {
     // checkCitation grounds every quote against the RECENT CONTEXT block, and this
     // answer is provably not in it — so a judge that cited it would collect an

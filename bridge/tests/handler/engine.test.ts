@@ -928,6 +928,135 @@ describe("escalation accounting", () => {
     expect(status.sessions[0].escalations[0].escalationId).toBe(esc.escalationId);
     expect(status.sessions[0].escalations[0].question).toBeTruthy();
   });
+
+  // The ask path is given `asked`/`answered`/`ask_rejected` precisely so a
+  // question and its resolution both read as themselves; a submitted line that
+  // retires a question deserves the same.
+  it("says in the feed that a submitted line answered the question", () => {
+    const { engine, sent, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        escalations: [{
+          escalationId: "e1", question: "Which env should this target?", reasoning: "r",
+          draftReply: "", urgency: "normal", at: 1,
+        }],
+      }),
+    });
+    engine.arm({ terminalId: "t1" });
+    engine.onUserReply("t1", "staging\r");
+    expect(statusOf(sent).pendingEscalations).toBe(0);
+    const rows = records(activity, "answered") as { reason: string; detail?: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.reason).toBe("Your reply answered Handler's question");
+    expect(rows[0]!.detail).toBe("Which env should this target?");
+  });
+
+  it("counts every question a single submitted line retired at once", () => {
+    const { engine, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        escalations: [
+          { escalationId: "e1", question: "Which env?", reasoning: "r", draftReply: "", urgency: "normal", at: 1 },
+          { escalationId: "e2", question: "Which branch?", reasoning: "r", draftReply: "", urgency: "normal", at: 2 },
+        ],
+      }),
+    });
+    engine.arm({ terminalId: "t1" });
+    engine.onUserReply("t1", "staging, main\r");
+    const rows = records(activity, "answered") as { reason: string; detail?: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.reason).toBe("Your reply answered 2 of Handler's questions");
+  });
+
+  it("says nothing when a submitted line cleared nothing", () => {
+    const { engine, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        goal: "", backlog: [item("i1")],
+        escalations: [{
+          escalationId: "a1", question: "Which database?", reasoning: "r", draftReply: "",
+          urgency: "normal", at: 1, nonBlocking: true, unblocked: ["i1"],
+          askOptions: [
+            { choiceId: "opt1", label: "A", cost: "x" },
+            { choiceId: "opt2", label: "B", cost: "y" },
+          ],
+        }],
+      }),
+    });
+    engine.arm({ terminalId: "t1" });
+    const promptGenOf = () => (engine as unknown as {
+      sessions: Map<string, { promptGen?: number }>;
+    }).sessions.get("t1")?.promptGen;
+    const before = promptGenOf();
+    engine.onUserReply("t1", "carry on\r");
+    expect(records(activity, "answered")).toEqual([]);
+    expect(promptGenOf()).toBe(before);
+  });
+
+  // The suspended pass banked a hash computed BEFORE the question it stood on was
+  // retired. Without the promptGen bump paired with the hash clear above, its
+  // return re-banks that stale hash on top of the clear, and the next event finds
+  // an unmoved-looking context and judges nothing.
+  it("a submitted line that retires a question invalidates the prompt already in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let started = false;
+    const { engine } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        escalations: [{
+          escalationId: "e1", question: "Drop the pricing page?", reasoning: "r",
+          draftReply: "", urgency: "normal", at: 1,
+        }],
+      }),
+      runDecisionFn: async () => { started = true; await gate; return decide({}); },
+    });
+    engine.arm({ terminalId: "t1" });
+    const inFlight = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    for (let i = 0; i < 400 && !started; i++) await new Promise<void>((r) => { setTimeout(r, 1); });
+    engine.onUserReply("t1", "skip it\r");
+    release();
+    await inFlight;
+    const s = (engine as unknown as {
+      sessions: Map<string, { lastJudgedContextHash?: string }>;
+    }).sessions.get("t1")!;
+    expect(s.lastJudgedContextHash).toBeUndefined();
+  });
+
+  // A `resolve_in_session` row is retired by a RESOLVE on the agent's OWN
+  // permission/question prompt, an act with nothing to do with "a reply typed
+  // into this session" — and its `question` is a notify body, not prose. Neither
+  // reads naturally under the wording above, so it gets none.
+  it("says nothing in the feed when a resolve retires the agent's own permission prompt", async () => {
+    const { engine, sent, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "permission_request", detail: "Bash: rm -rf build" });
+    // This row carries no `promptId` (the fixture's event named none), so ANY
+    // named resolve retires it under the kept filter above — an id-less legacy
+    // row is the case that would otherwise inflate this count for an answer the
+    // resolve never gave.
+    engine.onUserReply("t1", "\r", { resolvedPromptId: "some-other-prompt" });
+    expect(records(activity, "answered")).toEqual([]);
+    expect(statusOf(sent).pendingEscalations).toBe(0);
+  });
+
+  // A chat resolve's bare "\r" is a SUBMIT keystroke, so it clears every other
+  // blocking `reply` row standing on the same terminal (unchanged: see the
+  // kept-filter comment above) — but that row was never what the resolve
+  // answered. Saying "Your reply answered Handler's question" here would tell
+  // the user their tap on an unrelated permission dialog answered a question
+  // they never saw an answer box for.
+  it("says nothing in the feed when a resolve also clears an unrelated blocking question", async () => {
+    const { engine, sent, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        escalations: [{
+          escalationId: "e1", question: "Which env should this target?", reasoning: "r",
+          draftReply: "", urgency: "normal", at: 1,
+        }],
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "permission_request", detail: "Bash: rm -rf build", promptId: "perm-1" });
+    engine.onUserReply("t1", "\r", { resolvedPromptId: "perm-1" });
+    expect(records(activity, "answered")).toEqual([]);
+    expect(statusOf(sent).pendingEscalations).toBe(0);
+  });
 });
 
 function decide(d: Partial<HandlerDecision>): HandlerDecision {
@@ -5265,6 +5394,15 @@ describe("answering an ask", () => {
     expect((statusOf(sent) as unknown as { askAnswer?: true }).askAnswer).toBe(true);
   });
 
+  it("the snapshot advertises that this bridge can be told a blocking escalation's answer", () => {
+    // Same reasoning as `askAnswer` above, for the sibling capability: if this
+    // mint is ever lost, `escalationAnswer` stays false forever, the app's gate
+    // refuses to send the note, and the judge keeps re-asking a question the user
+    // already answered — with no error anywhere to say why.
+    const { sent } = armedWithAsk([ask()]);
+    expect((statusOf(sent) as unknown as { escalationAnswer?: true }).escalationAnswer).toBe(true);
+  });
+
   describe("free text on handler:instruct", () => {
     it("naming a standing ask parks the answer and never becomes work", async () => {
       const { engine, activity, saved } = armedWithAsk([ask()]);
@@ -5312,7 +5450,7 @@ describe("answering an ask", () => {
         })).toBeNull();
         await settle();
       });
-      expect(warned).toContain("not a standing ask");
+      expect(warned).toContain("not an answerable question");
       expect(statuses(sent).length).toBe(beforeStatuses + 1);
       expect(session(engine).backlog.map((i) => i.id)).toEqual(["i1"]);
       expect(lifted(session(engine))).toEqual({ patterns: [], paths: [], hosts: [] });
@@ -5457,6 +5595,324 @@ describe("answering an ask", () => {
       expect(handed).toBeUndefined();
     });
   });
+});
+
+// A BLOCKING escalation's answer is a fundamentally different fact than an ask's:
+// the words already reached the agent through the ordinary reply transport, so
+// this note exists only to tell the judge its question was answered — never to
+// relay anything and never to lift anything. `delivered`/`choiceId` on
+// handler:instruct is the wire shape; instruct's delivered arm is the bridge
+// side.
+describe("answering the question that stopped the session", () => {
+  const DRAFT = "Yes, reuse the existing migration table.";
+  // Minted the same way the app would see it — through quickChoicesFor itself —
+  // rather than hand-typed, so a change to the mint site cannot drift silently
+  // out of step with what these fixtures exercise.
+  const CHOICES = quickChoicesFor({ draftReply: DRAFT, projectPath: "/proj" })!;
+  const REJECT_TEXT = CHOICES[1]!.text;
+
+  function blockingRow(over: Partial<OpenEscalation> = {}): OpenEscalation {
+    return {
+      escalationId: "e1", question: "Handler has a question", reasoning: "r",
+      draftReply: DRAFT, urgency: "normal", at: 2, choices: CHOICES, ...over,
+    };
+  }
+  const armedWithRow = (escalations: OpenEscalation[], over: Record<string, unknown> = {}) => {
+    const h = makeEngine({
+      loadSessionFn: () => sessionRecord({ goal: "", backlog: [item("i1")], escalations }),
+      ...over,
+    });
+    h.engine.arm({ terminalId: "t1" });
+    return h;
+  };
+  interface PrivateSession {
+    auth: { patterns: Set<string>; paths: Set<string>; hosts: Set<string> };
+    backlog: InstructionItem[];
+    escalations: OpenEscalation[];
+    lastJudgedContextHash?: string;
+    askAnswer?: { escalationId: string; question: string; answer: string; tapped: boolean; blocking?: true; at: number };
+  }
+  const session = (engine: HandlerEngine): PrivateSession =>
+    (engine as unknown as { sessions: Map<string, PrivateSession> }).sessions.get("t1")!;
+  const lifted = (s: PrivateSession) =>
+    ({ patterns: [...s.auth.patterns], paths: [...s.auth.paths], hosts: [...s.auth.hosts] });
+  const statuses = (sent: AbMessage[]) => sent.filter((m) => m.type === "handler:status");
+  const answeredRows = (activity: unknown[]) =>
+    records(activity, "answered") as { reason: string; detail?: string }[];
+  const tick = () => new Promise<void>((r) => { setTimeout(r, 1); });
+  const settle = async () => { for (let i = 0; i < 8; i++) await tick(); };
+
+  it("banks a delivered answer for the judge and retires the row", () => {
+    const { engine, saved, activity } = armedWithRow([blockingRow()]);
+    // `text` is deliberately something no choice on the row offers: the frame's
+    // own text must never be what gets banked, so a fixture where it happens to
+    // coincide with the choice's text cannot tell the two apart. If `answer` came
+    // from `text` instead of `esc.choices`, this would bank this string, not DRAFT.
+    const granted = engine.instruct({
+      terminalId: "t1", escalationId: "e1", text: "something the card never offered",
+      delivered: true, choiceId: "approve",
+    });
+    // No grant summary to describe: the delivered arm mints no authorization.
+    expect(granted).toBeNull();
+    expect(session(engine).escalations).toEqual([]);
+    // The words banked are the card's own text, resolved by choiceId — not
+    // whatever the frame's `text` field happened to carry.
+    expect(session(engine).askAnswer).toEqual({
+      escalationId: "e1", question: "Handler has a question",
+      answer: DRAFT, tapped: true, blocking: true, at: 1000,
+    });
+    const rec = saved.at(-1) as HandlerSessionRecord;
+    expect(rec.escalations).toEqual([]);
+    expect(rec.askAnswer?.blocking).toBe(true);
+    const rows = answeredRows(activity);
+    expect(rows.at(-1)!.reason).toBe("You answered Handler's question");
+    expect(rows.at(-1)!.detail).toBe(DRAFT);
+  });
+
+  it("banks the option's own words when the answer was a tap, never the frame's text", () => {
+    // The frame's `text` here is neither choice's text — a command an ordinary
+    // instruction would authorize, standing in for "whatever the app happened to
+    // put on the wire". Only `s.auth` staying empty and `answer` reading as
+    // REJECT_TEXT proves the choiceId lookup won, not the frame's own words.
+    const { engine } = armedWithRow([blockingRow()]);
+    engine.instruct({
+      terminalId: "t1", escalationId: "e1", text: "rm -rf /", delivered: true, choiceId: "reject",
+    });
+    expect(session(engine).askAnswer?.answer).toBe(REJECT_TEXT);
+    expect(lifted(session(engine))).toEqual({ patterns: [], paths: [], hosts: [] });
+  });
+
+  it("a delivered answer with no choiceId banks the delivered text itself", () => {
+    // A typed-but-delivered note carries no choiceId at all — the case the `??
+    // text` fallback in the delivered arm exists for.
+    const { engine } = armedWithRow([blockingRow()]);
+    engine.instruct({ terminalId: "t1", escalationId: "e1", text: "actually, use the old table", delivered: true });
+    expect(session(engine).askAnswer).toMatchObject({ answer: "actually, use the old table", tapped: false });
+  });
+
+  it("refuses a choiceId that names no option on the row", async () => {
+    const { engine, sent } = armedWithRow([blockingRow()]);
+    const before = statuses(sent).length;
+    const warned = await capturingWarnings(async () => {
+      expect(engine.instruct({
+        terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: "opt9",
+      })).toBeNull();
+    });
+    expect(warned).toContain("names no choice");
+    expect(statuses(sent).length).toBe(before + 1);
+    expect(session(engine).escalations).toHaveLength(1);
+    expect(session(engine).askAnswer).toBeUndefined();
+  });
+
+  it("refuses a choiceId on a frame that delivered nothing", async () => {
+    // A choiceId is meaningless off the delivered channel, and instruct must not
+    // guess which reading was meant.
+    const { engine, sent } = armedWithRow([blockingRow()]);
+    const before = statuses(sent).length;
+    const warned = await capturingWarnings(async () => {
+      expect(engine.instruct({
+        terminalId: "t1", escalationId: "e1", text: DRAFT, choiceId: "approve",
+      })).toBeNull();
+    });
+    expect(warned).toContain("not an answerable question");
+    expect(statuses(sent).length).toBe(before + 1);
+    expect(session(engine).escalations).toHaveLength(1);
+  });
+
+  it("refuses a delivered note that names an ask", async () => {
+    const askRow: OpenEscalation = {
+      escalationId: "a1", question: "Which db?", reasoning: "r", draftReply: "",
+      urgency: "normal", kind: "reply", at: 2, nonBlocking: true, unblocked: ["i1"],
+      askOptions: [{ choiceId: "opt1", label: "staging", cost: "x" }],
+    };
+    const { engine, sent } = armedWithRow([askRow]);
+    const before = statuses(sent).length;
+    const warned = await capturingWarnings(async () => {
+      expect(engine.instruct({ terminalId: "t1", escalationId: "a1", text: "staging", delivered: true }))
+        .toBeNull();
+    });
+    expect(warned).toContain("not an answerable question");
+    expect(statuses(sent).length).toBe(before + 1);
+    expect(session(engine).escalations).toEqual([askRow]);
+  });
+
+  it("refuses an undelivered answer that names a blocking row", async () => {
+    const { engine, sent } = armedWithRow([blockingRow()]);
+    const before = statuses(sent).length;
+    const warned = await capturingWarnings(async () => {
+      expect(engine.instruct({ terminalId: "t1", escalationId: "e1", text: DRAFT })).toBeNull();
+    });
+    expect(warned).toContain("not an answerable question");
+    expect(statuses(sent).length).toBe(before + 1);
+    expect(session(engine).escalations).toHaveLength(1);
+    expect(session(engine).askAnswer).toBeUndefined();
+  });
+
+  it("refuses a delivered note on a guard_blocked row", async () => {
+    const { engine, sent } = armedWithRow([blockingRow({ kind: "guard_blocked" })]);
+    const before = statuses(sent).length;
+    const warned = await capturingWarnings(async () => {
+      expect(engine.instruct({
+        terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: "approve",
+      })).toBeNull();
+    });
+    expect(warned).toContain("not an answerable question");
+    expect(statuses(sent).length).toBe(before + 1);
+    expect(session(engine).escalations).toHaveLength(1);
+  });
+
+  it("refuses a delivered note on a resolve_in_session row", async () => {
+    // Raised live rather than rehydrated: a `resolve_in_session` row does not
+    // survive a restart (see "a rehydrated resolve_in_session row is dropped"),
+    // so a fixture naming one AS rehydrated would never reach instruct at all.
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "permission_request", detail: "Bash: ls" });
+    const escId = (sent.find((m) => m.type === "handler:escalation") as never as { escalationId: string })
+      .escalationId;
+    const before = sent.filter((m) => m.type === "handler:status").length;
+    const warned = await capturingWarnings(async () => {
+      expect(engine.instruct({
+        terminalId: "t1", escalationId: escId, text: DRAFT, delivered: true, choiceId: "approve",
+      })).toBeNull();
+    });
+    expect(warned).toContain("not an answerable question");
+    expect(sent.filter((m) => m.type === "handler:status").length).toBe(before + 1);
+    expect((sent.at(-1) as never as { sessions: Array<{ pendingEscalations: number }> })
+      .sessions[0]!.pendingEscalations).toBe(1);
+  });
+
+  it("takes no authorization lift and queues no extraction on a tapped note (regression guard)", () => {
+    // The option deliberately names a command an ordinary instruction WOULD lift,
+    // so the test fails if a delivered note ever gains a path into either.
+    const row = blockingRow({
+      draftReply: "yes, run rm -rf build first and then continue",
+      choices: [
+        { choiceId: "approve", label: "Approve", text: "yes, run rm -rf build first and then continue" },
+        { choiceId: "reject", label: "Reject", text: REJECT_TEXT },
+      ],
+    });
+    const { engine, activity } = armedWithRow([row]);
+    engine.instruct({
+      terminalId: "t1", escalationId: "e1",
+      text: "yes, run rm -rf build first and then continue", delivered: true, choiceId: "approve",
+    });
+    expect(lifted(session(engine))).toEqual({ patterns: [], paths: [], hosts: [] });
+    expect(session(engine).backlog.map((i) => i.id)).toEqual(["i1"]);
+    expect(records(activity, "instruction_authorized")).toEqual([]);
+  });
+
+  it("starts no pass of its own (regression guard)", async () => {
+    // The agent's own turn_end is the pass that reads a delivered answer — unlike
+    // an ask's answer, which has no other producer and so must synthesise one.
+    const judged = { n: 0 };
+    const { engine } = armedWithRow([blockingRow()], {
+      runDecisionFn: async () => { judged.n++; return decide({}); },
+    });
+    engine.instruct({
+      terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: "approve",
+    });
+    await settle();
+    expect(judged.n).toBe(0);
+  });
+
+  // Regression guard, not new coverage: `instruct` already failed closed on a
+  // blocking escalationId before the delivered arm existed, so this passed
+  // before this feature too. What it pins is the `!s.askAnswer.blocking` gate on
+  // `askAnswerPending`'s projection, which a later edit could still lose.
+  it("raises no ANSWER QUEUED chip for a delivered answer", () => {
+    const { engine, sent } = armedWithRow([blockingRow()]);
+    engine.instruct({
+      terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: "approve",
+    });
+    expect((statusOf(sent) as unknown as { askAnswerPending?: true }).askAnswerPending).toBeUndefined();
+  });
+
+  // The private-state assertions above pin what `parkAskAnswer` banks; this pins
+  // that the bank actually reaches the judge. Without `blocking` surviving the
+  // projection at the runDecisionFn call site, the judge would receive this
+  // answer under the ASK arm's wording — "the agent has not seen it" — and act on
+  // it as if nothing had reached the session yet, landing a second instruction on
+  // top of the one the tap already gave.
+  it("hands the pass its own turn_end starts the tapped answer, framed as blocking", async () => {
+    const seen: Array<{ question: string; answer: string; tapped: boolean; blocking?: true } | undefined> = [];
+    const { engine } = armedWithRow([blockingRow()], {
+      runDecisionFn: async (o: {
+        askAnswer?: { question: string; answer: string; tapped: boolean; blocking?: true };
+      }) => {
+        seen.push(o.askAnswer);
+        return decide({});
+      },
+    });
+    engine.instruct({
+      terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: "approve",
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(seen).toEqual([{
+      question: "Handler has a question", answer: DRAFT, tapped: true, blocking: true,
+    }]);
+  });
+
+  // A pass already in flight when the delivered note lands banked its hash
+  // BEFORE this answer existed; without the promptGen bump inside parkAskAnswer,
+  // that pass's return re-banks the stale hash on top of the clear, and the
+  // agent's own turn_end — the one producer this path relies on — would find an
+  // unmoved-looking context and judge nothing. Parameterized over both delivered
+  // shapes, mirroring the ask-answer `racing()` cases below: the answer must
+  // survive the race whether it names a choice or not.
+  const deliveredCases: Array<{ name: string; choiceId?: string; wantTapped: boolean }> = [
+    { name: "typed-but-delivered (no choiceId)", wantTapped: false },
+    { name: "tapped (choiceId)", choiceId: "approve", wantTapped: true },
+  ];
+  for (const c of deliveredCases) {
+    it(`a delivered note (${c.name}) invalidates the prompt already in flight`, async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      let started = false;
+      const { engine } = armedWithRow([blockingRow()], {
+        runDecisionFn: async () => { started = true; await gate; return decide({}); },
+      });
+      const inFlight = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      for (let i = 0; i < 400 && !started; i++) await tick();
+      engine.instruct({
+        terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: c.choiceId,
+      });
+      release();
+      await inFlight;
+      expect(session(engine).lastJudgedContextHash).toBeUndefined();
+    });
+
+    it(`survives a pass suspended in runDecisionFn and reaches the NEXT pass (${c.name})`, async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const seen: Array<{ answer: string; tapped: boolean; blocking?: true } | undefined> = [];
+      let pass = 0;
+      const { engine } = armedWithRow([blockingRow()], {
+        runDecisionFn: async (o: {
+          askAnswer?: { answer: string; tapped: boolean; blocking?: true };
+        }) => {
+          // Filtered rather than pushed whole: the real payload also carries
+          // `question`, and this assertion cares only about the three fields the
+          // race can drop.
+          seen.push(o.askAnswer && { answer: o.askAnswer.answer, tapped: o.askAnswer.tapped, blocking: o.askAnswer.blocking });
+          if (pass++ === 0) await gate;
+          return decide({});
+        },
+      });
+      const inFlight = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      for (let i = 0; i < 400 && pass === 0; i++) await tick();
+      engine.instruct({
+        terminalId: "t1", escalationId: "e1", text: DRAFT, delivered: true, choiceId: c.choiceId,
+      });
+      release();
+      await inFlight;
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      // The suspended pass's prompt was already built without it; only the pass
+      // its own arrival wakes may see it.
+      expect(seen[0]).toBeUndefined();
+      expect(seen[1]).toEqual({ answer: DRAFT, tapped: c.wantTapped, blocking: true });
+    });
+  }
 });
 
 describe("raising an ask", () => {
@@ -6078,7 +6534,7 @@ describe("the ask sections in the decide prompt", () => {
   interface AskOpts {
     openAsks?: string[];
     askRejections?: string[];
-    askAnswer?: { question: string; answer: string; tapped: boolean };
+    askAnswer?: { question: string; answer: string; tapped: boolean; blocking?: true };
   }
   // What the engine owes buildDecidePrompt for the three ask sections, captured
   // per pass. Copied on the way in rather than held: both lists are derived off

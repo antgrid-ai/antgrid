@@ -1104,6 +1104,29 @@ export const HandlerInstructWire = z.object({
   // to today's path: an answer silently promoted to an authorizing, extracting
   // instruction is exactly the laundering the ask shape exists to prevent.
   escalationId: z.string().max(64).optional(),
+  // Present = the sender ALREADY typed this text into the session, and this frame
+  // is a note so the judge learns its question was answered. Absent = the words
+  // reached nobody but this bridge, which is what an ask's answer is.
+  //
+  // A property of the CHANNEL, never derived from the row it names: reconcileAsks
+  // clears `nonBlocking` on any agent event while the app holds a cached row, so a
+  // row-derived reading would tell the judge an ask's answer had reached the agent
+  // when it reached nobody — and then forbid it from ever asking again.
+  delivered: z.literal(true).optional(),
+  // Which one-tap option on that row the user pressed. Only meaningful beside
+  // `delivered`, and it names the option rather than carrying its words: those are
+  // resolved from THIS bridge's own persisted row, exactly the way handler:answer
+  // resolves an ask's option, so what is banked is the string the card actually
+  // offered and never a string the frame supplied. `text` still carries what the
+  // app put into the session — the frame stays self-describing — but on a tapped
+  // note it is not what is banked.
+  //
+  // Absent = the sender typed the answer, which is what every frame written before
+  // this field means. Present without `delivered`, instruct fails CLOSED rather
+  // than guessing: the cross-field rule lives there and not in a `.refine()` here,
+  // because whole-payload rules on this schema put a form in front of one line
+  // typed on a phone (see the header above).
+  choiceId: z.string().min(1).max(40).optional(),
 });
 
 const HandlerInstructMessage = BaseMessage.extend({
@@ -1416,6 +1439,14 @@ const HandlerSessionSnapshot = z.object({
     total: z.number().int().nonnegative(),
     items: z.array(z.string().max(120)).max(5),
   }).optional(),
+  // Presence IS the capability signal, the way `askAnswer`'s is: this bridge reads
+  // a `delivered` note on handler:instruct that names a BLOCKING row and banks the
+  // sentence for the judge instead of authorizing and extracting it as a new
+  // instruction. An app that sends the note to a bridge without this gets the old
+  // behaviour on the wrong verb — a session-long grant nobody read, plus a backlog
+  // item no terminal status can resolve — which is why the app must never send it
+  // uninvited. Absent means: send the reply and nothing else.
+  escalationAnswer: z.literal(true).optional(),
 });
 
 // Why this machine will not run the Handler, in the words the app has to answer

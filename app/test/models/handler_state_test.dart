@@ -605,6 +605,34 @@ void main() {
       expect(narrowed.askAnswer, isTrue);
       expect(narrowed.askAnswerPending, isTrue);
     });
+
+    // A second, independent capability flag: this one gates a `delivered` note
+    // on a BLOCKING row, not `askAnswer`'s tap on a standing ask.
+    test('escalationAnswer reads true only when the bridge advertised it', () {
+      final on = HandlerSessionState.fromWire({
+        ...sessionWire(),
+        'escalationAnswer': true,
+      })!;
+      expect(on.escalationAnswer, isTrue);
+
+      final off = HandlerSessionState.fromWire(sessionWire())!;
+      expect(off.escalationAnswer, isFalse);
+
+      final junk = HandlerSessionState.fromWire({
+        ...sessionWire(),
+        'escalationAnswer': 'yes',
+      });
+      expect(junk, isNotNull);
+      expect(junk!.escalationAnswer, isFalse);
+    });
+
+    test('copyWith carries escalationAnswer', () {
+      final s = HandlerSessionState.fromWire({
+        ...sessionWire(),
+        'escalationAnswer': true,
+      })!;
+      expect(s.copyWith(pendingEscalations: 0).escalationAnswer, isTrue);
+    });
   });
 
   group('the instruction window on a session snapshot', () {

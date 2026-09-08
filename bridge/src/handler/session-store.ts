@@ -250,6 +250,15 @@ export const HandlerSessionRecordSchema = z.object({
   askAnswer: z.object({
     escalationId: z.string(), question: z.string(), answer: z.string(),
     tapped: z.boolean(), at: z.number(),
+    // Which kind of question this answers, and the two differ in what the judge
+    // must then DO. An ask's answer reached nobody but the judge, so it has to be
+    // relayed. A blocking escalation's answer went straight into the session, so
+    // relaying it lands a second copy of an instruction the agent already has.
+    //
+    // Spelled `blocking` and z.literal(true) for the polarity `nonBlocking` uses
+    // one level up: absent is what every record written before this field meant,
+    // and that is the ask case.
+    blocking: z.literal(true).optional(),
   }).optional(),
 });
 export type HandlerSessionRecord = z.infer<typeof HandlerSessionRecordSchema>;
