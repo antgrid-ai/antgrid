@@ -1,3 +1,5 @@
+import 'dart:async';
+
 class PortInfo {
   final int port;
   final int? pid;
@@ -150,9 +152,9 @@ class TunnelHttpRequest {
   final Map<String, String> headers;
   final String? body;
 
-  /// Body encodings we can decode beyond the mandatory utf8/base64. A bridge
-  /// that predates this field ignores it and answers uncompressed, which is
-  /// why an unknown `bodyEncoding` can never reach us unrequested.
+  /// Body encodings we can decode beyond the mandatory base64. A bridge that
+  /// predates this field ignores it and answers uncompressed, which is why an
+  /// unknown `bodyEncoding` can never reach us unrequested.
   final List<String> acceptEncodings;
 
   const TunnelHttpRequest({
@@ -179,37 +181,54 @@ class TunnelHttpRequest {
       if (acceptEncodings.isNotEmpty) 'acceptEncodings': acceptEncodings,
     };
   }
+
+  /// Only the id is ever replaced: a re-send under a fresh id must be the SAME
+  /// request, or the dev server is asked something the browser never asked.
+  TunnelHttpRequest copyWith({String? requestId}) => TunnelHttpRequest(
+    requestId: requestId ?? this.requestId,
+    port: port,
+    scheme: scheme,
+    method: method,
+    path: path,
+    headers: headers,
+    body: body,
+    acceptEncodings: acceptEncodings,
+  );
 }
 
-class TunnelHttpResponse {
+/// Head of a tunneled response, carrying body slice 0 (mirrors
+/// `TunnelHttpStart` in the bridge's `tunnel-protocol.ts`). [last] means the
+/// body is complete after [data] — no chunk and no end follow.
+///
+/// [bodyEncoding] describes THIS frame's [data] alone: the bridge decides it
+/// per slice, so a gzipped page can be followed by a plain-base64 slice.
+class TunnelHttpStartMessage {
   final String requestId;
   final int status;
   final Map<String, String> headers;
-
-  /// Set-Cookie values carried out-of-band: a single response can set several,
-  /// and [headers] (a string map) can only hold one. Emitted as repeated
-  /// Set-Cookie headers by the proxy.
   final List<String> setCookies;
-  final String body;
+  final String data;
   final String bodyEncoding;
+  final bool last;
 
-  const TunnelHttpResponse({
+  const TunnelHttpStartMessage({
     required this.requestId,
     required this.status,
     required this.headers,
     this.setCookies = const [],
-    required this.body,
+    required this.data,
     required this.bodyEncoding,
+    this.last = false,
   });
 
-  static TunnelHttpResponse? fromJson(Map<String, dynamic> json) {
+  static TunnelHttpStartMessage? fromJson(Map<String, dynamic> json) {
     final requestId = json['requestId'];
     final status = json['status'];
-    final body = json['body'];
+    final data = json['data'];
     final bodyEncoding = json['bodyEncoding'];
     if (requestId is! String ||
         status is! int ||
-        body is! String ||
+        data is! String ||
         bodyEncoding is! String) {
       return null;
     }
@@ -228,15 +247,119 @@ class TunnelHttpResponse {
         (json['setCookies'] as List?)?.whereType<String>().toList() ??
         const <String>[];
 
-    return TunnelHttpResponse(
+    return TunnelHttpStartMessage(
       requestId: requestId,
       status: status,
       headers: headers,
       setCookies: setCookies,
-      body: body,
+      data: data,
+      bodyEncoding: bodyEncoding,
+      last: json['last'] == true,
+    );
+  }
+}
+
+/// One body slice after slice 0. [seq] is 1-based and dense — the only way to
+/// see a frame the relay dropped, since a channel is otherwise FIFO.
+///
+/// An unrecognised [bodyEncoding] parses: rejecting it here would make it
+/// indistinguishable from a lost frame, where the handler can fail the body
+/// naming the value it could not decode.
+class TunnelHttpChunkMessage {
+  final String requestId;
+  final int seq;
+  final String data;
+  final String bodyEncoding;
+
+  const TunnelHttpChunkMessage({
+    required this.requestId,
+    required this.seq,
+    required this.data,
+    required this.bodyEncoding,
+  });
+
+  static TunnelHttpChunkMessage? fromJson(Map<String, dynamic> json) {
+    final requestId = json['requestId'];
+    final seq = json['seq'];
+    final data = json['data'];
+    final bodyEncoding = json['bodyEncoding'];
+    if (requestId is! String ||
+        seq is! int ||
+        data is! String ||
+        bodyEncoding is! String) {
+      return null;
+    }
+    return TunnelHttpChunkMessage(
+      requestId: requestId,
+      seq: seq,
+      data: data,
       bodyEncoding: bodyEncoding,
     );
   }
+}
+
+/// Terminator of a multi-slice response. [chunks] is the last `seq` the bridge
+/// emitted, which is what catches a dropped FINAL chunk — the one hole an
+/// in-order channel cannot show. [error] present means the body is INCOMPLETE.
+class TunnelHttpEndMessage {
+  final String requestId;
+  final int chunks;
+  final String? error;
+
+  const TunnelHttpEndMessage({
+    required this.requestId,
+    required this.chunks,
+    this.error,
+  });
+
+  static TunnelHttpEndMessage? fromJson(Map<String, dynamic> json) {
+    final requestId = json['requestId'];
+    final chunks = json['chunks'];
+    if (requestId is! String || chunks is! int) return null;
+    final error = json['error'];
+    return TunnelHttpEndMessage(
+      requestId: requestId,
+      chunks: chunks,
+      error: error is String ? error : null,
+    );
+  }
+}
+
+/// A tunneled body that cannot be completed. Delivered as the error of
+/// [TunnelHttpResponse.body], or as the failure of the head when no head ever
+/// arrived, so both halves of a response fail with the same type.
+class TunnelStreamException implements Exception {
+  final String requestId;
+  final String reason;
+
+  const TunnelStreamException(this.requestId, this.reason);
+
+  @override
+  String toString() => 'TunnelStreamException($requestId): $reason';
+}
+
+/// A tunneled response as the proxy consumes it — NOT a wire shape. The head
+/// is known once `tunnel:http-start` lands; [body] yields DECODED bytes as the
+/// slices arrive, and errors with a [TunnelStreamException] if the body cannot
+/// be completed.
+class TunnelHttpResponse {
+  final String requestId;
+  final int status;
+  final Map<String, String> headers;
+
+  /// Set-Cookie values carried out-of-band: a single response can set several,
+  /// and [headers] (a string map) can only hold one. Emitted as repeated
+  /// Set-Cookie headers by the proxy.
+  final List<String> setCookies;
+  final Stream<List<int>> body;
+
+  const TunnelHttpResponse({
+    required this.requestId,
+    required this.status,
+    required this.headers,
+    this.setCookies = const [],
+    required this.body,
+  });
 }
 
 /// Inbound half of the WS tunnel (mirrors `TunnelWsData` in the bridge's
@@ -268,16 +391,27 @@ class TunnelWsDataMessage {
 }
 
 /// The bridge's side of a WS tunnel closed (the upstream dev-server
-/// connection ended) — mirror the close onto the local WebSocket.
+/// connection ended) — mirror the close onto the local WebSocket. [code] and
+/// [reason] carry the upstream's own close, or the bridge's when the tunnel
+/// died on the send path, so the page can tell a server going away from a
+/// frame that could not be carried.
 class TunnelWsCloseMessage {
   final String tunnelId;
+  final int? code;
+  final String? reason;
 
-  const TunnelWsCloseMessage({required this.tunnelId});
+  const TunnelWsCloseMessage({required this.tunnelId, this.code, this.reason});
 
   static TunnelWsCloseMessage? fromJson(Map<String, dynamic> json) {
     final tunnelId = json['tunnelId'];
     if (tunnelId is! String) return null;
-    return TunnelWsCloseMessage(tunnelId: tunnelId);
+    final code = json['code'];
+    final reason = json['reason'];
+    return TunnelWsCloseMessage(
+      tunnelId: tunnelId,
+      code: code is int ? code : null,
+      reason: reason is String ? reason : null,
+    );
   }
 }
 

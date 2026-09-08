@@ -166,7 +166,11 @@ class RelayConnection {
         // A dropped frame is not a connection fault — the socket stays open and
         // the ladder is unaffected. It reaches the session so services holding
         // re-issuable work can recover it instead of waiting out a timeout.
-        if (e.code == 'MESSAGE_RATE_LIMITED') {
+        // Both codes the relay uses for a discarded ROUTED frame: the rate
+        // limiter's, and `ROUTE_FAILED` for a recipient whose socket refused
+        // the write. Keep in lockstep with `handleDroppedFrameError` in the
+        // bridge's relay-client.ts.
+        if (e.code == 'MESSAGE_RATE_LIMITED' || e.code == 'ROUTE_FAILED') {
           _noteDroppedFrame();
           mechanisms.session?.noteFramesDropped();
         }

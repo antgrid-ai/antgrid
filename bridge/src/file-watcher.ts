@@ -19,9 +19,13 @@ export interface ProjectInfo {
 
 const DEBOUNCE_MS = 100;
 
-/** The watcher's one outbound hook. `opts.force` is honoured only by senders
- *  that publish through a deduping bus; a plain sender may ignore it. */
-type SendTreeMessage = (msg: AbMessage, opts?: { force?: boolean }) => void;
+/** The watcher's one outbound hook. Both flags are honoured only by senders
+ *  that publish through the replaying bus; a plain sender may ignore them and
+ *  deliver, which is the old behaviour rather than a break. */
+type SendTreeMessage = (
+  msg: AbMessage,
+  opts?: { force?: boolean; replayOnly?: boolean },
+) => void;
 
 type PendingChanges = {
   added: Map<string, FileTreeNode>;
@@ -63,20 +67,30 @@ export class FileWatcher {
     this.ig = loadIgnoreRules(this.projectRoot, []);
   }
 
+  /** The revision [getTreeSnapshot] would stamp, without walking the tree — so
+   *  a `sinceSeq` request that turns out to be current costs no walk. */
+  currentSeq(): number {
+    return this.connState.fileSeq(this.projectRoot);
+  }
+
   getTreeSnapshot(): { tree: FileTreeNode; seq: number } {
     const root = buildTree(this.projectRoot, this.projectRoot, this.ig);
     if (!root) {
       return {
         tree: { name: "", path: "", type: "directory", children: [] },
-        seq: this.connState.fileSeq,
+        seq: this.currentSeq(),
       };
     }
-    return { tree: root, seq: this.connState.fileSeq };
+    return { tree: root, seq: this.currentSeq() };
   }
 
   /** [opts.force] bypasses the bus's payload-equality dedup — for the re-sync
-   *  paths, where an unchanged tree is exactly what has to reach the wire. */
-  sendFullTree(opts: { force?: boolean } = {}): void {
+   *  paths, where an unchanged tree is exactly what has to reach the wire.
+   *  [opts.replayOnly] caches the tree for replay without delivering it, for
+   *  the open-time build: no client reads that push (each pulls its own tree
+   *  with `file:tree:snapshot:request`), and it went out before any of them
+   *  had a stream to receive it — see the open path in agent-core.ts. */
+  sendFullTree(opts: { force?: boolean; replayOnly?: boolean } = {}): void {
     const root = buildTree(this.projectRoot, this.projectRoot, this.ig);
     if (!root) {
       log.error("Failed to build file tree for %s", this.projectRoot);
@@ -87,10 +101,15 @@ export class FileWatcher {
       createMessage("tree:full", {
         projectId: this.projectId,
         root,
+        seq: this.currentSeq(),
       }),
       opts,
     );
-    log.info("Sent full file tree for project %s", this.projectId);
+    log.info(
+      "%s full file tree for project %s",
+      opts.replayOnly ? "Cached" : "Sent",
+      this.projectId,
+    );
   }
 
   startWatching(): void {
@@ -414,7 +433,7 @@ export class FileWatcher {
     // taken before the agent's last edit.
     this.onFilesChanged?.();
 
-    const seq = this.connState.bumpFileSeq();
+    const seq = this.connState.bumpFileSeq(this.projectRoot);
     if (this.connState.suppressed) {
       // Drop the update; the next tree-snapshot reply will reflect the current tree.
       // A pending RESYNC is deferred rather than dropped: the flag was consumed
