@@ -69,6 +69,22 @@ void _status(
   'sessions': [_session('t1', backlog), ...others],
 });
 
+/// The outbound message TYPES that answer a question — excludes the
+/// bootstrap requests every [ProjectSession] fires on construction
+/// (`client:focus-state`, `session:list`, the tree/git/config/preview
+/// snapshot requests), which an exact-order assertion would otherwise trip
+/// over.
+List<String> _answerTypes(FakeAgentTransport t) => t.sent
+    .map((m) => m['type'] as String)
+    .where(
+      (ty) => const {
+        'handler:instruct',
+        'terminal:input',
+        'agent:prompt',
+      }.contains(ty),
+    )
+    .toList();
+
 void main() {
   test('a 1-tap arm sends armed:true and no payload keys', () async {
     // Arming must not require a form, so an arm with no goal and no backlog
@@ -865,12 +881,80 @@ void main() {
       await session.close();
     });
 
-    test('a tap grants no authorization lift', () async {
-      // handler:instruct is the sole feed point for instruction-scoped
-      // authorization, and that lift derives only from the user's own words.
-      // Chip text is Assistant output, so routing a tap there would let the
-      // judge's own draft authorize itself for the rest of the session — and
-      // would stack an extraction item no terminal status can ever resolve.
+    test('a tap notes the choice it sent, by id', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': [
+          {..._session('t9', const []), 'escalationAnswer': true},
+        ],
+      });
+      t.emit('handler:escalation', escalationFrame());
+      await Future<void>.delayed(Duration.zero);
+
+      svc.answerWithChoice(svc.currentState.escalations.single, 'approve');
+
+      expect(
+        _answerTypes(t),
+        ['handler:instruct', 'terminal:input'],
+      );
+      final note = t.sent.firstWhere((m) => m['type'] == 'handler:instruct');
+      expect(note['escalationId'], 'e1');
+      expect(note['delivered'], true);
+      expect(note['choiceId'], 'approve');
+      expect(note['text'], 'ship it');
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a reject tap notes the reject, by id', () async {
+      // The replacement for banking a chip's own words: what rides the wire is
+      // the choiceId the card offered, never the sentence itself — the bridge
+      // resolves "Do not proceed." from its own row, not from this frame's
+      // `text` (bridge/tests/handler/engine.test.ts pins the other half).
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': [
+          {..._session('t9', const []), 'escalationAnswer': true},
+        ],
+      });
+      t.emit('handler:escalation', escalationFrame());
+      await Future<void>.delayed(Duration.zero);
+
+      svc.answerWithChoice(svc.currentState.escalations.single, 'reject');
+
+      final note = t.sent.firstWhere((m) => m['type'] == 'handler:instruct');
+      expect(note['choiceId'], 'reject');
+      expect(note['delivered'], true);
+      expect(note['text'], 'Do not proceed.');
+      // Nothing rides beside those: the frame stays the same shape a typed
+      // blocking answer sends, never gaining a field of its own that would name
+      // it an instruction the bridge should authorize.
+      expect(
+        note.keys.toSet(),
+        {
+          'type', 'id', 'timestamp', 'projectId', 'terminalId', 'text',
+          'escalationId', 'delivered', 'choiceId',
+        },
+      );
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a tap sends no note to a bridge that did not advertise it', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
       final svc = HandlerService.fromSession(session);
@@ -881,13 +965,101 @@ void main() {
 
       svc.answerWithChoice(svc.currentState.escalations.single, 'approve');
 
-      expect(t.sent.any((m) => m['type'] == 'handler:instruct'), isFalse);
-      expect(t.sent.any((m) => m['type'] == 'handler:configure'), isFalse);
+      expect(_answerTypes(t), ['terminal:input']);
 
       await sub.cancel();
       await svc.dispose();
       await session.close();
     });
+
+    test('the chat slot notes a tap the same way', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('session:list:result', {
+        'projectId': 'p',
+        'sessions': [
+          {
+            'id': 'chat-1',
+            'name': 'chat-1',
+            'createdAt': 0,
+            'lastUsedAt': 0,
+            'archived': false,
+            'running': true,
+            'mode': 'chat',
+          },
+        ],
+      });
+      t.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': [
+          {..._session('chat-1', const []), 'escalationAnswer': true},
+        ],
+      });
+      t.emit('handler:escalation', escalationFrame(terminalId: 'chat-1'));
+      await Future<void>.delayed(Duration.zero);
+
+      svc.answerWithChoice(svc.currentState.escalations.single, 'approve');
+
+      expect(
+        _answerTypes(t),
+        ['handler:instruct', 'agent:prompt'],
+      );
+      final note = t.sent.firstWhere((m) => m['type'] == 'handler:instruct');
+      expect(note['choiceId'], 'approve');
+      expect(note['delivered'], true);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test(
+      'a tap grants no authorization lift',
+      () async {
+        // handler:instruct is the sole feed point for instruction-scoped
+        // authorization, and that lift derives only from the user's own words.
+        // Chip text is Assistant output, so routing a tap there would let the
+        // judge's own draft authorize itself for the rest of the session — and
+        // would stack an extraction item no terminal status can ever resolve.
+        //
+        // The lift question lives bridge-side, not here: the `delivered` arm
+        // (engine.ts) takes no authorizeInstruction call and queues no
+        // extraction, so this test cannot observe a lift by the note's absence
+        // — it exists only to pin that the note this app DOES send carries
+        // nothing beyond the choiceId, never free-form text the judge did not
+        // already put on the card. See engine.test.ts for the bridge-side half.
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = HandlerService.fromSession(session);
+        final sub = session.heavyStream.listen((_) {});
+
+        t.emit('handler:status', {
+          'projectId': 'p',
+          'sessions': [
+            {..._session('t9', const []), 'escalationAnswer': true},
+          ],
+        });
+        t.emit('handler:escalation', escalationFrame());
+        await Future<void>.delayed(Duration.zero);
+
+        svc.answerWithChoice(svc.currentState.escalations.single, 'approve');
+
+        final notes = t.sent
+            .where((m) => m['type'] == 'handler:instruct')
+            .toList();
+        expect(notes, hasLength(1));
+        expect(notes.single['delivered'], true);
+        expect(notes.single['choiceId'], 'approve');
+        expect(t.sent.any((m) => m['type'] == 'handler:configure'), isFalse);
+
+        await sub.cancel();
+        await svc.dispose();
+        await session.close();
+      },
+    );
 
     test(
       'a chat slot takes the same agent:prompt path a typed reply does',
@@ -1155,6 +1327,176 @@ void main() {
       expect(t.sent.any((m) => m['type'] == 'terminal:input'), isFalse);
       expect(t.sent.any((m) => m['type'] == 'agent:prompt'), isFalse);
 
+      await svc.dispose();
+      await session.close();
+    });
+  });
+
+  group('answering the question that stopped the session', () {
+    Map<String, dynamic> escalationFrame({
+      String terminalId = 't9',
+      String? kind,
+      bool? nonBlocking,
+    }) => {
+      'projectId': 'p',
+      'escalationId': 'e1',
+      'terminalId': terminalId,
+      'question': 'q',
+      'reasoning': 'r',
+      'draftReply': 'ship it',
+      'urgency': 'normal',
+      'kind': ?kind,
+      'nonBlocking': ?nonBlocking,
+    };
+
+    test('notes the answer to the bridge before it reaches the session', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': [
+          {..._session('t9', const []), 'escalationAnswer': true},
+        ],
+      });
+      t.emit('handler:escalation', escalationFrame());
+      await Future<void>.delayed(Duration.zero);
+
+      svc.reply(svc.currentState.escalations.single, 'skip the pricing page');
+
+      expect(
+        _answerTypes(t),
+        ['handler:instruct', 'terminal:input'],
+      );
+      final note = t.sent.firstWhere((m) => m['type'] == 'handler:instruct');
+      expect(note['escalationId'], 'e1');
+      expect(note['delivered'], true);
+      expect(note['text'], 'skip the pricing page');
+      expect(note.containsKey('choiceId'), isFalse);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('the chat slot notes it the same way', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('session:list:result', {
+        'projectId': 'p',
+        'sessions': [
+          {
+            'id': 'chat-1',
+            'name': 'chat-1',
+            'createdAt': 0,
+            'lastUsedAt': 0,
+            'archived': false,
+            'running': true,
+            'mode': 'chat',
+          },
+        ],
+      });
+      t.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': [
+          {..._session('chat-1', const []), 'escalationAnswer': true},
+        ],
+      });
+      t.emit('handler:escalation', escalationFrame(terminalId: 'chat-1'));
+      await Future<void>.delayed(Duration.zero);
+
+      svc.reply(svc.currentState.escalations.single, 'skip the pricing page');
+
+      expect(
+        _answerTypes(t),
+        ['handler:instruct', 'agent:prompt'],
+      );
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('sends no note to a bridge that did not advertise it', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:escalation', escalationFrame());
+      await Future<void>.delayed(Duration.zero);
+
+      svc.reply(svc.currentState.escalations.single, 'skip the pricing page');
+
+      expect(_answerTypes(t), ['terminal:input']);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('sends no note for a report', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': [
+          {..._session('t9', const []), 'escalationAnswer': true},
+        ],
+      });
+      t.emit('handler:escalation', escalationFrame(kind: 'guard_blocked'));
+      await Future<void>.delayed(Duration.zero);
+
+      svc.reply(svc.currentState.escalations.single, 'run it yourself');
+
+      expect(t.sent.any((m) => m['type'] == 'handler:instruct'), isFalse);
+      expect(t.sent.any((m) => m['type'] == 'terminal:input'), isTrue);
+      expect(t.sent.any((m) => m['type'] == 'handler:dismiss'), isTrue);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('sends no note for an ask', () async {
+      // An ask's own transports (answerAsk / answerAskText) never reach here;
+      // this pins that a direct reply() on a nonBlocking row sends no note — the
+      // note is for a row that STOPPED the session, and an ask never did.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': [
+          {
+            ..._session('t9', const []),
+            'escalationAnswer': true,
+            // Preserves nonBlocking through _applyEscalationFloors, which
+            // otherwise clears it to false on a bridge that never advertised
+            // askAnswer — a different gate, and not the one this test is
+            // pinning.
+            'askAnswer': true,
+          },
+        ],
+      });
+      t.emit('handler:escalation', escalationFrame(nonBlocking: true));
+      await Future<void>.delayed(Duration.zero);
+
+      svc.reply(svc.currentState.escalations.single, 'yes, do that');
+
+      expect(_answerTypes(t), ['terminal:input']);
+
+      await sub.cancel();
       await svc.dispose();
       await session.close();
     });

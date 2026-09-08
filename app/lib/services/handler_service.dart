@@ -830,7 +830,18 @@ class HandlerService {
   /// unanswered escalation behind, so a surface that showed the send as
   /// in-flight has to be able to take that back — a control stuck reporting an
   /// answer nobody sent is worse than one that never latched.
-  bool reply(HandlerEscalation escalation, String text) {
+  ///
+  /// [tappedChoiceId] names the one-tap the user pressed, when this send is a
+  /// chip and not a typed line. It travels so the bridge can resolve the option's
+  /// words from its own persisted row: a chip's `text` is engine- or
+  /// judge-authored (`REJECT_CHOICE_TEXT`, or the judge's own `draftReply`), so
+  /// what must never be banked is the text, and what must be banked is which
+  /// option was taken.
+  bool reply(
+    HandlerEscalation escalation,
+    String text, {
+    String? tappedChoiceId,
+  }) {
     if (_disposed) return false;
     // An option-based agent prompt is resolvable only by the chat transcript's
     // permission/question UI, which holds the permissionId/questionId the driver
@@ -843,6 +854,36 @@ class HandlerService {
     // [Y/n] confirmation). The reply sheet also disables its send button when
     // empty; this is the enforcement floor.
     if (text.trim().isEmpty) return false;
+    // Handler asked this question and is owed the answer as much as the agent is.
+    // Sent BEFORE the reply and never instead of it: the bridge resolves the row by
+    // id, and the reply's own submitted line retires that row on arrival — so a note
+    // sent afterwards names a question that is already gone and the judge learns
+    // nothing, which is the bug this closes.
+    //
+    // `delivered` is what tells the bridge the words went into the session. It is a
+    // fact about THIS send, which is why it travels rather than being re-derived
+    // from the row: reconcileAsks can promote a row between the render and the tap.
+    //
+    // Gated on the session's own advert, re-read on every send and never latched: a
+    // bridge without it reads the `escalationId` as an ordinary instruction, mints
+    // an authorization lift out of the user's answer and splits it into backlog
+    // items.
+    final notesAnswers =
+        _state.sessions[escalation.terminalId]?.escalationAnswer == true;
+    if (notesAnswers &&
+        !escalation.nonBlocking &&
+        escalation.kind != 'guard_blocked') {
+      session.send(
+        createAbMessage('handler:instruct', {
+          'projectId': session.projectId,
+          'terminalId': escalation.terminalId,
+          'text': text,
+          'escalationId': escalation.escalationId,
+          'delivered': true,
+          'choiceId': ?tappedChoiceId,
+        }),
+      );
+    }
     if (_isChat(escalation.terminalId)) {
       session.send(
         createAbMessage('agent:prompt', {
@@ -947,18 +988,24 @@ class HandlerService {
   /// action — can never put text of its own into the session, and an id that no
   /// longer matches sends nothing rather than something else.
   ///
-  /// Routes through [reply] and deliberately NOT through [instruct]: a tap
-  /// grants no authorization lift. `handler:instruct` is the sole feed point
-  /// for instruction-scoped authorization, and it derives that only from the
-  /// user's own instruction text — chip text is Assistant output (the judge
-  /// composed the draft `[Approve]` sends), so minting a lift from it would
-  /// launder the judge's own words into a grant the user never gave. It would
-  /// also stack an extraction item no terminal status can resolve, leaving the
-  /// session unable to wrap up. The costs are asymmetric: under-lifting costs
-  /// one advisory `floor_warning` row per repeat, since the floor records
-  /// rather than blocks, while over-lifting costs a session-wide grant nobody
-  /// read. The real lift stays one control away, in the user's own words, via
-  /// the PA bar.
+  /// The words route through [reply] exactly as a typed answer's do — never
+  /// through [instruct] — and deliberately grant no authorization lift.
+  /// `handler:instruct` is the sole feed point for instruction-scoped
+  /// authorization, and it derives that only from the user's own instruction
+  /// text — chip text is Assistant output (the judge composed the draft
+  /// `[Approve]` sends), so minting a lift from it would launder the judge's
+  /// own words into a grant the user never gave. It would also stack an
+  /// extraction item no terminal status can resolve, leaving the session
+  /// unable to wrap up. The costs are asymmetric: under-lifting costs one
+  /// advisory `floor_warning` row per repeat, since the floor records rather
+  /// than blocks, while over-lifting costs a session-wide grant nobody read.
+  /// The real lift stays one control away, in the user's own words, via the
+  /// PA bar.
+  ///
+  /// [reply] also sends a note beside the words naming this choiceId, so the
+  /// bridge can bank what the card actually offered for its judge instead of
+  /// the words themselves — which are engine- or judge-authored, never the
+  /// user's own, and must never be recorded as if they were.
   ///
   /// Returns whether the answer reached the wire, so a card can only show a
   /// send as in-flight when one actually is.
@@ -971,7 +1018,7 @@ class HandlerService {
     final current = _escalationById(escalation.escalationId) ?? escalation;
     final choice = current.choiceById(choiceId);
     if (choice == null) return false;
-    return reply(current, choice.text);
+    return reply(current, choice.text, tappedChoiceId: choice.choiceId);
   }
 
   /// The live ask an answer may be sent against, or null when there is none.
