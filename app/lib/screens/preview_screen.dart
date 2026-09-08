@@ -431,9 +431,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// server) fell through to [_navigateToInput], which reads a bare number as
   /// a PATH on the CURRENT origin and requested `localhost:4000/4200` instead
   /// of ever reaching port 4200. A port/link target reuses the tab-per-port
-  /// pipeline ([_openPort], same as the port list) rather than reloading one
-  /// — it switches straight to an already-open tab for that port, or opens a
-  /// new one. Anything that ISN'T a port/link (an actual path, or a foreign
+  /// pipeline ([_openPort], same as the port list). A bare port only focuses
+  /// an existing tab; an explicit link navigates it through its actual proxy
+  /// origin. Anything that ISN'T a port/link (an actual path, or a foreign
   /// absolute URL) still navigates the active tab in place: this previews
   /// your dev server, not the open web.
   void _handleAddressSubmit(String input) {
@@ -452,7 +452,14 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         return;
       }
       final (port, scheme, path) = target;
-      unawaited(_openPort(port, scheme, path: path));
+      unawaited(
+        _openPort(
+          port,
+          scheme,
+          path: path,
+          navigateExisting: int.tryParse(trimmed) == null,
+        ),
+      );
       _addrFocus.unfocus();
       return;
     }
@@ -460,7 +467,14 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       final target = parsePreviewTarget(trimmed);
       if (target != null) {
         final (port, scheme, path) = target;
-        unawaited(_openPort(port, scheme, path: path));
+        unawaited(
+          _openPort(
+            port,
+            scheme,
+            path: path,
+            navigateExisting: int.tryParse(trimmed) == null,
+          ),
+        );
         _addrFocus.unfocus();
         return;
       }
@@ -515,7 +529,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// openTab] branches internally. Used by manual entry, recent-port
   /// quick-picks, and the port list. On a relay-mode port conflict, confirms
   /// before falling back to a different local port.
-  Future<void> _openPort(int port, String scheme, {String path = '/'}) async {
+  Future<void> _openPort(
+    int port,
+    String scheme, {
+    String path = '/',
+    bool navigateExisting = false,
+  }) async {
     // The sample project advertises the ports a real dev server would, because
     // an empty preview tab is not what the product looks like — but the demo
     // transport reports itself LOCAL, so opening one would point a real webview
@@ -537,6 +556,19 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         (s) => s.previewService,
       );
       if (svc == null) return;
+      if (navigateExisting) {
+        final target = svc.existingTabNavigationUrl(
+          port,
+          scheme: scheme,
+          path: path,
+        );
+        final controller = _tabStates[port]?.controller;
+        if (target != null && controller != null) {
+          svc.setActiveTab(port);
+          await controller.loadRequest(target);
+          return;
+        }
+      }
       final result = await svc.openTab(port, scheme: scheme, path: path);
       if (result != SelectPortResult.portInUse) {
         ref

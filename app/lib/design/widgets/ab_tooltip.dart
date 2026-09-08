@@ -24,31 +24,19 @@ class AbTooltip extends StatelessWidget {
   /// be that glyph's only explanation on touch.
   final TooltipTriggerMode? triggerMode;
 
-  // A plain [Tooltip.message] renders as one unwrapped line sized to the
-  // text's own intrinsic width — Flutter clamps the bubble's POSITION to the
-  // overlay (the whole window), never its width to the widget it's anchored
-  // under, so a long message (a commit subject, a full timestamp) renders
-  // wide enough to spill over neighboring panes on both sides. Routing
-  // through [Tooltip.richMessage] instead lets a [ConstrainedBox] cap the
-  // bubble's width and wrap the text inside it.
+  // Cap long messages without hiding their text inside a WidgetSpan, whose
+  // plain-text representation loses the tooltip's accessibility label.
   static const double _kMaxWidth = 280;
 
   @override
   Widget build(BuildContext context) {
     final c = context.antgrid;
     return Tooltip(
-      richMessage: WidgetSpan(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: _kMaxWidth),
-          child: Text(
-            message,
-            softWrap: true,
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontSm,
-              color: c.textPrimary,
-            ),
-          ),
-        ),
+      message: message,
+      constraints: const BoxConstraints(maxWidth: _kMaxWidth),
+      textStyle: AbTokens.sansStyle(
+        fontSize: AbTokens.fontSm,
+        color: c.textPrimary,
       ),
       triggerMode: triggerMode,
       decoration: BoxDecoration(

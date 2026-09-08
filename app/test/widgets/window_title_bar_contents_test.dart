@@ -426,7 +426,7 @@ void main() {
   );
 
   testWidgets(
-    'an expanded context panel swaps the icon-only toggle for a labeled button',
+    'a visible context panel keeps an icon toggle that hides it',
     (tester) async {
       try {
         debugDefaultTargetPlatformOverride = TargetPlatform.windows;
@@ -445,16 +445,16 @@ void main() {
             of: find.byKey(WindowTitleBarContents.contextPanelSlotKey),
             matching: find.byType(AbIconButton),
           ),
-          findsNothing,
+          findsOneWidget,
         );
         expect(
           find.descendant(
             of: find.byKey(WindowTitleBarContents.contextPanelSlotKey),
-            matching: find.text('Collapse'),
+            matching: find.byTooltip('Hide context panel'),
           ),
           findsOneWidget,
         );
-        await tester.tap(find.text('Collapse'));
+        await tester.tap(find.byTooltip('Hide context panel'));
         await tester.pump();
         expect(toggled, 1);
       } finally {

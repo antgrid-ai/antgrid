@@ -771,11 +771,16 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
         // separately.
         try {
           final hostUuid = await ref.read(localDeviceUuidProvider.future);
+          if (!mounted) return;
+          final projects = ref.read(projectsProvider.notifier);
+          final generation = projects.hostCatalogGeneration;
           final known = await client.phonesList();
           if (!mounted || hostUuid == null) return;
-          await ref
-              .read(projectsProvider.notifier)
-              .backfillFromHost(known.knownProjects, hostUuid: hostUuid);
+          await projects.backfillFromHost(
+            known.knownProjects,
+            hostUuid: hostUuid,
+            generation: generation,
+          );
         } catch (_) {
           // Best-effort — retried on the next tick.
         }

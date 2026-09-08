@@ -20,7 +20,7 @@ import 'package:flutter/widgets.dart';
 /// `TerminalViewWrapper` already works around this for the agent terminal
 /// with its own early-key modifier mirror (see its `_realModifierState`
 /// doc) — this is the same technique, generalized app-wide via
-/// [Actions.maybeInvoke] on `PasteTextIntent` instead of the terminal's raw
+/// [ActionDispatcher] on `PasteTextIntent` instead of the terminal's raw
 /// `ghostty.writeBytes`, since a plain text field has no equivalent to write
 /// into directly.
 ///
@@ -64,21 +64,18 @@ class WindowsPasteFix {
     final ctrl = _realControl ?? HardwareKeyboard.instance.isControlPressed;
     if (!ctrl) return KeyEventResult.ignored;
 
-    // Auto-repeat is swallowed, not acted on: a held chord fires ~30x/s, and
-    // each would re-invoke the paste action and re-read the clipboard.
-    if (event is KeyRepeatEvent) return KeyEventResult.handled;
-
     final focusContext = primaryFocus?.context;
     if (focusContext == null) return KeyEventResult.ignored;
-    // The terminal owns its own paste path (raw bytes straight to the PTY)
-    // and registers no `PasteTextIntent` action, so this only ever matches a
-    // plain text field's own `EditableTextState` — a null result here means
-    // nothing that can paste is focused, and the event is left alone.
-    final invoked = Actions.maybeInvoke<PasteTextIntent>(
+    const intent = PasteTextIntent(SelectionChangedCause.keyboard);
+    final action = Actions.maybeFind<PasteTextIntent>(focusContext);
+    if (action == null) return KeyEventResult.ignored;
+    if (event is KeyRepeatEvent) return KeyEventResult.handled;
+    // EditableText's paste action returns void even when it pastes. Only the
+    // dispatcher's enabled flag can distinguish that from an unhandled event.
+    final (invoked, _) = Actions.of(
       focusContext,
-      const PasteTextIntent(SelectionChangedCause.keyboard),
-    );
-    return invoked == null ? KeyEventResult.ignored : KeyEventResult.handled;
+    ).invokeActionIfEnabled(action, intent, focusContext);
+    return invoked ? KeyEventResult.handled : KeyEventResult.ignored;
   }
 
   static void _track(KeyEvent event) {

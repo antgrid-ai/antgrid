@@ -26,6 +26,11 @@ final pendingForgetsStoreProvider = Provider<PendingForgetsStore>((_) {
 class ProjectsNotifier extends Notifier<List<AbProject>> {
   late final ProjectStore _store;
   late final PendingForgetsStore _pendingForgets;
+  final Set<String> _removing = {};
+  int _hostCatalogGeneration = 0;
+
+  /// Capture before fetching the host catalog; deletion invalidates older polls.
+  int get hostCatalogGeneration => _hostCatalogGeneration;
 
   @override
   List<AbProject> build() {
@@ -75,7 +80,10 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
   Future<void> backfillFromHost(
     List<KnownProject> known, {
     required String hostUuid,
+    int? generation,
   }) async {
+    final expectedGeneration = generation ?? _hostCatalogGeneration;
+    if (expectedGeneration != _hostCatalogGeneration) return;
     // Retry-and-guard for anything the app deleted locally but couldn't
     // confirm the host forgot (see [PendingForgetsStore]). `known` was just
     // fetched live, so a pending id absent from it is already forgotten
@@ -84,8 +92,11 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
     // same call can never re-add a row it is in the middle of retiring.
     final pending = _pendingForgets.read();
     for (final id in pending) {
+      if (expectedGeneration != _hostCatalogGeneration) return;
+      if (_removing.contains(id)) continue;
       final stillKnown = known.any((p) => p.projectId == id);
       if (!stillKnown || await _forgetOnHost(id)) {
+        if (expectedGeneration != _hostCatalogGeneration) return;
         await _pendingForgets.remove(id);
       }
     }
@@ -94,12 +105,31 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
       known: known,
       hostUuid: hostUuid,
     )) {
-      if (pending.contains(p.projectId)) continue;
+      if (expectedGeneration != _hostCatalogGeneration) return;
+      if (pending.contains(p.projectId) ||
+          _removing.contains(p.projectId) ||
+          _pendingForgets.read().contains(p.projectId)) {
+        continue;
+      }
       await upsert(p);
     }
   }
 
   Future<void> remove(String id) async {
+    if (!_removing.add(id)) return;
+    _hostCatalogGeneration++;
+    try {
+      // Persist before the local row disappears. The poll must neither restore
+      // it during cleanup nor retry the host forget before eviction settles.
+      await _pendingForgets.add(id);
+      await _remove(id);
+    } finally {
+      _removing.remove(id);
+      _hostCatalogGeneration++;
+    }
+  }
+
+  Future<void> _remove(String id) async {
     // Only stop active sessions when the project is already warm — warming a
     // cold project just to stop sessions would block on the relay connect +
     // E2E handshake (3-5s if the agent is offline), which is exactly what
@@ -136,11 +166,6 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
     // is reopened — same projectId, same store on disk. This also destroys the
     // project's isolated working directories, which is why every caller of
     // `remove` must confirm first — see `projectForget`'s contract.
-    // Recorded as pending BEFORE the attempt (not just on failure): the local
-    // status poll's own `backfillFromHost` can interleave with this very
-    // await and see the host still reporting the project mid-forget, so the
-    // guard has to be up before the request goes out, not after it fails.
-    await _pendingForgets.add(id);
     if (await _forgetOnHost(id)) {
       await _pendingForgets.remove(id);
     }

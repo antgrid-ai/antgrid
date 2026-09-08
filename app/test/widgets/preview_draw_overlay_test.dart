@@ -204,6 +204,8 @@ void main() {
     ) async {
       final reported = await _pumpOverlay(tester);
 
+      await tester.ensureVisible(find.bySemanticsLabel('Note'));
+      await tester.pumpAndSettle();
       await tester.tap(find.bySemanticsLabel('Note'));
       await tester.pumpAndSettle();
       await tester.tapAt(tester.getCenter(_canvas));
@@ -227,6 +229,8 @@ void main() {
     ) async {
       final reported = await _pumpOverlay(tester);
 
+      await tester.ensureVisible(find.bySemanticsLabel('Note'));
+      await tester.pumpAndSettle();
       await tester.tap(find.bySemanticsLabel('Note'));
       await tester.pumpAndSettle();
       await tester.tapAt(tester.getCenter(_canvas));
@@ -246,6 +250,8 @@ void main() {
     ) async {
       final reported = await _pumpOverlay(tester);
 
+      await tester.ensureVisible(find.bySemanticsLabel('Note'));
+      await tester.pumpAndSettle();
       await tester.tap(find.bySemanticsLabel('Note'));
       await tester.pumpAndSettle();
       await tester.tapAt(tester.getCenter(_canvas));
@@ -267,6 +273,8 @@ void main() {
     ) async {
       final reported = await _pumpOverlay(tester);
 
+      await tester.ensureVisible(find.bySemanticsLabel('Note'));
+      await tester.pumpAndSettle();
       await tester.tap(find.bySemanticsLabel('Note'));
       await tester.pumpAndSettle();
       await tester.tapAt(tester.getCenter(_canvas));

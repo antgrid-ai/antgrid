@@ -1,4 +1,7 @@
 import 'dart:io';
+import 'dart:async';
+
+import 'package:antgrid/launcher/host_control_client.dart';
 
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/models/session_entry.dart';
@@ -53,6 +56,62 @@ void main() {
       // Windows can hold a transient handle on teardown; harmless for the test.
     }
   });
+
+  test(
+    'backfill cannot restore a project during cleanup or from an older poll',
+    () async {
+      final projectStore = await ProjectStore.open();
+      await projectStore.upsert(_project('p1'));
+      final pending = await PendingForgetsStore.open();
+      final cached = await CachedSessionsStore.open();
+      addTearDown(cached.close);
+      final blockedCache = _BlockingStatusCache(statusCache);
+      final container = ProviderContainer(
+        overrides: [
+          projectStoreProvider.overrideWithValue(projectStore),
+          pendingForgetsStoreProvider.overrideWithValue(pending),
+          cachedSessionsStoreProvider.overrideWithValue(cached),
+          projectStatusCacheProvider.overrideWithValue(blockedCache),
+          projectSessionRegistryProvider.overrideWith(
+            () => ProjectSessionRegistryController(
+              ProjectSessionRegistry(
+                localCap: 10,
+                relayCap: 30,
+                onEvict: (_) async {},
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final projects = container.read(projectsProvider.notifier);
+      final beforeDelete = projects.hostCatalogGeneration;
+      final removal = projects.remove('p1');
+      await blockedCache.started.future;
+      final duringDelete = projects.hostCatalogGeneration;
+      const known = [
+        KnownProject(projectId: 'p1', path: '/tmp/p1', running: false),
+      ];
+      expect(pending.read(), contains('p1'));
+      await projects.backfillFromHost(known, hostUuid: 'host');
+      expect(projectStore.list(), isEmpty);
+      // An empty catalog must not retire a guard while cleanup still owns it.
+      await projects.backfillFromHost(const [], hostUuid: 'host');
+      expect(pending.read(), contains('p1'));
+      blockedCache.release.complete();
+      await removal;
+      await projects.backfillFromHost(const [], hostUuid: 'host');
+      expect(pending.read(), isEmpty);
+      for (final generation in [beforeDelete, duringDelete]) {
+        await projects.backfillFromHost(
+          known,
+          hostUuid: 'host',
+          generation: generation,
+        );
+        expect(projectStore.list(), isEmpty);
+      }
+    },
+  );
 
   test(
     'remove purges cached sessions and the status cache file',
@@ -112,4 +171,28 @@ void main() {
       expect(cachedSessions.get('p2').map((s) => s.id), ['b']);
     },
   );
+}
+
+class _BlockingStatusCache implements ProjectStatusCache {
+  _BlockingStatusCache(this.delegate);
+  final ProjectStatusCache delegate;
+  final started = Completer<void>();
+  final release = Completer<void>();
+
+  @override
+  Future<void> clear(String id) async {
+    started.complete();
+    await release.future;
+    await delegate.clear(id);
+  }
+
+  @override
+  Future<void> clearAll() => delegate.clearAll();
+
+  @override
+  Future<ProjectStatus?> read(String id) => delegate.read(id);
+
+  @override
+  Future<void> write(String id, ProjectStatus status) =>
+      delegate.write(id, status);
 }
