@@ -93,6 +93,59 @@ describe("resolveProject", () => {
     expect("checkoutId" in resolved).toBe(false);
   });
 
+  // An isolated session started inside a linked worktree the user opened as its
+  // own project. `git worktree list` still names the primary, so folding there
+  // would open a project whose store has no record of this checkout — the wrong
+  // row, with nothing to focus. Observed live on 2026-09-08.
+  test("folds a managed checkout onto the project that owns it, not the primary", async () => {
+    await initRepo(dir);
+    const linked = join(dir, "linked checkout");
+    await git(dir, ["worktree", "add", "-b", "linked", linked]);
+    const canonicalLinked = canonical(linked);
+    const ownerId = computeProjectId(canonicalLinked);
+    const root = join(abDir, "wt", projectRootName(canonicalLinked, ownerId));
+    const checkoutPath = join(root, "managed-checkout");
+    await git(linked, ["worktree", "add", "-b", "managed", checkoutPath]);
+    const canonicalCheckoutPath = canonical(checkoutPath);
+
+    await new CheckoutStore(abDir, ownerId).put({
+      id: "checkout-2", projectId: ownerId, kind: "managed-worktree", path: canonicalCheckoutPath,
+      branch: "managed", baseRef: null, managed: true, sessionId: "session-2", createdAt: 0,
+    });
+
+    const resolved = await resolveProject(checkoutPath, runGit, { abDir });
+    expect(resolved).toEqual({
+      projectId: ownerId, repoPath: canonicalLinked, selectedPath: canonicalCheckoutPath,
+      isGitRepository: true, kind: "managed-checkout", checkoutId: "checkout-2",
+    });
+  });
+
+  // Every kind this resolver returns keeps projectId === computeProjectId(repoPath),
+  // and HostServer.open refuses a pair that breaks it. An owner whose folder is
+  // gone must therefore lose to the primary rather than name a repoPath that
+  // hashes to something else.
+  test("ignores an owning record whose project folder is no longer a worktree", async () => {
+    await initRepo(dir);
+    const repoPath = canonical(dir);
+    const projectId = computeProjectId(repoPath);
+    const root = join(abDir, "wt", projectRootName(repoPath, projectId));
+    const checkoutPath = join(root, "managed-checkout");
+    await git(dir, ["worktree", "add", "-b", "managed", checkoutPath]);
+    const canonicalCheckoutPath = canonical(checkoutPath);
+
+    const strandedId = computeProjectId(join(dir, "worktree removed since"));
+    await new CheckoutStore(abDir, strandedId).put({
+      id: "checkout-3", projectId: strandedId, kind: "managed-worktree", path: canonicalCheckoutPath,
+      branch: "managed", baseRef: null, managed: true, sessionId: "session-3", createdAt: 0,
+    });
+
+    const resolved = await resolveProject(checkoutPath, runGit, { abDir });
+    expect(resolved).toStrictEqual({
+      projectId, repoPath, selectedPath: canonicalCheckoutPath, isGitRepository: true,
+      kind: "managed-checkout",
+    });
+  });
+
   test("gives a user-made linked worktree outside wt/ its own identity", async () => {
     await initRepo(dir);
     const linked = join(dir, "linked checkout");

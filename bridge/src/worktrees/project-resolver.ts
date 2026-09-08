@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { readdir } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import { resolveAbDir } from "../antgrid-dir";
 import { computeProjectId } from "../project-id";
 import { CheckoutStore } from "./checkout-store";
@@ -81,17 +82,29 @@ export const runGit: GitRunner = async (args, cwd) => {
   }
 };
 
-/** The checkout record naming `selectedPath`, or undefined when none does —
- * including when the store cannot be read at all. A hand-edited or corrupt
- * checkouts.json must never turn a fold into a thrown error; it just means the
- * fold reports no checkoutId. */
-async function findCheckoutId(abDir: string, projectId: string, selectedPath: string): Promise<string | undefined> {
-  try {
-    const records = await new CheckoutStore(abDir, projectId).list();
-    return records.find((record) => canonicalPath(record.path) === selectedPath)?.id;
-  } catch {
-    return undefined;
+/** Every project whose store claims `selectedPath`, sorted by projectId so a
+ * path two stores both name resolves the same way on every machine. Empty when
+ * none does — including when the stores cannot be read at all. A hand-edited or
+ * corrupt checkouts.json must never turn a fold into a thrown error; it just
+ * means the fold reports no owner. */
+async function findCheckoutOwners(
+  abDir: string,
+  selectedPath: string,
+): Promise<Array<{ projectId: string; checkoutId: string }>> {
+  let projectIds: string[];
+  try { projectIds = await readdir(join(abDir, "agents")); }
+  catch { return []; }
+  const owners: Array<{ projectId: string; checkoutId: string }> = [];
+  for (const projectId of projectIds.sort()) {
+    try {
+      // `list()` drops rows whose projectId disagrees with the directory, so a
+      // row cannot name a project other than the one whose store holds it.
+      const records = await new CheckoutStore(abDir, projectId).list();
+      const match = records.find((record) => canonicalPath(record.path) === selectedPath);
+      if (match) owners.push({ projectId, checkoutId: match.id });
+    } catch { continue; }
   }
+  return owners;
 }
 
 /** Resolve a user-selected folder to its repository identity.
@@ -134,8 +147,8 @@ export async function resolveProject(
     // deepest containing entry is the one whose identity selectedPath
     // inherits; falling back to the primary covers the case where none
     // contains it (shouldn't happen, but must never invent a fresh identity).
-    const matchedPath = worktrees
-      .map((worktree) => canonicalPath(worktree.path))
+    const worktreePaths = worktrees.map((worktree) => canonicalPath(worktree.path));
+    const matchedPath = worktreePaths
       .filter((path) => path === selectedPath || pathBelow(path, selectedPath))
       .sort((a, b) => b.length - a.length)[0] ?? primaryPath;
 
@@ -150,18 +163,46 @@ export async function resolveProject(
     }
     const wtRoot = canonicalPath(resolve(abDir, WORKTREE_ROOT_DIR));
     if (pathBelow(wtRoot, matchedPath)) {
-      // A checkout Antgrid created for an isolated session: fold to the
-      // primary's identity, so an isolated session's tree/git/search all read
+      // A checkout Antgrid created for an isolated session: fold to the owning
+      // project's identity, so an isolated session's tree/git/search all read
       // the ONE project.
-      const projectId = computeProjectId(primaryPath);
-      const checkoutId = await findCheckoutId(abDir, projectId, selectedPath);
+      //
+      // The owner is whichever project the session was started FROM, which is
+      // not always the primary: start an isolated session inside a linked
+      // worktree the user made, and `git worktree list` still names the primary
+      // — so folding there opens a project whose store has no record of this
+      // checkout, i.e. the wrong row with no checkout to focus. Only the stores
+      // know, so ask them.
+      //
+      // Adopted only when the owner's own root is one of these worktrees:
+      // every kind this function returns keeps
+      // `projectId === computeProjectId(repoPath)`, and `HostServer.open`
+      // refuses a pair that breaks it. An owner whose folder is gone therefore
+      // falls back to the primary rather than naming a repoPath that hashes to
+      // something else.
+      const owners = await findCheckoutOwners(abDir, selectedPath);
+      const owned = owners
+        .map((owner) => ({
+          ...owner,
+          repoPath: worktreePaths.find((path) => computeProjectId(path) === owner.projectId),
+        }))
+        .find((owner) => owner.repoPath !== undefined);
+      if (owned?.repoPath !== undefined) {
+        return {
+          projectId: owned.projectId,
+          repoPath: owned.repoPath,
+          selectedPath,
+          isGitRepository: true,
+          kind: "managed-checkout",
+          checkoutId: owned.checkoutId,
+        };
+      }
       return {
-        projectId,
+        projectId: computeProjectId(primaryPath),
         repoPath: primaryPath,
         selectedPath,
         isGitRepository: true,
         kind: "managed-checkout",
-        ...(checkoutId !== undefined ? { checkoutId } : {}),
       };
     }
     // A worktree the USER made (outside Antgrid's own root): folding it to the
