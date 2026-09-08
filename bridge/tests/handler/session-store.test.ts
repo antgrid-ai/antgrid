@@ -196,6 +196,17 @@ describe("session record round-trip", () => {
     expect(loadHandlerSession(abDir, "proj", "t1")?.askAnswer?.blocking).toBeUndefined();
   });
 
+  it("round-trips staleAskIds, and a record written before it stays unset", () => {
+    // Read back into the decide prompt on the very next arm — a silent
+    // persist/reload regression here would surface only as prompt noise, not as
+    // a failing assertion anywhere else.
+    const abDir = tmpAbDir();
+    saveHandlerSession(abDir, "proj", record({ staleAskIds: true }));
+    expect(loadHandlerSession(abDir, "proj", "t1")?.staleAskIds).toBe(true);
+    saveHandlerSession(abDir, "proj", record());
+    expect(loadHandlerSession(abDir, "proj", "t1")?.staleAskIds).toBeUndefined();
+  });
+
   it("reads a record written before the ask fields existed as a stopped session", () => {
     // Every record on disk today is this one, and the absent reading has to be the
     // conservative one: no ask, nothing parked, a row the session stopped for.
@@ -278,6 +289,21 @@ describe("session record round-trip", () => {
     saveHandlerSession(abDir, "proj", record({ terminalId: "t2", goal: "two" }));
     expect(loadHandlerSession(abDir, "proj", "t1")?.goal).toBe("one");
     expect(loadHandlerSession(abDir, "proj", "t2")?.goal).toBe("two");
+  });
+});
+
+// A tripwire against a "tidy-up" `.max()` on this schema: the row is clipped at
+// MINT (engine.ts), never bounded here, because a bound here would make a longer
+// row already on disk fail HandlerSessionRecordSchema, and loadHandlerSession
+// answers a failed parse with null — the session comes back disarmed with an
+// empty backlog.
+describe("question and reasoning stay unbounded on the record", () => {
+  it("parses a 5000-char question and reasoning", () => {
+    const parsed = OpenEscalationSchema.safeParse({
+      escalationId: "e1", question: "q".repeat(5000), reasoning: "r".repeat(5000),
+      draftReply: "", urgency: "normal", at: 1,
+    });
+    expect(parsed.success).toBe(true);
   });
 });
 

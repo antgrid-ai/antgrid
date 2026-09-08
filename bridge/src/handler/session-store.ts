@@ -260,6 +260,12 @@ export const HandlerSessionRecordSchema = z.object({
     // and that is the ask case.
     blocking: z.literal(true).optional(),
   }).optional(),
+  // Whether the last ask raiseAsk raised named an `unblocked` set with nothing
+  // still open in it — see the field's own comment on ArmedSession (engine.ts).
+  // Persisted, unlike askRejections and floorWarnings: the row it describes is
+  // a real escalation on `escalations` above, not a rejection note, so it
+  // outlives a restart and the judge's feedback about it must too.
+  staleAskIds: z.boolean().optional(),
 });
 export type HandlerSessionRecord = z.infer<typeof HandlerSessionRecordSchema>;
 

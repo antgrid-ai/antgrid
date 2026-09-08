@@ -469,12 +469,39 @@ describe("the lens in the decide prompt", () => {
   it("tells the judge what each decision does and where a finished backlog ends", () => {
     const p = build();
     expect(p).toContain("`handle` sends `reply` to the agent and nothing to the user");
-    expect(p).toContain("never `reason`, never `reply`");
+    expect(p).toContain("reads your `reason` for an `escalate` as the \"Why\" behind the question, never `reply`");
     expect(p).toContain("close the last open item on a `handle` or a `continue`, the session ends there");
     expect(p).toContain("recorded on every decision, an `escalate` included");
     // Facts about the harness, not lens material: printed in the rules, above LENS.
     const lensed = build("pm");
     expect(at(lensed, "What each decision does after this pass")).toBeLessThan(at(lensed, "LENS"));
+  });
+
+  // A live card carried the same four facts three times: notify.body and reason
+  // both opened with them, and the backlog rendered beneath the card carried them
+  // a third time. The two required free-text fields had no stated division of
+  // labour, which is why the model wrote everything into both.
+  it("gives the notify body and the reason disjoint jobs", () => {
+    const p = build();
+    const line = p.split("\n").find((l) => l.includes("must not repeat each other"))!;
+    expect(line).toContain("`notify.body`");
+    expect(line).toContain("`reason`");
+    expect(line).toContain("FIRST sentence");
+    expect(line).toContain("restates item status");
+    expect(line).toContain("handle` or a `continue` nobody is being woken");
+    expect(p.split("must not repeat each other").length - 1).toBe(1);
+  });
+
+  // The two rules govern the same field and must not tell the judge to fill it
+  // two different ways: "the question itself, nothing else" would otherwise
+  // contradict the choice-forwarding rule's instruction to put options and
+  // costs there.
+  it("does not tell the judge notify.body holds nothing else when the choice rule says otherwise", () => {
+    const p = build();
+    const jobsLine = p.split("\n").find((l) => l.includes("must not repeat each other"))!;
+    expect(jobsLine).not.toContain("nothing else");
+    const choiceLine = p.split("\n").find((l) => l.includes("Put them in `notify.body`"))!;
+    expect(choiceLine).toContain("carrying the options, their costs and the one you would take");
   });
 
   // Ordering is the whole guard: printed above the rules a lens would read as one
@@ -761,9 +788,19 @@ describe("the third move in the decide prompt", () => {
     expect(contract.slice(contract.indexOf('"ask":'))).not.toContain("draftReply");
   });
 
+  // The contract line is the one place a judge reads what each field is FOR in
+  // one glance; a bare "..." on `reason` and `notify.body` is what let a model
+  // fill both with the same four facts.
+  it("describes reason and notify.body on the contract line, not just ask", () => {
+    const contract = build().split("\n").at(-1)!;
+    expect(contract).toContain('"reason":"why you decided this, for the record"');
+    expect(contract).toContain('"body":"the question the user must answer, its first sentence first"');
+    expect(contract).toContain('"draftReply":"the reply to send if they approve"');
+  });
+
   // The same absent-vs-empty discipline the floor warnings and the refused
   // transitions take: an empty list is a pass with no standing question.
-  it("renders the standing-question section only when one is standing", () => {
+  it("renders the open-ask section only when one is still open", () => {
     for (const p of [build(), build({ openAsks: [] })]) {
       expect(p).not.toContain("A QUESTION YOU HAVE ALREADY PUT TO THE USER");
     }
@@ -865,17 +902,78 @@ describe("the third move in the decide prompt", () => {
     const p = build({
       role: "pm",
       evidenceRejections: ['"i1" — done needs evidence'],
+      standingQuestions: ["an older, now-promoted question"],
       openAsks: [QUESTION],
       askRejections: ['"an older question" — a question of yours is still unanswered'],
       askAnswer: ANSWER,
     });
     expect(at(p, "LENS")).toBeLessThan(at(p, "THE HARNESS REFUSED"));
     expect(at(p, "THE HARNESS REFUSED"))
+      .toBeLessThan(at(p, "A QUESTION OF YOURS THE USER HAS NOT ANSWERED"));
+    expect(at(p, "A QUESTION OF YOURS THE USER HAS NOT ANSWERED"))
       .toBeLessThan(at(p, "A QUESTION YOU HAVE ALREADY PUT TO THE USER"));
     expect(at(p, "A QUESTION YOU HAVE ALREADY PUT TO THE USER"))
       .toBeLessThan(at(p, "QUESTIONS THE HARNESS DID NOT RAISE LAST PASS"));
     expect(at(p, "QUESTIONS THE HARNESS DID NOT RAISE LAST PASS"))
       .toBeLessThan(at(p, "THE USER HAS ANSWERED A QUESTION YOU PUT TO THEM"));
+  });
+
+  // The row is raised anyway (see raiseAsk in engine.ts) rather than discarded,
+  // so a promoted ask is a STANDING question the judge itself asked — a
+  // different fact from openAsks above, which stops being true the instant
+  // reconcileAsks promotes the row.
+  it("renders the standing-question section only when a question is standing", () => {
+    for (const p of [build(), build({ standingQuestions: [] })]) {
+      expect(p).not.toContain("A QUESTION OF YOURS THE USER HAS NOT ANSWERED");
+    }
+    const p = build({ standingQuestions: [QUESTION] });
+    expect(p).toContain("A QUESTION OF YOURS THE USER HAS NOT ANSWERED");
+    expect(p).toContain(`- ${QUESTION}`);
+    expect(p).toContain("Nothing has been sent to the agent since, and nothing will be until you send it.");
+  });
+
+  // `agentWorking` distinguishes a promoted ask whose reply already reached the
+  // agent from one the harness has heard nothing further about — a claim the
+  // section used to print unconditionally on the false side, which was wrong the
+  // moment the judge itself sent a further reply while the row stood. The true
+  // arm fires on the pass the agent's own turn_end produces, which is the far
+  // commoner case, so it must say the reply already landed rather than claim the
+  // agent is still mid-turn on it.
+  it("says the reply reached the agent when a standing question rides one that did", () => {
+    const idle = build({ standingQuestions: [QUESTION] });
+    expect(idle).toContain("Nothing has been sent to the agent since, and nothing will be until you send it.");
+    expect(idle).not.toContain("reached the agent");
+    const working = build({ standingQuestions: [QUESTION], agentWorking: true });
+    expect(working).toContain("The reply that carried it reached the agent");
+    expect(working).not.toContain("Nothing has been sent to the agent since");
+  });
+
+  it("tells the judge when its ask ids were stale", () => {
+    expect(build()).not.toContain("named no backlog item that was still open");
+    const p = build({ staleAskIds: true });
+    expect(p).toContain("named no backlog item that was still open");
+    expect(p).toContain("The question was raised anyway");
+  });
+});
+
+// The status vocabulary is what tells the judge which moves exist. `queued`
+// used to promise an exit from `blocked` that a DERIVED block does not have —
+// propagateBlocked re-derives every block after applyTransitions in the same
+// pass, so the item just came straight back and nothing said the move failed.
+describe("the status vocabulary for a derived block", () => {
+  const p = buildDecidePrompt({ instructions: [GOAL], backlogText: BACKLOG_TEXT, context: "ctx" });
+
+  it("never offers queued as a way to lift a block derived from a dependency", () => {
+    expect(p).not.toContain("use it to revive a blocked item");
+    expect(p).toContain("comes straight back blocked if you set it `queued`");
+  });
+
+  it("still offers queued to revive a block the judge set on its own", () => {
+    expect(p).toContain("If the item's own precondition is what you blocked it on, and that precondition now holds, `queued` revives it as normal");
+  });
+
+  it("still allows the ordinary close: blocked -> done on a citation", () => {
+    expect(p).toContain("if the agent went ahead and finished it anyway, report it `done`");
   });
 });
 

@@ -218,6 +218,21 @@ export function buildDecidePrompt(opts: {
   // never cached: each section asserts a state that the very next event can end.
   openAsks?: string[];
   askRejections?: string[];
+  // A promoted ask: still standing, but no longer counted among openAsks above
+  // (reconcileAsks promotes one by clearing the very flag openAsks filters on).
+  // Restricted by the caller to rows raiseAsk minted (`kind === "reply"`), so
+  // every entry here was genuinely marked "the work can go on without this" and
+  // no longer is — an ordinary escalation was never so marked.
+  standingQuestions?: string[];
+  // Whether the agent is mid-turn on the reply that carried a promoted ask, so
+  // the section below can say which it is instead of asserting one. False (or
+  // absent) reads as "nothing further is coming from the agent side" — true of
+  // an ordinary standing escalate, and of a promoted ask once its turn ends.
+  agentWorking?: boolean;
+  // Whether the last ask this session raised named `unblocked` ids none of
+  // which were still open — raised anyway (see raiseAsk in engine.ts), so this
+  // is the only way the judge learns the habit cost it nothing.
+  staleAskIds?: boolean;
   // The user's answer to a standing question, parked until this pass reads it.
   // Projected down to what the judge can act on — the escalationId is routing and
   // the timestamp is bookkeeping, and neither belongs in a prompt.
@@ -264,7 +279,15 @@ export function buildDecidePrompt(opts: {
     "REPORTING PROGRESS:",
     "- Report every item whose state changed as one entry in `transitions`.",
     "- Use ONLY the ids listed above, copied exactly. Any other id is discarded, and you cannot create an item — if the agent did something the backlog does not cover, describe it in `reason` instead.",
-    "- Statuses: `queued` (waiting its turn — use it to revive a blocked item whose precondition is now met), `active` (being worked on now), `done` (finished), `blocked` (a precondition or dependency is unmet), `skipped` (no longer applicable — its condition turned out false, or a later item supersedes it), `failed` (attempted and could not be completed).",
+    "- Statuses: `queued` (waiting its turn), `active` (being worked on now), `done` (finished), `blocked` (a precondition or dependency is unmet), `skipped` (no longer applicable — its condition turned out false, or a later item supersedes it), `failed` (attempted and could not be completed).",
+    // Only a block DERIVED from a dependency is re-derived after every pass —
+    // propagateBlocked (backlog.ts) re-blocks an item iff a `dependsOn` target is
+    // itself blocked or failed, so `queued` on that shape is undone in the same
+    // pass with nothing anywhere saying the move failed. A block the judge wrote
+    // on its own — the item has no such dependency, or the dependency itself is
+    // no longer blocked — has no re-deriver and `queued` sticks, which is exactly
+    // the revival this instruction exists to allow.
+    "- An item blocked BECAUSE another item it depends on (see its \"(depends on: …)\" line) is itself blocked or failed comes straight back blocked if you set it `queued` — that block is re-derived after every pass, and nothing tells you the move failed. If the item's own precondition is what you blocked it on, and that precondition now holds, `queued` revives it as normal. A blocked item is not frozen either way: if the agent went ahead and finished it anyway, report it `done` with evidence in the ordinary way and the block goes with it. If a dependency itself looks wrong — the work plainly did not need to wait — say so in `reason`; only the user can remove one.",
     "- Every transition to `done`, `skipped` or `failed` MUST carry `evidence`: a short verbatim quote copied character-for-character out of the RECENT CONTEXT block below, at least a phrase long. The harness searches that block for your quote — a paraphrase, a summary, or a quote from anywhere else is discarded and the item stays open. Never quote the item's own wording back; that says nothing about what happened.",
     "- If an item names a slash command, `done` additionally requires a quote showing THAT command being invoked. A quote about some other, similar step does not close it, however real the quote is.",
     "- Report `done` only on evidence the work actually happened (test output, exit codes, a diff), never on intent or belief. `outcome` is your one-line summary for the user and never substitutes for evidence.",
@@ -308,7 +331,13 @@ export function buildDecidePrompt(opts: {
     // escalate" closed the last item, and the session wrapped up over a question
     // the judge believed it had raised. Nothing here is a rule about when to
     // choose; it is what each choice does once made.
-    "- What each decision does after this pass, so that `reason` and `reply` are never asked to do a decision's work: `handle` sends `reply` to the agent and nothing to the user. `continue` sends nothing to anyone. `escalate` sends the agent nothing, wakes the user with `notify`, and holds the session for their answer. The user reads an `escalate`, an `ask`, and the wrap-up summary described next — never `reason`, never `reply`. When `transitions` close the last open item on a `handle` or a `continue`, the session ends there: the user gets a summary of the item outcomes and nothing else, and no further pass runs.",
+    "- What each decision does after this pass, so that `reason` and `reply` are never asked to do a decision's work: `handle` sends `reply` to the agent and nothing to the user. `continue` sends nothing to anyone. `escalate` sends the agent nothing, wakes the user with `notify`, and holds the session for their answer. The user reads an `escalate`, an `ask`, and the wrap-up summary described next — and reads your `reason` for an `escalate` as the \"Why\" behind the question, never `reply`. When `transitions` close the last open item on a `handle` or a `continue`, the session ends there: the user gets a summary of the item outcomes and nothing else, and no further pass runs.",
+    // Two required free-text fields with no stated division of labour is why one
+    // live card carried the same four facts three times: the model filled both, and
+    // the backlog the app renders beneath the card carried them again. The jobs are
+    // disjoint here so neither has to be inferred, and the length is stated because
+    // the harness cuts both at 400 characters.
+    "- On an `escalate`, `notify.body` and `reason` are read by different people and must not repeat each other. `notify.body` is what the USER reads on the card that stops the session: the question itself, and nothing the user does not need in order to answer it. Its FIRST sentence is the question; where the choice-forwarding rule below applies, the options and their costs follow it. `reason` is the record of WHY you are asking — shown to them behind a \"Why\" disclosure and read afterwards by whoever audits the session — never the question again, and never a status report. Neither of them restates item status: the app renders the backlog directly beneath your question, so \"item 2 is blocked, item 3 is waiting on it\" is already on the screen, and reading it back is noise the user has to get past before they can find what you are asking. Keep each under 400 characters; past that the harness cuts them, and the end of whichever one runs long — your question, or your reasoning — is what is lost. On a `handle` or a `continue` nobody is being woken, and `reason` is the one-line verdict the feed prints — say what you decided and why, briefly.",
     // Printed directly under the rule that prices the two resources, because it is
     // the only place the price is a live number rather than a standing asymmetry.
     // Tested with `!== undefined` and never for truthiness or `?.length`: the two
@@ -331,7 +360,7 @@ export function buildDecidePrompt(opts: {
     // the user is the only one who can answer and the session need not stop.
     "- There is a third move between answering the agent and waking the user, and it is the only one that does both at once: on a `handle`, fill `ask` with a question for the USER while `reply` keeps the agent working. Use it only when both halves hold — the question is one only the user can settle (intent, authorization, preference), AND there is work already on the backlog that their answer does not gate. Name that work in `ask.unblocked` as backlog ids copied exactly from the list above. If everything left waits on the answer there is no such work, and this was an escalation. `ask.options` is optional and holds 2 to 4 things the USER may pick between, each with a `cost` saying what picking it commits to; at most one may carry `recommended`. A tap on one sends the AGENT nothing — the pick comes back to you, and passing it on is yours to do.",
     "- `ask` is read on a `handle` alone. On `continue` or `escalate` it is discarded, because neither of those sends the agent anything: the session would sit behind a question you had told the user was not holding it up, with no further event arriving to raise it again.",
-    "- One question at a time. While a question of yours is unanswered it is listed for you below and a second `ask` is discarded rather than queued, so make the one you send the one you most need answered and do not reword it. An `ask` beside a reply that only marks time is worse than the escalation it avoided: the user reads a question over a session going nowhere, and nothing in the harness can check your claim that the rest of the work is independent except the ids you named.",
+    "- One question at a time. While a question of yours is still open it is listed for you below and a second `ask` is discarded rather than queued, so make the one you send the one you most need answered. The exact same question is discarded too even once it starts standing further down — never repeat or reword one just because it moved. An `ask` beside a reply that only marks time is worse than the escalation it avoided: the user reads a question over a session going nowhere, and nothing in the harness can check your claim that the rest of the work is independent except the ids you named.",
     // The half a judge would otherwise have to infer from the absence of a rule.
     // Nothing in the harness types an answer at the agent — answerAsk and the
     // ask-answer branch of instruct both park it for the next prompt and stop
@@ -403,6 +432,23 @@ export function buildDecidePrompt(opts: {
         "TRANSITIONS THE HARNESS REFUSED LAST PASS — those items are still open:",
         ...opts.evidenceRejections.map((r) => `- ${r}`),
         "Cite differently or leave the item open; the same quote gets the same answer.",
+      ]
+      : []),
+    ...(opts.standingQuestions?.length
+      ? [
+        "",
+        "A QUESTION OF YOURS THE USER HAS NOT ANSWERED — it is on their screen now, and the work is not going on without it:",
+        ...opts.standingQuestions.map((q) => `- ${q}`),
+        opts.agentWorking
+          ? "The reply that carried it reached the agent, and this pass is what the agent produced in answer — that is why you are seeing this pass at all."
+          : "Nothing has been sent to the agent since, and nothing will be until you send it.",
+        "Do not ask it again, do not reword it, and do not escalate the same thing a second time: the user is already looking at it and a second copy is you asking them to answer twice. If what you now hold makes it moot, say so in `reason` and let the work continue — the row is retired by the user's own line, never by you.",
+      ]
+      : []),
+    ...(opts.staleAskIds
+      ? [
+        "",
+        "The ids in your last `ask.unblocked` named no backlog item that was still open. The question was raised anyway, but it stops being a question the work goes on without the moment the harness notices — so name ids that are genuinely still running, or accept that the question will hold the session.",
       ]
       : []),
     // The `?.length` idiom, like the two sections above it: an empty list is a
@@ -503,7 +549,7 @@ export function buildDecidePrompt(opts: {
     // schema's: a contract line offering one would have a judge write it, and a
     // judge-authored draft on the row is the one artifact a reply composer could
     // prefill into the channel that mints authorization.
-    '{"decision":"continue|handle|escalate","confidence":0.0,"reason":"...","reply":"(when handle, and only if action is omitted) text to send the agent","action":{"kind":"slash_command|none","value":"/verb <args>"},"notify":{"title":"...","body":"...","draftReply":"...","urgency":"normal|high"},"ask":{"question":"...","reasoning":"...","unblocked":["backlog id the answer does not gate"],"options":[{"label":"the answer as the user would give it","cost":"what picking this commits to","recommended":true}]},"transitions":[{"id":"...","status":"queued|active|done|blocked|skipped|failed","evidence":"verbatim quote","outcome":"..."}]}',
+    '{"decision":"continue|handle|escalate","confidence":0.0,"reason":"why you decided this, for the record","reply":"(when handle, and only if action is omitted) text to send the agent","action":{"kind":"slash_command|none","value":"/verb <args>"},"notify":{"title":"...","body":"the question the user must answer, its first sentence first","draftReply":"the reply to send if they approve","urgency":"normal|high"},"ask":{"question":"...","reasoning":"...","unblocked":["backlog id the answer does not gate"],"options":[{"label":"the answer as the user would give it","cost":"what picking this commits to","recommended":true}]},"transitions":[{"id":"...","status":"queued|active|done|blocked|skipped|failed","evidence":"verbatim quote","outcome":"..."}]}',
   ].join("\n");
 }
 

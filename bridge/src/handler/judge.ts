@@ -119,6 +119,9 @@ export async function runDecision(opts: {
   replyBudget?: number;
   openAsks?: string[];
   askRejections?: string[];
+  standingQuestions?: string[];
+  agentWorking?: boolean;
+  staleAskIds?: boolean;
   askAnswer?: { question: string; answer: string; tapped: boolean; blocking?: true };
   agentTool?: string;
   commands?: CapCommand[];
@@ -136,6 +139,7 @@ export async function runDecision(opts: {
       floorWarnings: opts.floorWarnings, evidenceRejections: opts.evidenceRejections,
       replyBudget: opts.replyBudget,
       openAsks: opts.openAsks, askRejections: opts.askRejections, askAnswer: opts.askAnswer,
+      standingQuestions: opts.standingQuestions, agentWorking: opts.agentWorking, staleAskIds: opts.staleAskIds,
       agentTool: opts.agentTool, commands: opts.commands,
       // The retry legs below append to this prompt rather than rebuilding one,
       // so the lens and the brief ride through them with nothing further to do.
