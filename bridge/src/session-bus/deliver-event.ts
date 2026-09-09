@@ -4,8 +4,8 @@
 // One place, and a pure one, because the mapping is where the two halves of the
 // protocol meet: the coordinator decides what ARRIVED, the templates decide how
 // a delivery READS, and this decides which arrivals an agent is told about at
-// all. An event with no line here is not lost — it is on the task record, where
-// `antgrid_get_task` reads it — it simply does not interrupt.
+// all. An arrival with no line here is not lost — the message log still holds
+// it — it simply does not interrupt.
 //
 // Two arrivals, not one. A bus event comes off the wire from the other machine;
 // a JOIN is written by this machine's own app, because no bridge can reach
@@ -13,35 +13,18 @@
 // produce the same kind of line and both go through the same queue.
 //
 // Nothing here injects or persists: it returns a line for the queue, which is
-// what makes the "wake for a completed task survives a restart" guarantee a
-// property of one module rather than of this mapping.
+// what makes the "a line survives a restart" guarantee a property of one module
+// rather than of this mapping.
 
-import type { SessionMemberOf, SessionMemberRef, BusEnvelope, BusPart } from "../protocol";
+import type { SessionMemberRef, BusEnvelope, BusPart } from "../protocol";
 import { sha256Hex } from "./artifact-store";
-import { briefScope } from "./brief-store";
 import type { SessionBusEvent } from "./coordinator";
 import type { QueuedLine } from "./delivery-queue";
-import {
-  renderAnswer,
-  renderCancel,
-  renderJoined,
-  renderNote,
-  renderRaised,
-  renderTask,
-  renderWake,
-  type TaskArtifactHandle,
-} from "./delivery";
-import { isTerminal } from "./task-store";
-import { takeAskedQuestion } from "./api";
+import { renderJoined, type TaskArtifactHandle } from "./delivery";
 
 export interface EventDeliveryDeps {
   abDir: string;
   projectId: string;
-  /** The lead this session was created under, from its own membership row. A
-   *  peer with no row cannot be delivered to: every peer-facing template names
-   *  the lead, and inventing one would put a fabricated sender on an
-   *  instruction. */
-  memberOf: (sessionId: string) => SessionMemberOf | undefined;
   now: () => number;
 }
 
@@ -65,183 +48,17 @@ function envelopeOf(event: SessionBusEvent): BusEnvelope | null {
 /**
  * The line one inbound event owes the local agent, or null when it owes none.
  *
- * The four that do are the four that change what the agent should be doing: work
- * arriving, work it handed out finishing, an answer it was blocked on, and work
- * it was told to stop. Everything else — a finding, an expiry, an ack — is
- * recorded and readable, and interrupting a turn for it would spend the agent's
- * attention on something no decision waits on.
- *
- * The fifth is a finding on a task that is already terminal, and it is the
- * exception that proves the rule: a finding waits to be read because the task's
- * terminal state is still coming and will carry it, which is not true once that
- * state has arrived.
+ * Today it owes none. Every arrival is a message, and a message is read when the
+ * target chooses (`docs/session-messaging.md` §7.1); rendering one into a line
+ * here would interrupt a turn on the sender's say-so, with none of §7.4's budget
+ * in front of it. The mapping stays a function, and the part reductions above
+ * stay with it, so the notify verb has one place to arrive at and rendering
+ * stays outside the coordinator's fold.
  */
 export function lineForEvent(
   event: SessionBusEvent,
   deps: EventDeliveryDeps,
 ): Omit<QueuedLine, "queuedAt"> | null {
-  const envelope = envelopeOf(event);
-
-  if (event.kind === "assigned") {
-    // A raise arrives as an `assigned` too — same frame, same envelope — and is
-    // told apart by the ROLE the store gave the record: this session holds
-    // `lead` on a task it did not assign. Without this branch the lead is told
-    // nothing at all, since `memberOf` is empty for a lead and the peer-facing
-    // path below returns null on it.
-    if (event.task.role === "lead") {
-      if (!envelope) return null;
-      return {
-        id: envelope.messageId,
-        sessionId: event.sessionId,
-        kind: "raised",
-        taskId: event.task.taskId,
-        taskState: event.task.state,
-        text: renderRaised({
-          peer: event.task.peer,
-          taskId: event.task.taskId,
-          summary: envelope.metadata.summary,
-          instruction: textOf(envelope.parts),
-          artifacts: artifactsOf(envelope.parts),
-          ...(envelope.metadata.unexpected === undefined
-            ? {}
-            : { unexpected: envelope.metadata.unexpected }),
-        }),
-      };
-    }
-    const lead = deps.memberOf(event.sessionId);
-    if (!lead || !envelope) return null;
-    return {
-      id: envelope.messageId,
-      sessionId: event.sessionId,
-      kind: "task",
-      taskId: event.task.taskId,
-      taskState: event.task.state,
-      text: renderTask({
-        lead,
-        taskId: event.task.taskId,
-        summary: envelope.metadata.summary,
-        instruction: textOf(envelope.parts),
-        scope: briefScope(deps.abDir, deps.projectId, event.sessionId),
-        artifacts: artifactsOf(envelope.parts),
-        ...(envelope.metadata.unexpected === undefined
-          ? {}
-          : { unexpected: envelope.metadata.unexpected }),
-      }),
-    };
-  }
-
-  if (event.kind === "transitioned" && envelope) {
-    // The task's own role, not the session's: a session that leads one exchange
-    // and works another gets a wake for the first and an answer for the second.
-    if (event.task.role === "lead") {
-      if (event.state !== "completed" && event.state !== "failed" && event.state !== "input-required") {
-        // `working` from a peer is progress, not news — the lead asked for it to
-        // start. Waking a lead for it costs a turn and tells it nothing it did
-        // not already assume.
-        return null;
-      }
-      return {
-        id: envelope.messageId,
-        sessionId: event.sessionId,
-        kind: "wake",
-        taskId: event.task.taskId,
-        taskState: event.task.state,
-        text: renderWake({
-          peer: event.task.peer,
-          taskId: event.task.taskId,
-          state: event.state,
-          ...(event.task.waitingOn === undefined ? {} : { waitingOn: event.task.waitingOn }),
-          summary: envelope.metadata.summary,
-          result: textOf(envelope.parts),
-          ...(envelope.metadata.unexpected === undefined
-            ? {}
-            : { unexpected: envelope.metadata.unexpected }),
-          artifacts: artifactsOf(envelope.parts),
-        }),
-      };
-    }
-
-    // A peer's task moving back to `working` is how a lead's answer travels:
-    // there is no answer verb on the wire, and `input-required -> working` is
-    // the transition only an answer can cause (spec 5.3).
-    if (event.state !== "working") return null;
-    const lead = deps.memberOf(event.sessionId);
-    if (!lead) return null;
-    const question = takeAskedQuestion(
-      deps.abDir,
-      deps.projectId,
-      event.sessionId,
-      event.task.taskId,
-      deps.now(),
-    );
-    return {
-      id: envelope.messageId,
-      sessionId: event.sessionId,
-      kind: "answer",
-      taskId: event.task.taskId,
-      taskState: event.task.state,
-      text: renderAnswer({
-        lead,
-        taskId: event.task.taskId,
-        // The stored ask is gone after a restart or a lapsed row, and the answer
-        // still has to read on its own — so say the question is missing rather
-        // than render an answer to nothing.
-        question: question ?? "(the question this session asked is no longer on record)",
-        answer: textOf(envelope.parts),
-        scope: briefScope(deps.abDir, deps.projectId, event.sessionId),
-      }),
-    };
-  }
-
-  if (event.kind === "canceled") {
-    const lead = deps.memberOf(event.sessionId);
-    // Only the side WORKING the task is told to stop; the lead is the one that
-    // asked for the cancel and has already been answered by its own tool call.
-    if (!lead || event.task.role !== "peer") return null;
-    return {
-      // A task reaches `canceled` once and never leaves it, so the task id alone
-      // is a stable key for the one line a cancel can ever produce.
-      id: `${event.task.taskId}:canceled`,
-      sessionId: event.sessionId,
-      kind: "cancel",
-      taskId: event.task.taskId,
-      taskState: event.task.state,
-      text: renderCancel({ lead, taskId: event.task.taskId, reason: event.reason }),
-    };
-  }
-
-  // A peer's finding on work that is already over. Every other finding is
-  // recorded and left to be read (5.2) — the terminal transition is what wakes,
-  // and it carries the findings with it. A task that has already reached a
-  // terminal state has spent that wake, so this is the only delivery a peer's
-  // answer to a cancellation can ever get; without it the reply lands on disk
-  // and is found only by someone who thought to re-read a closed task.
-  if (event.kind === "message" && envelope && event.task && isTerminal(event.task.state)) {
-    // The lead's side only. A peer is told a task stopped by its own cancel
-    // line, and no lead verb sends a note back for this to mirror.
-    if (event.task.role !== "lead") return null;
-    return {
-      id: envelope.messageId,
-      sessionId: event.sessionId,
-      kind: "note",
-      taskId: event.task.taskId,
-      taskState: event.task.state,
-      text: renderNote({
-        peer: event.task.peer,
-        taskId: event.task.taskId,
-        // Narrowed by isTerminal above; the three terminal states are exactly
-        // the ones the template names.
-        state: event.task.state as "completed" | "failed" | "canceled",
-        summary: envelope.metadata.summary,
-        text: textOf(envelope.parts),
-        ...(envelope.metadata.unexpected === undefined
-          ? {}
-          : { unexpected: envelope.metadata.unexpected }),
-        artifacts: artifactsOf(envelope.parts),
-      }),
-    };
-  }
-
   return null;
 }
 

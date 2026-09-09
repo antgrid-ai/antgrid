@@ -1114,7 +1114,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       line = lineForEvent(event, {
         abDir,
         projectId: project.id,
-        memberOf: (id) => sessions?.memberOfFor(id),
         now: Date.now,
       });
     } catch (err) {

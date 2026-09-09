@@ -1,7 +1,8 @@
-// Turn-boundary delivery (spec 5.2). Two guarantees are load-bearing and both
-// fail silently if broken: a line never lands mid-turn, and a line never
-// vanishes — the wake for a completed task is the ONLY thing that tells a lead
-// its peer finished, and D11 forbids inferring that from an absence.
+// Turn-boundary delivery (`docs/session-messaging.md` §7.2). Two guarantees are
+// load-bearing and both fail silently if broken: a line never lands mid-turn,
+// and a line never vanishes — the sending machine is told a message left the
+// moment it does, so a line dropped here is one nothing on either side can
+// notice is missing.
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,13 +20,7 @@ import {
   saveDeliveries,
   type QueuedLine,
 } from "../src/session-bus/delivery-queue";
-import { lineForEvent } from "../src/session-bus/deliver-event";
 import { UNATTRIBUTED_TURN, turnOpenFor } from "../src/work-status";
-import { renderAnswer, renderCancel, renderNote, renderRaised, renderTask, renderWake } from "../src/session-bus/delivery";
-import { briefScope, saveBrief } from "../src/session-bus/brief-store";
-import type { SessionBusEvent } from "../src/session-bus/coordinator";
-import type { TaskRecord } from "../src/session-bus/task-store";
-import type { BusEnvelope, BusPart, SessionMemberOf, SessionMemberRef } from "../src/protocol";
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -40,57 +35,6 @@ afterAll(() => {
 
 const PROJECT = "p1";
 const SESSION = "s1";
-
-const LEAD: SessionMemberOf = {
-  machineId: "m1",
-  projectId: "pl",
-  sessionId: "lead-1",
-  sessionName: "lead session",
-  role: "lead",
-  joinedAt: 1,
-  state: "active",
-};
-
-const PEER_REF: SessionMemberRef = {
-  machineId: "m2",
-  projectId: "pp",
-  sessionId: "peer-1",
-  sessionName: "peer session",
-};
-
-function envelope(over: Partial<BusEnvelope> = {}): BusEnvelope {
-  const parts: BusPart[] = [{ kind: "text", text: "the body" }];
-  return {
-    messageId: "msg-1",
-    taskId: "t-1",
-    contextId: "ctx-1",
-    parts,
-    metadata: { peer: PEER_REF, summary: "a summary", timestamp: 10 },
-    ...over,
-  };
-}
-
-function task(over: Partial<TaskRecord> = {}): TaskRecord {
-  return {
-    taskId: "t-1",
-    contextId: "ctx-1",
-    role: "peer",
-    peer: PEER_REF,
-    state: "submitted",
-    title: "a summary",
-    appliedSeq: 0,
-    nextSeq: 1,
-    ackedSeq: 0,
-    acked: false,
-    outbox: [],
-    findings: [],
-    artifactIds: [],
-    repairs: 0,
-    createdAt: 1,
-    updatedAt: 1,
-    ...over,
-  };
-}
 
 function line(over: Partial<QueuedLine> = {}): Omit<QueuedLine, "queuedAt"> {
   return { id: "l-1", sessionId: SESSION, kind: "task", text: "a line", ...over };
@@ -139,9 +83,10 @@ describe("the delivery queue folds", () => {
       s = enqueueLine(s, { ...line({ id: `w-${i}`, kind: "wake" }), queuedAt: i + 1 });
     }
     expect(s.lines).toHaveLength(MAX_QUEUED_LINES);
-    // The cap is one project's whole queue, so a chatty session's wakes reach it
-    // first. Evicting by age alone would drop the assign at the head, and the
-    // coordinator acked it before it ever got here — nothing retries it.
+    // The cap is one project's whole queue, so the evictable kinds reach it
+    // first. Evicting by age alone would drop whatever sits at the head, and
+    // nothing re-sends a line this queue accepted: the sending machine was told
+    // it left as soon as it did.
     expect(s.lines[0]!.id).toBe("assign");
     expect(s.lines.map((l) => l.id)).not.toContain("w-0");
   });
@@ -295,275 +240,5 @@ describe("turn-boundary delivery", () => {
     h.queue.queue(line({ id: "b", sessionId: "other" }));
     h.queue.forget(SESSION);
     expect(h.queue.lines.map((l) => l.id)).toEqual(["b"]);
-  });
-});
-
-describe("which events become a line, and what it says", () => {
-  const deps = (abDir: string) => ({
-    abDir,
-    projectId: PROJECT,
-    memberOf: (id: string) => (id === SESSION ? LEAD : undefined),
-    now: () => 2_000,
-  });
-
-  test("an assign becomes the task template, keyed by the envelope's message id", () => {
-    const abDir = tempDir();
-    saveBrief(abDir, PROJECT, SESSION, { lead: LEAD, brief: "Owns: the codec.", now: 1 });
-    const event: SessionBusEvent = {
-      kind: "assigned",
-      sessionId: SESSION,
-      task: task(),
-      envelope: envelope(),
-    };
-    const l = lineForEvent(event, deps(abDir));
-    expect(l).toMatchObject({ id: "msg-1", sessionId: SESSION, kind: "task" });
-    expect(l!.text).toBe(renderTask({
-      lead: LEAD,
-      taskId: "t-1",
-      summary: "a summary",
-      instruction: "the body",
-      scope: briefScope(abDir, PROJECT, SESSION),
-      artifacts: [],
-    }));
-  });
-
-  // The other half of `assigned`, and the one with no `memberOf` behind it: a
-  // lead has no membership row, so the peer-facing branch answers null for it and
-  // the lead would be told nothing about a task it is now waiting on.
-  test("a raise reaching the lead becomes the raised template, not the task one", () => {
-    const abDir = tempDir();
-    const event: SessionBusEvent = {
-      kind: "assigned",
-      sessionId: SESSION,
-      task: task({ role: "lead", origin: "peer" }),
-      envelope: envelope({ messageId: "msg-raised" }),
-    };
-    const l = lineForEvent(event, deps(abDir));
-    expect(l).toMatchObject({ id: "msg-raised", sessionId: SESSION, kind: "raised" });
-    expect(l!.text).toBe(renderRaised({
-      peer: PEER_REF,
-      taskId: "t-1",
-      summary: "a summary",
-      instruction: "the body",
-      artifacts: [],
-    }));
-    // It must not read as an assignment: the peer is already working it.
-    expect(l!.text).not.toContain("antgrid_report_complete");
-    expect(l!.text).toContain("antgrid_cancel_task");
-  });
-
-  test("a completed task wakes its LEAD, rendered by renderWake", () => {
-    const abDir = tempDir();
-    const event: SessionBusEvent = {
-      kind: "transitioned",
-      sessionId: SESSION,
-      task: task({ role: "lead", state: "completed" }),
-      state: "completed",
-      envelope: envelope({ messageId: "msg-done" }),
-    };
-    const l = lineForEvent(event, deps(abDir));
-    expect(l).toMatchObject({ id: "msg-done", sessionId: SESSION, kind: "wake" });
-    // The envelope's text part rides along: the summary is a title, and the card
-    // is the only place the lead reads the result while it can still act on it.
-    expect(l!.text).toBe(renderWake({
-      peer: PEER_REF,
-      taskId: "t-1",
-      state: "completed",
-      summary: "a summary",
-      result: "the body",
-    }));
-    expect(l!.text).toContain("the body");
-  });
-
-  // A lead that withdrew a task has no reason to re-read it, and the peer has no
-  // transition left to ride: without this line its answer to the cancellation
-  // exists only as a row on a record nobody opens again.
-  test("a finding on a task that is already over reaches the lead as a note", () => {
-    const abDir = tempDir();
-    for (const state of ["canceled", "completed", "failed"] as const) {
-      const event: SessionBusEvent = {
-        kind: "message",
-        sessionId: SESSION,
-        taskId: "t-1",
-        task: task({ role: "lead", state }),
-        peer: PEER_REF,
-        envelope: envelope({ messageId: `msg-${state}` }),
-      };
-      const l = lineForEvent(event, deps(abDir));
-      expect(l).toMatchObject({ id: `msg-${state}`, sessionId: SESSION, kind: "note" });
-      expect(l!.text).toBe(renderNote({
-        peer: PEER_REF,
-        taskId: "t-1",
-        state,
-        summary: "a summary",
-        text: "the body",
-        artifacts: [],
-      }));
-    }
-  });
-
-  // The rule the note is an exception to, asserted so the exception stays one: a
-  // finding on live work is recorded and read, never delivered (5.2).
-  test("a finding on a task still running is delivered to nobody", () => {
-    const abDir = tempDir();
-    for (const state of ["submitted", "working", "input-required"] as const) {
-      const event: SessionBusEvent = {
-        kind: "message",
-        sessionId: SESSION,
-        taskId: "t-1",
-        task: task({ role: "lead", state }),
-        peer: PEER_REF,
-        envelope: envelope(),
-      };
-      expect(lineForEvent(event, deps(abDir))).toBeNull();
-    }
-  });
-
-  // Nothing on this side can produce one any more — `reportFinding` refuses a
-  // finding with no taskId and names `antgrid_raise_task` instead — but the
-  // receive side is what a bridge on an older build still sends at, and a line
-  // with no task is one nothing can render, list or answer.
-  test("a finding naming no task stays undelivered even when it is the only channel left", () => {
-    const abDir = tempDir();
-    const event: SessionBusEvent = {
-      kind: "message",
-      sessionId: SESSION,
-      taskId: null,
-      peer: PEER_REF,
-      envelope: envelope({ taskId: null }),
-    };
-    expect(lineForEvent(event, deps(abDir))).toBeNull();
-  });
-
-  // The peer's own side of a closed task: it was already told to stop by its
-  // cancel line, and the lead has no verb that would send it a note to mirror.
-  test("a note is a lead-side line only", () => {
-    const abDir = tempDir();
-    const event: SessionBusEvent = {
-      kind: "message",
-      sessionId: SESSION,
-      taskId: "t-1",
-      task: task({ role: "peer", state: "canceled" }),
-      peer: PEER_REF,
-      envelope: envelope(),
-    };
-    expect(lineForEvent(event, deps(abDir))).toBeNull();
-  });
-
-  test("a failed and an input-required task both wake the lead; working does not", () => {
-    const abDir = tempDir();
-    for (const state of ["failed", "input-required"] as const) {
-      const l = lineForEvent({
-        kind: "transitioned",
-        sessionId: SESSION,
-        task: task({ role: "lead", state }),
-        state,
-        envelope: envelope(),
-      }, deps(abDir));
-      expect(l?.kind).toBe("wake");
-    }
-    // Progress the lead already assumed: waking for it costs a turn and says
-    // nothing.
-    const working = lineForEvent({
-      kind: "transitioned",
-      sessionId: SESSION,
-      task: task({ role: "lead", state: "working" }),
-      state: "working",
-      envelope: envelope(),
-    }, deps(abDir));
-    expect(working).toBeNull();
-  });
-
-  test("a peer's task returning to working is the lead's answer, and says the question is gone when it is", () => {
-    const abDir = tempDir();
-    const l = lineForEvent({
-      kind: "transitioned",
-      sessionId: SESSION,
-      task: task({ role: "peer", state: "working" }),
-      state: "working",
-      envelope: envelope({ parts: [{ kind: "text", text: "development" }] }),
-    }, deps(abDir));
-    expect(l).toMatchObject({ kind: "answer", sessionId: SESSION });
-    expect(l!.text).toBe(renderAnswer({
-      lead: LEAD,
-      taskId: "t-1",
-      question: "(the question this session asked is no longer on record)",
-      answer: "development",
-      scope: [],
-    }));
-  });
-
-  test("a cancel reaches the side working the task and nobody else", () => {
-    const abDir = tempDir();
-    const canceled = lineForEvent({
-      kind: "canceled",
-      sessionId: SESSION,
-      task: task({ role: "peer", state: "canceled" }),
-      reason: "no longer needed",
-    }, deps(abDir));
-    expect(canceled).toMatchObject({ id: "t-1:canceled", kind: "cancel" });
-    expect(canceled!.text).toBe(renderCancel({ lead: LEAD, taskId: "t-1", reason: "no longer needed" }));
-
-    // The lead asked for the cancel; its own tool call already answered it.
-    const asLead = lineForEvent({
-      kind: "canceled",
-      sessionId: SESSION,
-      task: task({ role: "lead", state: "canceled" }),
-      reason: "no longer needed",
-    }, deps(abDir));
-    expect(asLead).toBeNull();
-  });
-
-  test("a finding and an expiry interrupt nobody — they are read off the task", () => {
-    const abDir = tempDir();
-    expect(lineForEvent({
-      kind: "message",
-      sessionId: SESSION,
-      taskId: "t-1",
-      peer: PEER_REF,
-      envelope: envelope(),
-    }, deps(abDir))).toBeNull();
-    expect(lineForEvent({
-      kind: "expired",
-      sessionId: SESSION,
-      task: task(),
-    }, deps(abDir))).toBeNull();
-  });
-
-  test("a session with no membership row is delivered nothing: every template names its lead", () => {
-    const abDir = tempDir();
-    const l = lineForEvent({
-      kind: "assigned",
-      sessionId: "not-a-member",
-      task: task(),
-      envelope: envelope(),
-    }, deps(abDir));
-    expect(l).toBeNull();
-  });
-
-  test("a rendered wake reaches the adapter through the queue", () => {
-    const abDir = tempDir();
-    const h = harness(abDir);
-    h.openTurns.add(SESSION);
-    const l = lineForEvent({
-      kind: "transitioned",
-      sessionId: SESSION,
-      task: task({ role: "lead", state: "completed" }),
-      state: "completed",
-      envelope: envelope({ messageId: "msg-wake" }),
-    }, deps(abDir))!;
-    h.queue.queue(l);
-    expect(h.injected).toHaveLength(0);
-
-    h.openTurns.delete(SESSION);
-    h.queue.drain(SESSION);
-    expect(h.injected).toHaveLength(1);
-    expect(h.injected[0]!.text).toBe(renderWake({
-      peer: PEER_REF,
-      taskId: "t-1",
-      state: "completed",
-      summary: "a summary",
-      result: "the body",
-    }));
   });
 });
