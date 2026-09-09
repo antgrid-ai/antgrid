@@ -8,10 +8,7 @@ import type { RelayClient } from "../helpers/relay-client";
  * loopback HTTP callers every bus scenario needs.
  *
  * Outside `evals/helpers/` for the reason `stream.ts` is — the harness is a
- * frozen shared surface — and deliberately NOT extracted out of
- * `gate-session-bus.test.ts`, which stays self-contained: that suite is the
- * single-machine reference row, and a shared edit that broke it would take the
- * cross-machine rows down with it.
+ * frozen shared surface.
  */
 
 // The receiving session's PTY is a stdin sink rather than an agent: these
@@ -26,12 +23,6 @@ process.stdin.resume();
 setInterval(() => {}, 1 << 30);
 `;
 export const SINK_SCRIPT_NAME = "antgrid-eval-sink.cjs";
-
-/** First header line of each delivery kind (`delivery.ts`'s renderers), minus
- *  the template-version suffix — the marker a sink text is counted for. */
-export const TASK_MARKER = "[antgrid session bus] delivery: task";
-export const WAKE_MARKER = "[antgrid session bus] delivery: wake";
-export const CANCEL_MARKER = "[antgrid session bus] delivery: cancel";
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -55,7 +46,8 @@ export function queuedLines(abDir: string, projectId: string, sessionId: string)
 }
 
 /** One project's persisted session rows, read off disk rather than the wire:
- *  a delete has to be provable after the row has left every advert. */
+ *  an advert is a push, so what it stopped carrying is no evidence of what the
+ *  bridge actually kept. */
 export function persistedSessions(abDir: string, projectId: string): any[] {
   const path = join(abDir, "agents", projectId, "sessions.json");
   if (!existsSync(path)) return [];
