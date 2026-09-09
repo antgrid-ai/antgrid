@@ -804,7 +804,8 @@ void main() {
       });
       await Future<void>.delayed(Duration.zero);
 
-      final svc = FileService.fromSession(session, checkoutId: 'wt-1');
+      final svc = FileService.fromSession(session, checkoutId: 'wt-1')
+        ..activate();
       await Future<void>.delayed(Duration.zero);
       final request = t.sent.lastWhere(
         (m) => m['type'] == 'file:tree:snapshot:request',
@@ -826,7 +827,8 @@ void main() {
     test('re-pulls on reconnect and stops after dispose', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
-      final svc = FileService.fromSession(session, checkoutId: 'wt-1');
+      final svc = FileService.fromSession(session, checkoutId: 'wt-1')
+        ..activate();
       await Future<void>.delayed(Duration.zero);
 
       t.redriveHydrators();
@@ -872,7 +874,7 @@ void main() {
         () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
+      final svc = FileService.fromSession(session)..activate();
       await Future<void>.delayed(Duration.zero);
       expect(treeRequests(t).last.containsKey('sinceSeq'), isFalse);
 
@@ -899,7 +901,7 @@ void main() {
     test('file:tree:unchanged keeps both the tree and the claim', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
+      final svc = FileService.fromSession(session)..activate();
 
       t.emit('file:tree:snapshot', {
         'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
@@ -922,7 +924,7 @@ void main() {
     test('only a contiguous tree:update advances the claim', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
+      final svc = FileService.fromSession(session)..activate();
 
       t.emit('file:tree:snapshot', {
         'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
@@ -962,7 +964,7 @@ void main() {
         () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
+      final svc = FileService.fromSession(session)..activate();
 
       t.emit('file:tree:snapshot', {
         'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),

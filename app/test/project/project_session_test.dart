@@ -1,7 +1,9 @@
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/project/project_session.dart';
+import 'package:antgrid/services/pending_reply.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
@@ -307,6 +309,140 @@ void main() {
       await session.close();
       expect(closeCount, 1);
       expect(session.mode, ProjectSessionMode.local);
+    });
+
+    group('newPending down/up registry', () {
+      test('a tracked pending fails with SessionDownException when the '
+          'transport goes down', () async {
+        final t = FakeAgentTransport();
+        final cache = await CachedSessionsStore.open();
+        final session = ProjectSession(
+          projectId: 'p',
+          transport: t,
+          mode: ProjectSessionMode.local,
+          cachedSessionsStore: cache,
+          onClose: t.dispose,
+        );
+
+        final pending = session.newPending<int>(
+          timeout: const Duration(seconds: 5),
+        );
+        final expectation = expectLater(
+          pending.future,
+          throwsA(isA<SessionDownException>()),
+        );
+
+        t.emitState(TransportState.disconnected);
+        await expectation;
+
+        await session.close();
+      });
+
+      test(
+        'newPending while already down fails immediately and runs onAbandon',
+        () async {
+          final t = FakeAgentTransport();
+          final cache = await CachedSessionsStore.open();
+          final session = ProjectSession(
+            projectId: 'p',
+            transport: t,
+            mode: ProjectSessionMode.local,
+            cachedSessionsStore: cache,
+            onClose: t.dispose,
+          );
+          t.emitState(TransportState.disconnected);
+          await Future<void>.delayed(Duration.zero);
+
+          var abandoned = false;
+          final pending = session.newPending<int>(
+            timeout: const Duration(seconds: 5),
+            onAbandon: () => abandoned = true,
+          );
+
+          // Failed on a microtask, not synchronously (see newPending's doc) —
+          // but well before the 5s timeout, which is the point of the test.
+          await expectLater(
+            pending.future,
+            throwsA(isA<SessionDownException>()),
+          );
+          expect(abandoned, isTrue);
+
+          await session.close();
+        },
+      );
+
+      test('a pending that completed normally is no longer tracked', () async {
+        final t = FakeAgentTransport();
+        final cache = await CachedSessionsStore.open();
+        final session = ProjectSession(
+          projectId: 'p',
+          transport: t,
+          mode: ProjectSessionMode.local,
+          cachedSessionsStore: cache,
+          onClose: t.dispose,
+        );
+
+        var abandoned = 0;
+        final pending = session.newPending<int>(
+          timeout: const Duration(seconds: 5),
+          onAbandon: () => abandoned++,
+        );
+        pending.complete(1);
+        expect(await pending.future, 1);
+
+        // If the registry still tracked this reply, marking the session down
+        // would call `fail` on it, which would run `onAbandon` again —
+        // `whenComplete`'s removal is what this test actually pins.
+        t.emitState(TransportState.disconnected);
+        await Future<void>.delayed(Duration.zero);
+        expect(abandoned, 0);
+
+        await session.close();
+      });
+
+      test('newPending after close fails immediately rather than arming a '
+          'live timer', () async {
+        final t = FakeAgentTransport();
+        final cache = await CachedSessionsStore.open();
+        final session = ProjectSession(
+          projectId: 'p',
+          transport: t,
+          mode: ProjectSessionMode.local,
+          cachedSessionsStore: cache,
+          onClose: t.dispose,
+        );
+        await session.close();
+
+        final pending = session.newPending<int>(
+          timeout: const Duration(seconds: 5),
+        );
+        await expectLater(pending.future, throwsA(isA<SessionDownException>()));
+      });
+
+      test('up after down lets a new pending proceed normally', () async {
+        final t = FakeAgentTransport();
+        final cache = await CachedSessionsStore.open();
+        final session = ProjectSession(
+          projectId: 'p',
+          transport: t,
+          mode: ProjectSessionMode.local,
+          cachedSessionsStore: cache,
+          onClose: t.dispose,
+        );
+
+        t.emitState(TransportState.disconnected);
+        await Future<void>.delayed(Duration.zero);
+        t.emitState(TransportState.connected);
+        await Future<void>.delayed(Duration.zero);
+
+        final pending = session.newPending<int>(
+          timeout: const Duration(seconds: 5),
+        );
+        pending.complete(7);
+        expect(await pending.future, 7);
+
+        await session.close();
+      });
     });
   });
 }

@@ -19,6 +19,7 @@ import '../../project/project_session_registry.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/providers.dart';
 import '../../services/file_service.dart';
+import '../../services/pending_reply.dart' show SessionDownException;
 import '../../util/detached.dart';
 
 /// Copy sources a starter block seeds when the project shows evidence of env
@@ -277,6 +278,9 @@ Future<void> _applyStarterSetup(
   } on TimeoutException {
     say("The machine didn't answer. Try again.");
     return;
+  } on SessionDownException catch (e) {
+    say('${e.toString()} Try again.');
+    return;
   } on StateError {
     // The config service was torn down under the request (an LRU eviction, a
     // host restart) or a settings screen superseded the read.
@@ -304,6 +308,9 @@ Future<void> _applyStarterSetup(
     );
   } on TimeoutException {
     say("The machine didn't answer. antgrid.yaml may be unchanged.");
+    return;
+  } on SessionDownException catch (e) {
+    say('${e.toString()} antgrid.yaml may be unchanged.');
     return;
   } on StateError {
     say('This project reconnected. antgrid.yaml may be unchanged.');

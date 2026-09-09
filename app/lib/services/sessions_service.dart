@@ -278,11 +278,11 @@ class SessionsService {
   String _newRequestId() => const Uuid().v4();
 
   PendingReply<T> _newPending<T>(
-    void Function() onTimeout, {
+    void Function() onAbandon, {
     Duration timeout = _kPendingReplyTimeout,
-  }) => PendingReply<T>(
+  }) => session.newPending<T>(
     timeout: timeout,
-    onTimeout: onTimeout,
+    onAbandon: onAbandon,
     timeoutError: () => TimeoutException('session reply timed out'),
   );
 
@@ -449,7 +449,7 @@ class SessionsService {
   /// [PendingReply] a second completion mode, so a disposal `StateError` from
   /// [_failPending] still propagates: that transport is genuinely gone.
   ///
-  /// [PendingReply.onTimeout] still de-registers the entry, and deliberately so
+  /// [PendingReply.onAbandon] still de-registers the entry, and deliberately so
   /// — a late `ok:false` is not lost by it. [_handleResult] writes the reason
   /// onto [SessionsState.error] BEFORE it looks the pending entry up, and
   /// `OperationalErrorToaster` toasts that for the focused project. What
@@ -482,7 +482,10 @@ class SessionsService {
       // StateError alongside the lapse: `dispose()` fails everything pending,
       // and a project switch mid-delete would otherwise surface as a generic
       // "couldn't delete" toast for a removal the bridge is still running.
-      test: (e) => e is TimeoutException || e is StateError,
+      // SessionDownException too: a reconnect landing inside the two-minute
+      // delete window is silence, same as a lapsed timer.
+      test: (e) =>
+          e is TimeoutException || e is StateError || e is SessionDownException,
     );
   }
 
@@ -536,30 +539,39 @@ class SessionsService {
     await _stateController.close();
   }
 
+  // Snapshot-then-clear-then-fail, in that order: `fail` runs each reply's
+  // `onAbandon`, which is exactly this map's own removal callback — iterating
+  // the live map while it fails would be a ConcurrentModificationError.
   void _failPending(Object error) {
-    for (final p in _pendingList.values) {
-      p.fail(error);
-    }
+    final list = _pendingList.values.toList();
     _pendingList.clear();
-    for (final p in _pendingMutations.values) {
+    for (final p in list) {
       p.fail(error);
     }
+    final mutations = _pendingMutations.values.toList();
     _pendingMutations.clear();
-    for (final p in _pendingRefusableMutations.values) {
+    for (final p in mutations) {
       p.fail(error);
     }
+    final refusable = _pendingRefusableMutations.values.toList();
     _pendingRefusableMutations.clear();
-    for (final p in _pendingCreates.values) {
+    for (final p in refusable) {
       p.fail(error);
     }
+    final creates = _pendingCreates.values.toList();
     _pendingCreates.clear();
-    for (final p in _pendingDeletes.values) {
+    for (final p in creates) {
       p.fail(error);
     }
+    final deletes = _pendingDeletes.values.toList();
     _pendingDeletes.clear();
-    for (final p in _pendingModeChanges.values) {
+    for (final p in deletes) {
       p.fail(error);
     }
+    final modeChanges = _pendingModeChanges.values.toList();
     _pendingModeChanges.clear();
+    for (final p in modeChanges) {
+      p.fail(error);
+    }
   }
 }

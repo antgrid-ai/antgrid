@@ -63,6 +63,12 @@ enum NewSessionStartAbortReason {
   /// hold a session either way, which is the whole reason this is its own
   /// reason and not a refusal.
   replyTimedOut,
+
+  /// The transport carrying this project went down mid-flight (a local
+  /// socket teardown, or a dropped relay machine session) — distinct from
+  /// [replyTimedOut] because nothing is still in flight to eventually answer:
+  /// `ProjectSession`'s registry failed every pending reply immediately.
+  sessionDown,
 }
 
 /// One start's outcome: why it produced no session, plus what it nonetheless

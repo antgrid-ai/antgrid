@@ -224,6 +224,23 @@ final focusedCheckoutIdProvider = Provider<String>((ref) {
   return ref.watch(activeSessionOrCachedProvider)?.checkoutId ?? 'main';
 });
 
+/// Keep-alive binder: the focused project's focused checkout is the only one
+/// that carries the per-checkout pulls (tree, config, preview, terminal
+/// snapshots). Same shape and same reason as `agentFocusBinderProvider` —
+/// `watch`, not `listen` + `read`, so the scheduler batches the recompute
+/// instead of rebuilding a dirty dependency mid-frame.
+///
+/// A project switched away from keeps its last active set, so a backgrounded
+/// project still refreshes its one visible checkout on reconnect rather than
+/// every checkout it has.
+final checkoutActivationBinderProvider = Provider<void>((ref) {
+  final id = ref.watch(selectedRegistrationIdProvider);
+  if (id == null) return;
+  final session = ref.watch(projectSessionProvider(id)).value;
+  if (session == null) return;
+  session.setActiveCheckouts({ref.watch(focusedCheckoutIdProvider)});
+});
+
 /// Side-effect listener: keep `activeSessionIdProvider` valid as the session
 /// list churns. If the active session is deleted or archived, advance to the
 /// most-recently-used non-archived sibling. If the list is empty, clear the

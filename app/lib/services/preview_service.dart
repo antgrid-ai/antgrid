@@ -111,36 +111,17 @@ class PreviewService {
   PreviewService.fromSession(this.session, {this.checkoutId = 'main'}) {
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
-    // Pull the preview picture rather than wait for a push. `preview:url` and
-    // `ports:update` are both change-driven, and a managed checkout's go out
-    // while its runtime is being prepared — BEFORE the session list that makes
-    // the app build this bundle — so an isolated session's preview and ports
-    // stayed empty until a port happened to open or close. Same reason (and
-    // same shape) as FileService's tree pull. As a hydrator it also re-pulls on
-    // every reconnect; the bridge answers with `preview:snapshot` and re-emits
-    // the detected ports alongside it.
-    session.hydrateCheckout(checkoutId, _snapshotHydratorKey, _hydrateSnapshot);
     // Every tunneled body in flight across a (re)establishment is dead by
     // construction — the relay client cleared its queues at promotion and the
     // bridge aborted its own runs — so this reaps them at the moment the
-    // session comes back rather than at the idle timer 30s later.
+    // session comes back rather than at the idle timer 30s later. Kept eager
+    // (not gated behind [activate]): it sends nothing for a checkout with no
+    // request in flight, so a background checkout costs it nothing — see
+    // [ProjectSession.setActiveCheckouts].
     session.hydrateCheckout(
       checkoutId,
       _reestablishHydratorKey,
       _onReestablished,
-    );
-    // A hydrator covers re-ESTABLISHMENT; a focus resume re-establishes nothing
-    // and is the other window the agent suppresses in. `preview:url` dropped
-    // there is remembered as undelivered agent-side, but the only thing that
-    // drains that flag is the port re-emit behind this very request — so without
-    // this pull a port that opened while the app was backgrounded stays unknown
-    // to it for the life of the connection.
-    _resumeSub = session.focusResumed.listen(
-      (_) => detached(
-        'PreviewService',
-        'preview snapshot re-pull on focus resume',
-        _hydrateSnapshot,
-      ),
     );
     _txSub = session.transport.messages.listen(_onTransportMessage);
     _dropSub = session.transport.droppedFrames.listen(
@@ -155,6 +136,40 @@ class PreviewService {
     checkoutId,
     createAbMessage('preview:snapshot:request', {}),
   );
+
+  /// Registers the preview picture pull and subscribes the focus-resume
+  /// re-drive. `preview:url` and `ports:update` are both change-driven, and a
+  /// managed checkout's go out while its runtime is being prepared — BEFORE
+  /// the session list that makes the app build this bundle — so an isolated
+  /// session's preview and ports stayed empty until a port happened to open or
+  /// close. Same reason (and same shape) as FileService's tree pull. As a
+  /// hydrator it also re-pulls on every reconnect; the bridge answers with
+  /// `preview:snapshot` and re-emits the detected ports alongside it. Only the
+  /// checkout on screen carries this — see [ProjectSession.setActiveCheckouts].
+  void activate() {
+    if (_disposed) return;
+    session.hydrateCheckout(checkoutId, _snapshotHydratorKey, _hydrateSnapshot);
+    // A hydrator covers re-ESTABLISHMENT; a focus resume re-establishes nothing
+    // and is the other window the agent suppresses in. `preview:url` dropped
+    // there is remembered as undelivered agent-side, but the only thing that
+    // drains that flag is the port re-emit behind this very request — so
+    // without this pull a port that opened while the app was backgrounded
+    // stays unknown to it for the life of the connection.
+    _resumeSub ??= session.focusResumed.listen(
+      (_) => detached(
+        'PreviewService',
+        'preview snapshot re-pull on focus resume',
+        _hydrateSnapshot,
+      ),
+    );
+  }
+
+  void deactivate() {
+    if (_disposed) return;
+    session.unhydrateCheckout(checkoutId, _snapshotHydratorKey);
+    unawaited(_resumeSub?.cancel());
+    _resumeSub = null;
+  }
 
   void _setState(PreviewState state) {
     if (_disposed) return;
@@ -625,10 +640,10 @@ class PreviewService {
     // head timer runs, and removing the original key would leave the entry in
     // the map forever with nothing left to complete it.
     late final _InFlightRequest entry;
-    final pending = PendingReply<TunnelHttpResponse>(
+    final pending = session.newPending<TunnelHttpResponse>(
       timeout: timeout,
+      onAbandon: () => _pendingRequests.remove(entry.requestId),
       onTimeout: () {
-        _pendingRequests.remove(entry.requestId);
         _statsTimedOut++;
         // The bridge may still be fetching for an id nothing will read.
         _sendCancel(entry.requestId);

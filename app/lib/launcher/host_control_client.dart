@@ -34,12 +34,22 @@ class ResolvedLocalProject {
   final String selectedPath;
   final String label;
   final bool isGitRepository;
+
+  /// `primary` | `managed-checkout` | `linked-worktree` | `plain`, or null for
+  /// a bridge predating this field (or the app's own local fallback).
+  final String? kind;
+
+  /// Set only for `kind == 'managed-checkout'` with a `checkouts.json` record.
+  final String? checkoutId;
+
   const ResolvedLocalProject({
     required this.projectId,
     required this.repoPath,
     required this.selectedPath,
     required this.label,
     required this.isGitRepository,
+    this.kind,
+    this.checkoutId,
   });
 
   factory ResolvedLocalProject.fromJson(Map<String, dynamic> json) {
@@ -62,6 +72,10 @@ class ResolvedLocalProject {
       selectedPath: selectedPath,
       label: label,
       isGitRepository: json['isGitRepository'] == true,
+      kind: json['kind'] is String ? json['kind'] as String : null,
+      checkoutId: json['checkoutId'] is String
+          ? json['checkoutId'] as String
+          : null,
     );
   }
 }

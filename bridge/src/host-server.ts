@@ -532,6 +532,7 @@ export class HostServer {
     return {
       attachStream: (bus, opts) => client.attachStream(bus, opts),
       currentPeerPubkey: () => client.currentPeerPubkey(),
+      peerPullsTree: () => client.peerPullsTree,
       sendPushDeliver: (m) => client.sendPushDeliver(m),
       // The LIVE socket's id, like every member beside it — not the inbound
       // auth's. The credential swap above is gated on nothing being live, so a
@@ -1568,10 +1569,12 @@ export class HostServer {
       this.touchSeenProject(projectId);
       return this.resultFor(existing);
     }
-    // The host is authoritative for project identity: a linked worktree and its
-    // primary checkout are ONE project. A caller naming a folder under its own
-    // path hash would otherwise get a second core over the same repository,
-    // with its own session store and its own idea of which checkout is main.
+    // The host is authoritative for project identity: resolveProject, not the
+    // caller, decides which folders are one project (a managed checkout folds
+    // onto its primary; a linked worktree the user made does not). A caller
+    // naming a folder under its own path hash would otherwise get a second
+    // core over the same managed checkout, with its own session store and its
+    // own idea of which checkout is main.
     // Checked below the warm-core branch so an already-running legacy alias
     // (validated when it was created) keeps working until migration imports it.
     if (resolved.projectId !== projectId) {
@@ -1922,6 +1925,7 @@ export class HostServer {
       },
       currentPeerPubkey: () => client.currentPeerPubkey(),
       currentPeerSupportsCheckoutRouting: () => client.peerSupportsCheckoutRouting,
+      currentPeerPullsTree: () => client.peerPullsTree,
       // client.deviceId, NOT the one from identityFor(): a local core is handed a fresh
       // randomUUID(), which addresses no machine the phone knows.
       machineDeviceId: () => client.deviceId,

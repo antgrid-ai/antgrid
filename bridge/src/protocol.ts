@@ -107,7 +107,10 @@ const HandshakeAgentReadyMessage = BaseMessage.extend({
 const AppReadyMessage = BaseMessage.extend({
   type: z.literal("app:ready"),
   confirm: z.string(),
-  capabilities: z.object({ checkoutRouting: z.literal(true).optional() }).optional(),
+  capabilities: z.object({
+    checkoutRouting: z.literal(true).optional(),
+    pullsTree: z.literal(true).optional(),
+  }).optional(),
 });
 
 const TerminalStartCommand = BaseMessage.extend({
