@@ -59,23 +59,29 @@ Future<ProjectSession> _openSession(FakeAgentTransport t) async {
   );
 }
 
+/// Frames for one pull, whichever arm carries it.
+///
+/// A terminal snapshot rides a correlated RPC rather than a fire-and-forget
+/// message, and `FakeAgentTransport.request` records that under `type:
+/// request` with the verb in `method` and the checkout in `params` — so a
+/// match on the top-level type and checkout alone would see none of them and
+/// read a gate that is working as one that silenced everything.
 List<Map<String, dynamic>> _sentOf(
   FakeAgentTransport t,
   String type, {
   String? checkoutId,
-}) => t.sent
-    .where(
-      (m) =>
-          m['type'] == type &&
-          (checkoutId == null || m['checkoutId'] == checkoutId),
-    )
-    .toList();
+}) => t.sent.where((m) {
+  final params = (m['params'] as Map?)?.cast<String, dynamic>();
+  if ((m['type'] == 'request' ? m['method'] : m['type']) != type) return false;
+  return checkoutId == null ||
+      (m['checkoutId'] ?? params?['checkoutId']) == checkoutId;
+}).toList();
 
 const _heavyTypes = [
   'file:tree:snapshot:request',
   'config:read',
   'preview:snapshot:request',
-  'terminal:snapshot:request',
+  'terminal.snapshot',
 ];
 
 /// Fires exactly one [MessageRouter.focusResumed] edge — the recipe every
@@ -372,7 +378,7 @@ void main() {
     for (final type in [
       'file:tree:snapshot:request',
       'preview:snapshot:request',
-      'terminal:snapshot:request',
+      'terminal.snapshot',
     ]) {
       expect(_sentOf(t, type, checkoutId: 'A'), isNotEmpty, reason: type);
       expect(_sentOf(t, type, checkoutId: 'B'), isEmpty, reason: type);

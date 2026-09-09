@@ -385,6 +385,12 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   // bridge / never advertised.
   final Map<String, String?> _lastAdvertLastActiveAt = {};
 
+  // Last-seen `project:list` work status per LOCAL project, keyed by bare
+  // projectId. The local-poll counterpart of [_lastAdvertStatus], used to
+  // detect the same attention/error transitions for a local project's
+  // re-peek — see [_peekLocalProjectSessions].
+  final Map<String, AgentWorkStatus?> _lastLocalStatus = {};
+
   @override
   void initState() {
     super.initState();
@@ -507,6 +513,7 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     _lastAdvertStatus.clear();
     _lastAdvertRunningCount.clear();
     _lastAdvertLastActiveAt.clear();
+    _lastLocalStatus.clear();
     _seedingSessions.clear();
     for (final sub in _labelSubs.values) {
       sub.close();
@@ -665,6 +672,38 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     );
   }
 
+  /// [_peekProjectSessions]'s local counterpart: peek a LOCAL project's session
+  /// list over the loopback control plane and write it through to the Recent
+  /// cache. `entryId` is the bare projectId (a local entry carries no
+  /// machine-uuid prefix), which also doubles as the dedup key in
+  /// [_seedingSessions] — safe alongside remote entries, since `isSafeProjectId`
+  /// forbids the `.` a compound remote key always contains.
+  ///
+  /// Opens and closes its OWN [HostControlClient] rather than reusing the
+  /// caller's: this fires unawaited (a slow reply must not hold up the 2s
+  /// tick), so it can still be in flight when the caller's tick ends and closes
+  /// its own client in `finally` — sharing it would abort this request mid-air.
+  void _peekLocalProjectSessions(
+    int controlPort,
+    String token,
+    String entryId,
+    CachedSessionsStore store,
+  ) {
+    if (_seedingSessions.contains(entryId)) return;
+    _seedingSessions.add(entryId);
+    final client = HostControlClient(port: controlPort, token: token);
+    unawaited(
+      client
+          .projectSessions(entryId)
+          .then((sessions) => store.put(entryId, sessions))
+          .catchError((_) {}) // host went away — retried on the next tick
+          .whenComplete(() {
+            client.close();
+            _seedingSessions.remove(entryId);
+          }),
+    );
+  }
+
   /// Release every open control-plane socket whose machine is neither viewed nor
   /// backing an open project (i.e. absent from [alive]); assert `wanted` on the
   /// survivors. See [reconcileControlPlaneWantedness] for the pure decision the
@@ -769,6 +808,42 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
           ref
               .read(remoteSessionStatusProvider.notifier)
               .setLocalSessionStatuses(sessionStatuses);
+          // Re-peek a local project's session LIST — never touched by the
+          // status write-through above — whenever it can't already account
+          // for every live session id `project:list` just reported, or on a
+          // fresh flip to a call-to-action status. Checked against the CACHE
+          // itself (not merely "changed since the last tick"), so this
+          // self-heals on the very first poll of a fresh process — a session
+          // already live before the app started, on a project cached from an
+          // earlier run, would otherwise never differ from "the last tick"
+          // because there IS no last tick yet. Without this,
+          // `remoteSessionStatusProvider` correctly reports a session as
+          // working, but no Recent/drawer ROW exists to show it on —
+          // sessionWorkStatusProvider is only ever invoked per cached row.
+          final store = ref.read(cachedSessionsStoreProvider);
+          for (final p in projects) {
+            final entryId = p.projectId;
+            final newStatus = statuses[entryId];
+            final hadStatus = _lastLocalStatus.containsKey(entryId);
+            final prevStatus = _lastLocalStatus[entryId];
+            _lastLocalStatus[entryId] = newStatus;
+            final repeek = shouldRepeekLocalSessions(
+              neverSynced: !store.has(entryId),
+              cachedSessionIds: store.get(entryId).map((s) => s.id).toSet(),
+              liveSessionIds: sessionStatuses[entryId]?.keys.toSet() ?? const {},
+              hadStatus: hadStatus,
+              prevStatus: prevStatus,
+              newStatus: newStatus,
+            );
+            if (repeek) {
+              _peekLocalProjectSessions(
+                hostFile.controlPort,
+                hostFile.token,
+                entryId,
+                store,
+              );
+            }
+          }
         } catch (_) {
           // Host went away between peek and list — ignore; next tick retries.
         }
@@ -860,4 +935,49 @@ List<String> reconcileControlPlaneWantedness({
     released.add(id);
   }
   return released;
+}
+
+/// Whether a LOCAL project's cached session LIST needs a re-peek. Pulled out
+/// of [_ControlPlaneReaperState._pollLocalProjectStatus] so it's testable
+/// without a host/timer/widget harness — same reasoning as
+/// [reconcileControlPlaneWantedness]'s own extraction.
+///
+/// [neverSynced]: the Recent cache has no session-list entry for this project
+/// at all yet, so there is nothing to diff against — always worth a peek.
+///
+/// [cachedSessionIds] vs [liveSessionIds]: the cache's own session ids against
+/// what `project:list` just reported as live (its per-session status map's
+/// key set). Checked against the CACHE directly rather than against the
+/// previous poll tick, deliberately: a session already live before the app
+/// started, on a project cached from an earlier run, would never differ from
+/// "the last tick" on this process's very first poll, because there IS no
+/// last tick yet to differ from — comparing against the cache instead
+/// self-heals on that very first poll instead of waiting for some LATER
+/// change nothing guarantees will ever come. This is what catches a session
+/// starting/resuming/exiting on a project the app has not opened this run —
+/// the gap that otherwise leaves `remoteSessionStatusProvider` correctly
+/// reporting "working" with no Recent/drawer row to show it on, since a row
+/// only exists for a session already in the cached list.
+///
+/// [hadStatus]/[prevStatus]/[newStatus]: this poll's work status against the
+/// last one seen for this project (necessarily tracked in memory — work
+/// status itself is never persisted). A fresh flip TO a call-to-action state
+/// (attention/error) is treated as new information worth a peek even when the
+/// id set alone did not change, mirroring the remote advert path's own
+/// `statusFlipped` trigger.
+@visibleForTesting
+bool shouldRepeekLocalSessions({
+  required bool neverSynced,
+  required Set<String> cachedSessionIds,
+  required Set<String> liveSessionIds,
+  required bool hadStatus,
+  required AgentWorkStatus? prevStatus,
+  required AgentWorkStatus? newStatus,
+}) {
+  if (neverSynced) return true;
+  if (!cachedSessionIds.containsAll(liveSessionIds)) return true;
+  return hadStatus &&
+      prevStatus != newStatus &&
+      (newStatus == AgentWorkStatus.attention ||
+          newStatus == AgentWorkStatus.error);
 }

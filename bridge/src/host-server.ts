@@ -1317,6 +1317,23 @@ export class HostServer {
         }
         return { id: req.id, ok: true, type: "project:start", running: existing.running, connect: existing.connect };
       }
+      case "project:sessions": {
+        // Same shape guard as the gated remote sessions.list peek
+        // (handleSessionsListRpc): a bad id would otherwise read
+        // `agents/<anything>/sessions.json` off disk via readPersisted below.
+        // No seen-catalog/mobile-access gate here — the loopback bearer token
+        // already proves this caller IS this machine.
+        if (!isSafeProjectId(req.projectId)) {
+          return { id: req.id, ok: false, error: { code: "E_BAD_PARAMS", message: "invalid projectId" } };
+        }
+        // Warm core reports true live per-session `running`; a cold project's
+        // disk file is authoritative otherwise. Mirrors handleSessionsListRpc's
+        // routing.
+        const entry = this.cores.get(req.projectId);
+        const liveSessions = entry?.core.listSessions(req.includeArchived ?? false);
+        const sessions = liveSessions ?? await SessionManager.readPersisted(resolveAbDir(), req.projectId, req.includeArchived ?? false);
+        return { id: req.id, ok: true, type: "project:sessions", sessions };
+      }
       case "project:stop":
         await this.stop(req.projectId);
         return { id: req.id, ok: true, type: "project:stop" };

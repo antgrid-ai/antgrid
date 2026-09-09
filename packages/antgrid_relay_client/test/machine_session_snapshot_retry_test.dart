@@ -188,6 +188,73 @@ void main() {
     expect(await snapshotRequestIds(), hasLength(1));
   });
 
+  test('refreshDurableState re-pulls the durable state', () async {
+    session.streamFor(kControlStreamId);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    final seeded = await snapshotRequestIds();
+    expect(seeded, hasLength(1));
+    await injectControl(snapshotReply(seeded.single));
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+
+    final st = session.streamFor(kControlStreamId);
+    unawaited(st.refreshDurableState());
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    final sent = await snapshotRequests();
+    expect(sent, hasLength(2));
+    expect(sent.last.params, {
+      'types': ['*'],
+      'exclude': ['tree:full'],
+    });
+
+    await injectControl(snapshotReply(sent.last.id));
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(
+      session.streamIdForProject('proj-a'),
+      's-42',
+      reason: "refreshDurableState's reply is applied like any other pull",
+    );
+  });
+
+  test('refreshDurableState leaves the hydrators alone', () async {
+    final st = session.streamFor(kControlStreamId);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    final seeded = await snapshotRequestIds();
+    expect(seeded, hasLength(1));
+    await injectControl(snapshotReply(seeded.single));
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+
+    var hydrated = 0;
+    await st.hydrate('probe', () async {
+      hydrated++;
+    });
+    expect(hydrated, 1, reason: 'hydrate runs once immediately when established');
+
+    unawaited(st.refreshDurableState());
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    final afterDurable = await snapshotRequestIds();
+    expect(afterDurable, hasLength(2));
+    await injectControl(snapshotReply(afterDurable.last));
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(
+      hydrated,
+      1,
+      reason:
+          'a checkout retry must not fan a tree:full out to every checkout',
+    );
+
+    unawaited(st.refreshSnapshot());
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    final afterFull = await snapshotRequestIds();
+    expect(afterFull, hasLength(3));
+    await injectControl(snapshotReply(afterFull.last));
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(
+      hydrated,
+      2,
+      reason: 'refreshSnapshot still redrives hydrators, unchanged',
+    );
+  });
+
   group('the tree is left to the hydrators', () {
     const stream = 's-42';
 

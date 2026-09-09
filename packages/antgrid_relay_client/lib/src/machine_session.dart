@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:developer' as developer;
 import 'dart:typed_data';
 
 import 'agent_transport.dart';
@@ -71,6 +70,7 @@ class MachineSession {
   final String machineDeviceId;
 
   final SessionHandshaker _handshaker;
+  final RelayLogger? _logger;
 
   /// Builds the `project:start` control message used to re-bind a project the
   /// agent has declared dead (`stream-invalid`). Injected rather than built here
@@ -103,7 +103,9 @@ class MachineSession {
     int? channelWindowBytes,
     int? socketInflightBytes,
     this.creditBatchBytes = kCreditBatchBytes,
+    RelayLogger? logger,
   }) : _handshaker = handshaker,
+       _logger = logger,
        _channelWindowBytes = channelWindowBytes ?? kChannelWindowBytes,
        _socketInflightBytes = socketInflightBytes ?? kSocketInflightBytes {
     // [ready] is observation-optional: failReady/dispose may completeError
@@ -183,6 +185,12 @@ class MachineSession {
     sink: _sealAndSend,
     window: _channelWindowBytes,
     socketCap: _socketInflightBytes,
+    // A gate stalled with data queued is the one failure here with no other
+    // observable: the socket keeps heartbeating (liveness frames bypass the
+    // queue), the peer keeps crediting, and meanwhile every frame the user
+    // typed sits in this scheduler. Left unwired, the canary fired into null
+    // and only the agent's side of the same stall was ever visible.
+    log: (m) => _log(RelayLogLevel.warn, m),
   );
 
   /// Test-only seam: park the send gate, shrink its limits, release it. Not
@@ -397,6 +405,16 @@ class MachineSession {
         streamId: streamId,
         msgType: type,
       );
+      // Info, not warn: the comment above is right that this is usually the
+      // benign reconnect case, and a terminal being typed into reaches here
+      // once per keystroke. It earns a line at all because a session that
+      // never comes back looks exactly like the benign case until someone can
+      // count how long the drops went on.
+      _log(
+        RelayLogLevel.info,
+        'send dropped — no E2E session',
+        fields: {'channel': channel, 'streamId': streamId, 'msgType': type},
+      );
       return;
     }
     final envelope = <String, dynamic>{
@@ -475,6 +493,19 @@ class MachineSession {
         msgType: type,
         detail: {'frames': frames.length},
       );
+      // Every send on this path is fire-and-forget, so the caller never learns
+      // its message was discarded; without this the loss is visible only to a
+      // netwatch tap nobody has armed.
+      _log(
+        RelayLogLevel.warn,
+        'send queue full — message dropped',
+        fields: {
+          'channel': channel,
+          'streamId': streamId,
+          'msgType': type,
+          'frames': frames.length,
+        },
+      );
       return;
     }
     // A fragment set leaves in order, so the last frame's hand-off is the
@@ -494,6 +525,18 @@ class MachineSession {
         streamId: f.streamId,
         msgType: f.msgType,
       );
+      // Warn where [sendOnStream]'s twin is info: this frame was accepted into
+      // the queue, so its sender was told it would go out and is awaiting a
+      // hand-off that now never comes.
+      _log(
+        RelayLogLevel.warn,
+        'queued frame dropped — session went down before it was sealed',
+        fields: {
+          'channel': f.channel,
+          'streamId': f.streamId,
+          'msgType': f.msgType,
+        },
+      );
       return null;
     }
     try {
@@ -512,6 +555,15 @@ class MachineSession {
           channel: f.channel,
           streamId: f.streamId,
           msgType: f.msgType,
+        );
+        _log(
+          RelayLogLevel.warn,
+          'queued frame dropped — keys rotated mid-seal',
+          fields: {
+            'channel': f.channel,
+            'streamId': f.streamId,
+            'msgType': f.msgType,
+          },
         );
         return null;
       }
@@ -536,6 +588,18 @@ class MachineSession {
         streamId: f.streamId,
         msgType: f.msgType,
         detail: {'error': '${e.runtimeType}'},
+      );
+      // The runtime type only, for the reason the comment above gives: the
+      // plaintext must not reach a log any more than it may reach a capture.
+      _log(
+        RelayLogLevel.error,
+        'queued frame dropped — seal threw',
+        fields: {
+          'channel': f.channel,
+          'streamId': f.streamId,
+          'msgType': f.msgType,
+          'error': '${e.runtimeType}',
+        },
       );
       return null;
     }
@@ -831,6 +895,14 @@ class MachineSession {
     });
   }
 
+  void _log(
+    RelayLogLevel level,
+    String message, {
+    Map<String, Object?>? fields,
+  }) {
+    _logger?.call(level, message, fields: fields);
+  }
+
   void _dropped(
     String dir,
     String reason, {
@@ -1005,9 +1077,10 @@ class MachineSession {
     // mid-flight), not the routine restart case. "0" legitimately has no
     // transport (adverts are snooped above), so it's never a drop.
     if (st == null && sid != kControlStreamId) {
-      developer.log(
-        'dropping inbound frame for unknown streamId $sid',
-        name: 'antgrid.relay',
+      _log(
+        RelayLogLevel.warn,
+        'dropping inbound frame for unknown stream',
+        fields: {'streamId': sid},
       );
       _dropped(
         'rx',
@@ -1189,10 +1262,7 @@ class MachineSession {
         if ((channel != 'control' && channel != 'preview') ||
             consumed is! int ||
             consumed < 0) {
-          developer.log(
-            'dropping malformed credit frame',
-            name: 'antgrid.relay',
-          );
+          _log(RelayLogLevel.warn, 'dropping malformed credit frame');
           break;
         }
         // A cumulative total only means anything against the session that
@@ -1221,6 +1291,15 @@ class MachineSession {
     final type = obj['type'] as String?;
     if (keys == null) {
       _dropped('tx', 'no-e2e-session', channel: 'control', msgType: type);
+      // This path carries ping, pong and credit — the frames the peer reads as
+      // proof we are alive and as permission to keep sending. Losing one is
+      // indistinguishable at the far end from a link that has gone dead, so it
+      // must never be diagnosed only from an unarmed tap.
+      _log(
+        RelayLogLevel.warn,
+        'session frame dropped — no E2E session',
+        fields: {'msgType': type},
+      );
       return;
     }
     final ct = await E2eTransportDart(
@@ -1233,6 +1312,11 @@ class MachineSession {
       // and a frame sealed under retired keys must not charge the window the
       // establishment that retired them has just zeroed.
       _dropped('tx', 'keys-rotated', channel: 'control', msgType: type);
+      _log(
+        RelayLogLevel.warn,
+        'session frame dropped — keys rotated mid-seal',
+        fields: {'msgType': type},
+      );
       return;
     }
     relay.sendMessage(machineDeviceId, 'control', ct);
@@ -1354,14 +1438,24 @@ class StreamTransport extends BufferedAgentTransport {
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
+    bool countsTowardHealth = true,
   }) async {
     try {
       final r = await super.request(method, params: params, timeout: timeout);
-      session.notifyRpcResult(timedOut: false);
+      // Both outcomes are gated, not just the timeout: an exempt call's
+      // SUCCESS resetting the run would let a pull that is re-driven on every
+      // re-establishment keep clearing the evidence of a link that is failing
+      // every other RPC — the same loop wearing the opposite sign.
+      if (countsTowardHealth) session.notifyRpcResult(timedOut: false);
       return r;
     } on RpcException catch (e) {
-      // ≥3 consecutive E_TIMEOUTs is a rekey trigger.
-      session.notifyRpcResult(timedOut: e.code == 'E_TIMEOUT');
+      // ≥3 consecutive E_TIMEOUTs is a rekey trigger. Skipped when the caller
+      // re-issues this same pull on every re-establishment — including the
+      // one a rekey itself causes — since folding those in makes the retry
+      // loop its own trigger (see the doc on [AgentTransport.request]).
+      if (countsTowardHealth) {
+        session.notifyRpcResult(timedOut: e.code == 'E_TIMEOUT');
+      }
       rethrow;
     }
   }
@@ -1417,6 +1511,25 @@ class StreamTransport extends BufferedAgentTransport {
     redriveHydrators();
   }
 
+  /// Re-pull the durable state alone, leaving the tier-3 hydrators as they are.
+  ///
+  /// [refreshSnapshot] exists for a (re)establishment, where the view-state the
+  /// snapshot does not carry is stale too. A user asking one checkout to try
+  /// attaching again is not that: the hydrator replay re-asks every ACTIVE
+  /// checkout for its whole `tree:full`, so routing a tap through it would
+  /// answer one stalled workspace with megabytes for every workspace on
+  /// screen beside it. This carries the frame
+  /// that tap is actually after — the bridge recomputes each checkout's
+  /// `agent:status` while serving the pull, so the reply is no older than the
+  /// tap.
+  ///
+  /// Shares [_fetchSnapshot]'s generation stamp, so a pull already airborne is
+  /// superseded rather than duplicated. The returned future completes when the
+  /// FIRST round trip settles, not when the snapshot lands: the retries run
+  /// detached, exactly as they do for [refreshSnapshot].
+  Future<void> refreshDurableState() =>
+      _fetchSnapshot(timeout: session.snapshotTimeout);
+
   /// Round trips a pull gets before it is given up on, the first included.
   /// Each retry doubles the previous wait, so the last one gives a slow reply
   /// four times the room the first did.
@@ -1441,10 +1554,11 @@ class StreamTransport extends BufferedAgentTransport {
       }
       if (await _pullSnapshot(timeout, attempt: attempt)) return;
     }
-    developer.log(
-      'state.snapshot gave up after $_kSnapshotAttempts attempts on stream '
-      '$streamId; its frames stay as they were until the next establishment',
-      name: 'antgrid.relay',
+    session._log(
+      RelayLogLevel.warn,
+      'state.snapshot gave up; frames stay as they were until the next '
+      'establishment',
+      fields: {'streamId': streamId, 'attempts': _kSnapshotAttempts},
     );
   }
 
@@ -1497,10 +1611,15 @@ class StreamTransport extends BufferedAgentTransport {
     } on RpcException catch (e) {
       // Leave the existing cache untouched either way.
       if (e.code != 'E_TIMEOUT') return true;
-      developer.log(
-        'state.snapshot timed out after ${timeout.inMilliseconds}ms on stream '
-        '$streamId (attempt $attempt of $_kSnapshotAttempts)',
-        name: 'antgrid.relay',
+      session._log(
+        RelayLogLevel.info,
+        'state.snapshot timed out',
+        fields: {
+          'streamId': streamId,
+          'timeoutMs': timeout.inMilliseconds,
+          'attempt': attempt,
+          'of': _kSnapshotAttempts,
+        },
       );
       return false;
     }

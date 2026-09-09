@@ -30,6 +30,8 @@ class FileService {
   StreamSubscription<Map<String, dynamic>>? _statusSub;
   StreamSubscription<void>? _resumeSub;
   int _snapshotSeq = -1;
+  /// The establishment [_snapshotSeq] was issued under — see [_claimableSeq].
+  int _snapshotEpoch = -1;
   int _gitOpSeq = 0;
   bool _disposed = false;
 
@@ -122,7 +124,7 @@ class FileService {
   /// checkout on screen carries these — see [ProjectSession.setActiveCheckouts].
   void activate() {
     if (_disposed) return;
-    session.hydrateCheckout(checkoutId, _treeHydratorKey, _hydrateTree);
+    session.hydrateCheckout(checkoutId, _treeHydratorKey, _pullTree);
     if (_stashesRequested) {
       session.hydrateCheckout(checkoutId, _stashHydratorKey, _hydrateStashes);
     }
@@ -148,7 +150,7 @@ class FileService {
       (_) => detached(
         'FileService',
         'tree re-pull on focus resume',
-        _repullTreeIfChanged,
+        _pullTree,
       ),
     );
   }
@@ -165,21 +167,41 @@ class FileService {
     _resumeSub = null;
   }
 
-  /// A full pull that claims nothing. A hydrator run means the transport
-  /// re-established, and the agent behind it may be a NEW PROCESS whose
-  /// revision counter restarted at zero — a claim carried over from the old one
-  /// could then match by coincidence and have a stale tree confirmed.
-  Future<void> _hydrateTree() => _requestTree();
+  /// The tree pull behind both the hydrator and the focus-resume re-drive.
+  /// Names the revision this checkout holds where that revision can still be
+  /// believed, so an unchanged tree is answered `file:tree:unchanged` rather
+  /// than in full.
+  ///
+  /// Claiming is worth the care because the unchanged answer is the common one:
+  /// every open project's every active checkout re-pulls on the same resume
+  /// edge, and activation is per-focused-checkout, so switching away from a
+  /// checkout and back re-runs this too — on an idle tree each of those answers
+  /// was a byte-identical few hundred KB.
+  Future<void> _pullTree() => _requestTree(sinceSeq: _claimableSeq());
 
-  /// The focus-resume variant, which names the revision it holds so an
-  /// unchanged checkout is answered `file:tree:unchanged` instead of the whole
-  /// tree. Safe to claim here precisely because a resume re-establishes nothing
-  /// (see [MessageRouter.focusResumed]): the agent being asked is the one that
-  /// issued the seq. Backgrounding is what makes this worth doing — every open
-  /// project's every checkout re-pulls on the same edge, and on an idle project
-  /// each of those answers was a byte-identical tree.
-  Future<void> _repullTreeIfChanged() =>
-      _requestTree(sinceSeq: _snapshotSeq >= 0 ? _snapshotSeq : null);
+  /// The held revision, or null when it cannot be believed.
+  ///
+  /// A seq is only comparable against the establishment that issued it. A
+  /// hydrator run means the transport re-established, and the agent behind it
+  /// may be a NEW PROCESS whose revision counter restarted at zero — a claim
+  /// carried across could then match by coincidence and have a stale tree
+  /// confirmed. The epoch is what separates that from the cases where the agent
+  /// is demonstrably the same one that issued the seq: a focus resume, which
+  /// re-establishes nothing (see [MessageRouter.focusResumed]), and a checkout
+  /// returning to screen on a transport that never dropped.
+  int? _claimableSeq() {
+    if (_snapshotSeq < 0) return null;
+    if (_snapshotEpoch != session.establishmentEpoch) return null;
+    return _snapshotSeq;
+  }
+
+  /// Records [seq] together with the establishment that issued it. Every write
+  /// to [_snapshotSeq] goes through here — a seq stored without its epoch would
+  /// be claimed against the wrong agent.
+  void _rememberSeq(int seq) {
+    _snapshotSeq = seq;
+    _snapshotEpoch = session.establishmentEpoch;
+  }
 
   Future<void> _requestTree({int? sinceSeq}) => session.sendForCheckout(
     checkoutId,
@@ -196,7 +218,7 @@ class FileService {
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
     if (parsed is FileTreeSnapshotMessage) {
-      _snapshotSeq = parsed.seq;
+      _rememberSeq(parsed.seq);
       _setState(_state.copyWith(root: parsed.tree));
       return;
     }
@@ -204,7 +226,7 @@ class FileService {
       // Nothing to apply — the agent is confirming the revision we claimed.
       // Guarded anyway so a confirmation that raced an applied delta cannot
       // walk the base backwards and re-admit an update already merged.
-      if (parsed.seq > _snapshotSeq) _snapshotSeq = parsed.seq;
+      if (parsed.seq > _snapshotSeq) _rememberSeq(parsed.seq);
       return;
     }
     if (parsed is TreeUpdateMessage) {
@@ -220,7 +242,7 @@ class FileService {
       // makes the next resume ask for a full tree rather than have a stale one
       // confirmed.
       if (seq != null && _snapshotSeq >= 0 && seq == _snapshotSeq + 1) {
-        _snapshotSeq = seq;
+        _rememberSeq(seq);
       }
       return;
     }
@@ -373,7 +395,7 @@ class FileService {
     // with the tree it replaces. An agent too old to stamp one leaves the base
     // where it was, which costs a full pull on the next resume and nothing else.
     final seq = msg.seq;
-    if (seq != null && seq > _snapshotSeq) _snapshotSeq = seq;
+    if (seq != null && seq > _snapshotSeq) _rememberSeq(seq);
     _setState(
       _state.copyWith(
         root: msg.root,
@@ -904,7 +926,10 @@ class FileService {
 
   void requestFullTree() {
     _setState(_state.copyWith(expandedPaths: {}));
-    unawaited(_hydrateTree());
+    // Deliberately claims nothing, unlike [_pullTree]: this is the user asking
+    // for the tree to be rebuilt from disk, and `file:tree:unchanged` would
+    // answer that refresh by doing visibly nothing.
+    unawaited(_requestTree());
   }
 
   void setFilterQuery(String? query) {
@@ -1316,6 +1341,18 @@ class FileService {
     _setState(
       _state.copyWith(
         git: _state.git.copyWith(history: history.copyWith(expandedShas: const {})),
+      ),
+    );
+  }
+
+  /// Fold the whole History section shut in the side-by-side layout, or
+  /// reopen it — see [GitPaneState.historyCollapsed].
+  void toggleHistoryCollapsed() {
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          historyCollapsed: !_state.git.historyCollapsed,
+        ),
       ),
     );
   }
