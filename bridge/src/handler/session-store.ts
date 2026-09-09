@@ -238,6 +238,11 @@ export const HandlerSessionRecordSchema = z.object({
   // Park state, so a bridge restart mid-park strands nothing. Optional because
   // an unparked session genuinely has none.
   parkKind: z.enum(["limit", "outage"]).optional(),
+  // The backoff policy above says how long to wait; this says who the wait is
+  // attributable to, and only this may be rendered as a reason. Absent on a
+  // record written before the field existed, which a restart must survive rather
+  // than treat as an unreadable value.
+  parkCause: z.enum(["agent_limit", "agent_failure", "judge_failure"]).optional(),
   parkedUntil: z.number().optional(),
   transientFailures: z.number().optional(),
   // Whether the parked pause still owes a judge a verdict. The stashed event
@@ -273,6 +278,29 @@ export const HandlerSessionRecordSchema = z.object({
   // a real escalation on `escalations` above, not a rejection note, so it
   // outlives a restart and the judge's feedback about it must too.
   staleAskIds: z.boolean().optional(),
+  // How much of the citation re-ask budget this session has already spent — see
+  // MAX_EVIDENCE_REASKS (engine.ts). Persisted because a session that stopped
+  // moving is diagnosed from this file and nothing else says it was ever in a
+  // refusal episode. Optional rather than `.default(0)`, matching its neighbours:
+  // every record written before this field lacks it, and the budget is a SPEND —
+  // so the conservative reading of an absent value is none spent, which is what
+  // the engine's `?? 0` gives it.
+  //
+  // Engine-internal and deliberately not on the wire, exactly as
+  // `transientFailures` above is.
+  evidenceReasks: z.number().int().min(0).optional(),
+  // The refusals that budget was spent on, and the text the escalation it ends in
+  // puts on the card. Persisted WITH the counter and never apart from it: restored
+  // out of lockstep, a resumed session carries a spend with nothing to say what it
+  // was for, and the card it eventually raises names no item, no quote and no
+  // reason while blocking wrap-up until somebody dismisses it. That is also what
+  // makes the counter above genuinely diagnosable from this file.
+  //
+  // Bounded at the mint (MAX_REMEMBERED_REJECTIONS, engine.ts) rather than here,
+  // for the reason OpenEscalation's `question` gives: a `.max()` fails the whole
+  // record over a list a bug made too long, and a failed parse brings the session
+  // back disarmed with an empty backlog.
+  evidenceRejections: z.array(z.object({ id: z.string(), line: z.string() })).optional(),
 });
 export type HandlerSessionRecord = z.infer<typeof HandlerSessionRecordSchema>;
 

@@ -62,7 +62,7 @@ describe("session record round-trip", () => {
     const abDir = tmpAbDir();
     saveHandlerSession(abDir, "proj", record({
       judgeTool: "codex", judgeModel: "gpt-5.3-codex",
-      parkKind: "limit", parkedUntil: 1770000000000,
+      parkKind: "limit", parkCause: "agent_limit", parkedUntil: 1770000000000,
       transientFailures: 2, parkAwaitingJudge: true,
       escalations: [{
         escalationId: "e1", question: "q", reasoning: "r", draftReply: "",
@@ -73,6 +73,9 @@ describe("session record round-trip", () => {
     expect(loaded?.judgeTool).toBe("codex");
     expect(loaded?.judgeModel).toBe("gpt-5.3-codex");
     expect(loaded?.parkKind).toBe("limit");
+    // The attribution has to survive alongside the policy: a restart that kept
+    // only the kind resumes rendering "temporary failure" for our own judge.
+    expect(loaded?.parkCause).toBe("agent_limit");
     expect(loaded?.parkedUntil).toBe(1770000000000);
     expect(loaded?.transientFailures).toBe(2);
     expect(loaded?.parkAwaitingJudge).toBe(true);
@@ -205,6 +208,30 @@ describe("session record round-trip", () => {
     expect(loadHandlerSession(abDir, "proj", "t1")?.staleAskIds).toBe(true);
     saveHandlerSession(abDir, "proj", record());
     expect(loadHandlerSession(abDir, "proj", "t1")?.staleAskIds).toBeUndefined();
+  });
+
+  it("round-trips evidenceReasks, and a record written before it spends nothing", () => {
+    // The one durable trace that a session was in a refusal episode, and what a
+    // stalled session is diagnosed from. Absent has to read as none spent: it is
+    // a SPEND, so the conservative reading is a full budget, not an exhausted one.
+    const abDir = tmpAbDir();
+    saveHandlerSession(abDir, "proj", record({ evidenceReasks: 2 }));
+    expect(loadHandlerSession(abDir, "proj", "t1")?.evidenceReasks).toBe(2);
+    writeRaw(abDir, "t2", JSON.stringify({ ...record({ terminalId: "t2" }), evidenceReasks: undefined }));
+    expect(loadHandlerSession(abDir, "proj", "t2")?.evidenceReasks).toBeUndefined();
+    expect(loadHandlerSession(abDir, "proj", "t2")?.backlog).toHaveLength(1);
+  });
+
+  it("round-trips the refusal lines the budget was spent on", () => {
+    // They ride with evidenceReasks and are read back with it: the counter alone
+    // says a spend was made and nothing about what for, and the escalation it ends
+    // in puts these lines on the card.
+    const abDir = tmpAbDir();
+    const rejections = [{ id: "i1", line: `"ship the migration" — nothing on record says so` }];
+    saveHandlerSession(abDir, "proj", record({ evidenceReasks: 1, evidenceRejections: rejections }));
+    expect(loadHandlerSession(abDir, "proj", "t1")?.evidenceRejections).toEqual(rejections);
+    writeRaw(abDir, "t2", JSON.stringify({ ...record({ terminalId: "t2" }), evidenceRejections: undefined }));
+    expect(loadHandlerSession(abDir, "proj", "t2")?.evidenceRejections).toBeUndefined();
   });
 
   it("reads a record written before the ask fields existed as a stopped session", () => {

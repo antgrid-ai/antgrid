@@ -1388,9 +1388,17 @@ const HandlerSessionSnapshot = z.object({
   goal: z.string(),
   backlog: BacklogWire,
   escalations: z.array(OpenEscalationWire),
-  // Why the session is parked and when it wakes (epoch ms), for the countdown
-  // chip. Present only while state is "parked".
+  // The BACKOFF POLICY the engine picked — how long to wait and on what curve —
+  // never a reason; `parkCause` below carries that. With `parkedUntil` (epoch ms)
+  // it drives the countdown chip. Present only while state is "parked".
   parkKind: z.enum(["limit", "outage"]).optional(),
+  // Who the pause is ATTRIBUTABLE to, which `parkKind` cannot say: that field is
+  // the backoff policy, and the two diverge on the case that named this one — a
+  // judge call of ours timing out parks as `outage` and read on the bar as the
+  // AGENT's provider being down. Optional because a park predating it, on disk or
+  // from an older bridge, is honestly unattributed; an app with no cause falls
+  // back to the policy's own copy.
+  parkCause: z.enum(["agent_limit", "agent_failure", "judge_failure"]).optional(),
   parkedUntil: z.number().optional(),
   // Per-session judge choice (absent = session default tool / CLI default model).
   judgeTool: z.string().optional(),

@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { HandlerEngine, quickChoicesFor } from "../../src/handler/engine";
+import { HandlerEngine, MAX_EVIDENCE_REASKS, quickChoicesFor } from "../../src/handler/engine";
 import { RunawayGuard } from "../../src/handler/runaway-guard";
 import {
   LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS, TRANSIENT_CEILING,
@@ -131,7 +131,8 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
 }
 
 interface SessionSnapshot {
-  state: string; parkKind?: string; parkedUntil?: number; pendingEscalations: number;
+  state: string; parkKind?: string; parkCause?: string; parkedUntil?: number;
+  pendingEscalations: number;
   goal: string; backlog: InstructionItem[];
   observability?: string;
 }
@@ -1420,11 +1421,15 @@ describe("evidence citations", () => {
     // Scrollback moves on. A quote that was honest two passes ago is no longer
     // checkable, and accepting it would make the corpus the whole session's
     // history — which is not the window the judge is reasoning over.
+    // The refusal re-asks, so the tail is read several more times than there are
+    // scripted passes — and an EMPTY corpus skips grounding altogether
+    // (backlog.ts), which would close the item and make this case about nothing.
+    // Every later read is fresh material the stale quote is still absent from.
     const tails = ["the migration landed cleanly", "compiling the workspace now"];
     let n = 0;
     let transitions: ItemTransition[] = [];
     const { engine, sent } = makeEngine({
-      adapter: { ...PTY, recentOutput: () => tails[n++] ?? "" },
+      adapter: { ...PTY, recentOutput: () => tails[n++] ?? `still compiling — pass ${n}` },
       runDecisionFn: async () => decide({ transitions }),
     });
     engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
@@ -1451,7 +1456,10 @@ describe("evidence citations", () => {
 
   it("a repeat refusal on the same item is logged again but not fed to the user twice", async () => {
     // One row per ITEM: the feed is a history of what happened to the backlog,
-    // not a transcript of how many ways the judge tried to close one line.
+    // not a transcript of how many ways the judge tried to close one line. The log
+    // is where that transcript lives, and it now also carries the re-ask chain —
+    // the first event spends the whole budget, the second finds the escalation
+    // that chain raised already standing and asks once.
     const { engine, activity } = makeEngine({
       runDecisionFn: async () => decide({
         transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
@@ -1463,7 +1471,7 @@ describe("evidence citations", () => {
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     });
     expect(records(activity, "evidence_rejected")).toHaveLength(1);
-    expect(logged.match(/not in the context/g)).toHaveLength(2);
+    expect(logged.match(/not in the context/g)).toHaveLength(1 + MAX_EVIDENCE_REASKS + 1);
   });
 
   it("a refused completion lifts no runaway cap and wraps nothing up", async () => {
@@ -1595,6 +1603,18 @@ pass ${n++}` },
       expect(records(activity, "wrapped_up")).toHaveLength(1);
     });
 
+    it("a re-ask chain does not spend the anchor's waiver", async () => {
+      // The four checks a chain makes are one judged pause asked again, so they
+      // count once. Counted separately they exhaust MAX_ANCHOR_REFUSALS inside a
+      // single turn, the waiver fires on the fourth, and a grounded quote about
+      // the wrong subject closes the item — the incident the anchor exists for.
+      const { engine, sent, activity } = routeEngine();
+      engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a", { text: ROUTE })] });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(statusOf(sent).backlog[0].status).toBe("queued");
+      expect(records(activity, "wrapped_up")).toHaveLength(0);
+    });
+
     it("gives up the anchor after a bounded number of refusals when there is no catalog", async () => {
       // A PTY has no catalog and cannot get one, so nothing can prove the token is
       // not a command — the anchor is asked for and then, once it has plainly gone
@@ -1608,6 +1628,10 @@ pass ${n++}` },
       for (let i = 0; i < 3; i++) await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(statusOf(sent).backlog[0].status).toBe("queued");
       expect(progressed).toEqual([]);
+      // The first event's chain ended by asking the user, and a session must not
+      // auto-disarm over a completion the harness refused while that question is
+      // still standing — so the waived pass wraps up only once it is answered.
+      engine.onUserReply("t1", "have another look\r");
       await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
       expect(records(activity, "wrapped_up")).toHaveLength(1);
       expect(progressed).toEqual(["t1"]);
@@ -1650,7 +1674,335 @@ pass ${n++}` },
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(seen[1]?.[0]).toContain("item a");
-    expect(seen[2]).toEqual([]);
+    // The last pass, not seen[2]: the refusal on the first event re-asks, so the
+    // scripted passes no longer sit at consecutive indices.
+    expect(seen.at(-1)).toEqual([]);
+  });
+
+  it("re-asks the judge with its own rejection rather than resting on a refused completion", async () => {
+    // The pass that refuses is the pass that has to fix it. Every event able to
+    // reach a judge means the agent has stopped and a `continue` injects nothing,
+    // so resting here waits on a pass nobody is going to raise.
+    let calls = 0;
+    const seen: Array<string[] | undefined> = [];
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async (o: { evidenceRejections?: string[] }) => {
+        seen.push(o.evidenceRejections ? [...o.evidenceRejections] : undefined);
+        calls++;
+        return decide({
+          transitions: [{
+            id: "a", status: "done",
+            evidence: calls === 1 ? "everything is finished and green" : "merged upstream",
+          }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(2);
+    // The re-ask is only worth making because the judge is handed what it got
+    // wrong; a chain that re-asked the same prompt would just repeat itself.
+    expect(seen[1]?.[0]).toContain("item a");
+    expect(records(activity, "item_done")).toHaveLength(1);
+    expect(records(activity, "wrapped_up")).toHaveLength(1);
+  });
+
+  it("escalates once the re-ask budget is spent instead of resting at watching", async () => {
+    // The freeze this exists for: the session rested at `watching` with an item
+    // the harness had refused, no escalation, and no further event coming.
+    let calls = 0;
+    const { engine, sent, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        return decide({
+          transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(1 + MAX_EVIDENCE_REASKS);
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+    const escalated = records(activity, "escalate") as Array<{ reason: string }>;
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0].reason).toContain("item a");
+    // The chain is one episode, so the feed carries one row for the item and none
+    // of the per-retry verdicts that would make it a transcript of the judge.
+    expect(records(activity, "evidence_rejected")).toHaveLength(1);
+    expect(records(activity, "continue")).toHaveLength(0);
+  });
+
+  it("spends the budget once per refusal episode, not once per event", async () => {
+    // A question already on the user's screen is the exit. Re-spending the budget
+    // behind it would cost three judge calls per turn and ask them the same thing
+    // again on every one.
+    let calls = 0;
+    const { engine, sent, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        return decide({
+          transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const spent = calls;
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(spent + 1);
+    expect(records(activity, "escalate")).toHaveLength(1);
+    expect(statusOf(sent).state).toBe("needs_you");
+  });
+
+  it("progress clears the re-ask budget", async () => {
+    // The budget is spent per episode, and an item closing is what ends one — so
+    // a later refusal gets its own three tries rather than none. The item has to
+    // close while the counter is still up: a chain that has already escalated
+    // zeroed it on the way out, and a record written after that proves nothing.
+    let calls = 0;
+    const { engine, saved } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        return decide({
+          transitions: [{
+            id: "a", status: "done",
+            evidence: calls === 1 ? "everything is finished and green" : "merged upstream",
+          }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // The refusal and the re-ask that answered it, and nothing after: the closing
+    // pass ends the episode, so the chain neither runs on nor escalates.
+    expect(calls).toBe(2);
+    const spend = saved.map((r) => (r as HandlerSessionRecord).evidenceReasks ?? 0);
+    expect(spend).toContain(1);
+    expect(spend.at(-1)).toBe(0);
+  });
+
+  it("a reply to the agent ends the refusal episode", async () => {
+    // The chain stands in for a pass nobody is going to raise, and an injected
+    // reply IS that pass. Left armed past it, the budget turns the next ordinary
+    // `continue` into three more judge calls and then a question about a refusal
+    // the agent was already told to fix.
+    let calls = 0;
+    const { engine, saved, injected, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        if (calls === 1) {
+          return decide({
+            transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
+          });
+        }
+        // The likeliest answer to being shown its own rejection: tell the agent to
+        // produce the evidence rather than claim the item again.
+        if (calls === 2) return decide({ decision: "handle", reply: "paste the test output" });
+        return decide({ reason: "still working through b" });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(injected).toHaveLength(1);
+    expect(lastSaved(saved).evidenceReasks).toBe(0);
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(3);
+    expect(records(activity, "escalate")).toHaveLength(0);
+  });
+
+  it("a standing ask does not exempt a refused completion", async () => {
+    // An ask rode a pass that already replied to the agent, so it stopped nothing
+    // and its answer resolves nothing here. Counted as somebody being waited on,
+    // it rests the session on the refusal — the freeze this whole exit is for.
+    let calls = 0;
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        if (calls === 1) {
+          return decide({
+            decision: "handle", reply: "keep going",
+            ask: {
+              question: "Which database should the migration target?",
+              reasoning: "the cutover order turns on it",
+              unblocked: ["b"],
+              options: [
+                { label: "Staging for now", cost: "one extra deploy later" },
+                { label: "Straight at production", cost: "no second cutover" },
+              ],
+            },
+          });
+        }
+        return decide({
+          transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(records(activity, "asked")).toHaveLength(1);
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(2 + MAX_EVIDENCE_REASKS);
+    expect(records(activity, "escalate")).toHaveLength(1);
+  });
+
+  it("hands a refusal to a fresher event rather than re-asking over it", async () => {
+    // The chain's premise is that nothing else is coming. A queued event says
+    // otherwise — the session is not frozen, and the chain would hold that event
+    // behind up to three more judge calls before it ever ran.
+    let calls = 0;
+    let second: Promise<void> | undefined;
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        // Registered while this pass is still running, the way agent-core's own
+        // unawaited POST does it.
+        if (calls === 1) second = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+        return calls === 1
+          ? decide({ transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }] })
+          : decide({ reason: "still working" });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await second;
+    expect(calls).toBe(2);
+    expect(records(activity, "escalate")).toHaveLength(0);
+  });
+
+  it("escalates over the refusal that spent the budget, not the one appended longest ago", async () => {
+    // A repeat refusal is deduped, so the remembered lines are not append-ordered
+    // by recency on their own — and the card names its item with the last of them.
+    let calls = 0;
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        const bogus = "everything is finished and green";
+        return decide({
+          transitions: calls === 1
+            ? [{ id: "a", status: "done", evidence: bogus }, { id: "b", status: "done", evidence: bogus }]
+            : [{ id: "a", status: "done", evidence: bogus }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const escalated = records(activity, "escalate") as Array<{ reason: string }>;
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0].reason).toContain("item a");
+  });
+
+  it("gives a resumed session its budget back only with the refusals it was spent on", async () => {
+    // A counter restored alone escalates to a card naming no item, no quote and no
+    // reason, which then blocks wrap-up until somebody dismisses it.
+    let calls = 0;
+    const { engine, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({ suspended: true, backlog: [item("a")], evidenceReasks: 2 }),
+      runDecisionFn: async () => { calls++; return decide({ reason: "still working" }); },
+    });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(1);
+    expect(records(activity, "escalate")).toHaveLength(0);
+  });
+
+  it("carries the refusal lines across a restart so the card can still name the item", async () => {
+    const { engine, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        suspended: true, backlog: [item("a")],
+        evidenceReasks: MAX_EVIDENCE_REASKS,
+        evidenceRejections: [{ id: "a", line: `"item a" — nothing on record says so` }],
+      }),
+      runDecisionFn: async () => decide({ reason: "still working" }),
+    });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const escalated = records(activity, "escalate") as Array<{ reason: string }>;
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0].reason).toContain("item a");
+  });
+
+  it("drops a resumed refusal whose item closed, and the budget with it", async () => {
+    // A restored line about a `done` item contradicts the backlog rendered beside
+    // it, and the spend it would hand back escalates to a card naming work the
+    // user can already see is finished.
+    let calls = 0;
+    const { engine, activity } = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        suspended: true,
+        backlog: [item("a", { status: "done" }), item("b")],
+        evidenceReasks: MAX_EVIDENCE_REASKS,
+        evidenceRejections: [{ id: "a", line: `"item a" — nothing on record says so` }],
+      }),
+      runDecisionFn: async () => { calls++; return decide({ reason: "still working" }); },
+    });
+    engine.arm({ terminalId: "t1" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(1);
+    expect(records(activity, "escalate")).toHaveLength(0);
+  });
+
+  it("a pass that closes one item while refusing another does not refill the budget", async () => {
+    // Withholding the reset on a refusing pass is what bounds the chain. A judge
+    // that closes one item per pass while refusing the next would otherwise get
+    // its three tries back at every level, so one turn_end would fan out to a
+    // nested judge spawn per backlog item — the freeze traded for a session that
+    // is merely stuck for a very long time, with nothing on the user's screen.
+    const closes = ["a", "b", "c", "d"];
+    let calls = 0;
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        return decide({
+          transitions: [
+            // Quoted from the fixture tail, so this half applies.
+            { id: closes[Math.min(calls, closes.length) - 1]!, status: "done", evidence: "shipped to main" },
+            // Ungroundable, so the same pass is also refused.
+            { id: "z", status: "done", evidence: "everything is finished and green" },
+          ],
+        });
+      },
+    });
+    engine.arm({
+      terminalId: "t1", goal: GOAL,
+      backlog: [...closes, "z"].map((id) => item(id)),
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(calls).toBe(1 + MAX_EVIDENCE_REASKS);
+    expect(records(activity, "escalate")).toHaveLength(1);
+  });
+
+  it("rests a refusal for a queued blocking prompt rather than re-asking over it", async () => {
+    // A blocking prompt is registered on the queue and never in `latest`, so the
+    // first half of wakeSourcePending cannot see it. Without the second, a real
+    // permission block waits out up to three more judge calls before its "needs
+    // you" row and push are raised — a blocked agent nobody hears about.
+    let calls = 0;
+    let prompt: Promise<void> | undefined;
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => {
+        calls++;
+        // Registered while this pass is still running, the way agent-core's own
+        // unawaited POST does it.
+        if (calls === 1) {
+          prompt = engine.handleEvent({
+            terminalId: "t1", event: "permission_request",
+            detail: "Bash: rm -rf build", promptId: "p1",
+          });
+        }
+        return decide({
+          transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
+        });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await prompt;
+    expect(calls).toBe(1);
+    expect(records(activity, "continue")).toHaveLength(1);
+    const escalated = records(activity, "escalate") as Array<{ reason: string }>;
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0].reason).toBe("blocking prompt requires you");
   });
 });
 
@@ -3321,7 +3673,9 @@ describe("lifecycle park / resume", () => {
 
   it("a blocking prompt mid-park unparks, cancels the timer, and escalates with no judge call", async () => {
     let judged = 0;
-    const { engine, sent, timers } = makeEngine({ runDecisionFn: async () => { judged++; return decide({}); } });
+    const { engine, sent, activity, timers } = makeEngine({
+      runDecisionFn: async () => { judged++; return decide({}); },
+    });
     engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     await engine.handleEvent({ terminalId: "t1", event: "permission_request", detail: "Bash: rm -rf build" });
@@ -3330,27 +3684,97 @@ describe("lifecycle park / resume", () => {
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(true);
     expect(statusOf(sent).state).toBe("needs_you");
     expect(statusOf(sent).parkKind).toBeUndefined();
+    // The second deliberate silence: the escalation this raised is the row that
+    // says the wait is over, so a `resumed` beside it would say it twice.
+    expect(records(activity, "resumed")).toHaveLength(0);
   });
 
   it("a submitted line unparks a session with zero pending escalations", async () => {
-    const { engine, sent, timers } = makeEngine();
+    const { engine, sent, activity, timers } = makeEngine();
     engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     engine.onUserReply("t1", "k");
     expect(statusOf(sent).state).toBe("parked"); // a bare keystroke is not a resume
+    expect(records(activity, "resumed")).toHaveLength(0);
     engine.onUserReply("t1", "go on\r");
     expect(timers.at(-1)!.cancelled).toBe(true);
     expect(statusOf(sent).state).toBe("watching");
     expect(statusOf(sent).parkKind).toBeUndefined();
+    // Every other end of a park says why it ended, and the feed is where a
+    // session leaving `parked` is explained at all — asserted as the literal
+    // reason, because "distinguishable from the timer" is the whole point.
+    const rows = records(activity, "resumed") as Array<{ reason: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reason).toBe("you replied to the agent");
+  });
+
+  it("a line that ends a park and answers a question records both, park first", async () => {
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => decide({ decision: "escalate" }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    engine.onUserReply("t1", "go on\r");
+    // Two separate facts about one line, and an implementation that made them
+    // exclusive would drop whichever it judged less important.
+    expect(records(activity, "resumed")).toHaveLength(1);
+    expect(records(activity, "answered")).toHaveLength(1);
+    const kinds = activity.map((a) => (a as { decision: string }).decision);
+    // The app's feed prepends by arrival, so the later row renders on top: the
+    // answer leads and "Resumed:" sits beneath it.
+    expect(kinds.indexOf("resumed")).toBeLessThan(kinds.indexOf("answered"));
+  });
+
+  it("an app-routed resolve that ends a park records the resume, not an answer", async () => {
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "c1", goal: GOAL });
+    await engine.handleEvent({
+      terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "perm-1",
+    });
+    await engine.handleEvent({ terminalId: "c1", event: "limit_hit" });
+    engine.onUserReply("c1", "\r", { resolvedPromptId: "perm-1" });
+    // The asymmetry is deliberate: `answered` is withheld because the tap named
+    // the prompt it answered and claims nothing about any other row, while the
+    // park genuinely ended — and it ended because the user replied.
+    expect(records(activity, "resumed")).toHaveLength(1);
+    expect(records(activity, "answered")).toHaveLength(0);
+  });
+
+  it("a line into an unparked session records no resume", async () => {
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => decide({ decision: "escalate" }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    engine.onUserReply("t1", "carry on\r");
+    expect(records(activity, "answered")).toHaveLength(1);
+    expect(records(activity, "resumed")).toHaveLength(0);
   });
 
   it("a prompt retraction unparks a session with zero pending escalations", async () => {
-    const { engine, sent, timers } = makeEngine();
+    const { engine, sent, activity, timers } = makeEngine();
     engine.arm({ terminalId: "t1", goal: GOAL });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
     engine.onPromptRetracted("t1");
     expect(timers.at(-1)!.cancelled).toBe(true);
     expect(statusOf(sent).state).toBe("watching");
+    // The same entry point serves a driver withdrawing a prompt and a PTY
+    // question reporting its own completion, so the row names neither party.
+    const rows = records(activity, "resumed") as Array<{ reason: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reason).toBe("the prompt is no longer waiting");
+  });
+
+  it("disarming a parked session records no resume", async () => {
+    // One of the three deliberate silences unparkIfParked documents: there is no
+    // supervised session left to resume, so a `resumed` row would be a claim
+    // about a session that no longer exists.
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    engine.disarm("t1");
+    expect(records(activity, "resumed")).toHaveLength(0);
   });
 
   it("disarm and terminal exit cancel the park timer", async () => {
@@ -3631,6 +4055,74 @@ describe("lifecycle transient ceiling", () => {
     expect(statusOf(sent).state).toBe("parked");
     expect(statusOf(sent).parkKind).toBe("outage");
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+  });
+});
+
+// Two unrelated failures share the "outage" backoff curve, so parkKind cannot be
+// read as a reason — which is exactly how Antgrid's own judge timing out was
+// rendered to the user as their agent's provider being down.
+describe("park attribution (parkCause)", () => {
+  it("a provider limit is attributed to the agent's limit", async () => {
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    expect(statusOf(sent).parkKind).toBe("limit");
+    expect(statusOf(sent).parkCause).toBe("agent_limit");
+  });
+
+  it("an agent turn failure and a judge that could not run share a kind, not a cause", async () => {
+    // The whole point of the field: both park as "outage", and only one of them
+    // is anything the user's own provider did.
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed", errorClass: "overloaded" });
+    expect(statusOf(sent).parkKind).toBe("outage");
+    expect(statusOf(sent).parkCause).toBe("agent_failure");
+  });
+
+  it("a judge that could not run names the judge", async () => {
+    const { engine, sent } = makeEngine({ runDecisionFn: async () => null });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(statusOf(sent).parkKind).toBe("outage");
+    expect(statusOf(sent).parkCause).toBe("judge_failure");
+  });
+
+  it("an unpark clears the attribution with the kind", async () => {
+    // Left standing, it describes a wait that is over — and the app renders it
+    // beside a countdown that is no longer there.
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_cleared" });
+    expect(statusOf(sent).state).toBe("watching");
+    expect(statusOf(sent).parkCause).toBeUndefined();
+  });
+
+  it("survives a restart, so a rehydrated park still says who it is waiting on", async () => {
+    const { engine, saved } = makeEngine({ runDecisionFn: async () => null });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect((saved.at(-1) as { parkCause?: string }).parkCause).toBe("judge_failure");
+
+    const restarted = makeEngine({
+      loadSessionFn: () => sessionRecord({
+        parkKind: "outage", parkCause: "judge_failure", parkedUntil: 1000 + 90_000,
+      }),
+    });
+    restarted.engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(statusOf(restarted.sent).parkCause).toBe("judge_failure");
+  });
+
+  it("a record written before the field existed rehydrates without one", () => {
+    // The app falls back to the backoff policy for exactly this bridge, so an
+    // absent cause has to stay absent rather than be guessed at.
+    const { engine, sent } = makeEngine({
+      loadSessionFn: () => sessionRecord({ parkKind: "outage", parkedUntil: 1000 + 90_000 }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(statusOf(sent).state).toBe("parked");
+    expect(statusOf(sent).parkCause).toBeUndefined();
   });
 });
 
