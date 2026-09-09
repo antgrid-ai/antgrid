@@ -1073,6 +1073,11 @@ export class HandlerEngine {
     // deliveries) would file 400 characters of preamble and none of the mandate.
     // It names what the item should carry when the judge produced nothing; the
     // extractor and the authorizer still see the full text.
+    //
+    // No caller passes it today — the wrapped delivery that did was withdrawn
+    // with the task verbs — and it is kept deliberately: the delivery this hook
+    // exists for is being rebuilt, and re-deriving the prefix problem after a
+    // cleanup removed the fix is how it ships broken the second time.
     const raw: ExtractedItem[] = [
       { ref: "raw", text: (opts.fallbackText ?? text).slice(0, MAX_ITEM_CHARS) },
     ];

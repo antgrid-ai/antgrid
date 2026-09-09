@@ -91,15 +91,16 @@ export function readOsCard(): OsCard {
 }
 
 /**
- * The §7.5 auto-match key: scheme-less, credential-free, lowercase
- * `host[:port]/path`, e.g. `github.com/owner/repo`. `null` for anything that
- * cannot identify the same repository from another machine.
+ * The repo-identity key (`docs/session-messaging.md` §5.1): scheme-less,
+ * credential-free, lowercase `host[:port]/path`, e.g. `github.com/owner/repo`.
+ * `null` for anything that cannot identify the same repository from another
+ * machine.
  *
  * Stripping userinfo is a security requirement, not tidiness: a remote can
  * embed a credential (`https://x-access-token:ghp_…@host/o/r.git`), and the
  * card leaves this machine and is rendered in a dialog, so an authority carried
- * verbatim would hand a token to the lead's app and to any screenshot of it.
- * Only the normalized form ever reaches the wire.
+ * verbatim would hand a token to another machine's app and to any screenshot of
+ * it. Only the normalized form ever reaches the wire.
  *
  * Whole-key lowercasing is deliberate: this pre-selects a dropdown the user can
  * override, so matching `Owner/Repo` to `owner/repo` is worth more than the

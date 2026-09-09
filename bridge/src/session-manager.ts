@@ -25,16 +25,7 @@ import { TITLE_RANKS, titleRankValue, type TitleRank } from "./session-namer";
 import type { WorkStatus } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
 import { AGENT_GRACE_MS } from "./terminal-session";
-import type {
-  AbMessage,
-  SessionEntry,
-  SessionMember,
-  SessionMemberKey,
-  SessionMemberOf,
-  SessionMemberRef,
-} from "./protocol";
-import { MAX_SESSION_MEMBERS, SessionMemberOfSchema, SessionMemberSchema } from "./protocol";
-import { sameAddress } from "./session-bus/address";
+import type { AbMessage, SessionEntry } from "./protocol";
 import {
   CHECKOUT_KINDS,
   CHECKOUT_STATES,
@@ -74,24 +65,6 @@ export interface SessionLaunchSpec {
   isolation?: "shared" | "worktree";
   /** An explicitly selected local branch to use as a base for a worktree. */
   baseBranch?: string;
-  /** Create this session as the PEER half of a multi-machine session led from
-   *  another machine. Mutually exclusive with worktree isolation (D10). */
-  memberOf?: SessionMemberRef;
-  /** The lead's opening instruction, held on disk until this session's Handler
-   *  is armed. Only meaningful alongside `memberOf`. */
-  brief?: string;
-}
-
-/** Membership refusals the app must branch on, distinct from the worktree
- *  refusals `delete` raises. Carried to the client as `session:result.errorCode`
- *  exactly like `WorktreeError`. */
-export type SessionErrorCode = "SESSION_MEMBER_LIMIT" | "SESSION_MEMBER_CONFLICT";
-
-export class SessionError extends Error {
-  constructor(readonly code: SessionErrorCode, message: string) {
-    super(message);
-    this.name = "SessionError";
-  }
 }
 
 export type ForkWorkspace = "copy" | "current";
@@ -279,17 +252,6 @@ interface PersistedEntry {
    *  It is what still answers "forked from what" once the derived name below
    *  has been renamed away on either side. */
   forkedFromSessionId?: string;
-  /** Multi-machine membership (spec 3.1). Exactly one half is ever set on a
-   *  given row, and only the half THIS machine owns (D9): `members` on a lead,
-   *  `memberOf` on a peer. Both absent for an ordinary session. */
-  members?: SessionMember[];
-  memberOf?: SessionMemberOf;
-  /** The lead's brief, held until this peer's Handler is armed — a session is
-   *  created before its agent runs, and an instruction with no armed Handler is
-   *  dropped silently. Persisted-only: it is human text destined for one
-   *  bridge-authored wrapper, and putting it on the wire would invite a client
-   *  to render or re-send it unwrapped. Cleared once delivered. */
-  pendingBrief?: string;
 }
 
 /** On-disk shape written by `flush()`; validated on read by PersistedFileSchema. */
@@ -329,12 +291,6 @@ const PersistedEntrySchema = z
     forkNativeAttempted: z.boolean().optional().catch(undefined),
     conversationStart: z.enum(["fresh", "resume", "fork"]).optional().catch(undefined),
     forkedFromSessionId: z.string().optional().catch(undefined),
-    // Whole-list `.catch` like every field here: a row with one unreadable
-    // member is still a session, and dropping the list is recoverable (the app
-    // re-records) where dropping the row is not.
-    members: z.array(SessionMemberSchema).max(MAX_SESSION_MEMBERS).optional().catch(undefined),
-    memberOf: SessionMemberOfSchema.optional().catch(undefined),
-    pendingBrief: z.string().optional().catch(undefined),
   })
   .transform((s): PersistedEntry => {
     const createdAt = s.createdAt ?? Date.now();
@@ -377,12 +333,6 @@ const PersistedEntrySchema = z
       forkNativeAttempted: s.forkNativeAttempted,
       conversationStart: s.conversationStart ?? (s.agentSessionId ? "resume" : "fresh"),
       forkedFromSessionId: s.forkedFromSessionId,
-      // Never cross-defaulted: a row that lost its `memberOf` must not be
-      // rebuilt as a lead (or vice versa) from the other machine's half, which
-      // this bridge has no way to verify.
-      members: s.members,
-      memberOf: s.memberOf,
-      pendingBrief: s.pendingBrief,
     };
   });
 
@@ -718,11 +668,6 @@ export class SessionManager {
         checkoutKind: e.checkoutKind,
         checkoutBranch: e.checkoutBranch,
         checkoutState: e.checkoutState,
-        // Durable, so the peek carries it: membership is what tells a second
-        // device that a row belongs to a multi-machine session at all, and a
-        // peek that drops it renders a peer as an unrelated local session.
-        members: e.members?.length ? e.members : undefined,
-        memberOf: e.memberOf,
       });
     }
     out.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
@@ -780,201 +725,18 @@ export class SessionManager {
     return best?.config ? { ...best.config } : undefined;
   }
 
-  create(name?: string, spec?: SessionLaunchSpec & { isolation?: "shared"; memberOf?: undefined }): SessionEntry;
+  create(name?: string, spec?: SessionLaunchSpec & { isolation?: "shared" }): SessionEntry;
   create(name: string | undefined, spec: SessionLaunchSpec & { isolation: "worktree" }): Promise<SessionEntry>;
-  create(name: string | undefined, spec: SessionLaunchSpec & { memberOf: SessionMemberRef }): Promise<SessionEntry>;
   create(name?: string, spec?: SessionLaunchSpec): SessionEntry | Promise<SessionEntry>;
   create(name?: string, spec?: SessionLaunchSpec): SessionEntry | Promise<SessionEntry> {
     if (spec?.baseBranch && spec.isolation !== "worktree") {
       throw new Error("baseBranch is only valid for an isolated worktree session");
     }
-    // Restated here and not left to the wire schema: the schema guards the one
-    // client path, and this is the invariant — a peer diagnoses the machine as
-    // it is, on main (D10), so an isolated peer would hide the very working
-    // tree it was added to look at.
-    if (spec?.memberOf && spec.isolation === "worktree") {
-      throw new Error("a peer session cannot use worktree isolation");
-    }
-    if (spec?.brief && !spec.memberOf) {
-      throw new Error("brief is only valid for a peer session");
-    }
     if (spec?.isolation === "worktree") return this.createWorktree(name, spec);
-    if (spec?.memberOf) return this.createMember(name, spec);
     const entry = this.buildEntry(name, spec);
     this.entries.set(entry.id, entry);
     this.changed();
     return this.toWire(entry);
-  }
-
-  /** A peer create is durable before it is answered. The lead's app records the
-   *  matching member the instant this reply lands, and a member pointing at a
-   *  session this machine forgot in a crash is the one state neither side can
-   *  reconcile — the lead would keep offering work to a session id that never
-   *  existed. Rolled back on a failed write so nothing is announced either. */
-  private async createMember(name: string | undefined, spec: SessionLaunchSpec): Promise<SessionEntry> {
-    const entry = this.buildEntry(name, spec);
-    this.entries.set(entry.id, entry);
-    try {
-      await this.flushNowOrThrow();
-    } catch (error) {
-      this.entries.delete(entry.id);
-      throw error;
-    }
-    this.notifyObservers();
-    return this.toWire(entry);
-  }
-
-  // --- multi-machine membership (spec 3.3) ---
-  //
-  // Every verb below writes ONE half of a membership and is answered only after
-  // the write is on disk: the other half lives on a machine this bridge can
-  // never reach (D7), so a half that evaporates in a crash is never repaired by
-  // a peer noticing. The app is the only thing that sees both sides.
-
-  /** Lead-side: add or refresh one peer on this session's member list. */
-  async recordMember(
-    sessionId: string,
-    member: SessionMemberRef,
-    role: "peer" = "peer",
-  ): Promise<SessionEntry> {
-    const entry = this.requireEntry(sessionId);
-    if (entry.memberOf) {
-      throw new SessionError("SESSION_MEMBER_CONFLICT", "A member session cannot lead another.");
-    }
-    const list = entry.members ? [...entry.members] : [];
-    const at = list.findIndex((m) => sameAddress(m, member));
-    const existing = at >= 0 ? list[at] : undefined;
-    if (existing) {
-      // Re-recording revives a released member and refreshes its labels, but
-      // keeps the original `joinedAt`: the row answers "since when has this
-      // machine been on this session", and a retried request must not restate
-      // that as now.
-      list[at] = { ...member, role, joinedAt: existing.joinedAt, state: "active" };
-    } else {
-      if (list.length >= MAX_SESSION_MEMBERS) {
-        // Spend the bound on participants, not on history: a departed member is
-        // a rendered line, an active one is a machine doing work.
-        const stale = list.findIndex((m) => m.state !== "active");
-        if (stale < 0) {
-          throw new SessionError(
-            "SESSION_MEMBER_LIMIT",
-            `A session cannot hold more than ${MAX_SESSION_MEMBERS} machines.`,
-          );
-        }
-        list.splice(stale, 1);
-      }
-      list.push({ ...member, role, joinedAt: Date.now(), state: "active" });
-    }
-    const prev = entry.members;
-    entry.members = list;
-    await this.commitMembership(() => { entry.members = prev; });
-    return this.toWire(entry);
-  }
-
-  /** Lead-side: mark one member departed. A member this row never held is a
-   *  success, not an error — the app calls this after the peer bridge has
-   *  already answered, and by then the only useful outcome is "the lead is not
-   *  claiming that machine", which is already true. */
-  async releaseMember(
-    sessionId: string,
-    member: SessionMemberKey,
-    opts?: { deleteRefused?: boolean; reason?: string },
-  ): Promise<SessionEntry> {
-    const entry = this.requireEntry(sessionId);
-    const at = entry.members?.findIndex((m) => sameAddress(m, member)) ?? -1;
-    if (!entry.members || at < 0) return this.toWire(entry);
-    const prev = entry.members[at]!;
-    const next = [...entry.members];
-    // Last write wins rather than first: a plain release is often followed by
-    // the peer bridge's refusal, and the refusal is the state the user needs.
-    next[at] = {
-      ...prev,
-      state: opts?.deleteRefused ? "released-delete-refused" : "released",
-      releasedAt: Date.now(),
-      releaseReason: opts?.reason,
-    };
-    const before = entry.members;
-    entry.members = next;
-    await this.commitMembership(() => { entry.members = before; });
-    return this.toWire(entry);
-  }
-
-  /** Peer-side: the lead machine could not be reached. Marks only — D11 puts
-   *  the deletion behind the user, never behind an absence. */
-  async setMemberOfOrphaned(sessionId: string, orphaned: boolean): Promise<SessionEntry> {
-    const entry = this.requireEntry(sessionId);
-    if (!entry.memberOf) {
-      throw new SessionError("SESSION_MEMBER_CONFLICT", "This session has no lead to be orphaned from.");
-    }
-    const state = orphaned ? "orphaned" : "active";
-    if (entry.memberOf.state === state) return this.toWire(entry);
-    const prev = entry.memberOf;
-    entry.memberOf = {
-      ...entry.memberOf,
-      state,
-      orphanedAt: orphaned ? Date.now() : undefined,
-    };
-    await this.commitMembership(() => { entry.memberOf = prev; });
-    return this.toWire(entry);
-  }
-
-  /** This lead session's members, empty for every other session. */
-  membersOf(sessionId: string): SessionMember[] {
-    return this.entries.get(sessionId)?.members?.map((m) => ({ ...m })) ?? [];
-  }
-
-  /** This peer session's lead, absent for every other session. */
-  memberOfFor(sessionId: string): SessionMemberOf | undefined {
-    const memberOf = this.entries.get(sessionId)?.memberOf;
-    return memberOf ? { ...memberOf } : undefined;
-  }
-
-  /** The undelivered brief for a peer session, if one is still held. Read and
-   *  clear are separate on purpose: the caller must deliver BEFORE clearing, so
-   *  a crash in between costs a duplicate instruction (harmless — the wrapper
-   *  and the text are identical) rather than a peer that never learns what it
-   *  was added to do. */
-  pendingBriefFor(sessionId: string): string | undefined {
-    return this.entries.get(sessionId)?.pendingBrief;
-  }
-
-  async clearPendingBrief(sessionId: string): Promise<void> {
-    const entry = this.entries.get(sessionId);
-    if (!entry?.pendingBrief) return;
-    entry.pendingBrief = undefined;
-    // No observer notify: `pendingBrief` is persisted-only, so nothing on the
-    // wire changed and a broadcast here would be a frame that says nothing.
-    await this.flushNowOrThrow();
-  }
-
-  private requireEntry(sessionId: string): PersistedEntry {
-    const entry = this.entries.get(sessionId);
-    if (!entry) throw new Error(`session not found: ${sessionId}`);
-    return entry;
-  }
-
-  /**
-   * Persist a membership mutation, or leave memory as it was.
-   *
-   * `restore` is not optional and not a convenience: `flushNowOrThrow`
-   * serializes the WHOLE entry map, so a mutation left in memory after a failed
-   * write is picked up by the next flush from any unrelated cause — the app was
-   * told the record failed, and minutes later a rename in the same project
-   * persists and broadcasts it anyway. Rolling back here rather than at each
-   * call site is what keeps a future membership mutator from forgetting it.
-   */
-  private async commitMembership(restore: () => void): Promise<void> {
-    try {
-      await this.flushNowOrThrow();
-    } catch (error) {
-      restore();
-      // flushNowOrThrow disarms the debounce before it writes, so the failed
-      // write also swallowed whatever else was waiting on that timer. Re-arm it:
-      // the rolled-back map still owes those earlier changes a write.
-      this.scheduleFlush();
-      throw error;
-    }
-    this.notifyObservers();
   }
 
   /** Create a fresh registry-agent conversation from bridge-owned context. */
@@ -1085,10 +847,6 @@ export class SessionManager {
       checkoutState: "ready",
       conversationStart: "fresh",
     };
-    if (spec?.memberOf) {
-      entry.memberOf = { ...spec.memberOf, role: "lead", joinedAt: now, state: "active" };
-      entry.pendingBrief = spec.brief;
-    }
     // A new chat session inherits the last-used selection for its tool so it
     // opens on the model/mode/effort the user actually works with, not the
     // backend default. Terminal sessions and tool-less entries get nothing.
@@ -2770,10 +2528,6 @@ export class SessionManager {
       checkoutKind: e.checkoutKind,
       checkoutBranch: e.checkoutBranch,
       checkoutState: e.checkoutState,
-      // Absent, never `[]`: an ordinary session must stay byte-identical on the
-      // wire to what it was before membership existed.
-      members: e.members?.length ? e.members : undefined,
-      memberOf: e.memberOf,
       sharedWorkspace: memberCount > 1,
       // Floored at 1: `main` counts no members, and the wire schema requires a
       // positive integer.

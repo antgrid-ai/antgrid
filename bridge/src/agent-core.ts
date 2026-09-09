@@ -31,16 +31,14 @@ import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from ".
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
 import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
-import { saveBrief } from "./session-bus/brief-store";
 import { removeSessionBusSession } from "./session-bus/store-fs";
 import { BUS_ROUTE_PERSIST_INTERVAL_MS, BUS_ROUTE_TTL_MS, MAX_BUS_ROUTES } from "./session-bus/constants";
 import { loadBusRoutes, saveBusRoutes } from "./session-bus/route-store";
 import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
-import { sameAddress } from "./session-bus/address";
-import { lineForEvent, lineForJoin, type JoinInput } from "./session-bus/deliver-event";
+import { lineForEvent } from "./session-bus/deliver-event";
 import { neutralizeFenced } from "./session-bus/delivery";
 import type { QueuedLine } from "./session-bus/delivery-queue";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, SessionMemberOrphanWire, SessionMemberRecordWire, SessionMemberReleaseWire, SessionMembershipCreateWire, type AbMessage, type RpcRequest, type SessionEntry, type SessionMemberOf, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, clientKeyOf, type ClientKey, type InboundSource } from "./message-bus";
@@ -49,7 +47,7 @@ import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
 import { detectInstalledTools } from "./tool-detector";
-import { SessionError, SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
+import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -426,17 +424,6 @@ export interface BuildAgentCoreOptions {
    *  antgrid.yaml can learn it from config, so without this a host-spawned
    *  remote core has no relay coordinate to report. */
   relayUrl?: string;
-  /** Render the Handler instruction that carries a peer session's brief. The
-   *  brief is human text from another machine, and spec 5.2 requires every
-   *  delivered line to be a bridge-authored wrapper with the other side's
-   *  content fenced as data — so the core never builds that instruction itself
-   *  and never injects the brief raw. Supplied by the session-bus delivery
-   *  module, which owns the template and its per-kind tests.
-   *
-   *  A core without one HOLDS the brief on disk indefinitely: an undelivered
-   *  brief is a peer waiting for instructions, an unwrapped one is a mandate
-   *  set by unreviewed text. */
-  renderBriefInstruction?: (delivery: { lead: SessionMemberOf; brief: string }) => string;
   /** Hand one session-bus frame to the loopback owner — this machine's own
    *  desktop app — and to nothing else. The lead bridge can never reach the peer
    *  bridge (D7), so the owner is its only carrier; and the MessageBus has no
@@ -1128,26 +1115,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     deliverLine(line);
   }
 
-  /** Tell a lead session's agent that a machine joined it, carrying that
-   *  machine's Capability Card and the brief the human gave it (spec 3.3).
-   *
-   *  Not a bus event: membership is written by this machine's own app, so
-   *  nothing arrives from the peer to announce it — but the line takes the same
-   *  turn-boundary queue as every other delivery, because a lead mid-turn is as
-   *  bad a moment to read a new mandate as any other. */
-  function deliverJoin(input: JoinInput): void {
-    let line: Omit<QueuedLine, "queuedAt">;
-    try {
-      line = lineForJoin(input);
-    } catch (err) {
-      // The membership is already on disk and already answered by the time this
-      // runs, so a rendering problem costs the notice and never the join.
-      log.warn("could not render a session-bus join notice: %s", err);
-      return;
-    }
-    deliverLine(line);
-  }
-
   /** Hand a rendered line to whoever owns delivery: the turn-boundary queue when
    *  one is wired, this core's own submit otherwise. */
   function deliverLine(line: Omit<QueuedLine, "queuedAt">): void {
@@ -1389,11 +1356,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (parsed.success && parsed.data.armed) {
           const { terminalId, goal, backlog, judgeTool, judgeModel, personality } = parsed.data;
           handlerEngine.arm({ terminalId, goal, backlog, judgeTool, judgeModel, personality });
-          // Arming is the moment a brief becomes a MANDATE rather than a
-          // prompt: instruct() drops silently until the Handler is armed, and a
-          // peer that arms after create should get the Handler's framing rather
-          // than the queued line it would otherwise have had.
-          flushPendingBrief(terminalId);
         } else if (parsed.success) {
           handlerEngine.disarm(parsed.data.terminalId);
         } else {
@@ -1843,14 +1805,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           break;
         }
         void (async () => {
-          let sessionId: string | undefined;
           try {
-            // Re-parsed for the same reason handler:configure is: parseMessageFast
-            // validated the discriminator only, so the schema's bounds and its
-            // memberOf/isolation pairing rules have not run — and this brief ends
-            // up inside a Handler instruction on another machine's session.
-            const membership = SessionMembershipCreateWire.safeParse(msg);
-            if (!membership.success) throw new Error("Malformed membership payload.");
             const created = await sessions.create(msg.name, {
               tool: msg.tool,
               command: msg.command,
@@ -1859,74 +1814,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               approvalPolicy: msg.approvalPolicy ?? "default",
               isolation: msg.isolation ?? "shared",
               baseBranch: msg.baseBranch,
-              memberOf: membership.data.memberOf,
-              brief: membership.data.brief,
             });
             sendAb(createMessage("session:result", {
               requestId: msg.requestId, ok: true, session: created, checkoutId: created.checkoutId,
             }));
-            sessionId = created.id;
-            // Stored the moment the session exists, and NOT where the Handler
-            // takes the instruction: this copy is what every later task and
-            // answer restates its scope from (spec 5.2), and nothing in the bus
-            // arms a peer's Handler — so keying the write to arming would leave
-            // every delivery rendering an empty scope block, widening the
-            // mandate by silence instead of refusing.
-            // Read back rather than taken from the request: the manager stamps
-            // the role, join time and state the store's schema requires, and the
-            // wire's `memberOf` carries none of them.
-            const createdLead = sessions?.memberOfFor(created.id);
-            if (createdLead) {
-              // The carrier that created this membership is this bridge's only
-              // way back to the lead (D7), and this is the only place a peer's
-              // route can be recorded before it speaks: the bus path notes an
-              // origin solely for a `session-bus:*` frame it applied, so without
-              // this a peer cannot answer the very brief it was just given until
-              // the lead happens to send it something first.
-              //
-              // Keyed on the STORED memberOf rather than the request, because
-              // that is the same value every outbound of this session keys its
-              // context on (`contextOf`, session-bus/api.ts) — two readings of
-              // one field is how the route and the frames drift apart.
-              //
-              // Noted only after `createMember` resolved, which satisfies the
-              // bus path's "only what the handler accepted" rule more strongly
-              // than an address check does: this carrier did not merely name a
-              // session this bridge holds, it created it.
-              noteBusOrigin(createdLead.sessionId, peerId);
-              if (membership.data.brief) {
-                try {
-                  saveBrief(abDir, project.id, created.id, {
-                    lead: createdLead,
-                    brief: membership.data.brief,
-                    now: Date.now(),
-                  });
-                } catch (err) {
-                  // Costs the scope restatement on later deliveries, never the
-                  // session the app is waiting on.
-                  log.warn("could not store the brief for session %s: %s", created.id, err);
-                }
-              }
-            }
           } catch (err) {
             sendAb(createMessage("session:result", {
               requestId: msg.requestId,
               ok: false,
               error: err instanceof Error ? err.message : "Could not create the session.",
-              ...(err instanceof WorktreeError || err instanceof SessionError ? { errorCode: err.code } : {}),
+              ...(err instanceof WorktreeError ? { errorCode: err.code } : {}),
             }));
           }
-          // Strictly outside the try: this session is created, persisted and
-          // already acknowledged, so a failure in the delivery below must not
-          // author a second session:result for a requestId the app has answered
-          // — a carrier reading that as a failed create retries and ends up with
-          // two peer sessions. Usually this is where the brief actually goes
-          // out: an added machine starts in terminal mode and arms no Handler,
-          // so the queued path below is the one that runs, and its line waits at
-          // the head of the queue until an agent is running to take it. This verb
-          // does not start one: `session:start` is a separate verb, and the
-          // carrier owes it once the membership has landed on the lead.
-          if (sessionId) flushPendingBrief(sessionId);
         })();
         break;
       }
@@ -1960,9 +1859,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "session:unarchive":
       case "session:delete":
       case "session:set-mode":
-      case "session:member-record":
-      case "session:member-release":
-      case "session:member-orphan":
       case "session:setup": {
         // Bound to consts so the switch's narrowing and the not-null check below
         // survive into the async closure.
@@ -2012,47 +1908,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             }
             else if (verb.type === "session:set-mode") await s.setMode(verb.sessionId, verb.mode);
             else if (verb.type === "session:setup") await s.applySetupAction(verb.sessionId, verb.action);
-            // The three membership verbs re-parse before they touch the store:
-            // parseMessageFast checked the discriminator only, and these carry
-            // another machine's labels straight onto a persisted row and into a
-            // rendered card. A rejection is an ordinary failed result — there is
-            // no live state here for a malformed frame to tear down.
-            else if (verb.type === "session:member-record") {
-              const parsed = SessionMemberRecordWire.safeParse(verb);
-              if (!parsed.success) throw new Error("Malformed member payload.");
-              // Read BEFORE the write, because `recordMember` is also how a
-              // carrier refreshes a member's labels: only a machine that was not
-              // already an active member has actually joined, and re-announcing
-              // one that was costs the lead a turn to read a mandate it holds.
-              const led = s.get(parsed.data.sessionId);
-              const joining = !led?.members
-                ?.some((m) => m.state === "active" && sameAddress(m, parsed.data.member));
-              await s.recordMember(parsed.data.sessionId, parsed.data.member, parsed.data.role);
-              // Strictly after the row is on disk: a notice for a membership the
-              // write then failed to record would name a peer no tool can
-              // address.
-              if (joining) {
-                deliverJoin({
-                  sessionId: parsed.data.sessionId,
-                  member: parsed.data.member,
-                  ...(led === undefined ? {} : { leadSessionName: led.name }),
-                  ...(parsed.data.brief === undefined ? {} : { brief: parsed.data.brief }),
-                });
-              }
-            }
-            else if (verb.type === "session:member-release") {
-              const parsed = SessionMemberReleaseWire.safeParse(verb);
-              if (!parsed.success) throw new Error("Malformed member payload.");
-              await s.releaseMember(parsed.data.sessionId, parsed.data.member, {
-                deleteRefused: parsed.data.deleteRefused,
-                reason: parsed.data.reason,
-              });
-            }
-            else if (verb.type === "session:member-orphan") {
-              const parsed = SessionMemberOrphanWire.safeParse(verb);
-              if (!parsed.success) throw new Error("Malformed member payload.");
-              await s.setMemberOfOrphaned(parsed.data.sessionId, parsed.data.orphaned);
-            }
             const entry = s.get(verb.sessionId);
             sendAb(createMessage("session:result", {
               requestId: verb.requestId, ok: true, session: entry, checkoutId,
@@ -2062,7 +1917,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               requestId: verb.requestId,
               ok: false,
               error: err instanceof Error ? err.message : "Session operation failed.",
-              ...(err instanceof WorktreeError || err instanceof SessionError ? { errorCode: err.code } : {}),
+              ...(err instanceof WorktreeError ? { errorCode: err.code } : {}),
               checkoutId,
             }));
           }
@@ -2375,79 +2230,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       notificationType: "task_complete", message, sessionId: terminalId, projectId: project.id,
     })),
   });
-
-  /** Deliver a peer session's held brief by whichever route it has: the Handler
-   *  instruction when one is armed, and the turn-boundary delivery queue when
-   *  none is — which is the common case, since a machine added to a session
-   *  starts its agent in terminal mode. Called at both moments a brief can
-   *  become deliverable, and safe to call again after a crash because the brief
-   *  is cleared only once it has been handed over.
-   *
-   *  The durable copy the scope block is rendered from is written at create
-   *  (`session:create`), because a peer whose Handler never arms still receives
-   *  tasks and still has a mandate.
-   *
-   *  Deliberately fire-and-forget past the instruct: nothing on the wire is
-   *  waiting, and the create reply has already gone. */
-  function flushPendingBrief(sessionId: string): void {
-    const s = sessions;
-    if (!s) return;
-    const brief = s.pendingBriefFor(sessionId);
-    if (!brief) return;
-    const lead = s.memberOfFor(sessionId);
-    if (!lead) return;
-    // Held, not dropped, when there is no renderer: that is a build whose
-    // delivery module was never wired, and an unwrapped brief is a mandate with
-    // no provenance.
-    const render = opts.renderBriefInstruction;
-    if (!render) {
-      log.warn("brief held for session %s: no delivery renderer wired", sessionId);
-      return;
-    }
-    // Rendered inside each branch, never before them: a wrapper built for a
-    // route that turns out not to exist is a brief thrown away, and the renderer
-    // is the expensive half of this function.
-    if (handlerEngine.isArmed(sessionId)) {
-      try {
-        // `fallbackText` is the human's brief unwrapped. When extraction produces
-        // nothing — no judge-capable tool, or a rate-limited spawn — the Handler
-        // files the instruction as one raw item truncated to its first few hundred
-        // characters, which for a wrapped delivery is all preamble and no mandate.
-        // Authorization still reads the rendered text, so this widens nothing.
-        handlerEngine.instruct({ terminalId: sessionId, text: render({ lead, brief }), fallbackText: brief });
-      } catch (err) {
-        // Held rather than lost: the brief is still on disk, so the next arm
-        // retries it.
-        log.warn("could not deliver brief for session %s: %s", sessionId, err);
-        return;
-      }
-    } else {
-      // No Handler will ever arm on the common path — a machine added to a
-      // session starts its agent in TERMINAL mode — so the queue, not the arm,
-      // is what actually delivers most briefs. Same turn-boundary guarantee and
-      // the same wrapped template; only the mandate framing an armed Handler
-      // adds is missing, and a peer with no Handler has nothing to hand it to.
-      const queue = opts.queueBusLine;
-      if (!queue) {
-        log.warn("brief held for session %s: no delivery queue wired", sessionId);
-        return;
-      }
-      // One id per session: a brief is written once at create and this runs at
-      // every moment it could become deliverable, so a re-entry must not queue a
-      // second copy of the same mandate.
-      //
-      // Handing it over clears it, so a Handler armed AFTER this point finds
-      // nothing pending. That is the intended trade: the agent has already been
-      // given the brief, and the durable copy the scope block renders from is
-      // still on disk for `antgrid_get_brief` and for the arm's own context.
-      queue({ id: `brief:${sessionId}`, sessionId, kind: "brief", text: render({ lead, brief }) });
-    }
-    // Strictly after: a crash here costs a repeated instruction with identical
-    // text, which the peer can absorb. Clearing first costs the brief outright.
-    void s.clearPendingBrief(sessionId).catch((err) => {
-      log.warn("could not clear delivered brief for session %s: %s", sessionId, err);
-    });
-  }
 
   /** Provisions a freshly cut worktree — copies the untracked files a `git
    *  worktree add` cannot bring and runs the project's install steps — before

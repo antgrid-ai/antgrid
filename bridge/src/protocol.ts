@@ -1,10 +1,6 @@
 import { z } from "zod";
 import { AbConfigSchema } from "./config";
 import { KNOWN_TIERS } from "./entitlement";
-// The delivery renderer owns the brief budget: the wire may only accept what a
-// delivery can carry whole (spec 5.2). Type-only in the other direction, so
-// there is no runtime cycle.
-import { MAX_BRIEF_CHARS } from "./session-bus/delivery";
 import {
   ARTIFACT_CHUNK_B64_MAX,
   ARTIFACT_CHUNK_BYTES,
@@ -1523,11 +1519,6 @@ const ConfigDetectToolsResultMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-/** Ceiling on a lead row's member list. The array rides every `session:updated`
- *  broadcast, so a released-member history with no bound grows the frame for
- *  every attached app forever; `recordMember` enforces it. */
-export const MAX_SESSION_MEMBERS = 16;
-
 // Identity of one session on one machine, and the address every bus frame
 // carries. `machineId` is the account device uuid — the value the app already
 // addresses a machine by. Opaque to both bridges: neither derives it, the app
@@ -1538,17 +1529,17 @@ export const SessionMemberKeySchema = z.object({
   sessionId: z.string().min(1).max(200),
 });
 
-// The Capability Card as it travels ON a membership (spec 3.3): the two MVP
-// fields, both observed by the MEMBER's own bridge before any agent ran there.
-// Mirrors `OsCard`/`RepoCard` in capability-card.ts, which is where the values
-// are actually read — a second shape would be two things to keep true.
+// The Capability Card as it travels on an address (spec 5.3): the two MVP
+// fields, both observed by that machine's own bridge before any agent ran
+// there. Mirrors `OsCard`/`RepoCard` in capability-card.ts, which is where the
+// values are actually read — a second shape would be two things to keep true.
 //
-// Every field is optional and tolerates an explicit null, top to bottom, because
-// the reader that fills it already produces nulls (`readRepoCard`) and because a
-// machine that could not answer must still be able to join: refusing a
-// membership over a blank branch would cost the human the machine rather than
-// the field. Bounded like every other label here — the values are rendered into
-// an agent's prompt.
+// Every field is optional and tolerates an explicit null, top to bottom,
+// because the reader that fills it already produces nulls (`readRepoCard`) and
+// because a machine that could not answer must still be able to appear in the
+// directory: withholding a row over a blank branch would cost the human the
+// machine rather than the field. Bounded like every other label here — the
+// values are rendered into an agent's prompt.
 export const SessionMemberCardSchema = z.object({
   os: z.object({
     name: z.string().max(60).nullish(),
@@ -1580,33 +1571,6 @@ export const SessionMemberRefSchema = SessionMemberKeySchema.extend({
   projectLabel: z.string().max(120).optional(),
   sessionName: z.string().max(120).optional(),
   card: SessionMemberCardSchema.optional(),
-});
-
-// The lead half: present only on a lead's row, on the lead's own bridge.
-export const SessionMemberSchema = SessionMemberRefSchema.extend({
-  // Constant "peer" today. Carried anyway because leadership is transferable
-  // (spec 5.1), and a row that never recorded which side it was cannot be
-  // handed over without asking the machine that just went away.
-  role: z.enum(["lead", "peer"]).default("peer"),
-  joinedAt: z.number(),
-  // History, not liveness: only `active` members are participants. The two
-  // released states are the outcomes spec 5.4 requires a removal to record.
-  state: z.enum(["active", "released", "released-delete-refused"]).default("active"),
-  releasedAt: z.number().optional(),
-  // The peer bridge's refusal code (WORKTREE_DIRTY, …) as the app relayed it.
-  // Rendered on the lead's row; never acted on.
-  releaseReason: z.string().max(200).optional(),
-});
-
-// The peer half: present only on a peer's row, on the peer's own bridge.
-export const SessionMemberOfSchema = SessionMemberRefSchema.extend({
-  role: z.enum(["lead"]).default("lead"),
-  joinedAt: z.number(),
-  // `orphaned` is set by the app when the lead machine is unreachable (D11:
-  // nothing is deleted on the word of an absence). The peer bridge cannot
-  // observe it — the lead is not reachable from here, ever.
-  state: z.enum(["active", "orphaned"]).default("active"),
-  orphanedAt: z.number().optional(),
 });
 
 const SessionEntrySchema = z.object({
@@ -1663,12 +1627,6 @@ const SessionEntrySchema = z.object({
   checkoutState: z.enum(["ready", "missing", "failed"]).default("ready"),
   sharedWorkspace: z.boolean().default(false),
   workspaceMemberCount: z.number().int().positive().default(1),
-  // Membership (spec 3.1, D9). Each bridge persists and advertises only its own
-  // half: `members` on a lead's row, `memberOf` on a peer's. Absent — never `[]`
-  // — for an ordinary session, so an older app parses a member row as a plain
-  // session and no broadcast pays bytes for a field almost nothing sets.
-  members: z.array(SessionMemberSchema).max(MAX_SESSION_MEMBERS).optional(),
-  memberOf: SessionMemberOfSchema.optional(),
   // Provisioning of this session's own checkout (`worktree.setup`). Orthogonal
   // to `checkoutState`, deliberately: that answers "is this workspace usable",
   // this one "has provisioning finished" — a checkout is `ready` while setup is
@@ -1712,21 +1670,6 @@ const SessionListResultMessage = BaseMessage.extend({
   sessions: z.array(SessionEntrySchema),
 });
 
-// The membership half of `session:create`, exported because the local/decrypted
-// hot path (`parseMessageFast`) validates only the discriminator: the switch
-// re-parses these two fields before they reach the SessionManager, so the
-// bounds below and the superRefine pairing rules actually run on every caller.
-export const SessionMembershipCreateWire = z.object({
-  // Present: create this session as the PEER half of a multi-machine session
-  // whose lead lives on another machine. The lead's own bridge records the
-  // matching `members` entry from its own app — the two bridges never speak.
-  memberOf: SessionMemberRefSchema.optional(),
-  // The lead's opening instruction for the peer, held on disk until the peer's
-  // Handler is armed and delivered as a bridge-authored, lift-neutral wrapper
-  // (spec 5.2). Never injected verbatim.
-  brief: z.string().min(1).max(MAX_BRIEF_CHARS).optional(),
-});
-
 const SessionCreateMessage = BaseMessage.extend({
   type: z.literal("session:create"),
   requestId: z.string(),
@@ -1741,18 +1684,9 @@ const SessionCreateMessage = BaseMessage.extend({
   // shared before invoking SessionManager.
   isolation: z.enum(["shared", "worktree"]).optional(),
   baseBranch: z.string().min(1).optional(),
-}).extend(SessionMembershipCreateWire.shape).superRefine((value, ctx) => {
+}).superRefine((value, ctx) => {
   if (value.baseBranch && value.isolation !== "worktree") {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["baseBranch"], message: "baseBranch requires worktree isolation" });
-  }
-  // D10: a peer is always a fresh session on the machine's MAIN checkout. An
-  // isolated peer would put the lead's work behind a worktree only the peer
-  // machine can see, which no branch on the lead's machine ever converges with.
-  if (value.memberOf && value.isolation === "worktree") {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["memberOf"], message: "a peer session cannot use worktree isolation" });
-  }
-  if (value.brief && !value.memberOf) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["brief"], message: "brief requires memberOf" });
   }
 });
 
@@ -1809,67 +1743,6 @@ const SessionDeleteMessage = BaseMessage.extend({
   removeCheckout: z.boolean().optional(),
   deleteBranch: z.boolean().optional(),
 });
-
-// Membership bookkeeping (spec 3.3). All three are issued by the LEAD's app —
-// one request per bridge, because no bridge can reach another (D7) — and reply
-// on the shared `session:result`. Each writes only the half its own machine
-// owns, so neither can be used to forge the other side's view.
-//
-// Lead-side: append/refresh one peer on this lead session's `members`.
-export const SessionMemberRecordWire = z.object({
-  requestId: z.string(),
-  // The LOCAL lead session gaining the member.
-  sessionId: z.string(),
-  member: SessionMemberRefSchema,
-  // Constant today; named so a future leadership transfer records which side
-  // this row was, rather than inferring it from a machine that has gone away.
-  role: z.enum(["peer"]).default("peer"),
-  // The brief the human wrote for this machine, as the carrier sent it to the
-  // peer's own `session:create`. Carried here so the lead agent is told what its
-  // new peer was told (spec 3.3: the card reaches the lead packaged with the
-  // brief) — nothing else on this machine ever sees it, because the durable
-  // brief record lives on the peer.
-  //
-  // Optional: a carrier that recorded a membership without one leaves the lead a
-  // join notice with no mandate in it, which is what an older app produces and
-  // is still better than the lead learning of the machine from nothing at all.
-  // Not persisted — the join notice is the only reader.
-  brief: z.string().min(1).max(MAX_BRIEF_CHARS).optional(),
-});
-const SessionMemberRecordMessage = BaseMessage.extend({
-  type: z.literal("session:member-record"),
-}).extend(SessionMemberRecordWire.shape);
-
-// Lead-side: mark one member released. Idempotent and never fails for an
-// unknown member — the app calls it after a peer bridge has already answered,
-// and a lead that never recorded the member must not turn that into an error
-// the user has to clear.
-export const SessionMemberReleaseWire = z.object({
-  requestId: z.string(),
-  sessionId: z.string(),
-  member: SessionMemberKeySchema,
-  // The peer bridge refused its own deletion (spec 5.4): the member stays on
-  // the row as `released-delete-refused` with the refusal code, so the user can
-  // see WHY the peer machine still holds work.
-  deleteRefused: z.boolean().optional(),
-  reason: z.string().max(200).optional(),
-});
-const SessionMemberReleaseMessage = BaseMessage.extend({
-  type: z.literal("session:member-release"),
-}).extend(SessionMemberReleaseWire.shape);
-
-// Peer-side: the lead machine could not be reached, so this row is orphaned.
-// D11 — an absence never deletes anything; it only marks, and only the user
-// acts on the mark.
-export const SessionMemberOrphanWire = z.object({
-  requestId: z.string(),
-  // The LOCAL peer session being marked.
-  sessionId: z.string(),
-  orphaned: z.boolean(),
-});
-const SessionMemberOrphanMessage = BaseMessage.extend({
-  type: z.literal("session:member-orphan"),
-}).extend(SessionMemberOrphanWire.shape);
 
 const SessionSetModeMessage = BaseMessage.extend({
   type: z.literal("session:set-mode"),
@@ -2621,9 +2494,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   SessionListMessage,
   SessionListResultMessage,
   SessionCreateMessage,
-  SessionMemberRecordMessage,
-  SessionMemberReleaseMessage,
-  SessionMemberOrphanMessage,
   SessionForkMessage,
   SessionStartMessage,
   SessionStopMessage,
@@ -2796,14 +2666,9 @@ export type SessionEntry = z.infer<typeof SessionEntrySchema>;
 export type SessionList = z.infer<typeof SessionListMessage>;
 export type SessionListResult = z.infer<typeof SessionListResultMessage>;
 export type SessionCreate = z.infer<typeof SessionCreateMessage>;
-export type SessionMember = z.infer<typeof SessionMemberSchema>;
-export type SessionMemberOf = z.infer<typeof SessionMemberOfSchema>;
 export type SessionMemberRef = z.infer<typeof SessionMemberRefSchema>;
 export type SessionMemberCard = z.infer<typeof SessionMemberCardSchema>;
 export type SessionMemberKey = z.infer<typeof SessionMemberKeySchema>;
-export type SessionMemberRecord = z.infer<typeof SessionMemberRecordMessage>;
-export type SessionMemberRelease = z.infer<typeof SessionMemberReleaseMessage>;
-export type SessionMemberOrphan = z.infer<typeof SessionMemberOrphanMessage>;
 export type SessionFork = z.infer<typeof SessionForkMessage>;
 export type SessionStart = z.infer<typeof SessionStartMessage>;
 export type SessionStop = z.infer<typeof SessionStopMessage>;
@@ -3007,7 +2872,6 @@ const KNOWN_TYPES = new Set<string>([
   "session:create", "session:fork", "session:start", "session:stop",
   "session:rename", "session:archive", "session:unarchive",
   "session:delete", "session:set-mode", "session:setup", "session:focus",
-  "session:member-record", "session:member-release", "session:member-orphan",
   "session:result", "session:updated",
   "client:focus-state",
   "terminal:snapshot:request", "terminal:snapshot",

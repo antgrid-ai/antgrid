@@ -159,12 +159,13 @@ invariant, which is why the reasoning lives beside the code rather than here.
 
 ## The session bus (`src/session-bus/`)
 
-The agent-to-agent plane of a multi-machine session. `docs/multi-machine-session.md`
-is the spec; this is the set of invariants a future edit breaks silently.
+The agent-to-agent plane: one session on one machine reaching another.
+`docs/session-messaging.md` is the spec; this is the set of invariants a future
+edit breaks silently.
 
-- **Outbound on a LEAD goes to the loopback owner and nowhere else.**
-  `ProjectCore.sendToOwner` is the only path, and `local-listener.ts` hands a
-  bus frame to an owner only if its hello declared
+- **Outbound on the machine that opened the exchange goes to the loopback owner
+  and nowhere else.** `ProjectCore.sendToOwner` is the only path, and
+  `local-listener.ts` hands a bus frame to an owner only if its hello declared
   `capabilities.sessionBusCarrier` (`ownerCarriesSessionBus`, surfaced to the
   loopback API as `carrierPresent`). The desktop app is the carrier; no
   attached carrier means the frame is HELD and retried by the coordinator, never
@@ -199,38 +200,26 @@ is the spec; this is the set of invariants a future edit breaks silently.
   differ, both processes say so once (`the other machine addresses session … as
   project …`, and the app's `peer addresses this lead by another project`) —
   routing no longer depends on it, but the row still renders it.
-- **Outbound on a PEER is `sendToAppSession(peerId)`,** keyed by the app session
-  that carried the exchange in (`busOriginByContext` / `noteBusOrigin` in
-  `agent-core.ts`). Falling through to the loopback owner would hand the lead's
-  answer to THIS machine's desktop, which accepts it and returns true — booking a
-  delivery that never happened and retiring the only outbox entry that could
-  retry it. A broadcast would additionally leak the whole exchange to the human's
-  phone, which is the mirror of the lead-side invariant above.
+- **Outbound on the machine that is answering is `sendToAppSession(peerId)`,**
+  keyed by the app session that carried the exchange in (`busOriginByContext` /
+  `noteBusOrigin` in `agent-core.ts`). Falling through to the loopback owner
+  would hand the answer to THIS machine's desktop, which accepts it and returns
+  true — booking a delivery that never happened and retiring the only outbox
+  entry that could retry it. A broadcast would additionally leak the whole
+  exchange to the human's phone, which is the mirror of the sending-side
+  invariant above.
 - **Every delivery into an agent is rendered, and lands at a TURN BOUNDARY.**
   `session-bus/delivery.ts` wraps the other agent's content as fenced data —
   never raw, never a bare instruction — and `delivery-queue.ts` holds the line
   until the turn closes. `DeliveryKindSchema` there is the whole set of queued
   kinds.
-- **The brief reaches the two sides by different channels, and only one of them
-  is the queue.** On the PEER it is a Handler INSTRUCTION at arm time
-  (`flushPendingBrief` -> `handlerEngine.instruct`, a turn boundary by
-  construction), with its durable record in `session-bus/brief-store.ts` — so a
-  test that watches the peer's terminal for a brief is watching the wrong
-  channel. On the LEAD the same text rides the `joined` notice through the
-  ordinary queue, because there it is context rather than a mandate to adopt and
-  nothing on the lead machine stores it.
-- **A join is announced, and it is not a bus event.** No bridge can reach
-  another (D7), so nothing arrives from the peer to say it joined: the app's own
-  `session:member-record` is what triggers `lineForJoin`, and only for a machine
-  that was not already an ACTIVE member (the same verb refreshes labels).
-- **The Capability Card travels on the member row and may only ever be FENCED.**
+- **The Capability Card travels on the address and may only ever be FENCED.**
   It is `SessionMemberCardSchema` on `SessionMemberRefSchema` (`protocol.ts`),
-  observed by the member's own bridge (`capability-card.ts`), and it is what
-  lets `antgrid_list_peers` answer OS + repo for a machine this bridge can never
-  reach. Its values are a hostname and a repo path — precisely what
-  `authorizeInstruction` reads as a grant — so no template may put it in a
-  wrapper, and the one kind that carries it (`joined`) must stay on the
-  `injectReply` path rather than reaching `instruct`.
+  observed by that machine's own bridge (`capability-card.ts`), and it is what
+  answers OS + repo for a machine this bridge can never reach. Its values are a
+  hostname and a repo path — precisely what `authorizeInstruction` reads as a
+  grant — so no template may put it in a wrapper, and any kind that carries it
+  must stay on the `injectReply` path rather than reaching `instruct`.
 - **The no-progress halt is `session-bus/task-guard.ts`, and it is per SESSION,
   not per machine** — two agents can trade messages that advance nothing
   forever, and a per-machine ceiling would let one session spend another's

@@ -1,6 +1,5 @@
 import { describe, it, expect } from "bun:test";
 import { parseMessage, createMessage, AbMessageSchema, parseMessageFast } from "../src/protocol";
-import { MAX_BRIEF_CHARS } from "../src/session-bus/delivery";
 
 describe("agent:status shape", () => {
   it("accepts services + ports in place of terminals/proxies/layout", () => {
@@ -484,120 +483,38 @@ describe("terminal:output carries optional seq", () => {
   });
 });
 
-describe("multi-machine session membership", () => {
+describe("the session object is unchanged and unextended", () => {
   const envelope = { id: "3f2a0f5e-1c3b-4c2b-9f2e-2b7c1d4e5a60", timestamp: 1_700_000_000_000 };
-  const member = { machineId: "m1", projectId: "p1", sessionId: "s1" };
+  const address = { machineId: "m1", projectId: "p1", sessionId: "s1" };
 
-  it("refuses a peer session on an isolated worktree", () => {
-    const msg = {
-      ...envelope, type: "session:create", requestId: "r1",
-      isolation: "worktree", memberOf: member,
-    };
-    expect(parseMessage(JSON.stringify(msg))).toBeNull();
-  });
-
-  it("refuses a brief with no lead to attribute it to", () => {
-    const msg = { ...envelope, type: "session:create", requestId: "r1", brief: "do the thing" };
-    expect(parseMessage(JSON.stringify(msg))).toBeNull();
-  });
-
-  it("accepts a peer create carrying a lead and a brief", () => {
-    const msg = {
-      ...envelope, type: "session:create", requestId: "r1",
-      memberOf: { ...member, machineLabel: "Laptop" }, brief: "Own the backend.",
-    };
-    const parsed = parseMessage(JSON.stringify(msg));
-    expect(parsed?.type).toBe("session:create");
-    if (parsed?.type !== "session:create") throw new Error("unreachable");
-    expect(parsed.memberOf?.machineLabel).toBe("Laptop");
-    expect(parsed.brief).toBe("Own the backend.");
-  });
-
-  it("bounds the brief where the delivery renderer bounds it", () => {
-    // The two bounds are one constant on purpose: a brief the wire accepts is
-    // delivered whole, and the tail of a mandate — where a human writes what the
-    // peer may NOT do — is exactly what a silent trim would drop, with nothing
-    // on session:result to say so.
-    const brief = (n: number) => ({
-      ...envelope, type: "session:create", requestId: "r1", memberOf: member, brief: "b".repeat(n),
-    });
-    expect(parseMessage(JSON.stringify(brief(MAX_BRIEF_CHARS)))?.type).toBe("session:create");
-    expect(parseMessage(JSON.stringify(brief(MAX_BRIEF_CHARS + 1)))).toBeNull();
-  });
-
-  it("defaults a recorded member's role to peer", () => {
-    const msg = { ...envelope, type: "session:member-record", requestId: "r1", sessionId: "lead", member };
-    const parsed = parseMessage(JSON.stringify(msg));
-    expect(parsed?.type).toBe("session:member-record");
-    if (parsed?.type !== "session:member-record") throw new Error("unreachable");
-    expect(parsed.role).toBe("peer");
-    // Session verbs route by sessionId and the bridge resolves the checkout
-    // from the entry, so a checkoutId here would be a second, conflicting answer.
-    expect((parsed as { checkoutId?: string }).checkoutId).toBeUndefined();
-  });
-
-  it("bounds the labels a member carries onto a row and into a card", () => {
-    const msg = {
-      ...envelope, type: "session:member-record", requestId: "r1", sessionId: "lead",
-      member: { ...member, sessionName: "x".repeat(121) },
-    };
-    expect(parseMessage(JSON.stringify(msg))).toBeNull();
-  });
-
-  it("carries a peer bridge's refusal back onto the lead's row", () => {
-    const msg = {
-      ...envelope, type: "session:member-release", requestId: "r1", sessionId: "lead",
-      member, deleteRefused: true, reason: "WORKTREE_DIRTY",
-    };
-    const parsed = parseMessage(JSON.stringify(msg));
-    expect(parsed?.type).toBe("session:member-release");
-    if (parsed?.type !== "session:member-release") throw new Error("unreachable");
-    expect(parsed.deleteRefused).toBe(true);
-    expect(parsed.reason).toBe("WORKTREE_DIRTY");
-  });
-
-  it("parses an orphan mark", () => {
-    const msg = { ...envelope, type: "session:member-orphan", requestId: "r1", sessionId: "peer", orphaned: true };
-    const parsed = parseMessage(JSON.stringify(msg));
-    expect(parsed?.type).toBe("session:member-orphan");
-  });
-
-  it("admits every membership verb on the fast path", () => {
-    // parseMessageFast answers from KNOWN_TYPES alone, so a verb missing from
-    // that set is dropped on the local/decrypted path while the union accepts
-    // it — a failure mode with no error anywhere.
-    const types = ["session:member-record", "session:member-release", "session:member-orphan"] as const;
-    for (const type of types) {
-      expect(parseMessageFast(JSON.stringify({ ...envelope, type }))?.type).toBe(type);
-    }
-  });
-
-  it("carries both membership halves on a session entry", () => {
+  // `docs/session-messaging.md` §4.1: the bus addresses a session by its id and
+  // adds nothing to it. Asserted on the wire rather than left to review, because
+  // re-growing a field here costs nothing at the schema and is invisible
+  // afterwards — a wave that wants one has to delete this test to get it.
+  it("carries no membership half on a session entry", () => {
     const msg = {
       ...envelope, type: "session:updated",
       sessions: [{
-        id: "lead", name: "Lead", createdAt: 1, lastUsedAt: 1, archived: false, running: false,
-        members: [{ ...member, joinedAt: 2 }],
-      }, {
-        id: "peer", name: "Peer", createdAt: 1, lastUsedAt: 1, archived: false, running: false,
-        memberOf: { ...member, joinedAt: 2 },
+        id: "s1", name: "Solo", createdAt: 1, lastUsedAt: 1, archived: false, running: false,
+        members: [{ ...address, joinedAt: 2 }],
+        memberOf: { ...address, joinedAt: 2 },
       }],
     };
     const parsed = parseMessage(JSON.stringify(msg));
     expect(parsed?.type).toBe("session:updated");
     if (parsed?.type !== "session:updated") throw new Error("unreachable");
-    expect(parsed.sessions[0]!.members?.[0]).toMatchObject({ role: "peer", state: "active" });
-    expect(parsed.sessions[1]!.memberOf).toMatchObject({ role: "lead", state: "active" });
+    expect(parsed.sessions[0]!).not.toHaveProperty("members");
+    expect(parsed.sessions[0]!).not.toHaveProperty("memberOf");
   });
 
-  it("refuses a member list past the ceiling", () => {
-    const members = Array.from({ length: 17 }, (_, i) => ({
-      machineId: `m${i}`, projectId: "p", sessionId: "s", joinedAt: 1,
-    }));
+  it("takes no membership fields on session:create", () => {
     const msg = {
-      ...envelope, type: "session:updated",
-      sessions: [{ id: "lead", name: "Lead", createdAt: 1, lastUsedAt: 1, archived: false, running: false, members }],
+      ...envelope, type: "session:create", requestId: "r1",
+      memberOf: address, brief: "Own the backend.",
     };
-    expect(parseMessage(JSON.stringify(msg))).toBeNull();
+    const parsed = parseMessage(JSON.stringify(msg));
+    expect(parsed?.type).toBe("session:create");
+    expect(parsed).not.toHaveProperty("memberOf");
+    expect(parsed).not.toHaveProperty("brief");
   });
 });

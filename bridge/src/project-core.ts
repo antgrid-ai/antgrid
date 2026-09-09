@@ -7,7 +7,6 @@ import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./stream-m
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
 import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
-import { renderBrief } from "./session-bus/delivery";
 import { SessionBusDeliveryQueue, closedTurns, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
@@ -400,10 +399,6 @@ export class ProjectCore {
       // Handler never pays a context assemble plus a judge spawn for a nudge on
       // a turn that already finished.
       isStaleIdleNudge: (id) => isStaleIdleNudge(this._work, id),
-      // The core holds a peer's brief until something can wrap it (spec 5.2);
-      // this is that something, and every production core gets it so a held
-      // brief is never a missing dependency.
-      renderBriefInstruction: renderBrief,
       sendToOwner: (msg) => this.sendToOwner(msg),
       sendToAppSession: (peerId, msg) => this.sendToAppSession(peerId, msg),
       // This machine's half of every session-bus address. The relay slot's id

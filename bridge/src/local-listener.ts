@@ -220,12 +220,12 @@ export class LocalListener implements TransportSubscriber {
    * Session-bus traffic never goes through the MessageBus even though
    * {@link deliver} above ends at the same socket: a published frame fans out to
    * every established app session, and the human's phone is one of them — it
-   * must never see another agent's task traffic (spec 4.1). This is the only
+   * must never see another agent's bus traffic. This is the only
    * other way a frame reaches the owner, and it takes the frame directly.
    *
    * False means the frame did not leave: no owner, or an owner that does not
-   * carry the bus. The caller holds it in its outbox and retries — an absent
-   * carrier is not a failed task (D11).
+   * carry the bus. The caller holds it in its outbox and retries: an absent
+   * carrier is a machine that has not attached yet, never a refusal.
    */
   deliverToOwner(msg: AbMessage, channel: Channel = "control"): boolean {
     if (!this.ownerSocket || !this.ownerCarriesSessionBus) return false;

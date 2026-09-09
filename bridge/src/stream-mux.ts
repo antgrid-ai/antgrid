@@ -32,7 +32,7 @@ export interface StreamHandle {
   /** Send one frame on a named channel to a single app session, bypassing the
    *  bus. The bus has no addressing, so a published frame reaches every
    *  established session — including the human's phone, which is attached here
-   *  too and must never see another agent's task traffic (spec 4.1). Resolves
+   *  too and must never see another agent's bus traffic. Resolves
    *  the same outcomes as `sendTunnel`, so a caller with an outbox can hold the
    *  frame rather than assume it left. */
   sendTo(msg: unknown, channel: Channel, target: SendTarget): Promise<SendOutcome>;
