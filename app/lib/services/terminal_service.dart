@@ -771,9 +771,22 @@ class TerminalService {
     if (_disposed || _snapshotGeneration[terminalId] != generation) return;
     final snap = (res['snapshot'] as Map?)?.cast<String, dynamic>();
     if (snap == null) {
-      // Not a failure: the bridge has no screen left to serialize for this
-      // terminal (an exited PTY whose screen was disposed, an id it does not
-      // know) and has said so explicitly rather than answering with nothing.
+      // Not a failure for a terminal with no PTY behind it: the bridge has no
+      // screen left to serialize (an exited PTY whose screen was disposed, a
+      // retained transcript) and has said so explicitly rather than answering
+      // with nothing. `_deriveAttach` skips such a tab, so cold holds nothing
+      // back.
+      //
+      // A LIVE one is a failure, exactly as the legacy arm's deadline calls it:
+      // retiring alone drops the tab to TerminalAttachStage.cold, which
+      // `_deriveAttach` counts as a wait nothing can end — the checkout never
+      // leaves `attaching`, the boot overlay never hands off, and the pane
+      // offers no Retry.
+      final tab = _state.tabs[terminalId];
+      if (tab != null && _hasLivePty(tab)) {
+        _failSnapshotPull(terminalId);
+        return;
+      }
       if (_retireSnapshotPull(terminalId)) _publishHydration();
       return;
     }

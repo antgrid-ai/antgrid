@@ -277,6 +277,36 @@ void main() {
     },
   );
 
+  // The mirror of the case above, and the whole reason it has to branch on the
+  // PTY: a LIVE terminal answered `snapshot: null` has no bound behind it on
+  // the RPC arm, so retiring alone leaves it cold — which `_deriveAttach`
+  // counts as a wait, holding the checkout at `attaching` with nothing left to
+  // end it and no Retry on the pane.
+  test(
+    "a live terminal's pull answered snapshot: null fails instead of "
+    'stranding the checkout',
+    () async {
+      final t = newTransport();
+      final session = await newSession(t);
+      final svc = newService(session, snapshotAttachTimeout: _attachBound);
+      t.requestHandler = (_, _) => <String, dynamic>{'snapshot': null};
+
+      emitStatus(t, [terminalInfo('a')]);
+      await settle();
+
+      expect(stageOf(svc, 'a'), TerminalAttachStage.failed);
+      expect(
+        svc.currentState.attach,
+        CheckoutAttachStatus.ready,
+        reason: 'one terminal that cannot be snapshotted leaves the checkout '
+            'usable — the failure belongs on its own pane',
+      );
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
   // The common case for a busy TUI, and for a pull the agent answers with
   // nothing: without this the pane waits out the whole bound and then reports a
   // failure over output the user can see arriving.

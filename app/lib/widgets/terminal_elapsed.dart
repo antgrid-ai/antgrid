@@ -46,7 +46,18 @@ class _TerminalElapsedState extends State<TerminalElapsed> {
   void initState() {
     super.initState();
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() => _elapsed += const Duration(seconds: 1));
+      if (!mounted) return;
+      setState(() {
+        final ticked = _elapsed + const Duration(seconds: 1);
+        // The LARGER of the tick count and the wall clock. Timers are
+        // suspended while the app is backgrounded, so ticks alone under-report
+        // a wait the user sat through off screen — the "2s to someone who
+        // waited forty" reading this readout exists to prevent. Not the wall
+        // clock outright: FakeAsync advances timers without moving it, so a
+        // now()-only value freezes in widget tests.
+        final wall = _seed();
+        _elapsed = wall > ticked ? wall : ticked;
+      });
     });
   }
 

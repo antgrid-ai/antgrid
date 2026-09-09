@@ -3992,7 +3992,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           return;
         }
         if (msg.method === "terminal.snapshot") {
-          void handleTerminalSnapshotRpc(msg).then((res) => bus.publish(res, channel));
+          // `.catch` before the publish, not after: the handler awaits
+          // `checkoutRuntimes.resolve` (a store read) and
+          // `prepareCheckoutRuntime` (config load + runtime start), neither of
+          // which is guarded inside it. An unhandled rejection here reaches
+          // `index.ts`'s `unhandledRejection` hook, which shuts the whole host
+          // down over one failed screen pull.
+          void handleTerminalSnapshotRpc(msg)
+            .catch((err) => {
+              log.warn("terminal.snapshot failed for project %s: %s", project.id, err);
+              return createMessage("response", {
+                requestId: msg.requestId,
+                ok: false,
+                error: { code: "E_HANDLER", message: "terminal snapshot failed" },
+              });
+            })
+            .then((res) => bus.publish(res, channel));
           return;
         }
         void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));
