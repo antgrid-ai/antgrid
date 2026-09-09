@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_colors.dart';
 import '../design/ab_tokens.dart';
+import '../models/file_tree_models.dart';
 import '../providers/providers.dart';
 import '../services/file_service.dart';
 import 'file_viewer_router.dart';
@@ -32,7 +33,7 @@ Future<void> showFilePreviewDialog(
   try {
     await showDialog<void>(
       context: context,
-      builder: (context) => const AttachmentPreviewDialog(),
+      builder: (context) => AttachmentPreviewDialog(service: service),
     );
   } finally {
     // Also runs when the barrier or system back dismissed the dialog, which
@@ -69,13 +70,21 @@ Future<void> showAttachmentPreview(
   );
 }
 
-class AttachmentPreviewDialog extends ConsumerWidget {
-  const AttachmentPreviewDialog({super.key});
+class AttachmentPreviewDialog extends StatelessWidget {
+  const AttachmentPreviewDialog({super.key, required this.service});
+
+  final FileService service;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) => StreamBuilder<FileTreeState>(
+    stream: service.stateStream,
+    initialData: service.currentState,
+    builder: (context, snapshot) => _buildPreview(context, snapshot.data!),
+  );
+
+  Widget _buildPreview(BuildContext context, FileTreeState state) {
     final colors = context.antgrid;
-    final preview = ref.watch(fileTreeStateProvider).value?.preview;
+    final preview = state.preview;
     return Dialog(
       insetPadding: const EdgeInsets.all(AbTokens.space16),
       child: ConstrainedBox(
@@ -88,12 +97,9 @@ class AttachmentPreviewDialog extends ConsumerWidget {
           child: ClipRRect(
             borderRadius: AbTokens.borderRadius8,
             child: FileViewerRouter(
-              fileContent: preview?.content,
-              // Null state means the service went away under us (project
-              // evicted mid-preview); the router's loading branch is the honest
-              // rendering of "nothing to show yet", not an error.
-              isLoading: preview?.isLoading ?? true,
-              selectedFilePath: preview?.displayName ?? preview?.path,
+              fileContent: preview.content,
+              isLoading: preview.isLoading,
+              selectedFilePath: preview.displayName ?? preview.path,
               onClose: () => Navigator.of(context).pop(),
             ),
           ),
