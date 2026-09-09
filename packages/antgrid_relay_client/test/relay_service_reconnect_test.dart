@@ -205,6 +205,46 @@ void main() {
     expect(disconnectFields!['authenticatedAgeMs'], isNotNull);
   });
 
+  // This drop returns before _markInboundHealthy, so a sustained failure here
+  // is bytes arriving while the heartbeat counts the socket silent and reaps a
+  // link that is still delivering. It used to be visible only to a netwatch tap,
+  // which is never armed over a fault that arrives unannounced.
+  test('an undecodable inbound frame is logged, not merely tapped', () async {
+    final warns = <Map<String, Object?>?>[];
+    final logged = RelayService(
+      crypto: CryptoService(),
+      logger: (level, message, {fields}) {
+        if (message == 'dropping undecodable inbound frame') warns.add(fields);
+      },
+    );
+    addTearDown(logged.dispose);
+
+    final connect = logged.connect(
+      server.wsUrl,
+      _identity(),
+      licenseToken: 'tok',
+      epoch: 1,
+    );
+    expect(await conns.moveNext(), isTrue);
+    final conn = conns.current;
+    conn.sendJson({
+      'type': 'welcome',
+      'deviceId': 'phone-1',
+      'epoch': 1,
+      'serverTime': DateTime.now().toUtc().toIso8601String(),
+    });
+    await connect;
+
+    conn.sendBinary(const [0, 1, 2, 3]);
+    for (var i = 0; i < 100 && warns.isEmpty; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+
+    expect(warns, isNotEmpty);
+    expect(warns.first!['reason'], 'bad-frame');
+    expect(warns.first!['bytes'], 4);
+  });
+
   test('a retryable error followed by a close does NOT self-redial', () async {
     final connect = relay.connect(
       server.wsUrl,

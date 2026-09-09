@@ -614,6 +614,20 @@ class RelayService {
         'reason': 'bad-frame',
         'detail': {'why': e.reason.name},
       });
+      // Returns BEFORE _markInboundHealthy, so a sustained failure here is bytes
+      // arriving while liveness is never marked — the heartbeat then reaps a
+      // socket that is still delivering. Tap-only, that was observable solely
+      // while a netwatch capture happened to be armed, which over a fault
+      // arriving a few times a day means never.
+      _log(
+        RelayLogLevel.warn,
+        'dropping undecodable inbound frame',
+        fields: {
+          'reason': 'bad-frame',
+          'why': e.reason.name,
+          'bytes': data.length,
+        },
+      );
       return;
     }
     // Computed here and nowhere else: this is the last point at which the
@@ -639,6 +653,16 @@ class RelayService {
         'frameId': frameId,
         'reason': 'bad-route-header',
       });
+      // The other half of the same blind spot as the bad-frame return above.
+      _log(
+        RelayLogLevel.warn,
+        'dropping inbound frame with an unusable route header',
+        fields: {
+          'reason': 'bad-route-header',
+          'channel': channel is String ? channel : null,
+          'bytes': decoded.payload.length,
+        },
+      );
       return;
     }
     tap?.call({
