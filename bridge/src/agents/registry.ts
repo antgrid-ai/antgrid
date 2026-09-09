@@ -193,15 +193,18 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     },
     transcript: readCodexTranscript,
     // null = the DB is undeterminable (missing/locked/schema drift), which is
-    // not a confirmation that the thread is gone.
+    // not a confirmation that the thread is gone. Passed through rather than
+    // collapsed here: callers separate "codex disowns this thread" from "codex
+    // could not say", and only the former may refuse a resume.
     resumable: ({ agentSessionId, codexHome }) =>
-      codexThreadExistsSync(agentSessionId, codexHome ?? join(homedir(), ".codex")) ?? true,
+      codexThreadExistsSync(agentSessionId, codexHome ?? codexHomeDir()),
+    sessionStoreIsAuthoritative: true,
     // The CLI's live state DB is the only source populated for bridge-spawned
     // `codex-tui` sessions. session_index.jsonl is not read at all: every name
     // in it is one the Codex DESKTOP app generated, and we name sessions
     // ourselves (see ResolvedTitle).
     resolveTitle: async ({ sessionId, codexHome }) =>
-      await resolveCodexThreadTitle(sessionId, codexHome ?? join(homedir(), ".codex")),
+      await resolveCodexThreadTitle(sessionId, codexHome ?? codexHomeDir()),
     update: {
       npmPackage: "@openai/codex",
       command: "codex",
@@ -328,7 +331,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
       copilotSessionExistsSync(
         agentSessionId,
         copilotHome ?? process.env.COPILOT_HOME ?? join(homedir(), ".copilot"),
-      ) ?? true,
+      ),
     resolveTitle: async ({ sessionId, copilotHome }) =>
       await resolveCopilotSessionTitle(
         sessionId,

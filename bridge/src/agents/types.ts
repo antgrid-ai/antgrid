@@ -709,12 +709,22 @@ export interface AgentSpec {
    *  Never synthesize a path: a "transcript"-tier judge has no verified
    *  read-only restriction, so it gets no file hint it could not follow. */
   transcript?: (opts: TranscriptOpts) => Promise<{ msgs: string[]; transcriptPath?: string }>;
-  /** Can this stored id still be resumed? False ONLY when the agent can
-   *  POSITIVELY confirm the conversation is gone — a false negative silently
-   *  starts a fresh session, so uncertainty must answer true. Absent = this
-   *  agent has no store-existence check (the honest answer, not a default);
-   *  callers treat absence as resumable. */
-  resumable?: (args: ResumableArgs) => boolean;
+  /** Can this stored id still be resumed? Three answers, and `false` vs `null`
+   *  is load-bearing: `false` ONLY when the agent POSITIVELY confirms it does
+   *  not hold this conversation, `null` when its store could not be read at all
+   *  (missing/locked/schema drift). Collapsing the two costs a real
+   *  conversation on every locked DB, and callers that refuse a resume act on
+   *  `false` alone. Absent = this agent has no store-existence check (the honest
+   *  answer, not a default); callers treat absence as resumable. */
+  resumable?: (args: ResumableArgs) => boolean | null;
+  /** Does a POSITIVE `resumable: false` predict that the CLI will refuse this
+   *  id too? Set it only where the store `resumable` reads is the SAME one the
+   *  resume flag consults. Codex qualifies: `codex resume <id-its-thread-store-
+   *  lacks>` prints "Resuming session…" and exits 1 (measured on 0.153.4).
+   *  Copilot does not — its sessions outlive the local index, so a miss there is
+   *  a stale index rather than a refusal, and acting on one would throw away a
+   *  resume the CLI would have honored. Absent = a miss is never acted on. */
+  sessionStoreIsAuthoritative?: true;
   /** Reads the name for this agent's session that is NOT one the agent chose
    *  for itself, tagged `manual` vs `first-message` (see ResolvedTitle — the tag
    *  drives whether we spend a model call). Absent = the agent has neither on
