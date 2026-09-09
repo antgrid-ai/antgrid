@@ -2037,10 +2037,13 @@ export class HostServer {
    *    1. stop a warm core (kills its PTYs + any relay slot),
    *    2. reclaim the project's managed worktrees,
    *    3. delete the on-disk store dir (`agents/<id>/`, holding sessions.json),
-   *    4. drop the seen-catalog hint (also clears the stale projects.json entry).
+   *    4. drop what the project owns in the MACHINE-level stores, which step 3
+   *       cannot reach because they live outside `agents/<id>/`: its session
+   *       index rows and its session-bus carrier routes,
+   *    5. drop the seen-catalog hint (also clears the stale projects.json entry).
    *  Step 2's position is the invariant, not a preference: it reads
    *  `agents/<id>/checkouts.json`, which step 3 deletes, and it resolves the
-   *  repository from `seenProjects`, which step 4 drops — so anywhere later it
+   *  repository from `seenProjects`, which step 5 drops — so anywhere later it
    *  would leak the worktrees with nothing left able to name them.
    *  Deliberately does NOT touch the machine's mobile-access switch: that is
    *  machine-wide policy, and deleting one project must not turn the machine
@@ -2051,11 +2054,12 @@ export class HostServer {
     await this.reclaimManagedCheckouts(projectId);
     this.deleteProjectStores(projectId);
     this.sessionIndex.forgetProject(projectId);
-    // `deleteProjectStores` above already removed `agents/<projectId>/` and the
-    // index above no longer resolves it — a route left in the shared table
-    // would otherwise sit there forever, since nothing will ever route to a
-    // project this machine no longer holds, and the next wholesale save would
-    // keep writing it back to the machine-level routes.json regardless.
+    // Step 3 removed `agents/<projectId>/` and the index above no longer
+    // resolves it, but the machine-level routes.json sits OUTSIDE that tree, so
+    // this is the only thing that reclaims the project's carrier rows: it drops
+    // them and rewrites the file, without which the next process start hydrates
+    // every one of them back from disk, leaving on disk exactly the kind of
+    // trace this method exists to erase.
     this.sessionBus.forgetProjectRoutes(projectId);
     if (this.seenProjects.delete(projectId)) this.flushSeen();
     // Unconditional: the advert IS the seen catalog now, so a forgotten project

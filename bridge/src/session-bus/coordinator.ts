@@ -275,7 +275,11 @@ export class SessionBusCoordinator {
    *  One machine-level file (E9/§5.4/C5) — every row, from every project, in
    *  one wholesale write — which is why this table may only ever have the one
    *  in-memory owner this coordinator is: two writers here would erase each
-   *  other's rows with valid JSON and no error. */
+   *  other's rows with valid JSON and no error. That single-owner bound is per
+   *  PROCESS (`HostServer` builds exactly one), not per abDir — two hosts
+   *  pointed at one ANTGRID_DIR still overwrite each other wholesale, which is
+   *  survivable only because a lost route costs a relearn (route-store.ts's
+   *  header) and never a misdelivery. */
   private saveRoutesIfDue(now: number, force: boolean): void {
     if (!force && now - this.routesSavedAt < BUS_ROUTE_PERSIST_INTERVAL_MS) return;
     this.routesSavedAt = now;
@@ -290,21 +294,29 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * Drop every route naming [projectId] from the shared table. Called only
-   * when the project itself is forgotten (`HostServer.forget`): the machine
-   * routes.json (`sessionBusMachineDir`) lives outside `agents/<projectId>/`,
-   * so deleting that tree does not touch it, and a route naming a project this
-   * machine no longer holds would otherwise sit in the table forever — its
-   * owner is gone, so nothing will ever resolve it, and the next wholesale
-   * `saveRoutesIfDue` would still write it back to disk as if it might. Never
-   * called on an eviction: a merely-cold project is still real, and its routes
-   * must survive for the coordinator to keep dispatching against once it warms
-   * again, the same way its sessions survive in the session index.
+   * Drop every route naming [projectId], from the table AND from disk. Called
+   * only when the project itself is forgotten (`HostServer.forget`): the
+   * machine routes.json (`sessionBusMachineDir`) lives outside
+   * `agents/<projectId>/`, so the tree delete that reclaims everything else the
+   * project owned cannot reach these rows — this is their only reclaim. The
+   * write is FORCED rather than throttled, and is the half that makes the drop
+   * durable: `forget` may be the last bus-relevant thing this process ever
+   * does, and an in-memory drop nothing persisted is undone wholesale by the
+   * next process start, since `hydrateRoutes` sets every row it finds without
+   * asking whether the machine still holds that project. Never called on an
+   * eviction: a merely-cold project is still real, and its routes must survive
+   * for the coordinator to keep dispatching against once it warms again, the
+   * same way its sessions survive in the session index.
    */
   forgetProjectRoutes(projectId: string): void {
+    let dropped = false;
     for (const [contextId, route] of this.routes) {
-      if (route.projectId === projectId) this.routes.delete(contextId);
+      if (route.projectId === projectId) {
+        this.routes.delete(contextId);
+        dropped = true;
+      }
     }
+    if (dropped) this.saveRoutesIfDue(this.now(), true);
   }
 
   /** Register (or, with null, clear) the per-project consumer that turns a bus

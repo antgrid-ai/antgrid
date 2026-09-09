@@ -15,7 +15,9 @@ import { buildAgentCore, type AgentCore } from "../src/agent-core";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage, type SessionMemberKey, type SessionMemberRef } from "../src/protocol";
 import { setLogLevel } from "../src/logger";
+import { BUS_ROUTE_TTL_MS } from "../src/session-bus/constants";
 import { SessionBusCoordinator } from "../src/session-bus/coordinator";
+import { loadBusRoutes } from "../src/session-bus/route-store";
 import { SessionBusSessionIndex } from "../src/session-bus/session-index";
 import { SessionManager } from "../src/session-manager";
 
@@ -349,3 +351,25 @@ test(
   },
   30_000,
 );
+
+test("forgetting a project erases its carrier routes from the machine file, not just from memory", () => {
+  // No cores: `forgetProjectRoutes` touches nothing but the route table, and
+  // the property under test is what survives on disk once a forgotten project
+  // is the last bus-relevant thing this process saw — so the harness is two
+  // learned routes, the one call `HostServer.forget` makes, and a fresh read.
+  const coordinator = new SessionBusCoordinator({
+    abDir,
+    projectIdFor: () => null,
+    self: () => null,
+    send: () => true,
+  });
+  coordinator.noteRoute("ctx-doomed", "phone#m1", "p-forgotten");
+  coordinator.noteRoute("ctx-kept", "phone#m1", "p-kept");
+  coordinator.forgetProjectRoutes("p-forgotten");
+  coordinator.stop();
+
+  // The next process start hydrates whatever is here wholesale (hydrateRoutes
+  // takes no project list), so a row still on disk is a row resurrected.
+  const onDisk = loadBusRoutes(abDir, BUS_ROUTE_TTL_MS, Date.now());
+  expect([...onDisk.keys()]).toEqual(["ctx-kept"]);
+});
