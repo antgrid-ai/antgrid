@@ -493,7 +493,7 @@ class PreviewService {
       fields: {
         'requestId': id,
         'reason': reason,
-        'seq': (body?.nextSeq ?? 1) - 1,
+        if (body != null) 'chunksReceived': body.nextSeq - 1,
       },
     );
     _logIfSettled();

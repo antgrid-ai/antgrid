@@ -93,6 +93,11 @@ class MachineSession {
   /// bulk transfer's window reopens.
   final int creditBatchBytes;
 
+  /// How often the unbound-stream drop may take a log line — see
+  /// [_logUnknownStreamDrop]. Tunable only so a test can prove the suppressed
+  /// count actually surfaces without idling out the real interval.
+  final Duration unknownStreamLogInterval;
+
   MachineSession({
     required this.relay,
     required this.machineDeviceId,
@@ -103,6 +108,7 @@ class MachineSession {
     int? channelWindowBytes,
     int? socketInflightBytes,
     this.creditBatchBytes = kCreditBatchBytes,
+    this.unknownStreamLogInterval = const Duration(seconds: 30),
     RelayLogger? logger,
   }) : _handshaker = handshaker,
        _logger = logger,
@@ -215,10 +221,15 @@ class MachineSession {
   /// with no way back.
   final Set<String> _rebindInFlight = {};
 
+  /// Rate-limit state for [_logUnknownStreamDrop] — see there for why this drop
+  /// in particular cannot be left to log per frame.
+  final Map<String, DateTime> _unknownStreamLoggedAt = {};
+  final Map<String, int> _unknownStreamSuppressed = {};
+
   late final FragReassembler _reassembler = FragReassembler(
     timeoutMs: kTransferTimeoutMs,
     globalBudgetBytes: kGlobalReassemblyBudget,
-    onComplete: (json, channel) => _dispatchDecoded(json, channel),
+    onComplete: _dispatchDecoded,
     onAbort: (hint) {
       if (hint != null && !_fragAborts.isClosed) _fragAborts.add(hint);
     },
@@ -862,6 +873,18 @@ class MachineSession {
     final silentFor = DateTime.now().difference(_lastRecv);
     if (silentFor < pingSilence) return;
     if (_missedPongs >= kMaxMissedPongs) {
+      // Ahead of _stopLiveness, which zeroes the count this line reports. The
+      // session resetting itself is otherwise the one E2E transition with no
+      // trace at all in app.log — the rekey that follows either succeeds (and
+      // looks like nothing happened) or tears down under a reason of its own.
+      _log(
+        RelayLogLevel.warn,
+        'E2E session declared dead — rekeying on the live socket',
+        fields: {
+          'silentForMs': silentFor.inMilliseconds,
+          'missedPongs': _missedPongs,
+        },
+      );
       // Session declared dead at the E2E layer → rekey on the live socket.
       _stopLiveness();
       unawaited(_rekey());
@@ -878,8 +901,8 @@ class MachineSession {
   /// can never disagree about whether one is armed.
   RelayNetTap? get _tap => relay.netTap;
 
-  String? _frameId(Uint8List payload, [FrameKind kind = FrameKind.sealed]) =>
-      _tap == null ? null : frameIdOf(payload, kind);
+  String? _frameId(Uint8List payload) =>
+      _tap == null ? null : frameIdOf(payload, FrameKind.sealed);
 
   /// Name a frame this layer can type but not identify. [RelayService] records
   /// the wire event synchronously as the frame crosses the socket, so by the
@@ -970,7 +993,13 @@ class MachineSession {
     // legible only exists after. The two meet by id, not by threading — this
     // path is chained through `_inboundTails` and is genuinely async, so a
     // field would start mis-attributing under any concurrency.
-    final frameId = _frameId(msg.payload, msg.kind);
+    //
+    // Computed whether or not a capture is armed, unlike the tx sites: the
+    // unknown-stream and decrypt-failed logs name it, and those are read on the
+    // sessions nobody thought to tap — which is every session, right up until
+    // it misbehaves. A sealed payload's id is a hex encode of its 12-byte
+    // nonce.
+    final frameId = frameIdOf(msg.payload, msg.kind);
     var openedUnder = epoch;
     _noteConsumed(msg.channel, msg.payload.length);
     var plaintext = await E2eTransportDart(
@@ -1009,7 +1038,12 @@ class MachineSession {
     }
     _lastRecv = DateTime.now();
     _missedPongs = 0;
-    if (_reassembler.accept(plaintext, channel: msg.channel)) {
+    if (_reassembler.accept(
+      plaintext,
+      channel: msg.channel,
+      frameId: frameId,
+      epoch: openedUnder,
+    )) {
       // The reassembler consumes a fragment before any type is visible, so this
       // is the only chance to say what it was. Matches the bridge's `__frag`.
       _annotate(frameId, msgType: '__frag');
@@ -1018,14 +1052,15 @@ class MachineSession {
     _dispatchDecoded(plaintext, msg.channel, frameId, openedUnder);
   }
 
-  /// [frameId] is absent for a reassembled message: it arrived as N frames with
-  /// N ids, and no single one of them carried it.
+  /// [frameId] and [epoch] name the sealed frame this plaintext arrived in. A
+  /// reassembled message spans N frames and takes them from the fragment that
+  /// completed it — see [FragReassembler.accept].
   void _dispatchDecoded(
     String plaintext,
-    String channel, [
-    String? frameId,
-    int? epoch,
-  ]) {
+    String channel,
+    String frameId,
+    int epoch,
+  ) {
     Map<String, dynamic> json;
     try {
       json = jsonDecode(plaintext) as Map<String, dynamic>;
@@ -1077,11 +1112,7 @@ class MachineSession {
     // mid-flight), not the routine restart case. "0" legitimately has no
     // transport (adverts are snooped above), so it's never a drop.
     if (st == null && sid != kControlStreamId) {
-      _log(
-        RelayLogLevel.warn,
-        'dropping inbound frame for unknown stream',
-        fields: {'streamId': sid},
-      );
+      _logUnknownStreamDrop(sid, mType, frameId, epoch);
       _dropped(
         'rx',
         'unknown-stream',
@@ -1091,6 +1122,73 @@ class MachineSession {
         frameId: frameId,
       );
     }
+  }
+
+  /// One warn per stream per [unknownStreamLogInterval], carrying how many
+  /// frames it stands for in `framesDropped`. Sum that field to get the loss —
+  /// counting lines gives the throttle's rate, not the drop rate.
+  ///
+  /// The unbound-stream drop is not self-limiting: nothing in the protocol
+  /// heals an agent pushing onto an id the app holds no transport for (the
+  /// `stream-invalid` notice covers the mirror case — the app sending onto a
+  /// dead id — and [_onStreamInvalid] returns early for an id it has no binding
+  /// for, which is exactly this one). So a live PTY on an unbound stream drops
+  /// one frame per frame, indefinitely: measured at ~13/sec for 20+ minutes,
+  /// which left 5,976 of the last 6,000 lines of one app.log saying this and
+  /// nothing else. Unthrottled, the line added to make the loss visible is what
+  /// buries every other clue about it.
+  ///
+  /// [frameId] and [epoch] separate the two causes, which want opposite fixes.
+  /// The id names only the ONE frame this line was emitted for, never the
+  /// `framesDropped` frames it stands for, so it is evidence in a single
+  /// direction: an id recurring across lines is a frame being re-delivered,
+  /// while a non-recurring one rules nothing out — at one sample per throttle
+  /// window a replayed stream of distinct frames looks exactly like a peer
+  /// sealing fresh ones. `openedUnder` behind `sessionEpoch` is the reading
+  /// that stands on its own: the frame arrived under an earlier session and
+  /// only drained out of its channel's decrypt chain now.
+  ///
+  /// The netwatch tap is deliberately NOT throttled — a capture is opened to
+  /// see every frame, and it is bounded by how long it runs.
+  void _logUnknownStreamDrop(
+    String sid,
+    String? msgType,
+    String frameId,
+    int epoch,
+  ) {
+    final now = DateTime.now();
+    final last = _unknownStreamLoggedAt[sid];
+    if (last != null && now.difference(last) < unknownStreamLogInterval) {
+      _unknownStreamSuppressed[sid] = (_unknownStreamSuppressed[sid] ?? 0) + 1;
+      return;
+    }
+    // Bounded against a peer that sprays ids: the maps exist to rate-limit a
+    // handful of stale streams, not to accumulate one entry per id ever seen.
+    if (_unknownStreamLoggedAt.length > 64) {
+      _unknownStreamLoggedAt.clear();
+      _unknownStreamSuppressed.clear();
+    }
+    _unknownStreamLoggedAt[sid] = now;
+    final suppressed = _unknownStreamSuppressed.remove(sid) ?? 0;
+    _log(
+      RelayLogLevel.warn,
+      'dropping inbound frame for unknown stream',
+      fields: {
+        'streamId': sid,
+        'msgType': msgType,
+        'frameId': frameId,
+        'openedUnder': epoch,
+        // Paired with `openedUnder`, which says nothing on its own: a reader
+        // has no other way to tell an epoch that is current from one the
+        // session has since left behind.
+        'sessionEpoch': _sessionEpoch,
+        // ALWAYS present, and counts this frame as well as the ones it stands
+        // for. Omitting it at 1 would leave a reader summing LINES to get a
+        // loss rate, and one line here can stand for ~750 frames — three orders
+        // of magnitude wrong, in the direction that says the problem is small.
+        'framesDropped': suppressed + 1,
+      },
+    );
   }
 
   /// Snoop control-plane adverts for project→stream bindings so [bindProject]
@@ -1246,7 +1344,7 @@ class MachineSession {
   }
 
   /// Takes the whole decoded frame, not just its type: `credit` carries fields.
-  void _handleSessionFrame(Map<String, dynamic> json, [int? epoch]) {
+  void _handleSessionFrame(Map<String, dynamic> json, int epoch) {
     switch (json['type']) {
       case 'ping':
         unawaited(_sendSessionFrame({'type': 'pong'}).catchError((_) {}));
@@ -1270,7 +1368,7 @@ class MachineSession {
         // establishment zeroed the windows, and banking the old session's much
         // larger total would make every credit of the new one read as stale —
         // the channel would then ride the resync floor for the rest of it.
-        if (epoch != null && epoch != _sessionEpoch) break;
+        if (epoch != _sessionEpoch) break;
         _scheduler.credit(channel as String, consumed);
         break;
       case 'session-takeover':

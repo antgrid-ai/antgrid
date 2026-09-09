@@ -92,6 +92,12 @@ class RelayService {
   Duration _heartbeatInterval = const Duration(seconds: 25);
   Timer? _heartbeatTimer;
   DateTime? _socketOpenedAt;
+
+  /// Stamped at `welcome`, where [_socketOpenedAt] is stamped at dial. A connect
+  /// that gives up after [_connectTimeoutDuration] without ever authenticating
+  /// otherwise logs an age indistinguishable from a socket that really lived
+  /// that long — null here is the only thing separating the two.
+  DateTime? _socketAuthenticatedAt;
   DateTime? _lastInboundAt;
   DateTime? _probeSentAt;
   String? _relaySlotId;
@@ -444,6 +450,11 @@ class RelayService {
         'bytes': utf8.encode(data).length,
         'reason': 'unparseable',
       });
+      _log(
+        RelayLogLevel.warn,
+        'dropping unparseable relay control text',
+        fields: {'bytes': utf8.encode(data).length},
+      );
       return;
     }
 
@@ -457,6 +468,15 @@ class RelayService {
         'bytes': utf8.encode(data).length,
         'reason': 'unknown-control',
       });
+      // Includes the type the relay used: a forward-compat message from a newer
+      // relay and a genuinely malformed one are indistinguishable without it,
+      // and this is the path an `error` (MESSAGE_RATE_LIMITED — the relay saying
+      // it threw our frame away) would vanish down.
+      _log(
+        RelayLogLevel.warn,
+        'dropping unrecognised relay control message',
+        fields: {'msgType': json['type'] as String?},
+      );
       return;
     }
 
@@ -478,6 +498,7 @@ class RelayService {
     _markInboundHealthy();
 
     if (msg is WelcomeMessage) {
+      _socketAuthenticatedAt = DateTime.now().toUtc();
       // State first, then the completer: whoever awaits connect() re-reads the
       // connection state the instant it resolves.
       _setState(
@@ -607,6 +628,20 @@ class RelayService {
         'reason': 'bad-frame',
         'detail': {'why': e.reason.name},
       });
+      // Returns BEFORE _markInboundHealthy, so a sustained failure here is bytes
+      // arriving while liveness is never marked — the heartbeat then reaps a
+      // socket that is still delivering. Tap-only, that was observable solely
+      // while a netwatch capture happened to be armed, which over a fault
+      // arriving a few times a day means never.
+      _log(
+        RelayLogLevel.warn,
+        'dropping undecodable inbound frame',
+        fields: {
+          'reason': 'bad-frame',
+          'why': e.reason.name,
+          'bytes': data.length,
+        },
+      );
       return;
     }
     // Computed here and nowhere else: this is the last point at which the
@@ -632,6 +667,16 @@ class RelayService {
         'frameId': frameId,
         'reason': 'bad-route-header',
       });
+      // The other half of the same blind spot as the bad-frame return above.
+      _log(
+        RelayLogLevel.warn,
+        'dropping inbound frame with an unusable route header',
+        fields: {
+          'reason': 'bad-route-header',
+          'channel': channel is String ? channel : null,
+          'bytes': decoded.payload.length,
+        },
+      );
       return;
     }
     tap?.call({
@@ -653,6 +698,15 @@ class RelayService {
         'frameId': frameId,
         'reason': 'message-stream-closed',
       });
+      // debug, not warn: this is the routine teardown race — frames still in
+      // flight when the controller closes. It earns a line only because a
+      // SUSTAINED run of it means inbound is being discarded by a service
+      // nobody noticed had shut down.
+      _log(
+        RelayLogLevel.debug,
+        'dropping inbound frame after the message stream closed',
+        fields: {'channel': msg.channel, 'bytes': decoded.payload.length},
+      );
       return;
     }
     _messageController.add(msg);
@@ -672,6 +726,7 @@ class RelayService {
       fields: {
         'machineSlot': _relaySlotId,
         'socketAgeMs': _ageMs(_socketOpenedAt),
+        'authenticatedAgeMs': _ageMs(_socketAuthenticatedAt),
         if (error != null) 'error': '$error',
       },
     );
@@ -752,6 +807,15 @@ class RelayService {
         'frameId': frameId,
         'reason': 'socket-not-open',
       });
+      // sendMessage returns void, so the caller believes this frame went out.
+      // It is the same contract the send-queue drop got a line for one layer
+      // up, and it is the drop a connection that never establishes produces
+      // most of — the case with no stream traffic to diagnose from.
+      _log(
+        RelayLogLevel.warn,
+        'dropping outbound frame — socket not open',
+        fields: {'channel': channel, 'bytes': payload.length},
+      );
       return;
     }
     try {
@@ -781,6 +845,15 @@ class RelayService {
         'reason': 'frame-encode-failed',
         'detail': {'why': e.reason.name},
       });
+      _log(
+        RelayLogLevel.warn,
+        'dropping outbound frame — encode failed',
+        fields: {
+          'channel': channel,
+          'bytes': payload.length,
+          'why': e.reason.name,
+        },
+      );
     }
   }
 
@@ -883,6 +956,7 @@ class RelayService {
       fields: {
         'machineSlot': _relaySlotId,
         'socketAgeMs': _ageMs(_socketOpenedAt, now),
+        'authenticatedAgeMs': _ageMs(_socketAuthenticatedAt, now),
         'lastInboundAgeMs': _ageMs(_lastInboundAt, now),
         'outstandingProbeAgeMs': _ageMs(_probeSentAt, now),
       },
@@ -902,6 +976,7 @@ class RelayService {
     _lastInboundAt = null;
     _probeSentAt = null;
     _socketOpenedAt = null;
+    _socketAuthenticatedAt = null;
   }
 
   int? _ageMs(DateTime? at, [DateTime? now]) => at == null
