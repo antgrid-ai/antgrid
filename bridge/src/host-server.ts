@@ -35,6 +35,7 @@ import { buildAgentCatalog } from "./agent-catalog";
 import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";
 import { SessionManager } from "./session-manager";
+import { SessionBusSessionIndex } from "./session-bus/session-index";
 import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
 import type { BranchRemoteStatus } from "./git-branches";
@@ -246,6 +247,13 @@ export class HostServer {
   // state of its own. Persisted to <abDir>/projects.json; if that file is lost,
   // worst case a stopped project isn't advertised until reopened.
   private readonly seenProjects: Map<string, SeenProject> = loadSeenProjects(seenProjectsPath());
+  // Machine-wide sessionId -> owning project (docs/session-messaging.md §5.4's
+  // directory). `liveSessions` defers to whichever core is warm right now, so
+  // an open project's own answer never lags its own sessions.json flush; see
+  // SessionBusSessionIndex's own doc for what that buys and what it costs.
+  private readonly sessionIndex = new SessionBusSessionIndex({
+    liveSessions: (projectId) => this.cores.get(projectId)?.core.listSessions(true) ?? null,
+  });
   // The always-on, coreless control-plane relay registered under the BARE
   // deviceUuid (no projectId), used to advertise the project catalog and accept
   // mobile-access-gated project verbs from a paired phone. Opened only when remote
@@ -286,6 +294,13 @@ export class HostServer {
       this.readvertiseToControlPlane();
     });
     this.pruneMissingSeenProjects();
+    // Fire-and-forget: nothing on this host blocks on the session index being
+    // ready, and a lookup that lands before this resolves gets its own
+    // distinguishable log line (SessionBusSessionIndex.lookup) rather than
+    // reading as a real addressing miss.
+    void this.sessionIndex
+      .hydrate(resolveAbDir(), [...this.seenProjects].map(([id, seen]) => ({ id, label: seen.label })))
+      .catch((err) => log.warn({ err }, "host: session index hydrate failed"));
   }
 
   /** Self-heal the hint catalog at startup: drop any entry whose folder no
@@ -1719,6 +1734,14 @@ export class HostServer {
     await core.start();
     const entry: CatalogEntry = { core, path: projectPath, mode, lastFocusedMs: this.tick() };
     this.cores.set(projectId, entry);
+    // Keyed by the core's OWN id, never the `projectId` parameter: the two
+    // agree here (the PROJECT_ID_MISMATCH check above already enforced it for
+    // this call), but the warm-core early return in open() grandfathers a
+    // legacy alias that skips that check, and this index must never learn a
+    // project under an id no route or store path will ever match. Also
+    // refreshes the disk-fallback set a later eviction will read once this
+    // project goes cold again.
+    this.sessionIndex.noteProject(core.projectId, basename(projectPath), core.listSessions(true) ?? []);
     // Re-advertise on a real work-status transition so the phone's Recent/sidebar
     // track activity (working/attention/error/done) without warming this core
     // themselves. Deduped inside the core, so this fires on transitions only.
@@ -1896,6 +1919,7 @@ export class HostServer {
     await this.stop(projectId);
     await this.reclaimManagedCheckouts(projectId);
     this.deleteProjectStores(projectId);
+    this.sessionIndex.forgetProject(projectId);
     if (this.seenProjects.delete(projectId)) this.flushSeen();
     // Unconditional: the advert IS the seen catalog now, so a forgotten project
     // must vanish from a live phone's picker without waiting for a reconnect
