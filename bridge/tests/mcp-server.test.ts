@@ -159,4 +159,22 @@ describe("the session-bus tools", () => {
     });
     expect(received).toEqual({ name: "diff.txt", summary: "the codec diff", content: "0123456789" });
   });
+
+  test("an argument the tool does not advertise is not forwarded into a .strict() body", async () => {
+    let received: any = null;
+    stub((path, body) => {
+      received = body;
+      return Response.json({ ok: true, artifact: { artifactId: "a-1", name: "diff.txt", bytes: 10 } });
+    });
+    // The route refuses an unknown field with a 400, so anything the tool sends
+    // and the body schema does not name breaks the tool for every caller that
+    // fills it in — including a field this table used to advertise.
+    await callSessionBusTool("antgrid_publish_artifact", {
+      name: "diff.txt",
+      summary: "the codec diff",
+      content: "0123456789",
+      taskId: "t-1",
+    });
+    expect(received.taskId).toBeUndefined();
+  });
 });

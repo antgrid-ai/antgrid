@@ -31,7 +31,8 @@ export const HeldMessageSchema = z.object({
    *  re-derived at flush time so the frame goes out the way it was addressed. */
   role: z.enum(["lead", "peer"]),
   to: SessionMemberKeySchema,
-  /** The serialized `session-bus:message` frame, opaque here like the outbox's. */
+  /** The serialized `session-bus:message` frame, opaque here: this store is a
+   *  parking space for a send, never a reader of what it carries. */
   frame: z.unknown(),
   heldAt: z.number().int().nonnegative(),
 });

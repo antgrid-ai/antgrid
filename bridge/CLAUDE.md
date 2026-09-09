@@ -174,12 +174,13 @@ is the spec; this is the set of invariants a future edit breaks silently.
   taking a frame says only that it left this machine, so a post answers `sent`
   and never "received". The one honest answer is the other side's ack, and
   `session-bus:ack` is a reserved verb nothing on this bridge emits yet — so
-  until it is re-keyed to a message id, the logs are the only witness a frame
-  that goes nowhere has: the coordinator says so when a frame names a session
-  this bridge does not hold, and the app says the other half (`no leg for
-  addressed member`, `lead project not open`). Take a log line out of any of
-  those three and a carrier that accepts frames and delivers none is silent in
-  both processes again — which it was, for three hours, across a restart.
+  until it is re-keyed to a message id, the only witnesses a frame that goes
+  nowhere has are downstream of the send: the RECEIVING coordinator says so when
+  a frame names a session that bridge does not hold, and the app says the other
+  half (`no leg for addressed member`, `lead project not open`). The sending
+  machine has none at all — a carrier that accepts frames and delivers none is
+  already silent there, which it was, for three hours, across a restart. Take a
+  log line out of either survivor and it is silent in both processes again.
 - **An artifact id from the other machine is a reference, not a handle.**
   `coordinator.onFetch` answers a `session-bus:fetch`; nothing sends one, so the
   requester half of cross-machine fetch does not exist. Every surface has to say

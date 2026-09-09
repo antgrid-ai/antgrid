@@ -129,7 +129,7 @@ function str(description: string) {
 const SESSION_BUS_TOOLS: McpTool[] = [
   {
     name: "antgrid_publish_artifact",
-    description: "Store a file-sized piece of evidence — a diff, a log, a transcript — and get back an id to attach to a task or a report. The bytes stay on this machine. The other side is shown the id, name and summary and cannot read the content, so put anything it must actually READ in the report text.",
+    description: "Store a file-sized piece of evidence — a diff, a log, a transcript — and get back an id to name in a message. The bytes stay on this machine. The other side is shown the id, name and summary and cannot read the content, so put anything it must actually READ in the message text.",
     inputSchema: {
       type: "object",
       properties: {
@@ -138,7 +138,6 @@ const SESSION_BUS_TOOLS: McpTool[] = [
         content: str("The text to store. Use contentBase64 instead for anything that is not text."),
         contentBase64: str("Base64 bytes, for content that is not text. Pass exactly one of content or contentBase64."),
         mediaType: str("Media type, defaulting to text/plain."),
-        taskId: str("The task this belongs to, when it belongs to one."),
       },
       required: ["name", "summary"],
     },
@@ -232,11 +231,10 @@ export async function callSessionBusTool(
         content: argStr(args, "content"),
         contentBase64: argStr(args, "contentBase64"),
         mediaType: argStr(args, "mediaType"),
-        taskId: argStr(args, "taskId"),
       }));
       if (!r.ok) return toolError(busError(r));
       const a = r.data.artifact;
-      return toolText(`Published ${a.name} as ${a.artifactId} (${a.bytes} bytes). Attach that id to a task or a report.`);
+      return toolText(`Published ${a.name} as ${a.artifactId} (${a.bytes} bytes). Name that id in a message to point the other side at it.`);
     }
 
     case "antgrid_list_artifacts": {

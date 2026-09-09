@@ -239,20 +239,20 @@ export interface AgentCore {
   /** Machine-level phone registry (identity, label, push routing), shared across
    *  projects. Not an authorization store — see remote-access-policy.ts. */
   readonly pairedPhones: PairedPhonesStore;
-  /** The multi-machine task bus for this project: task stores, sequencing and
-   *  the retry outbox. Its frames leave through the carrier this core was wired
-   *  with and NEVER through the MessageBus (see {@link
+  /** The multi-machine message bus for this project: the message log, the held
+   *  store and the carrier routes. Its frames leave through the carrier this
+   *  core was wired with and NEVER through the MessageBus (see {@link
    *  BuildAgentCoreOptions.sendToOwner}). */
   readonly sessionBus: SessionBusCoordinator;
   /** Wire the one consumer that turns a bus event into a line an agent reads.
-   *  A core with none still folds, acks and retries — it just delivers nothing,
+   *  A core with none still records and holds — it just delivers nothing,
    *  which is the honest state for a build whose delivery layer is absent. */
   setSessionBusListener(fn: ((event: SessionBusEvent) => void) | null): void;
   /** Submit one rendered session-bus line into a live session, through the same
    *  adapter a Handler auto-reply uses. False means it did not go in — the
    *  session has no live agent — so the caller's queue keeps the line for the
    *  next boundary rather than reporting a delivery that never happened. */
-  injectBusLine(sessionId: string, text: string, task?: { taskId: string; state: string }): boolean;
+  injectBusLine(sessionId: string, text: string): boolean;
   /** The owner's work reduction moved: re-emit `session:updated` so the
    *  `workStatus` stamped on each entry (from
    *  {@link BuildAgentCoreOptions.sessionWorkStatusFor}) is current. No-op
@@ -440,9 +440,9 @@ export interface BuildAgentCoreOptions {
   /** Hand one session-bus frame to the loopback owner — this machine's own
    *  desktop app — and to nothing else. The lead bridge can never reach the peer
    *  bridge (D7), so the owner is its only carrier; and the MessageBus has no
-   *  addressing, so publishing instead would put task traffic on the human's
+   *  addressing, so publishing instead would put agent traffic on the human's
    *  phone (spec 4.1). False when there is no owner, or the owner did not
-   *  declare itself a carrier: the frame stays in the outbox. */
+   *  declare itself a carrier: the frame is held until one attaches. */
   sendToOwner?: (msg: AbMessage) => boolean;
   /** Hand one session-bus frame to ONE attached app session — the peer bridge
    *  answering the carrier that delivered to it, which is the only route it has
@@ -960,10 +960,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   }
 
   /** Contexts already warned about for having no route. An unroutable frame is
-   *  retried on every outbox tick and `noteAttempt` advances the backoff only for
-   *  a send that LEFT, so a per-attempt warning would repeat for the life of the
-   *  bridge. Cleared when a route appears, so a link that breaks twice is said
-   *  twice. */
+   *  held and re-tried on every coordinator tick, so a per-attempt warning would
+   *  repeat for the life of the bridge. Cleared when a route appears, so a link
+   *  that breaks twice is said twice. */
   const busRouteMissWarned = new Set<string>();
 
   /** The same latch for a LEAD with no carrier attached. Separate from the one
@@ -4295,10 +4294,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb(buildAgentHello(config, VERSION));
     // Re-sync the config-error dot on every connect (see emitConfigState).
     emitConfigState();
-    // A carrier just arrived: anything the outbox held for want of one goes now
-    // rather than waiting out the backoff it accrued while unreachable. Resumed
-    // first, because a session created before this process started is on disk and
-    // nowhere else until something reads it.
+    // A carrier just arrived: anything held for want of one goes now rather than
+    // waiting out the next tick. Resumed first, because a session created before
+    // this process started is on disk and nowhere else until something reads it.
     sessionBus.resume();
     sessionBus.pump();
     // Seed the app's Handler defaults (judge overrides) even when
