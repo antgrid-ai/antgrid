@@ -1,6 +1,8 @@
-// The bus's transport half: it owns the stores for one project's sessions, turns
-// an agent's message into an addressed frame, and folds an inbound frame back
-// into a store. It knows nothing about how a frame travels — a `send` that
+// The bus's transport half: it owns the stores for the sessions its owner hands
+// it — one project's, when a core builds its own fallback instance, or every
+// project's on the machine, when the host builds the one shared instance — and
+// turns an agent's message into an addressed frame, and folds an inbound frame
+// back into a store. It knows nothing about how a frame travels — a `send` that
 // returns false is all it needs to hold the frame and try again — which is what
 // lets ONE module serve both ends of a link neither can open (E4: a bridge
 // cannot dial another bridge; the initiating machine's desktop app carries).
@@ -25,10 +27,12 @@ import {
 import { addressesSameSession } from "./address";
 import { listSessionBusSessions } from "./store-fs";
 import { artifactById, loadArtifacts, readArtifactContent, type ArtifactState } from "./artifact-store";
-import { ARTIFACT_CHUNK_BYTES } from "./constants";
+import { ARTIFACT_CHUNK_BYTES, BUS_ROUTE_PERSIST_INTERVAL_MS, BUS_ROUTE_TTL_MS, MAX_BUS_ROUTES } from "./constants";
 import { checkEnvelopeSize, stampEnvelope, type EnvelopeDraft } from "./envelope";
 import { refuse, type SessionBusRefusal } from "./errors";
+import { loadBusRoutes, saveBusRoutes, type BusRouteMap } from "./route-store";
 import {
+  emptyHeld,
   expireHeld,
   hasHeld,
   holdMessage,
@@ -39,6 +43,7 @@ import {
 } from "./held-store";
 import {
   appendLog,
+  emptyLog,
   loadMessageLog,
   saveMessageLog,
   type MessageLogState,
@@ -87,7 +92,14 @@ export type SessionBusEvent =
 
 export interface CoordinatorDeps {
   abDir: string;
-  projectId: string;
+  /** Which project owns [sessionId]'s bus state, or null when this coordinator
+   *  has no record of it at all. One coordinator now answers for every project
+   *  a machine has open (E9/§5.4's directory), not one project's own sessions —
+   *  so every store call below resolves its path PER SESSION instead of
+   *  assuming one shared projectId. A per-core fallback (no host) answers this
+   *  with a constant closure over its own project id, which is what makes it
+   *  behave exactly as a single-project coordinator did before this widened. */
+  projectIdFor: (sessionId: string) => string | null;
   send: SessionBusSend;
   /** This bridge's address for one of its own sessions, or null when the machine
    *  has no identity to be addressed by. */
@@ -117,6 +129,13 @@ interface SessionState {
   /** Read on the first fetch this session answers: most sessions publish nothing
    *  and never pay for the file. */
   artifacts: ArtifactState | null;
+  /** `deps.projectIdFor(sessionId)` as answered when this state was first
+   *  loaded, pinned rather than re-queried on every commit: a session mid
+   *  project-teardown must not have one write land under the project its
+   *  first read came from and a later write land under whatever the resolver
+   *  says next. Null means unresolved — kept in memory only, never persisted,
+   *  which is the honest answer for bus state this bridge cannot place. */
+  projectId: string | null;
 }
 
 export interface MessageInput {
@@ -141,10 +160,174 @@ export class SessionBusCoordinator {
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly now: () => number;
   private readonly newId: () => string;
+  // Which app session — and which project's stream — carried a context in,
+  // machine-wide. Moved here (from a per-core closure) so a route learned while
+  // handling project A's inbound frame is the SAME table project B's outbound
+  // send for that context consults; see noteRoute/routeFor. This table does not
+  // decide anything on its own — message()/fetch()/flushHeld()/onFetch() still
+  // hand every frame to `deps.send` unconditionally, exactly as before the
+  // move — because the lookup-then-dispatch decision belongs to whoever wired
+  // `send`: only it knows what a `sendToAppSession`/`sendToOwner` call means.
+  private routes: BusRouteMap = new Map();
+  private routesSavedAt = 0;
+  // Per-project bus-event consumers, registered via `setListener` (the seam
+  // `AgentCore.setSessionBusListener` feeds). One coordinator now fires one
+  // `onEvent` for every project's sessions, so a single hard-wired consumer
+  // would deliver into whichever project registered — silently wrong for
+  // every other one. Resolved per event through `deps.projectIdFor`.
+  private readonly listeners = new Map<string, (event: SessionBusEvent) => void>();
 
   constructor(private deps: CoordinatorDeps) {
     this.now = deps.now ?? (() => Date.now());
     this.newId = deps.newId ?? (() => randomUUID());
+  }
+
+  /**
+   * Seed the route table from every project this machine has ever opened.
+   *
+   * Unlike a session's message log or held store — loaded lazily, the first
+   * time THAT session is addressed, because each belongs to exactly one
+   * project — a route is looked up by CONTEXT id, which may name a session in
+   * any project on the machine, so there is no single project whose warm-up
+   * can defer this. Synchronous, because `loadBusRoutes` is: meant to run once,
+   * before the first inbound frame this process folds, so a restart does not
+   * relearn every route a live link would otherwise still have. The file stays
+   * one per project until the machine-level route file lands (E9/§5.4's next
+   * step); each row already carries which project's stream carried it in
+   * (route-store.ts), which is what lets `saveRoutesIfDue` write each project's
+   * own rows back to that project's own file from this one shared map.
+   */
+  hydrateRoutes(projectIds: Iterable<string>): void {
+    const now = this.now();
+    for (const projectId of projectIds) {
+      for (const [contextId, route] of loadBusRoutes(this.deps.abDir, projectId, BUS_ROUTE_TTL_MS, now)) {
+        const existing = this.routes.get(contextId);
+        if (!existing || route.at > existing.at) this.routes.set(contextId, route);
+      }
+    }
+  }
+
+  /**
+   * Record which app session — and which project's stream — carried
+   * [contextId] in, so a later peer-role send on this context knows where home
+   * is. Called only for a frame `handleInbound` already reported `"applied"`:
+   * that address check is what proves the sender is talking about a session
+   * this bridge actually holds, and this table is the other end's only route
+   * back — noting on an unapplied frame would let any app session rebind it
+   * with one syntactically valid frame carrying someone else's contextId, and
+   * take the next answer for itself.
+   *
+   * No peerId means the loopback owner — this machine's own desktop app,
+   * already reachable without a route.
+   */
+  noteRoute(contextId: string, peerId: string | undefined, projectId: string): void {
+    if (!peerId) return;
+    const now = this.now();
+    let pruned = false;
+    for (const [key, origin] of this.routes) {
+      if (now - origin.at >= BUS_ROUTE_TTL_MS) {
+        this.routes.delete(key);
+        pruned = true;
+      }
+    }
+    const previous = this.routes.get(contextId)?.peerId;
+    // Deleted before it is set so a restamp moves the entry to the back: a Map
+    // keeps first-insertion order, and the eviction below reads the front as
+    // the least recently carried.
+    this.routes.delete(contextId);
+    this.routes.set(contextId, { peerId, projectId, at: now });
+    while (this.routes.size > MAX_BUS_ROUTES) {
+      const oldest = this.routes.keys().next();
+      if (oldest.done) break;
+      this.routes.delete(oldest.value);
+      pruned = true;
+    }
+    this.saveRoutesIfDue(now, pruned || previous !== peerId);
+    // Logged because a carrier attach is otherwise invisible: nothing else
+    // records which app session a bus context routes through, which makes a
+    // peer that cannot answer indistinguishable from one that was never
+    // carried.
+    if (previous !== peerId) {
+      log.info("session bus: context %s routes home via app session %s (project %s)", contextId, peerId, projectId);
+    }
+  }
+
+  /**
+   * The live route entry, or null. Returned by reference so a caller that
+   * actually gets a frame out can stamp `.at` — see each `send` implementation
+   * (agent-core.ts's per-core fallback, host-server.ts's machine dispatcher).
+   *
+   * A route is sized to outlast a conversation rather than a round trip: a
+   * reply may be the first frame the other side sends after a long stretch of
+   * silence, and one that lapsed in between would strand it. A successful send
+   * refreshes it too (the `.at` restamp above), so a route in continuous use
+   * never ages out at all. An expired entry costs nothing but a held frame,
+   * which the next inbound frame on the context releases — and a miss here is
+   * NEVER a fallback to broadcast: that would put another session's words on
+   * the human's phone.
+   */
+  routeFor(contextId: string): { peerId: string; projectId: string; at: number } | null {
+    const origin = this.routes.get(contextId);
+    if (!origin) return null;
+    const now = this.now();
+    if (now - origin.at >= BUS_ROUTE_TTL_MS) {
+      this.routes.delete(contextId);
+      this.saveRoutesIfDue(now, true);
+      return null;
+    }
+    return origin;
+  }
+
+  /** Persist the map, throttled: a binding change or a prune is written at
+   *  once, a bare restamp only every {@link BUS_ROUTE_PERSIST_INTERVAL_MS}.
+   *  Grouped by each row's OWN project, so each project's file keeps holding
+   *  only that project's rows — unchanged file shape, now written from one
+   *  shared table instead of N duplicated ones. */
+  private saveRoutesIfDue(now: number, force: boolean): void {
+    if (!force && now - this.routesSavedAt < BUS_ROUTE_PERSIST_INTERVAL_MS) return;
+    this.routesSavedAt = now;
+    const byProject = new Map<string, BusRouteMap>();
+    for (const [contextId, route] of this.routes) {
+      let group = byProject.get(route.projectId);
+      if (!group) { group = new Map(); byProject.set(route.projectId, group); }
+      group.set(contextId, route);
+    }
+    for (const [projectId, group] of byProject) {
+      try {
+        saveBusRoutes(this.deps.abDir, projectId, group);
+      } catch (err) {
+        // A route that outlives this process is an optimisation over relearning
+        // one; a bridge must not fail to carry a frame because it could not
+        // write that down.
+        log.warn("session bus: could not persist carrier routes for project %s: %s", projectId, err);
+      }
+    }
+  }
+
+  /**
+   * Drop every route naming [projectId], with no rewrite of that project's own
+   * routes.json. Called only when the project itself is forgotten
+   * (`HostServer.forget`), which has already deleted `agents/<projectId>/`
+   * wholesale — a route left in the shared map would otherwise resurrect that
+   * directory the next time `saveRoutesIfDue` groups its rows out and writes
+   * them back. Never called on an eviction: a merely-cold project is still
+   * real, and its routes must survive to be reloaded on its next
+   * `hydrateRoutes` the same way its sessions survive in the session index.
+   */
+  forgetProjectRoutes(projectId: string): void {
+    for (const [contextId, route] of this.routes) {
+      if (route.projectId === projectId) this.routes.delete(contextId);
+    }
+  }
+
+  /** Register (or, with null, clear) the per-project consumer that turns a bus
+   *  event into a line its own agent reads. `AgentCore.setSessionBusListener`
+   *  is the public seam that feeds this — called by whoever holds the core
+   *  (a host, or a test) once per project, so this table has at most one entry
+   *  per project regardless of how many projects share this coordinator. */
+  setListener(projectId: string, fn: ((event: SessionBusEvent) => void) | null): void {
+    if (fn) this.listeners.set(projectId, fn);
+    else this.listeners.delete(projectId);
   }
 
   /** Read one session's stores off disk. Idempotent, and worth calling as a
@@ -161,11 +344,26 @@ export class SessionBusCoordinator {
    * A restart is the only case that needs it, and the case that would otherwise
    * lose a message in silence: `pump` drains the sessions it holds in memory and
    * a fresh process holds none, so a message the dead process could not send
-   * would simply never go. Called once as the project comes up, and again
-   * whenever a carrier appears, which is when a held message can finally leave.
+   * would simply never go. Called once, at process start — machine-wide when
+   * host-injected, or once per fallback core with no host — never again on a
+   * later carrier attach: it re-enumerates every session bus directory this
+   * coordinator can see, and a flaky carrier reconnecting would otherwise turn
+   * into a reconnect storm that re-scans the whole machine on every flap.
+   * `pump()` alone is what a carrier attach needs — the in-memory outbox this
+   * call seeded already holds what `resume()` would only rediscover.
    */
   resume(): void {
-    for (const sessionId of listSessionBusSessions(this.deps.abDir, this.deps.projectId)) {
+    for (const { sessionId } of listSessionBusSessions(this.deps.abDir)) {
+      // The directory enumeration names the project bytes are FILED under; the
+      // index (`projectIdFor`) is the authoritative answer for who OWNS them
+      // now — the two can disagree for a session whose project was renamed,
+      // reassigned or forgotten but not yet swept. Trusting the directory here
+      // would resume retries against a project this bridge no longer believes
+      // holds the session.
+      if (this.deps.projectIdFor(sessionId) === null) {
+        log.warn("session-bus: resume found bus state for session %s with no known owning project — skipped", sessionId);
+        continue;
+      }
       this.stateFor(sessionId);
     }
   }
@@ -379,12 +577,22 @@ export class SessionBusCoordinator {
   private stateFor(sessionId: string): SessionState {
     let s = this.sessions.get(sessionId);
     if (!s) {
-      s = {
-        log: loadMessageLog(this.deps.abDir, this.deps.projectId, sessionId),
-        held: loadHeld(this.deps.abDir, this.deps.projectId, sessionId),
-        guard: emptyGuard(),
-        artifacts: null,
-      };
+      const projectId = this.deps.projectIdFor(sessionId);
+      if (projectId === null) {
+        // Unresolvable rather than a throw: a send racing the project that owns
+        // it being forgotten must not crash the coordinator over one message.
+        // Kept in memory only — see the field's own doc on SessionState.
+        log.warn("session-bus: no owning project for session %s — state kept in memory only, not persisted", sessionId);
+        s = { log: emptyLog(), held: emptyHeld(), guard: emptyGuard(), artifacts: null, projectId: null };
+      } else {
+        s = {
+          log: loadMessageLog(this.deps.abDir, projectId, sessionId),
+          held: loadHeld(this.deps.abDir, projectId, sessionId),
+          guard: emptyGuard(),
+          artifacts: null,
+          projectId,
+        };
+      }
       this.sessions.set(sessionId, s);
       // Hydrating IS how a held message comes back off disk, so the timer has to
       // be considered here and not only at a commit: nothing else re-arms the
@@ -398,8 +606,10 @@ export class SessionBusCoordinator {
     const s = this.stateFor(sessionId);
     const next: SessionState = { ...s, ...patch };
     this.sessions.set(sessionId, next);
-    if (next.log !== s.log) saveMessageLog(this.deps.abDir, this.deps.projectId, sessionId, next.log);
-    if (next.held !== s.held) saveHeld(this.deps.abDir, this.deps.projectId, sessionId, next.held);
+    if (next.projectId !== null) {
+      if (next.log !== s.log) saveMessageLog(this.deps.abDir, next.projectId, sessionId, next.log);
+      if (next.held !== s.held) saveHeld(this.deps.abDir, next.projectId, sessionId, next.held);
+    }
     this.ensureTimer();
   }
 
@@ -500,20 +710,22 @@ export class SessionBusCoordinator {
 
   private onFetch(sessionId: string, self: SessionBusSelf, msg: Extract<AbMessage, { type: "session-bus:fetch" }>): void {
     const s = this.stateFor(sessionId);
-    if (!s.artifacts) {
+    if (!s.artifacts && s.projectId !== null) {
       this.sessions.set(sessionId, {
         ...s,
-        artifacts: loadArtifacts(this.deps.abDir, this.deps.projectId, sessionId),
+        artifacts: loadArtifacts(this.deps.abDir, s.projectId, sessionId),
       });
     }
-    const artifacts = this.stateFor(sessionId).artifacts;
+    const current = this.stateFor(sessionId);
+    const artifacts = current.artifacts;
     const handle = artifacts ? artifactById(artifacts, msg.artifactId) : null;
-    // A handle with no bytes under it and an artifact this session never
-    // published are the same answer to the fetcher: there is nothing to read.
-    const slice = handle
+    // A handle with no bytes under it, an artifact this session never
+    // published, and a session with no owning project to read one from are all
+    // the same answer to the fetcher: there is nothing to read.
+    const slice = handle && current.projectId !== null
       ? readArtifactContent(
           this.deps.abDir,
-          this.deps.projectId,
+          current.projectId,
           sessionId,
           msg.artifactId,
           msg.offset,
@@ -547,6 +759,12 @@ export class SessionBusCoordinator {
   private emit(event: SessionBusEvent): void {
     try {
       this.deps.onEvent?.(event);
+      // Fanned to the OWNING project's own listener, never to every registered
+      // one: one coordinator now fires this for every project's sessions, and
+      // handing every event to whichever project happened to register would
+      // deliver into the wrong project silently — see setListener.
+      const projectId = this.deps.projectIdFor(event.sessionId);
+      if (projectId !== null) this.listeners.get(projectId)?.(event);
     } catch (err) {
       // A consumer that throws must not cost the store write that already
       // landed.

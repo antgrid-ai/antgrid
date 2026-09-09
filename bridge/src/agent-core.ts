@@ -32,8 +32,6 @@ import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } f
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
 import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
 import { removeSessionBusSession } from "./session-bus/store-fs";
-import { BUS_ROUTE_PERSIST_INTERVAL_MS, BUS_ROUTE_TTL_MS, MAX_BUS_ROUTES } from "./session-bus/constants";
-import { loadBusRoutes, saveBusRoutes } from "./session-bus/route-store";
 import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
 import { lineForEvent } from "./session-bus/deliver-event";
 import { neutralizeFenced } from "./session-bus/delivery";
@@ -99,17 +97,6 @@ const yieldToEventLoop = () => new Promise<void>((r) => setImmediate(r));
  *  can be addressed back to the device that asked. Comfortably past the app's
  *  own preview timeouts; an expired entry costs a broadcast, never a body. */
 const TUNNEL_ORIGIN_TTL_MS = 120_000;
-
-/** How long the app session that delivered a bus frame stays the way back for
- *  its context. Sized to outlast a conversation rather than a round trip: a
- *  reply may be the first frame the other side sends after a long stretch of
- *  silence, and a route that lapsed in between would strand it. A successful
- *  send refreshes it too, so a route in continuous use never ages out at all. An
- *  expired entry costs nothing but a held frame, which the next inbound frame on
- *  the context releases. It is NEVER a fallback to broadcast: a broadcast would
- *  put another session's words on the human's phone.
- */
-const BUS_ORIGIN_TTL_MS = BUS_ROUTE_TTL_MS;
 
 type CheckoutAgentSpec = {
   command: string;
@@ -237,8 +224,14 @@ export interface AgentCore {
   /** Machine-level phone registry (identity, label, push routing), shared across
    *  projects. Not an authorization store — see remote-access-policy.ts. */
   readonly pairedPhones: PairedPhonesStore;
-  /** The multi-machine message bus for this project: the message log, the held
-   *  store and the carrier routes. Its frames leave through the carrier this
+  /** The session bus this project's sessions read and write through: the
+   *  message log, the held store and the carrier routes for their contexts.
+   *  Host-injected, this is shared with every other project the host has
+   *  open (E9/§5.4) — a MACHINE-level object that happens to be reachable
+   *  from here, not "this project's own" — so a caller that means to affect
+   *  only this project's sessions must go through this core's own methods
+   *  (`setSessionBusListener`, `injectBusLine`) rather than the coordinator's
+   *  machine-wide ones directly. Its frames leave through the carrier this
    *  core was wired with and NEVER through the MessageBus (see {@link
    *  BuildAgentCoreOptions.sendToOwner}). */
   readonly sessionBus: SessionBusCoordinator;
@@ -445,6 +438,14 @@ export interface BuildAgentCoreOptions {
    *  whether a peer is reachable at all; absent means no carrier, which is the
    *  honest answer for a core nothing has connected to. */
   carrierPresent?: () => boolean;
+  /** A host-injected, MACHINE-level session bus (E9/§5.4) shared with every
+   *  other project the host has open. Absent means a per-core fallback is
+   *  built instead, scoped to this project alone — the same
+   *  `opts.X ?? new Y(...)` idiom `pairedPhones` and the rest of this file
+   *  already use for a project with no host. The host resumes an injected
+   *  coordinator itself, once, machine-wide, at process start; a fallback
+   *  resumes itself on construction — see where `sessionBus` is built below. */
+  sessionBus?: SessionBusCoordinator;
   /** Hand one rendered line to the turn-boundary queue that owns delivery
    *  (spec 5.2). Absent means there is no queue to hold it: the turn-open set
    *  lives in the reduction ABOVE this core, so a core built without one has
@@ -920,32 +921,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return { kind: "peer", peerId: origin.peerId };
   }
 
-  // Which app session carried a bus frame in, keyed by its context. A bridge
-  // cannot dial another bridge, so the carrier that delivered to it is its only
-  // way back; unlike a tunnel there is no broadcast fallback, because the bus
-  // fans out to every established session including the human's phone. A miss
-  // holds the frame instead, which the next inbound frame on the context clears.
-  // Hydrated, because a fresh process has learned nothing and the held messages
-  // it resumes beside would then refuse every retry it re-arms — see
-  // route-store.
-  const busOriginByContext = loadBusRoutes(abDir, project.id, BUS_ORIGIN_TTL_MS, Date.now());
-  let busRoutesSavedAt = 0;
-
-  /** Persist the map, throttled: a binding change or a prune is written at once,
-   *  a bare restamp only every {@link BUS_ROUTE_PERSIST_INTERVAL_MS}. */
-  function saveBusRoutesIfDue(now: number, force: boolean): void {
-    if (!force && now - busRoutesSavedAt < BUS_ROUTE_PERSIST_INTERVAL_MS) return;
-    busRoutesSavedAt = now;
-    try {
-      saveBusRoutes(abDir, project.id, busOriginByContext);
-    } catch (err) {
-      // A route that outlives this process is an optimisation over relearning
-      // one; a bridge must not fail to carry a frame because it could not write
-      // that down.
-      log.warn("session bus: could not persist carrier routes: %s", err);
-    }
-  }
-
   /** Contexts already warned about for having no route. An unroutable frame is
    *  held and re-tried on every coordinator tick, so a per-attempt warning would
    *  repeat for the life of the bridge. Cleared when a route appears, so a link
@@ -958,54 +933,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  — and a shared set would let one clear the other's warning. */
   const busOwnerMissWarned = new Set<string>();
 
-  function noteBusOrigin(contextId: string, peerId: string | undefined): void {
-    // No peerId is the loopback owner — this machine's own carrier, already
-    // reachable without a route.
-    if (!peerId) return;
-    const now = Date.now();
-    let pruned = false;
-    for (const [key, origin] of busOriginByContext) {
-      if (now - origin.at >= BUS_ORIGIN_TTL_MS) {
-        busOriginByContext.delete(key);
-        pruned = true;
-      }
-    }
-    const previous = busOriginByContext.get(contextId)?.peerId;
-    // Deleted before it is set so a restamp moves the entry to the back: a Map
-    // keeps first-insertion order, and the eviction below reads the front as the
-    // least recently carried.
-    busOriginByContext.delete(contextId);
-    busOriginByContext.set(contextId, { peerId, projectId: project.id, at: now });
-    while (busOriginByContext.size > MAX_BUS_ROUTES) {
-      const oldest = busOriginByContext.keys().next();
-      if (oldest.done) break;
-      busOriginByContext.delete(oldest.value);
-      pruned = true;
-    }
-    busRouteMissWarned.delete(contextId);
-    saveBusRoutesIfDue(now, pruned || previous !== peerId);
-    // Logged because a carrier attach is otherwise invisible: nothing else
-    // records which app session a bus context routes through, which makes a peer
-    // that cannot answer indistinguishable from one that was never carried.
-    if (previous !== peerId) {
-      log.info("session bus: context %s routes home via app session %s", contextId, peerId);
-    }
-  }
-
-  /** The live route entry, or null. Returned by reference so a caller that
-   *  actually gets a frame out can stamp it — see the coordinator's `send`. */
-  function busTargetFor(contextId: string): { peerId: string; projectId: string; at: number } | null {
-    const origin = busOriginByContext.get(contextId);
-    if (!origin) return null;
-    const now = Date.now();
-    if (now - origin.at >= BUS_ORIGIN_TTL_MS) {
-      busOriginByContext.delete(contextId);
-      saveBusRoutesIfDue(now, true);
-      return null;
-    }
-    return origin;
-  }
-
   // A session this bridge may address on the bus. Every session this bridge
   // holds is addressable — a session is the unit and there is no membership to
   // join (`docs/session-messaging.md` E1/E2) — so the only two refusals left are
@@ -1016,6 +943,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // This is not the consent gate. §5.1's repo key and the machine's
   // remote-access switch are, and they sit in front of the directory rather than
   // here; a carrier can still only reach a session it was told the id of.
+  //
+  // Used only by the per-core FALLBACK coordinator below: when `opts.sessionBus`
+  // is injected, the host answers `self` machine-wide through its own session
+  // index (see host-server.ts), which resolves a session created moments ago
+  // off the LIVE SessionManager the same way this does — never a debounce-lagged
+  // disk snapshot.
   function sessionBusSelf(sessionId: string): SessionBusSelf | null {
     const machineId = opts.machineId?.() ?? null;
     if (!machineId) return null;
@@ -1035,14 +968,23 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   let busEventListener: ((event: SessionBusEvent) => void) | null = null;
 
-  const sessionBus = new SessionBusCoordinator({
+  // The session bus for this project's sessions. Host-supplied and shared with
+  // every other project the host has open (E9/§5.4: one coordinator per
+  // MACHINE, not one per project) whenever a host built this core; a bare
+  // agent with no host (14+ test files call `buildAgentCore` directly) falls
+  // back to a coordinator scoped to this project alone — the exact idiom
+  // `opts.pairedPhones ?? loadPairedPhones(abDir)` already uses above.
+  const sessionBus: SessionBusCoordinator = opts.sessionBus ?? new SessionBusCoordinator({
     abDir,
-    projectId: project.id,
+    projectIdFor: () => project.id,
     self: sessionBusSelf,
     addressable: () => (opts.machineId?.() ?? null) !== null,
     // A session that opened a context hands every frame to its own desktop app;
     // one that was contacted answers on the session that carried the context in.
-    // Neither path is the MessageBus.
+    // Neither path is the MessageBus. The route table itself lives on the
+    // coordinator now (`noteRoute`/`routeFor`, session-bus/coordinator.ts) —
+    // shared machine-wide when host-injected — so this closure only decides
+    // WHAT a resolved route or a missing one means for a single-project core.
     send: (frame, ctx) => {
       if (ctx.role === "peer") {
         // There is exactly one way home and it is the carrier that brought the
@@ -1050,7 +992,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // to THIS machine's own desktop app, which accepts it and returns true —
         // booking a delivery that never happened and dropping the held message
         // that was the only thing left to retry it.
-        const origin = busTargetFor(ctx.contextId);
+        const origin = sessionBus.routeFor(ctx.contextId);
         if (!origin) {
           if (!busRouteMissWarned.has(ctx.contextId)) {
             busRouteMissWarned.add(ctx.contextId);
@@ -1061,11 +1003,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           }
           return false;
         }
-        // origin.projectId names the project whose stream carried this context
-        // in — always this core's own id today, since the route table is still
-        // per-project. Keep it on the row anyway: once the table is
-        // machine-level a route learned on one project must not send on
-        // another's stream, and this is the field that will pick the right one.
         const sent = opts.sendToAppSession?.(origin.peerId, frame) ?? false;
         if (sent) origin.at = Date.now();
         return sent;
@@ -1087,15 +1024,31 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
       return sentToOwner;
     },
-    onEvent: (event) => {
-      deliverBusEvent(event);
-      busEventListener?.(event);
-    },
   });
-  // Hydrate whatever a previous process left in flight. Without it a cold
-  // coordinator holds no sessions, so nothing re-arms the retries a killed bridge
-  // queued and a finished task's report never goes.
-  sessionBus.resume();
+  // The consumer that turns THIS project's bus events into lines its own
+  // agents read (defined below; hoisted, so the forward reference is safe).
+  // Registered on the coordinator rather than passed at construction, because
+  // a host-shared coordinator fires one `onEvent` for every project on the
+  // machine and must fan each one to the right project's own consumer — see
+  // `setListener`'s doc.
+  sessionBus.setListener(project.id, (event) => {
+    deliverBusEvent(event);
+    busEventListener?.(event);
+  });
+  if (!opts.sessionBus) {
+    // Fallback path only: a standalone/test core with no host to have hydrated
+    // this on its behalf, scoped to this one project — what the pre-E9
+    // coordinator always loaded for itself.
+    sessionBus.hydrateRoutes([project.id]);
+    // Hydrate whatever a previous process left in flight. Without it a cold
+    // coordinator holds no sessions, so nothing re-arms the retries a killed
+    // bridge queued and a finished task's report never goes. The host-injected
+    // case resumes once, machine-wide, at host start instead (see
+    // HostServer's constructor) — every warm core calling this too would
+    // re-enumerate the whole machine on every core start, the reconnect-storm
+    // shape this repo has already paid for twice.
+    sessionBus.resume();
+  }
 
   /** Turn one inbound bus event into the line its session reads, and hand that
    *  line to whoever owns delivery. The mapping lives in `deliver-event.ts`, so
@@ -1253,7 +1206,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // holds, and this map is the other end's only route home — noting first
         // would let any app session rebind it with one syntactically valid frame
         // carrying someone else's contextId, and take the next answer for itself.
-        if (sessionBus.handleInbound(msg) === "applied") noteBusOrigin(msg.contextId, peerId);
+        if (sessionBus.handleInbound(msg) === "applied") sessionBus.noteRoute(msg.contextId, peerId, project.id);
         break;
       case "agent:prompt":
       case "agent:permission-resolve":
@@ -4078,9 +4031,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Re-sync the config-error dot on every connect (see emitConfigState).
     emitConfigState();
     // A carrier just arrived: anything held for want of one goes now rather than
-    // waiting out the next tick. Resumed first, because a session created before
-    // this process started is on disk and nowhere else until something reads it.
-    sessionBus.resume();
+    // waiting out the next tick. Not `resume()` — that re-enumerates every
+    // session bus directory on disk (machine-wide, when host-injected) and
+    // runs once at process start (or once per fallback core); calling it again
+    // on every reconnect would turn a flaky carrier into a reconnect storm
+    // that re-scans the whole machine on each flap. `pump()` alone is enough:
+    // the in-memory outbox already holds what `resume()` would rediscover.
     sessionBus.pump();
     // Seed the app's Handler defaults (judge overrides) even when
     // nothing is armed — arming is one tap and carries no payload, so it arms
@@ -4446,9 +4402,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       isShuttingDown = true;
 
       apiServer?.stop();
-      // Stops the retry timer only. Outbox state is on disk, so a frame this
-      // process never got out is retried by the next one rather than lost.
-      sessionBus.stop();
+      // Detach this project's consumer only — never `sessionBus.stop()`: when
+      // `opts.sessionBus` is host-injected, the coordinator is shared with
+      // every other project on the machine, and stopping it here would kill
+      // the shared retry timer for all of them over one project's teardown
+      // (an LRU eviction, say). The coordinator's own lifetime is the host's
+      // to stop, once, at machine shutdown.
+      sessionBus.setListener(project.id, null);
       // Before teardownServices, which force-kills through `killAll()` and then
       // nulls `manager` — sequenced after it this could only ever see an empty
       // map, so no session was ever asked to exit on its own and the line below

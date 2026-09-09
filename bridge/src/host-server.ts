@@ -36,6 +36,7 @@ import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";
 import { SessionManager } from "./session-manager";
 import { SessionBusSessionIndex } from "./session-bus/session-index";
+import { SessionBusCoordinator } from "./session-bus/coordinator";
 import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
 import type { BranchRemoteStatus } from "./git-branches";
@@ -254,6 +255,82 @@ export class HostServer {
   private readonly sessionIndex = new SessionBusSessionIndex({
     liveSessions: (projectId) => this.cores.get(projectId)?.core.listSessions(true) ?? null,
   });
+  // The same latches `agent-core.ts`'s per-core fallback keeps, moved here
+  // because the machine-level `send` below is this host's own copy of that
+  // fallback's dispatcher — see its doc for why the two absences (no route
+  // home for a peer, no desktop attached to this machine) get separate sets.
+  private readonly busRouteMissWarned = new Set<string>();
+  private readonly busOwnerMissWarned = new Set<string>();
+  // The ONE session bus for this machine (E9/§5.4): every project core built
+  // by `startCore` below is handed this exact instance rather than building
+  // its own, so a route learned while handling project A's inbound frame is
+  // visible to project B's outbound send for the same context, and a
+  // session created in project B is addressable the moment `self()` is asked
+  // about it from project A's stream. `projectIdFor`/`self` both resolve
+  // through `sessionIndex` rather than a captured project id, which is what
+  // makes this the single seam a bare `buildAgentCore` caller has no host to
+  // supply — see `BuildAgentCoreOptions.sessionBus`'s own doc.
+  private readonly sessionBus: SessionBusCoordinator = new SessionBusCoordinator({
+    abDir: resolveAbDir(),
+    projectIdFor: (sessionId) => this.sessionIndex.lookup(sessionId)?.projectId ?? null,
+    self: (sessionId) => {
+      const machineId = this.controlPlaneRegistrationId;
+      if (!machineId) return null;
+      const entry = this.sessionIndex.lookup(sessionId);
+      if (!entry) return null;
+      return {
+        key: { machineId, projectId: entry.projectId, sessionId },
+        ref: {
+          machineId,
+          projectId: entry.projectId,
+          sessionId,
+          projectLabel: entry.projectLabel,
+          sessionName: entry.sessionName,
+        },
+      };
+    },
+    addressable: () => this.controlPlaneRegistrationId !== null,
+    send: (frame, ctx) => {
+      if (ctx.role === "peer") {
+        // There is exactly one way home and it is the carrier — on WHICHEVER
+        // project's stream — that brought the context in. `routeFor` names
+        // that project explicitly (`origin.projectId`), so this dispatch
+        // never assumes the sending core's own project is the right stream —
+        // the whole point of moving the route table off a single core.
+        const origin = this.sessionBus.routeFor(ctx.contextId);
+        if (!origin) {
+          if (!this.busRouteMissWarned.has(ctx.contextId)) {
+            this.busRouteMissWarned.add(ctx.contextId);
+            log.warn("session bus: no carrier route for context %s — frames held until one arrives", ctx.contextId);
+          }
+          return false;
+        }
+        const sent = this.cores.get(origin.projectId)?.core.sendToAppSession(origin.peerId, frame) ?? false;
+        if (sent) origin.at = Date.now();
+        return sent;
+      }
+      // Lead role: `ctx.to` names the REMOTE peer this frame is addressed
+      // to, not the local project sending it — so the project whose desktop
+      // owner should carry it out has to come from the SESSION that opened
+      // the exchange instead. `roleForContext` answers "lead" exactly when
+      // `contextId === sessionId` (coordinator.ts), which is what makes
+      // resolving the owning project off `ctx.contextId` through the same
+      // index the coordinator itself uses for `projectIdFor` correct here.
+      const projectId = this.sessionIndex.lookup(ctx.contextId)?.projectId ?? null;
+      const sentToOwner = projectId ? this.cores.get(projectId)?.core.sendToOwner(frame) ?? false : false;
+      if (sentToOwner) {
+        this.busOwnerMissWarned.delete(ctx.contextId);
+      } else if (!this.busOwnerMissWarned.has(ctx.contextId)) {
+        this.busOwnerMissWarned.add(ctx.contextId);
+        log.warn(
+          "session bus: no carrier attached to project %s for context %s — frames held until a desktop app attaches",
+          projectId,
+          ctx.contextId,
+        );
+      }
+      return sentToOwner;
+    },
+  });
   // The always-on, coreless control-plane relay registered under the BARE
   // deviceUuid (no projectId), used to advertise the project catalog and accept
   // mobile-access-gated project verbs from a paired phone. Opened only when remote
@@ -298,9 +375,22 @@ export class HostServer {
     // ready, and a lookup that lands before this resolves gets its own
     // distinguishable log line (SessionBusSessionIndex.lookup) rather than
     // reading as a real addressing miss.
+    //
+    // Route-table hydration and the one machine-wide `resume()` wait for it —
+    // both resolve `projectIdFor` through this same index, and a `resume()`
+    // that ran first would read every cold project's on-disk session as
+    // unaddressable (a warned miss, per the index's own doc) instead of
+    // re-arming its held retries. `.finally` rather than chaining off the
+    // resolved promise: a hydrate that fails for one project must not also
+    // cost every other project its resume, so route hydration and resume run
+    // once the attempt SETTLES, not only once it succeeds.
     void this.sessionIndex
       .hydrate(resolveAbDir(), [...this.seenProjects].map(([id, seen]) => ({ id, label: seen.label })))
-      .catch((err) => log.warn({ err }, "host: session index hydrate failed"));
+      .catch((err) => log.warn({ err }, "host: session index hydrate failed"))
+      .finally(() => {
+        this.sessionBus.hydrateRoutes([...this.seenProjects.keys()]);
+        this.sessionBus.resume();
+      });
   }
 
   /** Self-heal the hint catalog at startup: drop any entry whose folder no
@@ -1729,6 +1819,10 @@ export class HostServer {
       // sessions — which is a local core's business as often as a remote one's.
       machineDeviceId: () => this.controlPlaneRegistrationId,
       ensureMachineRelay: (msg) => this.ensureMachineRelay(msg),
+      // One coordinator for every project this host has open — see the field's
+      // own doc for why the route table and `self()` are keyed off the shared
+      // session index rather than this core's own id.
+      sessionBus: this.sessionBus,
       ...(mode === "remote" ? { remote } : {}),
     });
     await core.start();
@@ -1935,6 +2029,10 @@ export class HostServer {
     await this.reclaimManagedCheckouts(projectId);
     this.deleteProjectStores(projectId);
     this.sessionIndex.forgetProject(projectId);
+    // `deleteProjectStores` above already removed `agents/<projectId>/` — a
+    // route left in the shared table would otherwise resurrect that directory
+    // the next time the coordinator groups its rows out to disk.
+    this.sessionBus.forgetProjectRoutes(projectId);
     if (this.seenProjects.delete(projectId)) this.flushSeen();
     // Unconditional: the advert IS the seen catalog now, so a forgotten project
     // must vanish from a live phone's picker without waiting for a reconnect
@@ -1996,6 +2094,11 @@ export class HostServer {
     this.controlPlaneRelay = null;
     this.controlPlaneBus = null;
     this.remoteRuntime?.maint.stop();
+    // The one machine-wide coordinator's retry timer. Stopped here, once, at
+    // process exit — never inside a project core's own `shutdown()`, which
+    // runs on a routine LRU eviction too and must not silence retries for
+    // every OTHER project still warm on this machine.
+    this.sessionBus.stop();
     // Always close the paired-phones fs.watch handle, even if the control plane
     // was never started, so tests don't leak handles (Windows EBUSY).
     this.stopPhonesWatch?.();

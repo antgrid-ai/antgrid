@@ -410,6 +410,10 @@ export class ProjectCore {
       // the machine it is addressed to; anything else is an unreachable target,
       // not a failed send.
       carrierPresent: () => this.listener?.ownerCarriesSessionBus ?? false,
+      // Host-injected: absent only for a standalone core built with no host
+      // (evals, most of this file's own test callers), which falls back to a
+      // coordinator scoped to itself.
+      sessionBus: this.deps.sessionBus,
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),
       relayUrl: this.deps.relayUrl,

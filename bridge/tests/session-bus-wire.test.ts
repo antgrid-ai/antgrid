@@ -204,7 +204,7 @@ describe("session-bus coordinator across a carrier", () => {
     // can hold, drop or duplicate it the way a real link does.
     lead = new SessionBusCoordinator({
       abDir: join(dir, "lead"),
-      projectId: "p-lead",
+      projectIdFor: () => "p-lead",
       self: selfFor(LEAD_REF),
       send: (frame, ctx) => {
         if (!carrierUp) return false;
@@ -218,7 +218,7 @@ describe("session-bus coordinator across a carrier", () => {
     });
     peer = new SessionBusCoordinator({
       abDir: join(dir, "peer"),
-      projectId: "p-peer",
+      projectIdFor: () => "p-peer",
       self: selfFor(PEER_REF),
       send: (frame, ctx) => {
         if (!carrierUp) return false;
@@ -381,7 +381,7 @@ describe("session-bus coordinator across a carrier", () => {
 
     const resumed = new SessionBusCoordinator({
       abDir: join(dir, "peer"),
-      projectId: "p-peer",
+      projectIdFor: () => "p-peer",
       self: selfFor(PEER_REF),
       send: (frame) => { carried.push(frame); return true; },
       now: () => now,

@@ -200,9 +200,28 @@ edit breaks silently.
   differ, both processes say so once (`the other machine addresses session … as
   project …`, and the app's `peer addresses this lead by another project`) —
   routing no longer depends on it, but the row still renders it.
+- **One coordinator now answers for every project a host has open (E9/§5.4),
+  which is what makes the invariant above load-bearing rather than academic:**
+  a peer admitted onto ANY project's stream can apply a frame naming a session
+  in any OTHER project this machine holds, because `addressesSameSession` was
+  always machine+session and never machine+session+project. What still bounds
+  that is unchanged by the move, and is named here so it is a decision rather
+  than something discovered later: `remoteFrameAllowed` (`agent-core.ts`, gate
+  applied once per inbound frame in `attachTransport`, before dispatch) refuses
+  every relay-origin frame while the machine's mobile-access switch is off —
+  loopback is exempt, but a loopback caller is this machine's own desktop,
+  already trusted with every session on it; the `checkoutRouting` gate
+  (`peerCanRouteCheckouts`, same call site) refuses a peer that never declared
+  the capability, for any project currently holding an isolated session; and a
+  session id is `crypto.randomUUID()` (`session-manager.ts`), so naming one is
+  guessing a UUID, never enumerating a small keyspace. Together these mean
+  widening the address space to the machine did not widen WHO may address it —
+  only what an already-admitted peer may name once inside.
 - **Outbound on the machine that is answering is `sendToAppSession(peerId)`,**
-  keyed by the app session that carried the exchange in (`busOriginByContext` /
-  `noteBusOrigin` in `agent-core.ts`). Falling through to the loopback owner
+  keyed by the app session — and, since the route table moved onto the
+  coordinator itself (E9/§5.4), the PROJECT — that carried the exchange in
+  (`SessionBusCoordinator.noteRoute`/`routeFor`, `session-bus/coordinator.ts`).
+  Falling through to the loopback owner
   would hand the answer to THIS machine's desktop, which accepts it and returns
   true — booking a delivery that never happened and retiring the only outbox
   entry that could retry it. A broadcast would additionally leak the whole

@@ -10,6 +10,9 @@
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { z } from "zod";
+import { logger } from "../logger";
+
+const log = logger.child({ component: "session-bus" });
 
 /** Where one project's bus state lives. Ids are bridge-issued but encoded
  *  anyway: a path separator inside one must not escape the project directory. */
@@ -35,31 +38,53 @@ export function sessionBusDeliveryDir(abDir: string, projectId: string): string 
 }
 
 /**
- * Every session this project has bus state on disk for.
+ * Every session this MACHINE has bus state on disk for, across every project.
  *
  * The restart path needs this: a fresh process holds no sessions in memory, so
  * without enumerating the directory nothing would re-arm the retries a killed
  * bridge left queued, and a held message would sit unsent until some unrelated
- * call happened to name that session.
+ * call happened to name that session. Machine-wide since E9/§5.4: one
+ * coordinator now resumes for every project a host has open, not one project's
+ * own directory, so the shape widens from a bare session id to the pair the
+ * caller needs to resolve a store path from (`sessionBusSessionDir`).
  */
-export function listSessionBusSessions(abDir: string, projectId: string): string[] {
-  const dir = sessionBusProjectDir(abDir, projectId);
+export function listSessionBusSessions(abDir: string): { projectId: string; sessionId: string }[] {
+  const root = join(abDir, "agents");
+  let projectDirs: string[];
   try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
-      .map((e) => {
-        try {
-          return decodeURIComponent(e.name);
-        } catch {
-          // A directory name this bridge did not encode. Skipping is right:
-          // there is no session id it could name.
-          return null;
-        }
-      })
-      .filter((id): id is string => id !== null);
-  } catch {
+    projectDirs = readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch (err) {
+    // Distinct from "no project has bus state": an unreadable root is
+    // otherwise indistinguishable from a machine that has never held anything.
+    log.warn({ err }, "session-bus: could not enumerate agents/ while resuming — treating as no sessions");
     return [];
   }
+  const out: { projectId: string; sessionId: string }[] = [];
+  for (const encProjectId of projectDirs) {
+    let projectId: string;
+    try {
+      projectId = decodeURIComponent(encProjectId);
+    } catch {
+      continue; // A directory name this bridge did not encode.
+    }
+    const dir = sessionBusProjectDir(abDir, projectId);
+    let sessionEntries;
+    try {
+      sessionEntries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue; // This project has no session-bus subdirectory at all.
+    }
+    for (const e of sessionEntries) {
+      if (!e.isDirectory()) continue;
+      try {
+        out.push({ projectId, sessionId: decodeURIComponent(e.name) });
+      } catch {
+        // A directory name this bridge did not encode. Skipping is right:
+        // there is no session id it could name.
+      }
+    }
+  }
+  return out;
 }
 
 /** Read and validate a store file, falling back to [empty] on anything at all:

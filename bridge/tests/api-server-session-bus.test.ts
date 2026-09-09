@@ -63,7 +63,7 @@ function machine(opts: {
   const routes: { contextId: string; role: string }[] = [];
   const coordinator = new SessionBusCoordinator({
     abDir: opts.abDir,
-    projectId: opts.projectId,
+    projectIdFor: () => opts.projectId,
     self: (sessionId) =>
       opts.sessionIds.includes(sessionId)
         ? {
@@ -208,7 +208,7 @@ describe("a self with no address is not a session this bridge does not hold", ()
   function coordinatorWith(addressable?: () => boolean): SessionBusCoordinator {
     return new SessionBusCoordinator({
       abDir: tempDir("antgrid-bus-selfnull-"),
-      projectId: "proj",
+      projectIdFor: () => "proj",
       // Null for the same reason in both cases; only `addressable` says which.
       self: () => null,
       send: () => true,
