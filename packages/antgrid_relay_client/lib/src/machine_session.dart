@@ -405,6 +405,16 @@ class MachineSession {
         streamId: streamId,
         msgType: type,
       );
+      // Info, not warn: the comment above is right that this is usually the
+      // benign reconnect case, and a terminal being typed into reaches here
+      // once per keystroke. It earns a line at all because a session that
+      // never comes back looks exactly like the benign case until someone can
+      // count how long the drops went on.
+      _log(
+        RelayLogLevel.info,
+        'send dropped — no E2E session',
+        fields: {'channel': channel, 'streamId': streamId, 'msgType': type},
+      );
       return;
     }
     final envelope = <String, dynamic>{
@@ -515,6 +525,18 @@ class MachineSession {
         streamId: f.streamId,
         msgType: f.msgType,
       );
+      // Warn where [sendOnStream]'s twin is info: this frame was accepted into
+      // the queue, so its sender was told it would go out and is awaiting a
+      // hand-off that now never comes.
+      _log(
+        RelayLogLevel.warn,
+        'queued frame dropped — session went down before it was sealed',
+        fields: {
+          'channel': f.channel,
+          'streamId': f.streamId,
+          'msgType': f.msgType,
+        },
+      );
       return null;
     }
     try {
@@ -533,6 +555,15 @@ class MachineSession {
           channel: f.channel,
           streamId: f.streamId,
           msgType: f.msgType,
+        );
+        _log(
+          RelayLogLevel.warn,
+          'queued frame dropped — keys rotated mid-seal',
+          fields: {
+            'channel': f.channel,
+            'streamId': f.streamId,
+            'msgType': f.msgType,
+          },
         );
         return null;
       }
@@ -557,6 +588,18 @@ class MachineSession {
         streamId: f.streamId,
         msgType: f.msgType,
         detail: {'error': '${e.runtimeType}'},
+      );
+      // The runtime type only, for the reason the comment above gives: the
+      // plaintext must not reach a log any more than it may reach a capture.
+      _log(
+        RelayLogLevel.error,
+        'queued frame dropped — seal threw',
+        fields: {
+          'channel': f.channel,
+          'streamId': f.streamId,
+          'msgType': f.msgType,
+          'error': '${e.runtimeType}',
+        },
       );
       return null;
     }
@@ -1248,6 +1291,15 @@ class MachineSession {
     final type = obj['type'] as String?;
     if (keys == null) {
       _dropped('tx', 'no-e2e-session', channel: 'control', msgType: type);
+      // This path carries ping, pong and credit — the frames the peer reads as
+      // proof we are alive and as permission to keep sending. Losing one is
+      // indistinguishable at the far end from a link that has gone dead, so it
+      // must never be diagnosed only from an unarmed tap.
+      _log(
+        RelayLogLevel.warn,
+        'session frame dropped — no E2E session',
+        fields: {'msgType': type},
+      );
       return;
     }
     final ct = await E2eTransportDart(
@@ -1260,6 +1312,11 @@ class MachineSession {
       // and a frame sealed under retired keys must not charge the window the
       // establishment that retired them has just zeroed.
       _dropped('tx', 'keys-rotated', channel: 'control', msgType: type);
+      _log(
+        RelayLogLevel.warn,
+        'session frame dropped — keys rotated mid-seal',
+        fields: {'msgType': type},
+      );
       return;
     }
     relay.sendMessage(machineDeviceId, 'control', ct);

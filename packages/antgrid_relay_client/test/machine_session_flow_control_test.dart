@@ -162,6 +162,33 @@ void main() {
     );
   });
 
+  test('a send with no session reaches the logger', () async {
+    // Every drop on this path was reported only to a netwatch tap, so a session
+    // that never came back was indistinguishable in the logs from one nobody
+    // had typed into. Pin the wiring, not the wording.
+    final logged = <String>[];
+    final session = MachineSession(
+      relay: relay,
+      machineDeviceId: 'machine-1',
+      handshaker: handshaker,
+      logger: (level, message, {fields}) =>
+          logged.add('${level.name}: $message'),
+    );
+    addTearDown(() async {
+      await session.dispose();
+      await relay.closeStreams();
+    });
+
+    // Deliberately never established — the state a terminal is typed into
+    // while the ladder is still climbing.
+    await session.sendOnStream('s1', {'type': 'terminal:input'}, 'control');
+
+    expect(
+      logged,
+      anyElement(startsWith('info: send dropped — no E2E session')),
+    );
+  });
+
   test('a session ping is written while app frames are held, and the control '
       'envelope precedes them all once the gate opens', () async {
     final session = await establish(
