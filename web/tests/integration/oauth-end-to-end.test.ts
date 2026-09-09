@@ -96,5 +96,9 @@ describe("OAuth end-to-end", () => {
     expect(payload.tier).toBe("pro");
     expect(payload.email).toBe("alice@example.com");
     expect(payload.pk).toBe(pub);
+    // Stamped by the provider from the client's registered scope, not from the
+    // token request. `requireBearerJwt` fails closed on it, so a Better-Auth
+    // change that drops the claim must break here rather than in the field.
+    expect(payload.scope).toBe("agent");
   });
 });

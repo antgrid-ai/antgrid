@@ -72,7 +72,7 @@ describe("resolveProject", () => {
     const resolved = await resolveProject(checkoutPath, runGit, { abDir });
     expect(resolved).toEqual({
       projectId, repoPath, selectedPath: canonicalCheckoutPath, isGitRepository: true,
-      kind: "managed-checkout", checkoutId: "checkout-1",
+      kind: "managed-checkout", checkoutId: "checkout-1", repoKey: null,
     });
   });
 
@@ -88,7 +88,7 @@ describe("resolveProject", () => {
     const resolved = await resolveProject(checkoutPath, runGit, { abDir });
     expect(resolved).toStrictEqual({
       projectId, repoPath, selectedPath: canonicalCheckoutPath, isGitRepository: true,
-      kind: "managed-checkout",
+      kind: "managed-checkout", repoKey: null,
     });
     expect("checkoutId" in resolved).toBe(false);
   });
@@ -116,7 +116,7 @@ describe("resolveProject", () => {
     const resolved = await resolveProject(checkoutPath, runGit, { abDir });
     expect(resolved).toEqual({
       projectId: ownerId, repoPath: canonicalLinked, selectedPath: canonicalCheckoutPath,
-      isGitRepository: true, kind: "managed-checkout", checkoutId: "checkout-2",
+      isGitRepository: true, kind: "managed-checkout", checkoutId: "checkout-2", repoKey: null,
     });
   });
 
@@ -142,7 +142,7 @@ describe("resolveProject", () => {
     const resolved = await resolveProject(checkoutPath, runGit, { abDir });
     expect(resolved).toStrictEqual({
       projectId, repoPath, selectedPath: canonicalCheckoutPath, isGitRepository: true,
-      kind: "managed-checkout",
+      kind: "managed-checkout", repoKey: null,
     });
   });
 
@@ -155,7 +155,7 @@ describe("resolveProject", () => {
     const resolved = await resolveProject(linked, runGit, { abDir });
     expect(resolved).toEqual({
       projectId: computeProjectId(canonicalLinked), repoPath: canonicalLinked, selectedPath: canonicalLinked,
-      isGitRepository: true, kind: "linked-worktree",
+      isGitRepository: true, kind: "linked-worktree", repoKey: null,
     });
   });
 
@@ -168,7 +168,7 @@ describe("resolveProject", () => {
     const resolved = await resolveProject(sub, runGit, { abDir });
     expect(resolved).toEqual({
       projectId: computeProjectId(repoPath), repoPath, selectedPath: canonical(sub),
-      isGitRepository: true, kind: "primary",
+      isGitRepository: true, kind: "primary", repoKey: null,
     });
   });
 
@@ -183,15 +183,42 @@ describe("resolveProject", () => {
     const resolved = await resolveProject(sub, runGit, { abDir });
     expect(resolved).toEqual({
       projectId: computeProjectId(canonicalLinked), repoPath: canonicalLinked, selectedPath: canonical(sub),
-      isGitRepository: true, kind: "linked-worktree",
+      isGitRepository: true, kind: "linked-worktree", repoKey: null,
     });
   });
 
   test("keeps non-Git folders as ordinary path-hash projects", async () => {
     const resolved = await resolveProject(dir);
     expect(resolved).toEqual({
-      projectId: computeProjectId(dir), repoPath: dir, selectedPath: dir, isGitRepository: false, kind: "plain",
+      projectId: computeProjectId(dir), repoPath: dir, selectedPath: dir, isGitRepository: false,
+      kind: "plain", repoKey: null,
     });
+  });
+
+  test("folds the origin remote into a repoKey", async () => {
+    await git(dir, ["init"]);
+    await git(dir, ["remote", "add", "origin", "git@github.com:antgrid/antgrid.git"]);
+    const resolved = await resolveProject(dir);
+    expect(resolved.repoKey).toBe("github.com/antgrid/antgrid");
+  });
+
+  test("a repository with no origin has no repoKey", async () => {
+    await git(dir, ["init"]);
+    const resolved = await resolveProject(dir);
+    expect(resolved.isGitRepository).toBe(true);
+    expect(resolved.repoKey).toBeNull();
+  });
+
+  test("a failing remote-url call leaves the resolve otherwise intact", async () => {
+    await git(dir, ["init"]);
+    await git(dir, ["remote", "add", "origin", "https://github.com/antgrid/antgrid.git"]);
+    const resolved = await resolveProject(dir, async (args, cwd) => {
+      if (args[0] === "remote") throw new Error("git remote exploded");
+      return runGit(args, cwd);
+    });
+    expect(resolved.repoKey).toBeNull();
+    expect(resolved.isGitRepository).toBe(true);
+    expect(resolved.projectId).toBe(computeProjectId(dir));
   });
 
   // HostServer.open resolves before it does anything else, so a rejection here

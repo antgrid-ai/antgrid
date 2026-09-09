@@ -102,6 +102,11 @@ export interface ProjectSummary {
    *  the relay advert carries, so a LOCAL project's session rows dot themselves
    *  instead of inheriting the project rollup. Absent for a cold core. */
   sessionStatuses?: Record<string, string>;
+  /** Cross-machine repository identity (see repo-key.ts). The desktop binds a
+   *  project's tasks by this the same way the phone does, so it rides both
+   *  planes. Optional because it is read from the seen catalog, where an entry
+   *  recorded before the field existed simply has none. */
+  repoKey?: string;
 }
 
 /** One paired phone as surfaced to the desktop mobile-devices hub. Mirror of the
@@ -148,10 +153,15 @@ export interface ConnectInfo {
 
 export type ControlResponse =
   | { id: string; ok: true; type: "project:list"; projects: ProjectSummary[] }
+  // `repoKey` is nullable rather than optional here, unlike ProjectSummary's:
+  // this response is computed by a fresh resolve, so `null` is the real answer
+  // "this folder names no shareable repository" — the synthetic per-machine key
+  // is minted at open time, where the machine's device id lives.
   | {
       id: string; ok: true; type: "project:resolve"; projectId: string; repoPath: string;
       selectedPath: string; label: string; isGitRepository: boolean;
       kind: "primary" | "managed-checkout" | "linked-worktree" | "plain"; checkoutId?: string;
+      repoKey: string | null;
     }
   | { id: string; ok: true; type: "tools:list"; tools: ToolSummary[]; agents?: AgentDescriptor[] }
   | { id: string; ok: true; type: "project:open"; running: boolean; connect: ConnectInfo | null }

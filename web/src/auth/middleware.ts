@@ -1,10 +1,19 @@
 import type { Context, MiddlewareHandler } from "hono";
 import type { Auth } from "./better-auth.js";
+import type { DB } from "../db/index.js";
+import type { Env } from "../env.js";
+import { requireBearerJwt } from "./jwt-bearer.js";
 
 export type AuthVars = {
   userId: string;
   sessionId: string;
   userEmail: string | null;
+  /**
+   * The caller's live device, set only by `requireBearerJwt`. Its presence is
+   * the actor-type signal — a Bearer-gated request leaves `sessionId` empty, so
+   * the credential is all that distinguishes a bridge from a browser session.
+   */
+  deviceId?: string;
 };
 
 type Session = { sessionId: string; userId: string; email: string | null };
@@ -32,6 +41,37 @@ export function requireUser(deps: { auth: Auth }): MiddlewareHandler<{ Variables
     if (!s) return c.json({ error: "UNAUTHENTICATED" }, 401);
     setAuthVars(c, s);
     await next();
+  };
+}
+
+/**
+ * Gate a route both a human client and the bridge reach, each with its own
+ * carrier — cookie from the app and browser, device JWT from the bridge.
+ *
+ * An `Authorization: Bearer` header is terminal. A request that presents a
+ * device token and fails on it must not be rescued by a session cookie riding
+ * along in the same request, or a revoked device keeps working the moment its
+ * user happens to be signed in somewhere.
+ *
+ * The two gates stay distinguishable downstream: only the Bearer path sets
+ * `deviceId`, so a route that must not be reachable programmatically can still
+ * refuse on its presence.
+ */
+export function requireUserOrBearer(deps: {
+  auth: Auth;
+  db: DB;
+  env: Env;
+}): MiddlewareHandler<{ Variables: AuthVars }> {
+  // Built once: the bearer gate caches the JWKS per instance, and rebuilding it
+  // per request would refetch on every call.
+  const bearer = requireBearerJwt(deps);
+  const cookie = requireUser({ auth: deps.auth });
+  return async (c, next) => {
+    // One lookup: `header()` reads through the Fetch Headers API, which folds
+    // case itself.
+    const authz = c.req.header("authorization");
+    if (authz && authz.toLowerCase().startsWith("bearer ")) return bearer(c, next);
+    return cookie(c, next);
   };
 }
 

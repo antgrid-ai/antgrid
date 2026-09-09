@@ -5,6 +5,8 @@ import { basename, join, resolve } from "node:path";
 import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps, type PromotionHandle, type RegisterOutcome } from "./project-core";
 import { OAuthClient, startTokenMaintenance } from "./auth/oauth-client";
 import { sendHeartbeat } from "./heartbeat";
+import { ProjectBindingReporter } from "./project-binding";
+import { TaskRunReporter } from "./task-run";
 import { ControlListener } from "./control-listener";
 import type { ControlRequest, ControlResponse } from "./control-protocol";
 import { hostFilePath, writeHostFile, removeHostFile } from "./host-discovery";
@@ -39,6 +41,7 @@ import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
 import type { BranchRemoteStatus } from "./git-branches";
 import { resolveProject } from "./worktrees/project-resolver";
+import { syntheticRepoKey } from "./repo-key";
 import { WorktreeError, WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
 import { isIsolatedCheckoutKind, isManagedCheckoutKind } from "./worktrees/checkout-types";
@@ -260,6 +263,19 @@ export class HostServer {
   // buildProjectsAdvertisement (per-project streamId) and stream-ready. Populated
   // when a core attaches (remoteDepsFor's wrapper), cleared on detach.
   private readonly streamIds = new Map<string, string>();
+  // Reports each project's repository identity to the account so tasks can bind
+  // to it.
+  private readonly bindingReporter = new ProjectBindingReporter({
+    credentials: () => this.accountCredentials(),
+  });
+  // Reports each task-bound session's work status to the account, so a run row
+  // exists whether or not a phone is watching. Same credentials and the same
+  // gate as the binding reporter and the heartbeat: this is the machine
+  // reporting its own work to its own account, not a phone driving this
+  // machine, so the remote-access switch has no say in it.
+  private readonly taskRunReporter = new TaskRunReporter({
+    credentials: () => this.accountCredentials(),
+  });
 
   constructor(private readonly opts: HostServerOptions) {
     // Watch the backing file so an external edit (e.g. `antgrid phones remove`)
@@ -318,6 +334,23 @@ export class HostServer {
       close: () => {},
     } as unknown as RelayClient;
     this.readvertiseToControlPlane();
+  }
+
+  /** Machine credentials for the account's Bearer-gated REST routes, or null
+   *  while this machine has no remote config / no OAuth runtime yet.
+   *
+   *  Read per report rather than captured: the reporters are built in the
+   *  constructor, before start() opens the control plane — and that open is
+   *  best-effort, so `remoteRuntime` can still be absent after it (a swallowed
+   *  mint failure) and appear only on a later remote open's retry. */
+  private accountCredentials(): { licenseApiUrl: string; getToken: () => string; deviceUuid: string } | null {
+    const r = this.remoteConfig();
+    if (!r || !this.remoteRuntime) return null;
+    return {
+      licenseApiUrl: r.licenseApiUrl,
+      getToken: this.remoteRuntime.maint.getToken,
+      deviceUuid: r.auth.deviceUuid,
+    };
   }
 
   /** The single machine-level phone registry shared across all cores. */
@@ -579,7 +612,7 @@ export class HostServer {
         // Live work status + running-session count for warm cores only. Cold
         // projects omit both (their agent PTY isn't alive → nothing "working");
         // the app falls back to `running` for those, reading them as done/offline.
-        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, sessionStatuses: entry?.core.sessionWorkStatuses, lastActiveAt: seen?.lastActiveAt, streamId };
+        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, sessionStatuses: entry?.core.sessionWorkStatuses, lastActiveAt: seen?.lastActiveAt, streamId, repoKey: seen?.repoKey };
       });
   }
 
@@ -1573,7 +1606,7 @@ export class HostServer {
     // promise instead so the second caller gets the same core.
     const inflight = this.opening.get(projectId);
     if (inflight) return inflight;
-    const promise = this.startCore(projectId, projectPath, mode);
+    const promise = this.startCore(projectId, projectPath, mode, resolved.repoKey);
     this.opening.set(projectId, promise);
     try {
       return await promise;
@@ -1582,7 +1615,7 @@ export class HostServer {
     }
   }
 
-  private async startCore(projectId: string, projectPath: string, mode: "local" | "remote"): Promise<OpenResult> {
+  private async startCore(projectId: string, projectPath: string, mode: "local" | "remote", repoKey: string | null): Promise<OpenResult> {
     let remote: ProjectCoreRemoteDeps | undefined;
     let relayUrl: string | undefined;
     if (mode === "remote") {
@@ -1614,6 +1647,7 @@ export class HostServer {
       // and local is the desktop default.
       tierClaim: () => this.tierClaimNow(),
       ensureMachineRelay: (msg) => this.ensureMachineRelay(msg),
+      taskRuns: this.taskRunReporter,
       ...(mode === "remote" ? { remote } : {}),
     });
     await core.start();
@@ -1637,8 +1671,22 @@ export class HostServer {
     // The in-memory .set() is what matters for runtime; the flush is a non-secret
     // best-effort persist whose failure must NEVER break opening a project (the
     // read path already "never throws into the caller" — extend that to writes).
-    this.seenProjects.set(projectId, { path: projectPath, label: basename(projectPath), lastActiveAt: new Date().toISOString() });
+    const seenRepoKey = this.repoKeyFor(projectId, repoKey);
+    this.seenProjects.set(projectId, {
+      path: projectPath,
+      label: basename(projectPath),
+      lastActiveAt: new Date().toISOString(),
+      ...(seenRepoKey ? { repoKey: seenRepoKey } : {}),
+    });
     this.flushSeen();
+    // The one place the repository identity and the resolved checkout path are
+    // both settled, so it is where the account learns the pair. Fire-and-forget
+    // for the same reason the flush above is best-effort.
+    this.bindingReporter.report({
+      localProjectId: projectId,
+      localPath: projectPath,
+      repoKey: seenRepoKey,
+    });
     // Push the newly-warm project to the connected phone NOW — without this,
     // a project opened from the desktop reaches the phone only when its first
     // work-status transition happens to re-advertise (i.e. late or never).
@@ -1761,6 +1809,7 @@ export class HostServer {
       projectId, path: e.path, running: true, mode: e.mode,
       workStatus: e.core.workStatus,
       sessionStatuses: e.core.sessionWorkStatuses,
+      repoKey: this.seenProjects.get(projectId)?.repoKey,
     }));
   }
 
@@ -2066,6 +2115,22 @@ export class HostServer {
     this.flushSeen();
   }
 
+  /** The repository identity to record for a project, given whatever the resolve
+   *  could fold from its origin remote. A folder with no shareable origin still
+   *  needs a key so its tasks bind somewhere, and the synthetic one names this
+   *  machine — so it is unavailable until the machine has a device id, and a
+   *  machine that has never registered has no stable device half to invent. */
+  private repoKeyFor(projectId: string, resolved: string | null): string | undefined {
+    if (resolved) return resolved;
+    // A resolve that could not fold an origin is indistinguishable from one whose
+    // git call failed, so a key already recorded for this project outlives it —
+    // re-keying a project silently re-buckets every task bound to it.
+    const recorded = this.seenProjects.get(projectId)?.repoKey;
+    if (recorded) return recorded;
+    const deviceId = this.remoteConfig()?.auth.deviceUuid;
+    return deviceId ? syntheticRepoKey(deviceId, projectId) : undefined;
+  }
+
   /** Best-effort persist of the non-authoritative seen-projects hint catalog. A
    *  write failure must NEVER break opening/focusing a project — it's a non-secret
    *  cache the read path already tolerates losing. */
@@ -2085,6 +2150,12 @@ export interface SeenProject {
   path: string;
   label?: string;
   lastActiveAt?: string;
+  /** Cross-machine repository identity (see repo-key.ts). Persisted because
+   *  `buildProjectsAdvertisement` serves COLD projects out of this catalog: an
+   *  unpersisted key means a project advertises none until it is warmed, and its
+   *  tasks cannot bind. Absent in a `projects.json` written before the field
+   *  existed, and absent for a machine with no device id to synthesize one. */
+  repoKey?: string;
 }
 
 interface SeenProjectsFileShape {

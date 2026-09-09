@@ -6,6 +6,7 @@ import {
   type JWTPayload,
 } from "jose";
 import type { Auth } from "./better-auth.js";
+import type { DB } from "../db/index.js";
 import type { Env } from "../env.js";
 import type { AuthVars } from "./middleware.js";
 
@@ -16,6 +17,24 @@ import type { AuthVars } from "./middleware.js";
  */
 function expectedIssuer(env: Env): string {
   return `${env.BETTER_AUTH_URL.replace(/\/+$/, "")}/api/auth`;
+}
+
+/**
+ * The only scope `auth/oauth-provider.ts` declares, and the only one a device
+ * client is registered with — the token endpoint refuses any other value, so a
+ * JWT lacking it did not come from that provider.
+ */
+const REQUIRED_SCOPE = "agent";
+
+/**
+ * Better-Auth stamps `scope` as the space-delimited OAuth string. The array
+ * form is tolerated as well, so a library-side shape change degrades to a
+ * working gate rather than a 401 for every device in the field.
+ */
+function tokenScopes(claim: unknown): string[] {
+  if (typeof claim === "string") return claim.split(" ").filter((s) => s.length > 0);
+  if (Array.isArray(claim)) return claim.filter((s): s is string => typeof s === "string");
+  return [];
 }
 
 interface CachedJwks {
@@ -57,14 +76,23 @@ async function fetchJwks(auth: Auth, env: Env): Promise<JSONWebKeySet> {
  *  - Issuer pinned to `${BETTER_AUTH_URL}/api/auth` (oauth-provider's default
  *    audience and the issuer Better-Auth stamps onto the token).
  *  - `uid` (verified claim) is the only source of `userId` set on the context.
- *  - On any verify failure (missing header, bad shape, expired, bad signature,
- *    wrong issuer, missing uid) responds 401 — no claims are trusted.
+ *  - `scope` must carry `agent`.
+ *  - The `deviceUuid` claim must resolve to a live device OWNED BY `uid`.
+ *    Device tokens live an hour (`m2mAccessTokenExpiresIn`), so without this a
+ *    revoked device would keep its access until the token expired on its own;
+ *    it is deliberately part of the one gate rather than a composable second
+ *    middleware, because a route added later cannot forget what it never had
+ *    to remember. The resolved id lands on the context as `deviceId`.
+ *  - On any failure (missing header, bad shape, expired, bad signature,
+ *    wrong issuer, missing uid, missing scope, dead device) responds 401 — no
+ *    claims are trusted.
  *
  * Returns 401 with `{ error: "UNAUTHENTICATED" }` to match `requireUser`'s
  * shape so client error handling is uniform across the two auth modes.
  */
 export function requireBearerJwt(deps: {
   auth: Auth;
+  db: DB;
   env: Env;
 }): MiddlewareHandler<{ Variables: AuthVars }> {
   let cache: CachedJwks | undefined;
@@ -121,9 +149,29 @@ export function requireBearerJwt(deps: {
       return c.json({ error: "UNAUTHENTICATED" }, 401);
     }
 
+    if (!tokenScopes(claims.scope).includes(REQUIRED_SCOPE)) {
+      return c.json({ error: "UNAUTHENTICATED" }, 401);
+    }
+
+    // Reading `deviceUuid` off the token is safe in a way a body-supplied id is
+    // not: it is only ever a lookup key scoped by the already-verified `uid`,
+    // so a claim naming a foreign device resolves to nothing.
+    const deviceUuid = claims.deviceUuid;
+    if (typeof deviceUuid !== "string" || deviceUuid.length === 0) {
+      return c.json({ error: "UNAUTHENTICATED" }, 401);
+    }
+    const device = await deps.db.device.findFirst({
+      where: { userId: uid, deviceId: deviceUuid, revokedAt: null },
+      select: { deviceId: true },
+    });
+    if (!device) {
+      return c.json({ error: "UNAUTHENTICATED" }, 401);
+    }
+
     c.set("userId", uid);
     c.set("sessionId", "");
     c.set("userEmail", typeof claims.email === "string" ? claims.email : null);
+    c.set("deviceId", device.deviceId);
     await next();
   };
 }

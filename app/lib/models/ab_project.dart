@@ -29,6 +29,18 @@ class AbProject {
   String hostMachineName;
   DateTime lastOpenedAt;
 
+  /// Cross-machine repository identity, folded by the HOST from the origin
+  /// remote and carried on `project:resolve`. Persisted rather than re-read per
+  /// launch because it is what joins this folder to its account-scoped tasks,
+  /// and that list arrives over HTTPS: needing a live host to know the key
+  /// would make the drawer's task node vanish whenever the bridge is down.
+  ///
+  /// Null for a folder with no origin remote, and for one not opened since this
+  /// field landed. Both mean "nothing to join to" — never "no tasks" — so a
+  /// caller must not synthesize one: a wrong key silently re-buckets the folder
+  /// onto another repository's work.
+  String? repoKey;
+
   AbProject({
     required this.projectId,
     required this.folder,
@@ -36,6 +48,7 @@ class AbProject {
     required this.hostDeviceUuid,
     required this.hostMachineName,
     required this.lastOpenedAt,
+    this.repoKey,
   });
 
   /// Returns true iff this project is hosted on the device identified by
@@ -57,6 +70,7 @@ class AbProject {
     if (hostDeviceUuid != null) 'hostDeviceUuid': hostDeviceUuid,
     'hostMachineName': hostMachineName,
     'lastOpenedAt': lastOpenedAt.toIso8601String(),
+    if (repoKey != null) 'repoKey': repoKey,
   };
 
   static AbProject fromJson(Map<String, dynamic> j) {
@@ -83,6 +97,7 @@ class AbProject {
       hostDeviceUuid: j['hostDeviceUuid'] as String?,
       hostMachineName: j['hostMachineName'] as String? ?? '',
       lastOpenedAt: DateTime.parse(j['lastOpenedAt'] as String),
+      repoKey: j['repoKey'] as String?,
     );
   }
 }

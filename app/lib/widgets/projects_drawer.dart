@@ -49,6 +49,7 @@ import 'drawer_entry_row.dart'
         drawerProjectTitleStyle;
 import 'first_run_checklist.dart';
 import 'open_folder_button.dart';
+import 'project_tasks_node.dart';
 import 'session_row.dart';
 import 'update_row.dart';
 
@@ -525,6 +526,9 @@ class _EntryWithSessions extends ConsumerWidget {
     // what opens the machine's control-plane socket. A local project (or a
     // legacy per-project row) defaults to EXPANDED and tracks its (rarer)
     // collapse in [collapsedDrawerIdsProvider].
+    // Hoisted to a local because a FIELD cannot be type-promoted by `is`, and
+    // the task node below needs the LocalProjectEntry arm's own project.
+    final entry = this.entry;
     final machineUuid = entry.machineUuid;
     final expanded = machineUuid != null
         ? ref.watch(expandedDrawerIdsProvider).contains(machineUuid)
@@ -547,7 +551,21 @@ class _EntryWithSessions extends ConsumerWidget {
         if (expanded)
           machineUuid != null
               ? _MachineProjects(machineUuid: machineUuid)
-              : SessionsList(projectId: entry.id),
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Above the sessions: a task outlives any session opened
+                    // against it, and a node that shifts down as sessions come
+                    // and go stops being findable.
+                    ProjectTasksNode(
+                      repoKey: entry is LocalProjectEntry
+                          ? entry.project.repoKey
+                          : null,
+                      expansionId: '${entry.id}.tasks',
+                    ),
+                    SessionsList(projectId: entry.id),
+                  ],
+                ),
       ],
     );
   }
@@ -752,7 +770,13 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
             );
           },
         ),
-        if (expanded) _ProjectSessions(regId: regId),
+        if (expanded) ...[
+          ProjectTasksNode(
+            repoKey: widget.project.repoKey,
+            expansionId: '$regId.tasks',
+          ),
+          _ProjectSessions(regId: regId),
+        ],
       ],
     );
   }

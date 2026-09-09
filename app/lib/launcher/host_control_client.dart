@@ -41,6 +41,9 @@ class ResolvedLocalProject {
   /// Set only for `kind == 'managed-checkout'` with a `checkouts.json` record.
   final String? checkoutId;
 
+  /// Cross-machine repository identity folded from the origin remote, or null
+  /// when the host could not fold one — never a value the app may invent.
+  final String? repoKey;
   const ResolvedLocalProject({
     required this.projectId,
     required this.repoPath,
@@ -49,6 +52,7 @@ class ResolvedLocalProject {
     required this.isGitRepository,
     this.kind,
     this.checkoutId,
+    this.repoKey,
   });
 
   factory ResolvedLocalProject.fromJson(Map<String, dynamic> json) {
@@ -75,6 +79,7 @@ class ResolvedLocalProject {
       checkoutId: json['checkoutId'] is String
           ? json['checkoutId'] as String
           : null,
+      repoKey: json['repoKey'] as String?,
     );
   }
 }
@@ -91,6 +96,9 @@ class ProjectSummary {
   /// Per-running-session status keyed by session id — [workStatus] is only their
   /// rollup. Null for a cold core (or an older host); `{}` when nothing runs.
   final Map<String, AgentWorkStatus>? sessionStatuses;
+
+  /// See [ResolvedLocalProject.repoKey]. Also null on a host too old to send it.
+  final String? repoKey;
   const ProjectSummary({
     required this.projectId,
     required this.path,
@@ -98,6 +106,7 @@ class ProjectSummary {
     required this.mode,
     this.workStatus,
     this.sessionStatuses,
+    this.repoKey,
   });
 }
 
@@ -405,6 +414,7 @@ class HostControlClient {
             mode: mode,
             workStatus: e['workStatus'] as String?,
             sessionStatuses: parseSessionStatuses(e['sessionStatuses']),
+            repoKey: e['repoKey'] as String?,
           );
         })
         .toList(growable: false);

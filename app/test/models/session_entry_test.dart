@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/session_entry.dart';
+import 'package:antgrid/models/task_ref.dart';
 
 void main() {
   test('defaults mode to terminal when absent', () {
@@ -388,5 +389,54 @@ void main() {
     });
     expect(e.forkedFromSessionId, isNull);
     expect(e.toJson().containsKey('forkedFromSessionId'), isFalse);
+  });
+
+  test('taskRef is null for a session the bridge sent without one', () {
+    final e = SessionEntry.fromJson({
+      'id': 'a', 'name': 'n', 'createdAt': 1, 'lastUsedAt': 1,
+      'archived': false, 'running': false,
+    });
+    expect(e.taskRef, isNull);
+    expect(e.toJson().containsKey('taskRef'), isFalse);
+  });
+
+  test('taskRef parses, round-trips and participates in equality', () {
+    final e = SessionEntry.fromJson({
+      'id': 'a', 'name': 'n', 'createdAt': 1, 'lastUsedAt': 1,
+      'archived': false, 'running': false,
+      'taskRef': {'taskId': 'task-abc', 'number': 14},
+    });
+    expect(e.taskRef, const TaskRef(taskId: 'task-abc', number: 14));
+    expect(e.toJson()['taskRef'], {'taskId': 'task-abc', 'number': 14});
+    expect(SessionEntry.fromJson(e.toJson()), e);
+
+    const untasked = SessionEntry(
+      id: 'a', name: 'n', createdAt: 1, lastUsedAt: 1,
+      archived: false, running: false,
+    );
+    expect(e, isNot(untasked));
+    expect(e.copyWith().taskRef, const TaskRef(taskId: 'task-abc', number: 14));
+  });
+
+  test('a half-formed taskRef is dropped rather than half-labelled', () {
+    for (final raw in <Object>[
+      {'taskId': 'task-abc'},
+      {'number': 14},
+      {'taskId': '', 'number': 14},
+      {'taskId': 'task-abc', 'number': 'fourteen'},
+      // The schema is int().positive(); accepting `num` and truncating would
+      // silently retarget the label at a different task, or at none.
+      {'taskId': 'task-abc', 'number': 1.5},
+      {'taskId': 'task-abc', 'number': 0},
+      {'taskId': 'task-abc', 'number': -3},
+      'task-abc',
+    ]) {
+      final e = SessionEntry.fromJson({
+        'id': 'a', 'name': 'n', 'createdAt': 1, 'lastUsedAt': 1,
+        'archived': false, 'running': false,
+        'taskRef': raw,
+      });
+      expect(e.taskRef, isNull, reason: 'taskRef: $raw');
+    }
   });
 }

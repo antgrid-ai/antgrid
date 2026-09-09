@@ -76,6 +76,12 @@ abstract final class AbIcons {
   static const drawEllipse = Mdi.ellipse_outline;
   static const drawText = Mdi.format_text;
   static const previewTabs = Codicon.multiple_windows;
+  // Two edits met and neither won outright. The merge glyph, not [warning], so
+  // a sync conflict never wears the same triangle as an agent waiting on a
+  // person — the two can sit on the same row.
+  static const syncConflict = Codicon.git_merge;
+  // The tombstone left when a task stops being linked to its issue.
+  static const syncOff = Codicon.sync_ignored;
   static const add = Codicon.add;
   static const trash = Codicon.trash;
   // Alias mirroring `add`; semantic for git's stage-changes action.
@@ -90,6 +96,13 @@ abstract final class AbIcons {
   static const menu = Codicon.menu;
   static const more = Codicon.kebab_vertical;
   static const list = Codicon.list_unordered;
+  static const tasks = Codicon.checklist;
+  static const tag = Codicon.tag;
+  static const filter = Codicon.filter;
+  // Partner to [account], which is the assignee glyph: a crossed circle rather
+  // than a greyed person, so "nobody" reads as a state and not as a disabled
+  // avatar.
+  static const unassigned = Codicon.circle_slash;
   static const browser =
       Codicon.browser; // alias mirroring `preview`; semantic for empty states
   static const folder = Codicon.folder;

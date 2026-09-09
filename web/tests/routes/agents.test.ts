@@ -413,7 +413,9 @@ describe("POST /account/devices/me/heartbeat", () => {
     expect(res.status).toBe(404);
   });
 
-  test("returns 404 when device is revoked", async () => {
+  // 401, not the handler's 404: the gate resolves the token's own device and a
+  // revoked one takes the credential down with it.
+  test("returns 401 when the calling device is revoked", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "eve@example.com");
     await createTestSubscription(pg.db, user.id, { tier: "pro" });
@@ -437,7 +439,7 @@ describe("POST /account/devices/me/heartbeat", () => {
       }),
     });
 
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(401);
   });
 
   test("returns 400 on invalid body", async () => {

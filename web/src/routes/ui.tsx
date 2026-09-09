@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { getCookie } from "hono/cookie";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { isAPIError } from "better-auth/api";
 import type { DB } from "../db/index.js";
@@ -109,6 +109,35 @@ import {
   type InviteNotice,
 } from "../ui/invite.js";
 import { TeamPage } from "../ui/team.js";
+import { createGithubAppClient, githubAppConfig } from "../integrations/github-app.js";
+import {
+  completeGithubInstall,
+  installDirectory,
+  startGithubInstall,
+  verifyInstallState,
+} from "../integrations/github-install.js";
+import {
+  getIntegration,
+  ImportFilterKindSchema,
+  IntegrationStatusSchema,
+  type IntegrationRepoRecord,
+  listIntegrationRepos,
+  listIntegrations,
+  parseImportFilter,
+  RepoVisibilitySchema,
+  resolveIntegrationRepo,
+  setRepoSyncSettings,
+} from "../models/integration.js";
+import {
+  IntegrationRepoRow,
+  IntegrationsPage,
+  type IntegrationRepoView,
+  type IntegrationView,
+} from "../ui/integrations.js";
+import {
+  parseIntegrationsNotice,
+  type IntegrationsNotice,
+} from "../ui/integrations-notice.js";
 import { parseTeamNotice, type TeamNotice } from "../ui/team-notice.js";
 
 // Internal relay-connections view is restricted to named operators. Gate on
@@ -116,6 +145,10 @@ import { parseTeamNotice, type TeamNotice } from "../ui/team-notice.js";
 // a safe identity anchor here. Non-operators get 404, not 403: don't reveal the
 // route exists.
 const INTERNAL_OPERATOR_EMAILS = new Set(["bharathm@radhaai.com"]);
+
+/** Scoped to `/integrations` rather than `/`: it is read by exactly one route
+ *  and has no business riding on every request to this service. */
+const INSTALL_STATE_COOKIE = "antgrid.gh_install";
 
 type UiContext = import("hono").Context<{ Variables: AuthVars }>;
 
@@ -1820,6 +1853,200 @@ export function uiRoutes(deps: {
       headers: c.req.raw.headers,
     });
     return c.text("");
+  });
+
+  /**
+   * The stored row is wider than the page, and `visibility` arrives as a plain
+   * string because the column is one. Anything unrecognized is shown as private:
+   * the private copy names what gets copied and who can read it, so guessing
+   * wrong in that direction over-warns rather than under-warns.
+   */
+  const repoView = (repo: IntegrationRepoRecord): IntegrationRepoView => ({
+    id: repo.id,
+    repoKey: repo.repoKey,
+    visibility: RepoVisibilitySchema.catch("private").parse(repo.visibility),
+    syncEnabled: repo.syncEnabled,
+    pushEnabled: repo.pushEnabled,
+    publishNewByDefault: repo.publishNewByDefault,
+    // The link publish targets join on (`listPublishTargets`), not a claim about
+    // a folder — so the page can say when there is nowhere to file a task from.
+    hasProject: repo.projectId !== null,
+    // An unreadable filter reads as `all` here because that is what
+    // `matchesImportFilter` does with one — the page must not claim a narrower
+    // import than the one actually running.
+    importFilterKind: ImportFilterKindSchema.catch("all").parse(repo.importFilterKind),
+    importFilterValue: repo.importFilterValue,
+    commentImportCap: repo.commentImportCap,
+    // `lastFullSyncAt` is written only where a walk saw a short page, so null
+    // means "never proven caught up" rather than "never polled" — which is the
+    // weaker claim, and the only one the column supports.
+    awaitingFirstImport: repo.lastFullSyncAt === null,
+    removedAt: repo.removedAt,
+  });
+
+  /**
+   * Where the browser goes to start an install.
+   *
+   * Our own route rather than a link straight to github.com, because the CSRF
+   * state and the cookie it is compared against have to be minted together. A
+   * GET that only sets a cookie and redirects is safe to be reached from
+   * anywhere: nothing is bound to an account until the callback proves, through
+   * GitHub, that the installation belongs to the person at the keyboard.
+   */
+  r.get("/integrations/connect", requireUserOrRedirect({ auth: deps.auth }), (c) => {
+    const config = githubAppConfig(deps.env);
+    if (!config) return c.redirect("/integrations?github=not_configured");
+    const start = startGithubInstall({ userId: c.get("userId"), appSlug: config.slug });
+    setCookie(c, INSTALL_STATE_COOKIE, start.cookie, {
+      httpOnly: true,
+      // Lax, never Strict: GitHub returns the user by a cross-site top-level
+      // navigation, and Strict drops the cookie on exactly that request.
+      sameSite: "Lax",
+      secure: deps.env.BETTER_AUTH_URL.startsWith("https://"),
+      path: "/integrations",
+      maxAge: start.maxAgeSeconds,
+    });
+    return c.redirect(start.url);
+  });
+
+  /**
+   * GitHub's redirect back, carrying `installation_id`, `setup_action` and —
+   * because the App requests user authorization during installation — a `code`.
+   *
+   * Every branch redirects rather than rendering, so the `code` does not sit in
+   * the browser's history or leak through a referrer.
+   */
+  r.get("/integrations/callback", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+    const done = (notice: IntegrationsNotice) => c.redirect(`/integrations?github=${notice}`);
+    // Single use, on every path including the failures: a state that survives a
+    // refused callback is a state an attacker gets a second attempt at.
+    const cookie = getCookie(c, INSTALL_STATE_COOKIE);
+    deleteCookie(c, INSTALL_STATE_COOKIE, { path: "/integrations" });
+
+    const config = githubAppConfig(deps.env);
+    if (!config) return done("not_configured");
+    const userId = c.get("userId");
+    if (!verifyInstallState({ cookie, state: c.req.query("state"), userId })) {
+      return done("bad_state");
+    }
+
+    // A member who cannot install the App on an org asks its owners instead;
+    // GitHub sends them back here with no installation and nothing to bind.
+    if (c.req.query("setup_action") === "request") return done("install_requested");
+
+    const installationId = c.req.query("installation_id");
+    const code = c.req.query("code");
+    if (!installationId || !code) return done("code_rejected");
+
+    await provisionProductAccountForUser(deps.db, userId);
+    const accountId = await resolveBillingAccountId(deps.db, userId);
+    if (!accountId) return c.redirect("/login");
+
+    const directory = installDirectory(createGithubAppClient({ config }));
+    const result = await completeGithubInstall(deps.db, directory, {
+      accountId,
+      userId,
+      installationId,
+      code,
+    });
+    if (result.kind === "provider_error") {
+      console.warn("[integrations.install] provider error", { detail: result.detail });
+      return done("provider_error");
+    }
+    return done(result.kind === "ok" ? "connected" : result.kind);
+  });
+
+  r.get("/integrations", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+    const userId = c.get("userId");
+    await provisionProductAccountForUser(deps.db, userId);
+    const accountId = await resolveBillingAccountId(deps.db, userId);
+    if (!accountId) return c.redirect("/login");
+
+    const integrations = await listIntegrations(deps.db, accountId);
+    const views: IntegrationView[] = await Promise.all(
+      integrations.map(async (integration) => ({
+        id: integration.id,
+        displayName: integration.displayName,
+        status: IntegrationStatusSchema.catch("active").parse(integration.status),
+        revokedAt: integration.revokedAt,
+        repos: (await listIntegrationRepos(deps.db, accountId, integration.id)).map(repoView),
+      }))
+    );
+
+    return c.html(
+      <IntegrationsPage
+        user={{ email: c.get("userEmail") }}
+        notice={parseIntegrationsNotice(c.req.query("github"))}
+        githubApp={
+          githubAppConfig(deps.env)
+            ? { configured: true, connectUrl: "/integrations/connect" }
+            : { configured: false }
+        }
+        integrations={views}
+      />
+    );
+  });
+
+  /**
+   * The per-repository consents, and the only writer of them from a browser.
+   *
+   * Answers with the row rather than a redirect: htmx swaps it in place, so the
+   * response markup and the first paint are the same component and a saved row
+   * cannot come back saying something the page never said.
+   */
+  r.post("/ui/integrations/repos/:id/sync", requireUser({ auth: deps.auth }), async (c) => {
+    const userId = c.get("userId");
+    const accountId = await resolveBillingAccountId(deps.db, userId);
+    if (!accountId) return c.text("Forbidden", 403);
+
+    const repoId = c.req.param("id");
+    const existing = await resolveIntegrationRepo(deps.db, accountId, repoId);
+    if (!existing) return c.text("Not found", 404);
+
+    const form = await c.req.parseBody();
+    // An unchecked box is not submitted at all, so absence is the off state and
+    // not a field the caller forgot.
+    const syncEnabled = form.syncEnabled === "on";
+    const pushEnabled = form.pushEnabled === "on";
+    // Off push disarms the default rather than parking it: left set, switching
+    // push back on months later would arm publishing by default on a consent
+    // given for a repository nobody was writing to.
+    const publishNewByDefault = pushEnabled && form.publishNewByDefault === "on";
+    const filter = parseImportFilter(
+      String(form.importFilterKind ?? existing.importFilterKind),
+      typeof form.importFilterValue === "string" && form.importFilterValue.trim() !== ""
+        ? form.importFilterValue.trim()
+        : null
+    );
+
+    const integration = await getIntegration(deps.db, accountId, existing.integrationId);
+    const readOnly = integration?.status === IntegrationStatusSchema.enum.revoked;
+    // Two states the page freezes and the route must freeze again: a connection
+    // that routes nothing, and a repository GitHub no longer lists. Turning sync
+    // on for either promises an import that cannot run.
+    // A filter pair the CHECK constraint would reject takes the whole write down
+    // with it. Saving the toggle alone would run the import under whatever
+    // filter is already stored - "every issue" on a repository nobody has
+    // narrowed yet - so a user who asked for one label and left the name box
+    // empty would get the entire repository imported instead of nothing.
+    const frozen = readOnly || existing.removedAt !== null || !filter;
+
+    const result = frozen
+      ? ({ kind: "ok", repo: existing } as const)
+      : await setRepoSyncSettings(deps.db, {
+          accountId,
+          repoId: existing.id,
+          syncEnabled,
+          pushEnabled,
+          publishNewByDefault,
+          importFilter: filter,
+        });
+    const repo = result.kind === "ok" ? result.repo : existing;
+
+    // 200 even for a refusal, because htmx does not swap a 4xx by default and an
+    // unswapped refusal leaves the switch showing the state the server declined
+    // to store. Answering with the unchanged row makes it snap back instead.
+    return c.html(<IntegrationRepoRow repo={repoView(repo)} readOnly={readOnly} />);
   });
 
   r.get("/account", requireUserOrRedirect({ auth: deps.auth }), async (c) => {

@@ -33,6 +33,10 @@ model ProductAccount {
   invites          AccountInvite[]
   subscriptions    Subscription[]
   billingCustomers BillingCustomer[]
+  projects         Project[]
+  tasks            Task[]
+  labels           Label[]
+  integrations     Integration[]
 
   @@map("product_accounts")
 }
@@ -199,15 +203,32 @@ model BillingCustomer {
   @@map("billing_customers")
 }
 
+/// Inbound provider deliveries, both the billing gateways' and (from the
+/// integrations phase) the issue providers'. One table, several namespaces.
 model WebhookEvent {
   id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   provider        String
-  providerEventId String    @unique @map("provider_event_id")
+  /// Unique per PROVIDER, never globally. Providers mint delivery ids in their
+  /// own namespaces, so a single global unique means one provider's id can
+  /// swallow another's delivery as a duplicate — silently, and the swallowed
+  /// delivery is never retried.
+  providerEventId String    @map("provider_event_id")
   type            String
   payload         Json
   receivedAt      DateTime  @default(now()) @map("received_at") @db.Timestamptz(6)
+  /// Billing stamps this at insert inside the effect's own transaction, so for
+  /// those rows it is never null. A provider that inserts before processing
+  /// leaves it null and the drain claims on it — which is what the
+  /// `[provider, processed_at]` index and the two columns below exist for.
   processedAt     DateTime? @map("processed_at") @db.Timestamptz(6)
+  attempts        Int       @default(0)
+  lastError       String?   @map("last_error")
 
+  @@unique([provider, providerEventId], map: "webhook_events_provider_event_key")
+  /// The drain reads `WHERE provider = ? AND processed_at IS NULL`, and this
+  /// table is on course to be the largest in the database once a busy repo is
+  /// connected — a sequential scan per poll is not a starting position.
+  @@index([provider, processedAt], map: "webhook_events_provider_processed_idx")
   @@map("webhook_events")
 }
 
@@ -238,22 +259,27 @@ model Device {
 }
 
 model User {
-  id                  String          @id
-  name                String
-  email               String          @db.Citext
-  emailVerified       Boolean         @default(false)
-  image               String?
+  id                    String          @id
+  name                  String
+  email                 String          @db.Citext
+  emailVerified         Boolean         @default(false)
+  image                 String?
   /// Denormalized billing ProductAccount.id — not unique: members of a team all
   /// point at the owner's account. `account_members` is the record of truth.
-  accountId           String?         @map("account_id") @db.Uuid
-  createdAt           DateTime        @default(now())
-  updatedAt           DateTime        @updatedAt
-  sessions            Session[]
-  accounts            Account[]
-  memberships         AccountMember[]
-  sentInvites         AccountInvite[]
-  ownedProductAccount ProductAccount? @relation("UserOwnedAccount")
-  billingAccount      ProductAccount? @relation("UserBillingAccount", fields: [accountId], references: [id], onDelete: SetNull)
+  accountId             String?         @map("account_id") @db.Uuid
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+  sessions              Session[]
+  accounts              Account[]
+  memberships           AccountMember[]
+  sentInvites           AccountInvite[]
+  ownedProductAccount   ProductAccount? @relation("UserOwnedAccount")
+  createdTasks          Task[]          @relation("TaskCreator")
+  assignedTasks         Task[]          @relation("TaskAssignee")
+  taskComments          TaskComment[]   @relation("TaskCommentAuthor")
+  installedIntegrations Integration[]   @relation("IntegrationInstaller")
+  providerIdentities    IntegrationIdentity[]
+  billingAccount        ProductAccount? @relation("UserBillingAccount", fields: [accountId], references: [id], onDelete: SetNull)
 
   @@unique([email])
   @@index([accountId], map: "user_account_id_idx")
@@ -380,6 +406,575 @@ model WaitlistSignup {
 
   @@index([createdAt], map: "waitlist_signup_created_at_idx")
   @@map("waitlist_signup")
+}
+
+// ---------- Project identity ----------
+
+/// A repository, not a folder. `repoKey` is the normalized origin remote
+/// (`bridge/src/repo-key.ts`), so every clone of one repository on every machine
+/// resolves to this one row — which is what lets work follow a repository across
+/// a folder move and between machines.
+model Project {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId   String   @map("account_id") @db.Uuid
+  /// Client-asserted: it is whatever a cloned repo's config says. Shape-gated by
+  /// `util/repo-key.ts` before it reaches this column.
+  repoKey     String   @map("repo_key")
+  displayName String   @map("display_name")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  // Cascade is NOT the cleanup path for a deleted account: `deleteUserAccount`
+  // tombstones (`product_accounts.deleted_at`) rather than deleting the row, so
+  // this never fires — same reason account_members carries an explicit close.
+  // Erasing an account's projects needs explicit deletes in that transaction.
+  account          ProductAccount    @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  bindings         ProjectBinding[]
+  tasks            Task[]            @relation("TaskProject")
+  runTargetTasks   Task[]            @relation("TaskRunTargetProject")
+  labels           Label[]
+  integrationRepos IntegrationRepo[]
+
+  @@unique([accountId, repoKey], map: "projects_account_repo_key")
+  @@map("projects")
+}
+
+/// Where a Project actually sits on one machine. Deliberately not columns on
+/// `projects`: the same repository is checked out on several machines at once,
+/// and each checkout has its own path and its own local id.
+model ProjectBinding {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId      String    @map("project_id") @db.Uuid
+  /// `devices.device_id`, not `devices.id`. No FK: that column is unique only per
+  /// user (`devices_user_id_device_id_key`), so there is nothing global to
+  /// reference — the route proves ownership by scoping to the caller's userId.
+  deviceId       String    @map("device_id")
+  localProjectId String    @map("local_project_id")
+  localPath      String    @map("local_path")
+  lastSeenAt     DateTime? @map("last_seen_at") @db.Timestamptz(6)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, localProjectId], map: "project_bindings_device_local_key")
+  @@index([projectId], map: "project_bindings_project_idx")
+  @@map("project_bindings")
+}
+
+// ---------- Tasks ----------
+
+/// A unit of work the account owns. Deliberately not a mirror of a provider
+/// issue: it exists with no integration at all, and an external identity is a
+/// set of columns it may later acquire (docs/tasks-and-integrations-plan.md).
+model Task {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId String  @map("account_id") @db.Uuid
+  projectId String? @map("project_id") @db.Uuid
+  /// Per-account display id (`ANT-14`), allocated under
+  /// `pg_advisory_xact_lock(hashtext('task:' || accountId))`. Uuids are never
+  /// exposed, so this small sequential key is what the API addresses — which is
+  /// why every read of it must carry `accountId` or it is trivially enumerable.
+  number    Int
+  title     String
+  body      String  @default("")
+  /// Antgrid vocabulary, never a provider passthrough:
+  /// open | in_progress | blocked | done | cancelled. GitHub can represent
+  /// neither `in_progress` nor `blocked`, which is exactly why its vocabulary is
+  /// mapped at the seam (src/tasks/merge.ts) rather than mirrored here.
+  status    String
+  /// Ordinal rank, low first. Deliberately not a named vocabulary: no surface
+  /// has chosen one, and an int lets the UI label the buckets without a
+  /// migration.
+  priority  Int?
+  /// Fractional index — a lexicographic midpoint between its neighbours, so a
+  /// drag reorder is one row write and never a renumber. One order per account;
+  /// a project- or status-filtered list is a subsequence of it.
+  sortKey   String  @map("sort_key")
+  /// Which system the task was born in. It never changes, and it is NOT the
+  /// same question as whether the task currently has an external link.
+  source    String  @default("local")
+
+  /// `devices.device_id`, not `devices.id`, and FK-less for the same reason as
+  /// `project_bindings.device_id`: that column is unique only per user, so there
+  /// is no global key to reference.
+  runTargetDeviceId  String? @map("run_target_device_id")
+  runTargetProjectId String? @map("run_target_project_id") @db.Uuid
+
+  /// Exactly one assignee identity, never both — `assignee_user_id` when the
+  /// assignee is an account member, the external triple when the provider
+  /// assignee maps to no member. `tasks_assignee_one_identity_check` (raw SQL in
+  /// the migration) is the floor under the single writer in models/task.ts;
+  /// login and avatar are a read-only snapshot and mean nothing without
+  /// `assignee_external_id`.
+  assigneeUserId     String? @map("assignee_user_id")
+  assigneeExternalId String? @map("assignee_external_id")
+  assigneeLogin      String? @map("assignee_login")
+  assigneeAvatarUrl  String? @map("assignee_avatar_url")
+
+  /// Which repo of the installation the issue lives in. The foreign key
+  /// enforces EXISTENCE, never tenancy — an `integration_repos.id` belonging to
+  /// another account satisfies it perfectly — so a caller-supplied repo id is
+  /// still re-resolved under the caller's `accountId` (`resolveIntegrationRepo`)
+  /// before it reaches this column.
+  integrationRepoId String?   @map("integration_repo_id") @db.Uuid
+  externalProvider  String?   @map("external_provider")
+  externalId        String?   @map("external_id")
+  externalKey       String?   @map("external_key")
+  externalUrl       String?   @map("external_url")
+  /// The last state both sides agreed on, in PROVIDER space — the base of the
+  /// three-way merge. `status` inside it is the raw provider projection
+  /// (`state` + `state_reason`), because the Antgrid mapping onto GitHub is
+  /// many-to-one and comparing our values against it is a push loop.
+  remoteSnapshot    Json?     @map("remote_snapshot")
+  /// The local value that lost a conflict. With nowhere to keep it, "remote
+  /// wins but we keep your edit" inverts into silent data loss.
+  localConflict     Json?     @map("local_conflict")
+  /// Content hash of the field set we last pushed. Echo suppression keys on
+  /// WHAT we wrote, never on when — a timestamp drops a third party edit we
+  /// just clobbered.
+  pushedHash        String?   @map("pushed_hash")
+  /// Per-field record of pushes that returned success and changed nothing:
+  /// `{ field: { count, lastAt, reason } }`. It lives here rather than on
+  /// `TaskSyncOp` because ops are superseded and replaced, so a counter there
+  /// would reset every time the user edited the field again — which is exactly
+  /// the loop it exists to stop.
+  pushBlocked       Json?     @map("push_blocked")
+  remoteUpdatedAt   DateTime? @map("remote_updated_at") @db.Timestamptz(6)
+  syncedAt          DateTime? @map("synced_at") @db.Timestamptz(6)
+  /// null until the task is linked: pending | synced | conflict | unlinked.
+  /// `unlinked` is a tombstone that keeps the external identity on the row, so
+  /// the UI can say *previously linked to #123* and a re-publish can warn that
+  /// it creates a second issue.
+  syncState         String?   @map("sync_state")
+  syncError         String?   @map("sync_error")
+
+  createdBy String    @map("created_by")
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  closedAt  DateTime? @map("closed_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  // Cascade is NOT the cleanup path for a deleted account: `deleteUserAccount`
+  // tombstones `product_accounts.deleted_at` rather than deleting the row, so
+  // this never fires and task bodies would outlive a "deleted" account. Erasing
+  // them needs explicit deletes in that transaction, exactly as projects do.
+  account          ProductAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  project          Project?         @relation("TaskProject", fields: [projectId], references: [id], onDelete: SetNull)
+  runTargetProject Project?         @relation("TaskRunTargetProject", fields: [runTargetProjectId], references: [id], onDelete: SetNull)
+  // SetNull rather than Cascade: unlinking a repo must not delete the tasks
+  // imported through it. They keep their external identity columns, which is
+  // what lets the UI still say *previously linked to #123*.
+  integrationRepo  IntegrationRepo? @relation(fields: [integrationRepoId], references: [id], onDelete: SetNull)
+  // Restrict, not Cascade: the task belongs to the account and not to whoever
+  // typed it, so a genuine user-row delete must fail loudly rather than take the
+  // account archive with it.
+  creator          User             @relation("TaskCreator", fields: [createdBy], references: [id])
+  assignee         User?            @relation("TaskAssignee", fields: [assigneeUserId], references: [id], onDelete: SetNull)
+  labels           TaskLabel[]
+  comments         TaskComment[]
+  runs             TaskRun[]
+  syncOps          TaskSyncOp[]
+
+  @@unique([accountId, number], map: "tasks_account_number_key")
+  /// The whole inbound idempotency mechanism: every inbound path is an upsert on
+  /// this key. It constrains nothing for local tasks — all three columns are
+  /// null and `NULL != NULL` — which is correct, because an unlinked task has no
+  /// identity to collide with.
+  @@unique([accountId, externalProvider, externalId], map: "tasks_account_external_key")
+  @@index([accountId, status], map: "tasks_account_status_idx")
+  @@index([accountId, projectId, status], map: "tasks_account_project_status_idx")
+  @@index([accountId, assigneeUserId, status], map: "tasks_account_assignee_status_idx")
+  @@index([accountId, sortKey], map: "tasks_account_sort_idx")
+  @@map("tasks")
+}
+
+/// The join between a task and a real agent session — what makes this a command
+/// centre rather than an issue tracker. It never syncs anywhere: no provider has
+/// a place to put it, and nothing outside Antgrid may learn that an agent ran.
+///
+/// One row per session, upserted as the bridge re-reports the session's
+/// `WorkStatus`. `branch` and `prUrl` are RECORDED, never parsed back — the
+/// branch name is lossy (`WorktreeManager.nextBranch` slugs and suffixes it) and
+/// the user may rename it, so this row is the record of truth and the branch is
+/// a courtesy to humans reading `git branch`.
+model TaskRun {
+  id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId String @map("task_id") @db.Uuid
+  /// `devices.device_id`, not `devices.id`, and FK-less for the same reason as
+  /// `project_bindings.device_id`: that column is unique only per user, so there
+  /// is no global key to reference. The route proves it by taking it from the
+  /// caller's own verified token rather than from the body.
+  deviceId String @map("device_id")
+  /// `computeProjectId` on the reporting machine — a path hash, so it means
+  /// nothing on any other one and there is nothing account-scoped to resolve it
+  /// against. Stored verbatim, like `project_bindings.local_project_id`.
+  localProjectId String  @map("local_project_id")
+  sessionId      String  @map("session_id")
+  checkoutId     String? @map("checkout_id")
+  tool           String?
+  /// The bridge's per-session `WorkStatus` verbatim:
+  /// working | attention | error | done. Deliberately NOT the task vocabulary —
+  /// this tracks liveness, and its `done` means only that no turn is open, which
+  /// a freshly-opened chat also reports (bridge/src/work-status.ts).
+  status         String
+  branch         String?
+  prUrl          String? @map("pr_url")
+
+  startedAt DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  endedAt   DateTime? @map("ended_at") @db.Timestamptz(6)
+  /// Capped at 200 characters BY THE COLUMN, which is the point: agent output,
+  /// diffs and transcripts are forbidden in task text, and a limit a table
+  /// enforces is enforceable where a rule in a design doc is not.
+  resultSummary String? @map("result_summary") @db.VarChar(200)
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  /// A run is identified by the session it is attached to, and a session id is
+  /// minted per bridge with no global registry — so the machine is part of the
+  /// key. This is what makes the bridge's repeated status reports an upsert
+  /// rather than a row per advert.
+  @@unique([deviceId, sessionId], map: "task_runs_device_session_key")
+  @@index([taskId, startedAt], map: "task_runs_task_started_idx")
+  @@map("task_runs")
+}
+
+/// The outbox. A local edit writes the task row and a row here in the same
+/// transaction, and a drain applies it — so a provider outage is a backlog
+/// rather than a failed request, and no user-facing write waits on a third
+/// party's API.
+///
+/// Ops for one task apply in `seq` order, which is why the claim groups by task
+/// instead of taking the globally-oldest `next_attempt_at`: an op that fails
+/// once backs off past its successor, and applying the successor first makes
+/// the older value win permanently.
+model TaskSyncOp {
+  id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId String @map("task_id") @db.Uuid
+  /// Whose credentials the op is sent with, pinned at enqueue. A task's repo can
+  /// be relinked, and an op built against the old installation must not go out
+  /// under the new one's token.
+  integrationId String @map("integration_id") @db.Uuid
+  /// Denormalized from the integration so the drain picks an adapter without a
+  /// join and a claimed op is self-describing in a log line.
+  provider      String
+  /// A closed vocabulary — `TaskSyncOpKindSchema` in src/tasks/sync-op.ts is the
+  /// source of truth. Supersede matches on it, `seq` orders within a task, and
+  /// the array-valued set is selected from it; none of the three is
+  /// implementable against a free-form string.
+  kind          String
+  payload       Json
+  /// Random 128 bits per op: the marker embedded in a created issue's body, and
+  /// therefore the only guard against a public double-post. Not a hash of the
+  /// payload (two legitimately identical edits would collide) and not a counter
+  /// (which would leak write volume into a public issue body).
+  opKey         String @map("op_key")
+  /// Per task, meaningless across tasks. Allocated in the enqueueing
+  /// transaction under the same `tasksync:` lock the drain claims with.
+  seq           Int
+  /// Failures only. A local throttle is not a failure and must never touch it,
+  /// or a queue that is merely waiting drives itself into exponential backoff.
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime  @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  /// pending | processed | given_up | cancelled. `given_up` is terminal and
+  /// deliberately not a delete — an abandoned write has to stay findable.
+  status        String    @default("pending")
+  lastError     String?   @map("last_error")
+  /// Stamped immediately BEFORE the provider call. The dangerous retry is the
+  /// one whose request committed and whose response was lost, and this is the
+  /// `since` bound the create-resolution listing searches from.
+  attemptedAt   DateTime? @map("attempted_at") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Cascade, like task_runs: a soft delete cancels the task's pending ops
+  // explicitly and leaves the rows, so this only fires on a genuine hard delete
+  // — where an op naming a task that no longer exists could never be applied.
+  task        Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, opKey], map: "task_sync_ops_task_op_key")
+  @@index([status, nextAttemptAt], map: "task_sync_ops_status_next_idx")
+  @@index([taskId, seq], map: "task_sync_ops_task_seq_idx")
+  @@map("task_sync_ops")
+}
+
+/// Inbound-only in v1: an imported provider comment mirrors here and de-dups on
+/// `externalId`, while a comment written in Antgrid stays in Antgrid.
+model TaskComment {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId              String    @map("task_id") @db.Uuid
+  authorUserId        String?   @map("author_user_id")
+  /// Snapshot of a provider author that maps to no member — the comment half of
+  /// the assignee snapshot, and read-only for the same reason.
+  authorExternalLogin String?   @map("author_external_login")
+  body                String
+  externalId          String?   @map("external_id")
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt           DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  task   Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  author User? @relation("TaskCommentAuthor", fields: [authorUserId], references: [id], onDelete: SetNull)
+
+  /// What makes a re-import idempotent. Nulls are distinct, so locally authored
+  /// comments are unconstrained by it.
+  @@unique([taskId, externalId], map: "task_comments_task_external_key")
+  @@index([taskId, createdAt], map: "task_comments_task_created_idx")
+  @@map("task_comments")
+}
+
+/// GitHub label shape on purpose — name + 6 hex digits + optional description —
+/// so import and push are a straight copy with no lossy mapping. `projectId` is
+/// nullable because a label can be account-wide (`needs-triage`) or repo-scoped
+/// (`area/relay`); provider labels always import repo-scoped, since that is how
+/// the provider scopes them.
+model Label {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId   String   @map("account_id") @db.Uuid
+  projectId   String?  @map("project_id") @db.Uuid
+  /// Citext, matching `user.email` and `account_invites.email`. Plain text is
+  /// case-SENSITIVE, so `Bug` and `bug` would become two local rows mapping to
+  /// one provider label and the element-wise label merge would oscillate
+  /// between them forever.
+  name        String   @db.Citext
+  /// Six hex digits, no leading `#`, stored verbatim so the round-trip to the
+  /// provider is exact. It is NOT a usable chip background — provider hexes are
+  /// chosen against a near-white surface and both of ours are dark.
+  color       String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  account ProductAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  // Cascade rather than SetNull: a repo-scoped label means nothing without its
+  // project, and orphaning it into the account-wide namespace would collide with
+  // `labels_account_name_unscoped_idx` — turning a project delete into a unique
+  // violation.
+  project Project?       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks   TaskLabel[]
+
+  // This @@unique does NOT constrain account-wide labels: `project_id` is
+  // nullable and `NULL != NULL` in Postgres, so it permits unlimited duplicate
+  // ('acct', NULL, 'needs-triage') rows. `labels_account_name_unscoped_idx` is a
+  // PARTIAL unique index (WHERE project_id IS NULL) covering exactly that gap,
+  // defined via raw SQL in the migration — Prisma cannot model a partial index
+  // and is blind to it on introspection, so declaring one here would make every
+  // `migrate dev` try to create a conflicting plain index. Same convention as
+  // account_invites_one_pending_per_email_idx.
+  @@unique([accountId, projectId, name], map: "labels_account_project_name_key")
+  @@map("labels")
+}
+
+/// Rows rather than an array column on `tasks`, because the label merge is
+/// element-wise and needs the elements addressable.
+model TaskLabel {
+  taskId  String @map("task_id") @db.Uuid
+  labelId String @map("label_id") @db.Uuid
+
+  task  Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  label Label @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, labelId])
+  @@index([labelId], map: "task_labels_label_idx")
+  @@map("task_labels")
+}
+
+// ---------- Integrations ----------
+
+/// One provider account connected to one Antgrid account. Provider-agnostic by
+/// construction: `provider` plus the two external identities is the whole of
+/// what provider specificity is allowed to be at this layer.
+model Integration {
+  id                String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId         String  @map("account_id") @db.Uuid
+  /// `github` today. Text rather than an enum so a second adapter is a code
+  /// change and not a migration.
+  provider          String
+  /// The provider account the App was installed ON — an org or user id. Display
+  /// and install-flow only. It is unique only WITHIN an Antgrid account, so it
+  /// can never be an inbound routing key; see `installationId`.
+  externalAccountId String  @map("external_account_id")
+  /// The ONLY key an inbound webhook may be resolved by, and the reason it is a
+  /// separate column from `externalAccountId`.
+  ///
+  /// A webhook carries no `accountId`, so the lookup that routes it has nothing
+  /// to scope by — and `[accountId, provider, externalAccountId]` is unique only
+  /// within one account. Two Antgrid accounts may legitimately hold the same
+  /// `externalAccountId` at once: account A connects org X and later uninstalls
+  /// (`revokedAt` set, the row retained by design), then account B installs on
+  /// org X. Resolving through the account-scoped key picks whichever row it
+  /// finds and writes a third party's private issue bodies into the wrong
+  /// tenant. `[provider, installationId]` is globally unique, which is what
+  /// makes it safe; every inbound resolution also filters `revokedAt IS NULL`,
+  /// because a revoked row matching a live payload is that same mis-route.
+  ///
+  /// Nullable because a provider with no install concept (Linear, Jira) has
+  /// nothing to put here, and Postgres treats NULLs as distinct in a unique
+  /// index — so the constraint costs those providers nothing. Each of them then
+  /// needs its own globally-unique inbound key named before its webhook handler
+  /// ships: the rule is "route by something unique outside the tenant", not
+  /// "route by installationId".
+  installationId    String? @map("installation_id")
+  displayName       String  @map("display_name")
+  /// active | suspended | revoked. `suspended` is the provider's own state — a
+  /// GitHub App installation can be suspended without being removed — and is not
+  /// the same as revoked: a suspension lifts, `revokedAt` never does.
+  status            String
+  /// Who clicked install. Restrict, not Cascade — see the relation below.
+  installedBy       String  @map("installed_by")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  /// Set on uninstall and never cleared: a reinstall mints a new installation
+  /// id, so it is a new row rather than a resurrected one. Retaining the row is
+  /// what keeps an imported task's provenance readable after the link is gone.
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+
+  // Cascade is NOT the cleanup path for a deleted account: `deleteUserAccount`
+  // tombstones `product_accounts.deleted_at` rather than deleting the row, so
+  // this never fires. It is a schema-integrity guard; erasing a tombstoned
+  // account's integrations needs explicit deletes, exactly as tasks do.
+  account   ProductAccount    @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  // Restrict (Prisma's default for a required relation), not Cascade: the
+  // integration belongs to the account and not to whoever clicked install, so a
+  // genuine user-row delete must fail loudly rather than silently disconnect the
+  // team's repositories.
+  installer  User                  @relation("IntegrationInstaller", fields: [installedBy], references: [id])
+  repos      IntegrationRepo[]
+  identities IntegrationIdentity[]
+  syncOps    TaskSyncOp[]
+
+  @@unique([accountId, provider, externalAccountId], map: "integrations_account_provider_external_key")
+  @@unique([provider, installationId], map: "integrations_provider_installation_key")
+  @@map("integrations")
+}
+
+/// One repository inside an integration, and the per-repo settings that decide
+/// what crosses the seam. Deliberately a row per repository rather than flags on
+/// `Integration`: every setting below is a consent the user gives about one
+/// repository, and an account-wide toggle would carry it to repositories they
+/// never looked at.
+model IntegrationRepo {
+  id             String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  integrationId  String  @map("integration_id") @db.Uuid
+  /// The same normalized repository identity as `projects.repo_key` — the origin
+  /// remote folded by `bridge/src/repo-key.ts`, shape-gated by `util/repo-key.ts`
+  /// on the way in. Reusing that exact form is the whole mechanism by which a
+  /// provider repository and a checkout on a developer's machine resolve to one
+  /// project; a second normalization would give two strings for one repository
+  /// and the join would silently never match.
+  repoKey        String  @map("repo_key")
+  /// The provider's own repo id, stable across a rename — which is why it, and
+  /// not `repoKey`, is the upsert key.
+  externalRepoId String  @map("external_repo_id")
+  projectId      String? @map("project_id") @db.Uuid
+  /// public | private, and MUTABLE. It backs the "public if the repo is" line in
+  /// the publish consent UI, so a private -> public transition retroactively
+  /// exposes every issue published under the opposite assurance — a change here
+  /// is a user-visible event, never a routine field refresh.
+  visibility     String
+
+  /// Whether inbound import runs for this repository.
+  syncEnabled         Boolean @map("sync_enabled")
+  /// Outbound writes, opt-in per repository and deliberately NOT implied by
+  /// `syncEnabled`. The first integration ships a one-way read-only import, and
+  /// users reasonably treat imported issues as a private notes layer over the
+  /// provider; turning outbound writes on later changes the meaning of a link
+  /// the user already accepted.
+  pushEnabled         Boolean @default(false) @map("push_enabled")
+  /// Whether a task created in Antgrid is published to the provider without
+  /// being asked. Off for the same reason, sharpened: publishing is
+  /// content-creating and unretractable.
+  publishNewByDefault Boolean @default(false) @map("publish_new_by_default")
+
+  /// all | label | milestone | assigned_to_member — what a first sync is allowed
+  /// to pull in. Unfiltered, a busy repository turns the account list into a
+  /// mirror and buries the Running view in issues we imported on purpose.
+  /// `integration_repos_import_filter_check` (raw SQL in the migration) holds
+  /// both the vocabulary and its pairing with the value below. Prisma can model
+  /// neither a CHECK nor a partial index and is blind to both on introspection,
+  /// so there is deliberately nothing declaring it here — same convention as
+  /// `tasks_assignee_one_identity_check` and `labels_account_name_unscoped_idx`.
+  importFilterKind  String  @default("all") @map("import_filter_kind")
+  /// The label or milestone name. NULL for `all` and `assigned_to_member`, which
+  /// name no value; the CHECK enforces the pairing in both directions.
+  importFilterValue String? @map("import_filter_value")
+  /// How many comments one issue may import. A column with a non-null default
+  /// rather than a constant, because a constant cannot be raised for the one
+  /// repository that needs it. The default is one provider page: uncapped, a
+  /// large repository is ~50k requests and roughly ten hours of primary rate
+  /// budget, while a single page bounds it at one request per issue. The local
+  /// thread is a PARTIAL mirror as a result, and the UI has to say so.
+  commentImportCap  Int     @default(100) @map("comment_import_cap")
+
+  /// When the repository stopped being reachable through the installation —
+  /// removed from it, or deleted on GitHub — and NULL while it is reachable.
+  /// Separate from `sync_enabled` because the two off states are different
+  /// sentences: one the user chose, one GitHub imposed, and only the second has
+  /// an explanation the settings page owes them. Re-adding the repository on
+  /// GitHub clears this and deliberately does NOT turn sync back on — a
+  /// repository leaving and returning is not consent to resume.
+  removedAt DateTime? @map("removed_at") @db.Timestamptz(6)
+
+  lastFullSyncAt DateTime? @map("last_full_sync_at") @db.Timestamptz(6)
+  lastCursor     String?   @map("last_cursor")
+  /// What makes the reconcile poll cheap: the conditional-request validator the
+  /// next poll sends back as `If-None-Match`.
+  etag           String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  // SetNull rather than Cascade: the link to a local checkout is a convenience,
+  // and deleting the project must not tear down the import that populated it.
+  project     Project?    @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  tasks       Task[]
+
+  @@unique([integrationId, repoKey], map: "integration_repos_integration_repo_key")
+  @@unique([integrationId, externalRepoId], map: "integration_repos_integration_external_key")
+  @@map("integration_repos")
+}
+
+/// A provider user seen on one integration, and the account member it resolves
+/// to when there is one. Better-Auth's `account` row stores the provider's
+/// numeric user id and not the login, so an inbound assignee cannot be matched
+/// to a member without this table.
+///
+/// **The unique is scoped to the integration, deliberately not to
+/// `[provider, externalUserId]`.** Two Antgrid accounts can each hold issues
+/// assigned to the same GitHub user; one globally-unique row carrying a
+/// `userId` would then resolve that GitHub user into a member of whichever
+/// account wrote the row first, which is the cross-tenant mis-assignment
+/// `Integration.installationId` describes for routing, arriving through
+/// identity instead. `integrationId` is account-scoped, so the row is
+/// per-tenant by construction. The price is one row per account per provider
+/// user, and that is the cheaper side of the trade.
+model IntegrationIdentity {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  integrationId  String    @map("integration_id") @db.Uuid
+  /// Null for a provider user who is not an Antgrid member — the row still
+  /// exists, because the login and avatar are what the UI renders for an
+  /// assignee we cannot resolve.
+  userId         String?   @map("user_id")
+  provider       String
+  /// The provider's own stable user id. The login is renameable and is
+  /// therefore display only, never a key.
+  externalUserId String    @map("external_user_id")
+  externalLogin  String    @map("external_login")
+  avatarUrl      String?   @map("avatar_url")
+  /// When `userId` was resolved; null while unresolved. Resolution is one-way —
+  /// nothing on the inbound path clears a link.
+  linkedAt       DateTime? @map("linked_at") @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  // SetNull rather than Cascade: a deleted user leaves the provider identity
+  // behind as an unresolved one, which is what the row means anyway, rather
+  // than erasing the login an imported task still displays.
+  user        User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([integrationId, externalUserId], map: "integration_identities_integration_external_key")
+  @@index([integrationId, userId], map: "integration_identities_integration_user_idx")
+  @@map("integration_identities")
 }
 
 // ---------- Better-Auth OAuth Provider plugin ----------

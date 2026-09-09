@@ -2,8 +2,9 @@ import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HostServer } from "../src/host-server";
+import { HostServer, loadSeenProjects } from "../src/host-server";
 import { computeProjectId } from "../src/project-id";
+import { resolveProject } from "../src/worktrees/project-resolver";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage } from "../src/protocol";
 
@@ -48,6 +49,23 @@ async function openTemp(h: HostServer, mode: "local" | "remote" = "local"): Prom
   const folder = tempFolder();
   const projectId = computeProjectId(folder);
   await h.open(projectId, folder, mode);
+  return projectId;
+}
+
+async function git(cwd: string, args: string[]): Promise<void> {
+  const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  if (exitCode !== 0) throw new Error(stderr);
+}
+
+/** Open a fresh temp project that is a real repository with `origin` set, under
+ *  whatever id the resolver gives it. */
+async function openRepoTemp(h: HostServer, origin: string): Promise<string> {
+  const folder = tempFolder();
+  await git(folder, ["init"]);
+  await git(folder, ["remote", "add", "origin", origin]);
+  const { projectId } = await resolveProject(folder);
+  await h.open(projectId, folder, "local");
   return projectId;
 }
 
@@ -119,6 +137,33 @@ test("warm core advertises runningSessions; a stopped project omits it (like sta
   expect(adv.find((p) => p.projectId === projA)?.runningSessions).toBe(0);
   // Cold → omitted, matching the status field's warm-only contract.
   expect(adv.find((p) => p.projectId === projB)?.runningSessions).toBeUndefined();
+});
+
+test("advertises repoKey for a warm project and for a cold one", async () => {
+  host = new HostServer({});
+  const warm = await openRepoTemp(host, "git@github.com:antgrid/antgrid.git");
+  const cold = await openRepoTemp(host, "https://gitlab.com/group/sub/repo.git");
+  await host.stop(cold);
+  await setMobileAccess(host, true);
+
+  const adv = host.buildProjectsAdvertisement();
+  expect(adv.find((p) => p.projectId === warm)?.repoKey).toBe("github.com/antgrid/antgrid");
+  // A cold project is served entirely out of the persisted catalog, so the key
+  // has to survive the core going away — a stopped project whose key is absent
+  // cannot bind its tasks, which is most projects most of the time.
+  expect(adv.find((p) => p.projectId === cold)?.repoKey).toBe("gitlab.com/group/sub/repo");
+  const persisted = loadSeenProjects(join(abDir!, "agents", "projects.json"));
+  expect(persisted.get(cold)?.repoKey).toBe("gitlab.com/group/sub/repo");
+});
+
+test("omits repoKey when a folder has no origin and the machine has no device id", async () => {
+  host = new HostServer({});
+  const projA = await openTemp(host);   // plain temp folder: no repository, no origin
+  await setMobileAccess(host, true);
+
+  // The synthetic key names a device, and this host was launched uncredentialed —
+  // inventing a machine half would produce a key a later run cannot reproduce.
+  expect(host.buildProjectsAdvertisement().find((p) => p.projectId === projA)?.repoKey).toBeUndefined();
 });
 
 test("the advert is the full catalog when enabled and empty when disabled", async () => {

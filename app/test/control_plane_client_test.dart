@@ -40,6 +40,38 @@ void main() {
     await client.dispose();
   });
 
+  test('agent:projects carries repoKey through, null when absent', () async {
+    // The advert entry is hand-mirrored in Dart, so a bridge that starts
+    // sending a field the parser drops fails silently — tasks would bind to
+    // nothing with every layer reporting success.
+    final t = FakeAgentTransport();
+    final client = ControlPlaneClient(transport: t);
+
+    t.emit('agent:projects', {
+      'projects': [
+        {
+          'projectId': 'projA',
+          'running': true,
+          'repoKey': 'github.com/antgrid/antgrid',
+        },
+        {
+          'projectId': 'projB',
+          'running': false,
+          'repoKey': 'local:dev-1/projB',
+        },
+        {'projectId': 'projC', 'running': false},
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    final projects = client.currentState.projects;
+    expect(projects[0].repoKey, 'github.com/antgrid/antgrid');
+    expect(projects[1].repoKey, 'local:dev-1/projB');
+    expect(projects[2].repoKey, isNull);
+
+    await client.dispose();
+  });
+
   test(
     'agent:projects parses the work status, null when absent/unknown',
     () async {

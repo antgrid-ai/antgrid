@@ -6,6 +6,7 @@ import 'package:antgrid/services/session_delete_policy.dart';
 
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/pending_reply.dart';
+import 'package:antgrid/models/task_ref.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
@@ -126,6 +127,57 @@ void main() {
       await session.close();
     },
   );
+
+  test('create raises the refusal rather than completing null', () async {
+    // `create` has no `raiseRefusal` switch — it ALWAYS throws on `ok:false`,
+    // and a null result means only `ok:true` carrying no session. A caller that
+    // reads a refusal as null drops the most ordinary failure there is (the
+    // session cap) into an unhandled async error, so the two outcomes are
+    // pinned separately here.
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    final future = svc.create(name: 'new-session');
+    await Future<void>.delayed(Duration.zero);
+    final sent = t.sent.firstWhere((m) => m['type'] == 'session:create');
+    t.emit('session:result', {
+      'requestId': sent['requestId'],
+      'ok': false,
+      'errorCode': 'SESSION_LIMIT',
+      'error': 'This project already has the maximum number of sessions.',
+    });
+
+    await expectLater(
+      future,
+      throwsA(
+        isA<SessionOperationException>()
+            .having((e) => e.errorCode, 'errorCode', 'SESSION_LIMIT')
+            .having((e) => e.message, 'message', contains('maximum')),
+      ),
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('create completes null only on ok:true carrying no session', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    final future = svc.create(name: 'new-session');
+    await Future<void>.delayed(Duration.zero);
+    final sent = t.sent.firstWhere((m) => m['type'] == 'session:create');
+    t.emit('session:result', {'requestId': sent['requestId'], 'ok': true});
+
+    expect(await future, isNull);
+
+    await svc.dispose();
+    await session.close();
+  });
 
   test('public methods include projectId from session', () async {
     final t = FakeAgentTransport();
@@ -500,6 +552,28 @@ void main() {
       await session.close();
     },
   );
+  test('create forwards a taskRef only when one was given', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    svc.create(name: 'untasked').ignore();
+    svc
+        .create(
+          name: 'ANT-14 flaky test',
+          taskRef: const TaskRef(taskId: 'task-abc', number: 14),
+        )
+        .ignore();
+    await Future<void>.delayed(Duration.zero);
+
+    final creates = t.sent.where((m) => m['type'] == 'session:create').toList();
+    expect(creates[0].containsKey('taskRef'), isFalse);
+    expect(creates[1]['taskRef'], {'taskId': 'task-abc', 'number': 14});
+
+    await svc.dispose();
+    await session.close();
+  });
 
   // The backstop de-registers the pending entry, which is why a late refusal
   // has no future left to fail. It still has to reach the user: _handleResult

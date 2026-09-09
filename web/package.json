@@ -18,7 +18,10 @@
     "prisma:migrate:deploy": "bunx --bun prisma@6 migrate deploy",
     "postinstall": "bunx --bun prisma@6 generate",
     "generate:key": "bun run scripts/generate-signing-key.ts",
-    "reconcile:seats": "bun run scripts/reconcile-seats.ts"
+    "reconcile:seats": "bun run scripts/reconcile-seats.ts",
+    "drain:github-webhooks": "bun run scripts/drain-github-webhooks.ts",
+    "drain:task-sync": "bun run scripts/drain-task-sync.ts",
+    "poll:github": "bun run scripts/poll-github-issues.ts"
   },
   "dependencies": {
     "@better-auth/core": "^1.6.9",

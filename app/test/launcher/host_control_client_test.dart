@@ -82,6 +82,7 @@ void main() {
           'selectedPath': '/repo/linked',
           'label': 'repo',
           'isGitRepository': true,
+          'repoKey': 'github.com/antgrid/antgrid',
         },
       );
       addTearDown(stub.close);
@@ -94,6 +95,7 @@ void main() {
       expect(result.projectId, 'primary-id');
       expect(result.repoPath, '/repo');
       expect(result.isGitRepository, isTrue);
+      expect(result.repoKey, 'github.com/antgrid/antgrid');
     },
   );
 
@@ -191,7 +193,14 @@ void main() {
         'ok': true,
         'type': 'project:list',
         'projects': [
-          {'projectId': 'a', 'path': '/a', 'running': true, 'mode': 'local'},
+          {
+            'projectId': 'a',
+            'path': '/a',
+            'running': true,
+            'mode': 'local',
+            'repoKey': 'github.com/antgrid/antgrid',
+          },
+          {'projectId': 'b', 'path': '/b', 'running': false, 'mode': 'local'},
         ],
       },
     );
@@ -199,9 +208,12 @@ void main() {
 
     final client = HostControlClient(port: stub.port, token: 't');
     final list = await client.projectList();
-    expect(list, hasLength(1));
+    expect(list, hasLength(2));
     expect(list.first.projectId, 'a');
     expect(list.first.mode, 'local');
+    expect(list.first.repoKey, 'github.com/antgrid/antgrid');
+    // A host too old to fold one, or a folder with no origin: absent, not empty.
+    expect(list.last.repoKey, isNull);
   });
 
   test('toolsList parses the tool catalog and the agent descriptors', () async {

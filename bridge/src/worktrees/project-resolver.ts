@@ -3,6 +3,7 @@ import { readdir } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { resolveAbDir } from "../antgrid-dir";
 import { computeProjectId } from "../project-id";
+import { normalizeRepoKey } from "../repo-key";
 import { CheckoutStore } from "./checkout-store";
 import { parseWorktreeList } from "./git-worktree-list";
 import { pathBelow } from "./path-guard";
@@ -24,6 +25,10 @@ export interface ResolvedProject {
   kind: ResolvedProjectKind;
   /** Set only for a "managed-checkout" whose checkouts.json still names it. */
   checkoutId?: string;
+  /** Cross-machine repository identity, or `null` when this folder names no
+   *  shareable repository. Callers mint a synthetic per-machine key from it —
+   *  never a guess (see repo-key.ts). */
+  repoKey: string | null;
 }
 
 export interface GitCommandResult {
@@ -134,8 +139,16 @@ export async function resolveProject(
       selectedPath,
       isGitRepository: false,
       kind: "plain",
+      repoKey: null,
     };
   }
+
+  // `origin` only: identity has to be the one remote every clone of a repository
+  // agrees on, and a fork's `upstream` would merge two repositories into one key.
+  // A repo without one is indistinguishable here from a git we could not ask,
+  // and both answer "no shareable identity" rather than failing the resolve.
+  const origin = await run(["remote", "get-url", "origin"]);
+  const repoKey = origin.exitCode === 0 ? normalizeRepoKey(origin.stdout.trim()) : null;
 
   const worktrees = parseWorktreeList(list.stdout).filter((worktree) => !worktree.bare);
   const primaryRaw = worktrees[0];
@@ -159,6 +172,7 @@ export async function resolveProject(
         selectedPath,
         isGitRepository: true,
         kind: "primary",
+        repoKey,
       };
     }
     const wtRoot = canonicalPath(resolve(abDir, WORKTREE_ROOT_DIR));
@@ -195,6 +209,7 @@ export async function resolveProject(
           isGitRepository: true,
           kind: "managed-checkout",
           checkoutId: owned.checkoutId,
+          repoKey,
         };
       }
       return {
@@ -203,6 +218,7 @@ export async function resolveProject(
         selectedPath,
         isGitRepository: true,
         kind: "managed-checkout",
+        repoKey,
       };
     }
     // A worktree the USER made (outside Antgrid's own root): folding it to the
@@ -215,6 +231,7 @@ export async function resolveProject(
       selectedPath,
       isGitRepository: true,
       kind: "linked-worktree",
+      repoKey,
     };
   }
 
@@ -231,5 +248,6 @@ export async function resolveProject(
     selectedPath,
     isGitRepository: true,
     kind: "primary",
+    repoKey,
   };
 }

@@ -19,6 +19,40 @@ const EnvSchema = z
     GOOGLE_CLIENT_SECRET: z.string().min(1),
     ZEPTOMAIL_TOKEN: z.string().optional(),
     ZEPTOMAIL_WEBHOOK_SECRET: z.string().min(16).optional(),
+    // The GitHub *App's* webhook secret — unrelated to GITHUB_CLIENT_SECRET
+    // above, which is the OAuth app users sign in with. Absent, POST
+    // /webhooks/github answers 503 rather than trusting an unverifiable body.
+    GITHUB_APP_WEBHOOK_SECRET: z.string().min(16).optional(),
+    // The rest of the App's registration. Every one is optional for the same
+    // reason as the secret above: a dev machine and the test suite boot without
+    // a registered App, and the install route refuses (503) rather than the
+    // process failing to start.
+    GITHUB_APP_ID: z.string().min(1).optional(),
+    /** URL slug for `https://github.com/apps/<slug>/installations/new`. */
+    GITHUB_APP_SLUG: z.string().min(1).optional(),
+    // The App's OWN OAuth credentials, used for one thing: exchanging the
+    // install callback's `code` for a user-to-server token, which is what makes
+    // `GET /user/installations` answer as the GitHub user rather than as the
+    // App. These are NOT GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET above — that is
+    // the separate OAuth app people sign in to Antgrid with. The two pairs look
+    // interchangeable and are not: crossing them yields
+    // `bad_verification_code` from a code that was perfectly good, which reads
+    // as an expired install rather than as misconfiguration.
+    GITHUB_APP_CLIENT_ID: z.string().min(1).optional(),
+    GITHUB_APP_CLIENT_SECRET: z.string().min(1).optional(),
+    // A `.env` line cannot hold a real newline, so this PEM usually arrives with
+    // its line breaks as the two characters `\n`; `integrations/github-app.ts`
+    // normalizes them. The gate here is only that the value is a private key at
+    // all — PKCS#1 (`BEGIN RSA PRIVATE KEY`, what GitHub's download button
+    // produces) or PKCS#8 — and the header survives either spelling, so it
+    // holds before normalization. The message never echoes the value: this key
+    // signs App JWTs for every installation across every tenant.
+    GITHUB_APP_PRIVATE_KEY: z
+      .string()
+      .refine((v) => /-----BEGIN (?:RSA )?PRIVATE KEY-----/.test(v), {
+        message: "must be a PEM private key (PKCS#1 or PKCS#8)",
+      })
+      .optional(),
     EMAIL_FROM: z.string().default("Antgrid <no-reply@radhaai.org>"),
     RELAY_INTERNAL_URL: z.string().url().optional(),
     RELAY_INTERNAL_SECRET: z.string().min(16).optional(),
@@ -120,6 +154,12 @@ const ENV_ALIASES: Record<string, string> = {
   RazorpayKeyId: "RAZORPAY_KEY_ID",
   RazorpayKeySecret: "RAZORPAY_KEY_SECRET",
   RazorpayWebhookSecret: "RAZORPAY_WEBHOOK_SECRET",
+  GithubAppWebhookSecret: "GITHUB_APP_WEBHOOK_SECRET",
+  GithubAppId: "GITHUB_APP_ID",
+  GithubAppSlug: "GITHUB_APP_SLUG",
+  GithubAppClientId: "GITHUB_APP_CLIENT_ID",
+  GithubAppClientSecret: "GITHUB_APP_CLIENT_SECRET",
+  GithubAppPrivateKey: "GITHUB_APP_PRIVATE_KEY",
   IPinfoAccessToken: "IPINFO_TOKEN",
 };
 

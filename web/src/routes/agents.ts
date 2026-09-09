@@ -26,7 +26,7 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
   // cookie). Gate it with Bearer-JWT verification against web's own JWKS.
   r.use(
     "/account/devices/me/heartbeat",
-    requireBearerJwt({ auth: deps.auth, env: deps.env })
+    requireBearerJwt({ auth: deps.auth, db: deps.db, env: deps.env })
   );
 
   // Peers is called by the bridge to discover enrolled app-device Ed25519 keys
@@ -36,7 +36,7 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
   // cookie-based requireUser and would reject Bearer tokens.
   r.use(
     "/account/devices/me/peers",
-    requireBearerJwt({ auth: deps.auth, env: deps.env })
+    requireBearerJwt({ auth: deps.auth, db: deps.db, env: deps.env })
   );
 
   // All other `/account/*` routes are called by the Flutter app's UI session

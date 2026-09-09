@@ -186,7 +186,12 @@ export async function applySubscriptionEvent(
   fetchImpl: typeof fetch = fetch
 ): Promise<{ duplicate: boolean }> {
   const existing = await db.webhookEvent.findUnique({
-    where: { providerEventId: event.providerEventId },
+    where: {
+      provider_providerEventId: {
+        provider: event.provider,
+        providerEventId: event.providerEventId,
+      },
+    },
   });
   if (existing) return { duplicate: true };
 

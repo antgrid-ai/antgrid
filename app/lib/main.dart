@@ -43,6 +43,8 @@ import 'providers/projects.dart';
 import 'providers/provider_retry.dart';
 import 'providers/push.dart';
 import 'providers/recent_agents.dart';
+import 'providers/task_launcher.dart';
+import 'providers/tasks.dart';
 import 'navigation/nav_console.dart';
 import 'navigation/nav_controller.dart';
 import 'navigation/nav_serialization.dart';
@@ -228,6 +230,12 @@ Future<void> main() async {
       analyticsServiceProvider.overrideWithValue(analytics),
       updateHandoffStoreProvider.overrideWithValue(updateHandoffStore),
       afterUpdateLaunchProvider.overrideWithValue(updatedFromVersion),
+      // The seam in `providers/tasks.dart` defaults to null so the tasks UI
+      // can be tested without the whole project stack behind it; this is the
+      // one place the real launcher is installed.
+      taskLauncherProvider.overrideWith(
+        (ref) => ref.watch(appTaskLauncherProvider),
+      ),
     ],
   );
 

@@ -13,6 +13,22 @@ bun run scripts/dev-grant.ts <email>
 
 cd web && bun run migrate        # prisma migrate deploy
 cd web && bun run generate:key   # Ed25519 signing seed
+
+# Scheduled jobs — run from an external scheduler (cron/systemd timer), never an
+# in-process timer; each exits 1 only on real failures, so a cron can alert.
+# Daily: gateway seat counts -> subscriptions
+cd web && bun run reconcile:seats
+# Every minute or two: apply the GitHub deliveries the webhook route recorded,
+# then purge processed rows past the retention cutoff
+cd web && bun run drain:github-webhooks
+# Every minute or two: push the task edits the outbox queued to GitHub. Paces
+# itself against the provider's 500 writes/hour, so a shorter interval buys
+# nothing. Safe to run beside itself — claims are leased under an advisory lock.
+cd web && bun run drain:task-sync
+# Every few minutes: read the issues no webhook ever delivered — the backlog a
+# newly switched-on repository already had, and any delivery lost to an outage.
+# Claims each repository under a try-lock, so running it beside itself is safe.
+cd web && bun run poll:github
 ```
 
 ## Worktrees
