@@ -450,6 +450,11 @@ class RelayService {
         'bytes': utf8.encode(data).length,
         'reason': 'unparseable',
       });
+      _log(
+        RelayLogLevel.warn,
+        'dropping unparseable relay control text',
+        fields: {'bytes': utf8.encode(data).length},
+      );
       return;
     }
 
@@ -463,6 +468,15 @@ class RelayService {
         'bytes': utf8.encode(data).length,
         'reason': 'unknown-control',
       });
+      // Includes the type the relay used: a forward-compat message from a newer
+      // relay and a genuinely malformed one are indistinguishable without it,
+      // and this is the path an `error` (MESSAGE_RATE_LIMITED — the relay saying
+      // it threw our frame away) would vanish down.
+      _log(
+        RelayLogLevel.warn,
+        'dropping unrecognised relay control message',
+        fields: {'msgType': json['type'] as String?},
+      );
       return;
     }
 
@@ -684,6 +698,15 @@ class RelayService {
         'frameId': frameId,
         'reason': 'message-stream-closed',
       });
+      // debug, not warn: this is the routine teardown race — frames still in
+      // flight when the controller closes. It earns a line only because a
+      // SUSTAINED run of it means inbound is being discarded by a service
+      // nobody noticed had shut down.
+      _log(
+        RelayLogLevel.debug,
+        'dropping inbound frame after the message stream closed',
+        fields: {'channel': msg.channel, 'bytes': decoded.payload.length},
+      );
       return;
     }
     _messageController.add(msg);
@@ -784,6 +807,15 @@ class RelayService {
         'frameId': frameId,
         'reason': 'socket-not-open',
       });
+      // sendMessage returns void, so the caller believes this frame went out.
+      // It is the same contract the send-queue drop got a line for one layer
+      // up, and it is the drop a connection that never establishes produces
+      // most of — the case with no stream traffic to diagnose from.
+      _log(
+        RelayLogLevel.warn,
+        'dropping outbound frame — socket not open',
+        fields: {'channel': channel, 'bytes': payload.length},
+      );
       return;
     }
     try {
@@ -813,6 +845,15 @@ class RelayService {
         'reason': 'frame-encode-failed',
         'detail': {'why': e.reason.name},
       });
+      _log(
+        RelayLogLevel.warn,
+        'dropping outbound frame — encode failed',
+        fields: {
+          'channel': channel,
+          'bytes': payload.length,
+          'why': e.reason.name,
+        },
+      );
     }
   }
 

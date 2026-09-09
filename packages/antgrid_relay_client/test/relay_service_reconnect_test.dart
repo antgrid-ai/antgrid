@@ -245,6 +245,27 @@ void main() {
     expect(warns.first!['bytes'], 4);
   });
 
+  // sendMessage returns void, so a frame dropped here is one the caller counts
+  // as sent. The same contract the send-queue drop got a line for one layer up.
+  test('an outbound frame dropped on a closed socket is logged', () async {
+    final warns = <Map<String, Object?>?>[];
+    final logged = RelayService(
+      crypto: CryptoService(),
+      logger: (level, message, {fields}) {
+        if (message == 'dropping outbound frame — socket not open') {
+          warns.add(fields);
+        }
+      },
+    );
+    addTearDown(logged.dispose);
+
+    logged.sendMessage('machine-1', 'control', Uint8List(16));
+
+    expect(warns, hasLength(1));
+    expect(warns.first!['channel'], 'control');
+    expect(warns.first!['bytes'], 16);
+  });
+
   test('a retryable error followed by a close does NOT self-redial', () async {
     final connect = relay.connect(
       server.wsUrl,
