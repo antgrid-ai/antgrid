@@ -2077,15 +2077,11 @@ Object? parseAbMessage(Map<String, dynamic> json) {
       return parseAgentEvent(json);
 
     // Session-bus frames are CARRIED, not consumed: the app is a transport leg
-    // between a lead session's bridge and a member's, so the payload is handed
-    // on verbatim rather than modelled — a field a newer bridge adds must
-    // survive an older app. Recognized here (returning the raw map, as the
-    // preview tunnel's frames effectively are) only so the classification gate
-    // sees a type that is deliberately unrouted; see kUnroutedInboundTypes.
-    case 'session-bus:assign':
-    case 'session-bus:raise':
-    case 'session-bus:transition':
-    case 'session-bus:cancel':
+    // between the two bridges of one exchange, so the payload is handed on
+    // verbatim rather than modelled — a field a newer bridge adds must survive
+    // an older app. Recognized here (returning the raw map, as the preview
+    // tunnel's frames effectively are) only so the classification gate sees a
+    // type that is deliberately unrouted; see kUnroutedInboundTypes.
     case 'session-bus:message':
     case 'session-bus:fetch':
     case 'session-bus:fetch:result':

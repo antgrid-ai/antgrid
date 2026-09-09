@@ -1272,19 +1272,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // cannot dial each other, so this bridge is an endpoint, never a hop: the
       // coordinator applies only frames addressed to a session it holds, and a
       // frame naming any other session is dropped rather than forwarded.
-      case "session-bus:assign":
-      case "session-bus:raise":
-      case "session-bus:transition":
-      case "session-bus:cancel":
       case "session-bus:message":
       case "session-bus:fetch":
       case "session-bus:fetch:result":
       case "session-bus:ack":
         // Noted only for a frame the coordinator ACCEPTED. Its address check is
         // what proves the sender is talking about a session this bridge actually
-        // holds, and this map is a peer's only route home — noting first would let
-        // any app session rebind it with one syntactically valid frame carrying
-        // someone else's contextId, and take the next transition for itself.
+        // holds, and this map is the other end's only route home — noting first
+        // would let any app session rebind it with one syntactically valid frame
+        // carrying someone else's contextId, and take the next answer for itself.
         if (sessionBus.handleInbound(msg) === "applied") noteBusOrigin(msg.contextId, peerId);
         break;
       case "agent:prompt":

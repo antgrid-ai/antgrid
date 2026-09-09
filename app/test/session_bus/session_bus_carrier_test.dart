@@ -46,7 +46,7 @@ SessionBusLink _link({
 );
 
 Map<String, dynamic> _busFrame({
-  String type = 'session-bus:assign',
+  String type = 'session-bus:message',
   Map<String, dynamic>? from,
   Map<String, dynamic>? to,
 }) => {

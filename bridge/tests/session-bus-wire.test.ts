@@ -11,12 +11,9 @@ import {
   createMessage,
   parseMessageFast,
   SessionBusAckWire,
-  SessionBusAssignWire,
-  SessionBusCancelWire,
   SessionBusFetchResultWire,
   SessionBusFetchWire,
   SessionBusMessageWire,
-  SessionBusTransitionWire,
   type AbMessage,
   type SessionMemberKey,
   type SessionMemberRef,
@@ -54,26 +51,6 @@ const ENVELOPE = {
 // One instance of every type in the family, in the exact shape the coordinator
 // puts on the wire.
 const SAMPLES: { msg: AbMessage; wire: { safeParse: (v: unknown) => { success: boolean } } }[] = [
-  {
-    msg: createMessage("session-bus:assign", {
-      from: LEAD_KEY, to: PEER_KEY, contextId: "ctx-1",
-      taskId: "t1", seq: 0, expiresAt: 2_000_000, envelope: ENVELOPE,
-    }),
-    wire: SessionBusAssignWire,
-  },
-  {
-    msg: createMessage("session-bus:transition", {
-      from: PEER_KEY, to: LEAD_KEY, contextId: "ctx-1",
-      taskId: "t1", seq: 1, state: "working", waitingOn: "lead", envelope: ENVELOPE,
-    }),
-    wire: SessionBusTransitionWire,
-  },
-  {
-    msg: createMessage("session-bus:cancel", {
-      from: LEAD_KEY, to: PEER_KEY, contextId: "ctx-1", taskId: "t1", seq: 1, reason: "no longer needed",
-    }),
-    wire: SessionBusCancelWire,
-  },
   {
     msg: createMessage("session-bus:message", {
       from: PEER_KEY, to: LEAD_KEY, contextId: "ctx-1", taskId: null, envelope: ENVELOPE,
@@ -116,22 +93,22 @@ describe("session-bus protocol", () => {
   });
 
   test("a body that violates its wire schema is refused", () => {
-    const bad = { ...SAMPLES[0]!.msg, seq: -1 };
-    expect(SessionBusAssignWire.safeParse(bad).success).toBe(false);
+    const bad = { ...SAMPLES[0]!.msg, taskId: "" };
+    expect(SessionBusMessageWire.safeParse(bad).success).toBe(false);
   });
 
   test("no bus frame is checkout-variable", () => {
-    // A task addresses a session, and a session's checkout is resolved from that
-    // id — routing one by checkoutId would let a carrier name a working tree.
+    // A bus frame addresses a session, and a session's checkout is resolved from
+    // that id — routing one by checkoutId would let a carrier name a working tree.
     for (const { msg } of SAMPLES) {
       expect(CHECKOUT_VARIABLE_MESSAGE_TYPES.has(msg.type as never)).toBe(false);
     }
   });
 
   test("no bus frame is replayed to a late joiner", () => {
-    // Task traffic is addressed and acked; replaying it on connect would hand a
-    // phone the exchange it must never see, and re-deliver a frame whose ack
-    // already retired it.
+    // Bus traffic is addressed to one session; replaying it on connect would
+    // hand a phone an exchange it must never see, and hand the agent a message
+    // it has already read.
     const bus = new MessageBus();
     for (const { msg } of SAMPLES) bus.publish(msg, "control");
     const snapshot = bus.getSnapshot(["*"]);
@@ -166,7 +143,7 @@ describe("session-bus forwarding", () => {
     return ws;
   }
 
-  test("the owner socket sees a task frame and a bus subscriber never does", async () => {
+  test("the owner socket sees a bus frame and a bus subscriber never does", async () => {
     // The first invariant of spec 4.1: the lead's phone is a bus subscriber, and
     // the bus has no addressing, so anything published fans out to it.
     const subscriber: string[] = [];

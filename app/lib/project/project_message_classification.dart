@@ -216,13 +216,13 @@ const Set<String> _statusTypes = <String>{
 ///     agent / loopback side.
 ///   - the three `*:snapshot:request` types are snapshot REQUESTS serviced
 ///     outside the heavy/status reducers.
-///   - the eight `session-bus:*` types are CARRIED between two bridges by
+///   - the `session-bus:*` types are CARRIED between two bridges by
 ///     `SessionBusCarrier`, which reads them off the transport directly. They
 ///     are not this app's messages: nothing here may reduce them, and they must
-///     never enter [kCheckoutVariableMessageTypes] (they address a member by
+///     never enter [kCheckoutVariableMessageTypes] (they address one session by
 ///     `to.sessionId`, not by the focused checkout) or
-///     [kCheckoutDurableReplayTypes] (a task assignment replayed to a new
-///     subscriber would be a second assignment).
+///     [kCheckoutDurableReplayTypes] (a message replayed to a new subscriber
+///     would reach the agent a second time).
 const Set<String> kUnroutedInboundTypes = <String>{
   'tunnel:http-start',
   'tunnel:http-chunk',
@@ -233,10 +233,6 @@ const Set<String> kUnroutedInboundTypes = <String>{
   'terminal:snapshot:request',
   'file:tree:snapshot:request',
   'preview:snapshot:request',
-  'session-bus:assign',
-  'session-bus:raise',
-  'session-bus:transition',
-  'session-bus:cancel',
   'session-bus:message',
   'session-bus:fetch',
   'session-bus:fetch:result',

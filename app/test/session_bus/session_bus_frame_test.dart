@@ -13,7 +13,7 @@ const _peer = {
 };
 
 Map<String, dynamic> _frame({
-  String type = 'session-bus:assign',
+  String type = 'session-bus:message',
   Map<String, dynamic> from = _lead,
   Map<String, dynamic> to = _peer,
 }) => {'type': type, 'from': from, 'to': to, 'contextId': 'ctx-1'};
@@ -37,8 +37,8 @@ BusForward _classify(
 
 void main() {
   group('frame vocabulary', () {
-    test('recognizes exactly the eight bridge types', () {
-      expect(kSessionBusTypes, hasLength(8));
+    test('recognizes exactly the four bridge types', () {
+      expect(kSessionBusTypes, hasLength(4));
       for (final type in kSessionBusTypes) {
         expect(isSessionBusFrame({'type': type}), isTrue);
       }
@@ -90,7 +90,7 @@ void main() {
       );
     });
 
-    test('every one of the seven types routes', () {
+    test('every one of the four types routes', () {
       for (final type in kSessionBusTypes) {
         expect(
           _classify(_frame(type: type), fromLead: true),

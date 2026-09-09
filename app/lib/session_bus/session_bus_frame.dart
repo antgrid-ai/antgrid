@@ -5,14 +5,10 @@
 /// unit-testable without a socket. `SessionBusCarrier` is the only caller.
 library;
 
-/// The eight agent<->agent frame types (`SessionBus*Wire` in
+/// The four agent<->agent frame types (`SessionBus*Wire` in
 /// `bridge/src/protocol.ts`). Mirrored BY HAND, like every other wire set the
 /// app shares with the bridge; adding a type on one side only is silent.
 const Set<String> kSessionBusTypes = <String>{
-  'session-bus:assign',
-  'session-bus:raise',
-  'session-bus:transition',
-  'session-bus:cancel',
   'session-bus:message',
   'session-bus:fetch',
   'session-bus:fetch:result',

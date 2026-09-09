@@ -1528,10 +1528,10 @@ const ConfigDetectToolsResultMessage = BaseMessage.extend({
  *  every attached app forever; `recordMember` enforces it. */
 export const MAX_SESSION_MEMBERS = 16;
 
-// Identity of one session on one machine. `machineId` is the account device
-// uuid — the value the app already addresses a machine by. Opaque to both
-// bridges: neither derives it, the app supplies both halves, because the lead
-// bridge can never reach the peer machine (D7).
+// Identity of one session on one machine, and the address every bus frame
+// carries. `machineId` is the account device uuid — the value the app already
+// addresses a machine by. Opaque to both bridges: neither derives it, the app
+// supplies both halves, because neither bridge can dial the other.
 export const SessionMemberKeySchema = z.object({
   machineId: z.string().min(1).max(200),
   projectId: z.string().min(1).max(200),
@@ -1565,10 +1565,11 @@ export const SessionMemberCardSchema = z.object({
   }).nullish(),
 });
 
-// Identity plus the labels a row renders from, so a member resolves with no
-// lookup on a machine that cannot reach the other one. Bounded because they
-// ride every session:updated frame AND are interpolated into a Handler
-// instruction, where the delivery template sanitizes them further.
+// Identity plus the labels a row renders from, so the other end of an exchange
+// resolves with no lookup on a machine that cannot reach the one it names.
+// Bounded because they ride every frame that names that end AND are
+// interpolated into a Handler instruction, where the delivery template
+// sanitizes them further.
 //
 // The card is the exception to that second half: hostnames and a repo path are
 // exactly what the Handler's authorizer reads as a grant, so no template may put
@@ -2364,14 +2365,14 @@ const AgentQuestionResolveMessage = BaseMessage.extend({
 });
 
 // ---------------------------------------------------------------------------
-// Session bus (spec 3.2, 6.1) — the cross-machine task family.
+// Session bus (`docs/session-messaging.md`) — the agent-to-agent frames.
 //
-// The envelope and the task-state enums live HERE rather than in
-// bridge/src/session-bus/, which is where the rest of the bus lives: they are
-// wire schemas, the stores under session-bus/ import `SessionMemberRefSchema`
-// from this file, and a schema module importing back would put this file's
-// top-level `z.object` calls behind a TDZ binding. Those modules re-export
-// these names so a bus caller still has one import site.
+// The envelope lives HERE rather than in bridge/src/session-bus/, which is
+// where the rest of the bus lives: it is a wire schema, the stores under
+// session-bus/ import `SessionMemberRefSchema` from this file, and a schema
+// module importing back would put this file's top-level `z.object` calls
+// behind a TDZ binding. Those modules re-export these names so a bus caller
+// still has one import site.
 // ---------------------------------------------------------------------------
 
 /** One unit of content. `artifact` carries the HANDLE only — spec 6.3's
@@ -2415,23 +2416,6 @@ export const BusEnvelopeSchema = z.object({
 });
 export type BusEnvelope = z.infer<typeof BusEnvelopeSchema>;
 
-export const TaskStateSchema = z.enum([
-  "submitted",
-  "working",
-  "input-required",
-  "completed",
-  "failed",
-  "canceled",
-]);
-export type TaskState = z.infer<typeof TaskStateSchema>;
-
-/** Who owes the answer that unblocks an `input-required` task. Set by the bridge
- *  FROM THE CAUSE of the transition (spec 3.4), never from a body field and
- *  never by an agent: a peer requests the block, it does not declare who is
- *  holding it. */
-export const WaitingOnSchema = z.enum(["lead", "human"]);
-export type WaitingOn = z.infer<typeof WaitingOnSchema>;
-
 /** Both endpoints on every frame. Nothing shorter is an address: a machine holds
  *  several projects and a project several sessions, and the carrier picks the
  *  relay session to forward on out of `to`. */
@@ -2440,40 +2424,6 @@ const SessionBusBaseWire = {
   to: SessionMemberKeySchema,
   contextId: z.string().min(1).max(200),
 };
-
-export const SessionBusAssignWire = z.object({
-  ...SessionBusBaseWire,
-  taskId: z.string().min(1).max(200),
-  seq: z.number().int().nonnegative(),
-  expiresAt: z.number().int().nonnegative(),
-  envelope: BusEnvelopeSchema,
-});
-
-/** A task the PEER opened with its own lead (spec 4.5), which is how something
- *  found outside assigned work becomes visible: a finding that names no task is
- *  refused, so without this a peer holding a brief and no task has nothing that
- *  can ever reach anyone. Identical to an assign on the wire and deliberately
- *  NOT a flag on one: the two differ only in who ends up working the task, and
- *  a bridge that did not know the flag would read a raise as an assign and take
- *  the wrong role — where an unknown TYPE is refused, which is the safe half of
- *  being wrong. */
-export const SessionBusRaiseWire = SessionBusAssignWire;
-
-export const SessionBusTransitionWire = z.object({
-  ...SessionBusBaseWire,
-  taskId: z.string().min(1).max(200),
-  seq: z.number().int().nonnegative(),
-  state: TaskStateSchema,
-  waitingOn: WaitingOnSchema.optional(),
-  envelope: BusEnvelopeSchema,
-});
-
-export const SessionBusCancelWire = z.object({
-  ...SessionBusBaseWire,
-  taskId: z.string().min(1).max(200),
-  seq: z.number().int().nonnegative(),
-  reason: z.string().max(500),
-});
 
 /** No `seq`, and never acked: spec 6 makes messages lossy on purpose. Reliable
  *  delivery behind text that changes no state would be unbounded retry buying
@@ -2504,10 +2454,11 @@ export const SessionBusFetchResultWire = z.object({
   dataBase64: z.string().max(ARTIFACT_CHUNK_B64_MAX),
 });
 
-/** Its own type rather than a flag on a result, because what is acked is a
- *  TRANSITION and transitions ride on three different types. `ok: false` still
- *  retires the seq — the ack means "this seq will never change my state again",
- *  not "I liked it". */
+/** Reserved and dark: nothing on this bridge emits a receipt and the inbound
+ *  case is a documented no-op, so the verb and its shape are held rather than
+ *  removed and re-added when they are re-keyed to a message id
+ *  (`docs/session-messaging.md`). `ok: false` still retires the seq — an ack
+ *  means "this seq will never reach me again", not "I liked it". */
 export const SessionBusAckWire = z.object({
   ...SessionBusBaseWire,
   taskId: z.string().min(1).max(200),
@@ -2515,22 +2466,6 @@ export const SessionBusAckWire = z.object({
   ok: z.boolean(),
   error: z.string().max(500).optional(),
 });
-
-const SessionBusAssignMessage = BaseMessage.extend({
-  type: z.literal("session-bus:assign"),
-}).extend(SessionBusAssignWire.shape);
-
-const SessionBusRaiseMessage = BaseMessage.extend({
-  type: z.literal("session-bus:raise"),
-}).extend(SessionBusRaiseWire.shape);
-
-const SessionBusTransitionMessage = BaseMessage.extend({
-  type: z.literal("session-bus:transition"),
-}).extend(SessionBusTransitionWire.shape);
-
-const SessionBusCancelMessage = BaseMessage.extend({
-  type: z.literal("session-bus:cancel"),
-}).extend(SessionBusCancelWire.shape);
 
 const SessionBusMessageMessage = BaseMessage.extend({
   type: z.literal("session-bus:message"),
@@ -2736,10 +2671,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentPermissionResolveMessage,
   AgentQuestionResolveMessage,
   AgentTaskStopMessage,
-  SessionBusAssignMessage,
-  SessionBusRaiseMessage,
-  SessionBusTransitionMessage,
-  SessionBusCancelMessage,
   SessionBusMessageMessage,
   SessionBusFetchMessage,
   SessionBusFetchResultMessage,
@@ -2926,10 +2857,6 @@ export type AgentSetConfig = z.infer<typeof AgentSetConfigMessage>;
 export type AgentSessionAction = z.infer<typeof AgentSessionActionMessage>;
 export type AgentPermissionResolve = z.infer<typeof AgentPermissionResolveMessage>;
 export type AgentQuestionResolve = z.infer<typeof AgentQuestionResolveMessage>;
-export type SessionBusAssign = z.infer<typeof SessionBusAssignMessage>;
-export type SessionBusRaise = z.infer<typeof SessionBusRaiseMessage>;
-export type SessionBusTransition = z.infer<typeof SessionBusTransitionMessage>;
-export type SessionBusCancel = z.infer<typeof SessionBusCancelMessage>;
 export type SessionBusMessage = z.infer<typeof SessionBusMessageMessage>;
 export type SessionBusFetch = z.infer<typeof SessionBusFetchMessage>;
 export type SessionBusFetchResult = z.infer<typeof SessionBusFetchResultMessage>;
@@ -3096,8 +3023,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
-  "session-bus:assign", "session-bus:raise", "session-bus:transition", "session-bus:cancel", "session-bus:message",
-  "session-bus:fetch", "session-bus:fetch:result", "session-bus:ack",
+  "session-bus:message", "session-bus:fetch", "session-bus:fetch:result", "session-bus:ack",
   "netwatch:configure", "netwatch:events",
 ]);
 
