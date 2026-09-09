@@ -101,6 +101,7 @@ void main() {
       cachedSessionsStore: cache,
       onClose: () async => t.dispose(),
     );
+    session.setActiveCheckouts({'main'});
     t.emit('agent:status', {
       'projectId': 'p',
       'terminals': [
@@ -154,6 +155,7 @@ void main() {
       cachedSessionsStore: cache,
       onClose: () async => t.dispose(),
     );
+    session.setActiveCheckouts({'main'});
     await Future<void>.delayed(Duration.zero);
 
     session.setLifecyclePaused(true);

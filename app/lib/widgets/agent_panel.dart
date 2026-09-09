@@ -35,6 +35,7 @@ import '../providers/session_mode.dart';
 import '../providers/sessions.dart';
 import '../providers/visible_surface.dart';
 import '../screens/terminal_screen.dart';
+import '../services/pending_reply.dart' show SessionDownException;
 import '../util/ab_log.dart';
 import '../util/device_id.dart';
 import '../util/detached.dart';
@@ -808,6 +809,8 @@ class _EditableSessionLeafState extends ConsumerState<EditableSessionLeaf> {
       await svc.rename(id, name);
     } on TimeoutException {
       report("the agent didn't answer. Check the connection and try again.");
+    } on SessionDownException catch (e) {
+      report(e.toString());
     }
   }
 

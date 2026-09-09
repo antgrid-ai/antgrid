@@ -13,7 +13,7 @@ const OUTCOMES: Array<boolean | undefined> = [true, false, undefined];
 
 const EXPECTED: Record<string, { notifications: ByOutcome; title: ByOutcome }> = {
   "claude-code": { notifications: [true, false, true], title: [true, false, true] },
-  codex: { notifications: [true, false, true], title: [true, false, true] },
+  codex: { notifications: [false, false, false], title: [true, false, true] },
   opencode: { notifications: [true, false, true], title: [true, false, true] },
   // Plugin notifications, but no structured title source — gating its OSC title
   // would kill auto-naming outright.
@@ -54,12 +54,7 @@ describe("osc suppression is intent AND outcome", () => {
   });
 
   test("an absent outcome is 'nothing could fail here', not 'assume failure'", () => {
-    // codex builds its injection out of argv alone — no file to write, so it
-    // reports no outcome and its intent stands on its own. Only an explicit
-    // false, from an injection we tried and could not complete, re-opens the
-    // scanner; treating undefined as failure would un-mute codex and opencode
-    // and double every notification they send.
-    expect(suppressesOscNotifications("codex", undefined)).toBe(true);
+    expect(suppressesOscNotifications("codex", undefined)).toBe(false);
     expect(suppressesOscTitle("codex", undefined)).toBe(true);
   });
 });

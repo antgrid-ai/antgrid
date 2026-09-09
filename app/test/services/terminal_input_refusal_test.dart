@@ -29,6 +29,12 @@ void main() {
     );
   }
 
+  /// The refusal latch is cleared by the hydrator re-drive, and both the
+  /// hydrator and the focus-resume subscription are activation-gated — this is
+  /// the checkout on screen, the one `setActiveCheckouts` always names.
+  TerminalService newService(ProjectSession session) =>
+      TerminalService.fromSession(session)..activate();
+
   /// Drains the delivery chain and the microtask the hydration re-emit is
   /// coalesced onto.
   Future<void> settle() => Future<void>.delayed(Duration.zero);
@@ -49,7 +55,7 @@ void main() {
   test('input is refused, not queued, while the transport is down', () async {
     final t = FakeAgentTransport();
     final session = await newSession(t);
-    final svc = TerminalService.fromSession(session);
+    final svc = newService(session);
     t.setEstablished(false);
 
     final ok = svc.sendInput('terminal-1', 'y\n');
@@ -68,7 +74,7 @@ void main() {
     () async {
       final t = FakeAgentTransport();
       final session = await newSession(t);
-      final svc = TerminalService.fromSession(session);
+      final svc = newService(session);
       t.setEstablished(false);
 
       expect(svc.sendInput('terminal-1', 'y\n'), isFalse);
@@ -99,7 +105,7 @@ void main() {
     () async {
       final t = FakeAgentTransport();
       final session = await newSession(t);
-      final svc = TerminalService.fromSession(session);
+      final svc = newService(session);
 
       t.emit('agent:status', {
         'projectId': 'p',
@@ -130,7 +136,7 @@ void main() {
   test('a focused pane reports paused before any keystroke', () async {
     final t = FakeAgentTransport();
     final session = await newSession(t);
-    final svc = TerminalService.fromSession(session);
+    final svc = newService(session);
     t.setEstablished(false);
 
     await resumeFocus(session);
@@ -149,7 +155,7 @@ void main() {
   test('a foregrounded pane clears a refusal the reconnect already fixed', () async {
     final t = FakeAgentTransport();
     final session = await newSession(t);
-    final svc = TerminalService.fromSession(session);
+    final svc = newService(session);
     t.setEstablished(false);
 
     expect(svc.sendInput('terminal-1', 'y\n'), isFalse);
@@ -171,7 +177,7 @@ void main() {
   test('an established transport still sends', () async {
     final t = FakeAgentTransport();
     final session = await newSession(t);
-    final svc = TerminalService.fromSession(session);
+    final svc = newService(session);
 
     final ok = svc.sendInput('terminal-1', 'ls\n');
     await settle();

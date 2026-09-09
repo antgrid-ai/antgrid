@@ -31,9 +31,7 @@ Future<AppSettingsService> _buildService() async {
   return AppSettingsService(prefs, AppSettings.fromPrefs(prefs));
 }
 
-/// Runs [body] against the settings screen on a desktop-sized viewport (the
-/// mobile branch drops the CONNECTION section, and a shorter list is a weaker
-/// scroll test).
+/// Runs [body] against the settings screen on a desktop-sized viewport.
 ///
 /// The platform override is cleared inside the test body, not in a tearDown:
 /// the binding asserts every foundation debug variable is unset before tearDown

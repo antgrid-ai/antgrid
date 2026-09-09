@@ -10,6 +10,7 @@ interface ConnState {
   state: "awaiting-hello" | "connected" | "rejected";
   appPid?: number;
   checkoutRouting?: boolean;
+  pullsTree?: boolean;
 }
 
 export interface LocalListenerOptions {
@@ -69,6 +70,13 @@ export class LocalListener implements TransportSubscriber {
    * authentication. */
   get ownerSupportsCheckoutRouting(): boolean {
     return this.ownerSocket?.data.checkoutRouting === true;
+  }
+
+  /** Whether the loopback owner pulls its own file tree (`file:tree:snapshot:request`),
+   *  so a re-sync push would only duplicate it. True with no owner attached —
+   *  there is then nothing the push could reach. */
+  get ownerPullsTree(): boolean {
+    return this.ownerSocket === null || this.ownerSocket.data.pullsTree === true;
   }
 
   /** Fail closed before a managed-checkout frame can reach an older desktop. */
@@ -219,6 +227,7 @@ export class LocalListener implements TransportSubscriber {
 
     const newPid = typeof envelope.appPid === "number" ? envelope.appPid : undefined;
     const checkoutRouting = envelope?.capabilities?.checkoutRouting === true;
+    const pullsTree = envelope?.capabilities?.pullsTree === true;
 
     // A second hello carrying the VALID token is the same trusted app
     // reconnecting (a provider rebuild, retry, or eviction+reopen on the app
@@ -248,6 +257,7 @@ export class LocalListener implements TransportSubscriber {
     ws.data.state = "connected";
     ws.data.appPid = newPid;
     ws.data.checkoutRouting = checkoutRouting;
+    ws.data.pullsTree = pullsTree;
     this.ownerSocket = ws;
     // The accepted hello and its answer, so a capture opens with the moment the
     // desktop attached rather than with unexplained traffic from a socket the

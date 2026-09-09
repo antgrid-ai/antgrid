@@ -56,7 +56,9 @@ Future<DeviceRecord> ensureCurrentUserDeviceRecord(dynamic ref) async {
     throw ProvisioningException('AUTH', 'Sign in required');
   }
 
-  final prefs = SharedPreferencesAsync();
+  final prefs = SharedPreferencesAsync(
+    options: desktopSharedPreferencesOptions,
+  );
   final existing = await prefs.getString(kLocalHostUuidKey);
   final record = await ref
       .read(deviceProvisioningProvider)
@@ -162,7 +164,9 @@ final localDeviceUuidProvider = FutureProvider<String?>((ref) async {
   final record = await store.read();
   if (record != null) return record.deviceUuid;
 
-  final prefs = SharedPreferencesAsync();
+  final prefs = SharedPreferencesAsync(
+    options: desktopSharedPreferencesOptions,
+  );
   final existing = await prefs.getString(kLocalHostUuidKey);
   if (existing != null) return existing;
 

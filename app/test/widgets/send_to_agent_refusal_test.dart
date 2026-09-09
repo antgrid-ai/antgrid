@@ -1,6 +1,8 @@
-// The three send-to-agent call sites outside the terminal pane each hand text
-// to the agent's terminal and must refuse visibly, not report success, when
-// the transport can't carry it. Every scenario below drives a REAL
+// Every send-to-agent surface routes its text through `sendCaptureToAgent`,
+// which must refuse visibly rather than report success when the transport
+// can't carry it. Mounted here are the three surfaces outside the terminal
+// pane; the pane's own selection route shares that helper and has no path of
+// its own left to test separately. Every scenario below drives a REAL
 // TerminalService (via a real ProjectSession over a FakeAgentTransport) with
 // a genuine running agent tab, so a refusal here is provably about
 // `isEstablished`, not about "no agent tab" — a different silent case

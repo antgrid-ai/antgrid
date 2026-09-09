@@ -20,6 +20,7 @@ import '../models/file_tree_models.dart';
 import '../providers/providers.dart';
 import '../util/detached.dart';
 import 'code_syntax.dart';
+import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
 import 'viewer_support.dart';
@@ -71,6 +72,10 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
   Timer? _editorReadyTimer;
   bool _showSearch = false;
   final FocusNode _searchFocusNode = FocusNode();
+
+  /// Anchors the follow-up comment popover under [SendToAgentButton] instead
+  /// of the window's centre — see [showSendToAgentComment]'s `anchorLink`.
+  final LayerLink _sendToAgentLink = LayerLink();
 
   // Edge auto-scroll
   late final Ticker _scrollTicker;
@@ -193,6 +198,9 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     });
   }
 
+  /// Routed through [sendCaptureToAgent] — see the same doc on
+  /// `TerminalViewWrapper._onSendToAgent` for why this no longer resolves a
+  /// terminal service and sends by hand.
   Future<void> _onSendToAgent() async {
     final controller = _controller;
     if (controller == null) return;
@@ -205,33 +213,18 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
       context: context,
       selectedText: text,
       sourceLabel: sourceLabel,
+      anchorLink: _sendToAgentLink,
     );
 
     if (message == null || !mounted) return;
-    // `mounted` doesn't imply the focused project still has a resolved session:
-    // the comment dialog holds this open indefinitely, and a reconnect or LRU
-    // evict in that window makes the façade throw — into a fire-and-forget
-    // button callback, so unhandled.
-    final svc = focusedCheckoutServiceOrNull(
-      ref.container,
-      (s) => s.terminalService,
+    final sent = await sendCaptureToAgent(
+      context: context,
+      container: ref.container,
+      text: message,
     );
-    if (svc == null) return;
-    if (!svc.sendToAgentTerminal(message)) {
-      if (context.mounted) showSendRefusedSnackBar(context);
-      return;
-    }
-    ref.read(focusAgentInputProvider)?.call();
+    if (!sent || !mounted) return;
     controller.cancelSelection();
     setState(() => _hasSelection = false);
-    showSentToAgentSnackBar(context);
-  }
-
-  /// `SendToAgentButton.onPressed` is a `VoidCallback`; passing the async
-  /// `_onSendToAgent` there directly would discard its future the same way an
-  /// unawaited call would, so the boundary is here instead.
-  void _handleSendToAgent() {
-    detached('FileContentViewer', 'send selection to agent', _onSendToAgent);
   }
 
   @override
@@ -506,7 +499,14 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                       child: const AbLoading(),
                     ),
                   if (showSendButton)
-                    SendToAgentButton(onPressed: _handleSendToAgent),
+                    SendToAgentButton(
+                      link: _sendToAgentLink,
+                      onPressed: () => detached(
+                        'FileContentViewer',
+                        'send to agent failed',
+                        _onSendToAgent,
+                      ),
+                    ),
                 ],
               );
             },

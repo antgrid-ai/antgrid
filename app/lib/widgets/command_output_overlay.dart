@@ -11,6 +11,7 @@ import '../models/command_models.dart';
 import '../providers/providers.dart';
 import '../services/command_service.dart';
 import '../util/detached.dart';
+import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
 
@@ -28,6 +29,10 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
   final ScrollController _scrollController = ScrollController();
   bool _scrollPending = false;
   bool _hasOutputSelection = false;
+
+  /// Anchors the follow-up comment popover under [SendToAgentButton] instead
+  /// of the window's centre — see [showSendToAgentComment]'s `anchorLink`.
+  final LayerLink _sendToAgentLink = LayerLink();
 
   /// The focused project's [CommandService], or null while its session is
   /// (re-)resolving. Every use below fires from a timer or a tap, where the
@@ -89,6 +94,9 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
     _commandService?.runCommand(current.commandName);
   }
 
+  /// Routed through [sendCaptureToAgent] — see the same doc on
+  /// `TerminalViewWrapper._onSendToAgent` for why this no longer resolves a
+  /// terminal service and sends by hand.
   Future<void> _sendTextToAgent(String text) async {
     final current = ref.read(commandStateProvider).value?.current;
     if (current == null) return;
@@ -98,23 +106,15 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
       context: context,
       selectedText: text,
       sourceLabel: sourceLabel,
+      anchorLink: _sendToAgentLink,
     );
 
     if (message == null || !mounted) return;
-    // The comment dialog holds this open indefinitely, so `mounted` alone
-    // doesn't mean the focused project still has a resolved session.
-    final svc = focusedCheckoutServiceOrNull(
-      ref.container,
-      (s) => s.terminalService,
+    await sendCaptureToAgent(
+      context: context,
+      container: ref.container,
+      text: message,
     );
-    if (svc == null) return;
-    if (!svc.sendToAgentTerminal(message)) {
-      if (context.mounted) showSendRefusedSnackBar(context);
-      return;
-    }
-    ref.read(switchToAgentProvider)?.call();
-    ref.read(focusAgentInputProvider)?.call();
-    showSentToAgentSnackBar(context);
   }
 
   void _sendFullOutputToAgent() {
@@ -124,7 +124,7 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
     if (outputText.isEmpty) return;
     detached(
       'CommandOutputOverlay',
-      'send full output to agent',
+      'send to agent failed',
       () => _sendTextToAgent(outputText),
     );
   }
@@ -249,6 +249,7 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
                           ),
                           if (showSendButton)
                             SendToAgentButton(
+                              link: _sendToAgentLink,
                               onPressed: () {
                                 // Extract selected text at press time
                                 // SelectionArea doesn't expose text programmatically,

@@ -1431,9 +1431,10 @@ class StreamTransport extends BufferedAgentTransport {
   ///
   /// [refreshSnapshot] exists for a (re)establishment, where the view-state the
   /// snapshot does not carry is stale too. A user asking one checkout to try
-  /// attaching again is not that: the hydrator replay re-asks every checkout
-  /// for its whole `tree:full`, so routing a tap through it would answer one
-  /// stalled workspace with megabytes for all of them. This carries the frame
+  /// attaching again is not that: the hydrator replay re-asks every ACTIVE
+  /// checkout for its whole `tree:full`, so routing a tap through it would
+  /// answer one stalled workspace with megabytes for every workspace on
+  /// screen beside it. This carries the frame
   /// that tap is actually after — the bridge recomputes each checkout's
   /// `agent:status` while serving the pull, so the reply is no older than the
   /// tap.

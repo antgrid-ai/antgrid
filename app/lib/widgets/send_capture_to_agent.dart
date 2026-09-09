@@ -31,13 +31,18 @@ bool focusedSessionIsChat(ProviderContainer container) =>
 ///
 /// [text] is the message body without any path line; the terminal route
 /// appends its own. [uploadService] is resolved by the caller so this stays
-/// usable from a surface whose own service may already be gone.
+/// usable from a surface whose own service may already be gone. [onProgress]
+/// and [cancelToken] only matter to the terminal route's upload — a caller
+/// wanting to surface it in flight (see `showAutoSendCapture`) passes them
+/// through; the chat route is synchronous and ignores both.
 Future<bool> sendCaptureToAgent({
   required BuildContext context,
   required ProviderContainer container,
   required String text,
   Uint8List? imageBytes,
   String? fileName,
+  void Function(int sent, int total)? onProgress,
+  UploadCancelToken? cancelToken,
 }) async {
   if (focusedSessionIsChat(container)) {
     container
@@ -83,8 +88,13 @@ Future<bool> sendCaptureToAgent({
         fileName: fileName,
         bytes: imageBytes,
         mimeType: 'image/png',
+        onProgress: onProgress,
+        cancelToken: cancelToken,
       );
     } on Object catch (e) {
+      // A cancel is the user's own doing, not a failure to report — the
+      // caller that owns cancelToken already knows and is closing its own UI.
+      if (e is UploadException && e.code == 'CANCELLED') return false;
       if (context.mounted) {
         showAbSnackBar(context, uploadErrorText(e, fileName));
       }

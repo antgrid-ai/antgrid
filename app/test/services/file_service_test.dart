@@ -644,6 +644,39 @@ void main() {
     await session.close();
   });
 
+  test('selectFile expands every ancestor so the tree reveals the file', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.selectFile('src/widgets/deep/nested_file.dart');
+
+    expect(
+      svc.currentState.expandedPaths,
+      containsAll(<String>['src', 'src/widgets', 'src/widgets/deep']),
+    );
+    expect(
+      svc.currentState.expandedPaths,
+      isNot(contains('src/widgets/deep/nested_file.dart')),
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('selectFile on a top-level file expands nothing', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.selectFile('README.md');
+
+    expect(svc.currentState.expandedPaths, isEmpty);
+
+    await svc.dispose();
+    await session.close();
+  });
+
   group('attachment preview', () {
     // The preview is a THIRD file:content consumer beside the Files and Git
     // panes. It shares the verb and the viewers, but not the slot — routing it
@@ -771,7 +804,8 @@ void main() {
       });
       await Future<void>.delayed(Duration.zero);
 
-      final svc = FileService.fromSession(session, checkoutId: 'wt-1');
+      final svc = FileService.fromSession(session, checkoutId: 'wt-1')
+        ..activate();
       await Future<void>.delayed(Duration.zero);
       final request = t.sent.lastWhere(
         (m) => m['type'] == 'file:tree:snapshot:request',
@@ -793,7 +827,8 @@ void main() {
     test('re-pulls on reconnect and stops after dispose', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
-      final svc = FileService.fromSession(session, checkoutId: 'wt-1');
+      final svc = FileService.fromSession(session, checkoutId: 'wt-1')
+        ..activate();
       await Future<void>.delayed(Duration.zero);
 
       t.redriveHydrators();
@@ -839,7 +874,7 @@ void main() {
         () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
+      final svc = FileService.fromSession(session)..activate();
       await Future<void>.delayed(Duration.zero);
       expect(treeRequests(t).last.containsKey('sinceSeq'), isFalse);
 
@@ -866,7 +901,7 @@ void main() {
     test('file:tree:unchanged keeps both the tree and the claim', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
+      final svc = FileService.fromSession(session)..activate();
 
       t.emit('file:tree:snapshot', {
         'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
@@ -889,7 +924,7 @@ void main() {
     test('only a contiguous tree:update advances the claim', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
+      final svc = FileService.fromSession(session)..activate();
 
       t.emit('file:tree:snapshot', {
         'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
@@ -929,7 +964,7 @@ void main() {
         () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
-      final svc = FileService.fromSession(session);
+      final svc = FileService.fromSession(session)..activate();
 
       t.emit('file:tree:snapshot', {
         'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),

@@ -162,6 +162,44 @@ void main() {
       expect(find.text('README.md'), findsNothing);
     });
 
+    testWidgets('selecting a file off the current viewport scrolls to reveal it', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 300);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final tree = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [
+          for (var i = 0; i < 60; i++)
+            FileNode(
+              name: 'file$i.dart',
+              path: 'project/file$i.dart',
+              type: FileNodeType.file,
+              extension: 'dart',
+            ),
+        ],
+      );
+
+      // Nothing selected yet: the tree renders from the top, so a file far
+      // down the (unscrolled) list is not yet built.
+      await tester.pumpWidget(buildTestWidget(root: tree));
+      expect(find.text('file59.dart'), findsNothing);
+
+      // Selecting it (as opening it from an agent transcript link does)
+      // should scroll the tree down to reveal its row, not just open the
+      // file's content off in another pane.
+      await tester.pumpWidget(
+        buildTestWidget(root: tree, selectedFilePath: 'project/file59.dart'),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('file59.dart'), findsOneWidget);
+    });
+
     testWidgets('a filename wider than the panel does not overflow', (
       tester,
     ) async {

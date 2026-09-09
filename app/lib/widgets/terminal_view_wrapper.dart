@@ -24,6 +24,7 @@ import '../services/terminal_service.dart';
 import '../util/detached.dart';
 import '../util/external_url.dart';
 import 'clipboard_image.dart';
+import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
 import 'terminal_attachment_uploader.dart';
@@ -139,6 +140,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   final ValueNotifier<({String uri, Offset at})?> _hoveredLink = ValueNotifier(
     null,
   );
+
+  /// Anchors the follow-up comment popover under [SendToAgentButton] instead
+  /// of the window's centre — see [showSendToAgentComment]'s `anchorLink`.
+  final LayerLink _sendToAgentLink = LayerLink();
 
   /// A hovered URI still waiting for the pointer position that produced it.
   ///
@@ -774,6 +779,15 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         : normalized;
   }
 
+  /// Routed through [sendCaptureToAgent] rather than resolving a terminal
+  /// service and sending by hand: that helper is the one place in the app
+  /// that already gets this right — it resolves the FOCUSED checkout fresh
+  /// (never a service captured before the dialog's indefinite wait, which a
+  /// reconnect or LRU evict in that window can make stale), tells the user
+  /// honestly when nothing was connected to send to instead of claiming
+  /// success regardless, and routes a chat-mode session to the composer
+  /// instead of a terminal that doesn't exist for it. Hand-rolling that logic
+  /// here a second time is exactly how the two copies drift.
   Future<void> _onSendToAgent() async {
     final text = _selectedText;
     if (text == null || text.isEmpty) return;
@@ -783,30 +797,17 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       context: context,
       selectedText: text,
       sourceLabel: sourceLabel,
+      anchorLink: _sendToAgentLink,
     );
 
     if (message == null || !mounted) return;
-    // `mounted` doesn't imply the focused project still has a resolved session:
-    // the comment dialog holds this open indefinitely, and a reconnect or LRU
-    // evict in that window makes the façade throw — into a fire-and-forget
-    // button callback, so unhandled.
-    final svc = focusedCheckoutServiceOrNull(
-      ref.container,
-      (s) => s.terminalService,
+    final sent = await sendCaptureToAgent(
+      context: context,
+      container: ref.container,
+      text: message,
     );
-    if (svc == null) return;
-    // The input-paused strip explains WHY a send is refused, but it cannot
-    // stand in for the outcome of this one: the selection is dropped, not
-    // queued, and "sent to agent" over a send that never left is the one thing
-    // no surface may say. The selection is kept so the user can retry it.
-    if (!svc.sendToAgentTerminal(message)) {
-      if (context.mounted) showSendRefusedSnackBar(context);
-      return;
-    }
-    ref.read(switchToAgentProvider)?.call();
-    ref.read(focusAgentInputProvider)?.call();
+    if (!sent || !mounted) return;
     setState(() => _selectedText = null);
-    showSentToAgentSnackBar(context);
   }
 
   @override
@@ -1263,7 +1264,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                   ),
                 ),
                 if (showSendButton)
-                  SendToAgentButton(onPressed: _onSendToAgent),
+                  SendToAgentButton(
+                    link: _sendToAgentLink,
+                    onPressed: () => detached(
+                      'TerminalView',
+                      'send to agent failed',
+                      _onSendToAgent,
+                    ),
+                  ),
                 Positioned.fill(
                   child: ValueListenableBuilder<({String uri, Offset at})?>(
                     valueListenable: _hoveredLink,
@@ -1368,6 +1376,19 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     final renderSize = amDriver ? _renderSize : null;
     final widthForCols = renderSize?.width ?? constraints.maxWidth;
     final heightForRows = renderSize?.height ?? constraints.maxHeight;
+
+    // A panel can be squeezed to zero readable width by a sibling pane while
+    // staying mounted on purpose (the touch tablet's context-panel expand
+    // pads the agent pane to nothing rather than unmounting it — see
+    // `workspace_shell.dart`'s `_buildTabletTouch`). With no content area the
+    // `max(1, …)` floors below would still produce a "valid" 1x1 grid, and
+    // sending it makes this device the shared driver for every OTHER viewer
+    // of the terminal — which is how a fullscreen panel on one client
+    // letterboxes every other client down to a handful of glyphs. Bail out
+    // before claiming or booking anything; the panel becoming visible again
+    // is a real layout pass that resumes this normally.
+    if (widthForCols <= _hPad || heightForRows <= _hPad) return;
+
     final nativeCols = math.max(
       1,
       ((widthForCols - _hPad) / charWidth).floor(),

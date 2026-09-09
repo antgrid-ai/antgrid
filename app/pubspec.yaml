@@ -73,6 +73,9 @@ dependencies:
   flutter_svg: ^2.2.4
   file_selector: ^1.1.0
   shared_preferences: ^2.5.5
+  shared_preferences_windows: ^2.4.1
+  shared_preferences_linux: ^2.4.1
+  shared_preferences_foundation: ^2.5.6
   collection: ^1.18.0
   path: ^1.9.0
   flutter_colorpicker: ^1.1.0

@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_snack_bar.dart';
 
 import '../constants/breakpoints.dart';
@@ -16,11 +18,19 @@ import '../design/ab_colors.dart';
 /// the capture routes (an element pick, a drawing over the preview) attach a
 /// picture the user never otherwise sees before it reaches the agent, and a
 /// crop of the wrong element is only obvious when you can look at it.
+///
+/// [anchorLink] pins the popover under whatever triggered it (typically a
+/// `CompositedTransformTarget` around a "Send to Agent" button) instead of
+/// the window centre — so the box appears where the user was just looking,
+/// beside the selection it's about. Desktop/tablet only: the mobile bottom
+/// sheet is already anchored to the action by sliding up from the bottom of
+/// the same screen, so it ignores this.
 Future<String?> showSendToAgentComment({
   required BuildContext context,
   required String selectedText,
   required String sourceLabel,
   Uint8List? imageBytes,
+  LayerLink? anchorLink,
 }) async {
   final screenWidth = MediaQuery.of(context).size.width;
   final isMobile = screenWidth < kCompactBreakpoint;
@@ -28,7 +38,13 @@ Future<String?> showSendToAgentComment({
   if (isMobile) {
     return _showBottomSheet(context, selectedText, sourceLabel, imageBytes);
   } else {
-    return _showPopover(context, selectedText, sourceLabel, imageBytes);
+    return _showPopover(
+      context,
+      selectedText,
+      sourceLabel,
+      imageBytes,
+      anchorLink,
+    );
   }
 }
 
@@ -78,19 +94,23 @@ Future<String?> _showBottomSheet(
   );
 }
 
-/// Centred, not anchored to whatever triggered it.
+/// Anchored under [anchorLink] when one is given — hanging the box off the
+/// button that triggered it, top-right of the terminal, rather than dropping
+/// it in the window's centre where nothing else on screen points to it. Falls
+/// back to centred when there's no link (a caller with no fixed trigger
+/// widget to hang off).
 ///
-/// This box is a modal step in the middle of a flow — read the capture, type a
-/// line, send — and the thing it is about (a picked element, a drawing) is
-/// already highlighted on the page behind it. Hanging it off a toolbar button
-/// put it in a corner, over the top-right of the very preview the user is
-/// being asked to look at, and pushed it off screen entirely on a narrow
-/// panel. The centre is where a modal is looked for.
+/// Growth is leftward and downward from the button's bottom-right corner —
+/// the button lives at the panel's trailing edge, so leftward is the only
+/// direction that stays inside it, same reasoning as `WorkspaceMenuButton`'s
+/// popup. [_clampedPopoverWidth] is what keeps that leftward box from
+/// overrunning the left edge on a narrow panel.
 Future<String?> _showPopover(
   BuildContext context,
   String selectedText,
   String sourceLabel,
   Uint8List? imageBytes,
+  LayerLink? anchorLink,
 ) async {
   final overlay = Overlay.of(context);
   final completer = Completer<String?>();
@@ -99,6 +119,35 @@ Future<String?> _showPopover(
   entry = OverlayEntry(
     builder: (context) {
       final size = MediaQuery.sizeOf(context);
+      final width = _clampedPopoverWidth(size.width);
+      final surface = Material(
+        color: const Color(0x00000000),
+        child: Container(
+          width: width,
+          // Never taller than the window it floats in — a large capture
+          // preview would otherwise push the comment field and the Send
+          // button off the bottom.
+          constraints: BoxConstraints(maxHeight: size.height * 0.8),
+          decoration: BoxDecoration(
+            color: context.antgrid.bgSurface,
+            border: Border.all(color: context.antgrid.borderDefault),
+            borderRadius: AbTokens.borderRadius8,
+          ),
+          child: _CommentContent(
+            selectedText: selectedText,
+            sourceLabel: sourceLabel,
+            imageBytes: imageBytes,
+            onSend: (message) {
+              entry.remove();
+              if (!completer.isCompleted) completer.complete(message);
+            },
+            onCancel: () {
+              entry.remove();
+              if (!completer.isCompleted) completer.complete(null);
+            },
+          ),
+        ),
+      );
       return Stack(
         children: [
           GestureDetector(
@@ -109,36 +158,19 @@ Future<String?> _showPopover(
             behavior: HitTestBehavior.opaque,
             child: const SizedBox.expand(),
           ),
-          Center(
-            child: Material(
-              color: const Color(0x00000000),
-              child: Container(
-                width: _kPopoverWidth,
-                // Never taller than the window it floats in — a large capture
-                // preview would otherwise push the comment field and the Send
-                // button off the bottom.
-                constraints: BoxConstraints(maxHeight: size.height * 0.8),
-                decoration: BoxDecoration(
-                  color: context.antgrid.bgSurface,
-                  border: Border.all(color: context.antgrid.borderDefault),
-                  borderRadius: AbTokens.borderRadius8,
+          anchorLink == null
+              ? Center(child: surface)
+              : CompositedTransformFollower(
+                  link: anchorLink,
+                  targetAnchor: Alignment.bottomRight,
+                  followerAnchor: Alignment.topRight,
+                  offset: const Offset(0, AbTokens.space8),
+                  // The follower otherwise hangs off the RIGHT edge of its
+                  // target with no bound — off the button is off the window
+                  // too, since the button itself sits at the panel's own
+                  // trailing edge.
+                  child: Align(alignment: Alignment.topRight, child: surface),
                 ),
-                child: _CommentContent(
-                  selectedText: selectedText,
-                  sourceLabel: sourceLabel,
-                  imageBytes: imageBytes,
-                  onSend: (message) {
-                    entry.remove();
-                    if (!completer.isCompleted) completer.complete(message);
-                  },
-                  onCancel: () {
-                    entry.remove();
-                    if (!completer.isCompleted) completer.complete(null);
-                  },
-                ),
-              ),
-            ),
-          ),
         ],
       );
     },
@@ -148,12 +180,20 @@ Future<String?> _showPopover(
   return completer.future;
 }
 
-const double _kPopoverWidth = 380.0;
+/// [_kPopoverWidth], but never wider than the window can show with a margin
+/// on both sides — the anchored placement grows leftward off a button
+/// pinned to the right edge, so an unclamped width is what would otherwise
+/// run past the LEFT edge on a narrow panel (a docked context pane, a
+/// tablet split) that the centred placement never had to worry about.
+double _clampedPopoverWidth(double screenWidth) =>
+    math.min(_kPopoverWidth, screenWidth - AbTokens.space16 * 2);
 
-/// Ceiling on the thumbnail. Tall enough to recognise a cropped element or a
-/// drawing at a glance, short enough that the comment field stays in view
-/// without scrolling for the common case.
-const double _kCapturePreviewMaxHeight = 220.0;
+const double _kPopoverWidth = 480.0;
+
+/// Default ceiling on [CaptureImagePreview]. Tall enough to recognise a
+/// cropped element or a drawing without squinting, short enough that the
+/// comment field stays in view without scrolling for the common case.
+const double _kCapturePreviewMaxHeight = 380.0;
 
 class _CommentContent extends StatefulWidget {
   final String selectedText;
@@ -235,16 +275,28 @@ class _CommentContentState extends State<_CommentContent> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            widget.sourceLabel,
-            style: AbTokens.monoStyle(
-              fontSize: AbTokens.fontXs,
-              color: context.antgrid.textMuted,
-            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text(
+                  widget.sourceLabel,
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: context.antgrid.textMuted,
+                  ),
+                ),
+              ),
+              AbIconButton(
+                icon: AbIcons.close,
+                tooltip: 'Cancel',
+                onTap: widget.onCancel,
+              ),
+            ],
           ),
           const SizedBox(height: AbTokens.space8),
           if (image != null) ...[
-            _CapturePreview(bytes: image),
+            CaptureImagePreview(bytes: image),
             const SizedBox(height: AbTokens.space8),
           ],
           Container(
@@ -269,6 +321,8 @@ class _CommentContentState extends State<_CommentContent> {
           TextField(
             controller: _commentController,
             focusNode: _focusNode,
+            minLines: 2,
+            maxLines: 2,
             style: AbTokens.sansStyle(fontSize: AbTokens.fontMd),
             decoration: InputDecoration(
               hintText: 'Add a comment (optional)',
@@ -301,25 +355,6 @@ class _CommentContentState extends State<_CommentContent> {
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              GestureDetector(
-                onTap: widget.onCancel,
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AbTokens.space8,
-                      vertical: AbTokens.space4,
-                    ),
-                    child: Text(
-                      'Cancel',
-                      style: AbTokens.sansStyle(
-                        color: context.antgrid.textMuted,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: AbTokens.space8),
               GestureDetector(
                 onTap: _send,
                 child: MouseRegion(
@@ -362,23 +397,31 @@ class _CommentContentState extends State<_CommentContent> {
   }
 }
 
-/// The exact image about to be attached, shown before it is.
+/// The exact image about to be attached, shown before it is. Shared by the
+/// comment popover above and by `showAutoSendCapture` (the draw tool's
+/// auto-send dialog), so both surfaces show the pending capture at the same
+/// size.
 ///
 /// Decoded at [_kCaptureDecodeWidth] rather than natively: a viewport capture
 /// is a multi-megapixel bitmap, and holding one at full size to draw it a
 /// couple of hundred pixels wide is the difference between a thumbnail and a
 /// spike in memory every time this box opens.
-class _CapturePreview extends StatelessWidget {
-  const _CapturePreview({required this.bytes});
+class CaptureImagePreview extends StatelessWidget {
+  const CaptureImagePreview({
+    super.key,
+    required this.bytes,
+    this.maxHeight = _kCapturePreviewMaxHeight,
+  });
 
-  static const int _kCaptureDecodeWidth = 760;
+  static const int _kCaptureDecodeWidth = 960;
 
   final Uint8List bytes;
+  final double maxHeight;
 
   @override
   Widget build(BuildContext context) {
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxHeight: _kCapturePreviewMaxHeight),
+      constraints: BoxConstraints(maxHeight: maxHeight),
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: context.antgrid.bgDeepest,

@@ -79,7 +79,13 @@ void main() {
     session,
     snapshotAttachTimeout: snapshotAttachTimeout,
     checkoutAttachTimeout: checkoutAttachTimeout,
-  );
+  )
+    // The heavy hydrator and the focus-resume re-drive are activation-gated,
+    // and every case here is about the checkout that is on screen — the one
+    // `ProjectSession.setActiveCheckouts` always names. Left inactive, a
+    // resume would re-pull nothing and the cases about a re-pull would pass
+    // while asserting over a service nothing ever asked to do anything.
+    ..activate();
 
   Map<String, dynamic> terminalInfo(String id, {bool running = true}) => {
     'id': id,

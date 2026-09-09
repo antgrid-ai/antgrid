@@ -245,6 +245,11 @@ export interface AgentCore {
   setPeerPubkeyProvider(fn: (() => string | null) | null): void;
   /** Current remote app capability; cleared when that transport detaches. */
   setPeerCheckoutRoutingProvider(fn: (() => boolean) | null): void;
+  /** Current remote app's tree-pull capability; cleared when that transport detaches. */
+  setPeerPullsTreeProvider(fn: (() => boolean) | null): void;
+  /** Same question for the loopback owner. Wired once at listener bind — the
+   *  listener outlives any single owner. */
+  setOwnerPullsTreeProvider(fn: (() => boolean) | null): void;
   /** Stream-gating state. The transport's peer-online/offline callbacks flip
    *  `peerOnline` to suppress the heavy stream while the paired phone is gone. */
   readonly connState: ConnState;
@@ -713,6 +718,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       : null;
     if (!terminalId) { sendAb(msg); return; }
     const { runtime, externalId } = terminalOwner(terminalId);
+    const session = msg.type === "terminal:notification" ? sessions?.get(terminalId) : undefined;
+    const tool = session?.tool ?? (session?.command ? undefined : runtime.config.agent?.tool);
+    if (session && msg.type === "terminal:notification" && tool === "codex") {
+      // Codex's TUI is configured to emit approvals only. Use the hook's wire
+      // channel so mobile push and the work-status reducer also see the prompt,
+      // without a second terminal notification producing a duplicate toast.
+      sendFromRuntime(runtime, createMessage("notification:push", {
+        notificationType: "permission_request",
+        message: msg.body ?? msg.title ?? "Codex needs approval",
+        sessionId: session.id,
+        sessionTitle: session.name,
+        projectId: project.id,
+      }));
+      return;
+    }
     sendFromRuntime(runtime, { ...msg, terminalId: externalId } as AbMessage);
   }
 
@@ -725,11 +745,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // in local mode, where there is no relay peer.
   let peerPubkeyProvider: (() => string | null) | null = null;
   let peerCheckoutRoutingProvider: (() => boolean) | null = null;
+  let peerPullsTreeProvider: (() => boolean) | null = null;
+  let ownerPullsTreeProvider: (() => boolean) | null = null;
   function setPeerPubkeyProvider(fn: (() => string | null) | null) {
     peerPubkeyProvider = fn;
   }
   function setPeerCheckoutRoutingProvider(fn: (() => boolean) | null) {
     peerCheckoutRoutingProvider = fn;
+  }
+  function setPeerPullsTreeProvider(fn: (() => boolean) | null) {
+    peerPullsTreeProvider = fn;
+  }
+  function setOwnerPullsTreeProvider(fn: (() => boolean) | null) {
+    ownerPullsTreeProvider = fn;
   }
 
   // Mobile-access gate, shared by every inbound path (bus verbs AND the
@@ -747,6 +775,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   function currentPeerCanRouteCheckouts(): boolean {
     return peerCheckoutRoutingProvider?.() === true;
+  }
+
+  /** A re-sync push reaches EVERY bus subscriber, so it may only be skipped when
+   *  every attached client pulls the tree for itself. No provider wired at all
+   *  means the core is driven by something that named no capability (a bare bus,
+   *  as in the unit tests) — that client gets the push. */
+  function everyClientPullsTrees(): boolean {
+    const wired = [ownerPullsTreeProvider, peerPullsTreeProvider]
+      .filter((p): p is () => boolean => p !== null);
+    return wired.length > 0 && wired.every((p) => p());
   }
 
   function handleTunnelMessage(raw: unknown) {
@@ -2560,17 +2598,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       );
     }
 
-    // Re-send the file tree. Forced for the same reason as the status/git pair
-    // above: an idle project's tree is byte-identical to the cached one, so the
-    // ordinary dedup would drop the very re-push this resync exists to perform.
-    for (const runtime of checkoutRuntimes.values()) {
-      await yieldToEventLoop();
-      // Re-tested after the yield, not just on entry: `sendFullTree` walks the
-      // whole tree synchronously and `stop()` does not disable it, so a
-      // teardown that started during the yield would be walking a directory
-      // Git is removing.
-      if (runtime.disposed) continue;
-      runtime.fileWatcher?.sendFullTree({ force: true });
+    // Re-send the file tree, but only for a client that cannot pull it. An app
+    // advertising `pullsTree` asks per checkout with `file:tree:snapshot:request`
+    // on every establishment, so the push is the largest frame the bridge
+    // produces spent on bytes already in flight the other way — ahead of that
+    // app's replies in the same FIFO.
+    //
+    // Forced, for the same reason as the status/git pair above: an idle
+    // project's tree is byte-identical to the cached one, so the ordinary dedup
+    // would drop the very re-push this branch exists to perform.
+    if (!everyClientPullsTrees()) {
+      for (const runtime of checkoutRuntimes.values()) {
+        await yieldToEventLoop();
+        // Re-tested after the yield, not just on entry: `sendFullTree` walks the
+        // whole tree synchronously and `stop()` does not disable it, so a
+        // teardown that started during the yield would be walking a directory
+        // Git is removing.
+        if (runtime.disposed) continue;
+        runtime.fileWatcher?.sendFullTree({ force: true });
+      }
     }
 
     // Re-emit the detected-port list. ports:update is only pushed on change,
@@ -4058,6 +4104,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     abortTunnelStreams,
     setPeerPubkeyProvider,
     setPeerCheckoutRoutingProvider,
+    setPeerPullsTreeProvider,
+    setOwnerPullsTreeProvider,
     connState,
     deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean> {
       if (!sessions) return false;
