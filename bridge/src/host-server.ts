@@ -37,6 +37,7 @@ import { z } from "zod";
 import { SessionManager } from "./session-manager";
 import { SessionBusSessionIndex } from "./session-bus/session-index";
 import { SessionBusCoordinator } from "./session-bus/coordinator";
+import { MAX_BUS_ROUTES } from "./session-bus/constants";
 import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
 import type { BranchRemoteStatus } from "./git-branches";
@@ -299,12 +300,16 @@ export class HostServer {
         // the whole point of moving the route table off a single core.
         const origin = this.sessionBus.routeFor(ctx.contextId);
         if (!origin) {
-          if (!this.busRouteMissWarned.has(ctx.contextId)) {
-            this.busRouteMissWarned.add(ctx.contextId);
+          if (this.latchBusWarn(this.busRouteMissWarned, ctx.contextId)) {
             log.warn("session bus: no carrier route for context %s — frames held until one arrives", ctx.contextId);
           }
           return false;
         }
+        // A route resolved, so the next context that loses one is worth saying
+        // again. Cleared here and not on a successful send: a route that exists
+        // but whose core is cold is a different silence, and latching this on it
+        // would mute the warning for the outage that follows.
+        this.busRouteMissWarned.delete(ctx.contextId);
         const sent = this.cores.get(origin.projectId)?.core.sendToAppSession(origin.peerId, frame) ?? false;
         if (sent) origin.at = Date.now();
         return sent;
@@ -320,8 +325,7 @@ export class HostServer {
       const sentToOwner = projectId ? this.cores.get(projectId)?.core.sendToOwner(frame) ?? false : false;
       if (sentToOwner) {
         this.busOwnerMissWarned.delete(ctx.contextId);
-      } else if (!this.busOwnerMissWarned.has(ctx.contextId)) {
-        this.busOwnerMissWarned.add(ctx.contextId);
+      } else if (this.latchBusWarn(this.busOwnerMissWarned, ctx.contextId)) {
         log.warn(
           "session bus: no carrier attached to project %s for context %s — frames held until a desktop app attaches",
           projectId,
@@ -331,6 +335,21 @@ export class HostServer {
       return sentToOwner;
     },
   });
+
+  /** Latch [contextId] into a warn set, answering whether this is the first
+   *  time — so a frame retried once a second says its absence once, not once a
+   *  tick. Unlike the per-core sets this replaced, these live as long as the
+   *  MACHINE, so the size check is what keeps a de-duplicator from becoming a
+   *  leak: a latch bigger than the route table it shadows is tracking more
+   *  contexts than this host can route, and the whole cost of dropping it is
+   *  that some of those absences get said a second time. */
+  private latchBusWarn(latch: Set<string>, contextId: string): boolean {
+    if (latch.has(contextId)) return false;
+    if (latch.size >= MAX_BUS_ROUTES) latch.clear();
+    latch.add(contextId);
+    return true;
+  }
+
   // The always-on, coreless control-plane relay registered under the BARE
   // deviceUuid (no projectId), used to advertise the project catalog and accept
   // mobile-access-gated project verbs from a paired phone. Opened only when remote

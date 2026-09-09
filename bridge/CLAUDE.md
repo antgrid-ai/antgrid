@@ -205,18 +205,25 @@ edit breaks silently.
   a peer admitted onto ANY project's stream can apply a frame naming a session
   in any OTHER project this machine holds, because `addressesSameSession` was
   always machine+session and never machine+session+project. What still bounds
-  that is unchanged by the move, and is named here so it is a decision rather
-  than something discovered later: `remoteFrameAllowed` (`agent-core.ts`, gate
-  applied once per inbound frame in `attachTransport`, before dispatch) refuses
-  every relay-origin frame while the machine's mobile-access switch is off —
+  that — and what does NOT, which is the half worth writing down — is named
+  here so it is a decision rather than something discovered later.
+  `remoteFrameAllowed` (`agent-core.ts`, gate applied once per inbound frame in
+  `attachTransport`, before dispatch) refuses every relay-origin frame while the
+  machine's mobile-access switch is off; that switch is machine-wide, so it
+  bounds the widened address space exactly as it bounded the narrow one —
   loopback is exempt, but a loopback caller is this machine's own desktop,
-  already trusted with every session on it; the `checkoutRouting` gate
-  (`peerCanRouteCheckouts`, same call site) refuses a peer that never declared
-  the capability, for any project currently holding an isolated session; and a
-  session id is `crypto.randomUUID()` (`session-manager.ts`), so naming one is
-  guessing a UUID, never enumerating a small keyspace. Together these mean
-  widening the address space to the machine did not widen WHO may address it —
-  only what an already-admitted peer may name once inside.
+  already trusted with every session on it. A session id is
+  `crypto.randomUUID()` (`session-manager.ts`), so naming one is guessing a
+  UUID, never enumerating a small keyspace. The `checkoutRouting` gate
+  (`peerCanRouteCheckouts`, same call site) does NOT follow the address: it
+  reads the ARRIVING core's own `hasIsolatedSessions()`, so a peer admitted to a
+  project holding no isolated session passes it and may then name a session in
+  a project that does — the one refusal the move genuinely widened, left to
+  Wave 2 rather than described here as cover it does not give. Net: WHO may
+  address this machine is unchanged (an account-trusted peer, mobile access on,
+  on a project in the host's catalog); what an already-admitted peer may NAME
+  once inside is now every session on the machine, and the isolated-session
+  gate covers only the project its frame arrived on.
 - **Outbound on the machine that is answering is `sendToAppSession(peerId)`,**
   keyed by the app session — and, since the route table moved onto the
   coordinator itself (E9/§5.4), the PROJECT — that carried the exchange in

@@ -339,7 +339,9 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * Hydrate every session this project left bus state on disk for.
+   * Hydrate every session this coordinator answers for that left bus state on
+   * disk — machine-wide when a host owns it, since the enumeration below reads
+   * every project's directory and only `projectIdFor` narrows it.
    *
    * A restart is the only case that needs it, and the case that would otherwise
    * lose a message in silence: `pump` drains the sessions it holds in memory and
@@ -613,9 +615,10 @@ export class SessionBusCoordinator {
     this.ensureTimer();
   }
 
-  /** The retry timer runs only while this project has something to wait for. A
-   *  project holding nothing — nearly always — must not wake the process once a
-   *  second forever. */
+  /** The retry timer runs only while some session this coordinator holds has
+   *  something to wait for — every project on the machine, once a host owns it.
+   *  A machine holding nothing — nearly always — must not wake the process once
+   *  a second forever. */
   private ensureTimer(): void {
     if (this.timer || !this.anyPending()) return;
     this.timer = setInterval(() => this.pump(), OUTBOX_TICK_MS);

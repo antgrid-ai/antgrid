@@ -923,8 +923,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   /** Contexts already warned about for having no route. An unroutable frame is
    *  held and re-tried on every coordinator tick, so a per-attempt warning would
-   *  repeat for the life of the bridge. Cleared when a route appears, so a link
-   *  that breaks twice is said twice. */
+   *  repeat for the life of the bridge. Cleared the next time a route resolves
+   *  for the context, so a link that breaks twice is said twice — the clear
+   *  lives at the send below rather than where a route is learned, because the
+   *  route table itself is the coordinator's now and may be shared with every
+   *  other project on the machine. */
   const busRouteMissWarned = new Set<string>();
 
   /** The same latch for a LEAD with no carrier attached. Separate from the one
@@ -1003,6 +1006,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           }
           return false;
         }
+        // A route resolved, so the next context that loses one is worth saying
+        // again. Cleared here and not on a successful send: a route that exists
+        // but whose core is cold is a different silence, and latching this on it
+        // would mute the warning for the outage that follows.
+        busRouteMissWarned.delete(ctx.contextId);
         const sent = opts.sendToAppSession?.(origin.peerId, frame) ?? false;
         if (sent) origin.at = Date.now();
         return sent;
@@ -4402,13 +4410,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       isShuttingDown = true;
 
       apiServer?.stop();
-      // Detach this project's consumer only — never `sessionBus.stop()`: when
-      // `opts.sessionBus` is host-injected, the coordinator is shared with
-      // every other project on the machine, and stopping it here would kill
-      // the shared retry timer for all of them over one project's teardown
-      // (an LRU eviction, say). The coordinator's own lifetime is the host's
-      // to stop, once, at machine shutdown.
+      // Detach this project's consumer always; stop the coordinator only when
+      // this core built it. A host-injected one is shared with every other
+      // project on the machine, and stopping it here would kill the shared
+      // retry timer for all of them over one project's teardown (an LRU
+      // eviction, say) — its lifetime is the host's, stopped once at machine
+      // shutdown. The fallback has no host to do that, so its 1 Hz timer would
+      // otherwise outlive the core forever, pumping held frames through a
+      // torn-down transport and writing them back into a directory the caller
+      // has already removed. Mirrors the construction guard: whoever built it
+      // stops it.
       sessionBus.setListener(project.id, null);
+      if (!opts.sessionBus) sessionBus.stop();
       // Before teardownServices, which force-kills through `killAll()` and then
       // nulls `manager` — sequenced after it this could only ever see an empty
       // map, so no session was ever asked to exit on its own and the line below
