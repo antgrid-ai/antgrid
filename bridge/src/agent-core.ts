@@ -33,13 +33,12 @@ import { augmentAgentLaunch } from "./agent-launch-augmenter";
 import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
 import { saveBrief } from "./session-bus/brief-store";
 import { removeSessionBusSession } from "./session-bus/store-fs";
-import { BUS_ROUTE_PERSIST_INTERVAL_MS, MAX_BUS_ROUTES, TASK_EXPIRY_MS } from "./session-bus/constants";
+import { BUS_ROUTE_PERSIST_INTERVAL_MS, BUS_ROUTE_TTL_MS, MAX_BUS_ROUTES } from "./session-bus/constants";
 import { loadBusRoutes, saveBusRoutes } from "./session-bus/route-store";
 import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
 import { sameAddress } from "./session-bus/address";
 import { lineForEvent, lineForJoin, type JoinInput } from "./session-bus/deliver-event";
 import { neutralizeFenced } from "./session-bus/delivery";
-import { stampTaskState } from "./session-bus/state-stamp";
 import type { QueuedLine } from "./session-bus/delivery-queue";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, SessionMemberOrphanWire, SessionMemberRecordWire, SessionMemberReleaseWire, SessionMembershipCreateWire, type AbMessage, type RpcRequest, type SessionEntry, type SessionMemberOf, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
@@ -104,17 +103,15 @@ const yieldToEventLoop = () => new Promise<void>((r) => setImmediate(r));
 const TUNNEL_ORIGIN_TTL_MS = 120_000;
 
 /** How long the app session that delivered a bus frame stays the way back for
- *  its context. Never shorter than a task's own life: a task is a unit of work,
- *  not a request/response, and the peer's answer may be the first frame it sends
- *  after a long stretch of silence — a route that lapsed while its task was still
- *  live would strand every report the peer had left to make. A successful send
- *  refreshes it too, so a route in continuous use never ages out at all. An
+ *  its context. Sized to outlast a conversation rather than a round trip: a
+ *  reply may be the first frame the other side sends after a long stretch of
+ *  silence, and a route that lapsed in between would strand it. A successful
+ *  send refreshes it too, so a route in continuous use never ages out at all. An
  *  expired entry costs nothing but a held frame, which the next inbound frame on
- *  the context releases. It is NEVER a fallback to broadcast: the bus has no
- *  addressing, so a broadcast would put task traffic on the human's phone
- *  (spec 4.1).
+ *  the context releases. It is NEVER a fallback to broadcast: a broadcast would
+ *  put another session's words on the human's phone.
  */
-const BUS_ORIGIN_TTL_MS = TASK_EXPIRY_MS;
+const BUS_ORIGIN_TTL_MS = BUS_ROUTE_TTL_MS;
 
 type CheckoutAgentSpec = {
   command: string;
@@ -936,14 +933,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return { kind: "peer", peerId: origin.peerId };
   }
 
-  // Which app session carried a bus frame in, keyed by its context. A peer
-  // bridge cannot reach the lead's machine (D7), so the carrier that delivered
-  // to it is its only way back; unlike a tunnel there is no broadcast fallback,
-  // because the bus fans out to every established session including the human's
-  // phone (spec 4.1). A miss holds the frame in the outbox instead, which the
-  // next inbound frame on the context clears.
-  // Hydrated, because a fresh process has learned nothing and the task store it
-  // resumes beside would then refuse every retry it re-arms — see route-store.
+  // Which app session carried a bus frame in, keyed by its context. A bridge
+  // cannot dial another bridge, so the carrier that delivered to it is its only
+  // way back; unlike a tunnel there is no broadcast fallback, because the bus
+  // fans out to every established session including the human's phone. A miss
+  // holds the frame instead, which the next inbound frame on the context clears.
+  // Hydrated, because a fresh process has learned nothing and the held messages
+  // it resumes beside would then refuse every retry it re-arms — see
+  // route-store.
   const busOriginByContext = loadBusRoutes(abDir, project.id, BUS_ORIGIN_TTL_MS, Date.now());
   let busRoutesSavedAt = 0;
 
@@ -976,8 +973,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   const busOwnerMissWarned = new Set<string>();
 
   function noteBusOrigin(contextId: string, peerId: string | undefined): void {
-    // No peerId is the loopback owner, which is the lead's carrier and is
-    // already reachable without a route.
+    // No peerId is the loopback owner — this machine's own carrier, already
+    // reachable without a route.
     if (!peerId) return;
     const now = Date.now();
     let pruned = false;
@@ -1023,17 +1020,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return origin;
   }
 
-  // A session this bridge may address on the bus. Membership is the gate: a
-  // carrier naming a session no human ever joined to a bus gets NOT_MEMBER
-  // rather than a synthesized identity, and a machine with no relay device id at
-  // all has no address to stamp. The coordinator's `addressable` is what tells
+  // A session this bridge may address on the bus. Every session this bridge
+  // holds is addressable — a session is the unit and there is no membership to
+  // join (`docs/session-messaging.md` E1/E2) — so the only two refusals left are
+  // a session id this bridge does not hold and a machine with no relay device id
+  // to stamp an address with. The coordinator's `addressable` is what tells
   // those two nulls apart for the caller.
+  //
+  // This is not the consent gate. §5.1's repo key and the machine's
+  // remote-access switch are, and they sit in front of the directory rather than
+  // here; a carrier can still only reach a session it was told the id of.
   function sessionBusSelf(sessionId: string): SessionBusSelf | null {
     const machineId = opts.machineId?.() ?? null;
     if (!machineId) return null;
     const entry = sessions?.get(sessionId);
     if (!entry) return null;
-    if (!entry.memberOf && !(entry.members && entry.members.length > 0)) return null;
     return {
       key: { machineId, projectId: project.id, sessionId },
       ref: {
@@ -1053,15 +1054,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     projectId: project.id,
     self: sessionBusSelf,
     addressable: () => (opts.machineId?.() ?? null) !== null,
-    // The lead hands every frame to its own desktop app; a peer answers on the
-    // session that carried the task in. Neither path is the MessageBus.
+    // A session that opened a context hands every frame to its own desktop app;
+    // one that was contacted answers on the session that carried the context in.
+    // Neither path is the MessageBus.
     send: (frame, ctx) => {
       if (ctx.role === "peer") {
-        // A peer has exactly one way home and it is the carrier that brought the
-        // task in (D7). Falling through to the loopback owner would hand the
-        // lead's result to THIS machine's own desktop app, which accepts it and
-        // returns true — booking a delivery that never happened and retiring the
-        // outbox entry that was the only thing left to retry it.
+        // There is exactly one way home and it is the carrier that brought the
+        // context in. Falling through to the loopback owner would hand the reply
+        // to THIS machine's own desktop app, which accepts it and returns true —
+        // booking a delivery that never happened and dropping the held message
+        // that was the only thing left to retry it.
         const origin = busTargetFor(ctx.contextId);
         if (!origin) {
           if (!busRouteMissWarned.has(ctx.contextId)) {
@@ -1079,9 +1081,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
       // True here means the owner ACCEPTED the frame, which is the whole of what
       // this process can observe: the app classifies and forwards afterwards, and
-      // an app that finds no leg for it drops it with no way to say so back. The
-      // task's ack is the only evidence of the rest, and `warnIfUnacked` in the
-      // coordinator is what says so when it never comes.
+      // an app that finds no leg for it drops it with no way to say so back.
+      // Nothing downstream reports the rest today — the receipt E6 keeps is
+      // reserved and dark until it is re-keyed to a message id.
       const sentToOwner = opts.sendToOwner?.(frame) ?? false;
       if (sentToOwner) {
         busOwnerMissWarned.delete(ctx.contextId);
@@ -1158,13 +1160,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *
    *  `injectReply` returns nothing, so "delivered" has to be decided here: a
    *  session with no live agent swallows the submit, and a queue told the line
-   *  went in would drop the only wake its lead is ever getting (D11). */
-  function injectBusLine(sessionId: string, text: string, task?: { taskId: string; state: string }): boolean {
+   *  went in would drop the only notice the other side is ever getting. */
+  function injectBusLine(sessionId: string, text: string): boolean {
     if (!sessions?.get(sessionId)?.running) return false;
-    // Read at DELIVERY and never written back: the stamp is about this delivery
-    // instant, so a line redelivered after a retry re-reads the state rather
-    // than carrying an older reading of it.
-    if (task) text = stampTaskState(text, task, sessionBus.task(sessionId, task.taskId)?.state);
     // The last boundary before another machine's words become keystrokes. The
     // renderer already neutralized them, so a difference here is an upstream bug
     // rather than an expected input — hence the warn.
@@ -1193,16 +1191,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     projectName: project.name,
     machineId: () => opts.machineId?.() ?? null,
     // The terminal id IS the session id for every agent session, so a tool
-    // caller's slot resolves its own membership; a service PTY names no session
-    // and is answered as a non-member.
+    // caller's slot resolves its own session; a service PTY names none and is
+    // answered as having no bus surface at all.
     membership: (terminalId) => {
       const entry = sessions?.get(terminalId);
       if (!entry) return null;
       return {
         sessionId: entry.id,
         ...(entry.name ? { sessionName: entry.name } : {}),
-        members: entry.members ?? [],
-        ...(entry.memberOf ? { memberOf: entry.memberOf } : {}),
       };
     },
     carrierPresent: () => opts.carrierPresent?.() ?? false,
@@ -1273,10 +1269,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // here is authorized at the bus handler and does not care.
   function handleAbMessage(msg: AbMessage, client: ClientKey, peerId?: string) {
     switch (msg.type) {
-      // Bus frames are relayed by an app session between two bridges that
-      // cannot reach each other, so this bridge is an endpoint, never a hop:
-      // the coordinator applies only frames addressed to a session it holds and
-      // acks every one it applies, including the duplicates a retry produces.
+      // A remote bus frame is relayed by an app session between two bridges that
+      // cannot dial each other, so this bridge is an endpoint, never a hop: the
+      // coordinator applies only frames addressed to a session it holds, and a
+      // frame naming any other session is dropped rather than forwarded.
       case "session-bus:assign":
       case "session-bus:raise":
       case "session-bus:transition":
@@ -2003,11 +1999,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
                 deleteBranch: verb.deleteBranch,
               });
               // The bus half of the row goes with the row. Nothing else ever
-              // removes it: the coordinator would keep retrying an outbox for a
-              // session that no longer exists, and the on-disk records and
+              // removes it: the coordinator would keep retrying held messages
+              // for a session that no longer exists, and the on-disk log and
               // artifact bytes would outlive every reader of them. Deliberately
               // after the delete succeeded — a refused delete (dirty worktree)
-              // leaves a live session that still owes its lead a report.
+              // leaves a live session with an exchange still open.
               sessionBus.forget(verb.sessionId);
               opts.forgetBusLines?.(verb.sessionId);
               try {

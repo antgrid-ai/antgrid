@@ -9,8 +9,10 @@ import type { SessionMemberKey } from "../protocol";
  * that changes under a rename, so folding them in would make the same session
  * compare unequal to itself.
  *
- * `SessionManager.sameMember` delegates here so a member the manager released
- * and a task the bus addressed can never disagree about who they mean.
+ * The strict comparison, for two halves that came out of ONE record on this
+ * machine. {@link addressesSameSession} is the one a frame off the wire is
+ * matched with, and the difference between them is the whole of the next
+ * paragraph.
  */
 export function sameAddress(a: SessionMemberKey, b: SessionMemberKey): boolean {
   return a.machineId === b.machineId && a.projectId === b.projectId && a.sessionId === b.sessionId;

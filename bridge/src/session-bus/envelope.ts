@@ -1,7 +1,7 @@
-// Spec 6.1's split: a FIXED envelope the bridge can route, cap and render, and
-// an OPEN payload it never interprets. The bus needs to know who sent a message,
-// which task it belongs to and how big it is; it never needs to know what a
-// finding says.
+// The split the wire depends on: a FIXED envelope the bridge can route, cap and
+// render, and an OPEN payload it never interprets. The bus needs to know who
+// sent a message, which thread it belongs to and how big it is; it never needs
+// to know what the message says.
 
 import {
   BusEnvelopeSchema,
@@ -69,8 +69,8 @@ export function checkEnvelopeSize(envelope: BusEnvelope): "ENVELOPE_TOO_LARGE" |
   return envelopeBytes(envelope) > MAX_ENVELOPE_BYTES ? "ENVELOPE_TOO_LARGE" : null;
 }
 
-/** Trim an envelope's parts for the message log, which is a rendering aid: the
- *  full text already lives in the finding or the artifact it arrived with. */
+/** Trim an envelope's parts for the message log, which is a rendering aid:
+ *  anything worth keeping whole arrived as an artifact. */
 export function trimEnvelopeForLog(envelope: BusEnvelope): BusEnvelope {
   return {
     ...envelope,

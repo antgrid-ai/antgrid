@@ -1,8 +1,5 @@
 // bridge/tests/session-bus-task-guard.test.ts
 import { test, expect } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   MAX_TASKS_PER_HOUR,
   MAX_TASKS_PER_SESSION,
@@ -16,18 +13,7 @@ import {
   noteProgress,
   type GuardState,
 } from "../src/session-bus/task-guard";
-import {
-  applyTransition,
-  emptyTasks,
-  loadTasks,
-  mintTask,
-  saveTasks,
-  taskCreatedAts,
-  type TaskStoreState,
-} from "../src/session-bus/task-store";
-import type { SessionMemberRef } from "../src/protocol";
 
-const PEER: SessionMemberRef = { machineId: "m2", projectId: "p2", sessionId: "s2" };
 const T0 = 5_000_000;
 
 function createdAts(n: number, at = T0): number[] {
@@ -103,53 +89,9 @@ test("progress resets the counter but never lifts a halt; only a human does", ()
   expect(clearHalt(lifted)).toBe(lifted);
 });
 
-test("an applied transition counts as progress in the task store's own fold", () => {
-  let s: TaskStoreState = emptyTasks();
-  for (let i = 0; i < NO_PROGRESS_EXCHANGES - 1; i += 1) {
-    s = { guard: noteExchange(s.guard, T0), tasks: s.tasks };
-  }
-  expect(s.guard.exchanges).toBe(NO_PROGRESS_EXCHANGES - 1);
-
-  const applied = applyTransition(
-    s,
-    {
-      taskId: "t1",
-      contextId: "c1",
-      seq: 0,
-      state: "submitted",
-      peer: PEER,
-      messageId: "m-0",
-      summary: "do the thing",
-    },
-    T0,
-  );
-  expect(applied.kind).toBe("applied");
-  expect(applied.next.guard.exchanges).toBe(0);
-});
-
-test("the counts survive a reload, so a restart cannot launder a runaway", () => {
-  const abDir = mkdtempSync(join(tmpdir(), "ab-bus-guard-"));
-  try {
-    let s = emptyTasks();
-    for (let i = 0; i < MAX_TASKS_PER_SESSION; i += 1) {
-      s = mintTask(s, { taskId: `t${i}`, contextId: "c1", peer: PEER, title: `task ${i}`, now: T0 }).next;
-    }
-    s = { guard: halted(T0), tasks: s.tasks };
-    saveTasks(abDir, "p1", "s1", s);
-
-    const back = loadTasks(abDir, "p1", "s1");
-    expect(taskCreatedAts(back)).toHaveLength(MAX_TASKS_PER_SESSION);
-    expect(back.guard.haltedAt).toBe(T0);
-    expect(checkAssign(back.guard, taskCreatedAts(back), T0)!.code).toBe("NO_PROGRESS");
-    expect(checkAssign(clearHalt(back.guard), taskCreatedAts(back), T0)!.code).toBe("TASK_CAP");
-  } finally {
-    rmSync(abDir, { recursive: true, force: true });
-  }
-});
-
 test("a halt is liftable, and lifting it restores the exchange budget", () => {
-  // The halt is persisted, so a guard nothing could clear would bar this session
-  // from ever assigning again — for the life of the checkout, across restarts.
+  // A halt outranks every other verdict this fold can reach, so a guard nothing
+  // could clear would bar the session for as long as the state is held.
   let g = emptyGuard();
   for (let i = 0; i < NO_PROGRESS_EXCHANGES; i += 1) g = noteExchange(g, T0);
   expect(g.haltedAt).toBe(T0);

@@ -6,7 +6,7 @@ import { createRelayPromotion, type RelayPromotionController, type RelayPromotio
 import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./stream-mux";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, attentionEdges, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnOpenFor, turnStart, UNATTRIBUTED_TURN, userReply, type WorkStatusState } from "./work-status";
 import { renderBrief } from "./session-bus/delivery";
 import { SessionBusDeliveryQueue, closedTurns, type QueuedLine } from "./session-bus/delivery-queue";
 import { logger } from "./logger";
@@ -43,13 +43,13 @@ export interface ProjectCoreRemoteDeps {
 export interface ProjectCoreDeps extends BuildAgentCoreOptions {
   remote?: ProjectCoreRemoteDeps; // Required when mode === "remote".
   /** This machine's relay device id, supplied by the host for cores of EVERY
-   *  mode. The session bus needs it on a local core too: the lead of a
-   *  multi-machine session is a desktop-opened project, so `mode === "local"`,
-   *  and it still has to stamp its own half of every address it sends. Distinct
-   *  from `identity.deviceId`, which for a local core is a fresh randomUUID that
-   *  addresses no machine any peer knows. Null when the host has no relay
-   *  identity yet, which is a machine with no bus address rather than a session
-   *  that joined nothing — see the coordinator's `addressable`. */
+   *  mode. The session bus needs it on a local core too: a desktop-opened
+   *  project is `mode === "local"` and still has to stamp its own half of every
+   *  address it sends. Distinct from `identity.deviceId`, which for a local core
+   *  is a fresh randomUUID that addresses no machine any peer knows. Null when
+   *  the host has no relay identity yet, which is a machine with no bus address
+   *  rather than a session this bridge does not hold — see the coordinator's
+   *  `addressable`. */
   machineDeviceId?: () => string | null;
   /** Host hook that lets the local wizard promotion path bring the machine relay
    *  socket up from the app-supplied credentials and attach this core as a
@@ -139,23 +139,23 @@ export class ProjectCore {
   get projectId(): string { return this.core?.projectId ?? ""; }
   get localConnectInfo(): { port: number; token: string } | null { return this._localConnectInfo; }
 
-  /** Session-bus outbound on a LEAD bridge. This bridge can never reach the
-   *  peer machine (D7), so the desktop owner is the only carrier, and the frame
-   *  goes to it directly: publishing would fan the lead's task traffic out to
-   *  the human's phone as well (spec 4.1). False means it did not leave. */
+  /** Session-bus outbound for a context this machine opened. A bridge cannot
+   *  dial another bridge, so the desktop owner is the only carrier, and the
+   *  frame goes to it directly: publishing would fan the exchange out to the
+   *  human's phone as well. False means it did not leave. */
   sendToOwner(msg: AbMessage): boolean {
     return this.listener?.deliverToOwner(msg) ?? false;
   }
 
-  /** Session-bus outbound on a PEER bridge, addressed at the one app session
-   *  that carried the exchange in. The phone is attached to the same stream, so
-   *  a broadcast here would leak the whole lead-to-peer exchange to it — the
+  /** Session-bus outbound on a context this machine was contacted on, addressed
+   *  at the one app session that carried it in. The phone is attached to the
+   *  same stream, so a broadcast here would leak the whole exchange to it — the
    *  mirror image of the invariant {@link sendToOwner} keeps. */
   sendToAppSession(peerId: string, msg: AbMessage): boolean {
     // `sendTo` settles when the frame leaves the send queue, which is long after
-    // the outbox has to decide whether to hold it. "The session is live" is the
+    // the caller has to decide whether to hold it. "The session is live" is the
     // strongest fact available synchronously and is exactly what the boolean
-    // used to mean; a later drop shows up as the task ack that never arrives.
+    // used to mean.
     if (!this.streamHandle || !this.deps.remote?.peerSession(peerId)) return false;
     void this.streamHandle.sendTo(msg, "control", { kind: "peer", peerId });
     return true;
@@ -240,11 +240,6 @@ export class ProjectCore {
     // closing edge is the whole delivery boundary, and reading it after the
     // swap would compare the new state with itself.
     const closed = closedTurns(this._work, next);
-    // A human blocking a peer stops its tasks' expiry clocks (spec 5.3), so the
-    // same pre-swap read serves both: `attention` is this reduction's name for an
-    // unanswered permission request or question, and there is no other place a
-    // bridge learns its own human is the hold-up.
-    const attention = attentionEdges(this._work, next);
     this._work = next;
     for (const sessionId of closed) {
       // An agent with no per-session turn reporting closes the UNATTRIBUTED_TURN
@@ -255,7 +250,6 @@ export class ProjectCore {
       if (sessionId === UNATTRIBUTED_TURN) this.deliveries?.drainAll();
       else this.deliveries?.drain(sessionId);
     }
-    for (const edge of attention) this.core?.sessionBus.humanBlocked(edge.sessionId, edge.blocked);
     if (changed) this._onWorkStatusChange?.();
     // The advert is not the only consumer: `session:updated` stamps each entry's
     // status from this same reduction, and the session list is otherwise only
@@ -418,8 +412,8 @@ export class ProjectCore {
       // relay stream are independent.
       machineId: () => this.deps.remote?.machineDeviceId() ?? this.deps.machineDeviceId?.() ?? null,
       // Only a desktop owner that declared itself a carrier can move a frame to
-      // the machine it is addressed to (D7); anything else is an unreachable
-      // peer, not a failed one.
+      // the machine it is addressed to; anything else is an unreachable target,
+      // not a failed send.
       carrierPresent: () => this.listener?.ownerCarriesSessionBus ?? false,
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),
@@ -436,11 +430,7 @@ export class ProjectCore {
       // agent that cannot attribute its turn-starts records them under
       // UNATTRIBUTED_TURN, and a delivery submitted against one lands mid-turn.
       isTurnOpen: (sessionId) => turnOpenFor(this._work.activeTurns, sessionId),
-      inject: (line) => this.core?.injectBusLine(
-        line.sessionId,
-        line.text,
-        line.taskId && line.taskState ? { taskId: line.taskId, state: line.taskState } : undefined,
-      ) ?? false,
+      inject: (line) => this.core?.injectBusLine(line.sessionId, line.text) ?? false,
     });
     const bus = new MessageBus();
     this.bus = bus;

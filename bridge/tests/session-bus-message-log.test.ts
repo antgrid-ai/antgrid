@@ -6,7 +6,6 @@ import { join } from "node:path";
 import {
   appendLog,
   emptyLog,
-  entriesFor,
   entriesForContext,
   loadMessageLog,
   saveMessageLog,
@@ -40,7 +39,7 @@ function tmpAbDir(): string {
   return mkdtempSync(join(tmpdir(), "ab-bus-log-"));
 }
 
-test("entries append in order and are addressable by task and by context", () => {
+test("entries append in order and are addressable by context", () => {
   let s = emptyLog();
   s = appendLog(s, { at: T0, direction: "out", peer: PEER_KEY, envelope: env() });
   s = appendLog(s, { at: T0 + 1, direction: "in", peer: PEER_KEY, envelope: env({ messageId: "m-2" }) });
@@ -52,7 +51,6 @@ test("entries append in order and are addressable by task and by context", () =>
   });
 
   expect(s.entries.map((e) => e.direction)).toEqual(["out", "in", "in"]);
-  expect(entriesFor(s, "t1").map((e) => e.envelope.messageId)).toEqual(["m-1", "m-2"]);
   expect(entriesForContext(s, "c2").map((e) => e.envelope.messageId)).toEqual(["m-3"]);
 });
 

@@ -1,16 +1,17 @@
-// Spec 6.3's artifacts, which is where reference-over-value (D5) becomes real:
-// an envelope carries only the HANDLE (id, name, media type, size, digest,
-// summary) and the bytes are pulled with `session-bus:fetch` in
-// ARTIFACT_CHUNK_BYTES slices. A peer that produced a 3 MB diff therefore costs
-// the other machine a line of prompt, not 3 MB of one.
+// Artifacts, which is where reference-over-value (D5) becomes real: an envelope
+// carries only the HANDLE (id, name, media type, size, digest, summary) and the
+// bytes are pulled with `session-bus:fetch` in ARTIFACT_CHUNK_BYTES slices. A
+// session that produced a 3 MB diff therefore costs the other machine a line of
+// prompt, not 3 MB of one. Messages are conversation and may be dropped; this is
+// the half that is not.
 //
 // SURVIVING THE SESSION IS A PROPERTY OF WHERE THIS LIVES, NOT OF A CLEANUP HOOK
 // THAT REMEMBERED TO SKIP IT. The directory is keyed by session id under
 // `agents/<projectId>/`, and nothing in the stop/archive path goes near it — so
 // stopping the agent, restarting the bridge and archiving the session all leave
-// the bytes readable, which is exactly what a lead reading a peer's evidence
-// needs after the peer is long gone. Only the section 5.4 session DELETE removes
-// them (`removeSessionBusSession`).
+// the bytes readable, which is exactly what reading another session's evidence
+// needs after that session is long gone. Only the session DELETE removes them
+// (`removeSessionBusSession`).
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, openSync, readSync, closeSync, statSync, writeFileSync } from "node:fs";
@@ -25,10 +26,12 @@ export const ARTIFACT_STORE_VERSION = 1;
 export const ArtifactRecordSchema = z.object({
   artifactId: z.string().min(1).max(200),
   contextId: z.string().min(1).max(200),
-  /** null for an artifact published outside any task. */
+  /** The thread this artifact was published under, or null for one published
+   *  outside any. Nothing writes it today — the publish body carries no thread —
+   *  and it is kept nullable as the slot the thread id re-keys into. */
   taskId: z.string().max(200).nullable(),
   /** Who published it, labels included: the row must render on a machine that
-   *  can never reach the one that wrote it (D7). */
+   *  can never reach the one that wrote it. */
   author: SessionMemberRefSchema,
   name: z.string().min(1).max(200),
   mediaType: z.string().min(1).max(120),

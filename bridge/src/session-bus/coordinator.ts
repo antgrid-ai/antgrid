@@ -1,16 +1,16 @@
 // The bus's transport half: it owns the stores for one project's sessions, turns
-// an agent's action into an addressed frame, and folds an inbound frame back
+// an agent's message into an addressed frame, and folds an inbound frame back
 // into a store. It knows nothing about how a frame travels — a `send` that
 // returns false is all it needs to hold the frame and try again — which is what
-// lets ONE module serve both roles across a link neither end can open (D7: the
-// lead bridge can never reach the peer bridge; the lead's desktop app carries).
+// lets ONE module serve both ends of a link neither can open (E4: a bridge
+// cannot dial another bridge; the initiating machine's desktop app carries).
 //
 // TWO INVARIANTS LIVE HERE AND NOWHERE ELSE.
 // Every frame leaves through `deps.send`, never through the MessageBus: a
 // published frame reaches every established app session, and the human's phone
-// is one of them (spec 4.1). And an inbound frame is applied only when its `to`
-// names a session THIS bridge holds, so a carrier is trusted to deliver and
-// never to say which of this bridge's sessions a task belongs to.
+// is one of them. And an inbound frame is applied only when its `to` names a
+// session THIS bridge holds, so a carrier is trusted to deliver and never to say
+// which of this bridge's sessions a message belongs to.
 
 import { randomUUID } from "node:crypto";
 import { logger } from "../logger";
@@ -21,17 +21,11 @@ import {
   type BusPart,
   type SessionMemberKey,
   type SessionMemberRef,
-  type TaskState,
-  type WaitingOn,
 } from "../protocol";
 import { addressesSameSession } from "./address";
 import { listSessionBusSessions } from "./store-fs";
 import { artifactById, loadArtifacts, readArtifactContent, type ArtifactState } from "./artifact-store";
-import {
-  ARTIFACT_CHUNK_BYTES,
-  SESSION_BUS_UNACKED_WARN_ATTEMPTS,
-  SESSION_BUS_UNACKED_WARN_EVERY,
-} from "./constants";
+import { ARTIFACT_CHUNK_BYTES } from "./constants";
 import { checkEnvelopeSize, stampEnvelope, type EnvelopeDraft } from "./envelope";
 import { refuse, type SessionBusRefusal } from "./errors";
 import {
@@ -49,34 +43,7 @@ import {
   saveMessageLog,
   type MessageLogState,
 } from "./message-log";
-import {
-  checkAssign,
-  clearHalt as clearGuardHalt,
-  guardBudget,
-  noteExchange,
-  type GuardBudget,
-} from "./task-guard";
-import {
-  ackOutbound,
-  applyTransition,
-  dueOutbox,
-  holdOutbound,
-  isTerminal,
-  loadTasks,
-  mintOutbound,
-  mintTask,
-  noteAttempt,
-  recordFinding,
-  saveTasks,
-  taskCreatedAts,
-  taskFor,
-  tasksFor,
-  setHumanWait,
-  tickExpiry,
-  type OutboundOutcome,
-  type TaskRecord,
-  type TaskStoreState,
-} from "./task-store";
+import { clearHalt as clearGuardHalt, emptyGuard, type GuardState } from "./task-guard";
 
 const log = logger.child({ component: "session-bus" });
 
@@ -84,7 +51,7 @@ export type BusRole = "lead" | "peer";
 
 /** This bridge's own half of an address, plus the labels it stamps onto what it
  *  sends. Labels travel because the other machine can never look them up: it
- *  cannot reach this one (D7). */
+ *  cannot reach this one (E4). */
 export interface SessionBusSelf {
   key: SessionMemberKey;
   ref: SessionMemberRef;
@@ -94,8 +61,8 @@ export interface SessionBusSelf {
  * Hand one frame to whatever carries this context.
  *
  * False means it did not leave — no carrier, or a carrier that cannot forward —
- * and the frame stays in the outbox at its current backoff. Never a throw and
- * never a failure: an absent carrier is not a failed task (D11).
+ * and the frame is held rather than dropped. Never a throw and never a failure:
+ * an absent carrier is not a failed exchange.
  */
 /**
  * What {@link SessionBusCoordinator.handleInbound} did with a frame.
@@ -113,34 +80,25 @@ export type SessionBusSend = (
 ) => boolean;
 
 /** What the coordinator learned from an inbound frame, for the layer that turns
- *  it into a line an agent reads. Emitted AFTER the store is written and the ack
- *  has gone, so a consumer that throws cannot cost either. */
+ *  it into a line an agent reads. Emitted AFTER the store is written, so a
+ *  consumer that throws cannot cost the fold. */
 export type SessionBusEvent =
-  | { kind: "assigned"; sessionId: string; task: TaskRecord; envelope: BusEnvelope }
-  | { kind: "transitioned"; sessionId: string; task: TaskRecord; state: TaskState; envelope: BusEnvelope }
-  | { kind: "canceled"; sessionId: string; task: TaskRecord; reason: string }
-  /** `task` is present whenever `taskId` names a record this bridge holds. It is
-   *  the record as it stood when the finding arrived, which is what lets the
-   *  delivery mapping tell a finding on live work — recorded, not delivered —
-   *  from the last word on a task that can never move again. */
-  | { kind: "message"; sessionId: string; taskId: string | null; task?: TaskRecord; peer: SessionMemberRef; envelope: BusEnvelope }
-  | { kind: "expired"; sessionId: string; task: TaskRecord };
+  | { kind: "message"; sessionId: string; taskId: string | null; peer: SessionMemberRef; envelope: BusEnvelope };
 
 export interface CoordinatorDeps {
   abDir: string;
   projectId: string;
   send: SessionBusSend;
-  /** This bridge's address for one of its own sessions, or null when the session
-   *  is not a bus member or the machine has no identity to be addressed by. */
+  /** This bridge's address for one of its own sessions, or null when the machine
+   *  has no identity to be addressed by. */
   self: (sessionId: string) => SessionBusSelf | null;
   /** Whether this machine has a bus address at all. Consulted ONLY when `self`
-   *  answers null, to tell the two reasons it can apart: a session that joined
-   *  nothing is `NOT_MEMBER`, while a machine with no relay identity is
-   *  `AGENT_NOT_READY` — the same split `/session` already makes. Without it a
-   *  lead whose `/role` says `lead:true` is refused "not a member", which reads
-   *  as a membership bug and sends the reader looking in the wrong place.
-   *  Absent means addressable, so a core that never wires it keeps today's
-   *  answer. */
+   *  answers null, to tell the two reasons it can apart: a session this bridge
+   *  does not hold is `NOT_MEMBER`, while a machine with no relay identity is
+   *  `AGENT_NOT_READY`. Without it a caller on a live session is refused "not a
+   *  member", which reads as an addressing bug and sends the reader looking in
+   *  the wrong place. Absent means addressable, so a core that never wires it
+   *  keeps today's answer. */
   addressable?: () => boolean;
   onEvent?: (event: SessionBusEvent) => void;
   now?: () => number;
@@ -148,44 +106,24 @@ export interface CoordinatorDeps {
 }
 
 interface SessionState {
-  tasks: TaskStoreState;
   log: MessageLogState;
-  /** Messages the transport refused, awaiting a route. Separate from the
-   *  per-task outbox on purpose: that one is stop-and-wait (D13), so a finding
-   *  queued there would block the transition behind it, and a taskless finding
-   *  has no record to queue on at all. */
+  /** Messages the transport refused, awaiting a route. Held rather than dropped
+   *  because a `send` that returned false never reached the relay, so putting
+   *  the frame out later is a delivery and not a second copy. */
   held: HeldState;
+  /** In-memory and deliberately unpersisted: nothing counts an exchange while
+   *  the no-progress halt is dormant, so a file would only record a zero. */
+  guard: GuardState;
   /** Read on the first fetch this session answers: most sessions publish nothing
    *  and never pay for the file. */
   artifacts: ArtifactState | null;
 }
 
-export interface AssignInput {
-  sessionId: string;
-  peer: SessionMemberRef;
-  summary: string;
-  parts: BusPart[];
-  /** Defaults to the summary. The wire carries no separate title — the peer
-   *  names the task by what the lead said it is. */
-  title?: string;
-  unexpected?: string;
-  /** Defaults to the lead's own session id, which is the one identifier both
-   *  machines can name for the same exchange. */
-  contextId?: string;
-  expiresAt?: number;
-}
-
-export interface ReportInput {
-  sessionId: string;
-  taskId: string;
-  summary: string;
-  parts: BusPart[];
-  unexpected?: string;
-  waitingOn?: WaitingOn;
-}
-
 export interface MessageInput {
   sessionId: string;
+  /** The thread this turn belongs to, or null to start one. Correlation only —
+   *  a thread has no state machine (`docs/session-messaging.md` §4.2) — so it is
+   *  carried and never validated. */
   taskId: string | null;
   to: SessionMemberRef;
   summary: string;
@@ -194,8 +132,8 @@ export interface MessageInput {
   contextId?: string;
 }
 
-/** How often the outbox is drained. One second is the shortest backoff step, so
- *  a slower tick would round every retry up to itself. */
+/** How often held messages are retried. One second is the shortest step worth
+ *  taking, so a slower tick would round every retry up to itself. */
 export const OUTBOX_TICK_MS = 1_000;
 
 export class SessionBusCoordinator {
@@ -210,8 +148,8 @@ export class SessionBusCoordinator {
   }
 
   /** Read one session's stores off disk. Idempotent, and worth calling as a
-   *  session joins a bus: a restart must resume retrying rather than drop a
-   *  completed task's report on the floor. */
+   *  session becomes addressable: a restart must resume retrying rather than
+   *  drop a held message on the floor. */
   load(sessionId: string): void {
     this.stateFor(sessionId);
     this.ensureTimer();
@@ -221,11 +159,10 @@ export class SessionBusCoordinator {
    * Hydrate every session this project left bus state on disk for.
    *
    * A restart is the only case that needs it, and the case that would otherwise
-   * lose work in silence: `pump` drains the sessions it holds in memory, a fresh
-   * process holds none, and D11 forbids reading failure into silence -- so a
-   * report the dead process had queued would simply never go. Called once as the
-   * project comes up, and again whenever a carrier appears, which is when the
-   * outbox can finally drain.
+   * lose a message in silence: `pump` drains the sessions it holds in memory and
+   * a fresh process holds none, so a message the dead process could not send
+   * would simply never go. Called once as the project comes up, and again
+   * whenever a carrier appears, which is when a held message can finally leave.
    */
   resume(): void {
     for (const sessionId of listSessionBusSessions(this.deps.abDir, this.deps.projectId)) {
@@ -243,312 +180,52 @@ export class SessionBusCoordinator {
     this.timer = null;
   }
 
-  tasks(sessionId: string): readonly TaskRecord[] {
-    return this.stateFor(sessionId).tasks.tasks;
-  }
-
-  task(sessionId: string, taskId: string): TaskRecord | null {
-    return taskFor(this.stateFor(sessionId).tasks, taskId);
-  }
-
-  budget(sessionId: string): GuardBudget {
-    const s = this.stateFor(sessionId).tasks;
-    return guardBudget(s.guard, taskCreatedAts(s), this.now());
-  }
-
   messages(sessionId: string): MessageLogState {
     return this.stateFor(sessionId).log;
   }
 
   /**
-   * Report whether a human at this machine is what [sessionId] is waiting on.
-   *
-   * Driven by the session's own work status, which is the only place a bridge
-   * learns that its agent is sitting on a permission prompt or a question. It
-   * pauses the expiry clock on the tasks that session is working (spec 5.3), so
-   * a human who takes the weekend does not lapse a task nobody abandoned.
-   */
-  humanBlocked(sessionId: string, blocked: boolean): void {
-    // Loaded sessions only, for the reason `clearHalt` gives: every session in
-    // the project reaches this on a status edge, and nearly none are on a bus.
-    const s = this.sessions.get(sessionId);
-    if (!s) return;
-    const tasks = setHumanWait(s.tasks, blocked, this.now());
-    if (tasks === s.tasks) return;
-    this.commit(sessionId, { tasks });
-  }
-
-  /**
-   * Lift a no-progress halt (spec 8).
+   * Lift a no-progress halt (`docs/session-messaging.md` §7.4).
    *
    * A human's own submitted reply into the halted session is what reaches here.
-   * The halt says two agents exchanged findings while the work stood still, and
-   * the guard holds out for a human to look -- a person typing into that very
+   * The halt says two agents exchanged messages while the work stood still, and
+   * the guard holds out for a human to look — a person typing into that very
    * session is exactly that, and it is the only such signal a bridge can
    * observe. An agent cannot forge it: nothing an agent submits arrives as
    * terminal input.
+   *
+   * Dormant until the per-pair counters of §7.4 are rebuilt: nothing counts an
+   * exchange today, so nothing halts and this clears nothing. Kept wired because
+   * it is the human's entry point and re-finding it later is how a halt ships
+   * with no way out.
    */
   clearHalt(sessionId: string): void {
     // Loaded sessions only. This runs on every human submit in the project, and
-    // hydrating a store for a session that is on no bus would put two file reads
-    // behind every keypress; a halted session always has records on disk, so
-    // `resume` has already brought it back.
+    // hydrating a store for a session that has never sent would put two file
+    // reads behind every keypress.
     const s = this.sessions.get(sessionId);
     if (!s) return;
-    const guard = clearGuardHalt(s.tasks.guard);
-    if (guard === s.tasks.guard) return;
-    this.commit(sessionId, { tasks: { guard, tasks: s.tasks.tasks } });
+    const guard = clearGuardHalt(s.guard);
+    if (guard === s.guard) return;
+    this.commit(sessionId, { guard });
   }
 
-  // -- outbound, lead side --------------------------------------------------
+  // -- outbound ---------------------------------------------------------------
 
   /**
-   * Open a task and put its assign in the outbox.
+   * Send one message to another session.
    *
-   * The task exists the moment this returns, whether or not the frame left: the
-   * outbox is what makes the send eventual, and a task that came into being only
-   * once a carrier answered would be a task the lead cannot see it created.
-   *
-   * Nothing here reports delivery, deliberately. The most this side observes is
-   * whether a carrier accepted the hand-off, and a carrier that accepts can
-   * still refuse to route with no way to say so back — so a delivery flag minted
-   * at this instant would be a guess dressed as a fact. The task's `acked` is
-   * the evidence, because an ack can only have come from the other bridge.
-   */
-  assign(input: AssignInput): { ok: true; taskId: string; seq: number } | SessionBusRefusal {
-    const self = this.deps.self(input.sessionId);
-    if (!self) return this.noSelf();
-
-    const now = this.now();
-    const state = this.stateFor(input.sessionId);
-    const guardRefusal = checkAssign(state.tasks.guard, taskCreatedAts(state.tasks), now);
-    if (guardRefusal) return refuse(guardRefusal.code, guardRefusal.reason);
-
-    const taskId = this.newId();
-    const contextId = input.contextId ?? input.sessionId;
-    const envelope = this.stamp(self, {
-      taskId,
-      contextId,
-      parts: input.parts,
-      summary: input.summary,
-      ...(input.unexpected === undefined ? {} : { unexpected: input.unexpected }),
-    });
-    const tooLarge = checkEnvelopeSize(envelope);
-    if (tooLarge) return refuse(tooLarge, ENVELOPE_TOO_LARGE_REASON);
-
-    const minted = mintTask(state.tasks, {
-      taskId,
-      contextId,
-      peer: input.peer,
-      title: input.title ?? input.summary,
-      now,
-      ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
-    });
-    const task = taskFor(minted.next, taskId);
-    const frame = createMessage("session-bus:assign", {
-      from: self.key,
-      to: keyOf(input.peer),
-      contextId,
-      taskId,
-      seq: minted.seq,
-      expiresAt: task?.expiresAt ?? now,
-      envelope,
-    });
-
-    const queued = mintOutbound(minted.next, { taskId, frame, seq: minted.seq, now });
-    if (queued.kind !== "queued") {
-      // Unreachable: the record was minted with an empty outbox one statement
-      // ago. Refusing rather than asserting keeps a future edit that breaks that
-      // pairing from creating a task no frame will ever carry.
-      return refuse("AGENT_NOT_READY", "the task could not be queued for its peer");
-    }
-    const attempt = this.firstAttempt(queued.next, queued.task, minted.seq, frame, now);
-    this.commit(input.sessionId, {
-      tasks: attempt.tasks,
-      log: appendLog(state.log, { at: now, direction: "out", peer: keyOf(input.peer), envelope }),
-    });
-    return { ok: true, taskId, seq: minted.seq };
-  }
-
-  /**
-   * Open a task with this session's own LEAD, for something found outside any
-   * assigned work (spec 4.5).
-   *
-   * Structurally an {@link assign} with the roles swapped: this bridge works
-   * what it opens and the lead is the side that will be woken by the terminal
-   * state. Everything after the mint is shared — the same outbox, the same
-   * stop-and-wait sequencing, the same expiry — because a raised task is a task,
-   * and a second lifecycle beside the first is how the two drift.
-   *
-   * Bounded by the same guard an assign is. A peer that can open its own work is
-   * a peer that can open it in a loop, and the runaway guard is the only thing
-   * between that and a lead's session filling with tasks nobody asked for.
-   */
-  raise(input: AssignInput): { ok: true; taskId: string; seq: number } | SessionBusRefusal {
-    const self = this.deps.self(input.sessionId);
-    if (!self) return this.noSelf();
-
-    const now = this.now();
-    const state = this.stateFor(input.sessionId);
-    const guardRefusal = checkAssign(state.tasks.guard, taskCreatedAts(state.tasks), now);
-    if (guardRefusal) return refuse(guardRefusal.code, guardRefusal.reason);
-
-    const taskId = this.newId();
-    // The LEAD's session id, not this one's: `contextId` names the exchange, and
-    // both machines have to spell it the same way or the ack comes back about a
-    // conversation neither can find.
-    const contextId = input.contextId ?? input.peer.sessionId;
-    const envelope = this.stamp(self, {
-      taskId,
-      contextId,
-      parts: input.parts,
-      summary: input.summary,
-      ...(input.unexpected === undefined ? {} : { unexpected: input.unexpected }),
-    });
-    const tooLarge = checkEnvelopeSize(envelope);
-    if (tooLarge) return refuse(tooLarge, ENVELOPE_TOO_LARGE_REASON);
-
-    const minted = mintTask(state.tasks, {
-      taskId,
-      contextId,
-      peer: input.peer,
-      title: input.title ?? input.summary,
-      now,
-      origin: "peer",
-      ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
-    });
-    const task = taskFor(minted.next, taskId);
-    const frame = createMessage("session-bus:raise", {
-      from: self.key,
-      to: keyOf(input.peer),
-      contextId,
-      taskId,
-      seq: minted.seq,
-      expiresAt: task?.expiresAt ?? now,
-      envelope,
-    });
-
-    const queued = mintOutbound(minted.next, { taskId, frame, seq: minted.seq, now });
-    if (queued.kind !== "queued") {
-      // Unreachable for the reason `assign` gives, and refused rather than
-      // asserted for the same one.
-      return refuse("AGENT_NOT_READY", "the task could not be queued for the lead");
-    }
-    const attempt = this.firstAttempt(queued.next, queued.task, minted.seq, frame, now);
-    this.commit(input.sessionId, {
-      tasks: attempt.tasks,
-      log: appendLog(state.log, { at: now, direction: "out", peer: keyOf(input.peer), envelope }),
-    });
-    return { ok: true, taskId, seq: minted.seq };
-  }
-
-  /** Withdraw a task. The cancel is a transition like any other — sequenced,
-   *  retried and acked — because "stop" arriving unreliably is worse than the
-   *  work continuing. */
-  cancel(sessionId: string, taskId: string, reason: string): { ok: true; seq: number } | SessionBusRefusal {
-    const self = this.deps.self(sessionId);
-    if (!self) return this.noSelf();
-    const s = this.stateFor(sessionId);
-    const rec = taskFor(s.tasks, taskId);
-    if (!rec) return unknownTask();
-    if (isTerminal(rec.state)) return refuse("TASK_TERMINAL", `this task is already ${rec.state}`);
-
-    const now = this.now();
-    const frame = createMessage("session-bus:cancel", {
-      from: self.key,
-      to: keyOf(rec.peer),
-      contextId: rec.contextId,
-      taskId,
-      seq: 0,
-      reason,
-    });
-    const queued = mintOutbound(s.tasks, { taskId, state: "canceled", frame, now, cancelReason: reason });
-    if (queued.kind !== "queued") return blocked(queued);
-    // The seq the record actually minted, stamped back onto the frame already in
-    // the outbox: `mintOutbound` is the only thing allowed to choose one, and a
-    // frame whose seq disagreed with its outbox entry would be acked into a slot
-    // that never retires.
-    frame.seq = queued.seq;
-    this.commit(sessionId, { tasks: this.firstAttempt(queued.next, queued.task, queued.seq, frame, now).tasks });
-    return { ok: true, seq: queued.seq };
-  }
-
-  // -- outbound, peer side --------------------------------------------------
-
-  /**
-   * Report a state this bridge has reached on a task it was assigned.
-   *
-   * `waitingOn` is chosen by the CALLER from the cause (spec 3.4) — the agent
-   * asks to be unblocked, it never declares who is holding it.
-   */
-  report(input: ReportInput, state: TaskState): { ok: true; seq: number } | SessionBusRefusal {
-    const self = this.deps.self(input.sessionId);
-    if (!self) return this.noSelf();
-    const s = this.stateFor(input.sessionId);
-    const rec = taskFor(s.tasks, input.taskId);
-    if (!rec) return unknownTask();
-    if (isTerminal(rec.state)) {
-      return refuse(
-        "TASK_TERMINAL",
-        `this task is already ${rec.state}, so it can never move again — a finding naming this taskId still reaches the other session`,
-      );
-    }
-
-    const now = this.now();
-    const envelope = this.stamp(self, {
-      taskId: input.taskId,
-      contextId: rec.contextId,
-      parts: input.parts,
-      summary: input.summary,
-      ...(input.unexpected === undefined ? {} : { unexpected: input.unexpected }),
-    });
-    const tooLarge = checkEnvelopeSize(envelope);
-    if (tooLarge) return refuse(tooLarge, ENVELOPE_TOO_LARGE_REASON);
-
-    const frame = createMessage("session-bus:transition", {
-      from: self.key,
-      to: keyOf(rec.peer),
-      contextId: rec.contextId,
-      taskId: input.taskId,
-      seq: 0,
-      state,
-      ...(input.waitingOn === undefined ? {} : { waitingOn: input.waitingOn }),
-      envelope,
-    });
-    const queued = mintOutbound(s.tasks, {
-      taskId: input.taskId,
-      state,
-      frame,
-      now,
-      ...(input.waitingOn === undefined ? {} : { waitingOn: input.waitingOn }),
-    });
-    if (queued.kind !== "queued") return blocked(queued);
-    frame.seq = queued.seq;
-    this.commit(input.sessionId, {
-      tasks: this.firstAttempt(queued.next, queued.task, queued.seq, frame, now).tasks,
-      log: appendLog(s.log, { at: now, direction: "out", peer: keyOf(rec.peer), envelope }),
-    });
-    return { ok: true, seq: queued.seq };
-  }
-
-  // -- outbound, either side ------------------------------------------------
-
-  /**
-   * An unsequenced, unacked note: a finding, an answer, an aside.
-   *
-   * Spec 6 makes these lossy on purpose, so a send that does not leave is
-   * dropped rather than queued — unbounded retry behind text that changes no
-   * state buys nothing, and the state that matters travels as a transition.
+   * Lossy on purpose: a send that does not leave is HELD, not queued for
+   * unbounded retry, and a message carries no seq and expects no ack. Anything
+   * that must survive is an Artifact (§4.1).
    */
   message(input: MessageInput): { ok: true; sent: boolean; held: boolean; messageId: string } | SessionBusRefusal {
     const self = this.deps.self(input.sessionId);
     if (!self) return this.noSelf();
     const s = this.stateFor(input.sessionId);
-    const rec = input.taskId === null ? null : taskFor(s.tasks, input.taskId);
-    if (input.taskId !== null && !rec) return unknownTask();
 
     const now = this.now();
-    const contextId = rec?.contextId ?? input.contextId ?? input.sessionId;
+    const contextId = input.contextId ?? input.sessionId;
     const envelope = this.stamp(self, {
       taskId: input.taskId,
       contextId,
@@ -566,40 +243,25 @@ export class SessionBusCoordinator {
       taskId: input.taskId,
       envelope,
     });
-    // The route follows the SESSION's side of this context, not a task record a
-    // taskless finding does not have: defaulting a peer's aside to "lead" posts
-    // it to the peer machine's own desktop app, which accepts it and reports it
-    // sent. A record refines the answer when there is one.
-    const role = rec?.role ?? this.roleForContext(input.sessionId, contextId);
+    const role = this.roleForContext(input.sessionId, contextId);
     const to = keyOf(input.to);
     const sent = this.deps.send(frame, { contextId, role, to });
 
-    let tasks = s.tasks;
-    if (rec) {
-      tasks = recordFinding(tasks, rec.taskId, {
-        at: now,
-        messageId: envelope.messageId,
-        summary: envelope.metadata.summary,
-        ...textOf(input.parts),
-      });
-    }
     // A false return is this bridge refusing before the frame reached the relay,
     // so keeping it is redelivery rather than a duplicate — the one retry an
-    // unacked message can safely have (held-store). The finding recorded just
-    // above is a local copy and travels on nothing.
+    // unacked message can safely have (held-store).
     const held = sent
       ? s.held
       : holdMessage(s.held, { messageId: envelope.messageId, contextId, role, to, frame, heldAt: now });
     this.commit(input.sessionId, {
-      tasks: withExchange(tasks, now),
       log: appendLog(s.log, { at: now, direction: "out", peer: to, envelope }),
       ...(held === s.held ? {} : { held }),
     });
     return { ok: true, sent, held: hasHeld(held, envelope.messageId), messageId: envelope.messageId };
   }
 
-  /** Ask the machine that published an artifact for one slice of it. Unacked and
-   *  unqueued like a message: the fetcher retries by asking again, because a
+  /** Ask the machine that published an artifact for one slice of it. Unheld and
+   *  unretried unlike a message: the fetcher retries by asking again, because a
    *  slice nobody is waiting for any more must not keep travelling. */
   fetch(input: {
     sessionId: string;
@@ -634,20 +296,20 @@ export class SessionBusCoordinator {
    *
    * The session is resolved from the frame's `to`, never from the connection it
    * arrived on. A frame naming a session this bridge does not hold is dropped
-   * WITHOUT an ack: acking it would tell the sender a task is being worked that
-   * nothing here will ever work.
+   * WITHOUT an ack: acking it would tell the sender its message landed somewhere
+   * that will never read it.
    */
   /** Sessions already reported as addressed by a project id other than this
-   *  bridge's own. A stored membership does not change its mind, so without the
+   *  bridge's own. A stored address does not change its mind, so without the
    *  latch this is a line per retry for the life of the session. */
   private readonly driftWarned = new Set<string>();
 
   /** Says once that the far side knows this session by a different project.
    *
    *  Nothing routes on that id any more, so this costs no delivery — but the
-   *  disagreement is worth a name: it is what a peer's row RENDERS, and it used
-   *  to be the difference between a session that worked and one that refused
-   *  every frame in silence. */
+   *  disagreement is worth a name: it is what a directory row RENDERS, and it
+   *  used to be the difference between a session that worked and one that
+   *  refused every frame in silence. */
   private warnIfProjectDrifted(self: SessionBusSelf, to: SessionMemberKey): void {
     if (self.key.projectId === to.projectId) return;
     if (this.driftWarned.has(to.sessionId)) return;
@@ -660,10 +322,6 @@ export class SessionBusCoordinator {
 
   handleInbound(msg: AbMessage): InboundOutcome {
     switch (msg.type) {
-      case "session-bus:assign":
-      case "session-bus:raise":
-      case "session-bus:transition":
-      case "session-bus:cancel":
       case "session-bus:message":
       case "session-bus:fetch":
       case "session-bus:fetch:result":
@@ -683,32 +341,11 @@ export class SessionBusCoordinator {
     const sessionId = msg.to.sessionId;
     this.warnIfProjectDrifted(self, msg.to);
     switch (msg.type) {
-      case "session-bus:assign":
-        this.onTransition(sessionId, self, msg.from, msg.contextId, msg.taskId, msg.seq, "submitted", msg.envelope, {
-          expiresAt: msg.expiresAt,
-        });
-        return "applied";
-      case "session-bus:raise":
-        // The only difference from an assign, and it is the whole point: the
-        // sender opened this task to work it, so this bridge takes `lead`.
-        this.onTransition(sessionId, self, msg.from, msg.contextId, msg.taskId, msg.seq, "submitted", msg.envelope, {
-          expiresAt: msg.expiresAt,
-          origin: "peer",
-        });
-        return "applied";
-      case "session-bus:transition":
-        this.onTransition(sessionId, self, msg.from, msg.contextId, msg.taskId, msg.seq, msg.state, msg.envelope, {
-          ...(msg.waitingOn === undefined ? {} : { waitingOn: msg.waitingOn }),
-        });
-        return "applied";
-      case "session-bus:cancel":
-        this.onCancel(sessionId, self, msg.from, msg.contextId, msg.taskId, msg.seq, msg.reason);
-        return "applied";
       case "session-bus:message":
         this.onMessage(sessionId, msg.from, msg.taskId, msg.envelope);
         return "applied";
       case "session-bus:ack":
-        this.onAck(sessionId, msg.taskId, msg.seq);
+        this.onAck();
         return "applied";
       case "session-bus:fetch":
         this.onFetch(sessionId, self, msg);
@@ -723,7 +360,7 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * Drain every due outbox entry across every loaded session.
+   * Retry every held message across every loaded session.
    *
    * Called on the timer, and directly whenever a carrier appears: a retry
    * schedule is the fallback for a silent link, not what decides how fast a live
@@ -732,8 +369,6 @@ export class SessionBusCoordinator {
   pump(): void {
     const now = this.now();
     for (const sessionId of [...this.sessions.keys()]) {
-      this.expire(sessionId, now);
-      this.flushOutbox(sessionId, now);
       this.flushHeld(sessionId, now);
     }
     if (this.timer && !this.anyPending()) this.stop();
@@ -745,15 +380,15 @@ export class SessionBusCoordinator {
     let s = this.sessions.get(sessionId);
     if (!s) {
       s = {
-        tasks: loadTasks(this.deps.abDir, this.deps.projectId, sessionId),
         log: loadMessageLog(this.deps.abDir, this.deps.projectId, sessionId),
         held: loadHeld(this.deps.abDir, this.deps.projectId, sessionId),
+        guard: emptyGuard(),
         artifacts: null,
       };
       this.sessions.set(sessionId, s);
-      // Hydrating IS how an outbox comes back off disk, so the timer has to be
-      // considered here and not only at a commit: nothing else re-arms the
-      // retries a previous process queued.
+      // Hydrating IS how a held message comes back off disk, so the timer has to
+      // be considered here and not only at a commit: nothing else re-arms the
+      // retries a previous process left.
       this.ensureTimer();
     }
     return s;
@@ -763,15 +398,14 @@ export class SessionBusCoordinator {
     const s = this.stateFor(sessionId);
     const next: SessionState = { ...s, ...patch };
     this.sessions.set(sessionId, next);
-    if (next.tasks !== s.tasks) saveTasks(this.deps.abDir, this.deps.projectId, sessionId, next.tasks);
     if (next.log !== s.log) saveMessageLog(this.deps.abDir, this.deps.projectId, sessionId, next.log);
     if (next.held !== s.held) saveHeld(this.deps.abDir, this.deps.projectId, sessionId, next.held);
     this.ensureTimer();
   }
 
-  /** The retry-and-expiry timer runs only while this project has something to
-   *  wait for. A project whose sessions are on no bus — nearly all of them —
-   *  must not wake the process once a second forever. */
+  /** The retry timer runs only while this project has something to wait for. A
+   *  project holding nothing — nearly always — must not wake the process once a
+   *  second forever. */
   private ensureTimer(): void {
     if (this.timer || !this.anyPending()) return;
     this.timer = setInterval(() => this.pump(), OUTBOX_TICK_MS);
@@ -780,13 +414,7 @@ export class SessionBusCoordinator {
 
   private anyPending(): boolean {
     for (const s of this.sessions.values()) {
-      // A held message is the only thing a session can be waiting on with no
-      // task at all, so the timer has to count it or nothing ever retries it.
       if (s.held.held.length > 0) return true;
-      for (const t of s.tasks.tasks) {
-        if (t.outbox.length > 0) return true;
-        if (!isTerminal(t.state) && t.expiredAt === undefined) return true;
-      }
     }
     return false;
   }
@@ -803,90 +431,19 @@ export class SessionBusCoordinator {
     return stampEnvelope(draft, { messageId: this.newId(), peer: self.ref, now: this.now() });
   }
 
-  /** Which end of the bus this session is on for a context, for a caller that
-   *  needs to know before there is a task to ask.
+  /** Which way a frame on this context leaves: to this machine's own carrier, or
+   *  back down the carrier that brought the context in.
    *
-   *  A task record answers outright. With none, the CONTEXT ID does: a context
-   *  is named by its lead's session id (`contextOf`, session-bus/api.ts), so a
-   *  session whose own id is the context id opened that context and leads it,
-   *  and any other context id is one this session was joined into as a peer.
+   *  The CONTEXT ID decides. A context is named by the session that opened it,
+   *  so a session whose own id is the context id opened it and reaches the other
+   *  end through its own desktop app; any other context id is one this session
+   *  was contacted on, and its only way home is the carrier that delivered.
    *
-   *  Defaulting to "lead" instead is exactly the misroute `message` warns about
-   *  one call up. A fresh peer has no tasks by definition, and reporting a
-   *  finding before it is assigned anything is what its brief asks of it — so
-   *  that default would post its first finding to its OWN machine's desktop app,
-   *  which accepts it and reports it sent. */
+   *  Defaulting to "lead" instead is the misroute this exists to prevent: it
+   *  posts the answer to THIS machine's own desktop app, which accepts it and
+   *  reports it sent. */
   private roleForContext(sessionId: string, contextId: string): BusRole {
-    const tasks = tasksFor(this.stateFor(sessionId).tasks, contextId);
-    if (tasks[0]) return tasks[0].role;
     return contextId === sessionId ? "lead" : "peer";
-  }
-
-  /** Make the one attempt `mintOutbound` counted on the caller's behalf.
-   *
-   * Kept out of the timer's drain because a frame must go the instant it is
-   * queued: routing the first send through the retry schedule would put a whole
-   * backoff step in front of every task, on a link that is usually up.
-   *
-   * `sent` rides back with the state because the state alone cannot say: a held
-   * frame and a delivered one differ only in an outbox entry the caller does not
-   * read.
-   */
-  private firstAttempt(
-    tasks: TaskStoreState,
-    rec: TaskRecord,
-    seq: number,
-    frame: AbMessage,
-    now: number,
-  ): { tasks: TaskStoreState; sent: boolean } {
-    const sent = this.deps.send(frame, { contextId: rec.contextId, role: rec.role, to: keyOf(rec.peer) });
-    return { tasks: sent ? tasks : holdOutbound(tasks, rec.taskId, seq, now), sent };
-  }
-
-  private flushOutbox(sessionId: string, now: number): void {
-    const s = this.stateFor(sessionId);
-    const due = dueOutbox(s.tasks, now);
-    if (due.length === 0) return;
-    let tasks = s.tasks;
-    for (const { taskId, entry } of due) {
-      const rec = taskFor(tasks, taskId);
-      if (!rec) continue;
-      const sent = this.deps.send(entry.frame as AbMessage, {
-        contextId: rec.contextId,
-        role: rec.role,
-        to: keyOf(rec.peer),
-      });
-      // A send that never left is not an attempt, and counting it would push a
-      // live task's next retry out to a minute for a link that was never tried.
-      if (!sent) continue;
-      tasks = noteAttempt(tasks, taskId, entry.seq, now);
-      this.warnIfUnacked(rec, entry.attempts + 1);
-    }
-    if (tasks !== s.tasks) this.commit(sessionId, { tasks });
-  }
-
-  /** Say out loud that a frame keeps leaving and nothing keeps arriving.
-   *
-   *  This is the only witness to the gap between "the carrier took it" and "the
-   *  peer got it". The carrier can accept a frame and then find no leg to put it
-   *  on — it has no way to report that back, and the retry then repeats forever
-   *  under a `sent` that was true every time. Without this the whole failure is
-   *  silent in both processes: nothing else logs a successful hand-off, and an
-   *  unacked task is indistinguishable from a peer taking its time. */
-  private warnIfUnacked(rec: TaskRecord, attempts: number): void {
-    if (rec.acked) return;
-    if (attempts < SESSION_BUS_UNACKED_WARN_ATTEMPTS) return;
-    if ((attempts - SESSION_BUS_UNACKED_WARN_ATTEMPTS) % SESSION_BUS_UNACKED_WARN_EVERY !== 0) return;
-    // Labels, not `addressKey`: that key is one-way by construction and a line a
-    // human greps for is built from what the member is called.
-    log.warn(
-      "session bus: task %s has left this machine %d times with nothing acked — the carrier is accepting frames it is not delivering (context %s, to %s on %s)",
-      rec.taskId,
-      attempts,
-      rec.contextId,
-      rec.peer.sessionName ?? rec.peer.sessionId,
-      rec.peer.machineLabel ?? rec.peer.machineId,
-    );
   }
 
   /**
@@ -894,8 +451,8 @@ export class SessionBusCoordinator {
    *
    * Only frames that never left are held (held-store), so redelivery here cannot
    * duplicate at the receiver. A route belongs to a context and fails whole, so
-   * stopping that context at its first refusal is what keeps a peer's findings
-   * arriving in the order it reported them.
+   * stopping that context at its first refusal is what keeps a sender's messages
+   * arriving in the order it wrote them.
    */
   private flushHeld(sessionId: string, now: number): void {
     const s = this.stateFor(sessionId);
@@ -914,119 +471,6 @@ export class SessionBusCoordinator {
     if (next !== s.held) this.commit(sessionId, { held: next });
   }
 
-  private expire(sessionId: string, now: number): void {
-    const s = this.stateFor(sessionId);
-    const ticked = tickExpiry(s.tasks, now);
-    if (ticked.expired.length === 0) return;
-    this.commit(sessionId, { tasks: ticked.next });
-    for (const task of ticked.expired) this.emit({ kind: "expired", sessionId, task });
-  }
-
-  private ack(
-    self: SessionBusSelf,
-    to: SessionMemberKey,
-    contextId: string,
-    taskId: string,
-    seq: number,
-    role: BusRole,
-  ): void {
-    const frame = createMessage("session-bus:ack", { from: self.key, to, contextId, taskId, seq, ok: true });
-    this.deps.send(frame, { contextId, role, to });
-  }
-
-  private onTransition(
-    sessionId: string,
-    self: SessionBusSelf,
-    from: SessionMemberKey,
-    contextId: string,
-    taskId: string,
-    seq: number,
-    state: TaskState,
-    envelope: BusEnvelope,
-    extra: { waitingOn?: WaitingOn; expiresAt?: number; origin?: "lead" | "peer" },
-  ): void {
-    const now = this.now();
-    const s = this.stateFor(sessionId);
-    const outcome = applyTransition(
-      s.tasks,
-      {
-        taskId,
-        contextId,
-        seq,
-        state,
-        peer: envelope.metadata.peer,
-        messageId: envelope.messageId,
-        summary: envelope.metadata.summary,
-        ...textOf(envelope.parts),
-        ...(envelope.metadata.unexpected === undefined
-          ? {}
-          : { unexpected: envelope.metadata.unexpected }),
-        artifactIds: artifactIdsOf(envelope.parts),
-        ...(extra.waitingOn === undefined ? {} : { waitingOn: extra.waitingOn }),
-        ...(extra.expiresAt === undefined ? {} : { expiresAt: extra.expiresAt }),
-        ...(extra.origin === undefined ? {} : { origin: extra.origin }),
-      },
-      now,
-    );
-    // No exchange is counted here. A transition that APPLIES is progress and the
-    // fold has already reset the counter; one that does not is a duplicate, a
-    // stale seq or a gap -- the retry machinery doing its job. Counting either
-    // would halt a session for a lossy link, and spec 8 bounds chatter between
-    // agents, not packets.
-    this.commit(sessionId, {
-      tasks: outcome.next,
-      log: appendLog(s.log, { at: now, direction: "in", peer: from, envelope }),
-    });
-    // Acked BEFORE the event fires, and for EVERY outcome — applied, duplicate,
-    // stale, gap, illegal, post-terminal. The ack means "this seq will never
-    // change my state again", not "I liked it", and declining to re-ack is what
-    // wedges a sender whose ack was the thing that got lost.
-    this.ack(self, from, contextId, taskId, seq, this.roleOf(sessionId, taskId));
-    if (outcome.kind !== "applied") return;
-    this.emit(
-      state === "submitted"
-        ? { kind: "assigned", sessionId, task: outcome.task, envelope }
-        : { kind: "transitioned", sessionId, task: outcome.task, state, envelope },
-    );
-  }
-
-  private onCancel(
-    sessionId: string,
-    self: SessionBusSelf,
-    from: SessionMemberKey,
-    contextId: string,
-    taskId: string,
-    seq: number,
-    reason: string,
-  ): void {
-    const now = this.now();
-    const s = this.stateFor(sessionId);
-    const rec = taskFor(s.tasks, taskId);
-    // A cancel carries no envelope — nothing an agent wrote crosses on it — so
-    // the provenance the fold wants comes from the task's own peer, and from the
-    // sender only when there is no task to ask.
-    const peer: SessionMemberRef = rec?.peer ?? { ...from };
-    const outcome = applyTransition(
-      s.tasks,
-      {
-        taskId,
-        contextId,
-        seq,
-        state: "canceled",
-        peer,
-        messageId: `${taskId}:cancel:${seq}`,
-        summary: reason || "canceled by the lead",
-        cancelReason: reason,
-      },
-      now,
-    );
-    // Not an exchange, for the reason `onTransition` gives.
-    this.commit(sessionId, { tasks: outcome.next });
-    this.ack(self, from, contextId, taskId, seq, this.roleOf(sessionId, taskId));
-    if (outcome.kind !== "applied") return;
-    this.emit({ kind: "canceled", sessionId, task: outcome.task, reason });
-  }
-
   private onMessage(
     sessionId: string,
     from: SessionMemberKey,
@@ -1035,39 +479,24 @@ export class SessionBusCoordinator {
   ): void {
     const now = this.now();
     const s = this.stateFor(sessionId);
-    let tasks = s.tasks;
-    const rec = taskId === null ? undefined : taskFor(tasks, taskId);
-    if (taskId !== null && rec) {
-      tasks = recordFinding(tasks, taskId, {
-        at: now,
-        messageId: envelope.messageId,
-        summary: envelope.metadata.summary,
-        ...textOf(envelope.parts),
-        ...(envelope.metadata.unexpected === undefined
-          ? {}
-          : { unexpected: envelope.metadata.unexpected }),
-      });
-    }
     this.commit(sessionId, {
-      tasks: withExchange(tasks, now),
       log: appendLog(s.log, { at: now, direction: "in", peer: from, envelope }),
     });
     this.emit({
       kind: "message",
       sessionId,
       taskId,
-      ...(rec == null ? {} : { task: rec }),
       peer: envelope.metadata.peer,
       envelope,
     });
   }
 
-  private onAck(sessionId: string, taskId: string, seq: number): void {
-    const s = this.stateFor(sessionId);
-    const next = ackOutbound(s.tasks, taskId, seq);
-    if (next === s.tasks) return;
-    this.commit(sessionId, { tasks: next });
-  }
+  /** Reserved and dark. E6 keeps the receipt verb, but nothing on this bridge
+   *  emits an ack and nothing holds an unacked frame for one to retire, so an
+   *  empty body is the honest one until the receipt is re-keyed to a message id.
+   *  The frame is still reported `applied`, which is what lets the caller bind
+   *  the route it arrived on. */
+  private onAck(): void {}
 
   private onFetch(sessionId: string, self: SessionBusSelf, msg: Extract<AbMessage, { type: "session-bus:fetch" }>): void {
     const s = this.stateFor(sessionId);
@@ -1115,16 +544,12 @@ export class SessionBusCoordinator {
     });
   }
 
-  private roleOf(sessionId: string, taskId: string): BusRole {
-    return taskFor(this.stateFor(sessionId).tasks, taskId)?.role ?? "peer";
-  }
-
   private emit(event: SessionBusEvent): void {
     try {
       this.deps.onEvent?.(event);
     } catch (err) {
-      // A consumer that throws must not cost the ack that already went, nor the
-      // store write that already landed.
+      // A consumer that throws must not cost the store write that already
+      // landed.
       log.error({ err, kind: event.kind }, "session-bus: event consumer threw");
     }
   }
@@ -1134,58 +559,9 @@ const ENVELOPE_TOO_LARGE_REASON =
   "this message is too large for the bus; publish the bulk as an artifact and reference it instead";
 
 function notMember(): SessionBusRefusal {
-  return refuse("NOT_MEMBER", "this session is not a member of a multi-machine session");
-}
-
-function unknownTask(): SessionBusRefusal {
-  return refuse("UNKNOWN_TASK", "no such task on this session");
-}
-
-/** Turn a store refusal into one an AGENT can act on.
- *
- *  Naming the current state is the whole point. A peer holds no reading tool for
- *  its own tasks, so a refusal that describes only what it may not do leaves it
- *  with no way to work out what it may — which is how "that is not a state this
- *  task can reach from here" became the last word on a task nobody could
- *  finish. */
-function blocked(o: Extract<OutboundOutcome, { kind: "blocked" }>): SessionBusRefusal {
-  if (o.reason === "unknown-task") return unknownTask();
-  if (o.reason === "illegal") {
-    if (!o.from) return refuse("DUPLICATE_STATE", "this task cannot move to the state being reported");
-    return isTerminal(o.from)
-        ? refuse(
-            "TASK_TERMINAL",
-            `this task is already ${o.from}, so it can never move again — a finding naming this taskId still reaches the other session`,
-          )
-      : refuse("DUPLICATE_STATE", `this task is already "${o.from}", so it cannot move to "${o.to}"`);
-  }
-  // Stop-and-wait: one transition per task is in flight at a time, so a second
-  // one is not lost, it is early. The caller retries once the ack lands.
-  return refuse("AGENT_NOT_READY", "the previous report on this task is still unacknowledged");
+  return refuse("NOT_MEMBER", "this bridge does not hold a session with that id");
 }
 
 function keyOf(ref: SessionMemberKey | SessionMemberRef): SessionMemberKey {
   return { machineId: ref.machineId, projectId: ref.projectId, sessionId: ref.sessionId };
-}
-
-/** The first text part, which is what a finding keeps as its durable body. A
- *  data or artifact part is a handle the finding already names by summary. */
-function textOf(parts: readonly BusPart[]): { text?: string } {
-  const first = parts.find((p) => p.kind === "text");
-  return first && first.kind === "text" ? { text: first.text } : {};
-}
-
-/** Artifact ids as they arrived, which name bytes held on the OTHER machine.
- *  Kept as ids and nothing more: this bridge cannot serve them, and recording a
- *  handle it cannot honour is still better than losing the only evidence that
- *  the evidence exists. */
-function artifactIdsOf(parts: readonly BusPart[]): string[] {
-  return parts.flatMap((p) => (p.kind === "artifact" ? [p.artifactId] : []));
-}
-
-/** Count one exchange that moved no task: a finding, an answer, an aside. Only
- *  agent-authored text reaches this -- never an ack, a duplicate or a retry. */
-function withExchange(s: TaskStoreState, now: number): TaskStoreState {
-  const guard = noteExchange(s.guard, now);
-  return guard === s.guard ? s : { guard, tasks: s.tasks };
 }

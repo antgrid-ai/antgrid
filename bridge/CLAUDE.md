@@ -166,94 +166,38 @@ is the spec; this is the set of invariants a future edit breaks silently.
   `ProjectCore.sendToOwner` is the only path, and `local-listener.ts` hands a
   bus frame to an owner only if its hello declared
   `capabilities.sessionBusCarrier` (`ownerCarriesSessionBus`, surfaced to the
-  loopback API as `carrierPresent` and to a caller as a member's
-  `carrierAttached`). The desktop app is the carrier; no attached carrier means
-  the frame is HELD and retried by the coordinator, never dropped, so a closed
-  desktop is an indefinitely delayed exchange rather than a failed one.
+  loopback API as `carrierPresent`). The desktop app is the carrier; no
+  attached carrier means the frame is HELD and retried by the coordinator, never
+  dropped, so a closed desktop is an indefinitely delayed exchange rather than a
+  failed one.
 - **Nothing this side of the relay may be reported as delivery.** The carrier
-  taking a frame says only that it left this machine, so a member is
-  `carrierAttached` and never "reachable", an assignment reports a task id and
-  no delivery, and the one honest answer — the peer's ack — is what
-  `TaskView.reachedPeer`/`unacked` carry and what `antgrid_list_tasks` marks NOT
-  YET DELIVERED until it arrives. That evidence is the task's `acked` BOOLEAN and
-  never `ackedSeq > 0`: the opening assign carries seq 0 and `ackedSeq` starts at
-  0, so the number cannot tell "nothing has landed" from "the assign landed". A lead that cannot tell a task nobody has
-  received from one being worked on re-assigns it, which is the duplicate the
-  whole acked outbox exists to prevent. Since nothing on the wire reports the
-  gap, the retry loop is its only witness: `warnIfUnacked` says so once a frame
-  has left this machine repeatedly with nothing acked, and the app says the
-  other half (`no leg for addressed member`, `lead project not open`). Take a
-  log line out of any of those three and a carrier that accepts frames and
-  delivers none is silent in both processes again — which it was, for three
-  hours, across a restart.
-- **A report is the payload; every surface has to keep the whole of it.** The
-  wake card renders `WakeDelivery.result` (the envelope's text part) and not just
-  `metadata.summary`, and the store keeps that same report as `TaskRecord.result`
-  rather than dropping it on the terminal transition. Both are needed and neither
-  is sufficient: the card leaves the lead's context within a turn or two, and
-  `antgrid_get_task` is what is left after that — carrying the summary alone at
-  both ends is how a lead read `ASK ANSWER OK` while the result sat unread on the
-  other machine. `result` is deliberately NOT a finding: findings are interim, and
-  a completion listed among them reads as one more aside. The same rule covers
-  `metadata.unexpected`, which four tools advertise and which crossed the relay
-  intact for as long as nothing on the receiving side read it.
-- **`working` is a notification, never a gate.** `LEGAL_TRANSITIONS.submitted`
-  reaches everything `working` reaches, because `antgrid_open_task` is the only
-  thing that emits `working`, the task card does not require it, and a peer holds
-  no `antgrid_get_task` to see whether it called it. Narrowing that row again
-  makes a courtesy load bearing and refuses a peer that did the work. It cannot
-  be fixed instead by emitting `working` under the report: stop-and-wait (D13)
-  allows one transition per task in flight, so the synthesised pair refuses its
-  own second half. Two consequences the same reasoning owns: a refusal must NAME
-  the state the task is in (`blocked()` in `coordinator.ts`, from the `from`/`to`
-  the store returns), and `SessionView.openTasks` carries per-task state because
-  it is the ONLY reading a peer gets of its own work.
-- **A terminal task can still be spoken about, and that is the one finding that
-  gets delivered.** Findings are recorded and left to be read because the terminal
-  transition is still coming and carries them (`lineForEvent` returns null for
-  every other `message`); once a task IS terminal that arrival is spent, so a
-  peer's answer to a cancellation would sit on a record the lead has no reason to
-  reopen. Hence the `note` kind. Two halves, and either alone leaves the hole:
-  `coordinator.report` refuses a terminal task by NAMING the finding route, and
-  `deliver-event` delivers a finding whose task is terminal. A peer told only
-  "already canceled" reaches for a taskless finding, and there is no such thing:
-  `reportFinding` refuses one. Delivered is not prompt: the note drains at the lead's next turn
-  boundary like every other line, so it buys "seen eventually", never "seen
-  soon". The card names no answering tool on purpose — `answer_peer` is refused
-  on a terminal task, so offering it sends the lead at a verb that cannot work.
-- **A finding names a task or it is refused, and the escape hatch is a second
-  verb.** A taskless finding was accepted and reported `sent`, but no record held
-  it: `antgrid_list_tasks` could not list it and `antgrid_get_task` had no id to
-  be given, so the spec's "poll-only" (D4a) named a poll that does not exist.
-  `reportFinding` refuses `NO_TASK` and names `antgrid_raise_task` — the spec's
-  `open-task` (4.5), which mints a task with `origin: peer` and crosses as
-  `session-bus:raise`. **`antgrid_open_task` is a DIFFERENT verb** that shipped
-  first under the colliding name and means "mark an assigned task started"; it
-  refuses anything not already assigned, so it can never serve this. The raise is
-  its own wire type rather than a flag on the assign because the two mint the same
-  record and differ only in which side works it — a bridge that did not know the
-  flag would take the wrong role, where an unknown type is refused. `origin` is
-  therefore not `role`: `role` is per machine and reverses across the wire (the
-  raiser holds `peer`, the receiver `lead`), `origin` is the same word on both
-  machines and is the only thing that can tell a lead it never asked for this.
+  taking a frame says only that it left this machine, so a post answers `sent`
+  and never "received". The one honest answer is the other side's ack, and
+  `session-bus:ack` is a reserved verb nothing on this bridge emits yet — so
+  until it is re-keyed to a message id, the logs are the only witness a frame
+  that goes nowhere has: the coordinator says so when a frame names a session
+  this bridge does not hold, and the app says the other half (`no leg for
+  addressed member`, `lead project not open`). Take a log line out of any of
+  those three and a carrier that accepts frames and delivers none is silent in
+  both processes again — which it was, for three hours, across a restart.
 - **An artifact id from the other machine is a reference, not a handle.**
   `coordinator.onFetch` answers a `session-bus:fetch`; nothing sends one, so the
   requester half of cross-machine fetch does not exist. Every surface has to say
-  so — `publish_artifact`'s description, the wake and note cards, and the
-  `TaskResult.artifactIds` doc — because an id offered as fetchable that then is
-  not teaches the reader to distrust the whole list.
+  so — `publish_artifact`'s description and the note card — because an id
+  offered as fetchable that then is not teaches the reader to distrust the whole
+  list.
 - **A bus address is matched on machine + session; the project id is a LABEL.**
   `addressesSameSession` (`session-bus/address.ts`) is what `handleInbound`
-  gates on, and the carrier matches a lead on its session id alone
+  gates on, and the carrier matches a session on its id alone
   (`classifyBusFrame`). One checkout can be open as more than one project — a
   managed worktree opened in its own right hashes to an id of its own — so the
   two machines legitimately hold different project ids for the same session, and
   comparing them refused every frame forever over a display string. `sameAddress`
-  stays strict and stays correct for a member the app names on this bridge's own
-  row: both sides of that comparison come from one record. When the ids do
+  stays strict and stays correct for a session the app names on this bridge's
+  own row: both sides of that comparison come from one record. When the ids do
   differ, both processes say so once (`the other machine addresses session … as
   project …`, and the app's `peer addresses this lead by another project`) —
-  routing no longer depends on it, but a peer's row still renders it.
+  routing no longer depends on it, but the row still renders it.
 - **Outbound on a PEER is `sendToAppSession(peerId)`,** keyed by the app session
   that carried the exchange in (`busOriginByContext` / `noteBusOrigin` in
   `agent-core.ts`). Falling through to the loopback owner would hand the lead's
@@ -286,14 +230,17 @@ is the spec; this is the set of invariants a future edit breaks silently.
   `authorizeInstruction` reads as a grant — so no template may put it in a
   wrapper, and the one kind that carries it (`joined`) must stay on the
   `injectReply` path rather than reaching `instruct`.
-- **The runaway caps are `session-bus/task-guard.ts`** and every one of them is
-  per SESSION, not per machine.
+- **The no-progress halt is `session-bus/task-guard.ts`, and it is per SESSION,
+  not per machine** — two agents can trade messages that advance nothing
+  forever, and a per-machine ceiling would let one session spend another's
+  budget. Nothing counts an exchange into it today: the guard state is
+  in-memory and only the human clear is wired, so the ceiling is declared and
+  dormant until there is a notion of progress on a message plane to feed it.
 - **`/session-bus/*` in `api-server.ts` is the loopback route table**, keyed off
   `?terminalId=` — which is what says whose session a request is about, and the
-  same slot that resolves an isolated session's checkout. Membership and bus
-  frames route by `sessionId` on the project stream, so nothing here carries a
-  `checkoutId` (the comment above `session:setup` in `protocol.ts` is the
-  standing reason).
+  same slot that resolves an isolated session's checkout. Bus frames route by
+  `sessionId` on the project stream, so nothing here carries a `checkoutId` (the
+  comment above `session:setup` in `protocol.ts` is the standing reason).
 
 Known gaps, stated rather than papered over: a codex CHAT session gets no MCP
 server at all (`codexNotifyOnlyArgs`), so nothing in it can reach the bus; and

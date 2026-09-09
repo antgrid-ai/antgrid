@@ -1,12 +1,11 @@
 // The one place the session bus touches disk. Every store above it is a pure
 // fold; this is the thin wrapper the repo already splits out
-// (`handler/session-store.ts` is the same shape), which is what lets the D13
-// idempotency rules be tested with no filesystem at all.
+// (`handler/session-store.ts` is the same shape), which is what lets those folds
+// be tested with no filesystem at all.
 //
 // A parse failure returns the EMPTY store, never a throw and never a partial. A
-// half-read task file would let a bridge re-apply a transition it already
-// applied; an empty one only costs the peer a redelivery, which the outbox
-// already handles.
+// half-read file would put a message back on the wire under a state nothing
+// wrote; an empty one costs at most a held message that was allowed to be lost.
 
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -18,9 +17,9 @@ export function sessionBusProjectDir(abDir: string, projectId: string): string {
   return join(abDir, "agents", encodeURIComponent(projectId), "session-bus");
 }
 
-/** Where one LOCAL session's bus state lives — the lead row on the lead machine,
- *  the peer row on the peer machine. Each bridge persists only its own half
- *  (D9); neither directory is ever a mirror of the other machine's. */
+/** Where one LOCAL session's bus state lives. Each bridge persists only what its
+ *  own sessions said and were told; neither directory is ever a mirror of the
+ *  other machine's. */
 export function sessionBusSessionDir(abDir: string, projectId: string, sessionId: string): string {
   return join(sessionBusProjectDir(abDir, projectId), encodeURIComponent(sessionId));
 }
@@ -30,9 +29,8 @@ export function sessionBusSessionDir(abDir: string, projectId: string, sessionId
  *
  * The restart path needs this: a fresh process holds no sessions in memory, so
  * without enumerating the directory nothing would re-arm the retries a killed
- * bridge left queued, and a finished task's report would sit unsent until some
- * unrelated call happened to name that session (D11 — silence is never a
- * failure, so nothing else would ever notice).
+ * bridge left queued, and a held message would sit unsent until some unrelated
+ * call happened to name that session.
  */
 export function listSessionBusSessions(abDir: string, projectId: string): string[] {
   const dir = sessionBusProjectDir(abDir, projectId);
@@ -84,10 +82,9 @@ export function writeStoreFile(path: string, dir: string, value: unknown): void 
  *
  * The ONLY thing that deletes an artifact. Stopping an agent, restarting the
  * bridge and archiving a session all leave the store readable, which is what
- * spec 5.4's "artifacts survive however the session ended" means in practice —
- * survival is a property of where the bytes are, not of a cleanup hook that
- * remembered to skip them. This is called from the session delete path and
- * nowhere else.
+ * "an artifact survives however the session ended" means in practice — survival
+ * is a property of where the bytes are, not of a cleanup hook that remembered to
+ * skip them. This is called from the session delete path and nowhere else.
  */
 export function removeSessionBusSession(abDir: string, projectId: string, sessionId: string): void {
   rmSync(sessionBusSessionDir(abDir, projectId, sessionId), { recursive: true, force: true });

@@ -1,12 +1,11 @@
 // Which app session carries a bus context, across a restart.
 //
-// A peer bridge cannot reach the lead's machine (D7), so the carrier that
-// delivered to it is its only way back, and that binding is learned from inbound
-// traffic. A fresh process has learned nothing — while the task store comes back
-// off disk and re-arms its retries, every one of them would refuse for want of a
-// route, and on a task the peer has already acked the lead has no reason to send
-// the frame that would teach it one. The exchange then sits until the task
-// lapses.
+// A bridge cannot dial another bridge, so the carrier that delivered to it is
+// its only way back, and that binding is learned from inbound traffic. A fresh
+// process has learned nothing — held messages come back off disk and re-arm
+// their retries, and every one of them would refuse for want of a route, while
+// the other side has no reason to send the frame that would teach it one. The
+// exchange then sits until the messages expire.
 //
 // A relay slot id (`<accountDeviceUuid>#<machineDeviceUuid>`) is a stable
 // transport address for one (account device, machine) pair, not a per-connection

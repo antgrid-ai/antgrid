@@ -1,12 +1,12 @@
-// A bounded ring of the envelopes that crossed, for rendering `list-tasks` /
-// `get-task` and for the app to read later.
+// A bounded ring of the envelopes that crossed, for a human or the app to read
+// back what a session said and was told.
 //
-// THE LOG IS NOT THE RECORD OF RECORD — the task store is. It is written on the
-// same flush, so a crash can lose the tail of the log but never a task
-// transition, and every part is trimmed to MAX_LOGGED_PART_CHARS on the way in:
-// the durable copy of a long result already lives in the finding or the artifact
-// it arrived with, and a log that grew to hold it would outweigh the store it
-// annotates.
+// THE LOG IS NOT THE DURABLE COPY — an Artifact is. A message is allowed to be
+// lost, so nothing may be reconstructed from this file, and every part is
+// trimmed to MAX_LOGGED_PART_CHARS on the way in: anything worth keeping whole
+// was published as an artifact, and a log that grew to hold it would outweigh
+// what it annotates. It is written on the same flush as the held store, so a
+// crash can lose the tail of the log but never a message still waiting to go.
 
 import { join } from "node:path";
 import { z } from "zod";
@@ -21,7 +21,7 @@ export const LoggedEnvelopeSchema = z.object({
   at: z.number(),
   direction: z.enum(["in", "out"]),
   /** The other end. The bare key, not the labelled ref: a log line is scanned by
-   *  address, and the labels are already on the task row it belongs to. */
+   *  address, and a label is display text that goes stale under a rename. */
   peer: SessionMemberKeySchema,
   envelope: BusEnvelopeSchema,
 });
@@ -60,10 +60,8 @@ export function appendLog(s: MessageLogState, e: LogInput): MessageLogState {
   return { entries: [...s.entries, entry].slice(-MAX_LOG_ENTRIES) };
 }
 
-export function entriesFor(s: MessageLogState, taskId: string): LoggedEnvelope[] {
-  return s.entries.filter((e) => e.envelope.taskId === taskId);
-}
-
+/** Every entry on one exchange. Uncalled today: the reader that asks a mailbox
+ *  "what has this thread said" is what §7.1 builds on top of it. */
 export function entriesForContext(s: MessageLogState, contextId: string): LoggedEnvelope[] {
   return s.entries.filter((e) => e.envelope.contextId === contextId);
 }

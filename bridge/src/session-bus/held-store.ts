@@ -1,37 +1,34 @@
 // Messages this bridge's own transport REFUSED, kept so a link that was down for
-// a moment does not cost a finding.
+// a moment does not cost a message.
 //
-// D13 gives a message no seq and no ack and lets it be lossy, which makes one
-// already on the wire unretryable: a second copy would land as a second finding
-// with nothing to tell it from the first. What CAN be redelivered is one that
-// never left — `send` returning false is this machine's own refusal, decided
-// before anything reached the relay — so nothing here can duplicate at the
-// receiver. That distinction is the whole reason this store is allowed to exist
-// beside D13, and it is why a caller must hold ONLY on a false return and never
-// on a silence.
+// A message carries no seq and no ack and is allowed to be lossy, which makes
+// one already on the wire unretryable: a second copy would land as a second
+// message with nothing to tell it from the first. What CAN be redelivered is one
+// that never left — `send` returning false is this machine's own refusal,
+// decided before anything reached the relay — so nothing here can duplicate at
+// the receiver. That distinction is the whole reason this store is allowed to
+// exist, and it is why a caller must hold ONLY on a false return and never on a
+// silence.
 //
-// The lossiness D13 asks for is still spent, just deliberately: past the cap the
-// oldest goes, and past the TTL the stale go.
+// The lossiness is still spent, just deliberately: past the cap the oldest goes,
+// and past the TTL the stale go.
 
 import { join } from "node:path";
 import { z } from "zod";
 import { SessionMemberKeySchema } from "../protocol";
-import { MAX_HELD_MESSAGES, TASK_EXPIRY_MS } from "./constants";
+import { BUS_MESSAGE_TTL_MS, MAX_HELD_MESSAGES } from "./constants";
 import { readStoreFile, sessionBusSessionDir, writeStoreFile } from "./store-fs";
 
 export const HELD_STORE_VERSION = 1;
 
-/** A held message stops being worth delivering when the task it could belong to
- *  would already have lapsed: a finding about work the lead has given up on is
- *  noise arriving as news. */
-export const HELD_MESSAGE_TTL_MS = TASK_EXPIRY_MS;
+export const HELD_MESSAGE_TTL_MS = BUS_MESSAGE_TTL_MS;
 
 export const HeldMessageSchema = z.object({
   messageId: z.string().min(1).max(200),
   contextId: z.string().min(1).max(200),
-  /** The role the send was made under. Re-resolving it at flush time would read
-   *  the store as it is THEN, and a context whose tasks have since been pruned
-   *  answers differently — the frame must go out the way it was addressed. */
+  /** Which way the send was addressed: out through this machine's own carrier,
+   *  or back down the carrier that brought the context in. Kept rather than
+   *  re-derived at flush time so the frame goes out the way it was addressed. */
   role: z.enum(["lead", "peer"]),
   to: SessionMemberKeySchema,
   /** The serialized `session-bus:message` frame, opaque here like the outbox's. */
@@ -58,7 +55,7 @@ export function hasHeld(s: HeldState, messageId: string): boolean {
 }
 
 /** Hold one refused message. Appended at the end and evicted from the front, so
- *  the order a peer reported in is the order the lead reads. */
+ *  the order a sender wrote in is the order the target reads. */
 export function holdMessage(s: HeldState, m: HeldMessage): HeldState {
   const held = [...s.held, m];
   return { held: held.length > MAX_HELD_MESSAGES ? held.slice(held.length - MAX_HELD_MESSAGES) : held };

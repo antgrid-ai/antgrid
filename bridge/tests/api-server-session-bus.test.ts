@@ -11,7 +11,7 @@ import { startApiServer, type AgentContext } from "../src/api-server";
 import { createSessionBusApi, type SessionMembership } from "../src/session-bus/api";
 import { SessionBusCoordinator } from "../src/session-bus/coordinator";
 import type { AbConfig } from "../src/config";
-import type { AbMessage, SessionMember, SessionMemberOf } from "../src/protocol";
+import type { AbMessage } from "../src/protocol";
 
 const dirs: string[] = [];
 function tempDir(prefix: string): string {
@@ -26,33 +26,6 @@ afterAll(() => {
 
 const LEAD_SESSION = "lead-1";
 const PEER_SESSION = "peer-1";
-
-const PEER_MEMBER: SessionMember = {
-  machineId: "m2",
-  projectId: "p2",
-  sessionId: PEER_SESSION,
-  sessionName: "peer session",
-  role: "peer",
-  // The Capability Card the peer's own bridge observed (spec 3.3). It is on the
-  // member row and nowhere else, so the peers route is the only thing that can
-  // ever answer a lead's "what is this machine".
-  card: {
-    os: { name: "Linux", version: "6.8.0", arch: "arm64" },
-    repo: { label: "ingest", remote: "github.com/acme/ingest", branch: "main" },
-  },
-  joinedAt: 1_000,
-  state: "active",
-};
-
-const LEAD_OF_PEER: SessionMemberOf = {
-  machineId: "m1",
-  projectId: "p1",
-  sessionId: LEAD_SESSION,
-  sessionName: "lead session",
-  role: "lead",
-  joinedAt: 1_000,
-  state: "active",
-};
 
 /** One machine's half of the pair: its own coordinator, the API over it, and a
  *  loopback API server. Nothing here stands up a relay — a frame is handed
@@ -70,14 +43,8 @@ interface Machine {
 }
 
 function membershipOf(terminalId: string): SessionMembership | null {
-  if (terminalId === LEAD_SESSION) {
-    return { sessionId: LEAD_SESSION, sessionName: "lead session", members: [PEER_MEMBER] };
-  }
-  if (terminalId === PEER_SESSION) {
-    return { sessionId: PEER_SESSION, sessionName: "peer session", members: [], memberOf: LEAD_OF_PEER };
-  }
-  // A session that exists and joined no bus, which is every ordinary session.
-  if (terminalId === "solo-1") return { sessionId: "solo-1", members: [] };
+  if (terminalId === LEAD_SESSION) return { sessionId: LEAD_SESSION, sessionName: "lead session" };
+  if (terminalId === PEER_SESSION) return { sessionId: PEER_SESSION, sessionName: "peer session" };
   // Anything else names no session at all (a service PTY, or a bad id).
   return null;
 }
@@ -233,11 +200,11 @@ describe("session-bus routes", () => {
   });
 });
 
-// A lead whose own machine has no bus address was refused NOT_MEMBER, which
-// flatly contradicts /role saying `lead:true` and sends the reader hunting for a
-// membership bug that isn't there. The two nulls are different answers and the
-// caller has to be able to tell them apart.
-describe("a self with no address is not a self with no membership", () => {
+// A session this bridge holds but cannot stamp an address for was refused
+// NOT_MEMBER, which sends the reader hunting for a session that is sitting right
+// there. The two nulls are different answers and the caller has to be able to
+// tell them apart.
+describe("a self with no address is not a session this bridge does not hold", () => {
   function coordinatorWith(addressable?: () => boolean): SessionBusCoordinator {
     return new SessionBusCoordinator({
       abDir: tempDir("antgrid-bus-selfnull-"),
@@ -249,23 +216,27 @@ describe("a self with no address is not a self with no membership", () => {
     });
   }
 
-  const assign = (c: SessionBusCoordinator) =>
-    c.assign({ sessionId: LEAD_SESSION, peer: "p", instruction: "go" } as never) as {
-      code?: string;
-    };
+  const post = (c: SessionBusCoordinator) =>
+    c.message({
+      sessionId: LEAD_SESSION,
+      taskId: null,
+      to: { machineId: "m2", projectId: "p2", sessionId: PEER_SESSION },
+      summary: "go",
+      parts: [{ kind: "text", text: "go" }],
+    }) as { code?: string };
 
   test("an unaddressable machine is AGENT_NOT_READY", () => {
-    expect(assign(coordinatorWith(() => false)).code).toBe("AGENT_NOT_READY");
+    expect(post(coordinatorWith(() => false)).code).toBe("AGENT_NOT_READY");
   });
 
   test("an addressable machine keeps NOT_MEMBER", () => {
-    expect(assign(coordinatorWith(() => true)).code).toBe("NOT_MEMBER");
+    expect(post(coordinatorWith(() => true)).code).toBe("NOT_MEMBER");
   });
 
   // A core that never wires it — every test harness and any older build — must
   // keep the answer it has always given.
   test("an unwired addressable keeps NOT_MEMBER", () => {
-    expect(assign(coordinatorWith()).code).toBe("NOT_MEMBER");
+    expect(post(coordinatorWith()).code).toBe("NOT_MEMBER");
   });
 });
 
