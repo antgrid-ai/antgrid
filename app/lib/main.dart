@@ -64,12 +64,14 @@ import 'storage/cached_sessions_store.dart';
 import 'storage/drawer_collapsed_store.dart';
 import 'storage/drawer_order_store.dart';
 import 'storage/first_run_store.dart';
+import 'storage/pending_forgets_store.dart';
 import 'storage/project_store.dart';
 import 'storage/recent_agents_store.dart';
 import 'storage/update_handoff_store.dart';
 import 'update/update_gate.dart';
 import 'util/ab_log.dart';
 import 'util/detached.dart';
+import 'util/windows_paste_fix.dart';
 import 'widgets/auth_splash.dart';
 import 'widgets/demo_frame.dart';
 import 'window/window_chrome.dart';
@@ -106,6 +108,10 @@ Future<void> main() async {
     defaultDebugPrint(message, wrapWidth: wrapWidth);
   };
   WidgetsFlutterBinding.ensureInitialized();
+  // Before any text field can take a keystroke: Windows' clipboard-history
+  // paste (Win+V) types a bare "v" instead of pasting without this — see
+  // WindowsPasteFix's doc.
+  WindowsPasteFix.install();
   // Before any socket can seal a frame: the default cipher is pure Dart and
   // blocks the UI isolate for the whole of a tunneled preview response.
   installNativeE2eCipher();
@@ -162,6 +168,9 @@ Future<void> main() async {
     openAppSettingsPrefs(),
     UpdateHandoffStore.open(),
   ).wait;
+  // Opened separately from the record above, which is already at the arity
+  // `Future.wait` on records supports.
+  final pendingForgetsStore = await PendingForgetsStore.open();
   final initialAppSettings = AppSettings.fromPrefs(prefs);
 
   // Consumed unconditionally, never behind Windows' `--after-update` argument:
@@ -198,6 +207,7 @@ Future<void> main() async {
     retry: noProviderRetry,
     overrides: [
       projectStoreProvider.overrideWithValue(projectStore),
+      pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
       recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
       drawerOrderStoreProvider.overrideWithValue(drawerOrderStore),
       drawerCollapsedStoreProvider.overrideWithValue(drawerCollapsedStore),

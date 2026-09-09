@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../src/session-manager";
+import { Database } from "bun:sqlite";
 
 function makeTm() {
   const live = new Set<string>();
@@ -22,7 +23,7 @@ function newStore() { const d = mkdtempSync(join(tmpdir(), "ab-sm-resume-")); di
 afterEach(() => { for (const d of dirs.splice(0)) try { rmSync(d, { recursive: true, force: true }); } catch {} });
 
 // `extra` lets later tests inject opts (e.g. an isolated `codexHome` so the
-// codex resume pre-flight can't read the dev machine's real ~/.codex).
+// availability hints can't read the dev machine's real ~/.codex).
 function mk(storeDir: string, tm = makeTm(), extra: Record<string, unknown> = {}) {
   return new SessionManager({
     projectId: "p1", storeDir, projectPath: storeDir,
@@ -69,6 +70,30 @@ describe("setAgentSession persistence", () => {
 });
 
 describe("start() resume wiring", () => {
+  test.each(["terminal", "chat"] as const)("Codex %s keeps an id absent from SQLite across reload and start", (mode) => {
+    const store = newStore();
+    const db = new Database(join(store, "state_5.sqlite"));
+    db.run("CREATE TABLE threads (id TEXT PRIMARY KEY)");
+    db.close();
+    const tm = makeTm();
+    const calls: Array<{ resumeId?: string }> = [];
+    const opts = { codexHome: store, onStartChat: (o: { resumeId?: string }) => calls.push(o) };
+    const sm = mk(store, tm, opts);
+    const session = sm.create("Codex", { tool: "codex", mode });
+    sm.setAgentSession(session.id, "saved-thread");
+    sm.flushNow();
+    const restored = mk(store, tm, opts);
+    restored.start(session.id);
+    if (mode === "terminal") {
+      expect(tm.__spawns.at(-1).args.slice(-2)).toEqual(["resume", "saved-thread"]);
+      expect(tm.__spawns.at(-1).suppressOscNotifications).toBe(false);
+    } else {
+      expect(calls[0].resumeId).toBe("saved-thread");
+    }
+    restored.flushNow();
+    expect(mk(store).get(session.id)?.agentSessionId).toBe("saved-thread");
+  });
+
   test("claude resume appends --resume to the spawn args", () => {
     const store = newStore();
     const tm = makeTm();
@@ -86,10 +111,6 @@ describe("start() resume wiring", () => {
   test("codex resume appends the subcommand AFTER the global -c flags", () => {
     const store = newStore();
     const tm = makeTm();
-    // Isolated, non-existent codexHome so the resume pre-flight is deterministic:
-    // codexThreadExistsSync returns null (undeterminable) → optimistic resume.
-    // WITHOUT this, the test reads the dev machine's real ~/.codex, where
-    // "uuid-1" is not a real thread → false → resume refused → test fails.
     const sm = mk(store, tm, { codexHome: join(store, "no-such-codex") });
     const s = sm.create("Slot", { tool: "codex" });
     sm.setAgentSession(s.id, "uuid-1"); // no transcript path → codex preflight via codexHome
@@ -103,7 +124,7 @@ describe("start() resume wiring", () => {
     expect(args.indexOf("-c")).toBeLessThan(args.indexOf("resume"));
   });
 
-  test("a stale id (transcript gone) is cleared and the session starts fresh", () => {
+  test("a missing transcript preserves the saved identity and attempts native resume", () => {
     const store = newStore();
     const tm = makeTm();
     const sm = mk(store, tm);
@@ -111,10 +132,11 @@ describe("start() resume wiring", () => {
     sm.setAgentSession(s.id, "sess-dead", "/no/such/file.jsonl");
     sm.start(s.id);
     const spawn = tm.__spawns.at(-1);
-    expect(spawn.args).not.toContain("--resume");
+    expect(spawn.args).toContain("--resume");
+    expect(spawn.args).toContain("sess-dead");
     sm.flushNow();
     const raw = JSON.parse(readFileSync(join(store, "agents", "p1", "sessions.json"), "utf8"));
-    expect(raw.sessions.find((r: any) => r.id === s.id).agentSessionId).toBeUndefined();
+    expect(raw.sessions.find((r: any) => r.id === s.id).agentSessionId).toBe("sess-dead");
   });
 
   test("resume args fold into the command line when per-session args are set", () => {

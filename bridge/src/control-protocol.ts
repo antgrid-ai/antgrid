@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AgentDescriptor } from "./protocol";
+import type { AgentDescriptor, SessionEntry } from "./protocol";
 import type { BranchRemoteStatus, StashEntry } from "./git-branches";
 
 export const ControlRequestSchema = z.discriminatedUnion("type", [
@@ -14,6 +14,19 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     mode: z.enum(["local", "remote"]),
   }),
   z.object({ id: z.string().min(1), type: z.literal("project:start"), projectId: z.string().min(1) }),
+  // Loopback-only session peek for a LOCAL project the app has not opened this
+  // run (so its cached Recent/drawer row never learned of a session started or
+  // resumed while it was cold). Deliberately ungated beyond the shape check —
+  // unlike `sessions.list` over the relay control plane (mobile-access-gated,
+  // seen-catalog-bound), the loopback bearer token IS the authorization: only a
+  // same-machine caller holding host.json's token can reach this endpoint at
+  // all. See `_peekLocalProjectSessions` in app_shell.dart, the app-side caller.
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("project:sessions"),
+    projectId: z.string().min(1),
+    includeArchived: z.boolean().optional(),
+  }),
   z.object({ id: z.string().min(1), type: z.literal("project:stop"), projectId: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("project:forget"), projectId: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("host:shutdown") }),
@@ -159,6 +172,8 @@ export interface KnownProject {
   label?: string;
   path?: string;
   running: boolean;
+  /** Seen-catalog recency, absent for a warm core with no catalog hint yet. */
+  lastActiveAt?: string;
 }
 
 /** One installed tool as reported by the loopback control plane. PATH-scoped:
@@ -183,10 +198,15 @@ export interface ConnectInfo {
 
 export type ControlResponse =
   | { id: string; ok: true; type: "project:list"; projects: ProjectSummary[] }
-  | { id: string; ok: true; type: "project:resolve"; projectId: string; repoPath: string; selectedPath: string; label: string; isGitRepository: boolean }
+  | {
+      id: string; ok: true; type: "project:resolve"; projectId: string; repoPath: string;
+      selectedPath: string; label: string; isGitRepository: boolean;
+      kind: "primary" | "managed-checkout" | "linked-worktree" | "plain"; checkoutId?: string;
+    }
   | { id: string; ok: true; type: "tools:list"; tools: ToolSummary[]; agents?: AgentDescriptor[] }
   | { id: string; ok: true; type: "project:open"; running: boolean; connect: ConnectInfo | null }
   | { id: string; ok: true; type: "project:start"; running: boolean; connect: ConnectInfo | null }
+  | { id: string; ok: true; type: "project:sessions"; sessions: SessionEntry[] }
   | { id: string; ok: true; type: "project:stop" }
   | { id: string; ok: true; type: "project:forget" }
   | { id: string; ok: true; type: "host:shutdown" }

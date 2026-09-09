@@ -14,6 +14,7 @@ import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/control_plane_client.dart';
+import 'package:antgrid/services/pending_reply.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
@@ -345,6 +346,7 @@ void main() {
       Future<void> Function(ProviderContainer container)? onCreate,
       Future<void> Function(ProviderContainer container)? onStart,
       Future<void> Function(ProviderContainer container)? onPrepare,
+      Object? throwOnCreate,
     }) async {
       useInMemoryPrefs();
       final stores = await buildTestStoreOverrides();
@@ -368,6 +370,7 @@ void main() {
         cache,
         onCreate: () async => onCreate?.call(container),
         onStart: () async => onStart?.call(container),
+        throwOnCreate: throwOnCreate,
       );
 
       container = ProviderContainer(
@@ -541,6 +544,24 @@ void main() {
       },
     );
 
+    test(
+      'the transport going down during create aborts with sessionDown, '
+      'not a bare timeout',
+      () async {
+        final h = await harness(throwOnCreate: const SessionDownException());
+
+        await startNewSession(h.container);
+
+        expect(
+          h.container.read(newSessionStartAbortProvider)?.reason,
+          NewSessionStartAbortReason.sessionDown,
+        );
+        // create's own throw happens before start is ever issued.
+        expect(h.service.started, isEmpty);
+        expect(h.container.read(newSessionStartInFlightProvider), isFalse);
+      },
+    );
+
     test('a success with the user still on the canvas navigates', () async {
       final h = await harness();
       h.container
@@ -653,10 +674,16 @@ class _StubSessionsService extends SessionsService {
     CachedSessionsStore cache, {
     required this.onCreate,
     required this.onStart,
+    this.throwOnCreate,
   }) : super.fromSession(cache: cache);
 
   final Future<void> Function() onCreate;
   final Future<void> Function() onStart;
+
+  /// Set to simulate `create()` failing the way `ProjectSession.newPending`'s
+  /// down/up registry does — e.g. `SessionDownException()` — rather than
+  /// answering with a session.
+  final Object? throwOnCreate;
 
   int created = 0;
   final started = <String>[];
@@ -674,6 +701,8 @@ class _StubSessionsService extends SessionsService {
   }) async {
     await onCreate();
     created++;
+    final err = throwOnCreate;
+    if (err != null) throw err;
     return _entry('s-new');
   }
 

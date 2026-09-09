@@ -24,8 +24,9 @@ import 'ab_colors.dart';
 /// `agentWorkStatusDotSpec`, which is the canonical mapping.
 ///
 /// That leaves [agentThinking]/[agentRunning]/[agentAttention] used only by
-/// `AbAgentTab`, itself only mounted in the design gallery. Prefer the generic
-/// tones for new agent surfaces; reach for these three only if the tab ships.
+/// `AbAgentTab`, which is not currently mounted anywhere (the design gallery
+/// that once previewed it is gone). Prefer the generic tones for new agent
+/// surfaces; reach for these three only if the tab ships.
 enum AbStatusTone {
   neutral,
   info,

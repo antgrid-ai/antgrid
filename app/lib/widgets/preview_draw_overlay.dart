@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/services.dart'
+    show HardwareKeyboard, KeyDownEvent, LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 
 import '../design/ab_colors.dart';
@@ -10,12 +12,14 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_text_field.dart';
 import '../utils/platform_utils.dart';
 
 /// What a tap or drag on the preview lays down.
-enum PreviewDrawTool { pen, line, rect, ellipse, text }
+enum PreviewDrawTool { pen, line, rect, ellipse, note }
 
 /// One annotation, in the LIVE overlay's logical coordinates — the same space
 /// the page is being displayed in, so a mark is stored exactly where the user
@@ -33,7 +37,7 @@ class PreviewDrawMark {
   final Color color;
 
   /// Freehand: every sampled point. Line/rect/ellipse: exactly the two
-  /// corners of the drag. Text: the single anchor it was placed at.
+  /// corners of the drag. Note: the single anchor it was placed at.
   final List<Offset> points;
 
   String text;
@@ -44,9 +48,15 @@ class PreviewDrawMark {
 /// controls buys nothing an agent can read out of the result.
 const double kPreviewDrawStrokeWidth = 3.0;
 
-/// Type size for a text mark. Large enough to survive being scaled into a
+/// Type size for a note mark. Large enough to survive being scaled into a
 /// full-resolution screenshot and read back by whoever opens the PNG.
-const double kPreviewDrawTextSize = AbTokens.fontLg;
+const double kPreviewDrawNoteFontSize = AbTokens.fontLg;
+
+/// A note wraps rather than running edge to edge, so it reads as a card and
+/// not a banner across the screenshot.
+const double kPreviewDrawNoteMaxWidth = 240.0;
+
+const double kPreviewDrawNotePadding = AbTokens.space6;
 
 /// Paints [marks] onto [canvas], scaling from overlay-logical coordinates to
 /// whatever space the canvas is in. Shared by the on-screen painter (scale 1)
@@ -97,20 +107,43 @@ void paintPreviewMarks(
       case PreviewDrawTool.ellipse:
         if (mark.points.length < 2) break;
         canvas.drawOval(_scaledBounds(mark, scale), paint);
-      case PreviewDrawTool.text:
+      case PreviewDrawTool.note:
+        // Rendered as a small tinted card, not bare text laid over the page:
+        // that's what reads as "an annotation left here" rather than as a
+        // caption baked into the screenshot itself.
         if (mark.text.isEmpty) break;
         final painter = TextPainter(
           text: TextSpan(
             text: mark.text,
             style: AbTokens.sansStyle(
-              fontSize: kPreviewDrawTextSize * scale,
+              fontSize: kPreviewDrawNoteFontSize * scale,
               color: mark.color,
               fontWeight: FontWeight.w600,
             ),
           ),
           textDirection: TextDirection.ltr,
-        )..layout();
-        painter.paint(canvas, mark.points.first * scale);
+        )..layout(maxWidth: kPreviewDrawNoteMaxWidth * scale);
+        final pad = kPreviewDrawNotePadding * scale;
+        final cardRect = Rect.fromLTWH(
+          mark.points.first.dx * scale,
+          mark.points.first.dy * scale,
+          painter.width + pad * 2,
+          painter.height + pad * 2,
+        );
+        final cardRadius = Radius.circular(AbTokens.radius5 * scale);
+        final card = RRect.fromRectAndRadius(cardRect, cardRadius);
+        canvas.drawRRect(
+          card,
+          Paint()..color = mark.color.withValues(alpha: 0.16),
+        );
+        canvas.drawRRect(
+          card,
+          Paint()
+            ..color = mark.color
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.5 * scale,
+        );
+        painter.paint(canvas, Offset(cardRect.left + pad, cardRect.top + pad));
     }
   }
 }
@@ -138,8 +171,7 @@ Future<Uint8List?> compositePreviewMarks({
   try {
     codec = await ui.instantiateImageCodec(screenshot);
     image = (await codec.getNextFrame()).image;
-    final scale =
-        overlaySize.width > 0 ? image.width / overlaySize.width : 1.0;
+    final scale = overlaySize.width > 0 ? image.width / overlaySize.width : 1.0;
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     canvas.drawImage(image, Offset.zero, Paint());
@@ -197,34 +229,66 @@ class PreviewDrawOverlay extends StatefulWidget {
 class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
   final List<PreviewDrawMark> _marks = [];
   final GlobalKey _canvasKey = GlobalKey();
-  final TextEditingController _textController = TextEditingController();
-  final FocusNode _textFocus = FocusNode();
+  final TextEditingController _noteController = TextEditingController();
+  final FocusNode _noteFocus = FocusNode();
+
+  /// Holds primary focus for the overlay so Ctrl+Z (Cmd+Z on macOS) reaches
+  /// [_undo] the same way the toolbar button does. The note editor's own
+  /// [FocusNode] takes it over the moment a note is opened, same as any
+  /// other descendant focus.
+  final FocusNode _overlayFocus = FocusNode(debugLabel: 'PreviewDrawOverlay');
 
   PreviewDrawTool _tool = PreviewDrawTool.pen;
   Color? _color;
   bool _sending = false;
 
-  /// Index into [_marks] of the text mark being typed into, or null. A text
-  /// mark is created empty on tap and dropped again if nothing is typed, so
-  /// this doubles as "an editor is open".
+  /// Index into [_marks] of the note being typed into, or null. A note mark
+  /// is created empty on tap and dropped again if nothing is typed, so this
+  /// doubles as "an editor is open".
   int? _editing;
 
   @override
   void initState() {
     super.initState();
     // Committing on focus loss as well as on submit is what makes tapping
-    // away from the field (onto the page, onto a tool) finish the text
+    // away from the field (onto the page, onto a tool) finish the note
     // instead of stranding an editor nothing will close.
-    _textFocus.addListener(() {
-      if (!_textFocus.hasFocus) _commitText();
+    _noteFocus.addListener(() {
+      if (!_noteFocus.hasFocus) _commitNote();
+    });
+    // `autofocus` on the Focus widget below only wins when nothing else in
+    // the scope is already focused — the address bar (or whatever the user
+    // last touched before arming the pencil) is still mounted underneath and
+    // usually still holds it, which is what left Ctrl+Z with nowhere to
+    // land. An explicit request, once the overlay is actually in the tree,
+    // forces it over regardless of who had it before.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _overlayFocus.requestFocus();
     });
   }
 
   @override
   void dispose() {
-    _textController.dispose();
-    _textFocus.dispose();
+    _noteController.dispose();
+    _noteFocus.dispose();
+    _overlayFocus.dispose();
     super.dispose();
+  }
+
+  /// Ctrl+Z (Cmd+Z on macOS) undoes the last mark, mirroring the toolbar
+  /// button. Shift is excluded so a future redo shortcut (Ctrl+Shift+Z) has
+  /// somewhere to land without this swallowing it first.
+  KeyEventResult _onOverlayKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (event.logicalKey != LogicalKeyboardKey.keyZ) {
+      return KeyEventResult.ignored;
+    }
+    final keys = HardwareKeyboard.instance;
+    if (keys.isShiftPressed) return KeyEventResult.ignored;
+    final isUndoModifier = keys.isControlPressed || keys.isMetaPressed;
+    if (!isUndoModifier) return KeyEventResult.ignored;
+    _undo();
+    return KeyEventResult.handled;
   }
 
   Color _penColor(BuildContext context) => _color ?? context.antgrid.error;
@@ -234,13 +298,31 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
     return box?.size ?? Size.zero;
   }
 
+  /// Confines a point to the overlay's own box. A pan gesture keeps reporting
+  /// [DragUpdateDetails.localPosition] — including well past the canvas
+  /// edge, negative coordinates included — for as long as the drag stays
+  /// alive, regardless of where the pointer actually is on screen. Since the
+  /// preview sits directly beside the agent panel, an unclamped drag lets a
+  /// stroke run off the browser and onto whatever's next to it. Marks are
+  /// meant to live entirely inside the previewed page, so every recorded
+  /// point is pinned back to it here rather than at paint time.
+  Offset _clampToCanvas(Offset point) {
+    final size = _canvasSize;
+    if (size.isEmpty) return point;
+    return Offset(
+      point.dx.clamp(0.0, size.width),
+      point.dy.clamp(0.0, size.height),
+    );
+  }
+
   void _startMark(Offset at, Color color) {
+    final clamped = _clampToCanvas(at);
     setState(() {
       _marks.add(
         PreviewDrawMark(
           tool: _tool,
           color: color,
-          points: _tool == PreviewDrawTool.pen ? [at] : [at, at],
+          points: _tool == PreviewDrawTool.pen ? [clamped] : [clamped, clamped],
         ),
       );
     });
@@ -248,12 +330,13 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
 
   void _extendMark(Offset to) {
     if (_marks.isEmpty) return;
+    final clamped = _clampToCanvas(to);
     setState(() {
       final mark = _marks.last;
       if (mark.tool == PreviewDrawTool.pen) {
-        mark.points.add(to);
+        mark.points.add(clamped);
       } else {
-        mark.points[1] = to;
+        mark.points[1] = clamped;
       }
     });
   }
@@ -274,23 +357,23 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
     if (_editing != null) {
       // The open editor takes the tap: finishing what is being typed is what
       // a tap elsewhere means here, not laying down a second mark.
-      _commitText();
+      _commitNote();
       return;
     }
     switch (_tool) {
-      case PreviewDrawTool.text:
+      case PreviewDrawTool.note:
         setState(() {
           _marks.add(
             PreviewDrawMark(
-              tool: PreviewDrawTool.text,
+              tool: PreviewDrawTool.note,
               color: color,
               points: [details.localPosition],
             ),
           );
           _editing = _marks.length - 1;
-          _textController.clear();
+          _noteController.clear();
         });
-        _textFocus.requestFocus();
+        _noteFocus.requestFocus();
       case PreviewDrawTool.pen:
         _startMark(details.localPosition, color);
       case PreviewDrawTool.line:
@@ -300,10 +383,10 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
     }
   }
 
-  void _commitText() {
+  void _commitNote() {
     final index = _editing;
     if (index == null) return;
-    final value = _textController.text.trim();
+    final value = _noteController.text.trim();
     setState(() {
       _editing = null;
       if (value.isEmpty) {
@@ -312,12 +395,30 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
         _marks[index].text = value;
       }
     });
-    _textController.clear();
+    _noteController.clear();
+    // Hand primary focus back to the overlay so Ctrl+Z keeps reaching
+    // [_undo] once the note editor's own FocusNode gives it up — nothing
+    // else on this surface claims focus on its own.
+    _overlayFocus.requestFocus();
+  }
+
+  /// Discards the note being typed outright, whatever it currently holds —
+  /// unlike [_commitNote], which only drops it when empty. This is the
+  /// explicit "never mind" the Escape key and the editor's close button use.
+  void _cancelNote() {
+    final index = _editing;
+    if (index == null) return;
+    setState(() {
+      _editing = null;
+      _marks.removeAt(index);
+    });
+    _noteController.clear();
+    _overlayFocus.requestFocus();
   }
 
   void _undo() {
     if (_marks.isEmpty) return;
-    _commitText();
+    _commitNote();
     if (_marks.isEmpty) return;
     setState(_marks.removeLast);
   }
@@ -328,7 +429,7 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
       _editing = null;
       _marks.clear();
     });
-    _textController.clear();
+    _noteController.clear();
   }
 
   /// Dismissing is only cheap while there is nothing to lose: once marks
@@ -339,7 +440,7 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
   /// guard instead of around it — see `preview_screen.dart`'s
   /// `_backFromPreview`.
   Future<void> requestClose() async {
-    _commitText();
+    _commitNote();
     if (_marks.isEmpty) {
       widget.onClose();
       return;
@@ -358,7 +459,7 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
 
   Future<void> _send() async {
     if (_sending) return;
-    _commitText();
+    _commitNote();
     final size = _canvasSize;
     setState(() => _sending = true);
     try {
@@ -379,55 +480,68 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
   @override
   Widget build(BuildContext context) {
     final color = _penColor(context);
-    return Stack(
-      key: _canvasKey,
-      children: [
-        Positioned.fill(
-          child: GestureDetector(
-            key: const ValueKey('preview-draw-canvas'),
-            behavior: HitTestBehavior.opaque,
-            onTapUp: (d) => _onTapUp(d, color),
-            onPanStart: _tool == PreviewDrawTool.text
-                ? null
-                : (d) => _startMark(d.localPosition, color),
-            onPanUpdate: _tool == PreviewDrawTool.text
-                ? null
-                : (d) => _extendMark(d.localPosition),
-            onPanEnd: _tool == PreviewDrawTool.text ? null : (_) => _endMark(),
-            child: CustomPaint(
-              painter: _MarksPainter(_marks),
-              child: const SizedBox.expand(),
+    return Focus(
+      focusNode: _overlayFocus,
+      autofocus: true,
+      onKeyEvent: _onOverlayKey,
+      child: Stack(
+        key: _canvasKey,
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              key: const ValueKey('preview-draw-canvas'),
+              behavior: HitTestBehavior.opaque,
+              onTapUp: (d) => _onTapUp(d, color),
+              onPanStart: _tool == PreviewDrawTool.note
+                  ? null
+                  : (d) => _startMark(d.localPosition, color),
+              onPanUpdate: _tool == PreviewDrawTool.note
+                  ? null
+                  : (d) => _extendMark(d.localPosition),
+              onPanEnd: _tool == PreviewDrawTool.note
+                  ? null
+                  : (_) => _endMark(),
+              // Belt-and-suspenders alongside the point clamping above: a
+              // `CustomPaint` doesn't clip its own canvas by default, so
+              // without this any point that slipped through un-clamped would
+              // still paint over whatever sits outside the preview.
+              child: ClipRect(
+                child: CustomPaint(
+                  painter: _MarksPainter(_marks),
+                  child: const SizedBox.expand(),
+                ),
+              ),
             ),
           ),
-        ),
-        if (_editing != null) _buildTextEditor(color),
-        Positioned(
-          left: AbTokens.space8,
-          right: AbTokens.space8,
-          bottom: AbTokens.space12,
-          child: Center(
-            child: _DrawToolBar(
-              tool: _tool,
-              color: color,
-              busy: _sending,
-              hasMarks: _marks.isNotEmpty,
-              onTool: (t) {
-                _commitText();
-                setState(() => _tool = t);
-              },
-              onColor: (c) => setState(() => _color = c),
-              onUndo: _undo,
-              onClear: _clear,
-              onClose: () => unawaited(requestClose()),
-              onSend: () => unawaited(_send()),
+          if (_editing != null) _buildNoteEditor(color),
+          Positioned(
+            left: AbTokens.space8,
+            right: AbTokens.space8,
+            bottom: AbTokens.space12,
+            child: Center(
+              child: _DrawToolBar(
+                tool: _tool,
+                color: color,
+                busy: _sending,
+                hasMarks: _marks.isNotEmpty,
+                onTool: (t) {
+                  _commitNote();
+                  setState(() => _tool = t);
+                },
+                onColor: (c) => setState(() => _color = c),
+                onUndo: _undo,
+                onClear: _clear,
+                onClose: () => unawaited(requestClose()),
+                onSend: () => unawaited(_send()),
+              ),
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
-  Widget _buildTextEditor(Color color) {
+  Widget _buildNoteEditor(Color color) {
     final anchor = _marks[_editing!].points.first;
     final size = _canvasSize;
     // Clamp so a mark placed near the right or bottom edge still opens a
@@ -435,7 +549,7 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
     final left = size.width > 0
         ? anchor.dx.clamp(
             0.0,
-            (size.width - _kTextEditorWidth).clamp(0.0, size.width),
+            (size.width - _kNoteEditorWidth).clamp(0.0, size.width),
           )
         : anchor.dx;
     final top = size.height > 0
@@ -447,19 +561,37 @@ class PreviewDrawOverlayState extends State<PreviewDrawOverlay> {
     return Positioned(
       left: left,
       top: top,
-      width: _kTextEditorWidth,
-      child: AbTextField(
-        controller: _textController,
-        focusNode: _textFocus,
-        hintText: 'Note',
-        autofocus: true,
-        onSubmitted: (_) => _commitText(),
+      width: _kNoteEditorWidth,
+      child: Focus(
+        onKeyEvent: (node, event) {
+          if (event is KeyDownEvent &&
+              event.logicalKey == LogicalKeyboardKey.escape) {
+            _cancelNote();
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        },
+        child: AbTextField(
+          controller: _noteController,
+          focusNode: _noteFocus,
+          hintText: 'Note',
+          autofocus: true,
+          // Tinted to match the color the note will render in, so the editor
+          // already reads as the card it's about to become.
+          fillColor: color.withValues(alpha: 0.12),
+          suffix: AbIconButton(
+            icon: AbIcons.close,
+            tooltip: 'Cancel note',
+            onTap: _cancelNote,
+          ),
+          onSubmitted: (_) => _commitNote(),
+        ),
       ),
     );
   }
 }
 
-const double _kTextEditorWidth = 220.0;
+const double _kNoteEditorWidth = 220.0;
 
 class _MarksPainter extends CustomPainter {
   const _MarksPainter(this.marks);
@@ -511,7 +643,7 @@ class _DrawToolBar extends StatelessWidget {
     (PreviewDrawTool.line, AbIcons.drawLine, 'Line'),
     (PreviewDrawTool.rect, AbIcons.drawRect, 'Rectangle'),
     (PreviewDrawTool.ellipse, AbIcons.drawEllipse, 'Ellipse'),
-    (PreviewDrawTool.text, AbIcons.drawText, 'Text'),
+    (PreviewDrawTool.note, AbIcons.comment, 'Note'),
   ];
 
   @override
@@ -534,10 +666,13 @@ class _DrawToolBar extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Only the tool cluster scrolls, and the two ways out are pinned
-          // outside it: a dozen cells cannot fit a phone-width panel, and the
-          // one control that must never be scrolled off is the one that gets
-          // you out of a mode covering the whole page.
+          // Only the tool/color cluster scrolls. Undo, Clear and the two ways
+          // out are all pinned outside it: a dozen cells cannot fit a
+          // phone-width panel, and a control someone needs to reach every
+          // time they overdraw must never be the one that scrolls out of
+          // view — that used to include Undo/Clear, which is exactly the bug
+          // this pinning fixes (they were reachable only by swiping the
+          // toolbar itself, and read as simply missing).
           Flexible(
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
@@ -558,50 +693,38 @@ class _DrawToolBar extends StatelessWidget {
                       ),
                     ),
                   const _BarDivider(),
-                  for (final swatch in palette)
-                    _BarCell(
-                      tooltip: 'Pen color',
-                      selected: swatch == color,
-                      onTap: () => onColor(swatch),
-                      child: Container(
-                        width: AbTokens.space16,
-                        height: AbTokens.space16,
-                        decoration: BoxDecoration(
-                          color: swatch,
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: context.antgrid.borderStrong,
-                          ),
-                        ),
-                      ),
-                    ),
-                  const _BarDivider(),
-                  _BarCell(
-                    tooltip: 'Undo',
-                    selected: false,
-                    onTap: hasMarks ? onUndo : null,
-                    child: AbIcon(
-                      AbIcons.undo,
-                      size: AbTokens.iconButtonGlyph,
-                      color: hasMarks
-                          ? context.antgrid.textSecondary
-                          : context.antgrid.textDisabled,
-                    ),
-                  ),
-                  _BarCell(
-                    tooltip: 'Clear',
-                    selected: false,
-                    onTap: hasMarks ? onClear : null,
-                    child: AbIcon(
-                      AbIcons.trash,
-                      size: AbTokens.iconButtonGlyph,
-                      color: hasMarks
-                          ? context.antgrid.textSecondary
-                          : context.antgrid.textDisabled,
-                    ),
+                  _ColorPickerCell(
+                    color: color,
+                    palette: palette,
+                    onColor: onColor,
                   ),
                 ],
               ),
+            ),
+          ),
+          const _BarDivider(),
+          _BarCell(
+            tooltip: 'Undo',
+            selected: false,
+            onTap: hasMarks ? onUndo : null,
+            child: AbIcon(
+              AbIcons.undo,
+              size: AbTokens.iconButtonGlyph,
+              color: hasMarks
+                  ? context.antgrid.textSecondary
+                  : context.antgrid.textDisabled,
+            ),
+          ),
+          _BarCell(
+            tooltip: 'Clear',
+            selected: false,
+            onTap: hasMarks ? onClear : null,
+            child: AbIcon(
+              AbIcons.trash,
+              size: AbTokens.iconButtonGlyph,
+              color: hasMarks
+                  ? context.antgrid.textSecondary
+                  : context.antgrid.textDisabled,
             ),
           ),
           const _BarDivider(),
@@ -638,6 +761,85 @@ class _BarDivider extends StatelessWidget {
       child: AbSeparator.vertical(weight: AbSeparatorWeight.strong),
     ),
   );
+}
+
+/// Current pen color as a single swatch cell that opens the palette in a
+/// popup, rather than laying all five swatches inline in the toolbar row.
+///
+/// The inline row used to sit inside the same scrollable cluster as the
+/// tools, so on a narrow preview panel it was squeezed out of the visible
+/// width entirely — reachable only by swiping the toolbar itself, which read
+/// as the palette simply being gone. One fixed-width trigger has nothing left
+/// to squeeze out.
+class _ColorPickerCell extends StatelessWidget {
+  const _ColorPickerCell({
+    required this.color,
+    required this.palette,
+    required this.onColor,
+  });
+
+  final Color color;
+  final List<Color> palette;
+  final ValueChanged<Color> onColor;
+
+  Future<void> _open(BuildContext context) async {
+    final anchor = abMenuAnchorRect(context);
+    if (anchor == null) return;
+    final picked = await showAbPanel<Color>(
+      context: context,
+      anchorRect: anchor,
+      width: 156,
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(AbTokens.space4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final swatch in palette)
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AbTokens.space2,
+                ),
+                child: GestureDetector(
+                  onTap: () => Navigator.of(ctx).pop(swatch),
+                  child: Container(
+                    width: AbTokens.space16,
+                    height: AbTokens.space16,
+                    decoration: BoxDecoration(
+                      color: swatch,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: swatch == color
+                            ? ctx.antgrid.textPrimary
+                            : ctx.antgrid.borderStrong,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (picked != null) onColor(picked);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _BarCell(
+      tooltip: 'Pen color',
+      selected: false,
+      onTap: () => unawaited(_open(context)),
+      child: Container(
+        width: AbTokens.space16,
+        height: AbTokens.space16,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(color: context.antgrid.borderStrong),
+        ),
+      ),
+    );
+  }
 }
 
 /// A bar cell: a fixed square target around whatever glyph or swatch it

@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:math';
 
+import '../util/ab_log.dart';
 import 'supervisor_state.dart';
+
+const String _component = 'ConnectionSupervisor';
 
 /// Where a machine lives right now: relay endpoint plus the agent identity the
 /// handshake pins against.
@@ -440,7 +443,15 @@ class ConnectionSupervisor {
         case ConnRung.routable:
           return;
       }
-    } catch (_) {
+    } catch (e) {
+      // Swallowing the exception is deliberate — the backoff, not the caller,
+      // decides what happens next — but swallowing it SILENTLY left a failing
+      // dial or handshake with no trace anywhere, which is why a connection
+      // that never climbed could only be diagnosed from the agent's logs.
+      AbLog.warn(_component, 'rung attempt failed', fields: {
+        'rung': rung.name,
+        'error': '$e',
+      });
       _failed(rung);
       return;
     }
@@ -458,6 +469,8 @@ class ConnectionSupervisor {
     // The step reported success but the rung is still down (dial completed
     // without a welcome, handshake returned without a session). Treat it as a
     // failure so it backs off instead of hot-looping.
+    AbLog.warn(_component, 'rung step returned without satisfying the rung',
+        fields: {'rung': rung.name});
     _failed(rung);
   }
 
@@ -493,6 +506,11 @@ class ConnectionSupervisor {
     final backoff = _backoff[rung]!;
     final delayMs = _backoffMs(backoff.attempt);
     backoff.attempt++;
+    AbLog.debug(_component, 'rung backing off', fields: {
+      'rung': rung.name,
+      'attempt': backoff.attempt,
+      'delayMs': delayMs,
+    });
 
     if (rung == ConnRung.established &&
         backoff.attempt >= _kMaxInitialHandshakeAttempts) {
@@ -559,6 +577,7 @@ class ConnectionSupervisor {
   }
 
   void _block(BlockReason reason) {
+    AbLog.warn(_component, 'climb blocked', fields: {'reason': reason.name});
     _emit(Blocked(reason));
   }
 

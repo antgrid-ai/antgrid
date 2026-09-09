@@ -247,6 +247,7 @@ describe("viewer routes", () => {
       "tools:list": { id: "a", type: "tools:list" },
       "project:open": { id: "a", type: "project:open", projectId: "p", projectPath: "/x", mode: "local" },
       "project:start": { id: "a", type: "project:start", projectId: "p" },
+      "project:sessions": { id: "a", type: "project:sessions", projectId: "p" },
       "project:stop": { id: "a", type: "project:stop", projectId: "p" },
       "project:forget": { id: "a", type: "project:forget", projectId: "p" },
       "host:shutdown": { id: "a", type: "host:shutdown" },

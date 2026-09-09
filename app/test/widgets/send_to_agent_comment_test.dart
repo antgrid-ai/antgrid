@@ -37,29 +37,43 @@ Future<String? Function()> _open(
   WidgetTester tester, {
   Uint8List? imageBytes,
   String selectedText = '<button id="submit">',
+  LayerLink? anchorLink,
 }) async {
   String? result;
   var returned = false;
+  final trigger = Builder(
+    builder: (context) => TextButton(
+      onPressed: () async {
+        result = await showSendToAgentComment(
+          context: context,
+          selectedText: selectedText,
+          sourceLabel: '[from preview: http://localhost:3000/]',
+          imageBytes: imageBytes,
+          anchorLink: anchorLink,
+        );
+        returned = true;
+      },
+      child: const Text('open'),
+    ),
+  );
   await tester.pumpWidget(
     MaterialApp(
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
       ),
       home: Scaffold(
-        body: Builder(
-          builder: (context) => TextButton(
-            onPressed: () async {
-              result = await showSendToAgentComment(
-                context: context,
-                selectedText: selectedText,
-                sourceLabel: '[from preview: http://localhost:3000/]',
-                imageBytes: imageBytes,
-              );
-              returned = true;
-            },
-            child: const Text('open'),
-          ),
-        ),
+        body: anchorLink == null
+            ? trigger
+            // Off in a corner, same as `SendToAgentButton`'s own fixed
+            // top-right spot, so the anchored test below has somewhere
+            // unambiguous to check the popover actually moved to.
+            : Align(
+                alignment: Alignment.topRight,
+                child: CompositedTransformTarget(
+                  link: anchorLink,
+                  child: trigger,
+                ),
+              ),
       ),
     ),
   );
@@ -81,6 +95,24 @@ void main() {
     expect((box.center.dx - screen.center.dx).abs(), lessThan(1));
     expect(box.center.dy, greaterThan(screen.height * 0.3));
     expect(box.center.dy, lessThan(screen.height * 0.7));
+  });
+
+  testWidgets('given an anchor, the box hangs off it instead of the centre', (
+    tester,
+  ) async {
+    _desktopWindow(tester);
+    final link = LayerLink();
+    await _open(tester, anchorLink: link);
+
+    final box = tester.getRect(find.byType(TextField));
+    final screen = tester.getRect(find.byType(Scaffold));
+    final button = tester.getRect(find.text('open'));
+    // Nowhere near the screen's centre (where the un-anchored case lands)...
+    expect((box.center.dx - screen.center.dx).abs(), greaterThan(1));
+    expect(box.center.dy, lessThan(screen.height * 0.3));
+    // ...and instead sits right under the button that triggered it.
+    expect(box.top, greaterThanOrEqualTo(button.bottom));
+    expect(box.right, lessThanOrEqualTo(button.right + 1));
   });
 
   testWidgets('shows the capture that is about to be attached', (tester) async {
@@ -130,7 +162,7 @@ void main() {
     _desktopWindow(tester);
     final read = await _open(tester);
 
-    await tester.tap(find.text('Cancel'));
+    await tester.tap(find.byTooltip('Cancel'));
     await tester.pump();
 
     expect(read(), isNull);

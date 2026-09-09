@@ -149,15 +149,7 @@ export class CodexDriver extends ChatSession {
         void this.discoverCapabilities();
         return this.threadId;
       } catch (err) {
-        // Resume failed (thread deleted via codex's own tools, or a store
-        // migration). Fall through to a fresh thread rather than a dead session;
-        // the app clears the stale agentSessionId (see manager onAgentSession).
-        log.warn(
-          "codex thread/resume failed for session %s (thread %s); starting a fresh thread: %s",
-          this.sessionId,
-          resumeId,
-          err,
-        );
+        throw new Error(`Could not resume Codex thread ${resumeId}: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
       }
     }
     const res = (await this.ep.request("thread/start", { cwd: this.cwd, ...(this.selModel ? { model: this.selModel } : {}) })) as any;

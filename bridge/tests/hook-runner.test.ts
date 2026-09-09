@@ -319,12 +319,21 @@ describe("Codex hooks", () => {
     expect(h.posts[0]?.body).toMatchObject({ sessionId: "thread-2" });
   });
 
-  test("permission, stop, and session-start map to their fixed routes", async () => {
+  test("permission hooks do not announce an escalation before its reviewer decides", async () => {
+    const h = harness({ agent: "codex", event: "permission-request", stdin: JSON.stringify({
+      session_id: "thread-1", permission_mode: "default",
+      tool_name: "Bash", tool_input: { command: "git status" },
+    }) });
+    await h.run();
+    expect(h.posts).toEqual([]);
+  });
+
+  test("legacy permission hook is silent while stop and session-start retain their routes", async () => {
     const permission = harness({ agent: "codex", event: "permission-request", stdin: "{}" });
     const stop = harness({ agent: "codex", event: "stop", stdin: "{}" });
     const start = harness({ agent: "codex", event: "session-start", stdin: "{}" });
     await Promise.all([permission.run(), stop.run(), start.run()]);
-    expect(permission.posts).toEqual([{ port: 43123, path: "/notify", body: { type: "permission_request", terminalId: "term-1" } }]);
+    expect(permission.posts).toEqual([]);
     expect(stop.posts).toEqual([{ port: 43123, path: "/notify", body: { type: "task_complete", terminalId: "term-1" } }]);
     expect(start.posts).toEqual([{ port: 43123, path: "/hook-alive", body: { terminalId: "term-1" } }]);
   });

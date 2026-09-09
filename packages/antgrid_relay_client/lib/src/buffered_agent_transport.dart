@@ -75,6 +75,7 @@ abstract class BufferedAgentTransport implements AgentTransport {
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
+    bool countsTowardHealth = true,
   }) {
     final requestId = 'r${_nextRequestId++}';
     final completer = Completer<Map<String, dynamic>>();
@@ -151,6 +152,11 @@ abstract class BufferedAgentTransport implements AgentTransport {
   /// session-down window where a send would silently drop.
   bool get isEstablished => _currentState == TransportState.connected;
 
+  int _establishmentEpoch = 0;
+
+  @override
+  int get establishmentEpoch => _establishmentEpoch;
+
   /// Tier-3: register [run] as the hydrator for [key] and, when the transport
   /// is already established, invoke it now. Re-invoked on every future
   /// (re)establishment via [redriveHydrators] — that replay is the whole point:
@@ -197,6 +203,10 @@ abstract class BufferedAgentTransport implements AgentTransport {
   /// a [StreamTransport] on each handshake establishment (from
   /// `refreshSnapshot`). One failing hydrator never blocks the others.
   void redriveHydrators() {
+    // Bumped BEFORE the replay, so a hydrator running as part of this
+    // establishment already sees the new epoch and re-pulls unconditionally
+    // rather than claiming a revision the previous agent issued.
+    _establishmentEpoch++;
     for (final run in _hydrators.values) {
       unawaited(_runHydrator(run));
     }

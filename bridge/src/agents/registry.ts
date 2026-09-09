@@ -142,7 +142,8 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     approvalPolicies: { bypass: { terminalArgs: ["--dangerously-bypass-approvals-and-sandbox"], chat: true, risk: "bypasses-approvals-and-sandbox" } },
     hookName: "codex",
     hookDir: "~/.codex/hooks",
-    notificationSource: "plugin",
+    // Approval prompts use OSC; the Stop hook supplies completion messages.
+    notificationSource: "osc",
     titleSource: "structured",
     resume: (id) => ["resume", id],
     resumeIsSubcommand: true,

@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
+import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/ansi_palette.dart';
@@ -23,11 +24,13 @@ import '../services/terminal_service.dart';
 import '../util/detached.dart';
 import '../util/external_url.dart';
 import 'clipboard_image.dart';
+import 'send_capture_to_agent.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
 import 'terminal_attachment_uploader.dart';
 import 'terminal_cell_metrics.dart';
 import 'terminal_drop_target.dart';
+import 'terminal_hydration_strip.dart';
 import 'terminal_hyperlink_preview.dart';
 import 'terminal_quick_actions_bar.dart';
 import 'terminal_upload_button.dart';
@@ -137,6 +140,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   final ValueNotifier<({String uri, Offset at})?> _hoveredLink = ValueNotifier(
     null,
   );
+
+  /// Anchors the follow-up comment popover under [SendToAgentButton] instead
+  /// of the window's centre — see [showSendToAgentComment]'s `anchorLink`.
+  final LayerLink _sendToAgentLink = LayerLink();
 
   /// A hovered URI still waiting for the pointer position that produced it.
   ///
@@ -289,15 +296,19 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// and the paste chord below never matches, so Win+V typed a bare `v` into
   /// the agent instead of pasting (measured on Flutter 3.44 / Windows 11).
   ///
-  /// Only SYNTHESIZED events are recorded here, and only for Ctrl/Shift — the
-  /// two that decide the chords below.
+  /// Only NON-synthesized events are recorded here, and only for Ctrl/Shift —
+  /// the two that decide the chords below.
   ///
   /// Three-valued, and that is the safety property: a key ABSENT from the map
   /// means "no real event seen", which defers to `HardwareKeyboard` rather than
   /// contradicting it. Ctrl-clicking into the terminal while already holding
   /// Ctrl is exactly that case, and a two-valued mirror would have called the
   /// chord released and eaten it. Cleared on every focus change, so a key-up
-  /// missed while the window was away leaves "unknown", never a stale answer.
+  /// missed while the window was away leaves "unknown", never a stale answer —
+  /// and cleared by `_handleEarlyKey` itself the moment a Ctrl/Shift-gated
+  /// chord consumes the reading, since an injected chord's Ctrl-down has no
+  /// physical key behind it and so no real key-up ever arrives to clear a
+  /// stuck "held" entry on its own.
   final Map<LogicalKeyboardKey, bool> _realModifierState =
       <LogicalKeyboardKey, bool>{};
 
@@ -357,6 +368,18 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         .setTerminalZoom(current + delta);
   }
 
+  /// Types [text] into this pane's terminal, saying so when the transport
+  /// refuses it.
+  ///
+  /// The keyboard's own writes go through the engine's transport (which has
+  /// the strip beside it to explain a pause), but these are one-shot lines the
+  /// user composed elsewhere — an uploaded file's path, a quick-action key —
+  /// and a dropped one leaves no trace on screen at all.
+  void _typeIntoTerminal(String text) {
+    if (widget.terminalService.sendInput(widget.tab.terminalId, text)) return;
+    if (mounted) showSendRefusedSnackBar(context);
+  }
+
   /// The one pipeline every attach gesture goes through. Its upload service is
   /// resolved from THIS terminal's own session and checkout rather than from a
   /// focused-* provider: the file has to be staged into the tree the terminal
@@ -389,8 +412,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
           onProgress: onProgress,
         )).path;
       },
-      insert: (text) =>
-          widget.terminalService.sendInput(widget.tab.terminalId, text),
+      // Routed through the shared refusal so a staged upload whose path the
+      // transport could not carry says so: the bytes are on the machine but
+      // the line the user needs was dropped, not queued, and silence there
+      // reads as a finished attach.
+      insert: _typeIntoTerminal,
       onError: (message) {
         if (mounted) showAbSnackBar(context, message);
       },
@@ -555,6 +581,15 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
             defaultTargetPlatform != TargetPlatform.macOS);
 
     if (isPasteChord && !alt) {
+      // The mirror's "real" reading is spent the moment it disambiguates one
+      // chord. An injected paste (Win+V clipboard history) has no physical
+      // key behind its Ctrl-down, so no real key-up ever follows to clear
+      // `_realModifierState` — left set, it would misread every later bare
+      // C/V in this focus session as still Ctrl-held (swallowing C as
+      // agent-SIGINT, re-pasting on V) until the terminal lost and regained
+      // focus. Clearing here hands later events back to `HardwareKeyboard`,
+      // which has by then resynced correctly.
+      _realModifierState.clear();
       // Auto-repeat is swallowed, not acted on. A held chord repeats ~30x/s;
       // each repeat would re-read the clipboard (on Windows, re-synthesizing a
       // multi-megabyte PNG from CF_DIB per repeat) and then lose the uploader's
@@ -580,6 +615,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     //   no selection, agent running → swallow (don't SIGINT the agent)
     //   otherwise → fall through so the PTY gets ^C
     if (event.logicalKey == LogicalKeyboardKey.keyC && ctrl && !alt) {
+      // Same one-shot spend as the paste chord above — see its comment.
+      _realModifierState.clear();
       final selection = _selectedText;
       if (selection != null && selection.isNotEmpty) {
         detached(
@@ -757,6 +794,15 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         : normalized;
   }
 
+  /// Routed through [sendCaptureToAgent] rather than resolving a terminal
+  /// service and sending by hand: that helper is the one place in the app
+  /// that already gets this right — it resolves the FOCUSED checkout fresh
+  /// (never a service captured before the dialog's indefinite wait, which a
+  /// reconnect or LRU evict in that window can make stale), tells the user
+  /// honestly when nothing was connected to send to instead of claiming
+  /// success regardless, and routes a chat-mode session to the composer
+  /// instead of a terminal that doesn't exist for it. Hand-rolling that logic
+  /// here a second time is exactly how the two copies drift.
   Future<void> _onSendToAgent() async {
     final text = _selectedText;
     if (text == null || text.isEmpty) return;
@@ -766,23 +812,17 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       context: context,
       selectedText: text,
       sourceLabel: sourceLabel,
+      anchorLink: _sendToAgentLink,
     );
 
     if (message == null || !mounted) return;
-    // `mounted` doesn't imply the focused project still has a resolved session:
-    // the comment dialog holds this open indefinitely, and a reconnect or LRU
-    // evict in that window makes the façade throw — into a fire-and-forget
-    // button callback, so unhandled.
-    final svc = focusedCheckoutServiceOrNull(
-      ref.container,
-      (s) => s.terminalService,
+    final sent = await sendCaptureToAgent(
+      context: context,
+      container: ref.container,
+      text: message,
     );
-    if (svc == null) return;
-    svc.sendToAgentTerminal(message);
-    ref.read(switchToAgentProvider)?.call();
-    ref.read(focusAgentInputProvider)?.call();
+    if (!sent || !mounted) return;
     setState(() => _selectedText = null);
-    showSentToAgentSnackBar(context);
   }
 
   @override
@@ -790,13 +830,32 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     final isExited = widget.tab.sessionState == TerminalSessionState.exited;
     final showStoppedView = !widget.tab.isAgent && isExited;
 
+    // Read by terminalId, never held in State: three of this widget's five
+    // mount sites are unkeyed and reuse this State across terminal swaps, so
+    // a value cached here would show the previous terminal's chrome for one
+    // frame after every swap.
+    final hydration = ref.watch(
+      terminalStateProvider.select(
+        (s) => s.value?.hydration[widget.tab.terminalId],
+      ),
+    );
+    final inputPaused = ref.watch(
+      terminalStateProvider.select((s) => s.value?.inputPaused ?? false),
+    );
+    final chrome = hydration == null ? null : _chromeFor(hydration);
+
     return Column(
       children: [
+        // Above the grid, not a Positioned overlay: a bottom-left overlay
+        // would sit over the guest's own prompt/status line, and outside the
+        // Stack this changes the box the terminal's LayoutBuilder measures by
+        // a fixed height instead of being invisible to it.
+        if (!showStoppedView) _buildHydrationStrip(hydration, inputPaused),
         // Stopped state: centered start button; running: terminal view
         Expanded(
           child: showStoppedView
               ? _buildStoppedView(context)
-              : _buildTerminal(context),
+              : _buildTerminal(context, dim: chrome?.dim ?? false),
         ),
 
         // Quick-action buttons — only on mobile/web (no physical keyboard)
@@ -806,6 +865,67 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
             builder: (context, attach, _) => _buildQuickActions(attach != null),
           ),
       ],
+    );
+  }
+
+  /// One authoritative mapping from a terminal's hydration record to its pane
+  /// chrome, expressed as an exhaustive switch over [TerminalAttachStage] so a
+  /// stage added later fails to compile here rather than silently falling
+  /// through to whatever the last arm happened to render.
+  ///
+  /// `refreshing` and `painted` both render nothing: the screen is real and
+  /// current, and a strip there would fire on every re-establishment and every
+  /// mobile focus resume — training the user to ignore it.
+  ({String? label, AbStatusTone tone, int? startedAtMs, bool retry, bool dim})
+  _chromeFor(TerminalHydration hydration) => switch (hydration.stage) {
+    TerminalAttachStage.failed => (
+      label: "couldn't load this terminal",
+      tone: AbStatusTone.danger,
+      startedAtMs: null,
+      retry: true,
+      dim: true,
+    ),
+    TerminalAttachStage.cold ||
+    TerminalAttachStage.awaitingScreen => (
+      label: 'attaching to terminal',
+      tone: AbStatusTone.warning,
+      startedAtMs: hydration.requestedAtMs,
+      retry: false,
+      dim: true,
+    ),
+    TerminalAttachStage.refreshing ||
+    TerminalAttachStage.painted => (
+      label: null,
+      tone: AbStatusTone.warning,
+      startedAtMs: null,
+      retry: false,
+      dim: false,
+    ),
+  };
+
+  /// `inputPaused` wins over the stage's own copy — a transport that cannot
+  /// carry a keystroke is worth saying regardless of what the screen pull is
+  /// doing. A missing hydration entry (the state before this terminal's first
+  /// `_setState`, or an unkeyed mount reusing this State mid-swap) is routine,
+  /// not exceptional, and renders nothing.
+  Widget _buildHydrationStrip(TerminalHydration? hydration, bool inputPaused) {
+    if (inputPaused) {
+      return const TerminalHydrationStrip(
+        label: 'reconnecting — input paused',
+        tone: AbStatusTone.warning,
+      );
+    }
+    if (hydration == null) return const SizedBox.shrink();
+    final chrome = _chromeFor(hydration);
+    final label = chrome.label;
+    if (label == null) return const SizedBox.shrink();
+    return TerminalHydrationStrip(
+      label: label,
+      tone: chrome.tone,
+      startedAtMs: chrome.startedAtMs,
+      onRetry: chrome.retry
+          ? () => widget.terminalService.retryAttach(widget.tab.terminalId)
+          : null,
     );
   }
 
@@ -830,7 +950,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// `GhosttyTerminalView`'s default `padding`.
   static const double _hPad = AbTokens.space8 * 2;
 
-  Widget _buildTerminal(BuildContext context) {
+  Widget _buildTerminal(BuildContext context, {required bool dim}) {
     final agentTab = ref.watch(agentTerminalProvider);
     final showSendButton = _hasSelection && agentTab != null;
     // Desktop's only attach route. Mobile already has one in the quick-actions
@@ -1058,7 +1178,15 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       if (amDriver) {
                         return _TerminalGridFreeze(
                           onSettled: _onRenderSizeSettled,
-                          child: terminalView,
+                          // Only when the engine is provably empty (cold,
+                          // awaitingScreen, failed) — never a painted screen,
+                          // however stale the pull sitting over it reads.
+                          child: dim
+                              ? Opacity(
+                                  opacity: AbTokens.opacityDisabled,
+                                  child: terminalView,
+                                )
+                              : terminalView,
                         );
                       }
 
@@ -1102,7 +1230,16 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                         child: SizedBox(
                           width: authWidth,
                           height: authHeight,
-                          child: terminalView,
+                          // A phone viewing a desktop-driven terminal is the
+                          // non-driver arm by default — exactly the surface
+                          // this de-emphasis targets, so it cannot be skipped
+                          // here even though the driver arm above covers it too.
+                          child: dim
+                              ? Opacity(
+                                  opacity: AbTokens.opacityDisabled,
+                                  child: terminalView,
+                                )
+                              : terminalView,
                         ),
                       );
                     },
@@ -1142,7 +1279,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                   ),
                 ),
                 if (showSendButton)
-                  SendToAgentButton(onPressed: _onSendToAgent),
+                  SendToAgentButton(
+                    link: _sendToAgentLink,
+                    onPressed: () => detached(
+                      'TerminalView',
+                      'send to agent failed',
+                      _onSendToAgent,
+                    ),
+                  ),
                 Positioned.fill(
                   child: ValueListenableBuilder<({String uri, Offset at})?>(
                     valueListenable: _hoveredLink,
@@ -1247,6 +1391,19 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     final renderSize = amDriver ? _renderSize : null;
     final widthForCols = renderSize?.width ?? constraints.maxWidth;
     final heightForRows = renderSize?.height ?? constraints.maxHeight;
+
+    // A panel can be squeezed to zero readable width by a sibling pane while
+    // staying mounted on purpose (the touch tablet's context-panel expand
+    // pads the agent pane to nothing rather than unmounting it — see
+    // `workspace_shell.dart`'s `_buildTabletTouch`). With no content area the
+    // `max(1, …)` floors below would still produce a "valid" 1x1 grid, and
+    // sending it makes this device the shared driver for every OTHER viewer
+    // of the terminal — which is how a fullscreen panel on one client
+    // letterboxes every other client down to a handful of glyphs. Bail out
+    // before claiming or booking anything; the panel becoming visible again
+    // is a real layout pass that resumes this normally.
+    if (widthForCols <= _hPad || heightForRows <= _hPad) return;
+
     final nativeCols = math.max(
       1,
       ((widthForCols - _hPad) / charWidth).floor(),
@@ -1341,8 +1498,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       onUploadError: (m) {
         if (mounted) showAbSnackBar(context, m);
       },
-      onSendInput: (data) =>
-          widget.terminalService.sendInput(widget.tab.terminalId, data),
+      onSendInput: _typeIntoTerminal,
       onZoomOut: () => _stepZoom(-0.1),
       onZoomIn: () => _stepZoom(0.1),
       onZoomReset: () =>

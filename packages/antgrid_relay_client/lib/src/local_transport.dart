@@ -61,6 +61,13 @@ class LocalTransport extends BufferedAgentTransport {
   IOWebSocketChannel? _ch;
   StreamSubscription? _sub;
 
+  /// The WS close code from the socket's last teardown after a successful
+  /// handshake (e.g. 4409 = another app superseded ownership of the project).
+  /// Null until the first post-ready close; a pre-ready refusal surfaces its
+  /// code through [LocalTransportHandshakeException.closeCode] instead.
+  int? get lastCloseCode => _lastCloseCode;
+  int? _lastCloseCode;
+
   LocalTransport({
     required this.port,
     required this.token,
@@ -270,7 +277,30 @@ class LocalTransport extends BufferedAgentTransport {
             ),
           );
         } else {
-          setState(TransportState.disconnected);
+          // The loopback listener never reconnects a superseded or dropped
+          // socket, and two app instances racing to reopen it would just war
+          // over ownership again — so this is a terminal state, not a retry
+          // point. failAllPending fails in-flight RPCs immediately instead of
+          // letting each one burn its own timeout waiting on a dead channel.
+          final code = _ch?.closeCode;
+          _lastCloseCode = code;
+          _dropped(
+            'rx',
+            'socket-closed',
+            detail: {if (code != null) 'closeCode': code},
+          );
+          unawaited(_sub?.cancel() ?? Future.value());
+          _sub = null;
+          _ch = null;
+          failAllPending(
+            code: code == 4409 ? 'E_SUPERSEDED' : 'E_SOCKET_CLOSED',
+            message: code == 4409
+                ? 'another app took over this project (close code 4409)'
+                : 'local socket closed (close code $code)',
+          );
+          setState(
+            code == 4409 ? TransportState.error : TransportState.disconnected,
+          );
         }
       },
     );
@@ -281,7 +311,7 @@ class LocalTransport extends BufferedAgentTransport {
         'token': token,
         'appPid': appPid,
         'appVersion': appVersion,
-        'capabilities': {'checkoutRouting': true},
+        'capabilities': {'checkoutRouting': true, 'pullsTree': true},
       }),
     );
 
@@ -303,6 +333,13 @@ class LocalTransport extends BufferedAgentTransport {
         'state.snapshot',
         params: {
           'types': ['*'],
+          // The relay path excludes the same type for the same reason
+          // (`_kHeavyReplayTypes` in machine_session.dart): the agent caches a
+          // `tree:full` per checkout at open, so a replay of everything hands a
+          // local project one full tree per managed worktree — measured at
+          // ~2 MB for a project with several — and no reader wants them.
+          // FileService pulls the tree for the checkout on screen itself.
+          'exclude': const ['tree:full'],
         },
         timeout: const Duration(seconds: 5),
       );

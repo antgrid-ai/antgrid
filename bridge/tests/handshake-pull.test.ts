@@ -113,7 +113,7 @@ interface Handshaked {
 /** Drive a full acked handshake (client-hello → agent-hello → agent-ready →
  *  app:ready → established) on a fresh forTest client and return the pieces a
  *  test needs to keep driving the session. */
-function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phoneEd: ReturnType<typeof ed25519Pair>; attemptId: string; onHandshakeComplete?: () => void }): Handshaked {
+function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phoneEd: ReturnType<typeof ed25519Pair>; attemptId: string; onHandshakeComplete?: () => void; capabilities?: object }): Handshaked {
   const sent: Array<string | Buffer> = [];
   const client = RelayClient.forTest({
     generateKeypair: generateEphemeralKeypair,
@@ -149,7 +149,11 @@ function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phone
   expect(readyMsg.type).toBe("handshake:agent-ready");
   expect(verifyConfirmTag(agentConfirmTag(phoneKeys.confirm), Buffer.from(readyMsg.confirm, "base64"))).toBe(true);
 
-  const appReadyJson = JSON.stringify({ type: "app:ready", attemptId: opts.attemptId, confirm: phoneConfirmTag(phoneKeys.confirm).toString("base64") });
+  const appReadyJson = JSON.stringify({
+    type: "app:ready", attemptId: opts.attemptId,
+    confirm: phoneConfirmTag(phoneKeys.confirm).toString("base64"),
+    ...(opts.capabilities ? { capabilities: opts.capabilities } : {}),
+  });
   injectFrame(client, FrameKind.sealed, phoneTransport.seal(appReadyJson));
   expect(client._handshakeComplete()).toBe(true);
 
@@ -189,6 +193,41 @@ test("duplicate app:ready for the live attemptId is idempotent: single establish
   expect(sent.length).toBe(sentBefore + 1);
   const dup = phoneTransport.open(sent[sent.length - 1] as Buffer);
   expect(JSON.parse(dup!)).toEqual({ type: "established", attemptId });
+});
+
+test("peerPullsTree is true once the app advertises pullsTree", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, pullsTree: true },
+  });
+  expect(client.peerPullsTree).toBe(true);
+});
+
+test("peerPullsTree is false when the app omits pullsTree", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true },
+  });
+  expect(client.peerPullsTree).toBe(false);
+});
+
+test("peerPullsTree is false for a wrong-typed capability", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { pullsTree: 1 },
+  });
+  expect(client.peerPullsTree).toBe(false);
+});
+
+test("peerPullsTree reads true again once the session is torn down — no app, not a surviving capability", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, pullsTree: true },
+  });
+  (client as any).tearDownEstablished();
+  expect((client as any).peerAdvertisedPullsTree).toBe(false);
+  // The getter's "true" here means "no app to push to", not "the capability survived".
+  expect(client.peerPullsTree).toBe(true);
 });
 
 test("agent rejects a client-hello with an invalid transcript signature", () => {

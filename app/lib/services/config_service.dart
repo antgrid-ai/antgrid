@@ -77,12 +77,24 @@ class ConfigService {
     this.requestTimeout = const Duration(seconds: 15),
   }) {
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
-    // Tier-3: re-read the config on every (re)establishment so a reconnect
-    // refreshes it (the reconciliation checkpoint). Deliberately a plain send,
-    // NOT read(): config:read-result updates state via _handleReadResult with
-    // or without a tracked _read, so the re-drive neither arms (and leaks) the
-    // caller-timeout timer nor supersedes a settings-screen read() in flight.
-    session.hydrateCheckout(checkoutId, 'config:read', _redriveRead);
+  }
+
+  static const _readHydratorKey = 'config:read';
+
+  /// Registers the config re-read. Deliberately a plain send, NOT read():
+  /// config:read-result updates state via _handleReadResult with or without a
+  /// tracked _read, so the re-drive neither arms (and leaks) the
+  /// caller-timeout timer nor supersedes a settings-screen read() in flight.
+  /// Only the checkout on screen carries this — see
+  /// [ProjectSession.setActiveCheckouts].
+  void activate() {
+    if (_disposed) return;
+    session.hydrateCheckout(checkoutId, _readHydratorKey, _redriveRead);
+  }
+
+  void deactivate() {
+    if (_disposed) return;
+    session.unhydrateCheckout(checkoutId, _readHydratorKey);
   }
 
   Future<void> _redriveRead() async {
@@ -107,7 +119,7 @@ class ConfigService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    session.unhydrateCheckout(checkoutId, 'config:read');
+    session.unhydrateCheckout(checkoutId, _readHydratorKey);
     _failPending(StateError('ConfigService disposed'));
     await _statusSub?.cancel();
     _statusSub = null;
@@ -120,20 +132,25 @@ class ConfigService {
   }
 
   /// Generic request helper. Builds a [PendingReply] bounded by
-  /// [requestTimeout], hands it to [register] (which stores it on the
-  /// appropriate field, superseding any in-flight one), sends the message and
-  /// returns the bounded future. Superseding calls [PendingReply.fail], which
-  /// cancels the timer — so [onTimeout] only ever runs for the reply still
-  /// owning its field and can clear it unconditionally.
+  /// [requestTimeout] through the session's down/up registry, hands it to
+  /// [register] (which stores it on the appropriate field, superseding any
+  /// in-flight one), sends the message and returns the bounded future.
+  /// Superseding calls [PendingReply.fail], which cancels the timer and runs
+  /// [onAbandon] — so [onAbandon] only ever runs for the reply still owning
+  /// its field and can clear it unconditionally. [onTimeout] is for a side
+  /// effect that must fire only on the hard timeout, never on a session-down
+  /// fail (only [read] needs one — see its own doc comment).
   Future<T> _request<T>(
     String type,
     Map<String, dynamic> payload,
     void Function(PendingReply<T>) register, {
-    required void Function() onTimeout,
+    void Function()? onTimeout,
+    required void Function() onAbandon,
   }) {
-    final pending = PendingReply<T>(
+    final pending = session.newPending<T>(
       timeout: requestTimeout,
       onTimeout: onTimeout,
+      onAbandon: onAbandon,
     );
     register(pending);
     unawaited(_send(createAbMessage(type, payload)));
@@ -233,20 +250,30 @@ class ConfigService {
   /// has no usable one. A lost reply throws [TimeoutException] — it must NOT
   /// resolve to `null`, or the settings screen would draft an empty config over
   /// a project whose real `antgrid.yaml` we simply never heard back about.
+  ///
+  /// [onTimeout] only stamps its timeout-specific copy on the hard timeout — a
+  /// session-down fail carries its own message and must not be overwritten
+  /// with stale "config read timed out" text.
   Future<AbConfig?> read() {
-    _setState(_state.copyWith(loading: true, clearError: true));
+    // `loading: true` is stamped from the registration callback, AFTER
+    // `_setRead` supersedes any in-flight read — that supersede's own
+    // `onAbandon` sets `loading: false`, and it must not win a race against
+    // the read it was just replaced by.
     return _request<AbConfig?>(
       'config:read',
       {},
-      _setRead,
-      onTimeout: () {
+      (next) {
+        _setRead(next);
+        _setState(_state.copyWith(loading: true, clearError: true));
+      },
+      onTimeout: () => _setState(
+        _state.copyWith(
+          error: 'No reply from the agent — config read timed out',
+        ),
+      ),
+      onAbandon: () {
         _read = null;
-        _setState(
-          _state.copyWith(
-            loading: false,
-            error: 'No reply from the agent — config read timed out',
-          ),
-        );
+        _setState(_state.copyWith(loading: false));
       },
     );
   }
@@ -259,7 +286,7 @@ class ConfigService {
       'config:write',
       {'config': cfg.toJson()},
       _setWrite,
-      onTimeout: () => _write = null,
+      onAbandon: () => _write = null,
     );
   }
 
@@ -271,7 +298,7 @@ class ConfigService {
       'config:detect-tools',
       {},
       _setDetect,
-      onTimeout: () => _detect = null,
+      onAbandon: () => _detect = null,
     );
   }
 }

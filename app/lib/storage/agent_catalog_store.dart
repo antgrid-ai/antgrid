@@ -25,7 +25,9 @@ class AgentCatalogStore {
   final SharedPreferencesAsync _prefs;
 
   AgentCatalogStore({SharedPreferencesAsync? prefs})
-    : _prefs = prefs ?? SharedPreferencesAsync();
+    : _prefs =
+          prefs ??
+          SharedPreferencesAsync(options: desktopSharedPreferencesOptions);
 
   /// Empty on a cold install, and on anything unreadable — a corrupt blob or an
   /// unavailable prefs platform is a cache miss, never a crash on the launch

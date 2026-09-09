@@ -15,6 +15,7 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
+import '../design/widgets/ab_progress_rule.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_url_field.dart';
@@ -36,6 +37,7 @@ import '../util/ab_log.dart';
 import '../widgets/new_session/environment_menu.dart'
     show PanelHint, PanelRow, PanelSectionHeader;
 import '../util/image_thumbnail.dart';
+import '../widgets/auto_send_capture_dialog.dart';
 import '../widgets/preview_draw_overlay.dart';
 import '../widgets/send_capture_to_agent.dart';
 import '../widgets/preview_empty_state.dart';
@@ -85,6 +87,12 @@ class _TabWebViewState {
   String currentUrl = '';
   bool canGoBack = false;
   bool canGoForward = false;
+  // True from onPageStarted until onPageFinished — drives the load progress
+  // rule in [_PreviewScreenState._buildTabWebView]. webview_all's Windows
+  // backend only ever reports 0/100 (see its onProgress doc), so this tracks
+  // start/finish rather than a real percentage — indeterminate is honest
+  // about what's actually known on every platform.
+  bool loading = false;
 }
 
 /// One in-flight viewport capture request — see
@@ -271,6 +279,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       )
       ..setNavigationDelegate(
         NavigationDelegate(
+          onPageStarted: (_) {
+            final tabState = _tabStates[port];
+            if (tabState != null && !tabState.loading && mounted) {
+              setState(() => tabState.loading = true);
+            }
+          },
           onPageFinished: (_) {
             _clearPickerIfArmedOn(port);
             _refreshHistoryFlags(port);
@@ -282,8 +296,14 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                 _tabStates[port]?.controller?.runJavaScript(kContextMenuScript),
               );
             }
-            if (_refreshingPort == port && mounted) {
-              setState(() => _refreshingPort = null);
+            final tabState = _tabStates[port];
+            final shouldClearRefresh = _refreshingPort == port;
+            final shouldClearLoading = tabState?.loading ?? false;
+            if (mounted && (shouldClearRefresh || shouldClearLoading)) {
+              setState(() {
+                if (shouldClearRefresh) _refreshingPort = null;
+                if (shouldClearLoading) tabState!.loading = false;
+              });
             }
           },
           onUrlChange: (change) {
@@ -356,15 +376,16 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     _addrController.text = url;
   }
 
-  /// Resolve user input → a navigable URL on the ACTIVE tab. This panel
-  /// previews YOUR dev-server ports, not the open web, so the two things
-  /// worth doing with typed input are: follow an absolute URL exactly as
+  /// Resolve user input → a navigable URL on the ACTIVE tab. Only called by
+  /// [_handleAddressSubmit] once it has already ruled out a port/dev-server
+  /// link (see [parsePreviewTarget] there) — so the two things left worth
+  /// doing with what reaches here are: follow an absolute URL exactly as
   /// given (a redirect target, an OAuth provider, a link your own app
   /// produced — the webview has real device networking regardless of
-  /// local/relay mode, it isn't sandboxed to the tab's origin), or treat
-  /// free text as a PATH relative to that tab's origin — the useful "type
-  /// `/login` to jump around your own dev server" behavior this panel exists
-  /// for. There is no third case: a bare word that isn't a path doesn't get
+  /// local/relay mode, it isn't sandboxed to the tab's origin), or treat free
+  /// text as a PATH relative to that tab's origin — the useful "type `/login`
+  /// to jump around your own dev server" behavior this panel exists for.
+  /// There is no third case: a bare word that isn't a path doesn't get
   /// guessed at as a site or searched for.
   void _navigateToInput(String input) {
     final id = ref.read(previewStateProvider).value?.activeTabId;
@@ -396,23 +417,30 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   }
 
   /// Dispatches an address-bar submit to whichever job it means: opening a
-  /// NEW tab (no active tab to navigate, or the "+" button armed
-  /// [_composingNewTab]) versus navigating the active one. One field serves
-  /// both — a real browser's address bar does the same double duty for
-  /// "new tab" vs "this tab", it just has an actual blank tab to submit into
-  /// first; this panel has no such placeholder tab, so the flag stands in
-  /// for it.
+  /// NEW-OR-EXISTING tab for a port (no active tab to navigate, the "+"
+  /// button armed [_composingNewTab], or the text names a port/dev-server
+  /// link even with a tab already active) versus navigating the active tab
+  /// to a path on ITS OWN origin. One field serves both — a real browser's
+  /// address bar does the same double duty for "new tab" vs "this tab", it
+  /// just has an actual blank tab to submit into first; this panel has no
+  /// such placeholder tab, so the flag stands in for it.
   ///
-  /// A new tab accepts a PORT or a LINK to your own dev server (see
-  /// [parsePreviewTarget]) — both open through the real preview/tunnel
-  /// pipeline, same as picking one from the port list, and land at whatever
-  /// path the link named. Anything else is rejected: this previews your dev
-  /// server, not the open web.
+  /// [parsePreviewTarget] is checked before falling back to a same-origin
+  /// path even with a tab active: without this, typing a different port to
+  /// replace a wrong one (say `4000` was a mistake and `4200` is the real
+  /// server) fell through to [_navigateToInput], which reads a bare number as
+  /// a PATH on the CURRENT origin and requested `localhost:4000/4200` instead
+  /// of ever reaching port 4200. A port/link target reuses the tab-per-port
+  /// pipeline ([_openPort], same as the port list). A bare port only focuses
+  /// an existing tab; an explicit link navigates it through its actual proxy
+  /// origin. Anything that ISN'T a port/link (an actual path, or a foreign
+  /// absolute URL) still navigates the active tab in place: this previews
+  /// your dev server, not the open web.
   void _handleAddressSubmit(String input) {
     final activeId = ref.read(previewStateProvider).value?.activeTabId;
+    final trimmed = input.trim();
     if (activeId == null || _composingNewTab) {
       if (_composingNewTab) setState(() => _composingNewTab = false);
-      final trimmed = input.trim();
       if (trimmed.isEmpty) return;
 
       final target = parsePreviewTarget(trimmed);
@@ -424,9 +452,32 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         return;
       }
       final (port, scheme, path) = target;
-      unawaited(_openPort(port, scheme, path: path));
+      unawaited(
+        _openPort(
+          port,
+          scheme,
+          path: path,
+          navigateExisting: int.tryParse(trimmed) == null,
+        ),
+      );
       _addrFocus.unfocus();
       return;
+    }
+    if (trimmed.isNotEmpty) {
+      final target = parsePreviewTarget(trimmed);
+      if (target != null) {
+        final (port, scheme, path) = target;
+        unawaited(
+          _openPort(
+            port,
+            scheme,
+            path: path,
+            navigateExisting: int.tryParse(trimmed) == null,
+          ),
+        );
+        _addrFocus.unfocus();
+        return;
+      }
     }
     _navigateToInput(input);
   }
@@ -478,7 +529,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// openTab] branches internally. Used by manual entry, recent-port
   /// quick-picks, and the port list. On a relay-mode port conflict, confirms
   /// before falling back to a different local port.
-  Future<void> _openPort(int port, String scheme, {String path = '/'}) async {
+  Future<void> _openPort(
+    int port,
+    String scheme, {
+    String path = '/',
+    bool navigateExisting = false,
+  }) async {
     // The sample project advertises the ports a real dev server would, because
     // an empty preview tab is not what the product looks like — but the demo
     // transport reports itself LOCAL, so opening one would point a real webview
@@ -500,6 +556,19 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         (s) => s.previewService,
       );
       if (svc == null) return;
+      if (navigateExisting) {
+        final target = svc.existingTabNavigationUrl(
+          port,
+          scheme: scheme,
+          path: path,
+        );
+        final controller = _tabStates[port]?.controller;
+        if (target != null && controller != null) {
+          svc.setActiveTab(port);
+          await controller.loadRequest(target);
+          return;
+        }
+      }
       final result = await svc.openTab(port, scheme: scheme, path: path);
       if (result != SelectPortResult.portInUse) {
         ref
@@ -1055,16 +1124,18 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// the crop that are ABOUT to be sent — a drawing is already the whole
   /// message, made on the page the user was looking at. Interposing a second
   /// "are you sure, add a comment" step there only asks them to confirm what
-  /// they just drew. Where the words go instead depends on the mode, which is
-  /// what [sendCaptureToAgent] decides: a chat gets the image as an
-  /// attachment in its composer, ready to be typed at; a terminal gets the
-  /// staged path written into it on the spot.
+  /// they just drew. Where the words go instead depends on the mode: a chat
+  /// gets the image as an attachment in its composer, ready to be typed at,
+  /// and returns instantly; a terminal gets the staged path written into it
+  /// once the upload lands, which [showAutoSendCapture] shows a progress bar
+  /// for (and a way to cancel), since that upload is real time on the wire and
+  /// the drawing tool had nothing on screen for it before.
   Future<void> _sendDrawing(int port, Uint8List bytes) async {
     final container = ref.container;
     final sourceUrl = _tabStates[port]?.currentUrl ?? '';
     setState(() => _drawActiveForPort = null);
 
-    await sendCaptureToAgent(
+    await showAutoSendCapture(
       context: context,
       container: container,
       text: '[from preview screenshot: $sourceUrl]',
@@ -1095,15 +1166,21 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         : null;
     final captureInFlight = _screenshotCapture != null;
 
-    // Desktop-only, and only while driving THIS device's own dev server —
-    // opening the tunnel proxy's URL in the controller's own system browser
-    // while remote-controlling a different machine isn't the address the
-    // user typed, so hide it there rather than open something confusing.
-    final showOpenExternal =
-        !isMobilePlatform && (preview?.session.transport.isLocal ?? false);
+    // Desktop-only — a phone/tablet has no "system browser" affordance worth
+    // surfacing here. Not gated on transport.isLocal: remote-controlling
+    // another machine FROM a desktop still has a real system browser to open
+    // into, and _openInSystemBrowser already resolves the right address for
+    // that case (the local tunnel proxy, not the address the user typed).
+    final showOpenExternal = !isMobilePlatform;
 
     return Column(
       children: [
+        // Every other AbToolbar in the app stacks flush against whatever's
+        // above it (see ab_toolbar.dart) — but this one sits directly under
+        // the workspace tab strip's own hairline border, and the two
+        // hairlines back to back read as a single cramped seam. A small gap
+        // just for this toolbar, not the design-system default.
+        const SizedBox(height: AbTokens.space8),
         AbToolbar.actions(
           // Back/Forward stay inline on every platform, always visible and
           // DISABLED (not hidden) until the active tab can actually go that
@@ -1506,6 +1583,13 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     if (entries.isNotEmpty) entries.add(const AbMenuDivider());
     entries.add(
       AbMenuItem(
+        label: 'Select all',
+        enabled: controller != null,
+        onTap: () => controller?.runJavaScript(kContextMenuSelectAllScript),
+      ),
+    );
+    entries.add(
+      AbMenuItem(
         label: 'Reload',
         icon: AbIcons.refresh,
         enabled: controller != null,
@@ -1545,7 +1629,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   }
 
   Widget _buildTabWebView(PreviewTab tab) {
-    final controller = _tabStates[tab.port]?.controller;
+    final tabState = _tabStates[tab.port];
+    final controller = tabState?.controller;
     if (controller == null) return const SizedBox.shrink();
     final webview = ColoredBox(
       // Dark underlay so the beat before the platform view first paints (and
@@ -1564,44 +1649,59 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         },
       ),
     );
+    Widget content;
     if (!isMobilePlatform) {
       // Same reasoning as the mobile Listener below — sees the raw
       // right-click regardless of what the EagerGestureRecognizer above does
       // with it, without taking the click away from the page.
-      return Listener(
+      content = Listener(
         onPointerDown: (e) => _onSecondaryPointerDown(tab.port, e),
         child: webview,
       );
-    }
-    // A Listener sees every raw pointer regardless of which gesture recognizer
-    // wins the arena, so this coexists with the EagerGestureRecognizer above
-    // (which still owns the drag for the page's own scrolling) without
-    // fighting it — Listener never participates in arena disambiguation.
-    return Stack(
-      children: [
-        Listener(
-          onPointerDown: (e) => _onPullDown(tab.port, controller, e),
-          onPointerMove: _onPullMove,
-          onPointerUp: (_) => _onPullUp(tab.port, controller),
-          onPointerCancel: (_) => _cancelPull(),
-          child: webview,
-        ),
-        if (_pullDistance > 0 || _refreshingPort == tab.port)
-          Positioned(
-            top: AbTokens.space12,
-            left: 0,
-            right: 0,
-            child: IgnorePointer(
-              child: Center(
-                child: AnimatedOpacity(
-                  duration: const Duration(milliseconds: 120),
-                  opacity: _refreshingPort == tab.port
-                      ? 1
-                      : (_pullDistance / _kPullRefreshThreshold).clamp(0, 1),
-                  child: const AbLoadingDot(size: 16),
+    } else {
+      // A Listener sees every raw pointer regardless of which gesture
+      // recognizer wins the arena, so this coexists with the
+      // EagerGestureRecognizer above (which still owns the drag for the
+      // page's own scrolling) without fighting it — Listener never
+      // participates in arena disambiguation.
+      content = Stack(
+        children: [
+          Listener(
+            onPointerDown: (e) => _onPullDown(tab.port, controller, e),
+            onPointerMove: _onPullMove,
+            onPointerUp: (_) => _onPullUp(tab.port, controller),
+            onPointerCancel: (_) => _cancelPull(),
+            child: webview,
+          ),
+          if (_pullDistance > 0 || _refreshingPort == tab.port)
+            Positioned(
+              top: AbTokens.space12,
+              left: 0,
+              right: 0,
+              child: IgnorePointer(
+                child: Center(
+                  child: AnimatedOpacity(
+                    duration: const Duration(milliseconds: 120),
+                    opacity: _refreshingPort == tab.port
+                        ? 1
+                        : (_pullDistance / _kPullRefreshThreshold).clamp(0, 1),
+                    child: const AbLoadingDot(size: 16),
+                  ),
                 ),
               ),
             ),
+        ],
+      );
+    }
+    return Stack(
+      children: [
+        content,
+        if (tabState?.loading ?? false)
+          const Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(child: AbProgressRule(fraction: null)),
           ),
       ],
     );

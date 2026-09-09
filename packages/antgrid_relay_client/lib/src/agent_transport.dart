@@ -56,6 +56,11 @@ abstract class AgentTransport {
 
   /// Send a JSON-encodable message on the named channel.
   /// Defaults to `control`; preview/HTTP-tunnel callers pass `preview`.
+  ///
+  /// Completes when the message has been handed to the socket, or dropped —
+  /// never when a peer has received it. A relay transport writes it behind
+  /// whatever is already outbound on that channel, so a caller that cannot
+  /// wait out the traffic ahead of it must impose its own timeout.
   Future<void> send(Map<String, dynamic> message, {String channel = 'control'});
 
   /// Issue a request/response RPC against the agent. Returns the decoded
@@ -63,10 +68,20 @@ abstract class AgentTransport {
   /// timeout. Default timeout 10s.
   ///
   /// Each transport implements correlation by `requestId`.
+  ///
+  /// [countsTowardHealth] gates whether a [StreamTransport] folds this call's
+  /// outcome into the session's consecutive-timeout rekey trigger (see
+  /// `MachineSession.notifyRpcResult`), success and timeout alike. A caller
+  /// that re-issues the SAME pull on every re-establishment — including the
+  /// one a rekey itself causes — must pass `false`, or a run of timeouts on a
+  /// link that cannot carry the pull forces a rekey, the rekey re-establishes,
+  /// the re-establish re-drives the same pull, and the loop never breaks. `LocalTransport` and
+  /// `FakeAgentTransport` accept and ignore it (no rekey counter to feed).
   Future<Map<String, dynamic>> request(
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
+    bool countsTowardHealth = true,
   });
 
   /// `true` once the transport can carry an RPC — a local session from the
@@ -74,6 +89,14 @@ abstract class AgentTransport {
   /// [currentState] == connected: a relay stream stays connected across a
   /// session-down window where a send would silently drop.
   bool get isEstablished;
+
+  /// Counts (re)establishments. A revision number a service obtained from the
+  /// agent is only comparable against the SAME establishment: a reconnect may
+  /// have reached a new agent process whose counters restarted, so a claim
+  /// carried across one could match by coincidence and have stale state
+  /// confirmed. Services that cache a server-issued seq record this beside it
+  /// and re-claim only while it still matches.
+  int get establishmentEpoch;
 
   /// Tier-3: register [run] as the hydrator for [key], invoking it now when the
   /// transport is already established and re-invoking it on every future
