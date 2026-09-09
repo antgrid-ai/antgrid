@@ -17,7 +17,26 @@ export interface ProjectInfo {
   name?: string;
 }
 
-const DEBOUNCE_MS = 100;
+/** Coalescing window for `tree:update`. [scheduleBatch] throttles rather than
+ *  debounces — a later change does not push the timer back — so while churn
+ *  continues the watcher emits exactly one frame per window, indefinitely. At
+ *  100 ms that is ~6 frames/s of ~1.9 KB each, and a remote app pays every one:
+ *  one measured 245 s agent run put 2.76 MB of deltas on the wire, 22% of that
+ *  whole session's download, and each frame is also a tree merge on the
+ *  consumer's UI thread.
+ *
+ *  So the window widens once the churn proves sustained. Widening costs far
+ *  less than it saves because [PendingChanges] is keyed by path: a longer
+ *  window folds repeated writes to the same file into ONE entry, so the frame
+ *  grows much more slowly than the rate falls. An isolated save keeps the
+ *  narrow window — that is the case a user is watching for. */
+const IDLE_WINDOW_MS = 100;
+const BUSY_WINDOW_MS = 750;
+/** A change arriving this soon after a flush means the churn never paused. */
+const CHURN_GRACE_MS = 150;
+/** Uninterrupted windows before widening. Two adjacent saves are not a storm;
+ *  a real one runs for minutes, so it widens almost immediately anyway. */
+const CHURN_RUN_TO_WIDEN = 3;
 
 /** The watcher's one outbound hook. Both flags are honoured only by senders
  *  that publish through the replaying bus; a plain sender may ignore them and
@@ -48,6 +67,10 @@ export class FileWatcher {
     removed: new Set(),
   };
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastFlushAt = 0;
+  /** Consecutive windows that were followed straight away by another change —
+   *  see [CHURN_RUN_TO_WIDEN]. */
+  private churnRun = 0;
   /** Set when the native recursive watcher reports a change with no path —
    *  see [startNativeRecursiveWatch] — so [flushBatch] falls back to a full
    *  resync instead of sending an incremental batch it knows is incomplete. */
@@ -407,7 +430,16 @@ export class FileWatcher {
 
   private scheduleBatch(): void {
     if (this.debounceTimer) return;
-    this.debounceTimer = setTimeout(() => this.flushBatch(), DEBOUNCE_MS);
+    // Measured from the last FLUSH to this change, not flush-to-flush: once the
+    // window widens, flushes are naturally further apart, and testing THAT gap
+    // against the grace would read the widened cadence as idle and narrow
+    // straight back on every cycle.
+    this.churnRun =
+      Date.now() - this.lastFlushAt < CHURN_GRACE_MS ? this.churnRun + 1 : 0;
+    this.debounceTimer = setTimeout(
+      () => this.flushBatch(),
+      this.churnRun >= CHURN_RUN_TO_WIDEN ? BUSY_WINDOW_MS : IDLE_WINDOW_MS,
+    );
   }
 
   private flushBatch(): void {
@@ -426,6 +458,10 @@ export class FileWatcher {
     this.pending.removed.clear();
 
     if (!fullResync && added.length === 0 && modified.length === 0 && removed.length === 0) return;
+
+    // Only a flush that carried something counts: stamping an empty one would
+    // make the next isolated save look like the continuation of a storm.
+    this.lastFlushAt = Date.now();
 
     // Ahead of the suppression gate below, and not gated by it: git status is
     // not a heavy-stream frame, and its cache is what a reconnecting app is

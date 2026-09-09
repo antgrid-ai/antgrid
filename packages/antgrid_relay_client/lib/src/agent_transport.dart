@@ -80,6 +80,14 @@ abstract class AgentTransport {
   /// session-down window where a send would silently drop.
   bool get isEstablished;
 
+  /// Counts (re)establishments. A revision number a service obtained from the
+  /// agent is only comparable against the SAME establishment: a reconnect may
+  /// have reached a new agent process whose counters restarted, so a claim
+  /// carried across one could match by coincidence and have stale state
+  /// confirmed. Services that cache a server-issued seq record this beside it
+  /// and re-claim only while it still matches.
+  int get establishmentEpoch;
+
   /// Tier-3: register [run] as the hydrator for [key], invoking it now when the
   /// transport is already established and re-invoking it on every future
   /// (re)establishment (the reconciliation checkpoint — a reconnect re-pulls

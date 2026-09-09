@@ -22,6 +22,9 @@ class _FakeAgent {
   final int port;
   WebSocket? socket;
 
+  /// Every frame the app sent, as received.
+  final received = <String>[];
+
   /// What to answer the hello with. `null` = close with [closeCode] instead,
   /// which is how the real listener refuses one.
   String? helloReply = '{"type":"ready"}';
@@ -35,6 +38,7 @@ class _FakeAgent {
       agent.socket = ws;
       ws.listen((data) {
         final text = data as String;
+        agent.received.add(text);
         if (text.contains('"hello"')) {
           final reply = agent.helloReply;
           if (reply == null) {
@@ -99,6 +103,22 @@ void main() {
   late _FakeAgent agent;
   setUp(() async => agent = await _FakeAgent.start());
   tearDown(() => agent.stop());
+
+  // The agent caches a `tree:full` per checkout at open time, so a replay of
+  // everything hands a local project one full tree per managed worktree. The
+  // relay path already excludes it (`_kHeavyReplayTypes`); this is the loopback
+  // half, and nothing else fails if it goes missing — the trees simply arrive
+  // and are thrown away.
+  test('the welcome replay excludes the cached full trees', () async {
+    final t = LocalTransport(port: agent.port, token: _token, appPid: 1);
+    addTearDown(t.dispose);
+    await t.connect();
+
+    final snapshot = agent.received
+        .map((f) => jsonDecode(f) as Map<String, dynamic>)
+        .singleWhere((f) => f['method'] == 'state.snapshot');
+    expect((snapshot['params'] as Map)['exclude'], ['tree:full']);
+  });
 
   group('handshake', () {
     test(

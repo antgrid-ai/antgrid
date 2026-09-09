@@ -423,6 +423,10 @@ class ProjectSession {
   Future<void> hydrate(String key, Future<void> Function() run) =>
       transport.hydrate(key, run);
 
+  /// See [AgentTransport.establishmentEpoch] — a service caching a
+  /// server-issued revision records this beside it.
+  int get establishmentEpoch => transport.establishmentEpoch;
+
   Future<void> hydrateCheckout(
     String checkoutId,
     String key,
