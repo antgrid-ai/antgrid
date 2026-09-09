@@ -5,7 +5,10 @@
 //
 // A parse failure returns the EMPTY store, never a throw and never a partial. A
 // half-read file would put a message back on the wire under a state nothing
-// wrote; an empty one costs at most a held message that was allowed to be lost.
+// wrote; for a per-session store an empty one costs at most a held message
+// that was allowed to be lost. `sessionBusMachineDir`'s routes.json is the
+// exception: it is machine-level (E9/§5.4), so the same fallback there empties
+// every project's carrier bindings at once, not one session's.
 
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,8 +17,21 @@ import { logger } from "../logger";
 
 const log = logger.child({ component: "session-bus" });
 
-/** Where one project's bus state lives. Ids are bridge-issued but encoded
- *  anyway: a path separator inside one must not escape the project directory. */
+/** The machine-level session-bus root (E9/§5.4). One file lives here today —
+ *  routes.json — because a carrier route is looked up by context id, which may
+ *  name a session in any project this machine has open, so no single project's
+ *  directory can hold it. Waves 2-3 add siblings here (directory.json,
+ *  mailbox/, budget.json), never a subdirectory keyed by project. */
+export function sessionBusMachineDir(abDir: string): string {
+  return join(abDir, "session-bus");
+}
+
+/** Where one project's bus state lives — the per-session message log, held
+ *  store and artifact bytes, plus the delivery queue (`sessionBusDeliveryDir`,
+ *  same path today, named separately by design). Carrier routes moved out to
+ *  `sessionBusMachineDir` (E9/§5.4); this directory holds none. Ids are
+ *  bridge-issued but encoded anyway: a path separator inside one must not
+ *  escape the project directory. */
 export function sessionBusProjectDir(abDir: string, projectId: string): string {
   return join(abDir, "agents", encodeURIComponent(projectId), "session-bus");
 }

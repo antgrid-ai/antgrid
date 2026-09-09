@@ -17,12 +17,14 @@
 import { join } from "node:path";
 import { z } from "zod";
 import { MAX_BUS_ROUTES } from "./constants";
-import { readStoreFile, sessionBusProjectDir, writeStoreFile } from "./store-fs";
+import { readStoreFile, sessionBusMachineDir, writeStoreFile } from "./store-fs";
 
-// Bumped for the move to a machine-level table (E9/§5.4): a pre-move row
-// carries no projectId and cannot name a stream, so it must be discarded
-// rather than read as if it could. The table is still per-project here — the
-// version only needs to move once, ahead of the row shape it protects.
+// Bumped when projectId was added to the row: a pre-move row carried none and
+// could not name a stream, so it had to be discarded rather than read as if it
+// could. Left at that value now that the FILE itself moves to one machine-level
+// path (`sessionBusMachineDir`): the row shape did not change here, and the old
+// per-project files simply stop being read — a second bump would only wipe a
+// file this version already emptied once.
 export const ROUTE_STORE_VERSION = 2;
 
 export const BusRouteSchema = z.object({
@@ -31,9 +33,9 @@ export const BusRouteSchema = z.object({
   peerId: z.string().min(1).max(400),
   /** The project whose stream carried this exchange in — which socket a reply
    *  leaves on, distinct from the peer's relay slot (route-store.ts:10-15,
-   *  above). Equal to the table's own project while the table stays
-   *  per-project; load-bearing once a machine-level table dispatches across
-   *  them. */
+   *  above). Load-bearing now that one machine-level table (E9/§5.4) can name
+   *  a route for any project this host has open: it is the only thing that
+   *  says which project's stream a peer-role dispatch may use. */
   projectId: z.string().min(1).max(200),
   /** When this route was last proven by an applied inbound frame. */
   at: z.number().int().nonnegative(),
@@ -47,16 +49,16 @@ export const BusRoutesFileSchema = z.object({
 
 export type BusRouteMap = Map<string, { peerId: string; projectId: string; at: number }>;
 
-function routesPath(abDir: string, projectId: string): string {
-  return join(sessionBusProjectDir(abDir, projectId), "routes.json");
+function routesPath(abDir: string): string {
+  return join(sessionBusMachineDir(abDir), "routes.json");
 }
 
 /** Read the remembered routes. Entries older than [ttlMs] are dropped here
  *  rather than at first use, so a bridge that comes up after a long stop starts
  *  from the same map it would have converged to. */
-export function loadBusRoutes(abDir: string, projectId: string, ttlMs: number, now: number): BusRouteMap {
+export function loadBusRoutes(abDir: string, ttlMs: number, now: number): BusRouteMap {
   const file = readStoreFile<z.infer<typeof BusRoutesFileSchema> | null>(
-    routesPath(abDir, projectId),
+    routesPath(abDir),
     BusRoutesFileSchema,
     null,
   );
@@ -68,8 +70,8 @@ export function loadBusRoutes(abDir: string, projectId: string, ttlMs: number, n
   return map;
 }
 
-export function saveBusRoutes(abDir: string, projectId: string, routes: BusRouteMap): void {
-  const dir = sessionBusProjectDir(abDir, projectId);
+export function saveBusRoutes(abDir: string, routes: BusRouteMap): void {
+  const dir = sessionBusMachineDir(abDir);
   const rows: BusRoute[] = [...routes.entries()].map(([contextId, r]) => ({
     contextId,
     peerId: r.peerId,

@@ -395,19 +395,22 @@ export class HostServer {
     // distinguishable log line (SessionBusSessionIndex.lookup) rather than
     // reading as a real addressing miss.
     //
-    // Route-table hydration and the one machine-wide `resume()` wait for it —
-    // both resolve `projectIdFor` through this same index, and a `resume()`
-    // that ran first would read every cold project's on-disk session as
-    // unaddressable (a warned miss, per the index's own doc) instead of
-    // re-arming its held retries. `.finally` rather than chaining off the
-    // resolved promise: a hydrate that fails for one project must not also
-    // cost every other project its resume, so route hydration and resume run
-    // once the attempt SETTLES, not only once it succeeds.
+    // The one machine-wide `resume()` waits for it: `resume()` resolves
+    // `projectIdFor` through this same index, and a `resume()` that ran first
+    // would read every cold project's on-disk session as unaddressable (a
+    // warned miss, per the index's own doc) instead of re-arming its held
+    // retries. Route-table hydration reads the one machine-level routes.json
+    // (E9/§5.4/C5) and needs no project list to do it, so it has nothing to
+    // wait for — it is only kept alongside `resume()` here so both land before
+    // the same first inbound frame this process folds. `.finally` rather than
+    // chaining off the resolved promise: a hydrate that fails for one project
+    // must not also cost every other project its resume, so route hydration
+    // and resume run once the attempt SETTLES, not only once it succeeds.
     void this.sessionIndex
       .hydrate(resolveAbDir(), [...this.seenProjects].map(([id, seen]) => ({ id, label: seen.label })))
       .catch((err) => log.warn({ err }, "host: session index hydrate failed"))
       .finally(() => {
-        this.sessionBus.hydrateRoutes([...this.seenProjects.keys()]);
+        this.sessionBus.hydrateRoutes();
         this.sessionBus.resume();
       });
   }
@@ -2048,9 +2051,11 @@ export class HostServer {
     await this.reclaimManagedCheckouts(projectId);
     this.deleteProjectStores(projectId);
     this.sessionIndex.forgetProject(projectId);
-    // `deleteProjectStores` above already removed `agents/<projectId>/` — a
-    // route left in the shared table would otherwise resurrect that directory
-    // the next time the coordinator groups its rows out to disk.
+    // `deleteProjectStores` above already removed `agents/<projectId>/` and the
+    // index above no longer resolves it — a route left in the shared table
+    // would otherwise sit there forever, since nothing will ever route to a
+    // project this machine no longer holds, and the next wholesale save would
+    // keep writing it back to the machine-level routes.json regardless.
     this.sessionBus.forgetProjectRoutes(projectId);
     if (this.seenProjects.delete(projectId)) this.flushSeen();
     // Unconditional: the advert IS the seen catalog now, so a forgotten project

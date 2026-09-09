@@ -183,7 +183,7 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * Seed the route table from every project this machine has ever opened.
+   * Seed the route table from the machine-level routes.json (E9/§5.4).
    *
    * Unlike a session's message log or held store — loaded lazily, the first
    * time THAT session is addressed, because each belongs to exactly one
@@ -191,19 +191,11 @@ export class SessionBusCoordinator {
    * any project on the machine, so there is no single project whose warm-up
    * can defer this. Synchronous, because `loadBusRoutes` is: meant to run once,
    * before the first inbound frame this process folds, so a restart does not
-   * relearn every route a live link would otherwise still have. The file stays
-   * one per project until the machine-level route file lands (E9/§5.4's next
-   * step); each row already carries which project's stream carried it in
-   * (route-store.ts), which is what lets `saveRoutesIfDue` write each project's
-   * own rows back to that project's own file from this one shared map.
+   * relearn every route a live link would otherwise still have.
    */
-  hydrateRoutes(projectIds: Iterable<string>): void {
-    const now = this.now();
-    for (const projectId of projectIds) {
-      for (const [contextId, route] of loadBusRoutes(this.deps.abDir, projectId, BUS_ROUTE_TTL_MS, now)) {
-        const existing = this.routes.get(contextId);
-        if (!existing || route.at > existing.at) this.routes.set(contextId, route);
-      }
+  hydrateRoutes(): void {
+    for (const [contextId, route] of loadBusRoutes(this.deps.abDir, BUS_ROUTE_TTL_MS, this.now())) {
+      this.routes.set(contextId, route);
     }
   }
 
@@ -280,39 +272,34 @@ export class SessionBusCoordinator {
 
   /** Persist the map, throttled: a binding change or a prune is written at
    *  once, a bare restamp only every {@link BUS_ROUTE_PERSIST_INTERVAL_MS}.
-   *  Grouped by each row's OWN project, so each project's file keeps holding
-   *  only that project's rows — unchanged file shape, now written from one
-   *  shared table instead of N duplicated ones. */
+   *  One machine-level file (E9/§5.4/C5) — every row, from every project, in
+   *  one wholesale write — which is why this table may only ever have the one
+   *  in-memory owner this coordinator is: two writers here would erase each
+   *  other's rows with valid JSON and no error. */
   private saveRoutesIfDue(now: number, force: boolean): void {
     if (!force && now - this.routesSavedAt < BUS_ROUTE_PERSIST_INTERVAL_MS) return;
     this.routesSavedAt = now;
-    const byProject = new Map<string, BusRouteMap>();
-    for (const [contextId, route] of this.routes) {
-      let group = byProject.get(route.projectId);
-      if (!group) { group = new Map(); byProject.set(route.projectId, group); }
-      group.set(contextId, route);
-    }
-    for (const [projectId, group] of byProject) {
-      try {
-        saveBusRoutes(this.deps.abDir, projectId, group);
-      } catch (err) {
-        // A route that outlives this process is an optimisation over relearning
-        // one; a bridge must not fail to carry a frame because it could not
-        // write that down.
-        log.warn("session bus: could not persist carrier routes for project %s: %s", projectId, err);
-      }
+    try {
+      saveBusRoutes(this.deps.abDir, this.routes);
+    } catch (err) {
+      // A route that outlives this process is an optimisation over relearning
+      // one; a bridge must not fail to carry a frame because it could not
+      // write that down.
+      log.warn("session bus: could not persist carrier routes: %s", err);
     }
   }
 
   /**
-   * Drop every route naming [projectId], with no rewrite of that project's own
-   * routes.json. Called only when the project itself is forgotten
-   * (`HostServer.forget`), which has already deleted `agents/<projectId>/`
-   * wholesale — a route left in the shared map would otherwise resurrect that
-   * directory the next time `saveRoutesIfDue` groups its rows out and writes
-   * them back. Never called on an eviction: a merely-cold project is still
-   * real, and its routes must survive to be reloaded on its next
-   * `hydrateRoutes` the same way its sessions survive in the session index.
+   * Drop every route naming [projectId] from the shared table. Called only
+   * when the project itself is forgotten (`HostServer.forget`): the machine
+   * routes.json (`sessionBusMachineDir`) lives outside `agents/<projectId>/`,
+   * so deleting that tree does not touch it, and a route naming a project this
+   * machine no longer holds would otherwise sit in the table forever — its
+   * owner is gone, so nothing will ever resolve it, and the next wholesale
+   * `saveRoutesIfDue` would still write it back to disk as if it might. Never
+   * called on an eviction: a merely-cold project is still real, and its routes
+   * must survive for the coordinator to keep dispatching against once it warms
+   * again, the same way its sessions survive in the session index.
    */
   forgetProjectRoutes(projectId: string): void {
     for (const [contextId, route] of this.routes) {
