@@ -102,6 +102,14 @@ abstract final class _MobilePage {
 /// by inspection, and would have fought the PageView for every swipe.
 const double _kBackOverscrollThreshold = 48.0;
 
+/// Pixel floors for the desktop split's [ResizablePane], passed as
+/// `minLeftWidth`/`minRightWidth`. `AgentBar` (`widgets/agent_panel.dart`) is
+/// a row of fixed-size controls that overflows — a visible RenderFlex error,
+/// not a graceful reflow — once squeezed narrower than this; the workspace
+/// tab bar + panel content need comparable room on the other side.
+const double _kAgentPanelMinWidth = 420.0;
+const double _kContextPanelMinWidth = 320.0;
+
 /// Desktop panel arrangement. Persisted by NAME as
 /// `ProjectPreferences.panelMode`, so reordering these is safe; renaming one
 /// drops that stored preference back to unchosen (see `_PanelModeNames` there).
@@ -2391,6 +2399,16 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           Expanded(
             child: ResizablePane(
               initialRatio: _splitRatio,
+              // Floors under the plain 0.2/0.8 ratio: AgentBar is a row of
+              // fixed-size controls (mark, approval badge, breadcrumb, mode
+              // control, handler control, menu button) that don't shrink
+              // below their own content, and the workspace tab bar +
+              // panel's own content need comparable room. Below these, the
+              // ratio-only clamp let a drag squeeze either bar past its
+              // minimum and threw a RenderFlex overflow instead of just
+              // stopping the drag.
+              minLeftWidth: _kAgentPanelMinWidth,
+              minRightWidth: _kContextPanelMinWidth,
               onRatioChanged: (r) {
                 _splitRatio = r;
                 _updatePrefs();

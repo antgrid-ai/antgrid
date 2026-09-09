@@ -47,7 +47,11 @@ class WindowsPasteFix {
   /// Real (non-synthesized) down/up per Ctrl key — mirrors
   /// `TerminalViewWrapper._realModifierState`. A key ABSENT from the map means
   /// "no real event seen yet", which defers to `HardwareKeyboard` rather than
-  /// asserting a released state a genuine held Ctrl would contradict.
+  /// asserting a released state a genuine held Ctrl would contradict. Cleared
+  /// by `_handle` itself once a chord consumes the reading, for the same
+  /// reason as its terminal counterpart: an injected chord's Ctrl-down has no
+  /// physical key behind it, so no real key-up ever arrives to clear a stuck
+  /// "held" entry on its own.
   static final Map<LogicalKeyboardKey, bool> _realControlState = {};
 
   static KeyEventResult _handle(KeyEvent event) {
@@ -63,6 +67,11 @@ class WindowsPasteFix {
     }
     final ctrl = _realControl ?? HardwareKeyboard.instance.isControlPressed;
     if (!ctrl) return KeyEventResult.ignored;
+    // Spend the mirror the moment it disambiguates this chord — an injected
+    // paste has no physical Ctrl-down behind it, so no real key-up ever
+    // arrives to clear `_realControlState`, and left set it would misread
+    // every later bare "v" keystroke app-wide as still Ctrl-held.
+    _realControlState.clear();
 
     final focusContext = primaryFocus?.context;
     if (focusContext == null) return KeyEventResult.ignored;
