@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../design/ab_colors.dart';
@@ -13,6 +15,18 @@ class ResizablePane extends StatefulWidget {
   final double maxRatio;
   final ValueChanged<double>? onRatioChanged;
 
+  /// Pixel floors under [minRatio]/[maxRatio], for a [left]/[right] whose
+  /// content has a real minimum functional width (a toolbar of fixed-size
+  /// controls, say) rather than one that degrades gracefully at any ratio.
+  /// A plain ratio can't express that: the same 0.2 that's generous on a wide
+  /// monitor can under-shoot a toolbar's own minimum on a narrower one, which
+  /// is silent here — nothing in this widget renders wrong, the squeeze just
+  /// hands the pane less width than its content needs and IT overflows.
+  /// Converted against [_available] each frame, so the floor stays a fixed
+  /// pixel width as the window resizes rather than a fixed fraction of it.
+  final double? minLeftWidth;
+  final double? minRightWidth;
+
   const ResizablePane({
     super.key,
     required this.left,
@@ -20,6 +34,8 @@ class ResizablePane extends StatefulWidget {
     this.initialRatio = 0.5,
     this.minRatio = 0.2,
     this.maxRatio = 0.8,
+    this.minLeftWidth,
+    this.minRightWidth,
     this.onRatioChanged,
   });
 
@@ -61,6 +77,28 @@ class _ResizablePaneState extends State<ResizablePane> {
     return box.size.width - _handleWidth;
   }
 
+  /// [widget.minRatio]/[widget.maxRatio], tightened against [widget.minLeftWidth]
+  /// / [widget.minRightWidth] using the last-known [_available] width. Reads
+  /// as "no pixel floor configured" (falling back to the plain ratio) both
+  /// when the caller passed none and on the very first build, before any
+  /// layout has reported a size — the ratio bound alone still applies there,
+  /// and the pixel floor catches up one frame later, same as [_available]'s
+  /// own doc explains for the drag path.
+  (double min, double max) get _effectiveRatioBounds {
+    final available = _available;
+    var min = widget.minRatio;
+    var max = widget.maxRatio;
+    if (available > 0) {
+      final minLeft = widget.minLeftWidth;
+      if (minLeft != null) min = math.max(min, minLeft / available);
+      final minRight = widget.minRightWidth;
+      if (minRight != null) max = math.min(max, 1 - (minRight / available));
+    }
+    // A window too narrow to honor both floors at once — split evenly rather
+    // than hand the clamp below an inverted (min > max) range, which throws.
+    return min <= max ? (min, max) : (0.5, 0.5);
+  }
+
   @override
   Widget build(BuildContext context) {
     // Flex weights, NOT a LayoutBuilder. Both panes carry GlobalKeys (see
@@ -75,10 +113,10 @@ class _ResizablePaneState extends State<ResizablePane> {
     // while the panel is hidden, so restoring the panel from the rail hit it
     // every time. Flex keeps the reparent in the build phase, where activating
     // an overlay child is legal.
-    final leftFlex = (_ratio * _flexResolution).round().clamp(
-      1,
-      _flexResolution - 1,
-    );
+    final (minRatio, maxRatio) = _effectiveRatioBounds;
+    final leftFlex = (_ratio.clamp(minRatio, maxRatio) * _flexResolution)
+        .round()
+        .clamp(1, _flexResolution - 1);
     return Row(
       children: [
         Expanded(flex: leftFlex, child: widget.left),
@@ -93,10 +131,11 @@ class _ResizablePaneState extends State<ResizablePane> {
           onDragUpdate: (dx) {
             final available = _available;
             if (available <= 0) return;
+            final (minRatio, maxRatio) = _effectiveRatioBounds;
             setState(() {
               _ratio = ((_ratio * available + dx) / available).clamp(
-                widget.minRatio,
-                widget.maxRatio,
+                minRatio,
+                maxRatio,
               );
             });
           },

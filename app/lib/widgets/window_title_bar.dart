@@ -560,12 +560,19 @@ class TitleBarBreadcrumb extends ConsumerWidget {
         ],
         if (showBranchPill && gitBranch != null) ...[
           const SizedBox(width: AbTokens.space8),
-          // Bounded, not Flexible: the breadcrumb is the only child that should
-          // absorb slack, and a second flexible sibling would split it evenly
-          // and truncate the name long before the row is actually tight. The
-          // cap is what keeps a long branch from making the badge + pill an
-          // unshrinkable floor on a narrow window.
-          const SessionBranchPill(maxWidth: 160),
+          // FlexFit.loose, not Expanded: the breadcrumb keeps first claim on
+          // slack (it has the higher flex below), and this only gives up its
+          // own width once the row is actually tight — a bare ConstrainedBox
+          // here does not shrink with the row at all, since a non-flex Row
+          // child is sized from its own content, capped but never squeezed,
+          // which is what let the fixed badges above push this row into
+          // overflow on a narrow agent panel. AbBranchPill's own Flexible
+          // Text (see its doc) is what turns this shrink into an ellipsis
+          // instead of a second overflow one widget down.
+          Flexible(
+            fit: FlexFit.loose,
+            child: SessionBranchPill(maxWidth: 160),
+          ),
         ],
       ],
     );

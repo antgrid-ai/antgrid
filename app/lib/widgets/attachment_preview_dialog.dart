@@ -70,7 +70,7 @@ Future<void> showAttachmentPreview(
 }
 
 class AttachmentPreviewDialog extends ConsumerWidget {
-  const AttachmentPreviewDialog();
+  const AttachmentPreviewDialog({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
