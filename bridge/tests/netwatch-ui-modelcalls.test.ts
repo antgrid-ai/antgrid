@@ -626,4 +626,17 @@ describe("model-call folding and formatting, run for real off the shipped source
     expect(floor).toBe(RETRY_FLOOR_MS);
     expect(h.mcRetryBudgetNote({ remainingMs: RETRY_FLOOR_MS - 1 })!.text).toContain("unreachable");
   });
+
+  it("keeps its unusable-outcome pattern in lockstep with the CLI's", async () => {
+    // Hand-mirrored, and the two disagreeing is invisible in both: the CLI
+    // would paint a verdict red while the browser painted the same one green.
+    const { UNUSABLE_OUTCOME_RE } = await import("../src/cli/modelwatch");
+    const mirrored = extractVar(script(), "MC_UNUSABLE_RE").match(/=\s*(\/.*\/)\s*;/)![1];
+    expect(mirrored).toBe(UNUSABLE_OUTCOME_RE.toString());
+    // And the newest verb the pair has to classify — a naming call refused
+    // before the spawn because the vendor bills per call — lands on the
+    // unusable side of both, rather than reading as a title that worked.
+    expect(UNUSABLE_OUTCOME_RE.test("skipped")).toBe(true);
+    expect(loadHelpers().mcAnswerWasUsable("skipped")).toBe(false);
+  });
 });

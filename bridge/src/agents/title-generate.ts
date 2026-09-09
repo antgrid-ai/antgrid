@@ -108,17 +108,23 @@ export async function buildTitleContext(opts: {
 /**
  * A generated title, or why there is none.
  *
- * The two reasons are NOT interchangeable to the caller, which is the whole
- * point of returning one rather than a bare null: "failed" is a spawn that ran
- * and did not produce a usable title — a signed-out CLI, a timeout, a rambling
+ * The reasons are NOT interchangeable to the caller, which is the whole point
+ * of returning one rather than a bare null. "failed" is a spawn that ran and
+ * did not produce a usable title — a signed-out CLI, a timeout, a rambling
  * answer — any of which the next turn may not repeat, so it is worth a bounded
- * retry. "unavailable" is the machine's answer, not this attempt's: no
- * installed agent declares an argv that can serve the call at all, so every
- * retry would re-read a transcript to reach the same refusal.
+ * retry.
+ *
+ * The other two are the machine's answer rather than this attempt's, so every
+ * retry would re-read a transcript to reach the same refusal. They stay apart
+ * because they send a reader to different places: "unavailable" means no
+ * installed agent declares an argv that can serve the call at all, where
+ * "skipped" means one does and we declined to spend it (AgentSpec.billsPerCall).
+ * Collapsing the second into the first would report a working install as a
+ * missing one.
  */
 export type TitleGeneration =
   | ({ ok: true; title: string } & TitleCallRef)
-  | ({ ok: false; reason: "unavailable" | "failed" } & TitleCallRef);
+  | ({ ok: false; reason: "unavailable" | "failed" | "skipped" } & TitleCallRef);
 
 /**
  * What the caller needs to record the OUTCOME of a naming call against the
@@ -131,12 +137,14 @@ export type TitleGeneration =
  */
 export interface TitleCallRef {
   callId: string;
-  /** The CLI that served the call. On the `unavailable` reason nothing ran at
-   *  all, so it is the requested tool: there is no second vendor to name, and
-   *  the reason itself is what says so. */
+  /** The CLI that served the call, or — where nothing ran — the one that would
+   *  have. On `unavailable` that is the requested tool, since there is no second
+   *  vendor to name and the reason itself says so; on `skipped` it is the vendor
+   *  whose billing IS the reason, which is the whole content of the record. */
   actualTool: string;
   /** The headless entry that served it, or `"none"` when no installed agent
-   *  declares one — the `unavailable` case has no reach to name. */
+   *  declares one — the `unavailable` case has no reach to name. A `skipped`
+   *  call names the reach it declined, which is what says an argv existed. */
   reach: string;
 }
 
@@ -218,6 +226,16 @@ export async function generateTitleFromContext(context: string, opts: {
     return { ok: false, reason: "unavailable", callId, actualTool: opts.tool, reach: "none" };
   }
   logBorrow("none", opts.tool, picked.tool);
+  // Asked of the SERVING agent, because that is the account that gets billed: a
+  // session of a token-billed vendor that borrows this one would otherwise
+  // spend the unit on a name anyway, and the session's own tool says nothing
+  // about who pays for a borrowed call.
+  if (agentSpec(picked.tool)?.billsPerCall) {
+    return {
+      ok: false, reason: "skipped", callId,
+      actualTool: picked.tool, reach: picked.reach,
+    };
+  }
   const model = namingModel(opts.tool, picked.tool, opts.model);
   // Sliced once and then both sent and digested: a digest taken over the whole
   // transcript would identify text the model was never shown.

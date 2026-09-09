@@ -318,15 +318,19 @@ describe("cheapNamingModel", () => {
     expect(calls[0]).not.toContain("some-other-model");
   });
 
-  // github-copilot has a verified readonly entry but no cheapNamingModel —
-  // nobody has found a string its account accepts (see registry.ts) — so its
-  // argv carries no --model and nothing else about it moves either.
+  // kilo has a verified transcript entry and no cheapNamingModel — nobody has
+  // found a string its account accepts (see registry.ts) — so its argv carries
+  // no --model and nothing else about it moves either. NOT github-copilot,
+  // which also declares no model but is now refused before the spawn entirely
+  // (billsPerCall), and so can no longer show what a bare argv looks like.
   test("an agent with no declared model spawns its bare verified argv", async () => {
     const { spawn, calls } = fakeSpawn("Something useful\n");
     await generateTitleFromContext("ctx", {
-      tool: "github-copilot", spawn, installedTools: ["github-copilot"],
+      tool: "kilo", spawn, installedTools: ["kilo"],
     });
-    expect(calls[0]).toEqual(["copilot", "-p", expect.stringContaining("ctx"), "--silent"]);
+    expect(calls[0]).toEqual([
+      "kilo", "run", "--agent", "plan", expect.stringContaining("ctx"),
+    ]);
   });
 
   // Each agent's `cmd` places --model at a different, independently-verified
@@ -372,6 +376,36 @@ describe("failure reasons", () => {
       callId: expect.any(String), actualTool: "kimi", reach: "none",
     });
     // Nothing ran: the refusal is the machine's, not this attempt's.
+    expect(calls.length).toBe(0);
+  });
+
+  // Refused BEFORE the spawn, and deliberately not as 'unavailable': this agent
+  // has a verified argv, so reporting the machine as unable to name it would
+  // send a reader looking for an install that is already there.
+  test("a vendor that bills per call is 'skipped', with nothing spawned", async () => {
+    const { spawn, calls } = fakeSpawn("Add retry to uploader");
+    const r = await generateTitleFromContext("ctx", {
+      tool: "github-copilot", spawn, installedTools: ["github-copilot"],
+    });
+    expect(r).toEqual({
+      ok: false, reason: "skipped",
+      callId: expect.any(String), actualTool: "github-copilot", reach: "readonly",
+    });
+    expect(calls.length).toBe(0);
+  });
+
+  // Read off the agent that would SERVE the call, never the one whose session
+  // it is: a borrowed call bills the vendor that runs it, so a kimi session
+  // landing on copilot would spend copilot's unit.
+  test("a borrow onto a per-call-billed vendor is skipped too", async () => {
+    const { spawn, calls } = fakeSpawn("Add retry to uploader");
+    const r = await generateTitleFromContext("ctx", {
+      tool: "kimi", spawn, installedTools: ["github-copilot"],
+    });
+    expect(r).toEqual({
+      ok: false, reason: "skipped",
+      callId: expect.any(String), actualTool: "github-copilot", reach: "readonly",
+    });
     expect(calls.length).toBe(0);
   });
 

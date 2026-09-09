@@ -817,29 +817,29 @@ describe("the production call sites ask for the numbers", () => {
     expect(ends()[0]!.actualModel).toBe("claude-opus-5");
   });
 
-  test("a naming call points github-copilot at a side file without touching its stdout", async () => {
-    const { spawn, calls } = replay(["Add usage capture\n"], COPILOT_OK);
-    const gen = await generateTitleFromContext("do the thing", {
-      tool: "github-copilot", spawn, installedTools: ["github-copilot"],
+  // The judge rather than naming, because copilot bills a whole premium request
+  // per call and a naming spawn is now refused before it starts
+  // (AgentSpec.billsPerCall), leaving this as the vendor's only live headless
+  // call site. What is pinned has not changed: the side file is asked for, and
+  // its numbers reach the ring with copilot's plain-text stdout undisturbed.
+  //
+  // A second test went with the move rather than being re-pointed. A copilot
+  // usage file reporting no billed request used to reject the TITLE through
+  // `HeadlessResult.vendorFailed`, and naming was the only path by which a
+  // side-file verdict ever reached a decision — the judge does not read that
+  // field. Re-pointing it would have pinned that gap as though it were the
+  // intent, so it is stated here instead.
+  test("a judge call points github-copilot at a side file without touching its stdout", async () => {
+    const decision = { decision: "continue", confidence: 0.9, reason: "the agent is working" };
+    const { spawn, calls } = replay([JSON.stringify(decision)], COPILOT_OK);
+    const d = await runDecision({
+      tool: "github-copilot", goal: "migrate the auth module", backlogText: "",
+      context: "C", cwd: ".", spawn,
     });
-    expect(gen).toMatchObject({ ok: true, title: "Add usage capture" });
+    expect(d?.decision).toBe("continue");
     expect(calls[0]).toContain("--usage-output-file");
     expect(ends()[0]!.usage?.inputTokens).toBe(13663);
     expect(ends()[0]!.actualModel).toBe("mai-code-1.1-flash");
-  });
-
-  // The only path by which a side-file verdict can reach a naming decision:
-  // copilot's stdout is byte-identical with the flag and without it, so the
-  // parser never sees a verdict and `HeadlessResult.vendorFailed` is the whole
-  // of the check. Kept for the direction it errs in — a rejected title is a
-  // retryable `failed`, while a refusal accepted as a title outranks the
-  // first-message name and is the session's name for good.
-  test("a copilot usage file reporting no billed request rejects the title on its stdout", async () => {
-    const { spawn } = replay(["Add usage capture\n"], COPILOT_FAIL);
-    const gen = await generateTitleFromContext("do the thing", {
-      tool: "github-copilot", spawn, installedTools: ["github-copilot"],
-    });
-    expect(gen).toMatchObject({ ok: false, reason: "failed", actualTool: "github-copilot" });
   });
 
   test("the judge carries the flag, and each attempt records its OWN numbers", async () => {

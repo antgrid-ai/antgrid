@@ -263,14 +263,23 @@ function modelCell(a: Attempt): string {
  * belongs to the callers (`note` in handler/judge.ts, the title path's own) and a
  * closed list here would silently classify the next verb they invent as a
  * success. Every failing leg any of them records names itself with one of these:
- * the answer would not parse, broke a stated rule, ran out of budget, hung, or
- * never ran at all.
+ * the answer would not parse, broke a stated rule, ran out of budget, hung,
+ * never ran at all, or was refused before it could run.
  *
+ * Exported for the reason RETRY_FLOOR_MS is: the capture page carries a
+ * hand-written twin (`MC_UNUSABLE_RE` in ../netwatch-ui-page.ts), and a verdict
+ * the CLI paints red while the browser paints the same one green is a drift
+ * nothing else would report.
+ */
+export const UNUSABLE_OUTCOME_RE =
+  /fail|timeout|reject|unparse|exhaust|unavailable|abandon|skip|no-judge/;
+
+/**
  * Two readers, and they must agree: the colour of the verdict, and whether the
  * leftover budget below describes a retry that was actually going to happen.
  */
 function answerWasUsable(outcome: string): boolean {
-  return !/fail|timeout|reject|unparse|exhaust|unavailable|abandon|no-judge/.test(outcome);
+  return !UNUSABLE_OUTCOME_RE.test(outcome);
 }
 
 /** Whether this attempt's leftover budget had nobody waiting on it: the caller

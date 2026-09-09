@@ -685,6 +685,26 @@ export interface AgentSpec {
    * handed to codex fails the call outright.
    */
   cheapNamingModel?: string;
+  /**
+   * This vendor charges a whole billing unit per headless call, however small
+   * the call is.
+   *
+   * Declared so a session name is not bought at that price. Naming is one spawn
+   * per conversation asking for six words, and where the unit is a REQUEST
+   * rather than a token it costs exactly what the largest call of the day
+   * costs; `generateTitleFromContext` (./title-generate.ts) refuses the spawn
+   * and the session keeps its first-message name instead.
+   *
+   * Read off `picked.tool` — the agent that ACTUALLY SERVES the call — never
+   * off the session's own `tool`, for the same reason `cheapNamingModel` is:
+   * naming borrows across vendors, so the account billed is the serving one.
+   *
+   * Absence is the honest answer rather than a default, and the bar is a real
+   * run whose usage envelope reports a per-call unit. A token-billed vendor
+   * must NOT be listed: a title there costs a fraction of a cent, and refusing
+   * it would trade a good name for nothing.
+   */
+  billsPerCall?: true;
   /** Returns messages AND, only when the source is a followable file, its path.
    *  Never synthesize a path: a "transcript"-tier judge has no verified
    *  read-only restriction, so it gets no file hint it could not follow. */

@@ -344,6 +344,12 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     // every borrowed title for this vendor into a permanent hard failure.
     // `COPILOT_MODEL` reaches the same resolver and fails identically, so it is
     // not a way around this either.
+    //
+    // Which leaves the call itself as the only thing left to decline, and that
+    // is measured too: a `-p` run answering "Reply with the single word: ok"
+    // reported `totalPremiumRequestCost: 1` — a whole premium request, the
+    // same unit a real turn of work spends, for six words of session title.
+    billsPerCall: true,
     headless: {
       // "readonly", not "sealed": -p reads the working tree with no flag asking
       // it to. Measured — it answered a "read package.json" prompt even under

@@ -1029,8 +1029,9 @@ function mcModelCell(a){
 /* Matched on the outcome's WORDS rather than an enumerated list, exactly as
    the CLI does — the vocabulary belongs to the callers (handler/judge.ts, the
    title path's own), and a closed list here would silently call the next verb
-   they invent a success. */
-var MC_UNUSABLE_RE = /fail|timeout|reject|unparse|exhaust|unavailable|abandon|no-judge/;
+   they invent a success. Keep in lockstep with UNUSABLE_OUTCOME_RE in
+   cli/modelwatch.ts — the two are compared in netwatch-ui-modelcalls.test.ts. */
+var MC_UNUSABLE_RE = /fail|timeout|reject|unparse|exhaust|unavailable|abandon|skip|no-judge/;
 function mcAnswerWasUsable(outcome){
   return !MC_UNUSABLE_RE.test(outcome);
 }
