@@ -71,6 +71,40 @@ describe("setAgentSession persistence", () => {
     expect((sm.get(s.id) as any).agentSessionId).toBe("real-thread");
   });
 
+  // The other half of the narrowing: a FIRST report displaces nothing, and
+  // codex's after-agent post is the only chance it ever gives us to learn a
+  // thread. Refusing one whose row has not reached the store yet would leave
+  // the session with no identity at all — every later report carries the same
+  // id, so the refusal would repeat forever.
+  test("a first codex report is taken even where the store answers without it", () => {
+    const store = newStore();
+    const db = new Database(join(store, "state_5.sqlite"));
+    db.run("CREATE TABLE threads (id TEXT PRIMARY KEY)");
+    db.query("INSERT INTO threads (id) VALUES (?)").run("someone-elses-thread");
+    db.close();
+    const sm = mk(store, makeTm(), { codexHome: store });
+    const s = sm.create("Codex", { tool: "codex" });
+    expect(sm.setAgentSession(s.id, "brand-new-thread")).toBe(true);
+    expect((sm.get(s.id) as any).agentSessionId).toBe("brand-new-thread");
+  });
+
+  // The refusal is what agent-core gates its title release on, so it has to be
+  // legible to the caller — a void return let a disowned id go on renaming the
+  // slot it was just refused for.
+  test("the return value distinguishes a refusal from an unknown slot", () => {
+    const store = newStore();
+    const db = new Database(join(store, "state_5.sqlite"));
+    db.run("CREATE TABLE threads (id TEXT PRIMARY KEY)");
+    db.query("INSERT INTO threads (id) VALUES (?)").run("real-thread");
+    db.close();
+    const sm = mk(store, makeTm(), { codexHome: store });
+    const s = sm.create("Codex", { tool: "codex" });
+    expect(sm.setAgentSession(s.id, "real-thread")).toBe(true);
+    expect(sm.setAgentSession(s.id, "real-thread")).toBe(true); // unchanged is still held
+    expect(sm.setAgentSession(s.id, "ephemeral-helper-thread")).toBe(false);
+    expect(sm.setAgentSession("no-such-slot", "real-thread")).toBe(false);
+  });
+
   // Only a POSITIVE denial refuses. An unreadable store cannot distinguish a
   // helper thread from the user's own, and refusing on it would leave a brand
   // new session with no identity at all.

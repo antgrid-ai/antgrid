@@ -3751,14 +3751,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // Persist the agent's native resume id for this slot every turn
       // (overwrite-latest), independent of title resolution. terminalId is the
       // slot id (stamped as ANTGRID_TERMINAL_ID at spawn).
-      if (!body.titleOnly) {
-        const prevAgentSession = sessions?.get(body.terminalId)?.agentSessionId;
-        sessions?.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
+      // True only when the manager REFUSED this id — an ephemeral thread the
+      // agent's own store disowns. The slot still holds a different
+      // conversation, so nothing below may name it after the id in this post.
+      // An UNKNOWN slot is not a refusal: a service PTY never had an identity.
+      let idRefused = false;
+      if (!body.titleOnly && sessions) {
+        const slot = sessions.get(body.terminalId);
+        const prevAgentSession = slot?.agentSessionId;
+        idRefused = slot !== undefined
+          && !sessions.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
         // A new conversation under a STILL-LIVE PTY (`/clear`, `/new`) reaches
         // no exit path, so this is the only place the previous conversation's
         // title rank can be released. Left latched, it vetoes every
         // first-message title the new conversation resolves.
-        if (prevAgentSession && prevAgentSession !== body.sessionId) {
+        if (!idRefused && prevAgentSession && prevAgentSession !== body.sessionId) {
           namer?.forgetStructuredTitle(body.terminalId);
         }
       }
@@ -3771,7 +3778,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       const hookTool = body.agent ? BY_HOOK_NAME[body.agent] : undefined;
       const chatSlot = sessions?.get(body.terminalId)?.mode === "chat";
       const nameFromHook = (fallback?: string) => {
-        if (!hookTool || !body.sessionId || chatSlot) return;
+        if (!hookTool || !body.sessionId || chatSlot || idRefused) return;
         maybeGenerateTitle(hookTool, {
           terminalId: body.terminalId,
           agentSessionId: body.sessionId,

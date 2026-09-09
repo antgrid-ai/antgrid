@@ -110,10 +110,14 @@ export interface SessionManagerOpts {
    *  exactly one per-session reduction; absent for a bare core with no owner,
    *  which then advertises no status at all. */
   sessionWorkStatusFor?: (sessionId: string) => WorkStatus | undefined;
-  /** Override for the codex thread store dir (availability hints). Unset in
-   *  production → defaults to ~/.codex; tests inject an isolated dir. */
+  /** Override for the codex thread store dir. Read for availability hints and —
+   *  codex being the one `sessionStoreIsAuthoritative` agent — for the disown
+   *  verdict setAgentSession and a launch act on, so a test that lets this
+   *  default through changes what the manager DOES, not just what it reports.
+   *  Unset in production → $CODEX_HOME or ~/.codex. */
   codexHome?: string;
-  /** Override for the Copilot session store dir (availability hints). */
+  /** Override for the Copilot session store dir (availability hints only: its
+   *  store is not authoritative, so a miss there refuses nothing). */
   copilotHome?: string;
   /** Override for how long setMode waits on the old runtime's teardown. Unset in
    *  production → TEARDOWN_TIMEOUT_MS; tests inject a short one to exercise the
@@ -529,7 +533,8 @@ export class SessionManager {
   // agentSessionId they were computed for. toWire() runs per entry on every
   // changed() emit and the real check does existsSync + a bun:sqlite query, so
   // it must never reach that path. Invalidated whenever setAgentSession writes
-  // something new. Launches let the provider validate the saved identity.
+  // something new. Launches let the provider validate the saved identity, save
+  // for the one verdict agentSessionGone acts on: a positive disown.
   private resumableCache = new Map<string, { agentSessionId: string; resumable: boolean }>();
   /** Sessions launched to CONTINUE their previous conversation, until the agent
    *  reports the identity it continued under. Per-run and therefore in memory:
@@ -1078,10 +1083,14 @@ export class SessionManager {
    * (overwrite-latest). Called from the /session-title pipeline every turn.
    * No-ops for unknown ids (service PTYs) so callers can fire it freely.
    * `id` is the slot id (== the hook's terminalId == the spawned PTY id).
+   *
+   * Returns whether the slot now holds this id. A caller that acts on the id it
+   * just posted must gate on that: the refusal below is silent otherwise, and
+   * every such caller would go on treating a disowned thread as the slot's own.
    */
-  setAgentSession(id: string, agentSessionId: string, agentTranscriptPath?: string): void {
+  setAgentSession(id: string, agentSessionId: string, agentTranscriptPath?: string): boolean {
     const entry = this.entries.get(id);
-    if (!entry) return;
+    if (!entry) return false;
     // An agent reports the thread that fired the turn, which is not always the
     // thread the user is in: codex's TUI runs helper threads of its own inside
     // the same process (the "catch-up" blurb it writes when you reopen a
@@ -1091,16 +1100,31 @@ export class SessionManager {
     // and because it arrives at turn END it is usually the LAST thing reported
     // before the PTY closes, so it is the one that sticks.
     //
+    // Scoped to a report that would DISPLACE an id already held — the whole of
+    // that case and none of its cost. A FIRST report has nothing to overwrite
+    // and is the only chance codex gives us to learn a thread at all (its
+    // `/session-title` post fires on after-agent alone), so refusing one a
+    // just-created thread has not reached the store yet would leave that
+    // session with no identity for good. A re-report of the id already stored
+    // is what every turn sends, and this check is a readdir plus a synchronous
+    // sqlite open — the work `resumableCache` exists to keep off such a path.
+    //
     // Only a positive "I do not hold this" refuses; a store that cannot answer
     // still reports freely, and the next turn re-reports the live thread
     // regardless, so a false refusal costs one update rather than an identity.
-    const reportingTool = this.resumeToolFor(entry);
+    const displaces = entry.agentSessionId !== undefined && entry.agentSessionId !== agentSessionId;
+    const reportingTool = displaces ? this.resumeToolFor(entry) : undefined;
     if (reportingTool && agentSessionGone({
       tool: reportingTool,
       agentSessionId,
       codexHome: this.opts.codexHome,
       copilotHome: this.opts.copilotHome,
-    })) return;
+    })) {
+      log.warn(
+        `session ${id}: ${reportingTool} disowns reported conversation ${agentSessionId}; keeping ${entry.agentSessionId}`,
+      );
+      return false;
+    }
     // A conversation change releases the slot's title — the name describes what
     // was being worked on, not the slot. Ordered BEFORE the unchanged early-out
     // below so a resume that comes back under the SAME id still consumes the
@@ -1119,7 +1143,7 @@ export class SessionManager {
         ? (agentTranscriptPath ?? entry.agentTranscriptPath)
         : agentTranscriptPath;
     if (entry.agentSessionId === agentSessionId && entry.agentTranscriptPath === nextPath) {
-      return; // unchanged — avoid a redundant flush/emit
+      return true; // unchanged — avoid a redundant flush/emit
     }
     entry.agentSessionId = agentSessionId;
     entry.agentTranscriptPath = nextPath;
@@ -1130,6 +1154,7 @@ export class SessionManager {
     // real provider fork.
     if (this.awaitingNativeForkIdentity(entry)) this.completeForkLaunch(entry);
     this.changed();
+    return true;
   }
 
   /** Handler-judge lookup. agentTranscriptPath is deliberately ABSENT from

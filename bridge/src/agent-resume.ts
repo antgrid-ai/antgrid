@@ -18,8 +18,8 @@ export function resumeArgv(tool: string, agentSessionId: string): string[] {
 
 /**
  * Best-effort local-store availability hint for mode switching and fork checks.
- * Launches pass saved identities directly to the provider: this hint must never
- * erase an identity or select a fresh conversation.
+ * This hint must never erase an identity or select a fresh conversation: that is
+ * agentSessionGone's job below, on the one verdict narrow enough to carry it.
  *
  * The transcript-path check sits AHEAD of the per-agent dispatch because it is
  * keyed on the shape of the args, not on the tool: whichever agent posted a
