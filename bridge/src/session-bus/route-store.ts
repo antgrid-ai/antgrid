@@ -19,12 +19,22 @@ import { z } from "zod";
 import { MAX_BUS_ROUTES } from "./constants";
 import { readStoreFile, sessionBusProjectDir, writeStoreFile } from "./store-fs";
 
-export const ROUTE_STORE_VERSION = 1;
+// Bumped for the move to a machine-level table (E9/§5.4): a pre-move row
+// carries no projectId and cannot name a stream, so it must be discarded
+// rather than read as if it could. The table is still per-project here — the
+// version only needs to move once, ahead of the row shape it protects.
+export const ROUTE_STORE_VERSION = 2;
 
 export const BusRouteSchema = z.object({
   contextId: z.string().min(1).max(200),
   /** The app session's relay slot id. */
   peerId: z.string().min(1).max(400),
+  /** The project whose stream carried this exchange in — which socket a reply
+   *  leaves on, distinct from the peer's relay slot (route-store.ts:10-15,
+   *  above). Equal to the table's own project while the table stays
+   *  per-project; load-bearing once a machine-level table dispatches across
+   *  them. */
+  projectId: z.string().min(1).max(200),
   /** When this route was last proven by an applied inbound frame. */
   at: z.number().int().nonnegative(),
 });
@@ -35,7 +45,7 @@ export const BusRoutesFileSchema = z.object({
   routes: z.array(BusRouteSchema).max(MAX_BUS_ROUTES),
 });
 
-export type BusRouteMap = Map<string, { peerId: string; at: number }>;
+export type BusRouteMap = Map<string, { peerId: string; projectId: string; at: number }>;
 
 function routesPath(abDir: string, projectId: string): string {
   return join(sessionBusProjectDir(abDir, projectId), "routes.json");
@@ -53,7 +63,7 @@ export function loadBusRoutes(abDir: string, projectId: string, ttlMs: number, n
   const map: BusRouteMap = new Map();
   for (const r of file?.routes ?? []) {
     if (now - r.at >= ttlMs) continue;
-    map.set(r.contextId, { peerId: r.peerId, at: r.at });
+    map.set(r.contextId, { peerId: r.peerId, projectId: r.projectId, at: r.at });
   }
   return map;
 }
@@ -63,6 +73,7 @@ export function saveBusRoutes(abDir: string, projectId: string, routes: BusRoute
   const rows: BusRoute[] = [...routes.entries()].map(([contextId, r]) => ({
     contextId,
     peerId: r.peerId,
+    projectId: r.projectId,
     at: r.at,
   }));
   // Freshest kept, oldest FIRST in the file: the cap is reached by a project

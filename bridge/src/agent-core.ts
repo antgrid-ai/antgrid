@@ -975,7 +975,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // keeps first-insertion order, and the eviction below reads the front as the
     // least recently carried.
     busOriginByContext.delete(contextId);
-    busOriginByContext.set(contextId, { peerId, at: now });
+    busOriginByContext.set(contextId, { peerId, projectId: project.id, at: now });
     while (busOriginByContext.size > MAX_BUS_ROUTES) {
       const oldest = busOriginByContext.keys().next();
       if (oldest.done) break;
@@ -994,7 +994,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   /** The live route entry, or null. Returned by reference so a caller that
    *  actually gets a frame out can stamp it — see the coordinator's `send`. */
-  function busTargetFor(contextId: string): { peerId: string; at: number } | null {
+  function busTargetFor(contextId: string): { peerId: string; projectId: string; at: number } | null {
     const origin = busOriginByContext.get(contextId);
     if (!origin) return null;
     const now = Date.now();
@@ -1061,6 +1061,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           }
           return false;
         }
+        // origin.projectId names the project whose stream carried this context
+        // in — always this core's own id today, since the route table is still
+        // per-project. Keep it on the row anyway: once the table is
+        // machine-level a route learned on one project must not send on
+        // another's stream, and this is the field that will pick the right one.
         const sent = opts.sendToAppSession?.(origin.peerId, frame) ?? false;
         if (sent) origin.at = Date.now();
         return sent;

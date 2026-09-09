@@ -27,10 +27,13 @@ export const MAX_HELD_MESSAGES = 32;
  *  TTL and be dropped on the next restart while it was never idle. */
 export const BUS_ROUTE_PERSIST_INTERVAL_MS = 5 * 60_000;
 
-/** Carrier routes one project remembers across a restart. One live exchange has
- *  one way home; this is deliberately loose, because expired contexts are pruned
- *  lazily and a project may hold several conversations at once. */
-export const MAX_BUS_ROUTES = 64;
+/** Carrier routes the machine remembers across a restart — one table shared by
+ *  every project it has open (E9/§5.4), not one per project. Raised from the
+ *  old per-project bound for that reason: a machine can hold several warm
+ *  projects at once (`kHostWarmCap`, host-server.ts), each with several live
+ *  exchanges, all sharing this cap now. Still deliberately loose, because
+ *  expired contexts are pruned lazily rather than counted against it. */
+export const MAX_BUS_ROUTES = 512;
 
 /** The largest artifact one publish may store. Content is written beside the
  *  record and fetched in slices, so this bounds a single peer's evidence, not

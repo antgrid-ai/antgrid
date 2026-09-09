@@ -14,16 +14,36 @@ function tmpAbDir(): string {
   return mkdtempSync(join(tmpdir(), "ab-bus-routes-"));
 }
 
-function routes(entries: [string, string, number][]): BusRouteMap {
-  return new Map(entries.map(([contextId, peerId, at]) => [contextId, { peerId, at }]));
+function routes(entries: [contextId: string, peerId: string, projectId: string, at: number][]): BusRouteMap {
+  return new Map(entries.map(([contextId, peerId, projectId, at]) => [contextId, { peerId, projectId, at }]));
 }
 
 test("a route written by one process is the route the next one uses", () => {
   const abDir = tmpAbDir();
   try {
-    saveBusRoutes(abDir, "p1", routes([["ctx-1", "app#machine", T0]]));
+    saveBusRoutes(abDir, "p1", routes([["ctx-1", "app#machine", "p1", T0]]));
     const loaded = loadBusRoutes(abDir, "p1", TTL, T0 + 1_000);
-    expect(loaded.get("ctx-1")).toEqual({ peerId: "app#machine", at: T0 });
+    expect(loaded.get("ctx-1")).toEqual({ peerId: "app#machine", projectId: "p1", at: T0 });
+  } finally {
+    rmSync(abDir, { recursive: true, force: true });
+  }
+});
+
+test("a route round-trips its projectId, and oldest-first order survives save then load", () => {
+  const abDir = tmpAbDir();
+  try {
+    saveBusRoutes(
+      abDir,
+      "p1",
+      routes([
+        ["older", "app-a", "proj-a", T0],
+        ["newer", "app-b", "proj-b", T0 + 1_000],
+      ]),
+    );
+    const loaded = loadBusRoutes(abDir, "p1", TTL * 1_000, T0 + 1_000);
+    expect(loaded.get("older")).toEqual({ peerId: "app-a", projectId: "proj-a", at: T0 });
+    expect(loaded.get("newer")).toEqual({ peerId: "app-b", projectId: "proj-b", at: T0 + 1_000 });
+    expect([...loaded.keys()]).toEqual(["older", "newer"]);
   } finally {
     rmSync(abDir, { recursive: true, force: true });
   }
@@ -32,7 +52,7 @@ test("a route written by one process is the route the next one uses", () => {
 test("a route nothing has carried in longer than the TTL is not loaded", () => {
   const abDir = tmpAbDir();
   try {
-    saveBusRoutes(abDir, "p1", routes([["fresh", "a", T0], ["stale", "b", T0 - TTL]]));
+    saveBusRoutes(abDir, "p1", routes([["fresh", "a", "p1", T0], ["stale", "b", "p1", T0 - TTL]]));
     const loaded = loadBusRoutes(abDir, "p1", TTL, T0);
     expect([...loaded.keys()]).toEqual(["fresh"]);
   } finally {
@@ -43,8 +63,8 @@ test("a route nothing has carried in longer than the TTL is not loaded", () => {
 test("past the cap the freshest are kept, and they load oldest first", () => {
   const abDir = tmpAbDir();
   try {
-    const over: [string, string, number][] = [];
-    for (let i = 0; i < MAX_BUS_ROUTES + 5; i++) over.push([`ctx-${i}`, `app-${i}`, T0 + i]);
+    const over: [string, string, string, number][] = [];
+    for (let i = 0; i < MAX_BUS_ROUTES + 5; i++) over.push([`ctx-${i}`, `app-${i}`, "p1", T0 + i]);
     saveBusRoutes(abDir, "p1", routes(over));
 
     const loaded = loadBusRoutes(abDir, "p1", TTL * 1_000, T0);
