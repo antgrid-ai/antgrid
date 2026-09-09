@@ -146,3 +146,35 @@ test("a core that cannot answer yet leaves the recorded set alone", async () => 
     rmSync(abDir, { recursive: true, force: true });
   }
 });
+
+test("forgetSession drops a session deleted while its project was cold", async () => {
+  // The cold-delete edge: `noteProject` never runs for a project that is not
+  // warm, so without this the deleted row keeps resolving for the rest of the
+  // process — `self()` still answers, the peer's next retry applies, and the
+  // message log is written back into the directory the delete just swept.
+  const abDir = tmpAbDir();
+  try {
+    seedPersisted(abDir, "proj-a", [
+      { id: "sess-doomed", name: "Doomed", createdAt: 1, lastUsedAt: 1, archived: false },
+      { id: "sess-kept", name: "Kept", createdAt: 1, lastUsedAt: 1, archived: false },
+    ]);
+    const index = coldIndex();
+    await index.hydrate(abDir, [{ id: "proj-a", label: "Project A" }]);
+    index.forgetSession("proj-a", "sess-doomed");
+    expect(index.lookup("sess-doomed")).toBeNull();
+    expect(index.lookup("sess-kept")).toEqual({ projectId: "proj-a", projectLabel: "Project A", sessionName: "Kept" });
+  } finally {
+    rmSync(abDir, { recursive: true, force: true });
+  }
+});
+
+test("forgetSession leaves another project's identically named session alone", () => {
+  // The same trap `removeSessionBusSession` has: the id alone does not say
+  // whose row it is, and a delete resolved against the wrong project would
+  // quietly unaddress a live session somewhere else on the machine.
+  const index = coldIndex();
+  index.noteProject("proj-a", "A", [liveEntry("sess-shared", "In A")]);
+  index.noteProject("proj-b", "B", [liveEntry("sess-shared", "In B")]);
+  index.forgetSession("proj-a", "sess-shared");
+  expect(index.lookup("sess-shared")).toEqual({ projectId: "proj-b", projectLabel: "B", sessionName: "In B" });
+});

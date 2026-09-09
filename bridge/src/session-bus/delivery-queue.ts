@@ -126,9 +126,12 @@ export function removeLine(s: DeliveryQueueState, id: string): DeliveryQueueStat
   return lines.length === s.lines.length ? s : { lines };
 }
 
-/** Drop everything held for a session that no longer exists. Called from the
- *  session delete path: a line for a deleted session can never be delivered, and
- *  keeping it would hold a slot against the cap forever. */
+/** Drop everything held for a session that no longer exists. Reached only by a
+ *  session delete that runs on a WARM core: a line for a deleted session can
+ *  never be delivered, and keeping it would hold a slot against the cap
+ *  forever. A session deleted while its project is cold reaches nothing here —
+ *  `HostServer.deleteColdSessionBusThenRow` owns no core to reach it through,
+ *  and says there why it leaves those lines for the next warm-up. */
 export function forgetSession(s: DeliveryQueueState, sessionId: string): DeliveryQueueState {
   const lines = s.lines.filter((l) => l.sessionId !== sessionId);
   return lines.length === s.lines.length ? s : { lines };

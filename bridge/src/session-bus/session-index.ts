@@ -46,12 +46,14 @@ export interface SessionBusSessionIndexDeps {
  * project with no core running right now, where nothing in this process's
  * memory is live to ask.
  *
- * There is no per-session note/forget: a warm project is always read live, so
- * nothing needs to invalidate a cache that a warm lookup never consults, and
- * a cold project's snapshot is refreshed wholesale by `noteProject` — which
- * must therefore run on the edge where a project goes cold, not only where it
- * warms up. See that method's own doc for when it runs and what it accepts
- * staying stale against.
+ * There is no per-session NOTE: a warm project is always read live, so nothing
+ * needs to seed a cache that a warm lookup never consults, and a cold
+ * project's snapshot is refreshed wholesale by `noteProject` — which must
+ * therefore run on the edge where a project goes cold, not only where it warms
+ * up. See that method's own doc for when it runs and what it accepts staying
+ * stale against. `forgetSession` is the one exception in the other direction:
+ * a session can be deleted while its project is cold, and that is the single
+ * mutation of a cold set no wholesale refresh is standing at.
  */
 export class SessionBusSessionIndex {
   private readonly labels = new Map<string, string | undefined>();
@@ -118,6 +120,28 @@ export class SessionBusSessionIndex {
   forgetProject(projectId: string): void {
     this.labels.delete(projectId);
     this.disk.delete(projectId);
+  }
+
+  /**
+   * Drop one session from a cold project's fallback set.
+   *
+   * The one mutation `noteProject`'s three edges cannot cover: a cold delete
+   * removes a row from a project that is not warm now and need never warm
+   * again, so nothing re-reads the set that row is in. Left stale, `lookup`
+   * keeps naming the deleted session's project and `self()` keeps answering
+   * for it, so the next inbound frame from its former peer is applied and
+   * writes the message log back — re-creating on disk exactly the store the
+   * delete just swept, with no session row left anywhere able to name it for a
+   * second reclaim.
+   *
+   * A warm project needs no such call: its answer is read live.
+   */
+  forgetSession(projectId: string, sessionId: string): void {
+    const known = this.disk.get(projectId);
+    if (!known?.has(sessionId)) return;
+    const next = new Map(known);
+    next.delete(sessionId);
+    this.disk.set(projectId, next);
   }
 
   /** Resolve one session id to its owning project, or null if this machine has

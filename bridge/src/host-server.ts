@@ -2298,9 +2298,25 @@ export class HostServer {
    *  thing that would ever revisit these bytes. Mirrors `forget()`'s own
    *  `reclaimManagedCheckouts` running before `deleteProjectStores`, "before the
    *  metadata naming them dies". Idempotent: `removeSessionBusSession` is a
-   *  force-remove, so a retried delete sweeps a no-op. */
+   *  force-remove, so a retried delete sweeps a no-op.
+   *
+   *  The session index is dropped here and NOT left to `noteProject`: this
+   *  path runs only for a project with no warm core, so none of that method's
+   *  three edges is coming, and a stale row means `self()` still answers for
+   *  the deleted session — the peer's next retry then applies and writes the
+   *  message log back, re-creating the directory just removed, with no session
+   *  row left anywhere able to name it for a second reclaim.
+   *
+   *  One piece of bus state is knowingly left behind: this project's persisted
+   *  `deliveries.json` lines for the session. That file is owned by a warm
+   *  `ProjectCore` (`forgetBusLines`), which is exactly what this path does
+   *  not have, and writing it from here would put a second writer on it. The
+   *  lines are undeliverable and hold a slot against `MAX_QUEUED_LINES` until
+   *  the project next warms — a bounded, per-project residue, unlike the
+   *  machine-wide hydration the two sweeps above prevent. */
   private deleteColdSessionBusThenRow(projectId: string, sessionId: string): Promise<boolean> {
     this.sessionBus.forget(sessionId);
+    this.sessionIndex.forgetSession(projectId, sessionId);
     try {
       removeSessionBusSession(resolveAbDir(), projectId, sessionId);
     } catch (err) {
