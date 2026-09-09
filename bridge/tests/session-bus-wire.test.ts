@@ -148,7 +148,7 @@ describe("session-bus forwarding", () => {
 
   beforeEach(async () => {
     bus = new MessageBus();
-    listener = new LocalListener({ bus, token: "secret-token" });
+    listener = new LocalListener({ bus, token: "secret-token", projectId: "proj-bus" });
     await listener.start();
   });
   afterEach(async () => { await listener.stop(); });

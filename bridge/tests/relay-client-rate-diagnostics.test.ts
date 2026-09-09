@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
 import { RelayClient } from "../src/relay-client";
 import { createMessage } from "../src/protocol";
 import { __setRootForTest } from "../src/logger";
+import { installFakeSession } from "./fake-session";
 
 const RELAY_RATE_ERROR = JSON.stringify({
   type: "error",
@@ -33,18 +34,7 @@ describe("RelayClient rate-limit diagnostics", () => {
       getLicenseToken: () => "token",
       onError: (code, message) => surfaced.push({ code, message }),
     });
-    (c as any).sessions.set("phone-1", {
-      attemptId: "a1",
-      transport: { seal: (plaintext: string) => Buffer.from(plaintext, "utf8") },
-      sessionKeys: { a2p: Buffer.alloc(32), p2a: Buffer.alloc(32), confirm: Buffer.alloc(32) },
-      peerId: "phone-1",
-      checkoutRouting: false,
-      reachable: true,
-      unreachableSince: 0,
-      lastSealedRecvAt: Date.now(),
-      missedPongs: 0,
-      frag: { accept: () => false, dispose: () => {} },
-    });
+    installFakeSession(c, "phone-1");
     (c as any).ws = {
       readyState: WebSocket.OPEN,
       send: () => {},

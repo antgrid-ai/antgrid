@@ -81,6 +81,7 @@ function task(over: Partial<TaskRecord> = {}): TaskRecord {
     appliedSeq: 0,
     nextSeq: 1,
     ackedSeq: 0,
+    acked: false,
     outbox: [],
     findings: [],
     artifactIds: [],

@@ -34,7 +34,7 @@ void main() {
       mode: ProjectSessionMode.local,
       cachedSessionsStore: cache,
       onClose: () async => t.dispose(),
-    );
+    )..setActiveCheckouts({'main'});
   }
 
   List<Map<String, dynamic>> sentOf(FakeAgentTransport t, String type) =>

@@ -16,6 +16,7 @@ import '../providers/new_session_picker.dart' show enterNewSession;
 import '../providers/providers.dart';
 import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
+import '../services/pending_reply.dart' show SessionDownException;
 import '../services/sessions_service.dart' show SessionOperationException;
 import '../util/ab_log.dart';
 import '../util/detached.dart';
@@ -224,7 +225,7 @@ class _StoppedSessionEmptyStateState
       // the timeout below, which invites a retry: retrying a refusal just earns
       // the same refusal.
       if (mounted) reportStartRefusal(context, error);
-    } on TimeoutException {
+    } on TimeoutException catch (_) {
       // The button the user just pressed is still on screen and the session is
       // still stopped, so a silent swallow reads as a dropped tap. A dropped
       // reply doesn't prove the start failed — the bridge may have spawned the
@@ -237,6 +238,8 @@ class _StoppedSessionEmptyStateState
           'try again.',
         );
       }
+    } on SessionDownException catch (e) {
+      if (mounted) showAbSnackBar(context, e.toString());
     }
   }
 

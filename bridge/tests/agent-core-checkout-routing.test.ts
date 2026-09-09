@@ -613,12 +613,12 @@ test("a tunnel request from a session that cannot route checkouts is refused, wh
 
   // Tunnel answers leave through the plaintext hook, never the bus.
   const plain: object[] = [];
-  core!.setPlainHook((frame) => plain.push(frame));
+  core!.setPlainHook(async (frame) => { plain.push(frame); return "sent"; });
   let checkoutRouting = false;
   core!.setPeerSessionProvider((peerId) => ({
-    peerId, peerPubkey: "pub-app", checkoutRouting, reachable: true,
+    peerId, peerPubkey: "pub-app", checkoutRouting, reachable: true, pullsTree: false,
   }));
-  const responses = () => plain.filter((frame) => (frame as { type?: string }).type === "tunnel:http-response");
+  const responses = () => plain.filter((frame) => (frame as { type?: string }).type === "tunnel:http-start");
   const request = (requestId: string) => core!.handleTunnelMessage({
     // Nothing listens on this port: an ADMITTED request still answers 502, so a
     // response frame is proof the gate passed it to the proxy.

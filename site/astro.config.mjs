@@ -75,6 +75,12 @@ const fonts = [
 // PUBLIC_SITE_URL kept in lockstep with Seo's PUBLIC_SITE_URL so canonical and sitemap never diverge.
 export default defineConfig({
   site: process.env.PUBLIC_SITE_URL ?? "https://antgrid.ai",
+  // There is no ClientRouter here, so every navigation is a full document load.
+  // `hover` buys the one that matters back: the download CTAs are deliberate,
+  // aimed clicks, and the page is fetched while the pointer is still travelling.
+  // prefetchAll rather than per-link opt-in because the site is nine pages —
+  // tagging them individually is a list that goes stale, not a saving.
+  prefetch: { prefetchAll: true, defaultStrategy: "hover" },
   // Still behind the experimental flag as of Astro 5.18 — the docs describe it
   // unflagged, but `fonts` at the top level throws ExperimentalFontsNotEnabled.
   // Move it up a level when it stabilises; the shape of `fonts` itself is what
@@ -100,12 +106,11 @@ export default defineConfig({
         ],
       },
     }),
-    // Both exclusions are pages that carry robots=noindex, and a sitemap that
-    // submits a noindex URL is a conflict Search Console reports rather than
-    // ignores. og-card is the screenshot source for the social card;
-    // download/started only means anything with a ?platform= the sitemap
-    // cannot carry, so an indexed copy would rank as a thank-you for a
-    // download the visitor never started.
-    sitemap({ filter: (page) => !page.includes("/og-card") && !page.includes("/download/started") }),
+    // og-card carries robots=noindex — it is the screenshot source for the
+    // social card — and a sitemap that submits a noindex URL is a conflict
+    // Search Console reports rather than ignores. /download is deliberately NOT
+    // excluded: it is the site's only addressable download URL and the one page
+    // a "antgrid download" search should be able to land on.
+    sitemap({ filter: (page) => !page.includes("/og-card") }),
   ],
 });

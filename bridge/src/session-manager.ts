@@ -137,10 +137,10 @@ export interface SessionManagerOpts {
    *  exactly one per-session reduction; absent for a bare core with no owner,
    *  which then advertises no status at all. */
   sessionWorkStatusFor?: (sessionId: string) => WorkStatus | undefined;
-  /** Override for the codex thread store dir (resume pre-flight). Unset in
+  /** Override for the codex thread store dir (availability hints). Unset in
    *  production → defaults to ~/.codex; tests inject an isolated dir. */
   codexHome?: string;
-  /** Override for the Copilot session store dir (resume pre-flight). */
+  /** Override for the Copilot session store dir (availability hints). */
   copilotHome?: string;
   /** Override for how long setMode waits on the old runtime's teardown. Unset in
    *  production → TEARDOWN_TIMEOUT_MS; tests inject a short one to exercise the
@@ -253,7 +253,7 @@ interface PersistedEntry {
   // resumed on the next start(). See agent-resume.ts.
   agentSessionId?: string;
   // The agent's transcript/session file path when its hook supplied one
-  // (claude). Used for the pre-flight existence check. Codex/
+  // (claude). Used for local availability hints. Codex/
   // opencode don't post a path.
   agentTranscriptPath?: string;
   // Session-scoped structured-driver selections keyed by the wire config key the
@@ -579,8 +579,7 @@ export class SessionManager {
   // agentSessionId they were computed for. toWire() runs per entry on every
   // changed() emit and the real check does existsSync + a bun:sqlite query, so
   // it must never reach that path. Invalidated whenever setAgentSession writes
-  // something new; a stale `true` is harmless because start() re-runs the real
-  // pre-flight and falls back to a fresh start.
+  // something new. Launches let the provider validate the saved identity.
   private resumableCache = new Map<string, { agentSessionId: string; resumable: boolean }>();
   /** Sessions launched to CONTINUE their previous conversation, until the agent
    *  reports the identity it continued under. Per-run and therefore in memory:
@@ -1651,42 +1650,10 @@ export class SessionManager {
     queueMicrotask(() => this.notifyObservers());
   }
 
-  /**
-   * The slot's last-active agent conversation id, or undefined when none was
-   * captured or it no longer exists on disk. A stale id (conversation deleted
-   * via the agent's own tools, or written under a cwd this slot no longer runs
-   * in — a managed worktree that has since gone) is cleared in place so the next
-   * start opens a fresh conversation.
-   *
-   * EVERY start path must come through here, PTY and chat alike. A dead id is
-   * worse for chat than for a PTY: the driver resumes it on every start, the
-   * backend answers "no conversation found", and nothing clears the id — so the
-   * session is bricked for good rather than for one spawn.
-   */
-  private resumeIdFor(tool: string, entry: PersistedEntry): string | undefined {
-    if (!entry.agentSessionId) return undefined;
-    const resumable = sessionResumable({
-      tool,
-      agentSessionId: entry.agentSessionId,
-      agentTranscriptPath: entry.agentTranscriptPath,
-      codexHome: this.opts.codexHome,
-      copilotHome: this.opts.copilotHome,
-    });
-    if (resumable) return entry.agentSessionId;
-    entry.agentSessionId = undefined;
-    entry.agentTranscriptPath = undefined;
-    this.resumableCache.delete(entry.id);
-    this.changed();
-    return undefined;
-  }
-
-  /**
-   * Resume tokens for the slot's last-active agent conversation, or [] when
-   * [resumeIdFor] has nothing live to resume. Shared by the per-session-tool and
-   * the default-spec (copilot) launch paths.
-   */
   private resumeArgsFor(tool: string, entry: PersistedEntry): string[] {
-    const resumeId = this.resumeIdFor(tool, entry);
+    // Only the provider can decide whether its saved identity is resumable.
+    // A missing local index row must not replace the user's conversation.
+    const resumeId = entry.agentSessionId;
     return resumeId ? resumeArgv(tool, resumeId) : [];
   }
 
@@ -2189,14 +2156,13 @@ export class SessionManager {
     if (entry.mode === "chat") {
       // Chat sessions have no PTY. Delegate to the structured manager; the
       // persisted agentSessionId (claude session / codex threadId / opencode
-      // sessionID) resumes the prior conversation, through the same liveness
-      // pre-flight the PTY path uses. Tool defaults to codex — chat is offered
+      // sessionID) resumes the prior conversation. Tool defaults to codex — chat is offered
       // only for chat-capable tools, gated app-side and re-checked in startChat.
       const chatAlreadyRunning = this.runningChat.has(id);
       this.runningChat.add(id);
       const chatTool = entry.tool ?? "codex";
       resolveApprovalPolicy(chatTool, "chat", entry.approvalPolicy);
-      const resumeId = entry.conversationStart === "fork" ? undefined : this.resumeIdFor(chatTool, entry);
+      const resumeId = entry.conversationStart === "fork" ? undefined : entry.agentSessionId;
       this.noteConversationStart(entry, resumeId !== undefined);
       this.opts.onStartChat?.({
         sessionId: id,

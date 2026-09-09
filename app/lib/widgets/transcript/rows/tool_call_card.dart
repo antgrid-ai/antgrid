@@ -31,6 +31,13 @@ class ToolCallCard extends StatefulWidget {
   /// foreground until a turn ends with the process still alive.
   final bool isBackground;
   final VoidCallback onToggle;
+
+  /// Opens a checkout-relative path (a diff block's [ToolContent.path]) in the
+  /// context panel's file viewer — any type the viewer supports, images
+  /// included, since it routes through the same file-open path as every other
+  /// file-explorer selection. Null on a surface with no context panel to open
+  /// it in.
+  final void Function(String path)? onOpenPath;
   const ToolCallCard({
     super.key,
     required this.data,
@@ -38,6 +45,7 @@ class ToolCallCard extends StatefulWidget {
     required this.expanded,
     required this.isBackground,
     required this.onToggle,
+    this.onOpenPath,
   });
 
   @override
@@ -286,17 +294,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
         SelectionContainer.disabled(
           child: Row(
             children: [
-              if (block.path != null)
-                Expanded(
-                  child: Text(
-                    block.path!,
-                    overflow: TextOverflow.ellipsis,
-                    style: AbTokens.monoStyle(
-                      fontSize: AbTokens.fontXs,
-                      color: c.textMuted,
-                    ),
-                  ),
-                ),
+              if (block.path != null) Expanded(child: _diffPathLabel(block.path!, c)),
               Text(
                 '+$adds ',
                 style: AbTokens.monoStyle(
@@ -317,6 +315,26 @@ class _ToolCallCardState extends State<ToolCallCard> {
         const SizedBox(height: AbTokens.space4),
         DiffView(lines: lines),
       ],
+    );
+  }
+
+  // Same affordance as the "Show all" toggles below (accent color, click
+  // cursor) — falls back to plain muted text when nothing above wired
+  // [ToolCallCard.onOpenPath] (no context panel on this surface).
+  Widget _diffPathLabel(String path, AbColors c) {
+    final onOpenPath = widget.onOpenPath;
+    final text = Text(
+      path,
+      overflow: TextOverflow.ellipsis,
+      style: AbTokens.monoStyle(
+        fontSize: AbTokens.fontXs,
+        color: onOpenPath == null ? c.textMuted : c.accent,
+      ),
+    );
+    if (onOpenPath == null) return text;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(onTap: () => onOpenPath(path), child: text),
     );
   }
 

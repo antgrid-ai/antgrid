@@ -15,6 +15,7 @@ import '../util/ab_log.dart';
 import '../util/detached.dart';
 import 'pending_reply.dart';
 import 'preview_proxy_server.dart';
+import 'tunnel_body.dart';
 
 /// Outcome of [PreviewService.selectPort]. `portInUse` means the exact local
 /// port couldn't be bound and the caller should confirm a fallback before
@@ -43,11 +44,24 @@ class PreviewService {
   PreviewState _state = const PreviewState();
 
   /// In-flight tunnel requests, held WITH the request so a frame the relay
-  /// dropped can be re-sent. Re-sending reuses the original `requestId`, which
-  /// is what lets the bridge replay a response it already produced instead of
-  /// running the upstream request twice (see TunnelManager's outbox).
+  /// dropped can be re-sent. A re-send normally reuses the original
+  /// `requestId`, which is what lets the bridge replay a response it already
+  /// produced instead of running the upstream request twice (see
+  /// TunnelManager's outbox); only a lost head re-keys, and [_onHeadLost] says
+  /// why. Keyed by the CURRENT id, so a re-key re-inserts the same entry.
   final Map<String, _InFlightRequest> _pendingRequests = {};
   final Map<String, _WsTunnel> _activeWsTunnels = {};
+
+  /// Ids already answered with one `tunnel:http-cancel` while unknown to us.
+  /// A stale run keeps sending for as long as its window holds — up to a whole
+  /// body — so the first stray frame buys one cancel and every later one is
+  /// free; without the memory a window of stale chunks becomes a window of
+  /// cancels. Insertion-ordered, so `first` is the oldest.
+  final Set<String> _cancelledIds = <String>{};
+
+  /// FIFO bound on [_cancelledIds]. Overflowing it only costs a repeat cancel,
+  /// which the bridge treats as a no-op.
+  static const _maxCancelledIds = 64;
 
   StreamSubscription<void>? _dropSub;
   StreamSubscription<void>? _resumeSub;
@@ -60,8 +74,22 @@ class PreviewService {
   static const _retryGrace = Duration(milliseconds: 600);
 
   /// Bounds amplification — a re-send costs frames on a link that just proved
-  /// it has none to spare.
+  /// it has none to spare. Counted across every re-send path, so a request
+  /// cannot be revived alternately by a drop report and a lost head.
   static const _maxRetries = 2;
+
+  /// How long a request may wait for its `tunnel:http-start`. Must stay ABOVE
+  /// the bridge's `FETCH_HEAD_TIMEOUT_MS` (localhost-fetch.ts) so a slow dev
+  /// server yields the bridge's 502 with the real error, never a phone-side
+  /// TimeoutException that names nothing.
+  static const kTunnelHeadTimeout = Duration(seconds: 30);
+
+  /// How long a started body may go without a chunk. Re-armed per chunk, so it
+  /// bounds silence rather than the body. Above the bridge's
+  /// `FETCH_READ_IDLE_MS` so a stalled dev server yields the bridge's
+  /// `end{error}` with the cause, and above one liveness tick so a lost credit
+  /// heals before a live body is declared dead.
+  static const kTunnelChunkIdleTimeout = Duration(seconds: 30);
 
   /// Relay-mode proxies, one per open tab, keyed by dev-server port. Local
   /// mode never populates this — the webview hits localhost directly.
@@ -83,27 +111,17 @@ class PreviewService {
   PreviewService.fromSession(this.session, {this.checkoutId = 'main'}) {
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
-    // Pull the preview picture rather than wait for a push. `preview:url` and
-    // `ports:update` are both change-driven, and a managed checkout's go out
-    // while its runtime is being prepared — BEFORE the session list that makes
-    // the app build this bundle — so an isolated session's preview and ports
-    // stayed empty until a port happened to open or close. Same reason (and
-    // same shape) as FileService's tree pull. As a hydrator it also re-pulls on
-    // every reconnect; the bridge answers with `preview:snapshot` and re-emits
-    // the detected ports alongside it.
-    session.hydrateCheckout(checkoutId, _snapshotHydratorKey, _hydrateSnapshot);
-    // A hydrator covers re-ESTABLISHMENT; a focus resume re-establishes nothing
-    // and is the other window the agent suppresses in. `preview:url` dropped
-    // there is remembered as undelivered agent-side, but the only thing that
-    // drains that flag is the port re-emit behind this very request — so without
-    // this pull a port that opened while the app was backgrounded stays unknown
-    // to it for the life of the connection.
-    _resumeSub = session.focusResumed.listen(
-      (_) => detached(
-        'PreviewService',
-        'preview snapshot re-pull on focus resume',
-        _hydrateSnapshot,
-      ),
+    // Every tunneled body in flight across a (re)establishment is dead by
+    // construction — the relay client cleared its queues at promotion and the
+    // bridge aborted its own runs — so this reaps them at the moment the
+    // session comes back rather than at the idle timer 30s later. Kept eager
+    // (not gated behind [activate]): it sends nothing for a checkout with no
+    // request in flight, so a background checkout costs it nothing — see
+    // [ProjectSession.setActiveCheckouts].
+    session.hydrateCheckout(
+      checkoutId,
+      _reestablishHydratorKey,
+      _onReestablished,
     );
     _txSub = session.transport.messages.listen(_onTransportMessage);
     _dropSub = session.transport.droppedFrames.listen(
@@ -112,11 +130,46 @@ class PreviewService {
   }
 
   static const _snapshotHydratorKey = 'preview:snapshot';
+  static const _reestablishHydratorKey = 'preview:tunnel-reestablish';
 
   Future<void> _hydrateSnapshot() => session.sendForCheckout(
     checkoutId,
     createAbMessage('preview:snapshot:request', {}),
   );
+
+  /// Registers the preview picture pull and subscribes the focus-resume
+  /// re-drive. `preview:url` and `ports:update` are both change-driven, and a
+  /// managed checkout's go out while its runtime is being prepared — BEFORE
+  /// the session list that makes the app build this bundle — so an isolated
+  /// session's preview and ports stayed empty until a port happened to open or
+  /// close. Same reason (and same shape) as FileService's tree pull. As a
+  /// hydrator it also re-pulls on every reconnect; the bridge answers with
+  /// `preview:snapshot` and re-emits the detected ports alongside it. Only the
+  /// checkout on screen carries this — see [ProjectSession.setActiveCheckouts].
+  void activate() {
+    if (_disposed) return;
+    session.hydrateCheckout(checkoutId, _snapshotHydratorKey, _hydrateSnapshot);
+    // A hydrator covers re-ESTABLISHMENT; a focus resume re-establishes nothing
+    // and is the other window the agent suppresses in. `preview:url` dropped
+    // there is remembered as undelivered agent-side, but the only thing that
+    // drains that flag is the port re-emit behind this very request — so
+    // without this pull a port that opened while the app was backgrounded
+    // stays unknown to it for the life of the connection.
+    _resumeSub ??= session.focusResumed.listen(
+      (_) => detached(
+        'PreviewService',
+        'preview snapshot re-pull on focus resume',
+        _hydrateSnapshot,
+      ),
+    );
+  }
+
+  void deactivate() {
+    if (_disposed) return;
+    session.unhydrateCheckout(checkoutId, _snapshotHydratorKey);
+    unawaited(_resumeSub?.cancel());
+    _resumeSub = null;
+  }
 
   void _setState(PreviewState state) {
     if (_disposed) return;
@@ -157,8 +210,12 @@ class PreviewService {
       _mergePreviewEntries(message.urls);
     } else if (message is PreviewUrlMessage) {
       _mergePreviewEntries([message.entry]);
-    } else if (message is TunnelHttpResponse) {
-      _handleTunnelResponse(message);
+    } else if (message is TunnelHttpStartMessage) {
+      _handleTunnelStart(message);
+    } else if (message is TunnelHttpChunkMessage) {
+      _handleTunnelChunk(message);
+    } else if (message is TunnelHttpEndMessage) {
+      _handleTunnelEnd(message);
     } else if (message is TunnelWsDataMessage) {
       _handleWsData(message);
     } else if (message is TunnelWsCloseMessage) {
@@ -237,13 +294,252 @@ class PreviewService {
     _setState(_state.copyWith(ports: ports));
   }
 
-  void _handleTunnelResponse(TunnelHttpResponse response) {
-    final entry = _pendingRequests.remove(response.requestId);
-    if (entry == null) return;
-    entry.reply.complete(response);
+  // --- Tunneled HTTP responses ---
+
+  /// The head, carrying body slice 0. A `last` start is the whole response in
+  /// one frame — nearly every page asset — and completes without ever building
+  /// a controller.
+  void _handleTunnelStart(TunnelHttpStartMessage msg) {
+    final entry = _pendingRequests[msg.requestId];
+    if (entry == null) {
+      _cancelUnknown(msg.requestId);
+      return;
+    }
+    // A second start for a started body is a replay racing the live run; the
+    // body it belongs to is already being served.
+    if (entry.body != null) return;
+
+    List<int> bytes;
+    try {
+      bytes = msg.data.isEmpty
+          ? const <int>[]
+          : decodeTunnelSlice(msg.data, msg.bodyEncoding);
+    } catch (e) {
+      _failHead(entry, TunnelStreamException(entry.requestId, 'undecodable start: $e'));
+      _sendCancel(msg.requestId);
+      return;
+    }
+
+    if (msg.last) {
+      _pendingRequests.remove(entry.requestId);
+      entry.head.complete(
+        TunnelHttpResponse(
+          requestId: msg.requestId,
+          status: msg.status,
+          headers: msg.headers,
+          setCookies: msg.setCookies,
+          body: bytes.isEmpty
+              ? const Stream<List<int>>.empty()
+              : Stream<List<int>>.value(bytes),
+        ),
+      );
+      _statsCompleted++;
+      _logIfSettled();
+      return;
+    }
+
+    final controller = StreamController<List<int>>(
+      onCancel: () => _onBodyCancelled(msg.requestId),
+    );
+    entry.body = _TunnelBody(controller);
+    if (bytes.isNotEmpty) controller.add(bytes);
+    _armIdle(entry);
+    entry.head.complete(
+      TunnelHttpResponse(
+        requestId: msg.requestId,
+        status: msg.status,
+        headers: msg.headers,
+        setCookies: msg.setCookies,
+        body: controller.stream,
+      ),
+    );
+  }
+
+  void _handleTunnelChunk(TunnelHttpChunkMessage msg) {
+    final entry = _pendingRequests[msg.requestId];
+    if (entry == null) {
+      _cancelUnknown(msg.requestId);
+      return;
+    }
+    final body = entry.body;
+    if (body == null) {
+      _onHeadLost(entry);
+      return;
+    }
+    if (msg.seq != body.nextSeq) {
+      _abortBody(
+        entry,
+        'chunk ${msg.seq} arrived, expected ${body.nextSeq}',
+      );
+      return;
+    }
+    List<int> bytes;
+    try {
+      bytes = decodeTunnelSlice(msg.data, msg.bodyEncoding);
+    } catch (e) {
+      _abortBody(entry, 'undecodable chunk ${msg.seq}: $e');
+      return;
+    }
+    body.controller.add(bytes);
+    body.nextSeq++;
+    _armIdle(entry);
+  }
+
+  void _handleTunnelEnd(TunnelHttpEndMessage msg) {
+    final entry = _pendingRequests[msg.requestId];
+    if (entry == null) {
+      _cancelUnknown(msg.requestId);
+      return;
+    }
+    final body = entry.body;
+    if (body == null) {
+      _onHeadLost(entry);
+      return;
+    }
+    if (msg.error != null) {
+      // The bridge has already ended its own run; a cancel would be a frame
+      // spent telling it what it just told us.
+      _abortBody(entry, msg.error!, sendCancel: false);
+      return;
+    }
+    final received = body.nextSeq - 1;
+    if (msg.chunks != received) {
+      _abortBody(
+        entry,
+        'end after ${msg.chunks} chunk(s), received $received',
+      );
+      return;
+    }
+    body.idle?.cancel();
+    _pendingRequests.remove(entry.requestId);
+    unawaited(body.controller.close());
     _statsCompleted++;
     _logIfSettled();
   }
+
+  /// A chunk or an end for an entry that never got its head. FIFO puts a
+  /// `start` ahead of its own chunks, so this frame proves the start was
+  /// dropped — and the relay reports a drop only to the frame's SENDER, so
+  /// nothing else will ever tell us. Acted on with no grace: on a fast link
+  /// chunk 1 lands milliseconds after the request.
+  ///
+  /// The re-send takes a FRESH requestId. The cancelled run still has up to a
+  /// window in flight, arriving for longer than any grace on a mobile link; a
+  /// fresh id is what makes those frames unknown rather than a second recovery
+  /// or a body spliced out of two runs.
+  void _onHeadLost(_InFlightRequest entry) {
+    final oldId = entry.requestId;
+    _pendingRequests.remove(oldId);
+    _sendCancel(oldId);
+
+    final method = entry.request.method.toUpperCase();
+    if ((method == 'GET' || method == 'HEAD') &&
+        entry.attempts < _maxRetries) {
+      entry.request = entry.request.copyWith(requestId: _newRequestId());
+      entry.attempts++;
+      entry.sentAt = DateTime.now();
+      _statsRetried++;
+      // The same PendingReply, so the caller's head timer keeps running from
+      // the original call — a recovery does not buy another 30s.
+      _pendingRequests[entry.requestId] = entry;
+      _sendTunnelRequest(entry.request);
+      return;
+    }
+    _failHead(entry, TunnelStreamException(oldId, 'response head lost'));
+  }
+
+  /// One cancel per id we are not waiting on: a start nobody waits on is a
+  /// re-fetch or a replay to stop, and a chunk for an id we re-keyed away or
+  /// already finished is a run whose cancel the relay may have dropped.
+  /// Answering it once stops that run at its next frame instead of letting it
+  /// stream a whole body into the void.
+  void _cancelUnknown(String id) {
+    if (_cancelledIds.contains(id)) return;
+    _sendCancel(id);
+  }
+
+  /// A fresh Timer per chunk, NOT a [PendingReply]: that one is non-resettable
+  /// by design, which is right for a head that arrives once and wrong for a
+  /// clock the next chunk must restart.
+  void _armIdle(_InFlightRequest entry) {
+    final body = entry.body;
+    if (body == null) return;
+    body.idle?.cancel();
+    body.idle = Timer(entry.chunkIdleTimeout, () {
+      _statsTimedOut++;
+      _abortBody(entry, 'no chunk within ${entry.chunkIdleTimeout}');
+    });
+  }
+
+  /// Fails a started body. The id is read off the ENTRY throughout — a re-key
+  /// may have moved it since any caller captured a string.
+  void _abortBody(
+    _InFlightRequest entry,
+    String reason, {
+    bool sendCancel = true,
+  }) {
+    final id = entry.requestId;
+    final body = entry.body;
+    _pendingRequests.remove(id);
+    body?.idle?.cancel();
+    if (body != null) {
+      body.controller.addError(TunnelStreamException(id, reason));
+      unawaited(body.controller.close());
+    }
+    if (sendCancel) _sendCancel(id);
+    AbLog.warn(
+      'preview',
+      'tunnel body aborted',
+      fields: {
+        'requestId': id,
+        'reason': reason,
+        'seq': (body?.nextSeq ?? 1) - 1,
+      },
+    );
+    _logIfSettled();
+  }
+
+  void _failHead(_InFlightRequest entry, Object error) {
+    _pendingRequests.remove(entry.requestId);
+    entry.head.fail(error);
+    _logIfSettled();
+  }
+
+  /// The proxy stopped reading — the browser closed the tab or the connection
+  /// died. Removing first is what keeps a COMPLETED body quiet: `onCancel`
+  /// also fires after `close()` delivered done, and by then the entry is gone.
+  void _onBodyCancelled(String id) {
+    final entry = _pendingRequests.remove(id);
+    if (entry == null) return;
+    entry.body?.idle?.cancel();
+    _sendCancel(id);
+    _logIfSettled();
+  }
+
+  /// Best-effort, idempotent, never awaited — the same shape as
+  /// [_sendTunnelRequest]. Deliberately NOT gated on `_disposed`: dispose sets
+  /// that flag before its first await, so a gate here would make every cancel
+  /// on the dispose path dead code and leave each body in flight still
+  /// streaming from the bridge.
+  ///
+  /// Every call site has just stopped waiting on [id], so this is also where
+  /// the id is remembered: whatever the cancelled run still has in flight is
+  /// then answered by nothing rather than by a cancel per frame.
+  void _sendCancel(String id) {
+    _cancelledIds.add(id);
+    if (_cancelledIds.length > _maxCancelledIds) {
+      _cancelledIds.remove(_cancelledIds.first);
+    }
+    unawaited(
+      session.transport.send({
+        'type': 'tunnel:http-cancel',
+        'requestId': id,
+        'checkoutId': checkoutId,
+      }, channel: 'preview'),
+    );
+  }
+
+  String _newRequestId() => const Uuid().v4();
 
   // --- Tunnel instrumentation ---
   //
@@ -285,8 +581,13 @@ class PreviewService {
   /// The relay dropped a routed frame. It identifies neither the frame nor the
   /// direction, so a request whose reply never arrives is indistinguishable
   /// from one that is merely slow — hence [_retryGrace] before acting, and
-  /// GET/HEAD only. A re-send that is not safe to repeat is worse than the 30s
-  /// timeout it would save.
+  /// GET/HEAD only. A re-send that is not safe to repeat is worse than the
+  /// head timeout it would save.
+  ///
+  /// A request whose head has landed is never re-sent: bytes may already be in
+  /// the browser and nothing can be spliced onto a partly delivered body. A
+  /// drop inside a body surfaces through the `seq` check or the idle timer as
+  /// a truncated response instead.
   void _onFramesDropped() {
     // A burst of drops arrives as a burst of errors; one sweep covers them all.
     _retrySweep ??= Timer(_retryGrace, () {
@@ -301,6 +602,7 @@ class PreviewService {
     for (final entry in _pendingRequests.values.toList()) {
       final method = entry.request.method.toUpperCase();
       if (method != 'GET' && method != 'HEAD') continue;
+      if (entry.body != null) continue;
       if (entry.attempts >= _maxRetries) continue;
       // The sweep is scheduled off the DROP, not off any one request, so
       // without this the map's youngest entries — a page load keeps adding
@@ -324,29 +626,63 @@ class PreviewService {
 
   // --- Public methods ---
 
+  /// Sends [request] and completes as soon as its HEAD lands. The returned
+  /// [TunnelHttpResponse.body] then streams the rest, bounded by
+  /// [chunkIdleTimeout] per chunk rather than by one clock over the whole body
+  /// — a 100 MB download must not be killed for taking longer than a head.
   Future<TunnelHttpResponse> proxyRequest(
     TunnelHttpRequest request, {
-    // Must stay ABOVE the bridge's FETCH_TIMEOUT_MS (localhost-fetch.ts) so a
-    // slow dev server yields the bridge's 502 (with the real error), never a
-    // phone-side TimeoutException.
-    Duration timeout = const Duration(seconds: 30),
+    Duration timeout = kTunnelHeadTimeout,
+    Duration chunkIdleTimeout = kTunnelChunkIdleTimeout,
   }) {
-    final pending = PendingReply<TunnelHttpResponse>(
+    // De-registered by the entry's CURRENT id, not the one this call named: a
+    // lost-head recovery re-keys the entry under a fresh id while the same
+    // head timer runs, and removing the original key would leave the entry in
+    // the map forever with nothing left to complete it.
+    late final _InFlightRequest entry;
+    final pending = session.newPending<TunnelHttpResponse>(
       timeout: timeout,
+      onAbandon: () => _pendingRequests.remove(entry.requestId),
       onTimeout: () {
-        _pendingRequests.remove(request.requestId);
         _statsTimedOut++;
+        // The bridge may still be fetching for an id nothing will read.
+        _sendCancel(entry.requestId);
         _logIfSettled();
       },
       timeoutError: () => TimeoutException('Request timed out', timeout),
     );
-    _pendingRequests[request.requestId] = _InFlightRequest(request, pending);
+    entry = _InFlightRequest(request, pending, chunkIdleTimeout);
+    _pendingRequests[request.requestId] = entry;
     _statsWindowStart ??= DateTime.now();
     _statsIssued++;
 
     _sendTunnelRequest(request);
 
     return pending.future;
+  }
+
+  /// A fresh E2E session: the relay client cleared its queues and the bridge
+  /// aborted every in-flight run, so a started body can never be completed.
+  /// A headless request is re-sent under the SAME id — the bridge replays it
+  /// from its outbox, fetches it fresh, or joins a run still going, which is
+  /// the one place the same-id join is what we want.
+  Future<void> _onReestablished() async {
+    for (final entry in _pendingRequests.values.toList()) {
+      if (entry.body != null) {
+        // Cancelling is redundant when the bridge's own peer hook fired, but
+        // it is one small frame and the only thing that stops the run if it
+        // did not.
+        _abortBody(entry, 'session re-established mid-body');
+        continue;
+      }
+      final method = entry.request.method.toUpperCase();
+      if (method != 'GET' && method != 'HEAD') continue;
+      if (entry.attempts >= _maxRetries) continue;
+      entry.attempts++;
+      entry.sentAt = DateTime.now();
+      _statsRetried++;
+      _sendTunnelRequest(entry.request);
+    }
   }
 
   PreviewTab? _tabByPort(int port) {
@@ -384,6 +720,21 @@ class PreviewService {
       focus: focus,
       path: path,
     );
+  }
+
+  /// Resolves an address-bar navigation through the tab's actual origin,
+  /// including an ephemeral proxy port when the target is remote.
+  Uri? existingTabNavigationUrl(
+    int port, {
+    required String scheme,
+    required String path,
+  }) {
+    final tab = _tabByPort(port);
+    if (tab == null || tab.scheme != scheme || tab.currentUrl == null) {
+      return null;
+    }
+    final origin = Uri.parse(tab.currentUrl!).origin;
+    return Uri.parse('$origin$path');
   }
 
   /// Confirmed retry after a [SelectPortResult.portInUse]: binds a random
@@ -498,7 +849,10 @@ class PreviewService {
     final server = _proxyServers.remove(port);
     await server?.stop();
 
-    final tabs = [for (final t in _state.tabs) if (t.port != port) t];
+    final tabs = [
+      for (final t in _state.tabs)
+        if (t.port != port) t,
+    ];
     final wasActive = _state.activeTabId == port;
     _setState(
       _state.copyWith(
@@ -613,7 +967,32 @@ class PreviewService {
     final tunnel = _activeWsTunnels.remove(msg.tunnelId);
     if (tunnel == null) return;
     unawaited(tunnel.sub.cancel());
-    unawaited(tunnel.channel.sink.close());
+    final code = _forwardableCloseCode(msg.code);
+    unawaited(
+      tunnel.channel.sink.close(
+        code,
+        code == null ? null : _forwardableCloseReason(msg.reason),
+      ),
+    );
+  }
+
+  /// The browser-facing socket is a `web_socket_channel` sink, whose
+  /// `checkCloseCode` accepts only 1000 and the private 3000-4999 range and
+  /// throws an `ArgumentError` for anything else — narrower than the RFC and
+  /// narrower than dart:io's own rule. A code it would refuse closes the socket
+  /// bare instead: the page still sees a real close event it can reconnect
+  /// from, which is the part that matters, and an exception thrown out of this
+  /// handler would take the whole transport subscription with it.
+  static int? _forwardableCloseCode(int? code) {
+    if (code == null) return null;
+    return code == 1000 || (code >= 3000 && code <= 4999) ? code : null;
+  }
+
+  /// The same sink caps a close reason at 123 UTF-8 bytes, so a longer one is
+  /// dropped rather than thrown.
+  static String? _forwardableCloseReason(String? reason) {
+    if (reason == null) return null;
+    return utf8ByteLength(reason) <= 123 ? reason : null;
   }
 
   Future<void> dispose() async {
@@ -624,19 +1003,28 @@ class PreviewService {
     // hydrator left registered re-requests a snapshot for a dead checkout on
     // every reconnect for the rest of the session.
     session.unhydrateCheckout(checkoutId, _snapshotHydratorKey);
+    session.unhydrateCheckout(checkoutId, _reestablishHydratorKey);
+
+    _retrySweep?.cancel();
+    _retrySweep = null;
+
+    // Before the proxies stop, and never in place of this loop: a stalled
+    // body's subscription only learns the socket died on its next write, so
+    // `HttpServer.close(force: true)` alone never reaches its `onCancel` and
+    // the bridge would keep streaming a body nobody will read.
+    for (final entry in _pendingRequests.values.toList()) {
+      if (entry.body != null) {
+        _abortBody(entry, 'service disposed');
+      } else {
+        entry.head.fail(TimeoutException('Service disposed'));
+      }
+    }
+    _pendingRequests.clear();
 
     for (final server in _proxyServers.values) {
       await server.stop();
     }
     _proxyServers.clear();
-
-    _retrySweep?.cancel();
-    _retrySweep = null;
-
-    for (final entry in _pendingRequests.values) {
-      entry.reply.fail(TimeoutException('Service disposed'));
-    }
-    _pendingRequests.clear();
 
     for (final tunnel in _activeWsTunnels.values) {
       await tunnel.sub.cancel();
@@ -660,14 +1048,38 @@ class PreviewService {
 }
 
 class _InFlightRequest {
-  final TunnelHttpRequest request;
-  final PendingReply<TunnelHttpResponse> reply;
+  /// NOT final: a lost head re-keys the entry under a fresh requestId, and
+  /// [requestId] is read off this request everywhere so nothing can hold the
+  /// stale one.
+  TunnelHttpRequest request;
+  final PendingReply<TunnelHttpResponse> head;
+  final Duration chunkIdleTimeout;
+
+  /// Non-null once a non-`last` start has arrived. A started request is
+  /// streaming and is never re-sent.
+  _TunnelBody? body;
+
+  /// Every re-send on any path, so the cap bounds them together.
   int attempts = 0;
 
   /// When the latest attempt went out — the age the retry sweep judges against.
   DateTime sentAt = DateTime.now();
 
-  _InFlightRequest(this.request, this.reply);
+  String get requestId => request.requestId;
+
+  _InFlightRequest(this.request, this.head, this.chunkIdleTimeout);
+}
+
+/// The streaming half of a response: the controller the proxy reads bytes
+/// from, the per-chunk idle clock, and the seq the next chunk must carry.
+class _TunnelBody {
+  final StreamController<List<int>> controller;
+  Timer? idle;
+
+  /// The start is slice 0, so chunks begin at 1.
+  int nextSeq = 1;
+
+  _TunnelBody(this.controller);
 }
 
 /// One active WS tunnel — the local [channel] a previewed page's own
@@ -706,11 +1118,22 @@ class _WsOutboundQueue {
   int _queuedBytes = 0;
   bool _aborted = false;
 
-  /// Same ceilings the bridge applies to its own pre-open buffer. Serializing
-  /// on the transport means a slow link builds the backlog HERE, and a browser
-  /// streaming into a wedged tunnel would otherwise grow it without limit.
+  /// Same ceilings the bridge applies to its own pre-open buffer, measured in
+  /// UTF-8 bytes as the bridge measures them. Serializing on the transport
+  /// means a slow link builds the backlog HERE, and a browser streaming into a
+  /// wedged tunnel would otherwise grow it without limit.
+  ///
+  /// This cap is also what keeps a browser frame from ever reaching
+  /// `kMaxTransferBytes`, where `sendOnStream` drops it with no signal the
+  /// caller can see. A frame this queue refuses aborts the tunnel, closes the
+  /// browser socket and (via `onDone` → `sendClose`) releases the bridge's
+  /// upstream, so both directions end.
   static const _maxQueuedFrames = 64;
   static const _maxQueuedBytes = 1024 * 1024;
+  /// A send resolves at hand-off to the socket, so this bounds the wait for
+  /// the channel ahead of this frame. Hitting it aborts the tunnel, which is
+  /// the right surface for a preview channel that has stopped draining: a WS
+  /// tunnel with a hole in it is worse than one the browser can re-open.
   static const _sendTimeout = Duration(seconds: 10);
 
   /// How long the close frame waits its turn. Ordering matters least here:
@@ -721,7 +1144,7 @@ class _WsOutboundQueue {
 
   void send(Map<String, dynamic> message) {
     if (_aborted) return;
-    final bytes = (message['data'] as String?)?.length ?? 0;
+    final bytes = utf8ByteLength((message['data'] as String?) ?? '');
     if (_queuedFrames >= _maxQueuedFrames ||
         _queuedBytes + bytes > _maxQueuedBytes) {
       _abort('outbound queue limit reached');

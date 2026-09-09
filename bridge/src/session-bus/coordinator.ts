@@ -1056,7 +1056,7 @@ export class SessionBusCoordinator {
       kind: "message",
       sessionId,
       taskId,
-      ...(rec === undefined ? {} : { task: rec }),
+      ...(rec == null ? {} : { task: rec }),
       peer: envelope.metadata.peer,
       envelope,
     });

@@ -57,6 +57,16 @@ class FakeAgentTransport implements AgentTransport {
     if (value) redriveHydrators();
   }
 
+  /// Test control: drive the transport's lifecycle state directly — the
+  /// signal `ProjectSession`'s pending-reply registry keys its down/up edges
+  /// on for a non-relay transport. Deliberately does not touch
+  /// [redriveHydrators] or [_established]: those model the E2E session, an
+  /// orthogonal axis to the socket-level state this simulates.
+  void emitState(TransportState value) {
+    _state = value;
+    _stateCtrl.add(value);
+  }
+
   final Map<String, Future<void> Function()> _hydrators = {};
 
   @override

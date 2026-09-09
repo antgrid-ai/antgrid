@@ -50,7 +50,10 @@ function registerPhone(store: PairedPhonesStore, phonePubkey: string, pushToken:
 function session(peerPubkey: string): PeerSessionView {
   // Unreachable: the sessions survive a relay presence drop with their keys, which
   // is exactly the window push exists to cover.
-  return { peerId: `${peerPubkey.toLowerCase()}#machine`, peerPubkey, checkoutRouting: true, reachable: false };
+  return {
+    peerId: `${peerPubkey.toLowerCase()}#machine`, peerPubkey,
+    checkoutRouting: true, reachable: false, pullsTree: true,
+  };
 }
 
 /** A remote core whose transport reports [peers] as established. onPeerOnline is
@@ -79,7 +82,7 @@ async function startCore(peers: PeerSessionView[], register: (store: PairedPhone
     remote: {
       attachStream: (b) => {
         bus = b;
-        return { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendTo: () => true };
+        return { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendTo: async () => "sent" as const };
       },
       establishedPeers: () => peers,
       peerSession: (peerId) => peers.find((p) => p.peerId === peerId) ?? null,
@@ -146,7 +149,7 @@ test("a push-incapable sibling holding a live session does not suppress the away
   // fallback entirely — the desktop is backgrounded, the phone's session was
   // reaped, and nothing reached the user at all.
   const desktop: PeerSessionView = {
-    peerId: "desktop#machine", peerPubkey: "PK_DESKTOP", checkoutRouting: true, reachable: true,
+    peerId: "desktop#machine", peerPubkey: "PK_DESKTOP", checkoutRouting: true, reachable: true, pullsTree: true,
   };
   const { notify, delivered, focus } = await startCore(
     [desktop],
@@ -165,10 +168,10 @@ test("a phone whose own session is reachable and unpaused is not pushed to while
   // The per-device half of the same question: the fallback is machine-wide, but
   // a device that can read the frame on its live stream must not also be buzzed.
   const held: PeerSessionView = {
-    peerId: "pk_held#machine", peerPubkey: "PK_HELD", checkoutRouting: true, reachable: true,
+    peerId: "pk_held#machine", peerPubkey: "PK_HELD", checkoutRouting: true, reachable: true, pullsTree: true,
   };
   const pocketed: PeerSessionView = {
-    peerId: "pk_pocket#machine", peerPubkey: "PK_POCKET", checkoutRouting: true, reachable: true,
+    peerId: "pk_pocket#machine", peerPubkey: "PK_POCKET", checkoutRouting: true, reachable: true, pullsTree: true,
   };
   const { notify, delivered, focus } = await startCore(
     [held, pocketed],

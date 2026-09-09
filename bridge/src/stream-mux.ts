@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { CONTROL_STREAM_ID } from "antgrid-wire";
 import type { Channel, MessageBus } from "./message-bus";
+import type { SendOutcome } from "./send-scheduler";
 import { createMessage, parseMessageFast } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { logger } from "./logger";
@@ -22,15 +23,19 @@ export interface StreamHandle {
   /** Send a tunnel-protocol (preview channel) message tagged with this stream.
    *  `target` names the app session that asked: a tunnel body answers exactly
    *  one request, so fanning it out to every attached device both wastes the
-   *  link and hands one device another's response. Absent = every session. */
-  sendTunnel(data: object, target?: SendTarget): void;
+   *  link and hands one device another's response. Absent = every session.
+   *
+   *  Resolves when the message left the send queue — "sent"/"dropped"/
+   *  "too-large" from the send path, or "gated" when this stream's outbound
+   *  authorization refused it. */
+  sendTunnel(data: object, target?: SendTarget): Promise<SendOutcome>;
   /** Send one frame on a named channel to a single app session, bypassing the
    *  bus. The bus has no addressing, so a published frame reaches every
    *  established session — including the human's phone, which is attached here
-   *  too and must never see another agent's task traffic (spec 4.1). Returns
-   *  false when the gates dropped it, so a caller with an outbox can hold the
+   *  too and must never see another agent's task traffic (spec 4.1). Resolves
+   *  the same outcomes as `sendTunnel`, so a caller with an outbox can hold the
    *  frame rather than assume it left. */
-  sendTo(msg: unknown, channel: Channel, target: SendTarget): boolean;
+  sendTo(msg: unknown, channel: Channel, target: SendTarget): Promise<SendOutcome>;
 }
 
 /** What one app session looks like to everything outside the relay client. No
@@ -40,6 +45,9 @@ export interface PeerSessionView {
   readonly peerPubkey: string;
   readonly checkoutRouting: boolean;
   readonly reachable: boolean;
+  /** Whether this device pulls trees on demand rather than being pushed them.
+   *  Per-device: the bridge may only stop pushing when EVERY attached one does. */
+  readonly pullsTree: boolean;
 }
 
 /** Who an outbound frame is for. A bridge holds one E2E session per attached
@@ -122,8 +130,14 @@ export interface StreamMuxTransport {
   openStream(streamId: string): void;
   closeStream(streamId: string): void;
   /** Seal + fragment + send one stream-tagged app envelope on `channel`, once
-   *  per session `target` selects (absent = every established session). */
-  sendEnvelope(streamId: string, msg: unknown, channel: Channel, target?: SendTarget): void;
+   *  per session `target` selects (absent = every established session).
+   *  Resolves when the message left the send queue. */
+  sendEnvelope(
+    streamId: string,
+    msg: unknown,
+    channel: Channel,
+    target?: SendTarget,
+  ): Promise<SendOutcome>;
   /** What the machine knows about one app session, or null for a route id that
    *  holds none. The mux needs it to apply a stream's per-device filters to a
    *  peer-addressed send and to an inbound frame, both of which name a session
@@ -185,18 +199,24 @@ export class StreamMux {
       const peer = this.transport.peerSession(target.peerId);
       return peer && opts.mayDeliverTo(peer) ? target : null;
     };
-    const sendTo = (msg: unknown, channel: Channel, target?: SendTarget): boolean => {
-      if (!mayDeliver()) return false;
+    const sendTo = (
+      msg: unknown,
+      channel: Channel,
+      target?: SendTarget,
+    ): Promise<SendOutcome> => {
+      if (!mayDeliver()) return Promise.resolve<SendOutcome>("gated");
+      // A target the per-receiver mute filtered away is the same fact as the
+      // machine switch being off, not a drop: nothing was queued, so a caller
+      // holding an outbox must not retire the frame.
       const to = gated(target);
-      if (!to) return false;
-      this.transport.sendEnvelope(streamId, msg, channel, to);
-      return true;
+      if (!to) return Promise.resolve<SendOutcome>("gated");
+      return this.transport.sendEnvelope(streamId, msg, channel, to);
     };
     const unsub = bus.subscribe({
       deliver: (msg, channel) => {
         if (!mayDeliver()) return;
         const target = gated();
-        if (target) this.transport.sendEnvelope(streamId, msg, channel, target);
+        if (target) void this.transport.sendEnvelope(streamId, msg, channel, target);
       },
     });
     this.streams.set(streamId, { bus, unsub, opts, settled: false });
@@ -208,10 +228,12 @@ export class StreamMux {
       streamId,
       detach: () => this.detach(streamId),
       // Gated too: tunnel frames bypass the bus (see setPlainHook), so the
-      // subscriber check above never sees them.
-      sendTunnel: (data, target) => {
-        sendTo(data, "preview", target);
-      },
+      // subscriber check above never sees them. The refusal is "gated", NOT
+      // "dropped": a WS tunnel must survive the switch being off (the close a
+      // teardown would send is gated too, leaving the browser socket mute for
+      // the life of the page), and a cleared queue and a closed switch are
+      // different facts to the one consumer that awaits this.
+      sendTunnel: (data, target) => sendTo(data, "preview", target),
       sendTo: (msg, channel, target) => sendTo(msg, channel, target),
     };
   }
@@ -256,7 +278,7 @@ export class StreamMux {
     if (!this.noticeDue(`invalid ${peerId} ${streamId}`)) return;
     // Addressed at the sender: the notice answers one bad frame, and telling a
     // healthy device its stream is dead makes it renegotiate for nothing.
-    this.transport.sendEnvelope(
+    void this.transport.sendEnvelope(
       CONTROL_STREAM_ID,
       createMessage("stream-invalid", { streamId }),
       "control",
@@ -275,7 +297,7 @@ export class StreamMux {
     projectId: string | undefined,
   ): void {
     if (!this.noticeDue(`refused ${peerId} ${streamId}`)) return;
-    this.transport.sendEnvelope(
+    void this.transport.sendEnvelope(
       CONTROL_STREAM_ID,
       createMessage("control:result", {
         ok: false,

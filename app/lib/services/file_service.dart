@@ -93,25 +93,49 @@ class FileService {
   }) : _state = FileTreeState(projectId: session.projectId) {
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
-    // Pull the tree rather than wait for the bridge's push. A managed
-    // checkout's `tree:full` goes out while its runtime is being prepared —
-    // which is BEFORE the session list that makes the app build this bundle —
-    // so a bundle created for an isolated session would never see one and its
-    // file tree stayed empty for the life of the session. As a hydrator it also
-    // re-pulls on every reconnect.
-    session.hydrateCheckout(checkoutId, _treeHydratorKey, _hydrateTree);
     // The bridge caches `git:sync-state` for replay, but only a checkout whose
     // bundle existed at connect time receives that replay — an isolated
-    // session's does not, exactly as [_hydrateTree] above documents. Asking
-    // also re-fires on every reconnect, which is what keeps the indicator from
-    // sitting on counts from before a drop.
+    // session's does not. Asking also re-fires on every reconnect, which is
+    // what keeps the indicator from sitting on counts from before a drop. Kept
+    // eager (not gated behind [activate]) because it feeds drawer/status
+    // chrome for every checkout, not just the one on screen — see
+    // [ProjectSession.setActiveCheckouts].
     session.hydrateCheckout(checkoutId, _syncHydratorKey, _hydrateSyncState);
-    // History is deliberately NOT hydrated here the way the tree and sync
-    // state are: it has no consumer besides the Git panel (every FileService
-    // exists whether or not that panel is ever opened), so eager-on-construct
-    // hydration would cost every project session a `git:log` round trip for a
-    // view most never visit. `GitPanel` triggers the first load itself once
-    // it is actually built with an empty history — see its `_maybeLoadHistory`.
+    // History is deliberately NOT hydrated here the way sync state is: it has
+    // no consumer besides the Git panel (every FileService exists whether or
+    // not that panel is ever opened), so eager-on-construct hydration would
+    // cost every project session a `git:log` round trip for a view most never
+    // visit. `GitPanel` triggers the first load itself once it is actually
+    // built with an empty history — see its `_maybeLoadHistory`.
+  }
+
+  static const _treeHydratorKey = 'file:tree';
+  static const _syncHydratorKey = 'git:sync-state';
+
+  /// Pulls the tree rather than waiting for the bridge's push. A managed
+  /// checkout's `tree:full` goes out while its runtime is being prepared —
+  /// BEFORE the session list that makes the app build this bundle — so a
+  /// bundle that never activates would never see one and its file tree would
+  /// stay empty for the life of the session. As a hydrator it also re-pulls on
+  /// every reconnect. Also re-registers the selected-file / preview pulls if
+  /// this checkout had one open before it was last deactivated. Only the
+  /// checkout on screen carries these — see [ProjectSession.setActiveCheckouts].
+  void activate() {
+    if (_disposed) return;
+    session.hydrateCheckout(checkoutId, _treeHydratorKey, _hydrateTree);
+    if (_stashesRequested) {
+      session.hydrateCheckout(checkoutId, _stashHydratorKey, _hydrateStashes);
+    }
+    if (_state.files.selectedFilePath != null) {
+      session.hydrateCheckout(
+        checkoutId,
+        'file:selected',
+        _hydrateSelectedFile,
+      );
+    }
+    if (_state.preview.isOpen) {
+      session.hydrateCheckout(checkoutId, 'file:preview', _hydratePreview);
+    }
     // A hydrator covers re-ESTABLISHMENT; this covers the other window the
     // agent suppresses in, which re-establishes nothing. While the app is
     // backgrounded the agent DROPS every `tree:update` and keeps bumping its
@@ -120,18 +144,46 @@ class FileService {
     // and a directory it deleted stays listed, for the life of the connection.
     // Nothing self-corrects it — `_snapshotSeq` only ever advances on a full
     // snapshot, which only this pull asks for.
-    _resumeSub = session.focusResumed.listen(
-      (_) =>
-          detached('FileService', 'tree re-pull on focus resume', _hydrateTree),
+    _resumeSub ??= session.focusResumed.listen(
+      (_) => detached(
+        'FileService',
+        'tree re-pull on focus resume',
+        _repullTreeIfChanged,
+      ),
     );
   }
 
-  static const _treeHydratorKey = 'file:tree';
-  static const _syncHydratorKey = 'git:sync-state';
+  /// Leaves [_state] intact — a re-[activate] renders the last tree while its
+  /// pull refreshes it.
+  void deactivate() {
+    if (_disposed) return;
+    session.unhydrateCheckout(checkoutId, _treeHydratorKey);
+    session.unhydrateCheckout(checkoutId, _stashHydratorKey);
+    session.unhydrateCheckout(checkoutId, 'file:selected');
+    session.unhydrateCheckout(checkoutId, 'file:preview');
+    unawaited(_resumeSub?.cancel());
+    _resumeSub = null;
+  }
 
-  Future<void> _hydrateTree() => session.sendForCheckout(
+  /// A full pull that claims nothing. A hydrator run means the transport
+  /// re-established, and the agent behind it may be a NEW PROCESS whose
+  /// revision counter restarted at zero — a claim carried over from the old one
+  /// could then match by coincidence and have a stale tree confirmed.
+  Future<void> _hydrateTree() => _requestTree();
+
+  /// The focus-resume variant, which names the revision it holds so an
+  /// unchanged checkout is answered `file:tree:unchanged` instead of the whole
+  /// tree. Safe to claim here precisely because a resume re-establishes nothing
+  /// (see [MessageRouter.focusResumed]): the agent being asked is the one that
+  /// issued the seq. Backgrounding is what makes this worth doing — every open
+  /// project's every checkout re-pulls on the same edge, and on an idle project
+  /// each of those answers was a byte-identical tree.
+  Future<void> _repullTreeIfChanged() =>
+      _requestTree(sinceSeq: _snapshotSeq >= 0 ? _snapshotSeq : null);
+
+  Future<void> _requestTree({int? sinceSeq}) => session.sendForCheckout(
     checkoutId,
-    createAbMessage('file:tree:snapshot:request', {}),
+    createAbMessage('file:tree:snapshot:request', {'sinceSeq': ?sinceSeq}),
   );
 
   void _setState(FileTreeState state) {
@@ -148,12 +200,28 @@ class FileService {
       _setState(_state.copyWith(root: parsed.tree));
       return;
     }
+    if (parsed is FileTreeUnchangedMessage) {
+      // Nothing to apply — the agent is confirming the revision we claimed.
+      // Guarded anyway so a confirmation that raced an applied delta cannot
+      // walk the base backwards and re-admit an update already merged.
+      if (parsed.seq > _snapshotSeq) _snapshotSeq = parsed.seq;
+      return;
+    }
     if (parsed is TreeUpdateMessage) {
       final seq = parsed.seq;
       if (seq != null && _snapshotSeq >= 0 && seq <= _snapshotSeq) {
         return; // stale — drop
       }
       _mergeTreeUpdate(parsed);
+      // Only a CONTIGUOUS delta may advance the base. A gap means the agent
+      // suppressed updates while this app was backgrounded and dropped them
+      // (it keeps counting through a suppression window), so the tree here is
+      // missing whatever those carried. Leaving the base behind is exactly what
+      // makes the next resume ask for a full tree rather than have a stale one
+      // confirmed.
+      if (seq != null && _snapshotSeq >= 0 && seq == _snapshotSeq + 1) {
+        _snapshotSeq = seq;
+      }
       return;
     }
     if (parsed is TreeFullMessage) {
@@ -301,6 +369,11 @@ class FileService {
 
   void _handleTreeFull(TreeFullMessage msg) {
     final preserveExpanded = msg.projectId == _state.projectId;
+    // A re-sync push carries the revision it was built at, so the base moves
+    // with the tree it replaces. An agent too old to stamp one leaves the base
+    // where it was, which costs a full pull on the next resume and nothing else.
+    final seq = msg.seq;
+    if (seq != null && seq > _snapshotSeq) _snapshotSeq = seq;
     _setState(
       _state.copyWith(
         root: msg.root,
@@ -573,6 +646,7 @@ class FileService {
       size: node.size,
       extension: node.extension,
       children: node.children.map(_cloneNode).toList(),
+      truncated: node.truncated,
     );
   }
 
@@ -590,6 +664,7 @@ class FileService {
       size: root.size,
       extension: root.extension,
       children: newChildren,
+      truncated: root.truncated,
     );
   }
 
@@ -617,6 +692,7 @@ class FileService {
       size: current.size,
       extension: current.extension,
       children: newChildren,
+      truncated: current.truncated,
     );
   }
 
@@ -652,6 +728,7 @@ class FileService {
       size: parent.size,
       extension: parent.extension,
       children: newChildren,
+      truncated: parent.truncated,
     );
   }
 
@@ -709,9 +786,9 @@ class FileService {
   /// `docs/architecture.md`), so it cannot relativize the path itself.
   Future<FileResolvePathResultMessage> resolveTerminalPath(String rawPath) {
     final requestId = const Uuid().v4();
-    final pending = PendingReply<FileResolvePathResultMessage>(
+    final pending = session.newPending<FileResolvePathResultMessage>(
       timeout: const Duration(seconds: 8),
-      onTimeout: () => _pendingResolves.remove(requestId),
+      onAbandon: () => _pendingResolves.remove(requestId),
     );
     _pendingResolves[requestId] = pending;
     session.sendForCheckout(
@@ -741,12 +818,31 @@ class FileService {
           clearSearchLine: searchLine == null,
           clearSearchQuery: searchQuery == null,
         ),
+        expandedPaths: _expandedWithAncestorsOf(path),
       ),
     );
     // Register (fires now if established) rather than sending inline — see
     // [_hydrateSelectedFile]. Re-registering under the same key supersedes, so
     // opening a new file replaces the prior file's hydrator.
     session.hydrateCheckout(checkoutId, 'file:selected', _hydrateSelectedFile);
+  }
+
+  /// Ancestor directories of [path], folded into the current expanded set —
+  /// mirrors [revealDirectory] but for a FILE selection (a terminal link, a
+  /// search result, git's "view file", …), none of which otherwise touches
+  /// [FileTreeState.expandedPaths]. Without this the tree can select a file
+  /// deep inside collapsed folders and show nothing, since [FileTreeView]
+  /// only walks into a directory that is in the expanded set.
+  Set<String> _expandedWithAncestorsOf(String path) {
+    final segments = path.split('/').where((s) => s.isNotEmpty).toList();
+    if (segments.length <= 1) return _state.expandedPaths;
+    final expanded = Set<String>.from(_state.expandedPaths);
+    var acc = '';
+    for (final segment in segments.sublist(0, segments.length - 1)) {
+      acc = acc.isEmpty ? segment : '$acc/$segment';
+      expanded.add(acc);
+    }
+    return expanded;
   }
 
   void requestFileContent(String path) {
@@ -798,7 +894,7 @@ class FileService {
 
   /// Tier-3 hydrator for the preview overlay. Reads the path from `_state` so a
   /// re-register always pulls whatever is CURRENTLY open, and no-ops once the
-  /// overlay is closed — which is what retires it without an unregister.
+  /// overlay is closed — unregistered on [deactivate] and [dispose].
   Future<void> _hydratePreview() async {
     if (_disposed) return;
     final path = _state.preview.path;
@@ -1333,11 +1429,13 @@ class FileService {
       latch.settle();
     }
     _commitFilesLatches.clear();
-    for (final pending in _pendingResolves.values) {
+    final resolves = _pendingResolves.values.toList();
+    _pendingResolves.clear();
+    for (final pending in resolves) {
       pending.fail(StateError('FileService disposed'));
     }
-    _pendingResolves.clear();
     session.unhydrateCheckout(checkoutId, 'file:selected');
+    session.unhydrateCheckout(checkoutId, 'file:preview');
     session.unhydrateCheckout(checkoutId, _treeHydratorKey);
     session.unhydrateCheckout(checkoutId, _syncHydratorKey);
     session.unhydrateCheckout(checkoutId, _stashHydratorKey);

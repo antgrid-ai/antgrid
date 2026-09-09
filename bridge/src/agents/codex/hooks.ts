@@ -33,7 +33,6 @@ export function buildCodexNotifyInjection(
     `hooks.${event}=[{hooks=[{type="command",command="${tomlBasicString(commandFor(commandEvent))}"}]}]`;
 
   const events: Array<{ event: string; label: string; commandEvent: string }> = [
-    { event: "PermissionRequest", label: EVENT_LABELS.PermissionRequest, commandEvent: "permission-request" },
     { event: "Stop", label: EVENT_LABELS.Stop, commandEvent: "stop" },
     { event: "SessionStart", label: EVENT_LABELS.SessionStart, commandEvent: "session-start" },
   ];
@@ -62,6 +61,12 @@ export function inject({ hookCommand }: HookInjectCtx): LaunchAugmentation {
     args: [
       "-c",
       `notify=${JSON.stringify(notifyArgv)}`,
+      // PermissionRequest precedes automatic review and cannot tell us whether
+      // the user is needed. Let the TUI emit actual approval prompts instead.
+      // Stop owns completion notifications, so exclude agent-turn-complete.
+      "-c", 'tui.notifications=["approval-requested"]',
+      "-c", 'tui.notification_method="osc9"',
+      "-c", 'tui.notification_condition="always"',
       ...buildCodexNotifyInjection(hookCommand),
     ],
     env: {},
@@ -111,7 +116,8 @@ export async function toPosts(
     // for every one of these events and a pipe nobody reads can block it.
     const raw = await readStdin();
     if (invocation.event === "permission-request") {
-      posts.push({ port, path: "/notify", body: { type: "permission_request", ...(terminalId ? { terminalId } : {}) } });
+      // Older running terminals may still invoke the pre-review hook.
+      return [];
     } else if (invocation.event === "stop") {
       // Parse failures fall through to a bare notify rather than returning:
       // a turn-end notification must survive a payload we can't read.

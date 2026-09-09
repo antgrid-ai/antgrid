@@ -90,6 +90,132 @@ describe("file-tree", () => {
     });
   });
 
+  describe("nested .gitignore", () => {
+    it("applies a directory's own .gitignore, anchored at that directory", () => {
+      mkdirSync(join(tempDir, "a", "sub"), { recursive: true });
+      mkdirSync(join(tempDir, "b"));
+      writeFileSync(join(tempDir, "a", ".gitignore"), "*.log\n/local-only\n");
+      writeFileSync(join(tempDir, "a", "x.log"), "");
+      writeFileSync(join(tempDir, "a", "keep.ts"), "");
+      writeFileSync(join(tempDir, "a", "sub", "y.log"), "");
+      writeFileSync(join(tempDir, "a", "local-only"), "");
+      writeFileSync(join(tempDir, "b", "x.log"), "");
+      writeFileSync(join(tempDir, "b", "local-only"), "");
+
+      const rules = loadIgnoreRules(tempDir, []);
+      const tree = buildTree(tempDir, tempDir, rules)!;
+      const paths = new Set<string>();
+      const visit = (n: { path: string; children?: any[] }) => {
+        paths.add(n.path);
+        n.children?.forEach(visit);
+      };
+      visit(tree);
+
+      expect(paths.has("a/keep.ts")).toBe(true);
+      expect(paths.has("a/x.log")).toBe(false);
+      expect(paths.has("a/sub/y.log")).toBe(false);
+      // Anchored: `/local-only` means a/local-only, not b/local-only.
+      expect(paths.has("a/local-only")).toBe(false);
+      expect(paths.has("b/local-only")).toBe(true);
+      expect(paths.has("b/x.log")).toBe(true);
+
+      // The same rules answer the watcher's per-path question identically.
+      expect(rules.ignores("a/sub/y.log")).toBe(true);
+      expect(rules.ignores("b/x.log")).toBe(false);
+    });
+
+    it("still applies the root .gitignore and the defaults", () => {
+      writeFileSync(join(tempDir, ".gitignore"), "dist\n");
+      mkdirSync(join(tempDir, "dist"));
+      writeFileSync(join(tempDir, "dist", "out.js"), "");
+      mkdirSync(join(tempDir, "node_modules"));
+      writeFileSync(join(tempDir, "src.ts"), "");
+
+      const tree = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []))!;
+      expect(tree.children!.map((c) => c.name)).toEqual([".gitignore", "src.ts"]);
+    });
+  });
+
+  describe("node budget", () => {
+    it("stops the listing at the budget and marks the directory it cut", () => {
+      for (const f of ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]) {
+        writeFileSync(join(tempDir, f), "");
+      }
+
+      // Root + three files.
+      const tree = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []), 4)!;
+      expect(tree.truncated).toBe(true);
+      expect(tree.children!.map((c) => c.name)).toEqual(["a.txt", "b.txt", "c.txt"]);
+      expect(countNodes(tree)).toBe(4);
+    });
+
+    it("marks every directory left unfinished, and none that completed", () => {
+      mkdirSync(join(tempDir, "first"));
+      writeFileSync(join(tempDir, "first", "1.txt"), "");
+      mkdirSync(join(tempDir, "second"));
+      writeFileSync(join(tempDir, "second", "1.txt"), "");
+      writeFileSync(join(tempDir, "second", "2.txt"), "");
+      mkdirSync(join(tempDir, "third"));
+
+      // Root, first, first/1.txt, second, second/1.txt — then the cut.
+      const tree = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []), 5)!;
+      const byName = Object.fromEntries(tree.children!.map((c) => [c.name, c]));
+      expect(byName.first.truncated).toBeUndefined();
+      expect(byName.second.truncated).toBe(true);
+      expect(byName.second.children!.map((c) => c.name)).toEqual(["1.txt"]);
+      expect(byName.third).toBeUndefined();
+      expect(tree.truncated).toBe(true);
+    });
+
+    it("a tree within budget carries no marker", () => {
+      writeFileSync(join(tempDir, "a.txt"), "");
+      const tree = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []), 2)!;
+      expect(tree.truncated).toBeUndefined();
+      expect(JSON.stringify(tree)).not.toContain("truncated");
+    });
+
+    // The depth guard drops children without the parent ever learning why, so
+    // the cap has to mark its own cut or it is the one truncation nothing
+    // reports — on the wire or in the app.
+    it("marks the directory the depth cap cut", () => {
+      let dir = tempDir;
+      for (let i = 0; i < 12; i++) {
+        dir = join(dir, `level${i}`);
+        mkdirSync(dir);
+        writeFileSync(join(dir, "file.txt"), "deep");
+      }
+
+      let node = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []))!;
+      let deepest = node;
+      while (true) {
+        const next = node.children?.find((c) => c.type === "directory");
+        if (!next) break;
+        node = next;
+        deepest = node;
+      }
+
+      expect(deepest.children).toEqual([]);
+      expect(deepest.truncated).toBe(true);
+    });
+
+    it("does not mark a capped directory whose entries were all ignored", () => {
+      let dir = tempDir;
+      for (let i = 0; i < 10; i++) {
+        dir = join(dir, `level${i}`);
+        mkdirSync(dir);
+      }
+      mkdirSync(join(dir, "node_modules"));
+
+      let node = buildTree(tempDir, tempDir, loadIgnoreRules(tempDir, []))!;
+      for (let i = 0; i < 10; i++) {
+        node = node.children!.find((c) => c.name === `level${i}`)!;
+      }
+
+      expect(node.children).toEqual([]);
+      expect(node.truncated).toBeUndefined();
+    });
+  });
+
   describe("readFile", () => {
     it("reads a text file", () => {
       writeFileSync(join(tempDir, "hello.txt"), "Hello, world!");
@@ -146,6 +272,19 @@ describe("file-tree", () => {
       expect(r.encoding).toBe("base64");
       expect(r.mimeType).toBe("image/png");
       expect(Buffer.from(r.content!, "base64").length).toBe(png.length);
+    });
+
+    it("reads a JFIF as base64 with the jpeg mimeType", () => {
+      // Reuses the 1x1 PNG bytes — only the extension→mime mapping is under test.
+      const bytes = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      writeFileSync(join(tempDir, "a.jfif"), bytes);
+      const r = readFile(tempDir, "a.jfif");
+      expect(r.error).toBeUndefined();
+      expect(r.encoding).toBe("base64");
+      expect(r.mimeType).toBe("image/jpeg");
     });
 
     it("text file stays utf8", () => {

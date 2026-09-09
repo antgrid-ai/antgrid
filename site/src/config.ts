@@ -14,26 +14,37 @@ export const RELEASES_URL = "https://github.com/antgrid-ai/antgrid";
 
 export const links = {
   signIn: `${APP_URL}/login`,
-  // Start free lands on the download band, not app sign-in — the desktop app is
+  // Start free lands on the download page, not app sign-in — the desktop app is
   // the product entry point; billing sign-in stays on links.signIn.
-  startFree: "/#download",
+  startFree: "/download",
   pricing: "/pricing",
   // #handler, not #fleet. Phases.astro sits ABOVE Fleet.astro on the home page,
   // so a "Features" link aimed at the fleet view opened one section PAST the only
   // feature anyone pays for. Anchor hrefs are excluded from the dead-link sweep in
   // home.spec.ts, so the id this depends on is pinned in contracts.spec.ts instead.
   features: "/#handler",
-  download: "/#download",
+  // A path, not the home page's #download band. A fragment is absent from the
+  // HTTP request-target grammar (RFC 9112 §3.2.1) — it never reaches a server,
+  // so no log, CDN or analytics tool can record one, and Google's URL-structure
+  // guidance is explicit that fragments are not indexed. The band stays as the
+  // home page's closing CTA; this is the address every other surface points at,
+  // and it carries ?platform= (see downloadUrlFor) to fire a specific build.
+  download: "/download",
   getStarted: "/get-started",
-  // The download confirmation page. Never linked bare — it is only meaningful
-  // with a ?platform= (see downloadUrlFor), and it is noindex for the same
-  // reason: a reader arriving from search would land on a page whose whole job
-  // has already happened.
-  downloadStarted: "/download/started",
   downloadMacos: `${RELEASES_URL}/releases/latest/download/antgrid-macos.dmg`,
-  // Microsoft Store deep link (product 9N0P7ZRL4D9W); version-stable like the
-  // GitHub release URLs above, so a new build never needs a site deploy.
+  // The Store's stub installer (product 9N0P7ZRL4D9W). Version-stable like the
+  // GitHub URLs above, so a new build never needs a site deploy — but it answers
+  // `Content-Disposition: attachment` to EVERY user agent, with no sniffing and
+  // no redirect. A Mac, a phone or a Linux box asking for it gets an 815KB
+  // Windows .exe it cannot run, so it is only ever offered to a reader already
+  // on Windows. Everyone else is offered storeListing.
   downloadWindows: "https://get.microsoft.com/installer/download/9N0P7ZRL4D9W?referrer=appbadge&cid=site",
+  // The Store's web listing: an ordinary page on every OS, and still a Store-app
+  // launch on Windows. This is what a reader who is NOT on Windows is offered
+  // for the Windows build — they are almost always fetching it for a machine
+  // they are not sitting at, and a listing survives being emailed to themselves
+  // where a stub installer does not.
+  storeListing: "https://apps.microsoft.com/detail/9N0P7ZRL4D9W",
   downloadLinux: `${RELEASES_URL}/releases/latest/download/antgrid-linux.AppImage`,
   support: "/support",
   security: "/security",
@@ -68,7 +79,7 @@ export const links = {
 };
 
 // The three desktop builds as one list, because three separate things have to
-// agree on the same ids: the hero's OS-matched button, the confirmation page's
+// agree on the same ids: the hero's OS-matched button, the download page's
 // per-platform panels, and that page's script, which maps ?platform= back to a
 // URL. An id that agrees in two of the three is the worst case — the reader is
 // thanked for a download that never started. contracts.spec.ts pins all three
@@ -77,16 +88,45 @@ export const links = {
 // `os` is the OTHER axis and is deliberately not the id: it is the value
 // Base.astro writes to data-os from the reader's machine, and the two answer
 // different questions — which build this is, versus which build this reader can
-// run. The confirmation page needs them apart, because what it fires is what
-// the URL ASKED for, not what the visitor happens to be sitting at.
-export const PLATFORMS = [
-  { id: "windows", os: "win", name: "Windows", icon: "tabler:brand-windows", url: links.downloadWindows },
+// run. /download needs them apart, because what it fires is what the URL ASKED
+// for, not what the visitor happens to be sitting at.
+//
+// Both are literal unions rather than `string`: the ids key the per-platform
+// install copy on /download and the `os` values key the reveal rules in
+// global.css, so a typo or a fourth build with nothing written for it is a
+// compile error here instead of a blank card or a button that never appears.
+export type PlatformId = "windows" | "macos" | "linux";
+
+export type Platform = {
+  id: PlatformId;
+  os: "win" | "mac" | "linux";
+  name: string;
+  icon: string;
+  /** The artifact itself. Safe to aim at a reader only once their machine is
+   *  known to BE this OS — see `awayUrl`. */
+  url: string;
+  /** Where to send a reader who is NOT on this OS, when it cannot be the same
+   *  place. Only Windows needs one: a .dmg or an AppImage fetched from another
+   *  machine is still the real artifact, but the Windows URL is a stub installer
+   *  that hands every caller a .exe regardless of what asked for it. Read it
+   *  through `offerUrlFor`, never as `p.awayUrl ?? p.url` at the call site. */
+  awayUrl?: string;
+};
+
+export const PLATFORMS: Platform[] = [
+  { id: "windows", os: "win", name: "Windows", icon: "tabler:brand-windows", url: links.downloadWindows, awayUrl: links.storeListing },
   { id: "macos", os: "mac", name: "macOS", icon: "tabler:brand-apple", url: links.downloadMacos },
   { id: "linux", os: "linux", name: "Linux", icon: "tabler:brand-open-source", url: links.downloadLinux },
 ];
 
-// One link that both downloads and orients: the query is what the confirmation
-// page fires on, and the page it lands on is the answer to "it downloaded, now
-// what". Split across two clicks — download here, instructions there — one of
-// them is always the one that gets skipped.
-export const downloadUrlFor = (id: string) => `${links.downloadStarted}?platform=${id}`;
+// One link that both downloads and orients: the query is what /download fires
+// on, and the page it lands on is the answer to "it downloaded, now what".
+// Split across two clicks — download here, instructions there — one of them is
+// always the one that gets skipped.
+export const downloadUrlFor = (id: PlatformId) => `${links.download}?platform=${id}`;
+
+// The one safe way to name a build to a reader who may not be on it. Every
+// "here are all three" surface owes this rather than `p.url`, and it lives here
+// because the alternative — remembering `?? p.awayUrl` at each call site — is a
+// rule that only has to be forgotten once to hand a Mac an 815KB .exe.
+export const offerUrlFor = (p: Platform) => p.awayUrl ?? p.url;

@@ -72,8 +72,18 @@ const isCurrent = (href: string) =>
           the page and nothing else above the fold says the beta costs nothing.
           The free PLAN's CTA keeps "Start free" (src/data/pricing.ts) — on a card
           beside a paid tier the offer is the point, and the two labels are
-          deliberately different. */}
-      <Button href={links.startFree} variant="primary" class="px-4 py-2">Download free</Button>
+          deliberately different.
+
+          Marked current like any other nav item, in both copies exactly as the
+          items above are: startFree is a path, so /download is a page the reader
+          can be standing on while this control still points at it. As a fragment
+          it never could be, which is why nothing marked it before. */}
+      <Button
+        href={links.startFree}
+        variant="primary"
+        class="px-4 py-2"
+        aria-current={isCurrent(links.startFree) ? "page" : undefined}
+      >Download free</Button>
     </div>
     <button
       id="navToggle"
@@ -100,7 +110,11 @@ const isCurrent = (href: string) =>
       <a href={links.repo} class="inline-flex items-center gap-2 text-note text-muted">
         <Icon name="tabler:brand-github" width="17" height="17" />GitHub
       </a>
-      <Button href={links.startFree} variant="primary">Download free</Button>
+      <Button
+        href={links.startFree}
+        variant="primary"
+        aria-current={isCurrent(links.startFree) ? "page" : undefined}
+      >Download free</Button>
     </div>
   </div>
 </header>
@@ -122,9 +136,12 @@ const isCurrent = (href: string) =>
 
   btn?.addEventListener("click", () => setOpen(menu?.classList.contains("hidden") ?? false));
 
-  // Half this menu's items are same-page anchors, which navigate without a
-  // reload — so nothing tears the drawer down, and it stays parked over the
-  // section the reader just asked to see.
+  // Every item here leaves the page, so the drawer is torn down by the document
+  // that follows either way. What this buys is the interval BEFORE that document
+  // arrives, which on a phone is the whole visible response to the tap: without
+  // it the drawer sits over the old page for the length of a cold navigation and
+  // the reader taps again. nav.spec.ts has to cancel the navigation to observe
+  // it at all, for exactly that reason.
   menu?.addEventListener("click", (e) => {
     if ((e.target as HTMLElement).closest("a")) setOpen(false);
   });

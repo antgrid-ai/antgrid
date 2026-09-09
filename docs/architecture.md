@@ -12,7 +12,8 @@ App (Flutter) <--E2E encrypted--> Relay (WS router) <--E2E encrypted--> Agent (B
 
 The relay authenticates devices via a single signed `hello` frame (Ed25519
 proof-of-possession) but cannot decrypt payloads. Two WS channels: `control`
-(terminal, files, status) and `preview` (HTTP tunnel).
+(terminal, files, status) and `preview` (HTTP tunnel, streamed as start/chunk/end
+frames under the credit window).
 
 ### The session bus
 
@@ -44,6 +45,16 @@ itself never crosses the wire. An app must advertise the `checkoutRouting` capab
 `app:ready` (`docs/protocol/e2e-handshake.md`) or it is refused a project holding a
 managed session, rather than shown main's workspace beside an isolated agent.
 `WORKTREE_SESSIONS_SUPPORTED` (`bridge/src/worktree-capability.ts`) is the kill switch.
+
+Tree state flows pull-first. The app registers one tree hydrator per *active*
+checkout (`CheckoutServices.activate`, `app/lib/project/project_session.dart`) and
+advertises `pullsTree` on both hellos, so the bridge's re-sync
+(`everyClientPullsTrees` in `bridge/src/agent-core.ts`) skips its `tree:full` push
+whenever every attached client pulls; a client that does not advertise it still gets
+the push. The app's capability literals live in the relay-client package
+(`connection_handshake.dart`, `local_transport.dart`) and are mirrored by hand against
+`AppReadyMessage.capabilities` in `bridge/src/protocol.ts` — Zod strips a key the
+schema does not declare, and the fail direction is a silent return of the flood.
 
 ## Shared packages (`packages/`)
 

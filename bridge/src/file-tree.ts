@@ -9,9 +9,21 @@ export type FileTreeNode = {
   size?: number;
   extension?: string;
   children?: FileTreeNode[];
+  /** The listing stopped early: `children` is a complete, ordered prefix of
+   * the directory, not the whole of it. See MAX_TREE_NODES. */
+  truncated?: true;
 };
 
 const MAX_DEPTH = 10;
+
+/** Nodes one tree may carry. Every checkout's tree is replayed to every app
+ * that binds the project, so the largest checkout sets the cost of every
+ * connect — and a worktree that grew a 20k-file data directory made that reply
+ * megabytes, enough on a phone's uplink to hold the bridge's own relay pongs
+ * behind it until the relay closed the socket. Past the budget the walk stops
+ * where it is and marks each directory it cut short; nothing already listed is
+ * dropped or reordered. */
+export const MAX_TREE_NODES = 10_000;
 const MAX_FILE_SIZE = 1_048_576; // 1MB
 const MAX_BINARY_FILE_SIZE = 10_485_760; // 10MB
 
@@ -19,12 +31,15 @@ const MAX_BINARY_FILE_SIZE = 10_485_760; // 10MB
 // still rejected (the app has no viewer for it).
 const RENDERABLE_BINARY_MIME: Record<string, string> = {
   ".png": "image/png",
+  ".apng": "image/apng",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
+  ".jfif": "image/jpeg",
   ".gif": "image/gif",
   ".webp": "image/webp",
   ".bmp": "image/bmp",
   ".ico": "image/x-icon",
+  ".avif": "image/avif",
   ".pdf": "application/pdf",
 };
 
@@ -56,30 +71,76 @@ const DEFAULT_IGNORES = [
   "Thumbs.db",
 ];
 
-export function loadIgnoreRules(projectRoot: string, configExcludes: string[]): Ignore {
-  const ig = ignore();
+function readGitignore(dir: string): Ignore | null {
+  const gitignorePath = join(dir, ".gitignore");
+  if (!existsSync(gitignorePath)) return null;
+  try {
+    return ignore().add(readFileSync(gitignorePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
 
-  ig.add(DEFAULT_IGNORES);
-  if (configExcludes.length > 0) ig.add(configExcludes);
+/** The project's ignore rules as Git reads them: the defaults, the config's
+ * excludes and the root `.gitignore`, plus each directory's own `.gitignore`,
+ * whose patterns are anchored at that directory. A nested file is read on
+ * first sight and kept for the life of the rules, exactly like the root's.
+ * One deviation from Git, tolerated because it only ever hides: a nested
+ * `!pattern` cannot re-include what an ancestor's rules excluded. */
+export class IgnoreRules {
+  private readonly nested = new Map<string, Ignore | null>();
 
-  const gitignorePath = join(projectRoot, ".gitignore");
-  if (existsSync(gitignorePath)) {
-    try {
-      const content = readFileSync(gitignorePath, "utf8");
-      ig.add(content);
-    } catch {
-      // ignore read errors
+  constructor(
+    private readonly projectRoot: string,
+    private readonly root: Ignore,
+  ) {}
+
+  /** `relPath` is root-relative with `/` separators and never the root itself
+   * (`ignore` throws rather than answer for "" or a path that escapes). */
+  ignores(relPath: string): boolean {
+    if (this.root.ignores(relPath)) return true;
+    const parts = relPath.split("/");
+    for (let i = 1; i < parts.length; i++) {
+      const rules = this.nestedFor(parts.slice(0, i).join("/"));
+      if (rules?.ignores(parts.slice(i).join("/"))) return true;
     }
+    return false;
   }
 
-  return ig;
+  private nestedFor(dir: string): Ignore | null {
+    let rules = this.nested.get(dir);
+    if (rules === undefined) {
+      rules = readGitignore(join(this.projectRoot, dir));
+      this.nested.set(dir, rules);
+    }
+    return rules;
+  }
+}
+
+export function loadIgnoreRules(projectRoot: string, configExcludes: string[]): IgnoreRules {
+  const ig = ignore();
+  ig.add(DEFAULT_IGNORES);
+  if (configExcludes.length > 0) ig.add(configExcludes);
+  const rootGitignore = readGitignore(projectRoot);
+  if (rootGitignore) ig.add(rootGitignore);
+  return new IgnoreRules(projectRoot, ig);
 }
 
 export function buildTree(
   absPath: string,
   projectRoot: string,
-  ig: Ignore,
-  depth = 0,
+  rules: IgnoreRules,
+  budget = MAX_TREE_NODES,
+): FileTreeNode | null {
+  return walk(absPath, projectRoot, rules, 0, { left: budget });
+}
+
+function walk(
+  absPath: string,
+  projectRoot: string,
+  rules: IgnoreRules,
+  depth: number,
+  budget: { left: number },
 ): FileTreeNode | null {
   if (depth > MAX_DEPTH) return null;
 
@@ -92,18 +153,19 @@ export function buildTree(
 
   if (stat.isSymbolicLink()) return null;
 
-  const relPath = relative(projectRoot, absPath);
+  const relPath = relative(projectRoot, absPath).replace(/\\/g, "/");
   const name = absPath === projectRoot ? "" : basename(absPath);
 
   // Check ignore rules (skip for the root itself)
-  if (relPath && relPath !== "." && ig.ignores(relPath.replace(/\\/g, "/"))) {
+  if (relPath && relPath !== "." && rules.ignores(relPath)) {
     return null;
   }
 
   if (stat.isFile()) {
+    budget.left--;
     return {
       name,
-      path: relPath.replace(/\\/g, "/"),
+      path: relPath,
       type: "file",
       size: stat.size,
       extension: extname(name) || undefined,
@@ -117,10 +179,32 @@ export function buildTree(
     } catch {
       return null;
     }
+    budget.left--;
 
+    // Walk in name order so a budget cut is deterministic: what survives is
+    // always the same leading run of the listing, not whatever the filesystem
+    // happened to enumerate first. Code-unit order, not `localeCompare`: this
+    // runs once per directory of every full tree build, and the collator is
+    // both far slower and dependent on the host's ICU data — which would make
+    // the cut differ between machines.
+    entries.sort();
     const children: FileTreeNode[] = [];
+    let truncated = false;
+    // The depth guard at the top of this function drops every child of a
+    // directory sitting at the cap and cannot say WHY it returned null, so the
+    // cut is marked here, where the cap is still in view. An ignored entry is
+    // not a cut — it was never going to be sent.
+    if (depth === MAX_DEPTH) {
+      truncated = entries.some((entry) =>
+        !rules.ignores(relative(projectRoot, join(absPath, entry)).replace(/\\/g, "/")),
+      );
+    }
     for (const entry of entries) {
-      const child = buildTree(join(absPath, entry), projectRoot, ig, depth + 1);
+      if (budget.left <= 0) {
+        truncated = true;
+        break;
+      }
+      const child = walk(join(absPath, entry), projectRoot, rules, depth + 1, budget);
       if (child) children.push(child);
     }
 
@@ -132,9 +216,10 @@ export function buildTree(
 
     return {
       name: name || basename(projectRoot),
-      path: relPath.replace(/\\/g, "/") || ".",
+      path: relPath || ".",
       type: "directory",
       children,
+      ...(truncated ? { truncated: true as const } : {}),
     };
   }
 

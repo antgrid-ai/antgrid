@@ -31,6 +31,7 @@ const FileTreeNodeSchema: z.ZodType<{
   size?: number;
   extension?: string;
   children?: any[];
+  truncated?: true;
 }> = z.lazy(() =>
   z.object({
     name: z.string(),
@@ -39,6 +40,9 @@ const FileTreeNodeSchema: z.ZodType<{
     size: z.number().optional(),
     extension: z.string().optional(),
     children: z.array(FileTreeNodeSchema).optional(),
+    // The directory's listing was cut at the tree's node budget — see
+    // MAX_TREE_NODES in file-tree.ts.
+    truncated: z.literal(true).optional(),
   }),
 );
 
@@ -115,7 +119,10 @@ const HandshakeAgentReadyMessage = BaseMessage.extend({
 const AppReadyMessage = BaseMessage.extend({
   type: z.literal("app:ready"),
   confirm: z.string(),
-  capabilities: z.object({ checkoutRouting: z.literal(true).optional() }).optional(),
+  capabilities: z.object({
+    checkoutRouting: z.literal(true).optional(),
+    pullsTree: z.literal(true).optional(),
+  }).optional(),
 });
 
 const TerminalStartCommand = BaseMessage.extend({
@@ -753,6 +760,11 @@ const TreeFullMessage = BaseMessage.extend({
   type: z.literal("tree:full"),
   projectId: z.string(),
   root: FileTreeNodeSchema,
+  // Which revision of the watcher's tree this is. A resync push is the only
+  // full tree that still reaches an app unasked, and an app that cannot name
+  // the revision it holds cannot ask "still this one?" on the next resume —
+  // see `sinceSeq` below. Optional so a pre-seq bridge still parses.
+  seq: z.number().int().nonnegative().optional(),
   ...CheckoutScoped,
 });
 
@@ -1942,12 +1954,29 @@ const TerminalSnapshotMessage = BaseMessage.extend({
 
 const FileTreeSnapshotRequestMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot:request"),
+  /** The revision the caller's tree is already at. Matched against the
+   *  watcher's current seq: still equal means the caller is current and is
+   *  answered `file:tree:unchanged` instead of the whole tree. Only a caller
+   *  that can vouch the seq came from THIS agent process may send it — a
+   *  restarted agent counts from zero again, so a stale claim would be
+   *  confirmed rather than corrected (see file_service.dart). */
+  sinceSeq: z.number().int().nonnegative().optional(),
   ...CheckoutScoped,
 });
 
 const FileTreeSnapshotMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot"),
   tree: FileTreeNodeSchema,
+  seq: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+/** The cheap answer to a `sinceSeq` request the watcher has not moved past.
+ *  Its own type rather than a tree-less `file:tree:snapshot`: a snapshot whose
+ *  tree is sometimes absent puts a "when is this null?" question on every
+ *  future reader of the frame that normally carries the tree. */
+const FileTreeUnchangedMessage = BaseMessage.extend({
+  type: z.literal("file:tree:unchanged"),
   seq: z.number().int().nonnegative(),
   ...CheckoutScoped,
 });
@@ -2520,6 +2549,40 @@ const SessionBusAckMessage = BaseMessage.extend({
 }).extend(SessionBusAckWire.shape);
 
 
+// ── Netwatch: shipping a remote app's half of the frame capture ───────────────
+// Both ride the machine CONTROL plane and are consumed by relay-client.ts before
+// anything project-scoped sees them. Deliberately absent from
+// CHECKOUT_VARIABLE_MESSAGE_TYPES: neither reads nor writes a working tree.
+
+// Agent -> app: arm or disarm the app's own frame capture. A phone has no env
+// var and no UI for this, so `antgrid watch --remote` is the only control
+// surface. `ttlMs` is a DEAD-MAN SWITCH, not a preference: a CLI killed with
+// SIGKILL sends no disarm, and a phone left capturing forever costs battery and
+// bandwidth with nothing on the device able to stop it. The watcher re-arms
+// well inside the window while it runs.
+const NetwatchConfigureMessage = BaseMessage.extend({
+  type: z.literal("netwatch:configure"),
+  enabled: z.boolean(),
+  ttlMs: z.number().int().positive().optional(),
+});
+
+// App -> agent: a batch of the app's own capture events. The element shape is
+// `NetwatchEvent` (netwatch.ts) minus the fields this side stamps itself, and is
+// passthrough on purpose — a bridge must forward an event from a NEWER app
+// without understanding every field, since the whole point is reading what that
+// app saw. `dropped` counts what the app's own budget discarded, so a gap in
+// `seq` is never mistaken for a frame that went missing on the wire.
+const NetwatchEventsMessage = BaseMessage.extend({
+  type: z.literal("netwatch:events"),
+  events: z.array(z.record(z.string(), z.unknown())).max(1000),
+  dropped: z.number().int().nonnegative().optional(),
+  /** The app's own clock when it sent this batch. The bridge subtracts it from
+   *  its own receive time to shift every `at` in the batch onto ONE clock — see
+   *  `Netwatch.ingestRemote`. Absent means no correction, which is right for an
+   *  app on this same machine. */
+  sentAt: z.number().optional(),
+});
+
 export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentHelloMessage,
   PortDetectedMessage,
@@ -2643,6 +2706,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   TerminalSnapshotMessage,
   FileTreeSnapshotRequestMessage,
   FileTreeSnapshotMessage,
+  FileTreeUnchangedMessage,
   PreviewSnapshotRequestMessage,
   PreviewSnapshotMessage,
   RequestMessage,
@@ -2680,9 +2744,14 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   SessionBusFetchMessage,
   SessionBusFetchResultMessage,
   SessionBusAckMessage,
+  NetwatchConfigureMessage,
+  NetwatchEventsMessage,
 ]);
 
 export type AbMessage = z.infer<typeof AbMessageSchema>;
+
+export type NetwatchConfigure = z.infer<typeof NetwatchConfigureMessage>;
+export type NetwatchEvents = z.infer<typeof NetwatchEventsMessage>;
 
 export type TerminalNotificationMessage = z.infer<typeof TerminalNotificationMessage>;
 
@@ -2821,6 +2890,7 @@ export type TerminalSnapshotRequest = z.infer<typeof TerminalSnapshotRequestMess
 export type TerminalSnapshot = z.infer<typeof TerminalSnapshotMessage>;
 export type FileTreeSnapshotRequest = z.infer<typeof FileTreeSnapshotRequestMessage>;
 export type FileTreeSnapshot = z.infer<typeof FileTreeSnapshotMessage>;
+export type FileTreeUnchanged = z.infer<typeof FileTreeUnchangedMessage>;
 export type PreviewSnapshotRequest = z.infer<typeof PreviewSnapshotRequestMessage>;
 export type PreviewSnapshot = z.infer<typeof PreviewSnapshotMessage>;
 export type PreviewUrlEntry = z.infer<typeof PreviewUrlEntrySchema>;
@@ -2865,6 +2935,40 @@ export type SessionBusFetch = z.infer<typeof SessionBusFetchMessage>;
 export type SessionBusFetchResult = z.infer<typeof SessionBusFetchResultMessage>;
 export type SessionBusAck = z.infer<typeof SessionBusAckMessage>;
 
+/**
+ * Types whose wire text must never be recorded verbatim, however loudly an
+ * operator asks for bodies.
+ *
+ * `antgrid watch --bodies` exists to show what crossed a socket, and its output
+ * is printed to a terminal, streamed over `/netwatch`, and appended to an
+ * `--export` file that ends up pasted into bug reports. That is fine for a
+ * `tree:full` and catastrophic for these three: `agent:enableRelay` carries the
+ * account device's Ed25519 PRIVATE key plus `clientSecret` and `licenseToken`;
+ * `agent:question-resolve` is the answer to a question the agent may have
+ * flagged `isSecret`, which the UI masks on the way in; `terminal:input` is
+ * literally the user's keystrokes, password prompts inside the PTY included.
+ * The `tunnel:*` set is the preview proxy's own wire (tunnel-protocol.ts) and
+ * carries the proxied site's request and response headers verbatim — `Cookie`,
+ * `Authorization`, `Set-Cookie`. They are named here rather than there because
+ * one list is the only way this stays checkable; they are also the case that
+ * proves the check must key off the CLAIMED type, since `parseMessageFast`
+ * refuses them and they reach the ring down the `unparseable` path.
+ *
+ * Metadata (type, id, byte count) is still recorded — only the payload is
+ * withheld, so a capture still shows that the frame crossed and when.
+ *
+ * Add a type here in the same commit that gives it a secret-bearing field.
+ */
+export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
+  "agent:enableRelay",
+  "agent:question-resolve",
+  "terminal:input",
+  "tunnel:http-request",
+  "tunnel:http-start",
+  "tunnel:http-chunk",
+  "tunnel:ws-open",
+]);
+
 /** The exhaustive checkout-variable protocol set. Any new filesystem-facing
  * type belongs here (and gets an explicit schema decision + contract test). */
 export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
@@ -2885,7 +2989,7 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "command:run", "command:output", "command:done",
   "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
-  "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "preview:snapshot:request", "preview:snapshot",
+  "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged", "preview:snapshot:request", "preview:snapshot",
   "session:result", "control:result",
 ]);
 
@@ -2980,7 +3084,7 @@ const KNOWN_TYPES = new Set<string>([
   "session:result", "session:updated",
   "client:focus-state",
   "terminal:snapshot:request", "terminal:snapshot",
-  "file:tree:snapshot:request", "file:tree:snapshot",
+  "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged",
   "preview:snapshot:request", "preview:snapshot",
   "request", "response",
   "agent:turn-start", "agent:session-reset", "agent:turn-end",
@@ -2994,6 +3098,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
   "session-bus:assign", "session-bus:raise", "session-bus:transition", "session-bus:cancel", "session-bus:message",
   "session-bus:fetch", "session-bus:fetch:result", "session-bus:ack",
+  "netwatch:configure", "netwatch:events",
 ]);
 
 export function parseMessageFast(raw: string): AbMessage | null {

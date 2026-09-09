@@ -18,6 +18,8 @@ import '../providers/control_plane.dart';
 import '../providers/device_revocation.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/connection_identity.dart';
+import '../providers/device_provisioning.dart';
+import '../providers/projects.dart';
 import '../providers/relay_connection.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
@@ -25,6 +27,7 @@ import '../services/control_plane_client.dart';
 import '../session_bus/session_bus_carrier.dart';
 import '../storage/cached_sessions_store.dart';
 import '../launcher/host_control_client.dart';
+import '../launcher/project_resolve.dart';
 import '../navigation/back_intent.dart';
 import '../util/ab_log.dart';
 import '../design/widgets/ab_window_controls.dart';
@@ -197,6 +200,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     // survives the picker/workspace swap keeps the chain fresh; this is the
     // nearest one.
     ref.watch(agentFocusBinderProvider);
+    ref.watch(checkoutActivationBinderProvider);
     final routed = _buildAgentRouting();
     // Mounted here rather than inside WorkspaceShell because the OS bar is
     // hidden process-wide (initDesktopWindowChrome): any full-window route
@@ -388,6 +392,12 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   // different process" available on the poll path.
   int? _catalogSyncedPort;
 
+  // Host control port [reconcileWithHost] has already run against — like
+  // _catalogSyncedPort, once per host process is enough (it spawns a git
+  // process per local row) and a failure leaves this unset so the next tick
+  // retries.
+  int? _reconciledPort;
+
   // Last-seen per-project advert running-session count, keyed by entryId. A
   // count change is the bridge's "the session list actually changed" signal —
   // it fires when a session starts/exits on the DESKTOP (done→working there is
@@ -523,6 +533,7 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   /// unknown until the bridge or app restarts.
   void _resetForSignOut() {
     _catalogSyncedPort = null;
+    _reconciledPort = null;
     _lastAdvertRunning.clear();
     _lastAdvertStatus.clear();
     _lastAdvertRunningCount.clear();
@@ -791,6 +802,43 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
               .setLocalSessionStatuses(sessionStatuses);
         } catch (_) {
           // Host went away between peek and list — ignore; next tick retries.
+        }
+        // Same 2s cadence as the status poll above — a project opened by a
+        // remote-control session on THIS machine (landing in the bridge's
+        // seen-catalog with no local "Open folder…" ever run) must reach the
+        // drawer in step with its work status, not up to 15s behind it; a
+        // throttled version of this call is what made the two show up
+        // separately.
+        try {
+          final hostUuid = await ref.read(localDeviceUuidProvider.future);
+          if (!mounted) return;
+          final projects = ref.read(projectsProvider.notifier);
+          final generation = projects.hostCatalogGeneration;
+          final known = await client.phonesList();
+          if (!mounted || hostUuid == null) return;
+          // Built over THIS peekHost-derived client, not
+          // localProjectResolverProvider — that provider's ensureHost() would
+          // make every 2s tick capable of spawning a host, breaking this
+          // poll's dead-host-is-a-no-op contract (see its doc above).
+          Future<ResolvedLocalProject> resolve(String folder) =>
+              resolveLocalProject(client, folder);
+          if (_reconciledPort != hostFile.controlPort) {
+            final completed = await projects.reconcileWithHost(
+              resolve: resolve,
+              hostUuid: hostUuid,
+              generation: generation,
+            );
+            if (!mounted) return;
+            if (completed) _reconciledPort = hostFile.controlPort;
+          }
+          await projects.backfillFromHost(
+            known.knownProjects,
+            hostUuid: hostUuid,
+            generation: generation,
+            resolve: resolve,
+          );
+        } catch (_) {
+          // Best-effort — retried on the next tick.
         }
       } finally {
         client.close();

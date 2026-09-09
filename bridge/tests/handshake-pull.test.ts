@@ -205,7 +205,7 @@ function handshakeOn(args: {
 /** Drive a full acked handshake (client-hello → agent-hello → agent-ready →
  *  app:ready → established) on a fresh forTest client and return the pieces a
  *  test needs to keep driving the session. */
-function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phoneEd: ReturnType<typeof ed25519Pair>; attemptId: string; onHandshakeComplete?: () => void }): Handshaked {
+function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phoneEd: ReturnType<typeof ed25519Pair>; attemptId: string; onHandshakeComplete?: () => void; capabilities?: object }): Handshaked {
   const sent: Array<string | Buffer> = [];
   const client = RelayClient.forTest({
     generateKeypair: generateEphemeralKeypair,
@@ -241,7 +241,11 @@ function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phone
   expect(readyMsg.type).toBe("handshake:agent-ready");
   expect(verifyConfirmTag(agentConfirmTag(phoneKeys.confirm), Buffer.from(readyMsg.confirm, "base64"))).toBe(true);
 
-  const appReadyJson = JSON.stringify({ type: "app:ready", attemptId: opts.attemptId, confirm: phoneConfirmTag(phoneKeys.confirm).toString("base64") });
+  const appReadyJson = JSON.stringify({
+    type: "app:ready", attemptId: opts.attemptId,
+    confirm: phoneConfirmTag(phoneKeys.confirm).toString("base64"),
+    ...(opts.capabilities ? { capabilities: opts.capabilities } : {}),
+  });
   injectFrame(client, FrameKind.sealed, phoneTransport.seal(appReadyJson));
   expect(client._handshakeComplete()).toBe(true);
 
@@ -281,6 +285,43 @@ test("duplicate app:ready for the live attemptId is idempotent: single establish
   expect(sent.length).toBe(sentBefore + 1);
   const dup = phoneTransport.open(sent[sent.length - 1] as Buffer);
   expect(JSON.parse(dup!)).toEqual({ type: "established", attemptId });
+});
+
+test("a session carries pullsTree once its app advertises it", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, pullsTree: true },
+  });
+  expect(client.peerSession(PHONE_ID)?.pullsTree).toBe(true);
+});
+
+test("a session carries pullsTree false when its app omits the capability", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true },
+  });
+  expect(client.peerSession(PHONE_ID)?.pullsTree).toBe(false);
+});
+
+test("a session carries pullsTree false for a wrong-typed capability", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { pullsTree: 1 },
+  });
+  expect(client.peerSession(PHONE_ID)?.pullsTree).toBe(false);
+});
+
+test("a torn-down session takes its pullsTree with it — the capability does not outlive the app", () => {
+  // The "nobody is attached" answer is no longer this file's to give: with N
+  // devices the question is whether EVERY established one pulls, which
+  // `everyClientPullsTrees` in agent-core asks of an empty roster.
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, pullsTree: true },
+  });
+  (client as any).dropSession(PHONE_ID);
+  expect(client.peerSession(PHONE_ID)).toBeNull();
+  expect(client.establishedPeers()).toEqual([]);
 });
 
 test("agent rejects a client-hello with an invalid transcript signature", () => {

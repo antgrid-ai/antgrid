@@ -190,6 +190,41 @@ describe("MessageBus.getSnapshot", () => {
     expect(bus.getSnapshot(["tree:full"])).toEqual([]);
   });
 
+  test("retain caches a frame for replay without delivering it", () => {
+    const bus = new MessageBus();
+    const delivered: string[] = [];
+    bus.subscribe({ deliver: (m) => delivered.push(m.type) });
+    const tree = createMessage("tree:full", {
+      projectId: "p1",
+      root: { name: "root", path: "/", type: "directory" as const, children: [] },
+    });
+
+    bus.retain(tree, "control");
+
+    // The pull answers with it; the wire never carried it. This is what makes
+    // the open-time tree free: every client asks for its own copy anyway.
+    expect(bus.getSnapshot(["tree:full"]).map((m) => m.type)).toEqual(["tree:full"]);
+    expect(delivered).toEqual([]);
+  });
+
+  test("a retained frame still counts as the cached one a republish must beat", () => {
+    const bus = new MessageBus();
+    const delivered: string[] = [];
+    bus.subscribe({ deliver: (m) => delivered.push(m.type) });
+    const tree = () => createMessage("tree:full", {
+      projectId: "p1",
+      root: { name: "root", path: "/", type: "directory" as const, children: [] },
+    });
+
+    bus.retain(tree(), "control");
+    // Byte-identical, so the ordinary dedup would swallow it — which is exactly
+    // the case a resync exists to defeat.
+    bus.publish(tree(), "control");
+    expect(delivered).toEqual([]);
+    bus.republish(tree(), "control");
+    expect(delivered).toEqual(["tree:full"]);
+  });
+
   test("exclude drops a type from both the ['*'] and the named answer", () => {
     const bus = new MessageBus();
     const tree = createMessage("tree:full", {

@@ -4,7 +4,9 @@ import '../launcher/host_control_client.dart';
 import '../models/ab_project.dart';
 import '../models/session_target.dart';
 import '../project/project_session_registry.dart';
+import '../storage/pending_forgets_store.dart';
 import '../storage/project_store.dart';
+import '../util/path_basename.dart';
 import 'agent_transport.dart';
 import 'control_plane.dart';
 import 'entry_cleanup.dart';
@@ -16,12 +18,32 @@ final projectStoreProvider = Provider<ProjectStore>((_) {
   throw StateError('projectStoreProvider must be overridden in main()');
 });
 
+/// Synchronous handle to the pending-forgets tombstone. Opened alongside
+/// [projectStoreProvider] in `main()` — see [PendingForgetsStore].
+final pendingForgetsStoreProvider = Provider<PendingForgetsStore>((_) {
+  throw StateError('pendingForgetsStoreProvider must be overridden in main()');
+});
+
 class ProjectsNotifier extends Notifier<List<AbProject>> {
   late final ProjectStore _store;
+  late final PendingForgetsStore _pendingForgets;
+  final Set<String> _removing = {};
+  int _hostCatalogGeneration = 0;
+
+  /// Ids [reconcileWithHost] has folded away (dropped as a duplicate, or
+  /// retired by a rekey) plus any [backfillFromHost] itself has caught as an
+  /// alias. The host catalog still names these forever — a forget is never
+  /// sent for them — so without this memo the alias row would resurrect on
+  /// the very next backfill tick and on every app restart.
+  final Set<String> _foldedIds = {};
+
+  /// Capture before fetching the host catalog; deletion invalidates older polls.
+  int get hostCatalogGeneration => _hostCatalogGeneration;
 
   @override
   List<AbProject> build() {
     _store = ref.watch(projectStoreProvider);
+    _pendingForgets = ref.watch(pendingForgetsStoreProvider);
     return _store.list();
   }
 
@@ -54,90 +76,187 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
     if (changed) state = _store.list();
   }
 
-  /// Drop a row whose id the host does not agree with, for the folder it was
-  /// stamped from.
-  ///
-  /// One case only: a folder picked before the app asked the host what it
-  /// opens as. A linked worktree folds into its repository's primary checkout
-  /// on the bridge, so the path hash the pick used names a project no bridge
-  /// holds — and the row survives as a second drawer entry for the same
-  /// checkout, whose cached sessions keep a session-bus link keyed on an id no
-  /// lead project can ever answer to. Matched on the folder as well as the id,
-  /// so this can only remove the row the resolve it follows was about.
-  ///
-  /// Deliberately NOT [remove]: the host holds nothing under this id, and
-  /// `remove` would ask it to forget — which destroys isolated working
-  /// directories, and would aim that at whatever real project shares the id.
-  Future<void> forgetAlias(String projectId, {required String folder}) async {
-    final all = _store.list();
-    final i = all.indexWhere((p) => p.projectId == projectId);
-    if (i < 0 || all[i].folder != folder) return;
-    await _store.remove(projectId);
-    state = _store.list();
-    await purgeEntryState(ref, projectId);
-    if (ref.read(selectedRegistrationIdProvider) == projectId) {
-      ref.read(selectedTargetProvider.notifier).set(null);
+  /// Registers every project the local bridge knows about but this store
+  /// doesn't — the gap that opens when a session is started from another
+  /// device's remote-control view of THIS machine: the bridge's seen-catalog
+  /// picks it up (so a phone controlling this desktop lists it), but nothing
+  /// ever ran the local "Open folder…" upsert that would land it here, so the
+  /// desktop app's own drawer never showed it. [known] is this machine's full
+  /// catalog (`HostControlClient.phonesList().knownProjects`, warm cores ∪
+  /// seen-catalog hints); [hostUuid] is this device's own host identity
+  /// ([localDeviceUuidProvider]).
+  Future<void> backfillFromHost(
+    List<KnownProject> known, {
+    required String hostUuid,
+    int? generation,
+    Future<ResolvedLocalProject> Function(String folder)? resolve,
+  }) async {
+    final expectedGeneration = generation ?? _hostCatalogGeneration;
+    if (expectedGeneration != _hostCatalogGeneration) return;
+    // Retry-and-guard for anything the app deleted locally but couldn't
+    // confirm the host forgot (see [PendingForgetsStore]). `known` was just
+    // fetched live, so a pending id absent from it is already forgotten
+    // (nothing to retry); one still present gets a fresh forget attempt.
+    // Either way it is captured in [pending] BEFORE the merge below, so this
+    // same call can never re-add a row it is in the middle of retiring.
+    final pending = _pendingForgets.read();
+    for (final id in pending) {
+      if (expectedGeneration != _hostCatalogGeneration) return;
+      if (_removing.contains(id)) continue;
+      final stillKnown = known.any((p) => p.projectId == id);
+      if (!stillKnown || await _forgetOnHost(id)) {
+        if (expectedGeneration != _hostCatalogGeneration) return;
+        await _pendingForgets.remove(id);
+      }
+    }
+    for (final p in missingLocalProjects(
+      locals: _store.list(),
+      known: known,
+      hostUuid: hostUuid,
+    )) {
+      if (expectedGeneration != _hostCatalogGeneration) return;
+      if (pending.contains(p.projectId) ||
+          _removing.contains(p.projectId) ||
+          _pendingForgets.read().contains(p.projectId)) {
+        continue;
+      }
+      if (_foldedIds.contains(p.projectId)) continue;
+      if (resolve != null) {
+        // The host catalog still names a folded alias forever (nobody ever
+        // forgets it) — resolve it ONCE and memoize so a stale row doesn't
+        // reappear on the next tick or after every restart. One git spawn per
+        // alias per app process, not one per tick.
+        final ResolvedLocalProject resolved;
+        try {
+          resolved = await resolve(p.folder);
+        } catch (_) {
+          continue;
+        }
+        if (expectedGeneration != _hostCatalogGeneration) return;
+        if (resolved.projectId != p.projectId) {
+          _foldedIds.add(p.projectId);
+          continue;
+        }
+      }
+      await upsert(p);
     }
   }
 
-  /// Re-key a row the host does not open under the id it is stored by.
+  /// One-time-per-host reconciliation for rows this app minted before a host
+  /// resolver existed to fold managed-checkout folders onto their primary
+  /// repository's id: for every LOCAL row, re-resolve its folder and either
+  /// drop it (a survivor with the resolved id already exists) or rekey it (no
+  /// survivor — the row itself just needs a new id). [resolve] is injected —
+  /// not a `HostControlClient` — so callers control spawn behaviour (the
+  /// widget seam may spawn a host; the poll in `app_shell.dart` must not) and
+  /// tests can substitute a fake.
   ///
-  /// The mirror of [forgetAlias], aimed at a row already in use rather than one
-  /// just picked. A folder picked before any host was warm keeps the selected
-  /// path's hash — `LocalAgentLauncher.resolveProject` peeks, so it answers
-  /// nothing then — and nothing ever re-resolves it afterwards: only a re-pick
-  /// asks again, and selecting the row from the drawer never does. The id is not
-  /// private to the drawer: it is the session-cache key, and `_leadRef`
-  /// (add_machine_dialog.dart) publishes it as this machine's identity, where a
-  /// peer stores and renders it for the life of the membership. So an alias that
-  /// survives one open survives every one after it.
+  /// Never touches a row hosted elsewhere, never stops live sessions (only
+  /// evicts the warm registry entry — the survivor reopens the same
+  /// worktree), and never calls `_forgetOnHost`/`PendingForgetsStore` (forget
+  /// destroys the managed worktree and session store on the host; the
+  /// resolved-away row's checkout is still in active use by the survivor).
+  /// Generation-guarded exactly like [backfillFromHost] — captures
+  /// [generation] once and re-checks it before starting work on each row,
+  /// bailing without bumping it itself. Once a row's fold actually begins
+  /// (the store row is about to be removed) it runs to completion regardless
+  /// of a concurrent generation bump: a mid-fold abort would delete the row
+  /// without ever reinserting it under its resolved id, which is worse than
+  /// the stale-catalog race the guard exists to avoid.
   ///
-  /// The repo path comes over with the id, and the label with it: the Capability
-  /// Card is read from this row's folder, so a row re-keyed but left pointing at
-  /// the worktree would still answer the worktree's branch.
-  ///
-  /// Matched on the folder as well as the id, for [forgetAlias]'s reason: this
-  /// may only touch the row the resolve it follows was about.
-  Future<void> adoptResolvedId({
-    required String staleId,
-    required String folder,
-    required ResolvedLocalProject resolved,
+  /// Returns `true` iff the sweep ran to completion; `false` iff it bailed
+  /// early on a generation mismatch — callers gate one-time-per-host bookkeeping
+  /// (`app_shell.dart`'s `_reconciledPort`) on that, so an aborted sweep is
+  /// retried on the next tick instead of being mistaken for a finished one.
+  /// Idempotent: a row already folded is gone from the store, so a second run
+  /// sees nothing left to do for it.
+  Future<bool> reconcileWithHost({
+    required Future<ResolvedLocalProject> Function(String folder) resolve,
+    required String hostUuid,
+    int? generation,
   }) async {
-    if (resolved.projectId == staleId) return;
-    final all = _store.list();
-    final i = all.indexWhere((p) => p.projectId == staleId);
-    if (i < 0 || all[i].folder != folder) return;
-    final stale = all[i];
-    final wasSelected = ref.read(selectedRegistrationIdProvider) == staleId;
-    // A row already standing under the resolved id is the real one and is left
-    // exactly as it is — it may have been opened more recently than the alias,
-    // and adopting the alias's timestamps over it would reorder the drawer for
-    // no reason. Only the alias goes.
-    if (!all.any((p) => p.projectId == resolved.projectId)) {
-      await upsert(
-        AbProject(
+    final expectedGeneration = generation ?? _hostCatalogGeneration;
+    for (final row in _store.list()) {
+      if (expectedGeneration != _hostCatalogGeneration) return false;
+      if (!row.isLocalFor(hostUuid)) continue;
+      if (_removing.contains(row.projectId)) continue;
+
+      final ResolvedLocalProject resolved;
+      try {
+        resolved = await resolve(row.folder);
+      } catch (_) {
+        continue;
+      }
+      if (expectedGeneration != _hostCatalogGeneration) return false;
+      if (resolved.projectId == row.projectId) continue;
+
+      AbProject? survivor;
+      for (final p in _store.list()) {
+        if (p.projectId == resolved.projectId) {
+          survivor = p;
+          break;
+        }
+      }
+      final wasSelected =
+          ref.read(selectedRegistrationIdProvider) == row.projectId;
+
+      // Atomic from here: evict the warm registry entry (never the live
+      // sessions — see doc above), remove the old row and purge its
+      // per-entry caches, then land the row in its final state (dropped or
+      // rekeyed). No generation re-check inside this block — see doc above.
+      await ref
+          .read(projectSessionRegistryProvider.notifier)
+          .forceEvictAndSettle(row.projectId);
+      await _store.remove(row.projectId);
+      state = _store.list();
+      await purgeEntryState(ref, row.projectId);
+      _foldedIds.add(row.projectId);
+
+      if (survivor != null) {
+        // DROP: the resolved id already has a row — this one was a duplicate.
+        if (wasSelected) {
+          ref
+              .read(selectedTargetProvider.notifier)
+              .set(LocalProject(survivor.projectId));
+        }
+      } else {
+        // REKEY: no existing row to fold onto — reinsert this one under its
+        // resolved id. Cache handling is delete (above), not move: nothing
+        // carries the old cached sessions/status over to the new id.
+        final rekeyed = AbProject(
           projectId: resolved.projectId,
           folder: resolved.repoPath,
-          displayName: resolved.label,
-          hostDeviceUuid: stale.hostDeviceUuid,
-          hostMachineName: stale.hostMachineName,
-          lastOpenedAt: stale.lastOpenedAt,
-        ),
-      );
+          displayName: pathBasename(resolved.repoPath),
+          hostDeviceUuid: row.hostDeviceUuid,
+          hostMachineName: row.hostMachineName,
+          lastOpenedAt: row.lastOpenedAt,
+        );
+        await upsert(rekeyed);
+        if (wasSelected) {
+          ref
+              .read(selectedTargetProvider.notifier)
+              .set(LocalProject(rekeyed.projectId));
+        }
+      }
     }
-    await forgetAlias(staleId, folder: folder);
-    // `forgetAlias` clears a selection it invalidates, so the workspace is
-    // pointing at nothing by here. Land it on the row that replaced the alias
-    // rather than leaving the user on an empty shell for a project that is
-    // still open.
-    if (wasSelected) {
-      ref.read(selectedTargetProvider.notifier).set(
-        LocalProject(resolved.projectId),
-      );
-    }
+    return true;
   }
 
   Future<void> remove(String id) async {
+    if (!_removing.add(id)) return;
+    _hostCatalogGeneration++;
+    try {
+      // Persist before the local row disappears. The poll must neither restore
+      // it during cleanup nor retry the host forget before eviction settles.
+      await _pendingForgets.add(id);
+      await _remove(id);
+    } finally {
+      _removing.remove(id);
+      _hostCatalogGeneration++;
+    }
+  }
+
+  Future<void> _remove(String id) async {
     // Only stop active sessions when the project is already warm — warming a
     // cold project just to stop sessions would block on the relay connect +
     // E2E handshake (3-5s if the agent is offline), which is exactly what
@@ -174,7 +293,9 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
     // is reopened — same projectId, same store on disk. This also destroys the
     // project's isolated working directories, which is why every caller of
     // `remove` must confirm first — see `projectForget`'s contract.
-    await _forgetOnHost(id);
+    if (await _forgetOnHost(id)) {
+      await _pendingForgets.remove(id);
+    }
     // If the removed project was active, clear the selection so the App
     // doesn't sit on a workspace shell with no transport.
     final selected = ref.read(selectedRegistrationIdProvider);
@@ -191,22 +312,26 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
   /// host live (it was spawned when the project opened), so this connects. When
   /// no host is running (remote-only user, or it already exited) we skip rather
   /// than boot one — that would add delete latency AND leave a host the
-  /// teardown-on-close must then reap. Worst case the on-disk store lingers until
-  /// a later delete that coincides with a live host.
-  Future<void> _forgetOnHost(String id) async {
+  /// teardown-on-close must then reap. Returns whether the host actually
+  /// confirmed the forget; a caller that got `false` back must keep the id in
+  /// [PendingForgetsStore] so [backfillFromHost] both retries it later and
+  /// refuses to resurrect it meanwhile.
+  Future<bool> _forgetOnHost(String id) async {
     HostControlClient? client;
     try {
       final host = await ref
           .read(hostControllerProvider)
           .peekHost()
           .timeout(const Duration(seconds: 5));
-      if (host == null) return; // no live host — nothing to reach.
+      if (host == null) return false; // no live host — nothing to reach.
       client = HostControlClient(port: host.controlPort, token: host.token);
       await client.projectForget(id).timeout(const Duration(seconds: 5));
+      return true;
     } catch (_) {
       // Host down, slow, or version-skewed (no project:forget verb) — the
-      // on-disk store survives until the host next runs, but the app-side delete
-      // stands. Nothing actionable here.
+      // on-disk store survives until a retry reaches a live host. Nothing
+      // actionable here.
+      return false;
     } finally {
       client?.close();
     }
@@ -242,3 +367,26 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
 final projectsProvider = NotifierProvider<ProjectsNotifier, List<AbProject>>(
   ProjectsNotifier.new,
 );
+
+/// Pure helper behind [ProjectsNotifier.backfillFromHost]: [known] entries
+/// whose id isn't already in [locals], turned into rows ready to [upsert].
+/// A hint with no `path` is skipped — nothing to open it with.
+List<AbProject> missingLocalProjects({
+  required List<AbProject> locals,
+  required List<KnownProject> known,
+  required String hostUuid,
+}) {
+  final existing = {for (final p in locals) p.projectId};
+  return [
+    for (final p in known)
+      if (!existing.contains(p.projectId) && p.path != null)
+        AbProject(
+          projectId: p.projectId,
+          folder: p.path!,
+          displayName: p.label ?? pathBasename(p.path!),
+          hostDeviceUuid: hostUuid,
+          hostMachineName: '',
+          lastOpenedAt: DateTime.tryParse(p.lastActiveAt ?? '') ?? DateTime.now(),
+        ),
+  ];
+}

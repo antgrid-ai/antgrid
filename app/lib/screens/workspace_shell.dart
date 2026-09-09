@@ -33,6 +33,7 @@ import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
 import '../providers/demo_mode.dart';
 import '../providers/device_provisioning.dart' show localDeviceUuidProvider;
+import '../providers/local_transport_fault.dart';
 import '../providers/new_session_picker.dart'
     show newSessionStartInFlightProvider;
 import '../providers/notification_route_apply.dart';
@@ -49,6 +50,7 @@ import '../providers/ui_attention_providers.dart';
 import '../providers/visible_surface.dart';
 import '../services/app_settings_service.dart';
 import '../services/local_notification_service.dart';
+import '../services/pending_reply.dart' show SessionDownException;
 import '../services/push_background_handler.dart'
     show decodePush, pushDataOf, pushDedupKey, routeOfPush;
 import '../services/push_identity.dart';
@@ -101,6 +103,22 @@ const double _kBackOverscrollThreshold = 48.0;
 /// `ProjectPreferences.panelMode`, so reordering these is safe; renaming one
 /// drops that stored preference back to unchosen (see `_PanelModeNames` there).
 enum _PanelMode { normal, contextHidden, contextExpanded }
+
+/// Downgrades a stored/observed panel-mode name away from `contextExpanded`
+/// before it can seed anything other than the session that actually chose
+/// it — `normal` unchanged otherwise.
+///
+/// `contextExpanded` has no collapsed agent stub and no restore affordance
+/// but its own toggle (`_buildPanels`'s `contextExpanded` case) — a mode
+/// meant to be an explicit, momentary choice for the session that made it,
+/// not a layout to inherit. Without this, expanding the context panel in one
+/// session persists into `ProjectPreferences.panelMode` via [_updatePrefs],
+/// and every *other* uninitialized session in the project — notably a
+/// freshly started one — seeds itself from that same project default
+/// (`_applyPrefs`'s else-branch, and the `activeSessionUiKeyProvider`
+/// listener in `build()`) and opens with its agent panel already gone.
+String? _seedablePanelModeName(String? name) =>
+    name == _PanelMode.contextExpanded.name ? _PanelMode.normal.name : name;
 
 /// Root layout orchestrator.
 ///
@@ -646,7 +664,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         _restoreSessionUi(saved);
       } else {
         final selectedView = _selectedView;
-        final panelMode = _panelMode?.name;
+        final panelMode = _seedablePanelModeName(_panelMode?.name);
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
           final current = ref.read(sessionWorkspaceStateProvider(key));
@@ -698,8 +716,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         workspaceViewIndex: _selectedView.index,
         // Null while unchosen, which copyWith reads as "leave alone" — so a
         // split-drag or tab switch never pins the derived default as if the
-        // user had picked it.
-        panelMode: _panelMode?.name,
+        // user had picked it. `contextExpanded` is downgraded to `normal`
+        // rather than passed straight through — see [_seedablePanelModeName]
+        // — so expanding THIS session's context panel can never become the
+        // project-wide default a different, freshly started session opens
+        // into with its agent panel already gone.
+        panelMode: _seedablePanelModeName(_panelMode?.name),
       ),
     );
   }
@@ -750,9 +772,20 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     List<SessionEntry> list;
     try {
       list = await svc.requestList();
+    } on SessionDownException {
+      // The transport went down mid-load — an owner takeover, a host restart,
+      // a relay stream drop. Nothing is wrong with the project and there is
+      // nothing to tell the user: `SessionsService`'s `sessions:list` hydrator
+      // re-runs the moment the transport re-establishes and refills the panel.
+      // Latching the banner here would outlive that recovery, because the only
+      // thing that clears it is a user tap (`ab_banner.dart`).
+      if (mounted && ref.read(selectedRegistrationIdProvider) == triggeredFor) {
+        ref.read(pendingActiveSessionIdProvider.notifier).set(null);
+        ref.read(pendingSessionStartSuppressedIdProvider.notifier).set(null);
+      }
+      return;
     } catch (e) {
-      // Transport switched / service stopped mid-flight is benign — the
-      // next project-open will retry. But a genuine error here means the
+      // A genuine error here means the
       // workspace is going to render with an empty sessions list and
       // unresponsive "+ new session" — surface it inline so the user has
       // an actionable next step instead of staring at a blank panel.
@@ -777,6 +810,16 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     }
     if (!mounted) return;
     if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
+
+    // A load that succeeded retires the notice an earlier failed load left
+    // behind. Nothing else retires it — the banner is cleared only by a user
+    // tap — so without this a project that has fully recovered keeps offering
+    // "switch projects and back to retry" over a panel that already reloaded.
+    // Scoped to this screen's own code so a relay notice (license, auth) that
+    // a successful session list says nothing about is left alone.
+    if (ref.read(relayErrorBannerProvider)?.code == 'SESSIONS') {
+      ref.read(relayErrorBannerProvider.notifier).set(null);
+    }
 
     // 1. Pending session-id (from a cross-project session-row click).
     final pendingId = ref.read(pendingActiveSessionIdProvider);
@@ -1019,7 +1062,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           selectedView: idx >= 0 && idx < WorkspaceView.values.length
               ? WorkspaceView.values[idx]
               : WorkspaceView.files,
-          panelMode: prefs.panelMode,
+          panelMode: _seedablePanelModeName(prefs.panelMode),
         );
         ref
             .read(sessionWorkspaceStateProvider(next).notifier)
@@ -1143,9 +1186,16 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // during the refresh is what flashed the launch-error screen for a beat
     // before the workspace appeared. Gate on !isLoading so the error screen
     // shows only once the latest attempt has actually failed.
+    // A fault ranks like a transport error: it fires from a LIVE local
+    // transport whose socket then tore down (see local_transport_fault.dart),
+    // which `transportAsync` itself has no way to observe — it stays healthy
+    // AsyncData throughout.
+    final localFault = activeProjectId == null
+        ? null
+        : ref.watch(localTransportFaultProvider(activeProjectId));
     final transportError = transportAsync.isLoading
         ? null
-        : transportAsync.error;
+        : (transportAsync.error ?? localFault);
     final sessionError = (sessionAsync == null || sessionAsync.isLoading)
         ? null
         : sessionAsync.error;
@@ -1401,6 +1451,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       onRetry: activeProjectId == null
           ? null
           : () {
+              // Cleared before anything else: a fault leaves the transport
+              // provider in healthy AsyncData, so a rebuild that read it back
+              // would land straight back on this same blocking screen.
+              ref
+                  .read(localTransportFaultProvider(activeProjectId).notifier)
+                  .clear();
               // Drop the static dedupe entry too: any prior failure has
               // settled by the time this screen renders, so it's already
               // gone, but invalidating the providers also guarantees fresh
@@ -3130,6 +3186,28 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
             'in the title bar — then Retry.',
         retryLabel: 'retry',
       );
+    }
+    // A working transport whose socket tore down AFTER the handshake — see
+    // local_transport_fault.dart. Distinct from the handshake exceptions
+    // below, which only ever fire before a session existed at all.
+    if (e is LocalTransportFault) {
+      return e.closeCode == 4409
+          ? (
+              headline: 'another antgrid window took over this project',
+              tip:
+                  'Another running instance of Antgrid opened this same '
+                  'project folder and took ownership of the local agent. '
+                  'Close the other window and Retry.',
+              retryLabel: 'retry',
+            )
+          : (
+              headline: 'connection to the local bridge dropped',
+              tip:
+                  'The socket to the local agent closed unexpectedly '
+                  '(close code ${e.closeCode}). Retry to reconnect; if it '
+                  'persists, open the log folder and check host.log.',
+              retryLabel: 'retry',
+            );
     }
     if (e is LocalTransportHandshakeException && e.closeCode == 4409) {
       return (

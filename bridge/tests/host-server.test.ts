@@ -124,7 +124,7 @@ test("HostServer.open accepts the resolved id and canonicalizes the path", async
   expect(host.list().map((entry) => entry.projectId)).toContain(projectId);
 });
 
-test("HostServer.open never creates a core under a linked worktree's own hash", async () => {
+test("HostServer.open gives a user-made linked worktree its own project, not the primary's", async () => {
   const runGit = async (cwd: string, args: string[]) => {
     const proc = Bun.spawn(["git", ...args], { cwd, stdout: "ignore", stderr: "pipe" });
     if (await proc.exited !== 0) throw new Error(await new Response(proc.stderr).text());
@@ -140,15 +140,18 @@ test("HostServer.open never creates a core under a linked worktree's own hash", 
   const linked = join(repo, "linked");
   await runGit(repo, ["worktree", "add", "-b", "linked", linked]);
 
-  await expect(host.open(computeProjectId(linked), linked, "local"))
+  // Named by the PRIMARY's id, this mismatches: a worktree the user made
+  // outside Antgrid's own `wt/` root is not folded onto the primary, unlike a
+  // managed checkout.
+  await expect(host.open(computeProjectId(repo), linked, "local"))
     .rejects.toMatchObject({ code: "PROJECT_ID_MISMATCH" });
 
-  // Named by the repository's id, the same folder opens — onto the primary
-  // checkout, which is what "main" means for every checkout-scoped surface.
-  const opened = await host.open(computeProjectId(repo), linked, "local");
+  // Named by its own id, the linked worktree opens as a project of its own —
+  // its files, not the primary's.
+  const opened = await host.open(computeProjectId(linked), linked, "local");
   expect(opened.connect?.port).toBeGreaterThan(0);
   expect(host.list()).toHaveLength(1);
-  expect(host.list()[0].path?.toLowerCase()).not.toContain("linked");
+  expect(host.list()[0].path?.toLowerCase()).toContain("linked");
 });
 
 test("concurrent open() of the same project coalesces into one core (no orphan)", async () => {

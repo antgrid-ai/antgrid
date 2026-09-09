@@ -19,6 +19,9 @@ pluginManagement {
 
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
+    // Pin both explicitly. Gradle's built-in Kotlin migration downgrades KGP to
+    // its embedded 2.0.0, below Flutter's floor, and transitive AndroidX
+    // hard-requires AGP >= 8.9.1.
     id("com.android.application") version "8.11.1" apply false
     id("org.jetbrains.kotlin.android") version "2.2.20" apply false
     id("com.google.gms.google-services") version "4.4.2" apply false

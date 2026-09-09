@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -7,13 +5,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../config/storage_scope.dart';
 import '../design/widgets/ab_button.dart';
-import '../launcher/host_control_client.dart' show ResolvedLocalProject;
+import '../launcher/host_control_client.dart';
 import '../launcher/project_id.dart';
 import '../models/ab_project.dart';
 import '../providers/agent_transport.dart';
+import '../providers/cached_sessions.dart';
+import '../providers/control_plane.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/projects.dart';
+import '../providers/sessions.dart';
+import '../util/path_basename.dart';
 
 bool _isDesktopPlatform() =>
     defaultTargetPlatform == TargetPlatform.windows ||
@@ -34,7 +37,9 @@ Future<String> _resolveLocalHostUuid(ProviderContainer ref) async {
 
   // Fall back to a persisted anonymous UUID so the project is still
   // correctly identified as local even when the user isn't signed in.
-  final prefs = SharedPreferencesAsync();
+  final prefs = SharedPreferencesAsync(
+    options: desktopSharedPreferencesOptions,
+  );
   final existing = await prefs.getString(kLocalHostUuidKey);
   if (existing != null) return existing;
   final fresh = const Uuid().v4();
@@ -77,66 +82,77 @@ Future<String?> registerPickedFolder(
   String folder, {
   bool select = true,
 }) async {
-  // Asked of the host, never derived here: a linked worktree opens as its
-  // repository's primary checkout, and `computeProjectId` — which hashes the
-  // selected path — is only the answer for a host too old to have the verb.
-  // The id persisted here becomes the drawer entry, the session cache key and
-  // the lead's identity on the session bus (`_leadRef`, add_machine_dialog),
-  // so a row that disagrees with the host is one the peer machine records
-  // forever.
-  //
-  // Swallowed on failure rather than surfaced: a pick that cannot reach the
-  // host still opens the folder, and the path hash is exactly what this did
-  // before the verb existed.
-  ResolvedLocalProject? resolved;
+  // Ask the host first: a folder under a managed worktree root must fold onto
+  // its repository's PRIMARY project row, not mint a second one from the raw
+  // path hash — see project-resolver.ts. Any failure (no host, wedged host,
+  // version-skewed bridge) falls back to the app-side hash so a pick always
+  // registers something.
+  ResolvedLocalProject resolved;
   try {
-    resolved = await ref.read(localAgentLauncherProvider).resolveProject(folder);
+    resolved = await ref.read(localProjectResolverProvider)(folder);
   } catch (_) {
-    resolved = null;
+    resolved = ResolvedLocalProject(
+      projectId: await computeProjectId(folder),
+      repoPath: folder,
+      selectedPath: folder,
+      label: pathBasename(folder),
+      isGitRepository: false,
+      kind: 'plain',
+    );
   }
-  final id = resolved?.projectId ?? await computeProjectId(folder);
-  // The repo, not the folder that reached it: the checkout the host serves
-  // files, git and sessions from is the one the row should name, or the drawer
-  // labels a worktree over a workspace that is not it.
-  final repoPath = resolved?.repoPath ?? folder;
-  final label = resolved?.label ?? _basename(folder);
-  if (resolved != null) {
-    final selectedHash = await computeProjectId(folder);
-    if (selectedHash != id) {
-      await ref
-          .read(projectsProvider.notifier)
-          .forgetAlias(selectedHash, folder: folder);
-    }
-  }
+  final id = resolved.projectId;
+  final repoPath = resolved.repoPath;
   final hostUuid = await _resolveLocalHostUuid(ref);
   final projects = ref.read(projectsProvider);
   final existingMatches = projects.where((p) => p.projectId == id).toList();
-  if (existingMatches.isNotEmpty) {
-    final existing = existingMatches.first;
-    existing.lastOpenedAt = DateTime.now();
-    // Re-stamp the host identity, not just the timestamp. The uuid this device
-    // answers with can move under an already-stored row — a folder opened while
-    // sign-in provisioning was still in flight keeps the anonymous uuid the
-    // account record then replaced — and a row left on the old one reads as
-    // hosted elsewhere forever: no working-directory actions, and a "Remote
-    // host" chip for a folder on this disk. The pick is the proof of locality;
-    // the user just named this folder on this machine.
-    existing.hostDeviceUuid = hostUuid;
-    await ref.read(projectsProvider.notifier).upsert(existing);
-    if (select) selectProject(ref, id);
-    return id;
-  }
+  final existing = existingMatches.isEmpty ? null : existingMatches.first;
+  // `folder`/`displayName` are rebuilt from `repoPath` unconditionally
+  // (never copied off `existing`) so a row folded from a stale checkout path
+  // onto its primary gets corrected to the repo root, same as a rekey in
+  // `ProjectsNotifier.reconcileWithHost`.
+  //
+  // Re-stamp the host identity too, not just the timestamp. The uuid this
+  // device answers with can move under an already-stored row — a folder
+  // opened while sign-in provisioning was still in flight keeps the
+  // anonymous uuid the account record then replaced — and a row left on the
+  // old one reads as hosted elsewhere forever: no working-directory actions,
+  // and a "Remote host" chip for a folder on this disk. The pick is the proof
+  // of locality; the user just named this folder on this machine.
   final project = AbProject(
     projectId: id,
     folder: repoPath,
-    displayName: label,
+    displayName: pathBasename(repoPath),
     hostDeviceUuid: hostUuid,
-    hostMachineName: '',
+    hostMachineName: existing?.hostMachineName ?? '',
     lastOpenedAt: DateTime.now(),
   );
   await ref.read(projectsProvider.notifier).upsert(project);
-  if (select) selectProject(ref, id);
+  if (select) {
+    _seedPendingCheckoutSession(ref, id, resolved.checkoutId);
+    selectProject(ref, id);
+  }
   return id;
+}
+
+/// A managed-checkout pick resolves onto its repository's primary project row
+/// — folding a second row into the first would otherwise leave the user
+/// staring at main's session list instead of the checkout they just picked.
+/// Seeding [pendingActiveSessionIdProvider] BEFORE [selectProject] (mirrors
+/// `recent_sessions.dart`'s `openRecentSession`) lands focus on the matching
+/// cached session instead.
+void _seedPendingCheckoutSession(
+  ProviderContainer ref,
+  String projectId,
+  String? checkoutId,
+) {
+  if (checkoutId == null) return;
+  final cached = ref.read(cachedSessionsStoreProvider).get(projectId);
+  for (final session in cached) {
+    if (session.checkoutId == checkoutId) {
+      ref.read(pendingActiveSessionIdProvider.notifier).set(session.id);
+      return;
+    }
+  }
 }
 
 /// Desktop-only "Open Folder" button. Thin wrapper over [openFolderPicker].
@@ -151,13 +167,4 @@ class OpenFolderButton extends ConsumerWidget {
       onTap: () => openFolderPicker(ref.container),
     );
   }
-}
-
-/// Last non-empty path segment. Avoids pulling in `package:path` for one call.
-String _basename(String folder) {
-  final parts = folder
-      .split(Platform.pathSeparator)
-      .where((s) => s.isNotEmpty)
-      .toList();
-  return parts.isEmpty ? folder : parts.last;
 }

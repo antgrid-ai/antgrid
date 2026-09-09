@@ -24,7 +24,12 @@ function fakeRemoteDeps(): { deps: ProjectCoreRemoteDeps; calls: Array<{ bus: Me
   const deps: ProjectCoreRemoteDeps = {
     attachStream: (bus, opts) => {
       calls.push({ bus, opts });
-      const handle: StreamHandle = { streamId: "stream-1", detach: () => {}, sendTunnel: () => {}, sendTo: () => true };
+      const handle: StreamHandle = {
+        streamId: "stream-1",
+        detach: () => {},
+        sendTunnel: async () => "sent" as const,
+        sendTo: async () => "sent" as const,
+      };
       return handle;
     },
     establishedPeers: () => [],

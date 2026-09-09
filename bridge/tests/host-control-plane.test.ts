@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
+import { installFakeSession } from "./fake-session";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
 import { hostFilePath, readHostFile } from "../src/host-discovery";
@@ -176,18 +177,7 @@ test("onPeerOnline re-advertises to a revived session (no fresh handshake fires)
 
   // Mirrors relay-client.ts's `peer-online` handler: the session is reachable
   // again (→ phonePubkey via phoneEd25519ByDeviceId) before the callback fires.
-  (client as any).sessions.set("phone-1", {
-    peerId: "phone-1",
-    reachable: true,
-    attemptId: "a1",
-    transport: { seal: (plaintext: string) => Buffer.from(plaintext, "utf8") },
-    sessionKeys: { a2p: Buffer.alloc(32), p2a: Buffer.alloc(32), confirm: Buffer.alloc(32) },
-    checkoutRouting: false,
-    unreachableSince: 0,
-    lastSealedRecvAt: Date.now(),
-    missedPongs: 0,
-    frag: { accept: () => false, dispose: () => {} },
-  });
+  installFakeSession(client, "phone-1");
   (client as any).phoneEd25519ByDeviceId.set("phone-1", "pub-1");
   client.opts.onPeerOnline?.("phone-1");
 

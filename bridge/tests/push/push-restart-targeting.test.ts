@@ -82,7 +82,12 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
       // exactly the post-restart state the regression below is about.
       attachStream: (b) => {
         bus = b;
-        return { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendTo: () => true };
+        return {
+          streamId: "s1",
+          detach: () => {},
+          sendTunnel: async () => "sent" as const,
+          sendTo: async () => "sent" as const,
+        };
       },
       establishedPeers: () => [],
       peerSession: () => null,

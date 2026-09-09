@@ -31,6 +31,7 @@ import 'auth.dart';
 import 'connection_identity.dart';
 import 'demo_mode.dart';
 import 'device_provisioning.dart';
+import 'local_transport_fault.dart';
 import 'projects.dart';
 import 'provider_retry.dart';
 import 'providers.dart';
@@ -66,7 +67,15 @@ void selectProject(ProviderContainer ref, String projectId) {
     ref.read(selectedTargetProvider.notifier).set(target);
   }
   if (priorId == projectId) {
-    if (ref.read(agentTransportProvider).hasError) {
+    // A local-transport fault (see local_transport_fault.dart) leaves the
+    // transport provider in healthy AsyncData, so `hasError` alone would miss
+    // a re-tap meant to retry it — clear it before invalidating, or the
+    // rebuilt workspace reads it straight back off the stale fault state.
+    final hadFault = ref.read(localTransportFaultProvider(projectId)) != null;
+    if (ref.read(agentTransportProvider).hasError || hadFault) {
+      if (hadFault) {
+        ref.read(localTransportFaultProvider(projectId).notifier).clear();
+      }
       ref.invalidate(agentTransportProvider);
       ref.invalidate(agentTransportForProvider(projectId));
     }
@@ -570,38 +579,6 @@ Future<AgentTransport?> _buildLocalTransportFor(
     relayUrl: device != null ? ref.read(defaultRelayUrlProvider) : null,
     telemetryEnabled: ref.read(telemetryEnabledProvider),
   );
-  // The host opened this folder as a project this row does not name. That is a
-  // linked worktree folding into its repository's primary checkout
-  // (`resolveProject`, bridge/src/worktrees/project-resolver.ts) under a row
-  // whose id is the selected path's hash — what a folder picked before any host
-  // was warm leaves behind, since the pick only PEEKS for one. Everything keeps
-  // working, which is the problem: the transport is keyed by the row while the
-  // sessions live under the host's id, and `_leadRef` (add_machine_dialog.dart)
-  // publishes the row's id to a peer machine as this machine's identity.
-  //
-  // Repaired here rather than at the pick because this is the first moment a
-  // host is guaranteed awake, and detached because the repair replaces the very
-  // registration this build is for: it must not run inside it.
-  if (result.projectId != projectId) {
-    final projects = ref.read(projectsProvider.notifier);
-    detached(
-      'AgentTransport',
-      're-keying a project row the host resolved elsewhere',
-      () async {
-        final resolved = await launcher.resolveProject(folder);
-        // Only the answer this open already acted on. A second resolve that
-        // says something else is a folder that moved under us, and re-keying to
-        // it would name a project this transport was never opened for.
-        if (resolved == null || resolved.projectId != result.projectId) return;
-        await projects.adoptResolvedId(
-          staleId: projectId,
-          folder: folder,
-          resolved: resolved,
-        );
-      },
-    );
-  }
-
   // NOTE: we deliberately do NOT terminate the host on app quit, even when this
   // process spawned it (result.owned). The host is a machine-level singleton
   // daemon: it persists across app runs (see HostController — attach via
@@ -610,6 +587,13 @@ Future<AgentTransport?> _buildLocalTransportFor(
   // here would drop every project's core and any paired phone. In dev, stale
   // hosts are reaped+respawned by HostController on the next launch.
   ref.onDispose(result.transport.dispose);
+
+  // A fresh, healthy transport clears any stale fault. Retry and the same-
+  // project re-tap already clear it themselves, but this is the only rebuild
+  // that also covers the paths that never do (host restart, LRU re-warm,
+  // registry eviction) — without it a since-recovered project stays pinned on
+  // the blocking error screen over the very reconnect it was waiting for.
+  ref.read(localTransportFaultProvider(projectId).notifier).clear();
 
   // Listen for structured stderr events from the spawned agent process.
   // For orphan-attached agents result.events is an empty stream (no-op).
@@ -638,6 +622,26 @@ Future<AgentTransport?> _buildLocalTransportFor(
         .set(RelayErrorBanner(code, msg));
   });
   ref.onDispose(errSub.cancel);
+
+  // The one consumer of a LocalTransport's post-ready teardown: a 4409
+  // (another app superseded ownership) or any other close leaves the
+  // transport dead with no reconnect (see LocalTransport.onDone) and nothing
+  // else watches `stateChanges` to say so.
+  final t = result.transport;
+  final faultSub = t.stateChanges.listen((s) {
+    if (s != TransportState.error && s != TransportState.disconnected) return;
+    ref
+        .read(localTransportFaultProvider(projectId).notifier)
+        .set(
+          LocalTransportFault(
+            closeCode: t.lastCloseCode,
+            message: t.lastCloseCode == 4409
+                ? 'Another Antgrid window took over this project.'
+                : 'The connection to the local bridge dropped.',
+          ),
+        );
+  });
+  ref.onDispose(faultSub.cancel);
 
   return result.transport;
 }

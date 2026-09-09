@@ -15,6 +15,13 @@ test("no horizontal overflow on mobile", async ({ page }) => {
   expect(overflow).toBe(false);
 });
 
+// Anchor hrefs are skipped because a fragment is never sent over HTTP; the ids
+// they name are pinned in contracts.spec.ts instead. Everything else is fetched
+// for real — which since the download route became a path rather than /#download
+// now includes /download and each of its ?platform= links, from all three start
+// pages. No filter change was needed for that: they are ordinary "/" hrefs and
+// the query is inert to a static server. It is the first time a build of the
+// site has proved that its own download URL resolves.
 test("internal links resolve (no dangling hrefs to missing pages)", async ({ page }) => {
   const removedPages = ["/docs"];
 

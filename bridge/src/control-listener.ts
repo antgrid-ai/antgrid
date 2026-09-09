@@ -1,5 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { ControlRequestSchema, type ControlRequest, type ControlResponse } from "./control-protocol";
+import { netwatch } from "./netwatch";
+import { netwatchUiPage } from "./netwatch-ui-page";
+import { redeemUiTicket, validateUiSession } from "./netwatch-ui-session";
 import { logger } from "./logger";
 const log = logger.child({ component: "control-listener" });
 
@@ -16,15 +19,159 @@ export interface ControlListenerOptions {
  *  warm core. Mirrors local-listener's payload bound. */
 const MAX_CONTROL_BODY_BYTES = 64 * 1024;
 
-function bearerMatches(header: string | null, token: string): boolean {
-  if (!header || !header.startsWith("Bearer ")) return false;
-  const presented = Buffer.from(header.slice("Bearer ".length));
-  const expected = Buffer.from(token);
-  return presented.length === expected.length && timingSafeEqual(presented, expected);
+function bearerToken(header: string | null): string | null {
+  if (!header || !header.startsWith("Bearer ")) return null;
+  return header.slice("Bearer ".length);
 }
+
+function bearerMatches(header: string | null, token: string): boolean {
+  const presented = bearerToken(header);
+  if (presented === null) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Whether a browser could have been tricked into making this request.
+ *
+ * Everything below `/netwatch` is now reachable from a page, which brings two
+ * attacks the bearer alone does not answer. DNS rebinding gives an attacker's
+ * document a `Host` of its own domain while the socket lands here, so a `Host`
+ * this listener never published means the request came by a name rather than by
+ * the address — refuse it. `Sec-Fetch-Site` and `Origin` are set by the browser
+ * and cannot be forged by page script, so their ABSENCE is what identifies a
+ * non-browser caller (the CLI, curl) and anything cross-site is refused.
+ *
+ * `/control` is deliberately left alone: it is not reachable from the viewer,
+ * its clients predate these headers, and widening a guard onto the plane that
+ * starts projects is not something a diagnostics feature gets to do.
+ */
+function browserGuardsPass(req: Request, port: number): boolean {
+  const host = req.headers.get("host");
+  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}` && host !== `[::1]:${port}`) {
+    return false;
+  }
+  const site = req.headers.get("sec-fetch-site");
+  if (site !== null && site !== "same-origin" && site !== "none") return false;
+  const origin = req.headers.get("origin");
+  if (origin !== null && origin !== `http://127.0.0.1:${port}` && origin !== `http://localhost:${port}`) {
+    return false;
+  }
+  return true;
+}
+
+/** The two verbs a viewer session may reach. It holds a credential derived from
+ *  the host bearer, not the bearer itself, so the narrowing has to be stated
+ *  here rather than inherited: everything else on `ControlRequestSchema` starts
+ *  projects, checks out branches or discloses host paths. */
+const UI_ARMABLE = new Set(["netwatch:local", "netwatch:remote"]);
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+}
+
+/** Well inside Bun's default 10s socket idle timeout, so a quiet capture is
+ *  never mistaken for a dead host by either end. */
+const NETWATCH_KEEPALIVE_MS = 5_000;
+
+/**
+ * Live frame capture as server-sent events, for `antgrid watch`.
+ *
+ * A GET on the machine control plane rather than a `ControlRequest` verb: that
+ * schema is a request/response RPC and cannot stream. It rides the same bearer
+ * token because it is the same trust boundary — a loopback caller that already
+ * holds host.json.
+ */
+function netwatchStream(url: URL): Response {
+  const raw = url.searchParams.get("limit");
+  const requested = Number(raw);
+  // `limit=0` means "no replay, live tail only" and must not fall through to
+  // the ring's default — a caller asking for nothing would otherwise be served
+  // the ring's whole buffer (`DEFAULT_CAPACITY` in netwatch.ts, and larger
+  // still under ANTGRID_NETWATCH_CAPACITY) and read it as live traffic.
+  const limit = raw !== null && Number.isFinite(requested) && requested >= 0 ? Math.floor(requested) : undefined;
+  const follow = url.searchParams.get("follow") !== "0";
+
+  const encoder = new TextEncoder();
+  let unsubscribe: (() => void) | null = null;
+  let keepalive: ReturnType<typeof setInterval> | null = null;
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const send = (line: string): void => {
+        try {
+          controller.enqueue(encoder.encode(line));
+        } catch {
+          // Reader went away mid-write; cancel() does the cleanup.
+        }
+      };
+      // Replay before following: whatever is being chased has already happened
+      // by the time someone thinks to attach a watcher.
+      const replay = netwatch.snapshot(limit);
+      for (const event of replay) send(`data: ${JSON.stringify(event)}\n\n`);
+      send(
+        `event: replayed\ndata: ${JSON.stringify({
+          recorded: netwatch.recorded,
+          evicted: netwatch.evicted,
+          // `limit` truncates the replay independently of eviction, so these
+          // two are what keep a short replay from reading as a complete one:
+          // with `evicted` alone, a default `--limit 200` against a full ring
+          // reports nothing missing while leaving most of the buffer unsent.
+          buffered: netwatch.buffered,
+          replayed: replay.length,
+        })}\n\n`,
+      );
+      if (!follow) {
+        controller.close();
+        return;
+      }
+      // Shed rather than queue when the reader falls behind. `enqueue` neither
+      // blocks nor throws past the high-water mark, so an unchecked live send
+      // grows this stream's internal queue without bound — and the producer is
+      // every loopback frame of every project, which on a scrolling build
+      // outruns a TTY render or a synchronous `--export` append with room to
+      // spare. The bridge owns every project core and PTY in this process, so
+      // an observer that can OOM it kills the thing it was attached to watch.
+      // The count is reported on the next send that fits, because a silent gap
+      // is exactly the blind spot the replay meta already exists to name.
+      let shed = 0;
+      unsubscribe = netwatch.subscribe((event) => {
+        const room = controller.desiredSize;
+        if (room !== null && room <= 0) {
+          shed++;
+          return;
+        }
+        if (shed > 0) {
+          send(`event: shed\ndata: ${JSON.stringify({ dropped: shed })}\n\n`);
+          shed = 0;
+        }
+        send(`data: ${JSON.stringify(event)}\n\n`);
+      });
+      keepalive = setInterval(() => send(": ping\n\n"), NETWATCH_KEEPALIVE_MS);
+      keepalive.unref?.();
+    },
+    cancel() {
+      unsubscribe?.();
+      unsubscribe = null;
+      if (keepalive) clearInterval(keepalive);
+      keepalive = null;
+    },
+  // The default strategy counts ONE chunk, so `desiredSize` goes non-positive
+  // the moment a single event is queued unread — which is every burst, reader
+  // keeping up or not, and would shed almost everything. This is the buffer the
+  // shedding defends: deep enough that a normal reader never loses a row,
+  // bounded so a stalled one costs a known amount of memory rather than the
+  // process.
+  }, new CountQueuingStrategy({ highWaterMark: 1024 }));
+
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+    },
+  });
 }
 
 export class ControlListener {
@@ -36,13 +183,99 @@ export class ControlListener {
     return this.server.port;
   }
 
+  /**
+   * Everything under `/netwatch`: the stream the CLI and the viewer both read,
+   * the viewer document itself, and the two POSTs that turn a launch ticket
+   * into a client of that stream. All of it has already passed
+   * `browserGuardsPass`.
+   */
+  private async handleNetwatch(req: Request, url: URL): Promise<Response> {
+    const header = req.headers.get("authorization");
+    const presented = bearerToken(header);
+    // A viewer session is admitted on exactly two routes, and the host bearer
+    // still opens both — the CLI reads the same stream.
+    const authed = bearerMatches(header, this.opts.token) ||
+      (presented !== null && validateUiSession(presented));
+
+    if (req.method === "GET" && url.pathname === "/netwatch") {
+      if (!authed) return new Response("unauthorized", { status: 401 });
+      return netwatchStream(url);
+    }
+
+    if (req.method === "GET" && url.pathname === "/netwatch/ui") {
+      // Unauthenticated on purpose: a browser sends no bearer on a navigation,
+      // and this document holds no capture and no credential. It is inert until
+      // it can spend a ticket for one.
+      const { html, csp } = netwatchUiPage(randomBytes(16).toString("hex"));
+      return new Response(html, {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "content-security-policy": csp,
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer",
+          "x-content-type-options": "nosniff",
+        },
+      });
+    }
+
+    if (req.method === "POST" && url.pathname === "/netwatch/ui/session") {
+      let raw: unknown;
+      try { raw = await req.json(); } catch { return new Response("bad json", { status: 400 }); }
+      const ticket = (raw as { ticket?: unknown } | null)?.ticket;
+      const session = typeof ticket === "string" ? redeemUiTicket(ticket) : null;
+      // Unknown, spent and lapsed are one answer: telling them apart tells a
+      // guesser which half of the guess was right.
+      if (session === null) return new Response("unauthorized", { status: 401 });
+      return json({ token: session });
+    }
+
+    if (req.method === "POST" && url.pathname === "/netwatch/ui/arm") {
+      if (!authed) return new Response("unauthorized", { status: 401 });
+      let raw: unknown;
+      try {
+        raw = await req.json();
+      } catch {
+        return json({ id: "", ok: false, error: { code: "BAD_JSON", message: "invalid JSON body" } }, 400);
+      }
+      const parsed = ControlRequestSchema.safeParse(raw);
+      if (!parsed.success) {
+        const id = typeof (raw as any)?.id === "string" ? (raw as any).id : "";
+        return json({ id, ok: false, error: { code: "BAD_REQUEST", message: parsed.error.issues.map((i) => i.message).join("; ") } }, 400);
+      }
+      // The schema admits every control verb; this route admits two of them.
+      if (!UI_ARMABLE.has(parsed.data.type)) {
+        return json({ id: parsed.data.id, ok: false, error: { code: "FORBIDDEN", message: "not reachable from the capture viewer" } }, 403);
+      }
+      try {
+        const res = await this.opts.handler(parsed.data);
+        return json(res, res.ok ? 200 : 400);
+      } catch (err) {
+        log.error("netwatch arm threw: %s", (err as Error).message);
+        return json({ id: parsed.data.id, ok: false, error: { code: "INTERNAL", message: (err as Error).message } }, 500);
+      }
+    }
+
+    return new Response("not found", { status: 404 });
+  }
+
   async start(): Promise<void> {
     this.server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       maxRequestBodySize: MAX_CONTROL_BODY_BYTES,
-      fetch: async (req) => {
-        if (req.method !== "POST" || new URL(req.url).pathname !== "/control") {
+      fetch: async (req, server) => {
+        const url = new URL(req.url);
+        // Undefined only for a unix-socket server, which this never is; the
+        // guard would have nothing to compare a Host against, so refuse rather
+        // than wave the request through.
+        const port = server.port;
+        if (url.pathname === "/netwatch" || url.pathname.startsWith("/netwatch/")) {
+          if (port === undefined || !browserGuardsPass(req, port)) {
+            return new Response("not found", { status: 404 });
+          }
+          return this.handleNetwatch(req, url);
+        }
+        if (req.method !== "POST" || url.pathname !== "/control") {
           return new Response("not found", { status: 404 });
         }
         if (!bearerMatches(req.headers.get("authorization"), this.opts.token)) {

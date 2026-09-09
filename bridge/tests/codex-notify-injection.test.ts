@@ -12,7 +12,7 @@ const BRIDGE_SELF = { compiled: true, binary: HOOK_COMMAND.binary };
 test("injects hook defs and a matching pre-seeded trusted_hash", () => {
   const args = buildCodexNotifyInjection(HOOK_COMMAND);
   const joined = args.join(" ");
-  expect(joined).toContain("hooks.PermissionRequest=");
+  expect(joined).not.toContain("hooks.PermissionRequest=");
   expect(joined).toContain("hooks.Stop=");
   expect(joined).toContain("hooks.state=");
   const cmdMatch = joined.match(/hooks\.Stop=.*?command="((?:\\.|[^"\\])*)"/);
@@ -27,7 +27,7 @@ test("codex hook command defs contain no raw backslash", () => {
   const defs = buildCodexNotifyInjection(HOOK_COMMAND).filter((a) =>
     /^hooks\.(PermissionRequest|Stop|SessionStart)=/.test(a),
   );
-  expect(defs.length).toBe(3);
+  expect(defs.length).toBe(2);
   for (const def of defs) {
     expect(def.replace(/\\"/g, "")).not.toContain("\\");
   }

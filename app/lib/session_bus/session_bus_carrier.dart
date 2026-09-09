@@ -419,7 +419,7 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
   /// came off a frame the lead's own bridge answered, so it is usually the
   /// correct one and the app's row is the stale alias — a folder picked before
   /// any host was warm keeps the selected path's hash while the bridge folds a
-  /// linked worktree into its primary checkout (`adoptResolvedId`,
+  /// linked worktree into its primary checkout (`reconcileWithHost`,
   /// providers/projects.dart). A reader greps this line precisely when
   /// something is wrong, and pointing them across the wire sends them to the
   /// machine that is right.
