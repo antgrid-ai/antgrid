@@ -47,3 +47,34 @@ export function sessionResumable(args: {
   if (forSpec.transcriptPath) return existsSync(forSpec.transcriptPath);
   return agentSpec(args.tool)?.resumable?.(forSpec) ?? true;
 }
+
+/**
+ * Does the agent POSITIVELY disown this id — not "we couldn't find it", but
+ * "the store answered, and this is not one of mine"? The only verdict a caller
+ * may refuse work on, and narrower than `!sessionResumable(...)` twice over.
+ *
+ * It splits from that function on the MIDDLE answer: a store that cannot be
+ * read is `false` here and `true` there, which is the whole point of keeping
+ * the spec's verdict tri-state. And it answers `false` for every agent that has
+ * not claimed `sessionStoreIsAuthoritative` — a store the resume flag does not
+ * itself consult can be stale without the conversation being gone.
+ *
+ * Deliberately id-only, with no transcript-path branch. The path an agent posts
+ * lags the conversation it names (claude's SessionStart fires before the file
+ * exists), so a path that isn't there yet is not evidence of anything; a caller
+ * refusing on it would reject the very first report of a live session.
+ */
+export function agentSessionGone(args: {
+  tool: string;
+  agentSessionId: string;
+  codexHome?: string;
+  copilotHome?: string;
+}): boolean {
+  const spec = agentSpec(args.tool);
+  if (!spec?.sessionStoreIsAuthoritative) return false;
+  return spec.resumable?.({
+    agentSessionId: args.agentSessionId,
+    codexHome: args.codexHome,
+    copilotHome: args.copilotHome,
+  }) === false;
+}

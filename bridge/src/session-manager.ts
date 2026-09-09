@@ -18,7 +18,7 @@ import { resolveApprovalPolicy } from "./agent-approval-policy";
 import type { AgentSpec as RegistryAgentSpec } from "./agents/types";
 import type { ApprovalPolicy } from "./agents/types";
 import { stripAnsi } from "./handler/context";
-import { resumeArgv, sessionResumable } from "./agent-resume";
+import { agentSessionGone, resumeArgv, sessionResumable } from "./agent-resume";
 import { isChatCapableTool } from "./structured/chat-capable";
 import { initialPromptArgv } from "./initial-prompt";
 import { TITLE_RANKS, titleRankValue, type TitleRank } from "./session-namer";
@@ -1082,6 +1082,25 @@ export class SessionManager {
   setAgentSession(id: string, agentSessionId: string, agentTranscriptPath?: string): void {
     const entry = this.entries.get(id);
     if (!entry) return;
+    // An agent reports the thread that fired the turn, which is not always the
+    // thread the user is in: codex's TUI runs helper threads of its own inside
+    // the same process (the "catch-up" blurb it writes when you reopen a
+    // session is one), and they are ephemeral — no rollout, no row in the
+    // thread store, nothing `codex resume` can ever find. Letting one land here
+    // replaces a real conversation with an id that bricks every later launch,
+    // and because it arrives at turn END it is usually the LAST thing reported
+    // before the PTY closes, so it is the one that sticks.
+    //
+    // Only a positive "I do not hold this" refuses; a store that cannot answer
+    // still reports freely, and the next turn re-reports the live thread
+    // regardless, so a false refusal costs one update rather than an identity.
+    const reportingTool = this.resumeToolFor(entry);
+    if (reportingTool && agentSessionGone({
+      tool: reportingTool,
+      agentSessionId,
+      codexHome: this.opts.codexHome,
+      copilotHome: this.opts.copilotHome,
+    })) return;
     // A conversation change releases the slot's title — the name describes what
     // was being worked on, not the slot. Ordered BEFORE the unchanged early-out
     // below so a resume that comes back under the SAME id still consumes the
@@ -1408,10 +1427,32 @@ export class SessionManager {
     queueMicrotask(() => this.notifyObservers());
   }
 
-  private resumeArgsFor(tool: string, entry: PersistedEntry): string[] {
-    // Only the provider can decide whether its saved identity is resumable.
-    // A missing local index row must not replace the user's conversation.
+  /**
+   * The identity to hand THIS launch, or undefined when the agent positively
+   * disowns it. Shared by the per-session-tool and the default-spec (copilot)
+   * launch paths, and by the chat path below.
+   *
+   * Deliberately does not clear `entry.agentSessionId`: an id the store cannot
+   * vouch for today may be one unarchive away, and erasing it in place is what
+   * used to cost users a live conversation. But handing a CLI an id it has
+   * already disowned is not "letting the provider decide" either — `codex
+   * resume <unknown>` prints "Resuming session…", exits 1 about two seconds in,
+   * and the app is left holding a session that never loads. Skip the resume for
+   * this launch, keep the id, re-ask next time.
+   */
+  private launchResumeId(tool: string, entry: PersistedEntry): string | undefined {
     const resumeId = entry.agentSessionId;
+    if (!resumeId) return undefined;
+    return agentSessionGone({
+      tool,
+      agentSessionId: resumeId,
+      codexHome: this.opts.codexHome,
+      copilotHome: this.opts.copilotHome,
+    }) ? undefined : resumeId;
+  }
+
+  private resumeArgsFor(tool: string, entry: PersistedEntry): string[] {
+    const resumeId = this.launchResumeId(tool, entry);
     return resumeId ? resumeArgv(tool, resumeId) : [];
   }
 
@@ -1920,7 +1961,7 @@ export class SessionManager {
       this.runningChat.add(id);
       const chatTool = entry.tool ?? "codex";
       resolveApprovalPolicy(chatTool, "chat", entry.approvalPolicy);
-      const resumeId = entry.conversationStart === "fork" ? undefined : entry.agentSessionId;
+      const resumeId = entry.conversationStart === "fork" ? undefined : this.launchResumeId(chatTool, entry);
       this.noteConversationStart(entry, resumeId !== undefined);
       this.opts.onStartChat?.({
         sessionId: id,
