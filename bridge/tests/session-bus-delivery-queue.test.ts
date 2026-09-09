@@ -241,4 +241,18 @@ describe("turn-boundary delivery", () => {
     h.queue.forget(SESSION);
     expect(h.queue.lines.map((l) => l.id)).toEqual(["b"]);
   });
+
+  test("two projects on one machine write distinct files and never see each other's lines", () => {
+    const abDir = tempDir();
+    let p1 = emptyDeliveries();
+    p1 = enqueueLine(p1, { ...line({ id: "p1-line" }), queuedAt: 1 });
+    saveDeliveries(abDir, "project-one", p1);
+
+    let p2 = emptyDeliveries();
+    p2 = enqueueLine(p2, { ...line({ id: "p2-line" }), queuedAt: 1 });
+    saveDeliveries(abDir, "project-two", p2);
+
+    expect(loadDeliveries(abDir, "project-one").lines.map((l) => l.id)).toEqual(["p1-line"]);
+    expect(loadDeliveries(abDir, "project-two").lines.map((l) => l.id)).toEqual(["p2-line"]);
+  });
 });

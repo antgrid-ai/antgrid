@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { logger } from "../logger";
 import { MAX_DELIVERY_CHARS } from "./delivery";
-import { readStoreFile, sessionBusProjectDir, writeStoreFile } from "./store-fs";
+import { readStoreFile, sessionBusDeliveryDir, writeStoreFile } from "./store-fs";
 
 const log = logger.child({ component: "session-bus" });
 
@@ -135,7 +135,7 @@ export function forgetSession(s: DeliveryQueueState, sessionId: string): Deliver
 }
 
 function queuePath(abDir: string, projectId: string): string {
-  return join(sessionBusProjectDir(abDir, projectId), "deliveries.json");
+  return join(sessionBusDeliveryDir(abDir, projectId), "deliveries.json");
 }
 
 export function loadDeliveries(abDir: string, projectId: string): DeliveryQueueState {
@@ -148,7 +148,7 @@ export function loadDeliveries(abDir: string, projectId: string): DeliveryQueueS
 }
 
 export function saveDeliveries(abDir: string, projectId: string, s: DeliveryQueueState): void {
-  const dir = sessionBusProjectDir(abDir, projectId);
+  const dir = sessionBusDeliveryDir(abDir, projectId);
   writeStoreFile(join(dir, "deliveries.json"), dir, {
     version: DELIVERY_QUEUE_VERSION,
     lines: s.lines.slice(-MAX_QUEUED_LINES),
