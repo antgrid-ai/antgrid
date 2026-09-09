@@ -4,7 +4,7 @@
 **Status:** Draft v0.15
 **Date:** 2026-09-04
 **Build plan:** `docs/multi-machine-session-waves.md`
-**Implementation:** waves 0-5 are landed — see §0.
+**Implementation:** largely removed — see §0.
 
 ---
 
@@ -17,12 +17,17 @@
 
 ## 0. Status
 
-Waves 0-5 of the build plan are landed. The end-to-end proof is
-`evals/tests/gate-multi-machine.test.ts`, which drives two real bridges against one relay with the
-desktop carrier played by a test object; the host-side invariants it pins are in `bridge/CLAUDE.md`
-(**The session bus**) and the carrier's in `app/CLAUDE.md`.
+Waves 0-5 of the build plan were landed and then largely cut back out: the
+successor spec's first wave removed the membership, task-lifecycle and brief
+machinery this document specifies, together with the end-to-end proof that drove
+two real bridges against one relay (`evals/tests/gate-multi-machine.test.ts`).
+What survives in the tree is the transport and the durable result — the carrier
+leg, the route table, the held/delivery queues and artifacts — whose host-side
+invariants are in `bridge/CLAUDE.md` (**The session bus**) and whose carrier
+invariants are in `app/CLAUDE.md`.
 
-Known divergences from this document, which the code decides:
+Known divergences below were true of the code as shipped before that cut, and
+are kept as part of the record rather than as a description of the tree:
 
 - A brief has two routes and the QUEUED one is the common path. `flushPendingBrief`
   (`bridge/src/agent-core.ts`) hands it to the Handler as an instruction when one is

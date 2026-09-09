@@ -3,6 +3,14 @@
 **Spec:** `docs/multi-machine-session.md` (Draft v0.15). Every wave below cites the spec section it implements; nothing here re-decides anything the decision log (spec §12) has closed.
 **Status:** Draft, 2026-09-04
 
+---
+
+> **SUPERSEDED (2026-09-09).** The spec this plan builds against was superseded by
+> `docs/session-messaging.md`, whose first wave removed most of what waves 2-5
+> shipped. Nothing below is open work, and no wave here should be picked up:
+> the successor spec's §3 says which decisions carried over. The wave bodies stay
+> as the build record for the code that shipped and the transport that survived.
+
 ## How the waves are cut
 
 - **Each wave gates and commits on its own.** Bridge, relay-client and app tests per workspace, one `flutter analyze` from the controller, then a commit. A wave that cannot go green alone is cut wrong.
