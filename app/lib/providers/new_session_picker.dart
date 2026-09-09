@@ -337,8 +337,8 @@ SessionTarget? sessionTargetOf(PickerProject? project) {
 /// off the composer's current pick — [newSessionDetectedToolsProvider] above
 /// holds what the map means and where each arm sources it.
 ///
-/// Keyed, because the add-machine dialog asks about a machine the composer is
-/// not pointing at: driving the composer's own selection to answer that would
+/// Keyed, because a caller can ask about a machine the composer is not
+/// pointing at: driving the composer's own selection to answer that would
 /// silently change what the composer creates next.
 final detectedToolsForProvider =
     FutureProvider.family<Map<String, String?>, SessionTarget?>((

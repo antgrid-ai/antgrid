@@ -8,8 +8,8 @@ import 'projects.dart';
 
 /// One remote machine's Capability Card, covering every project it has seen.
 ///
-/// Asked without a project filter on purpose: the add-machine dialog matches
-/// the lead's repo against ALL of a machine's projects to pre-select one, so
+/// Asked without a project filter on purpose: a caller matches a repo against
+/// ALL of a machine's projects to find the one that is the same checkout, so
 /// naming a project here would beg the question the card is being read to
 /// answer.
 ///

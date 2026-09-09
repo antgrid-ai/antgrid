@@ -418,11 +418,13 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // or expansion exists to claim them. Without this union the reaper would
   // close each eager socket moments after the kick opened it.
   alive.addAll(ref.watch(eagerControlPlaneTargetsProvider));
-  // Every machine hosting a member of a session this app leads. The session bus
-  // runs through this app (D7), so its socket is not a nicety: closing it
-  // silently strands a running member. Derived purely from the links, so the
-  // unpin needs no counterpart on any release path — the last membership ending
-  // removes the link, and the machine drops out of this set on the next pass.
+  // Every machine on the far side of a link this app carries. The session bus
+  // routes through this app, so its socket is not a nicety: closing it strands
+  // an agent mid-exchange with no way to say so. Derived purely from the links,
+  // so nothing has to remember to unpin — a link ending drops its machine out
+  // of this set on the next pass. Empty while `sessionBusLinksProvider` is
+  // stubbed, and this edge stays wired rather than being removed and re-added:
+  // its fan-in has crashed the frame before.
   alive.addAll(ref.watch(sessionBusLinksProvider).peerMachineIds);
   return alive;
 });

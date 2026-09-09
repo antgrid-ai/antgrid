@@ -1,5 +1,6 @@
 /// Which of a machine's projects is the same repository as the one a session
-/// already runs in — the §7.5 pre-selection in the add-machine dialog.
+/// already runs in — the discovery key for reaching the same repo on another
+/// machine (`docs/session-messaging.md` §5.1).
 ///
 /// Both sides are the bridge's NORMALISED remote (`RepoCard.remote`), never a
 /// raw URL: normalisation is where credentials are stripped and where the ssh

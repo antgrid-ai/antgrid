@@ -4,10 +4,10 @@
 ///
 /// [pinned] ids are never candidates, whatever their age. Unlike [protect]
 /// (one id, the project being opened right now) a pin outlives focus: it marks
-/// a project some other subsystem is still driving — a session's member
-/// machine, whose transport the session bus carries frames over. Returning null
-/// when every candidate is pinned is deliberate: the caller leaves the bucket
-/// over cap rather than evicting a project that is still in use.
+/// a project some other subsystem is still driving — the far side of a session
+/// bus link, whose transport frames are carried over. Returning null when every
+/// candidate is pinned is deliberate: the caller leaves the bucket over cap
+/// rather than evicting a project that is still in use.
 String? selectEvictionVictim({
   required List<String> open,
   required Map<String, DateTime> lastFocused,

@@ -43,50 +43,6 @@ void main() {
     expect(list[1].running, isFalse);
   });
 
-  // Membership is durable metadata, not process-lifetime state: a peer row
-  // served cold from this cache is exactly the row that has to keep saying whose
-  // member it is, since its lead lives on a machine the app may not be connected
-  // to. It must survive the round trip that strips `running` and `deleting`.
-  test('membership survives the round trip that strips transient state', () async {
-    const ref = SessionMemberRef(
-      machineId: 'machine-1',
-      projectId: 'proj-1',
-      sessionId: 'sess-1',
-      machineLabel: 'Studio',
-    );
-    final store = await CachedSessionsStore.open();
-    await store.put('p1', [
-      SessionEntry(
-        id: 'lead',
-        name: 'Lead',
-        createdAt: 1,
-        lastUsedAt: 2,
-        archived: false,
-        running: true,
-        deleting: true,
-        members: const [SessionMember(ref: ref, joinedAt: 10)],
-      ),
-      SessionEntry(
-        id: 'peer',
-        name: 'Peer',
-        createdAt: 1,
-        lastUsedAt: 2,
-        archived: false,
-        running: false,
-        memberOf: const SessionMemberOf(ref: ref, joinedAt: 10),
-      ),
-    ]);
-    await store.flushNow();
-
-    final reopened = await CachedSessionsStore.open();
-    final list = reopened.get('p1');
-    expect(list, hasLength(2));
-    expect(list[0].members.single.ref.machineLabel, 'Studio');
-    expect(list[0].deleting, isFalse);
-    expect(list[0].running, isFalse);
-    expect(list[1].memberOf!.ref.key, 'machine-1/proj-1/sess-1');
-  });
-
   test('changes emits the entryId that was written', () async {
     final store = await CachedSessionsStore.open();
     addTearDown(store.close);

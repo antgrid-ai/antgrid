@@ -52,8 +52,6 @@ import 'remote_access_control.dart';
 import 'remote_host_chip.dart';
 import 'session_agent_mark.dart';
 import 'session_approval_badge.dart';
-import 'session_member_tabs.dart';
-import 'session_membership_menu.dart';
 import 'session_mode_control.dart';
 import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
@@ -125,7 +123,6 @@ class AgentPanel extends ConsumerWidget {
           )
         else
           const AgentBar(),
-        const SessionMemberTabs(),
         const SessionSetupBanner(),
         Expanded(
           child: isChat && activeId != null
@@ -150,20 +147,19 @@ class AgentPanel extends ConsumerWidget {
 }
 
 /// Overflow trigger for everything about the session that has no inline home:
-/// the terminal/chat mode switch, the Handler arm/disarm row, and (whenever a
-/// multi-machine session has members to act on) the membership section. On a
-/// phone (see the comment above its call site in [AgentPanel.build]) it also
-/// takes the branch pill, which competes with the session title for the one
+/// the terminal/chat mode switch and the Handler arm/disarm row. On a phone
+/// (see the comment above its call site in [AgentPanel.build]) it also takes
+/// the branch pill, which competes with the session title for the one
 /// flexible slot at that width; [AgentBar] has room to keep the pill inside
 /// [TitleBarBreadcrumb] instead, so the same kebab there opens a shorter menu.
 /// Mounted unconditionally on both breakpoints — the mode switch and Handler
-/// row are always present, so a session working alone still has a kebab.
+/// row are always present, so every session has a kebab.
 class _SessionOverflowButton extends ConsumerWidget {
   const _SessionOverflowButton({required this.compact});
 
   /// True for the phone header. Both breakpoints open the same menu with the
-  /// same mode switch, Handler row and membership section; this only decides
-  /// whether the branch also renders there as a header label — on [AgentBar]
+  /// same mode switch and Handler row; this only decides whether the branch
+  /// also renders there as a header label — on [AgentBar]
   /// the branch stays inline in [TitleBarBreadcrumb], so restating it in the
   /// menu would give it two homes.
   final bool compact;
@@ -218,9 +214,9 @@ class _SessionOverflowButton extends ConsumerWidget {
 }
 
 /// The overflow popup's content: the mode switch and the Handler arm/disarm
-/// row (rather than the header's own button/segmented-control chrome), over
-/// the membership section. On a phone this is preceded by the branch as a
-/// menu header (Chrome's own tab-context-menu convention — the thing the menu
+/// row, rather than the header's own button/segmented-control chrome. On a
+/// phone this is preceded by the branch as a menu header (Chrome's own
+/// tab-context-menu convention — the thing the menu
 /// is ABOUT, named once at the top); on [AgentBar] the branch stays inline in
 /// [TitleBarBreadcrumb] instead, so this menu opens straight into the mode
 /// switch. [AbLiveMenuRow] is what a menu row that has to watch a provider
@@ -229,9 +225,9 @@ class _SessionOverflowMenu extends ConsumerWidget {
   const _SessionOverflowMenu({required this.compact});
 
   /// See [_SessionOverflowButton.compact]. Gates only the branch header label
-  /// — the mode switch, Handler row and membership section below it render on
-  /// both breakpoints, since neither has an inline home on [AgentBar] any
-  /// more than on the phone header.
+  /// — the mode switch and Handler row below it render on both breakpoints,
+  /// since neither has an inline home on [AgentBar] any more than on the
+  /// phone header.
   final bool compact;
 
   @override
@@ -244,7 +240,6 @@ class _SessionOverflowMenu extends ConsumerWidget {
         if (compact && branch != null) AbMenuHeaderLabel(branch),
         const SessionModeMenuItem(),
         const _HandlerMenuItem(),
-        const SessionMembershipMenuItems(),
       ],
     );
   }

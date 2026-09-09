@@ -41,8 +41,7 @@ enum OpenSessionOutcome {
 
   /// Focused and active, but the project's session service never resolved
   /// inside the timeout: that machine is not answering right now. The surface
-  /// on screen is empty rather than wrong, and a caller that was probing a
-  /// machine's reachability has its answer.
+  /// on screen is empty rather than wrong.
   unreachable,
 
   /// [ActiveSessionId] refused the id, because the bridge is deleting that
@@ -54,9 +53,9 @@ enum OpenSessionOutcome {
 /// that project first when it is not the focused one. Throws whatever the
 /// project open threw, with the prior focus restored.
 ///
-/// The one path a member tab and a notification tap share, so the ordering they
-/// both depend on lives once: the pick is QUEUED before the switch, because the
-/// new project's session list lands in stages and `reconcileActiveSession`
+/// The ordering every caller depends on lives here once: the pick is QUEUED
+/// before the switch, because the new project's session list lands in stages
+/// and `reconcileActiveSession`
 /// otherwise takes `first` from the persisted cache and renders it in full
 /// before the wire's list arrives. The suppression id rides with it — arriving
 /// at a session means "show me this", never "restart this agent".
@@ -114,8 +113,6 @@ Future<void> _switchProject(
     final machineUuid = baseDeviceUuid(registrationId);
     final projectId = baseProjectId(registrationId);
     // A warm project needs no promote round trip — its socket is already bound.
-    // That is the ordinary case for a session member, whose project the carrier
-    // pins warm for as long as the membership lasts.
     if (container.read(projectSessionRegistryProvider).contains(
       registrationId,
     )) {

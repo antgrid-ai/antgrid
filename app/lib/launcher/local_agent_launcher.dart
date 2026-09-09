@@ -312,8 +312,8 @@ class LocalAgentLauncher {
         netTap: localNetTapFor(projectId),
         // Unconditional: a LocalTransport only exists on a machine running a
         // bridge, and this app is that bridge's loopback owner — the sole
-        // carrier for session-bus frames addressed to its projects' members
-        // (the bridge hands them to the owner only when it claims this).
+        // carrier for session-bus frames addressed to another machine (the
+        // bridge hands them to the owner only when it claims this).
         capabilities: const {
           'checkoutRouting': true,
           'pullsTree': true,

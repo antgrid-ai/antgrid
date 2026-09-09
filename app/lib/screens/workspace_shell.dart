@@ -40,7 +40,6 @@ import '../providers/notification_route_apply.dart';
 import '../providers/providers.dart';
 import '../providers/recent_sessions.dart' show recentSessionsProvider;
 import '../providers/relay_error_banner.dart';
-import '../providers/session_members.dart' show startSessionMembers;
 import '../providers/session_search.dart';
 import '../providers/session_workspace_state.dart';
 import '../providers/session_setup.dart';
@@ -861,13 +860,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
         }
         svc.focus(desired.id);
-        // The other machines of a multi-machine session, brought up with the
-        // half that is on screen. Suppressed with the lead's own start: a tap
-        // that meant "show me this" must not start N agents either.
-        if (!startSuppressed) {
-          detached('SessionMembers', 'starting session members failed',
-              () => startSessionMembers(ref.container, lead: desired));
-        }
         return;
       }
       // Stale id (session deleted since cache write) — fall through to
@@ -941,10 +933,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // move server-side recency (`SessionManager.focus` is still a no-op), so
       // nothing here may depend on it reordering the list — see the pick above.
       svc.focus(session.id);
-      if (!startSuppressed) {
-        detached('SessionMembers', 'starting session members failed',
-            () => startSessionMembers(ref.container, lead: session));
-      }
     }
   }
 

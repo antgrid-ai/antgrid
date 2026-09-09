@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -12,7 +11,6 @@ import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/account_agents_api.dart';
-import 'package:antgrid/session_bus/session_bus_links.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
@@ -88,7 +86,6 @@ void main() {
           // Stated, not derived: these tests drive no drawer or session
           // graph, and the union under test is over machine ids, not over
           // how the links were computed.
-          sessionBusLinksProvider.overrideWithValue(SessionBusLinks.empty),
         ],
       );
     }
@@ -124,51 +121,6 @@ void main() {
       expect(alive, isNot(contains('local1')));
     });
 
-    test('a member machine is alive on the membership alone', () {
-      // The peer's project need not be open and its machine need not be
-      // selected or expanded: the session bus runs through this app, so the
-      // membership itself is the keep-alive. Reaping here strands a member
-      // that is still running.
-      final registry = ProjectSessionRegistry(
-        localCap: 10,
-        relayCap: 30,
-        onEvict: (_) async {},
-      );
-      final c = ProviderContainer(
-        overrides: [
-          projectSessionRegistryProvider.overrideWith(
-            () => ProjectSessionRegistryController(registry),
-          ),
-          pickerSourcesProvider.overrideWithValue(const [
-            PickerSource(
-              id: 'local',
-              label: 'Local',
-              isLocal: true,
-              projects: <PickerProject>[],
-            ),
-          ]),
-          selectedSourceIdProvider.overrideWith(() => ValueController('local')),
-          eagerControlPlanesEnabledProvider.overrideWithValue(false),
-          sessionBusLinksProvider.overrideWithValue(
-            const SessionBusLinks([
-              SessionBusLink(
-                leadProjectId: 'p-lead',
-                leadSessionId: 's-lead',
-                peer: SessionMemberRef(
-                  machineId: 'W',
-                  projectId: 'p-peer',
-                  sessionId: 's-peer',
-                ),
-              ),
-            ]),
-          ),
-        ],
-      );
-      addTearDown(c.dispose);
-
-      expect(c.read(controlPlaneAliveTargetsProvider), contains('W'));
-    });
-
     test(
       'focused remote pins its machine before the session registry opens',
       () {
@@ -199,8 +151,7 @@ void main() {
               () => ValueController(WorkbenchSurface.workspace),
             ),
             eagerControlPlanesEnabledProvider.overrideWithValue(false),
-            sessionBusLinksProvider.overrideWithValue(SessionBusLinks.empty),
-          ],
+            ],
         );
         addTearDown(c.dispose);
 
@@ -263,7 +214,6 @@ void main() {
           // Stated, not derived: these tests drive no drawer or session
           // graph, and the union under test is over machine ids, not over
           // how the links were computed.
-          sessionBusLinksProvider.overrideWithValue(SessionBusLinks.empty),
         ],
       );
       addTearDown(c.dispose);
@@ -306,8 +256,7 @@ void main() {
               () => ValueController(WorkbenchSurface.workspace),
             ),
             eagerControlPlanesEnabledProvider.overrideWithValue(false),
-            sessionBusLinksProvider.overrideWithValue(SessionBusLinks.empty),
-          ],
+            ],
         );
         addTearDown(c.dispose);
 

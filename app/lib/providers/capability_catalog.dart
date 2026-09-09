@@ -102,9 +102,10 @@ List<AgentCapabilityModel> cachedModelsFor(WidgetRef ref, String tool) =>
 /// The models [tool] is known to offer on the machine [sourceKey] names.
 ///
 /// Split out from [cachedModelsFor] so a surface can read ANOTHER machine's
-/// catalog without focusing it — the add-machine dialog names a model for a
-/// machine the app is not looking at, and the key is already per-machine
-/// ([capabilitySourceKey]), so the cache has the answer without a round trip.
+/// catalog without focusing it — naming a model for a machine the app is not
+/// looking at is a directory-shaped question, and the key is already
+/// per-machine ([capabilitySourceKey]), so the cache has the answer without a
+/// round trip.
 List<AgentCapabilityModel> cachedModelsForSource(
   WidgetRef ref,
   String sourceKey,

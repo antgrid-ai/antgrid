@@ -26,7 +26,6 @@ import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';
 import 'agent_panel.dart';
 import 'session_isolation_badge.dart';
-import 'session_member_badge.dart';
 import 'session_search_field.dart';
 import 'session_shared_workspace_badge.dart';
 
@@ -487,7 +486,6 @@ class TitleBarBreadcrumb extends ConsumerWidget {
             setup: ref.watch(activeSessionSetupProvider),
           ),
           SessionSharedWorkspaceBadge(session: active),
-          SessionMemberBadge(session: active),
         ],
         if (showBranchPill && gitBranch != null) ...[
           const SizedBox(width: AbTokens.space8),

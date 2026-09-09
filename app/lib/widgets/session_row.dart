@@ -43,7 +43,6 @@ import 'session_deleting_badge.dart';
 import 'session_handler_badge.dart';
 import 'session_fork_dialog.dart';
 import 'session_isolation_badge.dart';
-import 'session_member_badge.dart';
 import 'session_approval_badge.dart';
 import 'session_rename_dialog.dart';
 import 'session_shared_workspace_badge.dart';
@@ -345,7 +344,6 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                     ),
                     SessionApprovalBadge(session: session),
                     SessionSharedWorkspaceBadge(session: session),
-                    SessionMemberBadge(session: session),
                     SessionHandlerBadge(
                       entryId: widget.entryId,
                       sessionId: session.id,

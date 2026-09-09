@@ -311,9 +311,9 @@ class _AppShellState extends ConsumerState<AppShell> {
 ///
 /// The carrier is a `Notifier`, so something must hold a subscription or
 /// Riverpod never builds it. Mounted here, above the picker/workspace route
-/// switch, for the same reason as [ControlPlaneReaper] below and one more: a
-/// lead and its members must keep exchanging frames while the user is looking
-/// at an unrelated project, or at no project at all.
+/// switch, for the same reason as [ControlPlaneReaper] below and one more: two
+/// agents must keep exchanging frames while the user is looking at an unrelated
+/// project, or at no project at all.
 class SessionBusCarrierHost extends ConsumerStatefulWidget {
   const SessionBusCarrierHost({super.key, required this.child});
   final Widget child;

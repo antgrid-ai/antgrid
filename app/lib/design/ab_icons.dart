@@ -133,11 +133,6 @@ abstract final class AbIcons {
   // glyph, because what the marker reports is company rather than a place:
   // paired against [isolated], which says a session has a workspace to itself.
   static const sharedWorkspace = Codicon.live_share;
-  // A session that is a member of one led on another machine. The
-  // connected-machine glyph, because the marker reports where this session
-  // answers rather than what it runs: paired against [sharedWorkspace], which
-  // is company inside one directory on THIS machine.
-  static const sessionMemberOf = Codicon.vm_connect;
   // Sign-in method glyphs. `key` rather than `lock`: the cell offers a
   // credential the user supplies, not a state of being secured.
   static const password = Codicon.key;

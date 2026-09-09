@@ -390,16 +390,7 @@ void main() {
     expect(e.toJson().containsKey('forkedFromSessionId'), isFalse);
   });
 
-  group('membership', () {
-    Map<String, dynamic> base() => {
-      'id': 'a',
-      'name': 'n',
-      'createdAt': 1,
-      'lastUsedAt': 1,
-      'archived': false,
-      'running': false,
-    };
-
+  group('the address and its Capability Card', () {
     Map<String, dynamic> ref() => {
       'machineId': 'machine-1',
       'projectId': 'proj-1',
@@ -409,178 +400,27 @@ void main() {
       'sessionName': 'Trace the leak',
     };
 
-    // The absent case carries the whole compatibility claim: an ordinary
-    // session, every bridge predating the feature and every disk-only source
-    // say nothing about membership, and all three must decode to the entry this
-    // build already produced.
-    test('a session that is nobody\'s member parses exactly as before', () {
-      final e = SessionEntry.fromJson(base());
-      expect(e.members, isEmpty);
-      expect(e.memberOf, isNull);
-      expect(e.toJson().containsKey('members'), isFalse);
-      expect(e.toJson().containsKey('memberOf'), isFalse);
+    // An address that cannot be addressed is not an address, and the caller
+    // drops that element rather than the row containing it.
+    test('a ref missing any of the three ids decodes as no ref', () {
+      expect(SessionMemberRef.fromJson({...ref(), 'machineId': ''}), isNull);
+      expect(SessionMemberRef.fromJson({...ref()}..remove('projectId')), isNull);
+      expect(SessionMemberRef.fromJson({...ref(), 'sessionId': 7}), isNull);
     });
 
-    test('a lead row parses its members and round-trips them', () {
-      final e = SessionEntry.fromJson({
-        ...base(),
-        'members': [
-          {...ref(), 'role': 'peer', 'joinedAt': 100, 'state': 'active'},
-          {
-            ...ref(),
-            'sessionId': 'sess-2',
-            'role': 'peer',
-            'joinedAt': 200,
-            'state': 'released-delete-refused',
-            'releasedAt': 300,
-            'releaseReason': 'WORKTREE_DIRTY',
+    test('a Capability Card round-trips the wire shape', () {
+      final r = SessionMemberRef.fromJson({
+        ...ref(),
+        'card': {
+          'os': {'name': 'linux', 'version': '6.8', 'arch': 'x64'},
+          'repo': {
+            'label': 'app',
+            'remote': 'github.com/acme/app',
+            'branch': 'feature/leak',
           },
-        ],
-      });
-      expect(e.members, hasLength(2));
-      expect(e.members.first.ref.key, 'machine-1/proj-1/sess-1');
-      expect(e.members.first.ref.machineLabel, 'Studio');
-      expect(e.members.first.isActive, isTrue);
-      expect(e.members.last.isActive, isFalse);
-      expect(e.members.last.releaseReason, 'WORKTREE_DIRTY');
-      expect(SessionEntry.fromJson(e.toJson()), e);
-    });
-
-    test('a peer row parses its lead and round-trips it', () {
-      final e = SessionEntry.fromJson({
-        ...base(),
-        'memberOf': {
-          ...ref(),
-          'role': 'lead',
-          'joinedAt': 100,
-          'state': 'active',
         },
-      });
-      expect(e.memberOf!.ref.sessionName, 'Trace the leak');
-      expect(e.memberOf!.role, 'lead');
-      expect(e.memberOf!.isOrphaned, isFalse);
-      expect(e.members, isEmpty);
-      expect(SessionEntry.fromJson(e.toJson()), e);
-    });
-
-    test('an orphaned lead is carried, not dropped', () {
-      final e = SessionEntry.fromJson({
-        ...base(),
-        'memberOf': {
-          ...ref(),
-          'joinedAt': 100,
-          'state': 'orphaned',
-          'orphanedAt': 400,
-        },
-      });
-      expect(e.memberOf!.isOrphaned, isTrue);
-      expect(e.memberOf!.orphanedAt, 400);
-      expect(SessionEntry.fromJson(e.toJson()), e);
-    });
-
-    // One member the app cannot address must cost its own entry and nothing
-    // else — the row is a machine the user is working on.
-    test('a malformed member is skipped and the rest of the row survives', () {
-      final e = SessionEntry.fromJson({
-        ...base(),
-        'name': 'kept',
-        'members': [
-          'not a map',
-          {'projectId': 'proj-1', 'sessionId': 'sess-1', 'joinedAt': 1},
-          {...ref(), 'joinedAt': 100},
-        ],
-      });
-      expect(e.name, 'kept');
-      expect(e.members, hasLength(1));
-      expect(e.members.single.ref.sessionId, 'sess-1');
-    });
-
-    test('a memberOf with no addressable ref decodes as no membership', () {
-      final e = SessionEntry.fromJson({
-        ...base(),
-        'memberOf': {'machineId': 'machine-1', 'joinedAt': 1},
-      });
-      expect(e.memberOf, isNull);
-    });
-
-    // The bridge owns both vocabularies and may widen them; a member in a state
-    // this build cannot name is still a member.
-    test('an unrecognised role or state falls back to the default', () {
-      final e = SessionEntry.fromJson({
-        ...base(),
-        'members': [
-          {...ref(), 'role': 'captain', 'joinedAt': 1, 'state': 'suspended'},
-        ],
-        'memberOf': {...ref(), 'joinedAt': 1, 'state': 'estranged'},
-      });
-      expect(e.members.single.role, 'peer');
-      expect(e.members.single.state, 'active');
-      expect(e.memberOf!.state, 'active');
-      expect(e.memberOf!.isOrphaned, isFalse);
-    });
-
-    // This is what makes a membership change observable through SessionsState's
-    // equality and the no-op dedup in _handleUpdated — without it the push is
-    // dropped and the row never gains its member.
-    test('two rows differing only in membership are not equal', () {
-      final plain = SessionEntry.fromJson(base());
-      final led = SessionEntry.fromJson({
-        ...base(),
-        'members': [
-          {...ref(), 'joinedAt': 1},
-        ],
-      });
-      final peer = SessionEntry.fromJson({
-        ...base(),
-        'memberOf': {...ref(), 'joinedAt': 1},
-      });
-      expect(led, isNot(plain));
-      expect(led.hashCode, isNot(plain.hashCode));
-      expect(peer, isNot(plain));
-      expect(peer.hashCode, isNot(plain.hashCode));
-    });
-
-    test('copyWith carries both halves forward and replaces them', () {
-      final e = SessionEntry.fromJson({
-        ...base(),
-        'members': [
-          {...ref(), 'joinedAt': 1},
-        ],
-      });
-      expect(e.copyWith(running: true).members, e.members);
-      const other = SessionMemberOf(
-        ref: SessionMemberRef(
-          machineId: 'machine-2',
-          projectId: 'proj-2',
-          sessionId: 'sess-9',
-        ),
-        joinedAt: 5,
-      );
-      expect(e.copyWith(memberOf: other).memberOf, other);
-    });
-
-    // The card is the one thing on a membership the lead's agent is TOLD, so
-    // the nesting has to survive the trip in both directions — the bridge
-    // schema nests it and this mirror flattens it.
-    test('a Capability Card on a member round-trips the wire shape', () {
-      final e = SessionEntry.fromJson({
-        ...base(),
-        'members': [
-          {
-            ...ref(),
-            'joinedAt': 1,
-            'card': {
-              'os': {'name': 'linux', 'version': '6.8', 'arch': 'x64'},
-              'repo': {
-                'label': 'app',
-                'remote': 'github.com/acme/app',
-                'branch': 'feature/leak',
-              },
-            },
-          },
-        ],
-      });
-      final card = e.members.single.ref.card!;
+      })!;
+      final card = r.card!;
       expect(card.osName, 'linux');
       expect(card.osVersion, '6.8');
       expect(card.osArch, 'x64');
@@ -588,91 +428,65 @@ void main() {
       expect(card.repoRemote, 'github.com/acme/app');
       expect(card.repoBranch, 'feature/leak');
 
-      final again = SessionEntry.fromJson(e.toJson());
-      expect(again.members.single.ref.card, card);
-      expect(again, e);
+      final again = SessionMemberRef.fromJson(r.toJson())!;
+      expect(again.card, card);
+      expect(again, r);
     });
 
-    // A machine that answered nothing must still be a member: refusing one over
-    // a blank field would cost the human the machine rather than the field.
-    test('a member with no card decodes as no card and serialises none', () {
-      final e = SessionEntry.fromJson({
-        ...base(),
-        'members': [
-          {...ref(), 'joinedAt': 1},
-          {...ref(), 'sessionId': 'sess-2', 'joinedAt': 1, 'card': {}},
-          {
-            ...ref(),
-            'sessionId': 'sess-3',
-            'joinedAt': 1,
-            'card': {'os': null, 'repo': null},
-          },
-        ],
-      });
-      expect(e.members, hasLength(3));
-      for (final m in e.members) {
-        expect(m.ref.card, isNull);
-        expect(m.toJson().containsKey('card'), isFalse);
+    // A machine that answered nothing must still be addressable: refusing one
+    // over a blank field would cost the human the machine rather than the field.
+    test('no card decodes as no card and serialises none', () {
+      for (final raw in [
+        <String, dynamic>{...ref()},
+        <String, dynamic>{...ref(), 'card': <String, dynamic>{}},
+        <String, dynamic>{
+          ...ref(),
+          'card': {'os': null, 'repo': null},
+        },
+      ]) {
+        final r = SessionMemberRef.fromJson(raw)!;
+        expect(r.card, isNull);
+        expect(r.toJson().containsKey('card'), isFalse);
       }
     });
 
-    // The least load-bearing thing on a membership must never take the machine
+    // The least load-bearing thing on an address must never take the machine
     // down with it.
-    test('a malformed card costs itself and not the member', () {
-      final e = SessionEntry.fromJson({
-        ...base(),
-        'members': [
-          {...ref(), 'joinedAt': 1, 'card': 'linux'},
-          {
-            ...ref(),
-            'sessionId': 'sess-2',
-            'joinedAt': 1,
-            'card': {
-              'os': 7,
-              'repo': {'branch': 12, 'remote': 'a/b'},
-            },
-          },
-        ],
-      });
-      expect(e.members, hasLength(2));
-      expect(e.members.first.ref.card, isNull);
-      expect(e.members.last.ref.card!.repoBranch, isNull);
-      expect(e.members.last.ref.card!.repoRemote, 'a/b');
+    test('a malformed card costs itself and not the address', () {
+      expect(SessionMemberRef.fromJson({...ref(), 'card': 'linux'})!.card,
+          isNull);
+      final partial = SessionMemberRef.fromJson({
+        ...ref(),
+        'card': {
+          'os': 7,
+          'repo': {'branch': 12, 'remote': 'a/b'},
+        },
+      })!;
+      expect(partial.card!.repoBranch, isNull);
+      expect(partial.card!.repoRemote, 'a/b');
     });
 
-    // The lead bridge refuses the whole record above its bounds, so a branch
-    // name longer than one loses its tail here rather than the membership.
+    // The bridge refuses the whole record above its bounds, so a branch name
+    // longer than one loses its tail here rather than the address.
     test('an over-long card value is clamped, not refused', () {
       final long = 'b' * 400;
-      final e = SessionEntry.fromJson({
-        ...base(),
-        'members': [
-          {
-            ...ref(),
-            'joinedAt': 1,
-            'card': {
-              'repo': {'branch': long},
-            },
-          },
-        ],
-      });
-      expect(e.members.single.ref.card!.repoBranch, long.substring(0, 250));
+      final r = SessionMemberRef.fromJson({
+        ...ref(),
+        'card': {
+          'repo': {'branch': long},
+        },
+      })!;
+      expect(r.card!.repoBranch, long.substring(0, 250));
     });
 
     // Equality is what makes a card change observable through SessionsState.
-    test('two members differing only in their card are not equal', () {
-      SessionEntry withBranch(String branch) => SessionEntry.fromJson({
-        ...base(),
-        'members': [
-          {
-            ...ref(),
-            'joinedAt': 1,
-            'card': {
-              'repo': {'branch': branch},
-            },
-          },
-        ],
-      });
+    test('two addresses differing only in their card are not equal', () {
+      SessionMemberRef withBranch(String branch) => SessionMemberRef.fromJson({
+        ...ref(),
+        'card': {
+          'repo': {'branch': branch},
+        },
+      })!;
       expect(withBranch('main'), isNot(withBranch('feature/leak')));
       expect(
         withBranch('main').hashCode,

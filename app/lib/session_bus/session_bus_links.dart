@@ -1,10 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../models/drawer_entry.dart';
 import '../models/session_entry.dart';
-import '../providers/drawer_entries.dart';
-import '../providers/sessions.dart';
 
 /// One live membership: a session led on THIS machine and one machine that is
 /// currently part of it. The unit both the carrier's legs and the warm-project
@@ -26,7 +23,7 @@ class SessionBusLink {
   final String leadProjectId;
   final String leadSessionId;
 
-  /// The member as the lead's own row records it (`SessionEntry.members`).
+  /// The address of the machine on the far side of the link.
   final SessionMemberRef peer;
 
   /// `agentTransportForProvider`'s compound key for the peer's project.
@@ -88,34 +85,17 @@ class SessionBusLinks {
   int get hashCode => Object.hashAll(links);
 }
 
-/// Every active membership of a session led on this machine, right now.
+/// Every link this app can carry, right now — empty until the machine-level
+/// directory (`docs/session-messaging.md` §5.4) gives it a source.
 ///
-/// Only LOCAL entries are scanned: a session led on another machine is that
-/// machine's app's problem to carry (D7 — the carrier is the lead's desktop),
-/// and a peer's own row carries `memberOf`, never `members`, so it produces no
-/// link here even when this app can see it.
+/// A session no longer records who else is in it, so there is nothing left on
+/// a local row to derive a link from. The type stays because the carrier and
+/// the warm-project pin are both written against it and must keep deriving
+/// from ONE unit, and because dropping out of this list is still the only
+/// unpin there is — a second source would be a second answer.
 ///
-/// Released members drop out with no extra code — `isActive` is false for both
-/// `released` and `released-delete-refused`, so every 5.4 removal path unpins
-/// and detaches by simply not being in this list any more. That is the ONLY
-/// unpin: nothing commands one.
-final sessionBusLinksProvider = Provider<SessionBusLinks>((ref) {
-  final entries = ref.watch(drawerEntriesProvider);
-  final links = <SessionBusLink>[];
-  for (final entry in entries) {
-    if (entry.kind != EntryKind.local) continue;
-    for (final session in ref.watch(sessionsForEntryProvider(entry.id))) {
-      for (final member in session.members) {
-        if (!member.isActive) continue;
-        links.add(
-          SessionBusLink(
-            leadProjectId: entry.id,
-            leadSessionId: session.id,
-            peer: member.ref,
-          ),
-        );
-      }
-    }
-  }
-  return SessionBusLinks(List.unmodifiable(links));
-});
+/// While this is empty the carrier attaches no legs, so a frame addressed to
+/// another machine has no route out of this app.
+final sessionBusLinksProvider = Provider<SessionBusLinks>(
+  (ref) => SessionBusLinks.empty,
+);

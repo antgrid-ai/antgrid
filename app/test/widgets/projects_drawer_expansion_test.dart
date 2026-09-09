@@ -51,24 +51,6 @@ SessionEntry _session() => SessionEntry(
   running: false,
 );
 
-SessionEntry _memberSession() => const SessionEntry(
-  id: 'sess-peer',
-  name: 'Peer session',
-  createdAt: 0,
-  lastUsedAt: 0,
-  archived: false,
-  running: true,
-  memberOf: SessionMemberOf(
-    ref: SessionMemberRef(
-      machineId: 'lead-machine-uuid',
-      projectId: 'lead-proj',
-      sessionId: 'sess-lead',
-      machineLabel: 'Studio',
-    ),
-    joinedAt: 1,
-  ),
-);
-
 SessionEntry _managedSession(String id, String branch) => SessionEntry(
   id: id,
   name: 'Session $id',
@@ -251,44 +233,6 @@ void main() {
 
       expect(find.text(friendlyErrorCopy('NOT_ALLOWED')!), findsOneWidget);
       expect(find.text('Offline — no projects advertised.'), findsNothing);
-    },
-  );
-
-  testWidgets(
-    'a session that is a member of another machine\'s session is hidden from '
-    'its own project\'s drawer row',
-    (tester) async {
-      await stores.projectStore.upsert(_project());
-      await stores.cachedSessionsStore.put(_projectId, [_memberSession()]);
-      await stores.cachedSessionsStore.flushNow();
-
-      await tester.pumpWidget(buildDrawer());
-      await tester.pumpAndSettle();
-
-      // The row's only session is a member elsewhere — the project reads as
-      // having none, not zero-but-hidden.
-      expect(find.byType(SessionRow), findsNothing);
-    },
-  );
-
-  testWidgets(
-    'a member session stays hidden alongside an ordinary sibling session',
-    (tester) async {
-      await stores.projectStore.upsert(_project());
-      await stores.cachedSessionsStore.put(_projectId, [
-        _session(),
-        _memberSession(),
-      ]);
-      await stores.cachedSessionsStore.flushNow();
-
-      await tester.pumpWidget(buildDrawer());
-      await tester.pumpAndSettle();
-
-      // Only the ordinary session renders; the member one does not double up
-      // as a second row here — its home is the lead's member tab.
-      expect(find.byType(SessionRow), findsOneWidget);
-      final row = tester.widget<SessionRow>(find.byType(SessionRow));
-      expect(row.session.id, _session().id);
     },
   );
 

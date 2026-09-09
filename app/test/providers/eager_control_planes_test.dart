@@ -6,7 +6,6 @@ import 'package:antgrid/providers/eager_control_planes.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/relay_connection.dart';
-import 'package:antgrid/session_bus/session_bus_links.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
@@ -117,7 +116,6 @@ void main() {
           recentAgentsProvider.overrideWith(
             () => _FixedRecentAgents([_recent('M', DateTime(2026, 1, 1))]),
           ),
-          sessionBusLinksProvider.overrideWithValue(SessionBusLinks.empty),
         ],
       );
       addTearDown(c.dispose);

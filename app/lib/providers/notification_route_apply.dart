@@ -262,8 +262,8 @@ bool _applyInFocusedProject(ProviderContainer ref, NavLocation loc) {
   // that names none is a project destination and keeps its surface.
   var sessionRefused = false;
   if (sessionId != null) {
-    // The shared write, so this route and a member-tab press cross the same
-    // [ActiveSessionId] refusal and announce the pick identically. Refused
+    // The shared write, so every path to a session crosses the same
+    // [ActiveSessionId] refusal and announces the pick identically. Refused
     // means the bridge is deleting that session; an id this app does not
     // recognise is written through by design, because a project's list lands
     // in stages and a guard demanding presence drops most selections made
