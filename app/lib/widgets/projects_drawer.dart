@@ -552,6 +552,7 @@ class _EntryWithSessions extends ConsumerWidget {
           machineUuid != null
               ? _MachineProjects(machineUuid: machineUuid)
               : Column(
+                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     // Above the sessions: a task outlives any session opened

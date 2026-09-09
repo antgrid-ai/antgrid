@@ -88,6 +88,10 @@ class AbProject {
         hostDeviceUuid: null,
         hostMachineName: '',
         lastOpenedAt: DateTime.parse(j['lastOpenedAt'] as String),
+        // Read here too: a pre-v2 row keeps a null hostDeviceUuid across every
+        // re-upsert (toJson omits the key), so it takes this branch forever —
+        // and dropping repoKey here would lose the learned key on every restart.
+        repoKey: j['repoKey'] as String?,
       );
     }
     return AbProject(

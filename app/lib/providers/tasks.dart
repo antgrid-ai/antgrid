@@ -34,6 +34,11 @@ enum TaskScope {
   final String label;
 }
 
+/// Rows one list fetch asks for. Pinned to the `/tasks` route's own maximum —
+/// anything larger is refused there, and anything smaller silently truncates a
+/// set the client is about to narrow further.
+const int kTaskListPageSize = 500;
+
 const Set<TaskStatus> kOpenStatuses = {
   TaskStatus.open,
   TaskStatus.inProgress,
@@ -214,6 +219,13 @@ class TaskListController extends AsyncNotifier<List<Task>> {
       status: query.statuses,
       projectId: query.projectId,
       assignee: query.assignee,
+      // Ask for the route's ceiling, not its default: every narrowing the
+      // server used to do now runs on the client (see [TaskFilter.serverQuery]),
+      // so a page cut to the default 100 is a page the client then filters down
+      // to a partial — a project node missing rows, or a "Done" scope rendering
+      // empty because the first 100 by sortKey were all open. Still a cap, not
+      // pagination: the list has no paging affordance to carry a second page.
+      limit: kTaskListPageSize,
     );
   }
 
@@ -584,12 +596,22 @@ final visibleTasksProvider = Provider<AsyncValue<List<Task>>>((ref) {
   final filter = ref.watch(taskFilterProvider);
   final runs = ref.watch(taskRunPresenceProvider);
   // Resolved here rather than inside the predicate: `me` is the signed-in
-  // user's id, and the scope means nothing until it is known.
+  // user's id, and the scope means nothing until it is known. `me` is also
+  // accepted as an explicit assignee because [TaskQuery] documents that
+  // spelling and the server used to be the one resolving it.
   final myUserId = ref.watch(currentUserProvider).value?.userId;
+  final explicitAssignee = filter.assignee == 'me' ? myUserId : filter.assignee;
   final wantedAssignee =
-      filter.assignee ?? (filter.scope == TaskScope.mine ? myUserId : null);
+      explicitAssignee ?? (filter.scope == TaskScope.mine ? myUserId : null);
+  // The signed-in id is what "mine" MEANS, and the server no longer narrows by
+  // it. Answering the empty list until it is known is the only honest option:
+  // matching nothing shows everyone's tasks under "Mine".
+  final mineUnresolved =
+      wantedAssignee == null &&
+      (filter.scope == TaskScope.mine || filter.assignee != null);
 
   return tasks.whenData((list) {
+    if (mineUnresolved) return const <Task>[];
     final query = filter.query.trim().toLowerCase();
     final statuses = filter.effectiveStatuses;
     return list
@@ -752,7 +774,7 @@ final taskProjectIdByRepoKeyProvider = Provider<Map<String, String>>((ref) {
   };
 });
 
-/// The OPEN tasks filed against one account project, newest-ordered.
+/// The OPEN tasks filed against one account project, in list order.
 ///
 /// A partition of [taskListProvider], never its own fetch. One store is what
 /// keeps the optimistic write-through in [TaskListController] coherent — N
