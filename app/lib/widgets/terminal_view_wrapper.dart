@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
+import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/ansi_palette.dart';
@@ -29,6 +30,7 @@ import 'send_to_agent_comment.dart';
 import 'terminal_attachment_uploader.dart';
 import 'terminal_cell_metrics.dart';
 import 'terminal_drop_target.dart';
+import 'terminal_hydration_strip.dart';
 import 'terminal_hyperlink_preview.dart';
 import 'terminal_quick_actions_bar.dart';
 import 'terminal_upload_button.dart';
@@ -362,6 +364,18 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         .setTerminalZoom(current + delta);
   }
 
+  /// Types [text] into this pane's terminal, saying so when the transport
+  /// refuses it.
+  ///
+  /// The keyboard's own writes go through the engine's transport (which has
+  /// the strip beside it to explain a pause), but these are one-shot lines the
+  /// user composed elsewhere — an uploaded file's path, a quick-action key —
+  /// and a dropped one leaves no trace on screen at all.
+  void _typeIntoTerminal(String text) {
+    if (widget.terminalService.sendInput(widget.tab.terminalId, text)) return;
+    if (mounted) showSendRefusedSnackBar(context);
+  }
+
   /// The one pipeline every attach gesture goes through. Its upload service is
   /// resolved from THIS terminal's own session and checkout rather than from a
   /// focused-* provider: the file has to be staged into the tree the terminal
@@ -394,8 +408,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
           onProgress: onProgress,
         )).path;
       },
-      insert: (text) =>
-          widget.terminalService.sendInput(widget.tab.terminalId, text),
+      // Routed through the shared refusal so a staged upload whose path the
+      // transport could not carry says so: the bytes are on the machine but
+      // the line the user needs was dropped, not queued, and silence there
+      // reads as a finished attach.
+      insert: _typeIntoTerminal,
       onError: (message) {
         if (mounted) showAbSnackBar(context, message);
       },
@@ -798,13 +815,32 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     final isExited = widget.tab.sessionState == TerminalSessionState.exited;
     final showStoppedView = !widget.tab.isAgent && isExited;
 
+    // Read by terminalId, never held in State: three of this widget's five
+    // mount sites are unkeyed and reuse this State across terminal swaps, so
+    // a value cached here would show the previous terminal's chrome for one
+    // frame after every swap.
+    final hydration = ref.watch(
+      terminalStateProvider.select(
+        (s) => s.value?.hydration[widget.tab.terminalId],
+      ),
+    );
+    final inputPaused = ref.watch(
+      terminalStateProvider.select((s) => s.value?.inputPaused ?? false),
+    );
+    final chrome = hydration == null ? null : _chromeFor(hydration);
+
     return Column(
       children: [
+        // Above the grid, not a Positioned overlay: a bottom-left overlay
+        // would sit over the guest's own prompt/status line, and outside the
+        // Stack this changes the box the terminal's LayoutBuilder measures by
+        // a fixed height instead of being invisible to it.
+        if (!showStoppedView) _buildHydrationStrip(hydration, inputPaused),
         // Stopped state: centered start button; running: terminal view
         Expanded(
           child: showStoppedView
               ? _buildStoppedView(context)
-              : _buildTerminal(context),
+              : _buildTerminal(context, dim: chrome?.dim ?? false),
         ),
 
         // Quick-action buttons — only on mobile/web (no physical keyboard)
@@ -814,6 +850,67 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
             builder: (context, attach, _) => _buildQuickActions(attach != null),
           ),
       ],
+    );
+  }
+
+  /// One authoritative mapping from a terminal's hydration record to its pane
+  /// chrome, expressed as an exhaustive switch over [TerminalAttachStage] so a
+  /// stage added later fails to compile here rather than silently falling
+  /// through to whatever the last arm happened to render.
+  ///
+  /// `refreshing` and `painted` both render nothing: the screen is real and
+  /// current, and a strip there would fire on every re-establishment and every
+  /// mobile focus resume — training the user to ignore it.
+  ({String? label, AbStatusTone tone, int? startedAtMs, bool retry, bool dim})
+  _chromeFor(TerminalHydration hydration) => switch (hydration.stage) {
+    TerminalAttachStage.failed => (
+      label: "couldn't load this terminal",
+      tone: AbStatusTone.danger,
+      startedAtMs: null,
+      retry: true,
+      dim: true,
+    ),
+    TerminalAttachStage.cold ||
+    TerminalAttachStage.awaitingScreen => (
+      label: 'attaching to terminal',
+      tone: AbStatusTone.warning,
+      startedAtMs: hydration.requestedAtMs,
+      retry: false,
+      dim: true,
+    ),
+    TerminalAttachStage.refreshing ||
+    TerminalAttachStage.painted => (
+      label: null,
+      tone: AbStatusTone.warning,
+      startedAtMs: null,
+      retry: false,
+      dim: false,
+    ),
+  };
+
+  /// `inputPaused` wins over the stage's own copy — a transport that cannot
+  /// carry a keystroke is worth saying regardless of what the screen pull is
+  /// doing. A missing hydration entry (the state before this terminal's first
+  /// `_setState`, or an unkeyed mount reusing this State mid-swap) is routine,
+  /// not exceptional, and renders nothing.
+  Widget _buildHydrationStrip(TerminalHydration? hydration, bool inputPaused) {
+    if (inputPaused) {
+      return const TerminalHydrationStrip(
+        label: 'reconnecting — input paused',
+        tone: AbStatusTone.warning,
+      );
+    }
+    if (hydration == null) return const SizedBox.shrink();
+    final chrome = _chromeFor(hydration);
+    final label = chrome.label;
+    if (label == null) return const SizedBox.shrink();
+    return TerminalHydrationStrip(
+      label: label,
+      tone: chrome.tone,
+      startedAtMs: chrome.startedAtMs,
+      onRetry: chrome.retry
+          ? () => widget.terminalService.retryAttach(widget.tab.terminalId)
+          : null,
     );
   }
 
@@ -838,7 +935,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// `GhosttyTerminalView`'s default `padding`.
   static const double _hPad = AbTokens.space8 * 2;
 
-  Widget _buildTerminal(BuildContext context) {
+  Widget _buildTerminal(BuildContext context, {required bool dim}) {
     final agentTab = ref.watch(agentTerminalProvider);
     final showSendButton = _hasSelection && agentTab != null;
     // Desktop's only attach route. Mobile already has one in the quick-actions
@@ -1066,7 +1163,15 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       if (amDriver) {
                         return _TerminalGridFreeze(
                           onSettled: _onRenderSizeSettled,
-                          child: terminalView,
+                          // Only when the engine is provably empty (cold,
+                          // awaitingScreen, failed) — never a painted screen,
+                          // however stale the pull sitting over it reads.
+                          child: dim
+                              ? Opacity(
+                                  opacity: AbTokens.opacityDisabled,
+                                  child: terminalView,
+                                )
+                              : terminalView,
                         );
                       }
 
@@ -1110,7 +1215,16 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                         child: SizedBox(
                           width: authWidth,
                           height: authHeight,
-                          child: terminalView,
+                          // A phone viewing a desktop-driven terminal is the
+                          // non-driver arm by default — exactly the surface
+                          // this de-emphasis targets, so it cannot be skipped
+                          // here even though the driver arm above covers it too.
+                          child: dim
+                              ? Opacity(
+                                  opacity: AbTokens.opacityDisabled,
+                                  child: terminalView,
+                                )
+                              : terminalView,
                         ),
                       );
                     },
@@ -1369,8 +1483,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       onUploadError: (m) {
         if (mounted) showAbSnackBar(context, m);
       },
-      onSendInput: (data) =>
-          widget.terminalService.sendInput(widget.tab.terminalId, data),
+      onSendInput: _typeIntoTerminal,
       onZoomOut: () => _stepZoom(-0.1),
       onZoomIn: () => _stepZoom(0.1),
       onZoomReset: () =>

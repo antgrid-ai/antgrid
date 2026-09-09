@@ -26,11 +26,13 @@ import '../launcher/host_controller.dart' show HostPhase;
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
 import '../util/device_id.dart';
+import '../project/checkout_readiness.dart';
 import '../project/limits.dart';
 import '../project/perf_recorder.dart';
 import '../project/project_session_registry.dart';
 import '../project/project_status.dart';
 import '../providers/agent_transport.dart';
+import '../providers/checkout_readiness.dart';
 import '../providers/relay_connection.dart';
 import '../providers/cached_sessions.dart';
 import '../providers/demo_mode.dart';
@@ -969,6 +971,24 @@ Future<bool> ensureRemoteOnline(
 /// pops it on mobile), yet the target save/restore below must still land — and
 /// a cold remote open can run for ~30s before it does. `context` stays a widget
 /// context, but only ever behind a `context.mounted` guard for UI.
+/// What to tell someone who tapped the machine that is already being dialled.
+///
+/// Spelled out per state rather than lower-casing [readinessDisplayInfo]: those
+/// labels are written to stand alone in a chip, and two of them turn into
+/// nonsense behind "still" — the chip's verdicts read as progress reports here.
+String _stillWaitingMessage(ProviderContainer ref) =>
+    switch (ref.read(checkoutReadinessProvider)) {
+      CheckoutReadiness.reachingMachine => 'still reaching the machine…',
+      CheckoutReadiness.openingSession => 'still opening the session…',
+      CheckoutReadiness.loadingScreen => 'still loading the terminal…',
+      CheckoutReadiness.stalled => "couldn't load — retry from the terminal",
+      // Reached while the ladder is mid-climb and nothing has answered yet, so
+      // the tap is not being ignored — it is the same wait, still running.
+      CheckoutReadiness.cold ||
+      CheckoutReadiness.blocked ||
+      CheckoutReadiness.ready => 'still connecting…',
+    };
+
 Future<bool> activateDrawerEntryById(
   BuildContext context,
   ProviderContainer ref,
@@ -976,18 +996,6 @@ Future<bool> activateDrawerEntryById(
 ) async {
   final entries = ref.read(drawerEntriesProvider);
   final entry = entries.where((e) => e.id == entryId).firstOrNull;
-  if (entry == null) {
-    // A session row nested under a remote MACHINE entry carries its project's
-    // compound `<uuid>.<projectId>` regId, which is not itself a drawer entry
-    // (the entry is the bare-uuid machine). When that project is already open
-    // (warm transport), refocus it as a remote target — nothing to dial.
-    if (_focusOpenRemoteProject(ref, entryId)) return true;
-    // A cold (advertised-but-not-warm) project still needs its machine dialled,
-    // then promotion and a data-plane socket, before it can be focused —
-    // `_focusOpenRemoteProject` only refocuses one that is already warm.
-    return _openColdRemoteProject(context, ref, entryId);
-  }
-
   // Drop a duplicate tap on the machine whose connection is already mid-flight.
   // Every reachability provider here reads the FOCUS, so the guard only holds
   // while the focused machine IS the tapped one — otherwise one machine dialling
@@ -1007,8 +1015,31 @@ Future<bool> activateDrawerEntryById(
         ref.read(focusedIsRelayProvider) &&
         !ref.read(focusedAgentBlockedProvider) &&
         ref.read(agentReachabilityProvider) == AgentReachability.connecting) {
+      if (context.mounted) {
+        showAbSnackBar(context, _stillWaitingMessage(ref));
+      }
       return false;
     }
+  }
+
+  // Stamped only once the tap is going to do something: the guard above returns
+  // on a re-tap of the machine already being dialled, and stamping before it
+  // would snap the wait readout back to zero for a user who has been watching
+  // the same activation the whole time.
+  ref
+      .read(focusedWaitStartedAtProvider.notifier)
+      .set(DateTime.now().millisecondsSinceEpoch);
+
+  if (entry == null) {
+    // A session row nested under a remote MACHINE entry carries its project's
+    // compound `<uuid>.<projectId>` regId, which is not itself a drawer entry
+    // (the entry is the bare-uuid machine). When that project is already open
+    // (warm transport), refocus it as a remote target — nothing to dial.
+    if (_focusOpenRemoteProject(ref, entryId)) return true;
+    // A cold (advertised-but-not-warm) project still needs its machine dialled,
+    // then promotion and a data-plane socket, before it can be focused —
+    // `_focusOpenRemoteProject` only refocuses one that is already warm.
+    return _openColdRemoteProject(context, ref, entryId);
   }
 
   bool ok;

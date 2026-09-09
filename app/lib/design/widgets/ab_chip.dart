@@ -84,7 +84,9 @@ class _AbChipState extends State<AbChip> {
     };
 
     final interactive = widget.enabled && widget.onTap != null;
-    if (!widget.enabled) return Opacity(opacity: 0.4, child: chip);
+    if (!widget.enabled) {
+      return Opacity(opacity: AbTokens.opacityDisabled, child: chip);
+    }
     if (!interactive) return chip;
 
     return Semantics(

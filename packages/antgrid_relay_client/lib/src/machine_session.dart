@@ -1354,14 +1354,24 @@ class StreamTransport extends BufferedAgentTransport {
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
+    bool countsTowardHealth = true,
   }) async {
     try {
       final r = await super.request(method, params: params, timeout: timeout);
-      session.notifyRpcResult(timedOut: false);
+      // Both outcomes are gated, not just the timeout: an exempt call's
+      // SUCCESS resetting the run would let a pull that is re-driven on every
+      // re-establishment keep clearing the evidence of a link that is failing
+      // every other RPC — the same loop wearing the opposite sign.
+      if (countsTowardHealth) session.notifyRpcResult(timedOut: false);
       return r;
     } on RpcException catch (e) {
-      // ≥3 consecutive E_TIMEOUTs is a rekey trigger.
-      session.notifyRpcResult(timedOut: e.code == 'E_TIMEOUT');
+      // ≥3 consecutive E_TIMEOUTs is a rekey trigger. Skipped when the caller
+      // re-issues this same pull on every re-establishment — including the
+      // one a rekey itself causes — since folding those in makes the retry
+      // loop its own trigger (see the doc on [AgentTransport.request]).
+      if (countsTowardHealth) {
+        session.notifyRpcResult(timedOut: e.code == 'E_TIMEOUT');
+      }
       rethrow;
     }
   }
@@ -1416,6 +1426,25 @@ class StreamTransport extends BufferedAgentTransport {
     await _fetchSnapshot(timeout: session.snapshotTimeout);
     redriveHydrators();
   }
+
+  /// Re-pull the durable state alone, leaving the tier-3 hydrators as they are.
+  ///
+  /// [refreshSnapshot] exists for a (re)establishment, where the view-state the
+  /// snapshot does not carry is stale too. A user asking one checkout to try
+  /// attaching again is not that: the hydrator replay re-asks every ACTIVE
+  /// checkout for its whole `tree:full`, so routing a tap through it would
+  /// answer one stalled workspace with megabytes for every workspace on
+  /// screen beside it. This carries the frame
+  /// that tap is actually after — the bridge recomputes each checkout's
+  /// `agent:status` while serving the pull, so the reply is no older than the
+  /// tap.
+  ///
+  /// Shares [_fetchSnapshot]'s generation stamp, so a pull already airborne is
+  /// superseded rather than duplicated. The returned future completes when the
+  /// FIRST round trip settles, not when the snapshot lands: the retries run
+  /// detached, exactly as they do for [refreshSnapshot].
+  Future<void> refreshDurableState() =>
+      _fetchSnapshot(timeout: session.snapshotTimeout);
 
   /// Round trips a pull gets before it is given up on, the first included.
   /// Each retry doubles the previous wait, so the last one gives a slow reply
