@@ -8,6 +8,13 @@
 
 ---
 
+> **SUPERSEDED (2026-09-09) by `docs/session-messaging.md`.**
+> User interviews found that nobody wanted to link machines: they want SESSIONS
+> to reach each other, on one machine or several. The successor spec's §3 lists
+> which of the decisions below carry over and which are void — read that before
+> treating anything here as current. This document stays for the reasoning behind
+> the carried decisions and for the shipped code it still describes.
+
 ## 0. Status
 
 Waves 0-5 of the build plan are landed. The end-to-end proof is
