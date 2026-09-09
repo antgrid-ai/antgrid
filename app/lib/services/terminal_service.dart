@@ -101,31 +101,37 @@ class TerminalService {
     // git:branches, git:checkout-result. Routed through the focus-gated
     // router status stream so all dispatch goes through one path.
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+  }
 
-    // Tier-3 re-drive. This is the terminal's ONLY reconnect recovery: the
-    // agent drops terminal output while suppressed but keeps bumping the seq,
-    // so a tab that was already on screen when the stream went away renders
-    // whatever it held then, forever — nothing else re-pulls it (the discovery
-    // pulls only fire for a tab the app has never seen).
-    //
-    // A seq cutoff is only meaningful against the PTY generation it was taken
-    // from, and the agent's counter is per PTY: it is deleted on exit
-    // (`ConnState.clearTerminal`), so a same-id respawn starts again at 1. A
-    // disconnect is exactly the window in which a terminal can exit and respawn
-    // unwitnessed — neither `terminal:exited` nor `terminal:started` arrives —
-    // and nothing on the wire distinguishes the new run from the old, so a
-    // surviving cutoff sits above every seq the new PTY will ever emit and
-    // filters its entire output. The tab then renders blank behind a live
-    // process, with no user action that clears it. Dropped wholesale rather
-    // than reasoned about per tab: losing a still-valid cutoff costs a few
-    // duplicated lines on the next snapshot, keeping a stale one costs the
-    // pane.
+  static const _snapshotHydratorKey = 'terminal:snapshots';
+
+  /// Registers the terminal snapshot pull and subscribes the focus-resume
+  /// re-drive. This is the terminal's ONLY reconnect recovery: the agent drops
+  /// terminal output while suppressed but keeps bumping the seq, so a tab that
+  /// was already on screen when the stream went away renders whatever it held
+  /// then, forever — nothing else re-pulls it (the discovery pulls only fire
+  /// for a tab the app has never seen). Only the checkout on screen carries
+  /// this — see [ProjectSession.setActiveCheckouts].
+  ///
+  /// A seq cutoff is only meaningful against the PTY generation it was taken
+  /// from, and the agent's counter is per PTY: it is deleted on exit
+  /// (`ConnState.clearTerminal`), so a same-id respawn starts again at 1. A
+  /// disconnect is exactly the window in which a terminal can exit and respawn
+  /// unwitnessed — neither `terminal:exited` nor `terminal:started` arrives —
+  /// and nothing on the wire distinguishes the new run from the old, so a
+  /// surviving cutoff sits above every seq the new PTY will ever emit and
+  /// filters its entire output. The tab then renders blank behind a live
+  /// process, with no user action that clears it. Dropped wholesale rather
+  /// than reasoned about per tab: losing a still-valid cutoff costs a few
+  /// duplicated lines on the next snapshot, keeping a stale one costs the pane.
+  void activate() {
+    if (_disposed) return;
     session.hydrateCheckout(
       checkoutId,
       _snapshotHydratorKey,
       _rehydrateTerminals,
     );
-    _resumeSub = session.focusResumed.listen(
+    _resumeSub ??= session.focusResumed.listen(
       (_) => detached(
         'TerminalService',
         're-attach snapshot pull on focus resume',
@@ -134,7 +140,12 @@ class TerminalService {
     );
   }
 
-  static const _snapshotHydratorKey = 'terminal:snapshots';
+  void deactivate() {
+    if (_disposed) return;
+    session.unhydrateCheckout(checkoutId, _snapshotHydratorKey);
+    unawaited(_resumeSub?.cancel());
+    _resumeSub = null;
+  }
 
   Future<void> _rehydrateTerminals() async {
     if (_disposed) return;

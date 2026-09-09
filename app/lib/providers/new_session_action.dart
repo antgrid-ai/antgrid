@@ -12,6 +12,7 @@ import '../models/session_target.dart';
 import '../project/project_session.dart';
 import '../project/project_session_registry.dart';
 import '../services/control_plane_client.dart';
+import '../services/pending_reply.dart' show SessionDownException;
 import '../util/device_id.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/new_session/picker_sources.dart';
@@ -442,6 +443,11 @@ Future<void> startNewSession(
       // An accepted start consumes the draft. Navigation itself preserves
       // drafts, so failures and a later return to this canvas remain editable.
       resetNewSessionForm(ref);
+    } on SessionDownException {
+      // The registry failed create/start immediately rather than the bridge
+      // ever refusing them — nothing was left in flight to time out, so this
+      // gets its own reason instead of collapsing into replyTimedOut below.
+      abort(NewSessionStartAbortReason.sessionDown);
     } on TimeoutException {
       // A dropped/late reply is retryable. Typed bridge failures intentionally
       // reach the composer so it can show their safe display message — though

@@ -25,6 +25,9 @@ export interface ProjectCoreRemoteDeps {
   currentPeerPubkey(): string | null;
   /** E2E app capability, established only after authenticated app:ready. */
   currentPeerSupportsCheckoutRouting?(): boolean;
+  /** False only while an established app has NOT advertised `pullsTree`; the
+   *  re-sync's tree push exists for exactly that app. */
+  currentPeerPullsTree?(): boolean;
   /** The bare machine deviceUuid this host registers under. The phone addresses
    *  a project as `<machineUuid>.<projectId>`, so a push sealed without it is a
    *  push the phone cannot open. Required, unlike currentPeerSupportsCheckoutRouting:
@@ -398,6 +401,7 @@ export class ProjectCore {
     });
     await listener.start();
     this.listener = listener;
+    core.setOwnerPullsTreeProvider(() => listener.ownerPullsTree);
 
     // Connect info is published via the control-plane `project:open` response
     // (no per-project discovery file). Surface it for the host to hand out.
@@ -528,6 +532,7 @@ export class ProjectCore {
     // control stays ungated.
     core.setPeerPubkeyProvider(() => remote.currentPeerPubkey());
     core.setPeerCheckoutRoutingProvider(() => remote.currentPeerSupportsCheckoutRouting?.() === true);
+    core.setPeerPullsTreeProvider(() => remote.currentPeerPullsTree?.() === true);
 
     // Fallback push path: while the paired phone can't receive in-band (no live
     // peer on this stream OR the app is backgrounded), seal a notification to its
@@ -622,6 +627,7 @@ export class ProjectCore {
         try { core.setPlainHook(null); } catch { /* best-effort */ }
         try { core.setPeerPubkeyProvider(null); } catch { /* best-effort */ }
         try { core.setPeerCheckoutRoutingProvider(null); } catch { /* best-effort */ }
+        try { core.setPeerPullsTreeProvider(null); } catch { /* best-effort */ }
       },
     };
   }
@@ -662,6 +668,7 @@ export class ProjectCore {
         try { core.setPlainHook(null); } catch {}
         try { core.setPeerPubkeyProvider(null); } catch {}
         try { core.setPeerCheckoutRoutingProvider(null); } catch {}
+        try { core.setPeerPullsTreeProvider(null); } catch {}
       },
     };
   }
@@ -678,6 +685,7 @@ export class ProjectCore {
     }
     try { this.core?.setPeerPubkeyProvider(null); } catch {}
     try { this.core?.setPeerCheckoutRoutingProvider(null); } catch {}
+    try { this.core?.setPeerPullsTreeProvider(null); } catch {}
     // Remove the primary stream's push dispatcher (additive bus subscriber) before
     // detaching — deliver() would otherwise hand a frame to a torn-down stream.
     try { this.relayPushUnsub?.(); } catch {}

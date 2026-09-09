@@ -2,8 +2,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 
 import '../connection/supervisor_state.dart';
+import '../launcher/host_control_client.dart';
 import '../launcher/host_controller.dart';
 import '../launcher/local_agent_launcher.dart';
+import '../launcher/project_resolve.dart';
 import '../project/project_session_registry.dart';
 import '../services/control_plane_client.dart';
 import '../util/device_id.dart';
@@ -21,6 +23,28 @@ import 'ui_attention_providers.dart';
 /// host daemon and hands out a verified port+token via `ensureHost`).
 final hostControllerProvider = Provider<HostController>(
   (_) => LocalAgentLauncher.sharedHost,
+);
+
+/// Resolves a folder's host-owned repository identity, given only the folder
+/// path — the seam widgets call through so tests can substitute a fake
+/// without spawning a real bridge host.
+typedef LocalProjectResolver = Future<ResolvedLocalProject> Function(
+  String folder,
+);
+
+/// Default implementation: ensures the singleton host (spawning if needed —
+/// this is the widget-facing seam, unlike the poll-driven closure in
+/// `app_shell.dart`, which must never respawn) and resolves through it.
+final localProjectResolverProvider = Provider<LocalProjectResolver>(
+  (ref) => (folder) async {
+    final host = await ref.read(hostControllerProvider).ensureHost();
+    final client = HostControlClient(port: host.controlPort, token: host.token);
+    try {
+      return await resolveLocalProject(client, folder);
+    } finally {
+      client.close();
+    }
+  },
 );
 
 /// A [ControlPlaneClient] bound to the relay control plane of the remote machine

@@ -55,7 +55,7 @@ void main() {
       mode: ProjectSessionMode.local,
       cachedSessionsStore: cache,
       onClose: () async => t.dispose(),
-    );
+    )..setActiveCheckouts({'main'});
   }
 
   /// Seeds one running tab named `a` and settles the discovery pull.

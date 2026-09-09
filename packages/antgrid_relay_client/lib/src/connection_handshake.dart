@@ -295,7 +295,7 @@ class ConnectionHandshake {
             'type': 'app:ready',
             'attemptId': attemptId,
             'confirm': base64.encode(phoneTag),
-            'capabilities': {'checkoutRouting': true},
+            'capabilities': {'checkoutRouting': true, 'pullsTree': true},
           }),
         );
         if (_cancelled) return;

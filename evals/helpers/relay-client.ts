@@ -657,6 +657,9 @@ export class RelayClient {
        *  `dropFirstAppReady` the attempt times out (a FRESH attempt must recover
        *  — no permanent wedge state). */
       noRetransmit?: boolean;
+      /** Play a pre-`pullsTree` app: omit the capability so the bridge keeps
+       *  pushing the file tree on re-sync (gate-lazy-hydration's legacy row). */
+      omitPullsTree?: boolean;
     } = {},
   ): Promise<void> {
     this.e2eMode = true;
@@ -752,11 +755,14 @@ export class RelayClient {
     // Step 7: sealed app:ready with retransmit until established.
     // `capabilities` mirrors the production Dart client (connection_handshake.dart):
     // without checkoutRouting the bridge treats this app as pre-worktree and
-    // refuses to stream any project holding a managed session.
+    // refuses to stream any project holding a managed session; `pullsTree` tells
+    // it the app fetches its own file tree, so the re-sync need not push one.
     const appReady = {
       type: "app:ready", attemptId,
       confirm: phoneConfirmTag(sessionKeys.confirm).toString("base64"),
-      capabilities: { checkoutRouting: true },
+      capabilities: opts.omitPullsTree
+        ? { checkoutRouting: true }
+        : { checkoutRouting: true, pullsTree: true },
     };
     if (opts.dropEstablished) this.dropEstablishedAttemptId = attemptId;
     const establishedP = this.waitFor((m: any) => m.type === "established" && m.attemptId === attemptId, timeoutMs);
@@ -845,10 +851,11 @@ export class RelayClient {
         this.pending = null;
         throw new Error("rekey agent-ready confirm invalid");
       }
+      // Unconditional: a rekey must not silently downgrade a live app's capability.
       const appReady = {
         type: "app:ready", attemptId,
         confirm: phoneConfirmTag(sessionKeys.confirm).toString("base64"),
-        capabilities: { checkoutRouting: true },
+        capabilities: { checkoutRouting: true, pullsTree: true },
       };
       const establishedP = this.waitFor((m: any) => m.type === "established" && m.attemptId === attemptId, timeoutMs);
       this.sendSealedFrame(appReady, transport, "control");
