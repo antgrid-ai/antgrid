@@ -52,6 +52,7 @@ import { resolveStructuredTitle } from "./agents/title-dispatch";
 import { buildTitleContext, generateTitleFromContext } from "./agents/title-generate";
 import { TitleAttempts, type TitleOutcome } from "./agents/title-attempts";
 import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
+import { OpenAgentPrompts } from "./agents/open-prompts";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
 import { createEntitlementReader, type TierClaimSource } from "./entitlement";
 import { classifyTurnEndError } from "./handler/lifecycle-classify";
@@ -233,6 +234,14 @@ export interface AgentCore {
   /** True when any of this project's sessions runs somewhere other than main's
    *  working tree, and therefore needs checkout-scoped routing. */
   hasIsolatedSessions(): boolean;
+  /** True when the Handler is ARMED on [terminalId]. A blocking prompt on an
+   *  armed slot is escalated unconditionally and that escalation is pushed, so
+   *  the agent's own question notification would buzz the phone a second time
+   *  with the same sentence. Read by the push dispatcher, which is where "one
+   *  block, one push" belongs — the notification itself must still be emitted,
+   *  because it is what puts the session's dot on "needs you" and what the
+   *  attached app renders in band. */
+  isHandlerArmed(terminalId: string): boolean;
   /** True when a work-status key is bound to the main checkout (or is not a
    *  session at all). Pre-handshake this answers true — nothing is isolated
    *  yet, so no guard should be narrowed away. */
@@ -1674,7 +1683,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         commandCatalog: (id) => structured?.commandCatalog(id),
       }),
     }),
-    sendAb: (msg) => sendAb(msg),
+    sendAb: (msg) => {
+      // Every arm, disarm and suspend ends in an emitStatus, and the frame lists
+      // the engine's whole session map — so mirroring it here is a copy that
+      // cannot fall behind, unlike one kept by watching the verbs that reach us.
+      if (msg.type === "handler:status") {
+        handlerArmedSlots.clear();
+        for (const s of msg.sessions) handlerArmedSlots.add(s.terminalId);
+      }
+      sendAb(msg);
+    },
     sendPush: (message, terminalId) => sendNotifying(createMessage("notification:push", {
       notificationType: "task_complete", message, sessionId: terminalId, projectId: project.id,
     })),
@@ -1714,6 +1732,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  the terminal was. Emptied with the rest of the checkout in
    *  `sweepCheckoutRuntime`. */
   const setupTerminalIds = new Set<string>();
+
+  /** What each slot's agent is displaying, feeding the api-server's suppression
+   *  of the CLI's second announcement of one block. See {@link OpenAgentPrompts}
+   *  for why it is keyed by prompt and tool rather than by slot. */
+  const openAgentPrompts = new OpenAgentPrompts();
+
+  /** Slots with an ARMED Handler session, mirrored off the engine's own
+   *  `handler:status` — a full replacement snapshot that every arm, disarm and
+   *  suspend emits, so this cannot drift from the map it reflects. The engine
+   *  exposes no predicate of its own, and reading its private state from here
+   *  would be the drift.
+   *
+   *  Mirrored at the engine's sender rather than off the bus, which is where a
+   *  reader would naturally put it: `handler:status` is a REPLAY_TYPE and the
+   *  bus drops a re-publish whose payload is unchanged, so a subscriber that
+   *  attaches after the arm can wait indefinitely for a frame that never comes.
+   *
+   *  Read by {@link AgentCore.isHandlerArmed}; see it for what depends on it. */
+  const handlerArmedSlots = new Set<string>();
 
   function registerSetupTerminal(checkoutId: string, terminalId: string): void {
     checkoutRuntimes.runtime(checkoutId)?.configuredTerminalIds.set(terminalId, terminalId);
@@ -2832,6 +2869,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // banner's "View setup log" reads, exactly when the run has failed.
         // Released with the rest of the checkout in `teardownCheckoutRuntime`.
         if (setupRunner.handleExit(id) || setupTerminalIds.has(id)) return;
+        // Whatever the agent was displaying died with its terminal, and a slot
+        // is reused by a same-id restart — a stale entry would silence the new
+        // run's every block.
+        openAgentPrompts.clear(id);
         sessions?.noteExited(id);
         // Drop buffered title state so a stale title from this run can't leak
         // into a restarted same-id session (start() reuses the entry id). A
@@ -3516,12 +3557,50 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb: (msg) => sendNotifying(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
     onHandlerEvent: (body) => {
+      // What the agent is DISPLAYING is settled ahead of the chat guard, because
+      // it is a fact about the agent's own screen rather than about supervision:
+      // a chat spawn runs the very same hooks (buildChatSpawnAugment reuses the
+      // terminal injection) and the api-server reads this latch for every slot,
+      // so leaving it unpopulated there costs exactly the duplicate "Permission
+      // needed" it exists to drop.
+      if (body.event === "question") {
+        openAgentPrompts.open(body.terminalId, body.promptId, body.promptTool);
+      } else if (body.event === "prompt_answered") {
+        openAgentPrompts.close(body.terminalId, body.promptId);
+      } else if (body.event === "turn_end" || body.event === "turn_failed") {
+        // A prompt cannot outlive its turn, which is the same rule work-status's
+        // closeTurn already applies. This is the last resort, not the interrupt
+        // path: a question the user escaped out of reports its own failure hook,
+        // which arrives as `prompt_answered` and is closed by the branch above —
+        // Claude fires neither Stop nor StopFailure on a user interrupt, so
+        // nothing here would ever run for it.
+        openAgentPrompts.clear(body.terminalId);
+      }
       // Chat slots are fed by the in-process driver tap (observeChatFrameForHandler);
       // the reused title plugin's hooks still POST here for claude/codex chat
       // spawns — drop those or every turn_end fires twice.
       if (sessions?.get(body.terminalId)?.mode === "chat") return;
+      // A prompt that is over is not a pause to judge, and the engine's event
+      // union carries no member for it: it retires the row the `question`
+      // raised, by the id the agent gave that one tool call.
+      if (body.event === "prompt_answered") {
+        // The block the `question` notification recorded is gone, and this is the
+        // only thing that ever says so: a terminal-mode session's next signal is
+        // its Stop hook, minutes of real work later, so without this the dot
+        // reads "needs you" for the rest of the turn. Reported as a reply rather
+        // than through `onAnswer`, which would also OPEN a turn — and an
+        // interrupted question fires no Stop hook to close one again.
+        opts.onUserReply?.(body.terminalId, { submitted: false, typed: false });
+        // Only ever BY ID. An id-less retraction means "every prompt on this
+        // session is gone", which is true of a driver's synchronous turn-end
+        // sweep and never of one tool call reporting its own completion — it
+        // would take an outstanding ask the user has not answered with it.
+        if (body.promptId) handlerEngine.onPromptRetracted(body.terminalId, body.promptId);
+        return;
+      }
       handlerEngine.handleEvent({
         terminalId: body.terminalId, event: body.event,
+        detail: body.detail, promptId: body.promptId,
         transcriptPath: body.transcriptPath, sessionId: body.sessionId,
         resetsAt: body.resetsAt, errorClass: body.errorClass,
       }).catch((err) => log.error("Handler event failed: %s", err));
@@ -3593,8 +3672,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       if (!resolved || resolved.kind === "first-message") nameFromHook(resolved?.title);
     },
     onHookAlive: (terminalId) => { hookAlivePinged.add(terminalId); },
-    onTurnStart: (terminalId) => opts.onTurnStart?.(terminalId),
+    onTurnStart: (terminalId) => {
+      if (terminalId) openAgentPrompts.clear(terminalId);
+      opts.onTurnStart?.(terminalId);
+    },
     isStaleIdleNudge: (terminalId) => opts.isStaleIdleNudge?.(terminalId) ?? false,
+    hasOpenAgentPrompt: (terminalId, promptTool) => openAgentPrompts.has(terminalId, promptTool),
   });
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });
@@ -3793,6 +3876,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     hasIsolatedSessions(): boolean {
       return sessions?.hasIsolatedSessions() ?? false;
+    },
+    isHandlerArmed(terminalId: string): boolean {
+      return handlerArmedSlots.has(terminalId);
     },
     isMainCheckoutSession(id: string): boolean {
       return sessions?.isMainCheckoutSession(id) ?? true;

@@ -1,8 +1,13 @@
 import type { AbMessage } from "../protocol";
 
+// HAND-MIRRORED in the `labels` map of app/lib/screens/workspace_shell.dart,
+// which titles the same notification when the app is attached. A string added
+// on one side alone describes one event two different ways depending only on
+// whether the device was awake.
 const AGENT_LABELS: Record<string, string> = {
   permission_request: "Permission needed",
   awaiting_input: "Needs your input",
+  question: "Agent asks",
   task_complete: "Task complete",
   idle: "Waiting for you",
   error: "Agent error",

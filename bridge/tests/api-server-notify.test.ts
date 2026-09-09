@@ -184,3 +184,110 @@ describe("POST /turn-start", () => {
     } finally { srv.stop(); }
   });
 });
+
+describe("POST /notify — the enum this schema hand-mirrors", () => {
+  test("an awaiting_input notification is accepted and emitted", async () => {
+    // Regression: this member was missing from the copy while every claude idle
+    // nudge posted it, so the post was answered 400 — and `runHookInvocation`
+    // ignores every response, so the notification simply never arrived.
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({ sendAb: (m) => sent.push(m) }));
+    try {
+      const res = await post(srv.port, { type: "awaiting_input", terminalId: "t1", message: "Claude is waiting for your input" });
+      expect(res.status).toBe(200);
+      expect((sent[0] as any).notificationType).toBe("awaiting_input");
+    } finally { srv.stop(); }
+  });
+
+  test("a question notification is accepted and emitted", async () => {
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({ sendAb: (m) => sent.push(m) }));
+    try {
+      const res = await post(srv.port, { type: "question", terminalId: "t1", message: "Which env?" });
+      expect(res.status).toBe(200);
+      expect((sent[0] as any).notificationType).toBe("question");
+      expect((sent[0] as any).message).toBe("Which env?");
+    } finally { srv.stop(); }
+  });
+});
+
+describe("POST /notify — the open-prompt suppression", () => {
+  test("a permission_request is dropped while the agent holds a prompt on that slot", async () => {
+    // The `question` notify already went out carrying the question itself; this
+    // one describes the same block and could only say "Permission needed".
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({ sendAb: (m) => sent.push(m), hasOpenAgentPrompt: () => true }));
+    try {
+      const res = await post(srv.port, { type: "permission_request", terminalId: "t1" });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, suppressed: true });
+      expect(sent).toHaveLength(0);
+    } finally { srv.stop(); }
+  });
+
+  test("a turn end is never suppressed by an open prompt", async () => {
+    // Scoped to the two ambiguous kinds: a turn end is a different fact and
+    // must land whatever the agent is displaying.
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({ sendAb: (m) => sent.push(m), hasOpenAgentPrompt: () => true }));
+    try {
+      expect((await post(srv.port, { type: "task_complete", terminalId: "t1" })).status).toBe(200);
+      expect((await post(srv.port, { type: "question", terminalId: "t1", message: "Which env?" })).status).toBe(200);
+      expect(sent.map((m) => (m as any).notificationType)).toEqual(["task_complete", "question"]);
+    } finally { srv.stop(); }
+  });
+
+  test("an unwired context suppresses nothing", async () => {
+    // The predicate only ever silences, so absent has to mean "no prompt open".
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({ sendAb: (m) => sent.push(m) }));
+    try {
+      expect((await post(srv.port, { type: "permission_request", terminalId: "t1" })).status).toBe(200);
+      expect(sent).toHaveLength(1);
+    } finally { srv.stop(); }
+  });
+});
+
+describe("POST /notify — the gates a claude hook invocation needs", () => {
+  test("the post-completion idle nudge is dropped, the same fact /handler-event refuses", async () => {
+    // Past the hook's own classification this kind can only BE the nudge — a
+    // live block classifies as permission_request — so nothing here would
+    // survive the gate legitimately. Without it the dot reads "done" while the
+    // phone says "Needs your input" for a session that finished.
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({ sendAb: (m) => sent.push(m), isStaleIdleNudge: () => true }));
+    try {
+      const res = await post(srv.port, { type: "awaiting_input", terminalId: "t1", message: "Claude is waiting for your input" });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, stale: true });
+      expect(sent).toHaveLength(0);
+    } finally { srv.stop(); }
+  });
+
+  test("a mid-turn block on the same slot is never dropped as a nudge", async () => {
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({ sendAb: (m) => sent.push(m), isStaleIdleNudge: () => true }));
+    try {
+      expect((await post(srv.port, { type: "permission_request", terminalId: "t1" })).status).toBe(200);
+      expect(sent.map((m) => (m as any).notificationType)).toEqual(["permission_request"]);
+    } finally { srv.stop(); }
+  });
+
+  test("the open-prompt predicate is asked about the tool the post names", async () => {
+    // A parallel batch stops on AskUserQuestion AND on a Bash call needing
+    // approval; a predicate answering about the SLOT silences the approval
+    // nobody has been told about.
+    const asked: Array<string | undefined> = [];
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({
+      sendAb: (m) => sent.push(m),
+      hasOpenAgentPrompt: (_id, promptTool) => { asked.push(promptTool); return promptTool === "AskUserQuestion"; },
+    }));
+    try {
+      await post(srv.port, { type: "permission_request", terminalId: "t1", promptTool: "AskUserQuestion" });
+      await post(srv.port, { type: "permission_request", terminalId: "t1", promptTool: "Bash" });
+      expect(asked).toEqual(["AskUserQuestion", "Bash"]);
+      expect(sent).toHaveLength(1);
+    } finally { srv.stop(); }
+  });
+});

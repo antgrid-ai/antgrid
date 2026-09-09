@@ -527,6 +527,9 @@ export class ProjectCore {
       // gate, whose `peerOnline` defaults true, so it reads "can receive in-band"
       // for a phone that has never connected and mutes push after a host restart.
       shouldFallback: () => !peerConnected || core.connState.appFocusPaused,
+      // Read live, never captured: a slot is armed and disarmed under a stream
+      // that outlives both.
+      isHandlerArmed: (terminalId) => core.isHandlerArmed(terminalId),
       // A CONNECTED peer names the exact device in session, so target only it.
       // Otherwise fall back to the persisted phone registry: delivery never needs
       // the socket (the relay forwards to FCM/APNs blindly), and no phone may be

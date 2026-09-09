@@ -927,7 +927,7 @@ const CommandDoneMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-export const NotificationTypeSchema = z.enum(["task_complete", "permission_request", "awaiting_input", "idle", "error"]);
+export const NotificationTypeSchema = z.enum(["task_complete", "permission_request", "awaiting_input", "question", "idle", "error"]);
 export type NotificationType = z.infer<typeof NotificationTypeSchema>;
 
 const NotificationPushMessage = BaseMessage.extend({

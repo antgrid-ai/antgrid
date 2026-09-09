@@ -176,3 +176,41 @@ test("non-user-facing message → ignored", () => {
   d.onOutbound(createMessage("terminal:input", { terminalId: "t", data: "x" }));
   expect(delivered).toHaveLength(0);
 });
+test("an armed slot's question is pushed once, by the escalation that can answer it", () => {
+  // One hook invocation produces both: the agent's own question notification and
+  // the forced escalation the Handler raises from the same event. They carry the
+  // same sentence, so forwarding both buzzes the phone twice within milliseconds
+  // — and the escalation is the half that must survive, since it is the one
+  // carrying the escalationId the tap routes to.
+  const { d, delivered } = harness({ isHandlerArmed: () => true });
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "question", message: "Which env?", sessionId: "t1", projectId: "p1",
+  }));
+  expect(delivered).toHaveLength(0);
+  d.onOutbound(escalation({ terminalId: "t1", question: "Agent asks: Which env?", urgency: "high" }));
+  expect(delivered).toHaveLength(1);
+});
+
+test("an unarmed slot keeps its question notification", () => {
+  // Nothing else on that session ever says WHAT was asked: with no armed
+  // Handler there is no escalation, and the CLI's own permission notification
+  // reaches the phone as the same "Permission needed" every tool call gets.
+  const { d, delivered } = harness();
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "question", message: "Which env?", sessionId: "t1", projectId: "p1",
+  }));
+  expect(delivered).toHaveLength(1);
+});
+
+test("arming one slot never silences another, nor any other notification kind", () => {
+  const armed: string[] = [];
+  const { d, delivered } = harness({ isHandlerArmed: (id) => { armed.push(id); return id === "t1"; } });
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "question", message: "Which env?", sessionId: "t2", projectId: "p1",
+  }));
+  d.onOutbound(createMessage("notification:push", {
+    notificationType: "task_complete", message: "done", sessionId: "t1", projectId: "p1",
+  }));
+  expect(armed).toEqual(["t2"]);
+  expect(delivered).toHaveLength(2);
+});
