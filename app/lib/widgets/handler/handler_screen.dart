@@ -14,28 +14,19 @@ import '../../design/widgets/ab_list_row.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_progress_rule.dart';
 import '../../design/widgets/ab_section_header.dart';
-import '../../design/widgets/ab_snack_bar.dart';
 import '../../design/widgets/ab_state_chip.dart';
 import '../../design/widgets/ab_tooltip.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
-import '../../providers/sessions.dart';
 import '../../util/detached.dart';
 import '../../util/relative_time.dart';
 import 'handler_ask_footer.dart';
-import 'handler_ask_sheet.dart';
 import 'handler_backlog_drawer.dart';
-import 'handler_blocked_action_card.dart';
-import 'handler_decision_card.dart';
+import 'handler_escalation_answer.dart';
+import 'handler_escalation_row.dart';
 import 'handler_item_status.dart';
 import 'handler_layout.dart';
-import 'handler_reply_sheet.dart';
 import 'handler_session_settings.dart';
-
-/// Day-aware, not a bare clock: this feed is written while the user is away and
-/// read afterwards, so it routinely spans midnight.
-String _fmtTime(int epochMs) =>
-    dayAwareTime(DateTime.fromMillisecondsSinceEpoch(epochMs));
 
 class HandlerScreen extends ConsumerWidget {
   const HandlerScreen({super.key});
@@ -84,61 +75,6 @@ class HandlerScreen extends ConsumerWidget {
     // its live mode and judge pick. The pre-arm guess belongs where nothing is
     // armed yet (the header's shield tooltip).
 
-    Future<void> answer(HandlerEscalation e) async {
-      if (service == null) return;
-      if (e.nonBlocking) {
-        // An ask goes to its own sheet and its own transport. The reply sheet
-        // would prefill the judge's draft and send the result into the session
-        // as a submitted line — which is what an ask exists not to do: the
-        // agent is still working, and the answer belongs to Handler.
-        final result = await showHandlerAskSheet(context, e);
-        if (result == null) return;
-        // Re-resolved after the sheet for the reason spelled out below.
-        final asked = focusedServiceOrNull(container, (s) => s.handlerService);
-        if (asked == null) return;
-        if (result is HandlerAskDecline) {
-          asked.dismiss(e);
-          return;
-        }
-        final sent = asked.answerAskText(e, (result as HandlerAskAnswer).text);
-        // The one arm where a refusal costs the user real work. The service
-        // refuses a row that stopped being an ask while the sheet was open —
-        // the overnight case exactly, where the agent finishes the work the
-        // question did not gate while the user is still typing. The sheet has
-        // already popped and the text lives nowhere else, so saying nothing
-        // here reads as an answer given. The tap arm needs none of this: the
-        // card declines to latch and the user is out one tap.
-        if (!sent && context.mounted) {
-          showAbSnackBar(
-            context,
-            'That question changed while you were answering — your answer was '
-            'not sent. Handler is waiting on it here.',
-          );
-        }
-        return;
-      }
-      if (e.kind == 'resolve_in_session') {
-        // Option-based prompt — the chat transcript owns the resolution UI
-        // (permission card / question form); focusing the session gets the
-        // user there instead of collecting free text that can't answer it.
-        // Switching focus is not enough on mobile: this screen is the workspace
-        // page and the transcript is the agent page, so without the swipe the
-        // tap looks like it did nothing. Desktop shows both, and switching to
-        // the agent page there is a no-op.
-        ref.read(activeSessionIdProvider.notifier).set(e.terminalId);
-        ref.read(switchToAgentProvider)?.call();
-        return;
-      }
-      final text = await showHandlerReplySheet(context, e);
-      if (text == null) return;
-      // Re-resolved after the sheet, exactly like onDisarm below: the sheet stays open
-      // for as long as the user types, and the focused project's session can be rebuilt
-      // in that window. The build-time instance would be disposed by then, and
-      // `reply` answers a disposed service with `false` — an answer the user typed,
-      // silently dropped, under a card that still reads as answered.
-      focusedServiceOrNull(container, (s) => s.handlerService)?.reply(e, text);
-    }
-
     // Confirmed for one action out of four. Undoing a hard reset, a recursive
     // delete or a clean touches this machine only; undoing a force push writes
     // to a shared remote, and the row it is offered on is a scrolling list row
@@ -147,9 +83,10 @@ class HandlerScreen extends ConsumerWidget {
     // The dialog is the only thing standing between a thumb landing where the
     // scroll stopped and a ref overwritten for everyone on it.
     //
-    // Re-resolved after the dialog for the same reason `answer` re-resolves
-    // after its sheet: the focused project's session can be rebuilt while the
-    // dialog is open, and the build-time instance is disposed by then.
+    // Re-resolved after the dialog for the same reason
+    // [answerHandlerEscalation] re-resolves after its sheet: the focused
+    // project's session can be rebuilt while the dialog is open, and the
+    // build-time instance is disposed by then.
     Future<void> undo(HandlerSnapshot s) async {
       if (s.action == 'force_push') {
         final ok = await AbConfirmDialog.show(
@@ -171,31 +108,6 @@ class HandlerScreen extends ConsumerWidget {
       focusedServiceOrNull(container, (x) => x.handlerService)?.undo(s);
     }
 
-    // `urgent` rides the meta column rather than each row's own body: an
-    // escalation renders as one of three unrelated widgets (blocked card,
-    // decision card, plain row) and this is the only piece all three share, so
-    // it is the only place the marker cannot be added to two of them and
-    // forgotten on the third.
-    Widget meta(int at, {bool urgent = false, bool asked = false}) =>
-        _RowMeta(at: at, p: p, urgent: urgent, asked: asked);
-
-    // The urgency and ask tests themselves, once, for that same reason: spelled
-    // out at each of the three call sites they are three chances to omit, and a
-    // fourth row shape starts life without them.
-    Widget escalationMeta(HandlerEscalation e) =>
-        meta(e.at, urgent: e.urgency == 'high', asked: e.nonBlocking);
-
-    // Built here rather than inside the widget that draws it, because the claim
-    // is only checkable against the OWNING session's live backlog and that is
-    // held on this screen's state. A session with no snapshot yet hands over an
-    // empty backlog, which the footer reads as nothing running.
-    Widget? askFooter(HandlerEscalation e) => e.nonBlocking
-        ? HandlerAskFooter(
-            escalation: e,
-            backlog: state.sessions[e.terminalId]?.backlog ?? const [],
-          )
-        : null;
-
     return CustomScrollView(
       slivers: [
         // Actionable first. The old order opened with the session headers, so
@@ -206,125 +118,49 @@ class HandlerScreen extends ConsumerWidget {
           SliverList.list(
             children: [
               for (final e in state.escalations)
-                // First in the chain, and a cheap floor rather than a live
-                // case: the bridge never mints choices for a report, so this
-                // and the decision card can never both want the row.
-                if (e.kind == 'guard_blocked')
-                  HandlerBlockedActionCard(
-                    escalation: e,
-                    trailing: escalationMeta(e),
-                    // Re-resolved through the container for the same reason
-                    // `answer` re-resolves after its sheet: the build-time
-                    // instance can be disposed by the time a tap lands.
-                    onDismiss: service == null
-                        ? null
-                        : () => focusedServiceOrNull(
-                            container,
-                            (s) => s.handlerService,
-                          )?.dismiss(e),
-                    onReply: service == null ? null : () => answer(e),
-                  )
-                // An ask needs BOTH halves to draw buttons: the bridge clears
-                // `nonBlocking` and `askOptions` together when it promotes one,
-                // so a row carrying only one of them is a frame in flight and
-                // falls through to the plain row, which can still answer it in
-                // words.
-                else if (e.choices != null ||
-                    (e.nonBlocking && e.askOptions != null))
-                  HandlerDecisionCard(
-                    escalation: e,
-                    trailing: escalationMeta(e),
-                    footer: askFooter(e),
-                    // The id, not the choice: the service resolves it against
-                    // the escalation's own offered set, so the text on the wire
-                    // is always the one the bridge authored.
-                    //
-                    // Re-resolved through the container like `onDismiss` above
-                    // rather than closing over the build-time instance: a card
-                    // outlives a project session rebuild, and a disposed
-                    // service answers `false` — which the card reads as a
-                    // refusal and correctly declines to latch, so today this
-                    // only ever cost a tap. Re-resolving makes that tap land.
-                    onChoice: service == null
-                        ? null
-                        : (choiceId) =>
-                              focusedServiceOrNull(
-                                container,
-                                (s) => s.handlerService,
-                              )?.answerWithChoice(e, choiceId) ??
-                              false,
-                    // The ask's own transport, re-resolved for the same reason.
-                    // It sends the id alone and nothing into the session — the
-                    // service refuses a row it cannot answer, which is what the
-                    // card reads as a refusal and declines to latch on.
-                    onAskOption: service == null
-                        ? null
-                        : (choiceId) =>
-                              focusedServiceOrNull(
-                                container,
-                                (s) => s.handlerService,
-                              )?.answerAsk(e, choiceId) ??
-                              false,
-                    onCustomReply: service == null ? null : () => answer(e),
-                  )
-                else
-                  AbListRow(
-                    leading: HandlerRail(
-                      icon: e.floorRule != null ? AbIcons.shield : null,
-                      color: p.warning,
-                    ),
-                    // The question is the thing being decided, so it is allowed
-                    // the room to be read. Clipped at one line it was a decision
-                    // taken without its subject.
-                    titleMaxLines: 3,
-                    subtitleMaxLines: 2,
-                    // Top-aligned because the title wraps: centred, the shield
-                    // drifts down past the question it qualifies and lands
-                    // beside the reasoning, while the decision card directly
-                    // above keeps its own shield on the first line.
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    title: Text(
-                      e.question,
-                      style: AbTokens.sansStyle(fontWeight: FontWeight.w600),
-                    ),
-                    subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (e.floorRule != null)
-                          Text(
-                            'Safety floor: ${e.floorRule}',
-                            style: AbTokens.sansStyle(
-                              fontSize: AbTokens.fontXs,
-                              fontWeight: FontWeight.w600,
-                              color: p.warning,
-                            ),
-                          ),
-                        Text(
-                          e.reasoning,
-                          style: AbTokens.sansStyle(
-                            fontSize: AbTokens.fontXs,
-                            color: p.textMuted,
-                          ),
+                HandlerEscalationRow(
+                  escalation: e,
+                  // The OWNING session's backlog: the ask footer's claim is
+                  // only checkable against the items that session is actually
+                  // running, and this screen is the one surface holding them.
+                  backlog: state.sessions[e.terminalId]?.backlog ?? const [],
+                  onReply: service == null
+                      ? null
+                      : () => detached(
+                          'HandlerScreen',
+                          'answer escalation',
+                          () => answerHandlerEscalation(context, container, e),
                         ),
-                        // An ask reaching this row is one with no options to
-                        // tap — answerable in words alone, and owed the same
-                        // two things the card gives it: what happens to the
-                        // answer, and what is still running behind it.
-                        if (e.nonBlocking)
-                          Text(
-                            handlerAskLatencyNote,
-                            style: AbTokens.sansStyle(
-                              fontSize: AbTokens.fontXs,
-                              color: p.textMuted,
-                            ),
-                          ),
-                        ?askFooter(e),
-                      ],
-                    ),
-                    trailing: escalationMeta(e),
-                    onTap: () => answer(e),
-                  ),
+                  // Re-resolved through the container for the same reason
+                  // [answerHandlerEscalation] re-resolves after its sheet: the
+                  // build-time instance can be disposed by a tap landing, and a
+                  // disposed service answers `false` — which a card reads as a
+                  // refusal and correctly declines to latch on, so today this
+                  // only ever cost a tap. Re-resolving makes that tap land.
+                  onDismiss: service == null
+                      ? null
+                      : () =>
+                            focusedServiceOrNull(
+                              container,
+                              (s) => s.handlerService,
+                            )?.dismiss(e),
+                  onChoice: service == null
+                      ? null
+                      : (choiceId) =>
+                            focusedServiceOrNull(
+                              container,
+                              (s) => s.handlerService,
+                            )?.answerWithChoice(e, choiceId) ??
+                            false,
+                  onAskOption: service == null
+                      ? null
+                      : (choiceId) =>
+                            focusedServiceOrNull(
+                              container,
+                              (s) => s.handlerService,
+                            )?.answerAsk(e, choiceId) ??
+                            false,
+                ),
             ],
           ),
         ],
@@ -382,7 +218,7 @@ class HandlerScreen extends ConsumerWidget {
               final w = state.wrapUps[state.wrapUps.length - 1 - i];
               return _WrapUpCard(
                 wrapUp: w,
-                meta: meta(w.at),
+                meta: HandlerRowMeta(at: w.at),
                 // Derived, never read off the record: an undo taken after the
                 // wrap-up spends its entry and a re-arm retires the offers
                 // outright, so a count frozen at compose time is a lie on the
@@ -407,7 +243,7 @@ class HandlerScreen extends ConsumerWidget {
               final s = state.snapshots[state.snapshots.length - 1 - i];
               return _SnapshotRow(
                 snapshot: s,
-                meta: meta(s.at),
+                meta: HandlerRowMeta(at: s.at),
                 pending: state.pendingUndo.contains(s.snapshotId),
                 onUndo: () =>
                     detached('HandlerScreen', 'undo snapshot', () => undo(s)),
@@ -438,7 +274,11 @@ class HandlerScreen extends ConsumerWidget {
             itemCount: state.activity.length,
             itemBuilder: (_, i) {
               final a = state.activity[i];
-              return _ActivityRow(record: a, meta: meta(a.at), p: p);
+              return _ActivityRow(
+                record: a,
+                meta: HandlerRowMeta(at: a.at),
+                p: p,
+              );
             },
           ),
       ],
@@ -458,53 +298,6 @@ class HandlerScreen extends ConsumerWidget {
       );
 }
 
-/// Right-aligned time metadata shown on escalation and activity rows.
-class _RowMeta extends StatelessWidget {
-  const _RowMeta({
-    required this.at,
-    required this.p,
-    this.urgent = false,
-    this.asked = false,
-  });
-  final int at;
-  final AbColors p;
-
-  /// Only escalations pass this. Snapshots and activity rows are history, and
-  /// nothing about them is waiting on the user.
-  final bool urgent;
-
-  /// The row is a question the session did not stop for. Also escalations only,
-  /// and mutually exclusive with [urgent] by construction — an ask is always
-  /// minted `normal` — so the precedence below is a floor rather than a case.
-  final bool asked;
-
-  @override
-  Widget build(BuildContext context) {
-    final style = AbTokens.monoStyle(
-      fontSize: AbTokens.fontXxs,
-      color: p.textMuted,
-    );
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        // Above the timestamp, so the eye reaches it on the way down rather
-        // than after it. System-assigned data, so the mono uppercase chip,
-        // matching ESCALATE ONLY on the session card.
-        //
-        // One slot, so a row can never wear both words: URGENT wins, because a
-        // row that somehow carried both would be a stopped session, and that is
-        // the reading that must not be softened.
-        if (urgent)
-          AbChip.system(label: 'URGENT', color: p.warning)
-        else if (asked)
-          AbChip.system(label: 'ASKED', color: p.textSecondary),
-        Text(_fmtTime(at), style: style),
-      ],
-    );
-  }
-}
-
 /// The part of a park the run-state word can't carry: why it stopped, and when
 /// it comes back. Absolute rather than a countdown — the card is read hours
 /// after it was written, and a ticking clock on a scrolling log is a repaint
@@ -518,11 +311,7 @@ class _RowMeta extends StatelessWidget {
 /// card never disagree about a park. [now] is injectable for that reason.
 String? handlerParkNote(HandlerSessionState session, {DateTime? now}) {
   if (session.runState != HandlerRunState.parked) return null;
-  final reason = switch (session.parkKind) {
-    'limit' => 'rate limit',
-    'outage' => 'provider outage',
-    _ => null,
-  };
+  final reason = handlerParkReason(session);
   final until = session.parkedUntil;
   final ref = now ?? DateTime.now();
   final wake = until == null

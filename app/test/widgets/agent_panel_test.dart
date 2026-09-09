@@ -8,13 +8,21 @@
 import 'package:antgrid/design/widgets/ab_state_chip.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/ab_project.dart';
+import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
+import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/remote_access.dart';
+import 'package:antgrid/providers/sessions.dart';
+import 'package:antgrid/providers/value_controller.dart';
+import 'package:antgrid/screens/terminal_screen.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
+import 'package:antgrid/widgets/command_output_overlay.dart';
+import 'package:antgrid/widgets/handler/handler_escalation_overlay.dart';
+import 'package:antgrid/widgets/handler/handler_layout.dart';
 import 'package:antgrid/widgets/remote_host_chip.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
 import 'package:flutter/foundation.dart';
@@ -351,7 +359,16 @@ void main() {
 
   /// Pumps the desktop AgentPanel at 1000px, where [AgentBar] replaces the
   /// mobile header.
-  Future<void> pumpWide(WidgetTester tester) async {
+  ///
+  /// [escalations] null leaves the handler providers untouched — the two header
+  /// cases below have no armed session in them at all. A list arms t1 with
+  /// exactly those rows, which is what puts the escalation overlay in the
+  /// terminal's Stack and takes the collapsed strip out of the terminal's
+  /// height.
+  Future<void> pumpWide(
+    WidgetTester tester, {
+    List<HandlerEscalation>? escalations,
+  }) async {
     tester.view.physicalSize = const Size(1000, 800);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -361,12 +378,71 @@ void main() {
 
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [...stores.overrides],
+        overrides: [
+          ...stores.overrides,
+          if (escalations != null) ...[
+            activeSessionIdProvider.overrideWith(() => ValueController('t1')),
+            handlerStateProvider.overrideWith(
+              (ref) => Stream.value(
+                HandlerState.initial().copyWith(
+                  sessions: {
+                    't1': HandlerSessionState(
+                      terminalId: 't1',
+                      runState: escalations.isEmpty
+                          ? HandlerRunState.watching
+                          : HandlerRunState.needsYou,
+                      pendingEscalations: escalations.length,
+                      armedAt: 1,
+                      goal: 'ship it',
+                      backlog: const [],
+                      escalations: escalations,
+                    ),
+                  },
+                  escalations: escalations,
+                ),
+              ),
+            ),
+          ],
+        ],
         child: const MaterialApp(home: Scaffold(body: AgentPanel())),
       ),
     );
     await tester.pump();
   }
+
+  HandlerEscalation escalation({bool nonBlocking = false}) =>
+      HandlerEscalation(
+        escalationId: 'e1',
+        terminalId: 't1',
+        question: 'bun or vitest?',
+        reasoning: 'Affects CI wiring.',
+        draftReply: 'use bun',
+        urgency: nonBlocking ? 'normal' : 'high',
+        at: 1,
+        nonBlocking: nonBlocking,
+      );
+
+  /// The Stack the panel builds for a terminal session — the one whose child
+  /// ORDER is the stacking contract between the two bottom-pinned overlays.
+  Stack terminalStack(WidgetTester tester) => tester.widget<Stack>(
+    find
+        .ancestor(
+          of: find.byType(HandlerEscalationOverlay),
+          matching: find.byType(Stack),
+        )
+        .first,
+  );
+
+  /// The Padding the panel wraps `TerminalScreen` in fills the Stack, so its
+  /// bottom edge is the Stack's — and the gap between the two is the reserve.
+  Rect terminalBand(WidgetTester tester) => tester.getRect(
+    find
+        .ancestor(
+          of: find.byType(TerminalScreen),
+          matching: find.byType(Padding),
+        )
+        .first,
+  );
 
   // The breadcrumb moved OUT of the window title bar and into AgentBar, so the
   // desktop path carries it too now — only the mobile drawer button is still
@@ -399,6 +475,97 @@ void main() {
       expect(find.byTooltip('Hide panel'), findsNothing);
       expect(find.byTooltip('Hide projects'), findsNothing);
       expect(find.byTooltip('Show projects'), findsNothing);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  // Both of the next two are silent: no analyzer error, no failing test, and no
+  // visual change at all until a card is actually standing.
+  testWidgets('the escalation card sits under the command panel', (
+    tester,
+  ) async {
+    // "Newest overlay last" is the natural instinct and it is wrong here. Only
+    // one of the two can be dismissed: a failed command's output stands until
+    // the user closes it, so an opaque escalation painted over it puts the
+    // close and rerun buttons out of reach for as long as the question stands —
+    // and reading that failure is routinely what answering the question needs.
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      await pumpWide(tester, escalations: [escalation()]);
+
+      final children = terminalStack(tester).children;
+      expect(
+        children.indexWhere((w) => w is HandlerEscalationOverlay),
+        lessThan(children.indexWhere((w) => w is CommandOutputOverlay)),
+      );
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('the terminal gives up exactly the collapsed strip', (
+    tester,
+  ) async {
+    // The card FLOATS and the terminal reserves the strip alone, so the one
+    // line the user collapsed the card in order to read is not the line the
+    // strip covers. Dropping the padding is invisible until then.
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      await pumpWide(tester, escalations: [escalation()]);
+
+      final context = tester.element(find.byType(AgentPanel));
+      final band = terminalBand(tester);
+      expect(
+        band.bottom - tester.getRect(find.byType(TerminalScreen)).bottom,
+        handlerEscalationCollapsedHeight(context),
+      );
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('an ask takes no rows from a terminal that is still drawing', (
+    tester,
+  ) async {
+    // `raiseAsk` runs on a pass that has already replied to the agent, so the
+    // agent is streaming output past the question right now. Reserving here
+    // sends a `terminal:resize` into a live TUI and takes a second one back
+    // when the ask is answered — two full-screen reflows, over the relay, at
+    // the one moment the user is reading.
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      await pumpWide(
+        tester,
+        escalations: [escalation(nonBlocking: true)],
+      );
+
+      expect(
+        tester.getRect(find.byType(TerminalScreen)).bottom,
+        terminalBand(tester).bottom,
+      );
+      // The card is still floated over it — the reserve is what an ask does
+      // without, not the surface.
+      expect(find.text('bun or vitest?'), findsOneWidget);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('with nothing standing the terminal keeps its full height', (
+    tester,
+  ) async {
+    // The other half of the reserve, and the reason it is keyed on presence
+    // rather than left permanently in place: an unarmed terminal gives up no
+    // rows at all.
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      await pumpWide(tester, escalations: const []);
+
+      expect(
+        tester.getRect(find.byType(TerminalScreen)).bottom,
+        terminalBand(tester).bottom,
+      );
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

@@ -12,6 +12,7 @@ import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_list_row.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
+import '../../providers/session_mode.dart';
 import '../../providers/sessions.dart';
 import '../../providers/value_controller.dart';
 import '../../util/detached.dart';
@@ -71,26 +72,32 @@ String handlerPaStatusLabel(HandlerSessionState session, {DateTime? now}) {
 /// Three categories, not two, and the third is the one this prose exists for.
 /// Rows a line CLEARS are the ordinary blocking questions. Rows it leaves
 /// standing and that are not the user's to answer here are `resolve_in_session`
-/// (only the transcript's own resolve carries the id) and `guard_blocked` (a
-/// report of an action Handler could not take, retired only by its card's
-/// Dismiss) — both are subtracted from the count and otherwise unmentioned. A
-/// `nonBlocking` ask is the third: it also survives the line, but it is still
-/// the user's to answer, so it is subtracted AND named. Only its own card
-/// answers it (`handler:answer` for a tap, an escalationId-bearing
+/// (only the session's own prompt carries the id that resolves it) and
+/// `guard_blocked` (a report of an action Handler could not take, retired only
+/// by its card's Dismiss) — both are subtracted from the count and otherwise
+/// unmentioned. A `nonBlocking` ask is the third: it also survives the line,
+/// but it is still the user's to answer, so it is subtracted AND named. Only
+/// its own card answers it (`handler:answer` for a tap, an escalationId-bearing
 /// `handler:instruct` for typed words) or declines it with a dismiss; a line
 /// typed here reaches the agent and leaves the question exactly where it was.
 ///
 /// This prose is a hand-mirror of the bridge's clearing rule; getting it wrong
 /// promises the user something the bridge refuses to do.
 ///
+/// [isChat] decides which surface a prompt is sent to, and there is no honest
+/// default: the same `resolve_in_session` row is minted for a chat slot's
+/// permission card and for a PTY agent's own prompt, so the caller has to say
+/// which session it is naming.
+///
 /// Nothing is ever blocked. Handler's whole premise is acting while you are
 /// away, so a lock the user has to remember to undo would be left in the wrong
 /// position exactly when it matters.
 String? handlerTypingHint(
-  HandlerSessionState session,
-) => switch (session.runState) {
-  HandlerRunState.needsYou => _needsYouHint(session),
-  HandlerRunState.parked => _parkedHint(session),
+  HandlerSessionState session, {
+  required bool isChat,
+}) => switch (session.runState) {
+  HandlerRunState.needsYou => _needsYouHint(session, isChat),
+  HandlerRunState.parked => _parkedHint(session, isChat),
   HandlerRunState.handling =>
     'Handler is replying — a message now may cross it',
   // Watching is the resting state: nothing is being displaced, so a warning
@@ -99,12 +106,19 @@ String? handlerTypingHint(
 };
 
 /// An option-based prompt (`kind: 'resolve_in_session'`) is one of the rows
-/// a typed line neither answers nor clears — only the transcript's permission
-/// card or question form carries the id that resolves it, which is why
-/// `handler_screen.dart`'s `answer()` routes there instead of opening the reply
-/// sheet.
+/// a typed line neither answers nor clears — only the session's own resolution
+/// UI carries the id, which is why `answerHandlerEscalation` focuses the
+/// session instead of opening the reply sheet.
 int _prompts(HandlerSessionState session) =>
     session.escalations.where((e) => e.kind == 'resolve_in_session').length;
+
+/// Where that resolution UI actually is, which the session's MODE decides. A
+/// chat slot draws the permission card / question form inside the transcript;
+/// a PTY agent draws its own prompt in the terminal, and the engine mints the
+/// same kind for both (`isBlockingPrompt`, handler/engine.ts). Naming the wrong
+/// one sends a terminal user to look for a surface their session does not have.
+String _promptSurface(bool isChat) =>
+    isChat ? 'the transcript' : 'the terminal';
 
 /// A second one. A `guard_blocked` row reports an action Handler wanted to take
 /// and a guard refused, so there is no pause for a line to supersede — the
@@ -134,7 +148,7 @@ const _askStaysOpenBesideCleared = " — Handler's own question stays open";
 String _promptSubject(int prompts) =>
     prompts == 1 ? 'the prompt' : '$prompts prompts';
 
-String? _needsYouHint(HandlerSessionState session) {
+String? _needsYouHint(HandlerSessionState session, bool isChat) {
   final asks = _asks(session);
   final prompts = _prompts(session);
   if (prompts > 0) {
@@ -143,11 +157,24 @@ String? _needsYouHint(HandlerSessionState session) {
     // queued behind the prompt — the silent clearing this whole line exists to
     // stop, merely moved to the mixed case.
     final others = _others(session, prompts);
-    final answer = 'Answer ${_promptSubject(prompts)} in the transcript';
+    final surface = _promptSurface(isChat);
+    final answer = 'Answer ${_promptSubject(prompts)} in $surface';
     final questions = others == 1 ? 'question' : '$others questions';
-    final line = others == 0
-        ? '$answer — not here'
-        : '$answer — a message here clears the other $questions';
+    // "here" is the composer, and it is somewhere OTHER than the prompt only on
+    // a chat slot: there the two are separate acts, so the tail warns about a
+    // second thing the user might go on to do. A PTY agent draws its prompt in
+    // the very terminal the keystrokes go to, which makes them ONE act —
+    // arrow-select + Enter is a submit keystroke (`isSubmitKeystroke`,
+    // bridge/src/keystrokes.ts), and the bridge answers a submit by clearing
+    // every free-text row on the session. Warning about "a message there" would
+    // describe the keystroke we just told them to send, so the terminal branch
+    // states the consequence instead of naming a second surface.
+    final tail = others == 0
+        ? (isChat ? ' — not here' : '')
+        : isChat
+        ? ' — a message here clears the other $questions'
+        : ' — that also clears the other $questions';
+    final line = '$answer$tail';
     return asks > 0 ? '$line$_askStaysOpen' : line;
   }
   final pending = _others(session, 0);
@@ -188,7 +215,7 @@ int _others(HandlerSessionState session, int prompts) => math.max(
 /// before the park survives it (`enterPark` never touches `s.escalations`), and
 /// the engine lands such a session back on `needs_you` rather than resuming —
 /// so the bare "resumes Handler" promise is one the bridge refuses to keep.
-String _parkedHint(HandlerSessionState session) {
+String _parkedHint(HandlerSessionState session, bool isChat) {
   final prompts = _prompts(session);
   if (prompts == 0) {
     // Reachable rather than theoretical: the park timer's nudge counts only
@@ -200,17 +227,13 @@ String _parkedHint(HandlerSessionState session) {
   }
   final verb = prompts == 1 ? 'needs' : 'need';
   return 'Your next message ends the pause — ${_promptSubject(prompts)} '
-      'still $verb the transcript';
+      'still $verb ${_promptSurface(isChat)}';
 }
 
 /// A park always resumes on its own, so the wake time carries the message;
 /// without a deadline the bare reason is all we can honestly promise.
 String _parkedLabel(HandlerSessionState session, DateTime now) {
-  final reason = switch (session.parkKind) {
-    'limit' => 'rate limit',
-    'outage' => 'provider outage',
-    _ => null,
-  };
+  final reason = handlerParkReason(session);
   final head = reason == null ? 'Paused' : 'Paused ($reason)';
   final until = session.parkedUntil;
   if (until == null) return head;
@@ -290,7 +313,13 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
     final openBacklog =
         ref.watch(handlerBacklogOpenerProvider) ??
         (id) => unawaited(showHandlerBacklogDrawer(context, id));
-    final hint = handlerTypingHint(session);
+    // The in-flight target while a mode flip is pending, else the acked entry
+    // value — and null reads as NOT chat, the same way `AgentPanel` reads it
+    // when it picks the terminal over the transcript. A prompt named for the
+    // wrong surface is the failure this bar exists to avoid, and the two
+    // surfaces have to agree about which session they are looking at.
+    final isChat = ref.watch(activeSessionModeProvider) == 'chat';
+    final hint = handlerTypingHint(session, isChat: isChat);
     // An em-dash where this machine has never named the lenses it reads: the
     // chip is read as a live fact about the session, and naming a lens on a
     // machine that never advertised any is a claim about a control over

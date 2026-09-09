@@ -131,13 +131,33 @@ void main() {
       'backlog': [],
       'parkKind': 'limit',
       'parkedUntil': 1770000000000,
+      'parkCause': 'agent_limit',
     });
     expect(s, isNotNull);
     expect(s!.runState, HandlerRunState.parked);
     expect(s.parkKind, 'limit');
     expect(s.parkedUntil, 1770000000000);
+    expect(s.parkCause, 'agent_limit');
     expect(s.copyWith(pendingEscalations: 1).parkKind, 'limit');
     expect(s.copyWith(pendingEscalations: 1).parkedUntil, 1770000000000);
+    expect(s.copyWith(pendingEscalations: 1).parkCause, 'agent_limit');
+  });
+
+  test('a cause this build cannot name still rides through', () {
+    // Kept raw like `role`: the words a surface renders fall back to the park
+    // kind's own copy, but dropping the value would leave a newer bridge's
+    // attribution unreadable to anything downstream.
+    final s = HandlerSessionState.fromWire({
+      'terminalId': 't1',
+      'state': 'parked',
+      'pendingEscalations': 0,
+      'armedAt': 1,
+      'goal': 'g',
+      'backlog': [],
+      'parkKind': 'outage',
+      'parkCause': 'solar_flare',
+    })!;
+    expect(s.parkCause, 'solar_flare');
   });
 
   test('park fields are absent on an unparked session', () {
@@ -150,9 +170,11 @@ void main() {
       'backlog': [],
       'parkKind': 42,
       'parkedUntil': 'soon',
+      'parkCause': 42,
     })!;
     expect(s.parkKind, isNull);
     expect(s.parkedUntil, isNull);
+    expect(s.parkCause, isNull);
   });
 
   Map<String, dynamic> wire(Object? observability) => {

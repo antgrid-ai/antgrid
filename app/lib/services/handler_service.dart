@@ -843,11 +843,13 @@ class HandlerService {
     String? tappedChoiceId,
   }) {
     if (_disposed) return false;
-    // An option-based agent prompt is resolvable only by the chat transcript's
-    // permission/question UI, which holds the permissionId/questionId the driver
-    // is blocked on. Injected text answers nothing and the row rightly stays
-    // pending, so the send is pure noise into a stalled session. Callers route
-    // the user to the transcript; this is the floor for the ones that forget.
+    // An option-based agent prompt is resolvable only by the SESSION's own UI,
+    // which differs by mode — a chat slot's permission/question card in the
+    // transcript, a PTY agent's prompt drawn in the terminal — but either way it
+    // holds the id the driver is blocked on, which free text cannot carry.
+    // Injecting text is worse than noise on a PTY: it lands as keystrokes at the
+    // prompt, and the trailing CR accepts whatever option is highlighted. Callers
+    // route the user to the session; this is the floor for the ones that forget.
     if (escalation.kind == 'resolve_in_session') return false;
     // Never submit an empty answer: '$text\r' with blank text is a bare Enter,
     // which accepts the default at whatever prompt the agent is showing (e.g. a

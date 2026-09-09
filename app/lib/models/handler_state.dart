@@ -289,12 +289,22 @@ class HandlerSessionState {
   final String? judgeTool;
   final String? judgeModel;
 
-  /// Why the handler is waiting ('limit' | 'outage') and the epoch-ms wake
-  /// deadline. Both are present only while [runState] is
-  /// [HandlerRunState.parked]; a park with no known deadline leaves
-  /// [parkedUntil] null.
+  /// The BACKOFF POLICY the bridge picked ('limit' = wait out the provider's
+  /// own window, 'outage' = exponential retry) and the epoch-ms wake deadline.
+  /// Both are present only while [runState] is [HandlerRunState.parked]; a park
+  /// with no known deadline leaves [parkedUntil] null.
+  ///
+  /// [parkKind] is NOT a reason and must never be rendered as one — every park
+  /// that is not a provider limit is filed under 'outage', Handler's own judge
+  /// failing included. [parkCause] is the attribution, and the only one of the
+  /// two a surface may put into words (see `handlerParkReason`).
   final String? parkKind;
   final int? parkedUntil;
+
+  /// WHOSE system stopped serving us, absent on a bridge that predates the
+  /// field. Kept raw like [roleId]: a cause a newer bridge names must fall back
+  /// to the kind's own weaker copy rather than be dropped.
+  final String? parkCause;
 
   /// What the handler can actually do with THIS armed session, as the bridge
   /// reports it. Null = not reported (a bridge predating the field) — the UI
@@ -356,6 +366,7 @@ class HandlerSessionState {
     this.judgeModel,
     this.parkKind,
     this.parkedUntil,
+    this.parkCause,
     this.observability,
     this.askAnswer = false,
     this.askAnswerPending = false,
@@ -427,6 +438,7 @@ class HandlerSessionState {
     judgeModel: judgeModel,
     parkKind: parkKind,
     parkedUntil: parkedUntil,
+    parkCause: parkCause,
     observability: observability,
     askAnswer: askAnswer,
     askAnswerPending: askAnswerPending,
@@ -478,6 +490,7 @@ class HandlerSessionState {
     // render either way.
     final parkKind = json['parkKind'];
     final parkedUntil = json['parkedUntil'];
+    final parkCause = json['parkCause'];
     // Both ask booleans degrade to false rather than rejecting the session, for
     // the reason every other lenient read here has: a capability the bridge did
     // not claim is one the app must not act on, and losing the armed card over
@@ -541,6 +554,7 @@ class HandlerSessionState {
       judgeModel: judgeModel is String ? judgeModel : null,
       parkKind: parkKind is String ? parkKind : null,
       parkedUntil: parkedUntil is num ? parkedUntil.toInt() : null,
+      parkCause: parkCause is String ? parkCause : null,
       observability: handlerObservabilityFromWire(json['observability']),
       askAnswer: askAnswer is bool ? askAnswer : false,
       askAnswerPending: askAnswerPending is bool ? askAnswerPending : false,
@@ -641,9 +655,11 @@ class HandlerEscalationChoice {
   ///    make one-tappable. Tolerating absence is the whole compatibility
   ///    contract, the same one `kind` already established.
   ///  - [kind] is `resolve_in_session`. That escalation is an option-based
-  ///    agent prompt, resolvable only by the chat RPC that needs a
-  ///    permissionId the escalation never carries; a chip on one would inject
-  ///    text that answers nothing while the bridge clears the row anyway. The
+  ///    agent prompt, resolvable only where the session draws it — the chat
+  ///    transcript's card, or the agent's own prompt in the terminal — and
+  ///    either surface holds an id the escalation never carries; a chip on one
+  ///    would inject text that answers nothing while the bridge clears the row
+  ///    anyway. The
   ///    bridge refuses to mint these — this is the app's own floor, because a
   ///    dead button is invisible to whoever taps it.
   ///  - [kind] is `guard_blocked`. That row exists BECAUSE a guard refused this
@@ -816,7 +832,8 @@ class HandlerEscalation {
   // both sides, so a missed mirror is silent.
   //
   // null/'reply' → free-text reply sheet; 'resolve_in_session' → option-based
-  // prompt (permission/question) answered in the chat transcript UI;
+  // prompt answered where the session draws it (a chat slot's permission /
+  // question card, a PTY agent's own prompt in the terminal);
   // 'guard_blocked' → a report that a harness guard refused an action Handler
   // wanted to take. A reply to one is optional, a dismiss is what retires it
   // (`handler:dismiss`), and the bridge never sends choices for one.
@@ -1379,9 +1396,11 @@ class HandlerState {
   List<String> pendingInstructionsFor(String terminalId) =>
       pendingInstructions[terminalId] ?? const [];
 
-  /// This project's state narrowed to the one terminal the Handler tab shows.
+  /// This project's state narrowed to the one terminal the focused-session
+  /// surfaces show — the Handler tab, and the escalation card the agent panel
+  /// floats over the terminal.
   ///
-  /// Only the tab narrows. The service and the bridge engine stay project-wide
+  /// Only those narrow. The service and the bridge engine stay project-wide
   /// — one HandlerService per project, one engine keyed by terminalId — because
   /// escalations, undo offers and wrap-ups all have to keep arriving for
   /// sessions nobody is looking at, and the agent bar's NEEDS YOU pill reads

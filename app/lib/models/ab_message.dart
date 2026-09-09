@@ -233,7 +233,7 @@ class NotificationPushMessage {
   final String id;
   final int timestamp;
   final String
-  notificationType; // task_complete | permission_request | awaiting_input | idle | error
+  notificationType; // task_complete | permission_request | awaiting_input | question | idle | error
   final String? message;
   final String? sessionTitle;
 

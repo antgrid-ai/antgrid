@@ -134,6 +134,32 @@ Color handlerRunStateColor(
   HandlerRunState.parked => p.warning,
 };
 
+/// What a park is BLAMED on, in the words every surface that names one uses.
+///
+/// Reads [HandlerSessionState.parkCause] and never [HandlerSessionState.parkKind],
+/// which is the whole point: the kind is the backoff policy the engine picked,
+/// and everything that is not a provider limit is filed under `outage` —
+/// Handler's own judge failing included. Rendering that as "provider outage"
+/// tells a user whose agent is serving fine to go and debug their agent's
+/// provider, over a stopped session Antgrid stopped itself.
+///
+/// The [parkKind] fallback is for a bridge that predates the cause, and says
+/// only what `outage` genuinely knows — a failure the engine will retry — since
+/// a bridge that sent no cause cannot tell whose failure it was. A cause a newer
+/// bridge invents falls through to that same fallback rather than being spelled
+/// out raw.
+String? handlerParkReason(HandlerSessionState session) =>
+    switch (session.parkCause) {
+      'agent_limit' => 'rate limit',
+      'agent_failure' => 'agent error',
+      'judge_failure' => 'judge unavailable',
+      _ => switch (session.parkKind) {
+        'limit' => 'rate limit',
+        'outage' => 'temporary failure',
+        _ => null,
+      },
+    };
+
 /// Copy for the "this session cannot be watched" warning. [agentLabel] is the
 /// agent's display name when the catalog named one; without it the warning
 /// stays generic rather than inventing an attribution.

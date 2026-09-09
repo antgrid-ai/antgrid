@@ -1324,6 +1324,28 @@ void main() {
     );
   });
 
+  // The card and the bar read one helper, so the attribution cannot differ
+  // between the two surfaces a desktop user has on screen at once.
+  test('a park note names the judge when the judge is what failed', () {
+    final session = HandlerSessionState(
+      terminalId: 't1',
+      runState: HandlerRunState.parked,
+      pendingEscalations: 0,
+      armedAt: 1,
+      goal: 'ship it',
+      backlog: const [],
+      escalations: const [],
+      parkKind: 'outage',
+      parkedUntil: DateTime(2026, 8, 3, 14).millisecondsSinceEpoch,
+      parkCause: 'judge_failure',
+    );
+
+    expect(
+      handlerParkNote(session, now: DateTime(2026, 8, 3, 13)),
+      'judge unavailable · resumes 14:00',
+    );
+  });
+
   testWidgets('an unwatchable armed session says so on its row', (
     tester,
   ) async {

@@ -508,11 +508,35 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     lifecycle: _lifecycle,
   );
 
+  /// Whether [entryId]'s Handler holds an armed slot for [sessionId] — the
+  /// app-side reading of the bridge's `isHandlerArmed`, which is what
+  /// `handler:status` lists. Read off the notification's OWN project session
+  /// rather than the focused one: this surfacer spans every warm project (see
+  /// [agentPushNotificationsProvider]), and the focused project's armed set
+  /// cannot answer for a background one.
+  bool _handlerArmed(String entryId, String? sessionId) {
+    if (sessionId == null) return false;
+    final session = ref.read(projectSessionProvider(entryId)).value;
+    return session?.handlerService.currentState.sessions[sessionId] != null;
+  }
+
   void _onAgentNotificationPush(NotificationPushMessage msg, String entryId) {
     if (_isViewingSession(msg.sessionId)) return;
+    // The Handler's escalation for this same block is surfaced by
+    // [_onHandlerEscalation] a beat away, carrying the same sentence and the id
+    // that answers it. Two buzzes for one question is what the bridge's push
+    // lane already refuses; this is the in-band half of that rule.
+    if (handlerAnnouncesAgentNotification(
+      notificationType: msg.notificationType,
+      sessionId: msg.sessionId,
+      handlerArmed: _handlerArmed(entryId, msg.sessionId),
+    )) {
+      return;
+    }
     const labels = {
       'permission_request': 'Permission needed',
       'awaiting_input': 'Needs your input',
+      'question': 'Agent asks',
       'task_complete': 'Task complete',
       'idle': 'Waiting for you',
       'error': 'Agent error',

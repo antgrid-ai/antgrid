@@ -10,6 +10,7 @@ import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/providers/session_mode.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/storage/first_run_store.dart';
@@ -33,6 +34,7 @@ HandlerSessionState _armed({
   int? pendingEscalations,
   String? parkKind,
   int? parkedUntil,
+  String? parkCause,
   String? roleId,
   String? brief,
   HandlerObservability? observability,
@@ -46,6 +48,7 @@ HandlerSessionState _armed({
   escalations: escalations,
   parkKind: parkKind,
   parkedUntil: parkedUntil,
+  parkCause: parkCause,
   roleId: roleId,
   brief: brief,
   observability: observability,
@@ -91,6 +94,14 @@ List<HandlerEscalation> _replies(int n) => [
   for (var i = 0; i < n; i++) _escalation('e$i'),
 ];
 
+/// [handlerTypingHint] with the session mode defaulted to chat, which is the
+/// only half of the copy the cases below are not about. Production has no such
+/// default — the bar reads `activeSessionModeProvider` and passes it — because
+/// a prompt named for the wrong surface is the failure the parameter exists to
+/// prevent.
+String? _hint(HandlerSessionState session, {bool isChat = true}) =>
+    handlerTypingHint(session, isChat: isChat);
+
 /// The bar sends nothing of its own now, so this needs no project session — only
 /// the focused terminal and the handler snapshot the row reads.
 ///
@@ -100,11 +111,15 @@ List<HandlerEscalation> _replies(int n) => [
 /// [lenses] is what the machine has advertised: the four this build knows,
 /// unless a test is standing up a machine that never named any (null), which
 /// is the only state the bar renders as a dash.
+/// [mode] is the focused session's own mode, which decides which surface the
+/// hint sends an option-based prompt to — overridden rather than seeded through
+/// a session list, since the bar reads only the derived value.
 Future<void> _pump(
   WidgetTester tester, {
   required Map<String, HandlerSessionState> sessions,
   HandlerBacklogOpener? opener,
   List<String>? lenses = const ['pm', 'qa', 'critic', 'release'],
+  String mode = 'chat',
 }) async {
   useInMemoryPrefs();
   final firstRun = await FirstRunStore.open();
@@ -113,6 +128,7 @@ Future<void> _pump(
       overrides: [
         firstRunStoreProvider.overrideWithValue(firstRun),
         activeSessionIdProvider.overrideWith(() => ValueController('t1')),
+        activeSessionModeProvider.overrideWithValue(mode),
         handlerStateProvider.overrideWith(
           (ref) => Stream.value(
             const HandlerState.initial().copyWith(
@@ -384,6 +400,26 @@ void main() {
     expect(tester.renderObject<RenderParagraph>(hint).maxLines, 2);
   });
 
+  testWidgets('the bar reads the session mode, not a fixed surface', (
+    tester,
+  ) async {
+    // The wiring, not the copy: a PTY AskUserQuestion mints the same
+    // `resolve_in_session` a chat permission prompt does, and this bar sits
+    // directly under the terminal that is showing it. Sending that user to a
+    // transcript names a surface their session does not have.
+    await _pump(
+      tester,
+      sessions: {
+        't1': _armed(
+          runState: HandlerRunState.needsYou,
+          escalations: [_escalation('e1', kind: 'resolve_in_session')],
+        ),
+      },
+      mode: 'terminal',
+    );
+    expect(find.text('Answer the prompt in the terminal'), findsOneWidget);
+  });
+
   test('a skipped item never advances the ordinal', () {
     // Skipped and failed close an item without achieving it, so counting them
     // would inflate the progress the bar promises.
@@ -444,12 +480,58 @@ void main() {
     );
   });
 
+  // An older bridge sends no cause at all, and the bar must not invent one: all
+  // `outage` itself knows is that the engine will retry, so that is all it says.
   test('a park with no deadline promises only the reason', () {
     expect(
       handlerPaStatusLabel(
         _armed(runState: HandlerRunState.parked, parkKind: 'outage'),
       ),
-      'Paused (provider outage)',
+      'Paused (temporary failure)',
+    );
+  });
+
+  // The defect this cause exists for: every non-limit park is filed under
+  // `outage`, so reading the kind blamed the coding agent's provider for
+  // Antgrid's own judge going down.
+  test("a judge failure names the judge, not the agent's provider", () {
+    expect(
+      handlerPaStatusLabel(
+        _armed(
+          runState: HandlerRunState.parked,
+          parkKind: 'outage',
+          parkCause: 'judge_failure',
+        ),
+      ),
+      'Paused (judge unavailable)',
+    );
+  });
+
+  test("the agent's own failure is named as such", () {
+    expect(
+      handlerPaStatusLabel(
+        _armed(
+          runState: HandlerRunState.parked,
+          parkKind: 'outage',
+          parkCause: 'agent_failure',
+        ),
+      ),
+      'Paused (agent error)',
+    );
+  });
+
+  // A newer bridge's cause falls back to the kind's copy rather than printing a
+  // wire word at the user.
+  test('a cause this build cannot name falls back to the kind', () {
+    expect(
+      handlerPaStatusLabel(
+        _armed(
+          runState: HandlerRunState.parked,
+          parkKind: 'limit',
+          parkCause: 'solar_flare',
+        ),
+      ),
+      'Paused (rate limit)',
     );
   });
 
@@ -458,14 +540,14 @@ void main() {
   // (HandlerEngine.onUserReply), and these are its consequences said out loud.
   group('handlerTypingHint', () {
     test('watching warns about nothing, since nothing is displaced', () {
-      expect(handlerTypingHint(_armed()), isNull);
+      expect(_hint(_armed()), isNull);
     });
 
     test('one pending question promises clearing, never an answer', () {
       // The engine never inspects the text, so a line retires the row whether
       // or not it addressed the question.
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(runState: HandlerRunState.needsYou, escalations: _replies(1)),
         ),
         'Your next message clears this question, answered or not',
@@ -476,7 +558,7 @@ void main() {
       // Each pause supersedes the last, so the engine retires the whole
       // free-text list on a submitted line.
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(runState: HandlerRunState.needsYou, escalations: _replies(4)),
         ),
         'Your next message clears all 4 questions, answered or not',
@@ -488,7 +570,7 @@ void main() {
       // it either — promising anything else here is what left a blocked agent
       // behind a quiet session.
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.needsYou,
             escalations: [_escalation('e1', kind: 'resolve_in_session')],
@@ -502,7 +584,7 @@ void main() {
       // The redirect alone reads as "typing here does nothing", and the user who
       // types anyway loses the two free-text rows without ever being told.
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.needsYou,
             escalations: [
@@ -519,7 +601,7 @@ void main() {
 
     test('one question behind a prompt is counted in the singular', () {
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.needsYou,
             escalations: [
@@ -538,7 +620,7 @@ void main() {
       // and the engine raises a row for each — a singular label there sends the
       // user to answer one thing and leaves the agent blocked on the rest.
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.needsYou,
             escalations: [
@@ -555,7 +637,7 @@ void main() {
 
     test('a park says typing ends the wait early', () {
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(runState: HandlerRunState.parked, parkKind: 'limit'),
         ),
         'Your next message resumes Handler now',
@@ -567,7 +649,7 @@ void main() {
       // back on needs_you — so "resumes Handler now" is a promise the engine
       // refuses to keep.
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.parked,
             parkKind: 'limit',
@@ -583,7 +665,7 @@ void main() {
       // onUserReply keeps a guard_blocked row standing, so counting it would
       // promise clearing the bridge refuses to do.
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.needsYou,
             escalations: [
@@ -600,7 +682,7 @@ void main() {
       // needs_you with nothing a typed line would clear: the bar has no promise
       // to make, and the report goes away through its own Dismiss.
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.needsYou,
             escalations: [_escalation('b1', kind: 'guard_blocked')],
@@ -612,7 +694,7 @@ void main() {
 
     test('a report beside a prompt shrinks neither count wrongly', () {
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.needsYou,
             escalations: [
@@ -627,7 +709,7 @@ void main() {
 
     test('handling is the one state with a second writer on the session', () {
       expect(
-        handlerTypingHint(_armed(runState: HandlerRunState.handling)),
+        _hint(_armed(runState: HandlerRunState.handling)),
         'Handler is replying — a message now may cross it',
       );
     });
@@ -637,7 +719,7 @@ void main() {
       // would let them type, watch the line land, and believe they had answered
       // a question that never moved.
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.needsYou,
             escalations: [_escalation('a1', nonBlocking: true)],
@@ -649,7 +731,7 @@ void main() {
 
     test('an ask beside one question keeps both halves of the promise', () {
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.needsYou,
             escalations: [
@@ -668,7 +750,7 @@ void main() {
       // read as "clears all 3", which is a promise the bridge refuses to keep
       // rather than a hint that failed to appear.
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.needsYou,
             escalations: [
@@ -685,7 +767,7 @@ void main() {
 
     test('an ask behind a prompt is appended to the redirect once', () {
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.needsYou,
             escalations: [
@@ -701,7 +783,7 @@ void main() {
 
     test('an ask behind a prompt does not inflate the cleared count', () {
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.needsYou,
             escalations: [
@@ -720,7 +802,7 @@ void main() {
       // Reachable rather than theoretical: the park timer's nudge counts
       // blocking questions alone, so an ask-only session parks and self-resumes.
       expect(
-        handlerTypingHint(
+        _hint(
           _armed(
             runState: HandlerRunState.parked,
             parkKind: 'limit',
@@ -728,6 +810,88 @@ void main() {
           ),
         ),
         'Your next message resumes Handler now — its question stays open',
+      );
+    });
+
+    // A PTY agent's AskUserQuestion reaches the same forced escalate as a chat
+    // permission prompt (`isBlockingPrompt`, handler/engine.ts), so
+    // `resolve_in_session` is minted for a terminal session too — and every
+    // line below used to send that user to a transcript their session does not
+    // have.
+    test('a terminal prompt is answered in the terminal, not a transcript', () {
+      expect(
+        _hint(
+          _armed(
+            runState: HandlerRunState.needsYou,
+            escalations: [_escalation('e1', kind: 'resolve_in_session')],
+          ),
+          isChat: false,
+        ),
+        'Answer the prompt in the terminal',
+      );
+    });
+
+    test('a terminal prompt drops the "not here" the composer earns', () {
+      // The redirect's whole point on a chat slot is that the composer is
+      // somewhere other than the permission card. A PTY agent draws its prompt
+      // in the very terminal the keystrokes go to, so "not here" would point
+      // away from the only place that can answer it.
+      expect(
+        _hint(
+          _armed(
+            runState: HandlerRunState.needsYou,
+            escalations: [_escalation('e1', kind: 'resolve_in_session')],
+          ),
+          isChat: false,
+        ),
+        isNot(contains('not here')),
+      );
+    });
+
+    test('a terminal prompt says answering it is what clears the lines', () {
+      expect(
+        _hint(
+          _armed(
+            runState: HandlerRunState.needsYou,
+            escalations: [
+              _escalation('e1', kind: 'resolve_in_session'),
+              _escalation('e2'),
+            ],
+          ),
+          isChat: false,
+        ),
+        'Answer the prompt in the terminal — '
+        'that also clears the other question',
+      );
+    });
+
+    test('a parked terminal prompt still needs the terminal', () {
+      expect(
+        _hint(
+          _armed(
+            runState: HandlerRunState.parked,
+            parkKind: 'limit',
+            escalations: [_escalation('e1', kind: 'resolve_in_session')],
+          ),
+          isChat: false,
+        ),
+        'Your next message ends the pause — the prompt still needs the '
+        'terminal',
+      );
+    });
+
+    test('a terminal ask keeps the tail the mode does not change', () {
+      // Only the prompt arms name a surface; everything else is about the
+      // session's own composer and reads identically in both modes.
+      expect(
+        _hint(
+          _armed(
+            runState: HandlerRunState.needsYou,
+            escalations: [_escalation('a1', nonBlocking: true)],
+          ),
+          isChat: false,
+        ),
+        "Your next message goes to the agent — Handler's question stays open",
       );
     });
   });

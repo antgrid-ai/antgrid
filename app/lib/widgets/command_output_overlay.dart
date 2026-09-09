@@ -13,6 +13,13 @@ import '../services/command_service.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
 
+/// The running/last project command, pinned to the bottom of the terminal
+/// Stack.
+///
+/// It shares that edge with `HandlerEscalationOverlay`, which is opaque and
+/// full-width too; which of the two paints over the other is decided at their
+/// mount in `AgentPanel`, and this one is on top because it is the only one of
+/// the two the user can dismiss.
 class CommandOutputOverlay extends ConsumerStatefulWidget {
   const CommandOutputOverlay({super.key});
 
