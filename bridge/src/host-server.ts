@@ -1738,10 +1738,10 @@ export class HostServer {
     // agree here (the PROJECT_ID_MISMATCH check above already enforced it for
     // this call), but the warm-core early return in open() grandfathers a
     // legacy alias that skips that check, and this index must never learn a
-    // project under an id no route or store path will ever match. Also
-    // refreshes the disk-fallback set a later eviction will read once this
-    // project goes cold again.
-    this.sessionIndex.noteProject(core.projectId, basename(projectPath), core.listSessions(true) ?? []);
+    // project under an id no route or store path will ever match. This is the
+    // start-time half only: what a session created LATER in this core needs is
+    // the cold-edge refresh in noteColdSnapshot().
+    this.sessionIndex.noteProject(core.projectId, basename(projectPath), core.listSessions(true));
     // Re-advertise on a real work-status transition so the phone's Recent/sidebar
     // track activity (working/attention/error/done) without warming this core
     // themselves. Deduped inside the core, so this fires on transitions only.
@@ -1887,9 +1887,24 @@ export class HostServer {
     }));
   }
 
+  /** Take the session-index fallback snapshot for a core about to leave the
+   *  warm map. The index answers a warm project live and a cold one from this
+   *  snapshot, so a session created since the core started exists ONLY in the
+   *  live answer until this runs — skip it and every such session becomes
+   *  unaddressable the moment the project is stopped or evicted, which is the
+   *  unreachability keeping the rows across an eviction exists to prevent.
+   *  Must run BEFORE `core.shutdown()`, which is what takes the live answer
+   *  away. Keyed by the core's own id for the same reason startCore is. */
+  private noteColdSnapshot(entry: CatalogEntry): void {
+    const id = entry.core.projectId;
+    if (!id) return;
+    this.sessionIndex.noteProject(id, basename(entry.path), entry.core.listSessions(true));
+  }
+
   async stop(projectId: string): Promise<void> {
     const entry = this.cores.get(projectId);
     if (!entry) return;
+    this.noteColdSnapshot(entry);
     this.cores.delete(projectId);
     // A promoted local core holds a relay slot separate from its loopback session
     // (core.shutdown only closes the core's own `this.relay`, which a local core
@@ -2149,6 +2164,7 @@ export class HostServer {
       const victim = this.selectEvictionVictim(justOpened);
       if (!victim) break;
       const entry = this.cores.get(victim);
+      if (entry) this.noteColdSnapshot(entry);
       this.cores.delete(victim);
       try { entry?.promotion?.stop(); } catch (e) { log.warn("Failed to stop promotion for evicted core %s: %s", victim, e instanceof Error ? e.message : String(e)); }
       log.info(`host: evicting LRU core ${victim} (cap ${cap})`);

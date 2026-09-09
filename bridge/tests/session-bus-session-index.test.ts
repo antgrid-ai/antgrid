@@ -105,3 +105,44 @@ test("forgetProject drops every row it knew about that project", () => {
   index.forgetProject("proj-gone");
   expect(index.lookup("sess-x")).toBeNull();
 });
+
+test("a session created while a project was warm still resolves once it goes cold", async () => {
+  // The cold edge, which is the only place the fallback set can learn a session
+  // that never existed at start: the live answer disappears with the core, so a
+  // snapshot taken only at start would answer every session created since as
+  // unknown the instant the project is stopped or evicted.
+  const abDir = tmpAbDir();
+  try {
+    seedPersisted(abDir, "proj-a", [{ id: "sess-old", name: "Old", createdAt: 1, lastUsedAt: 1, archived: false }]);
+    let warm: SessionEntry[] | null = [liveEntry("sess-old", "Old")];
+    const index = new SessionBusSessionIndex({ liveSessions: (id) => (id === "proj-a" ? warm : null) });
+    await index.hydrate(abDir, [{ id: "proj-a", label: "Project A" }]);
+    index.noteProject("proj-a", "Project A", warm); // core start
+
+    warm = [liveEntry("sess-old", "Old"), liveEntry("sess-new", "New")]; // created while warm
+    expect(index.lookup("sess-new")).toEqual({ projectId: "proj-a", projectLabel: "Project A", sessionName: "New" });
+
+    index.noteProject("proj-a", "Project A", warm); // cold edge, before the core is dropped
+    warm = null; // stopped or evicted
+    expect(index.lookup("sess-new")).toEqual({ projectId: "proj-a", projectLabel: "Project A", sessionName: "New" });
+  } finally {
+    rmSync(abDir, { recursive: true, force: true });
+  }
+});
+
+test("a core that cannot answer yet leaves the recorded set alone", async () => {
+  // `ProjectCore.listSessions` answers null before a core finishes initialising.
+  // Reading that as "this project has zero sessions" would durably overwrite
+  // hydrate's correct disk snapshot and leave the project unaddressable while
+  // cold, so null must mean "no answer", never "empty".
+  const abDir = tmpAbDir();
+  try {
+    seedPersisted(abDir, "proj-a", [{ id: "sess-a", name: "A", createdAt: 1, lastUsedAt: 1, archived: false }]);
+    const index = coldIndex();
+    await index.hydrate(abDir, [{ id: "proj-a", label: "Project A" }]);
+    index.noteProject("proj-a", "Project A", null);
+    expect(index.lookup("sess-a")).toEqual({ projectId: "proj-a", projectLabel: "Project A", sessionName: "A" });
+  } finally {
+    rmSync(abDir, { recursive: true, force: true });
+  }
+});

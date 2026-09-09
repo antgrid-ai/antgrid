@@ -13,16 +13,23 @@ const log = logger.child({ component: "session-bus" });
 
 export interface SessionIndexEntry {
   projectId: string;
+  /** The project's FOLDER basename, which is not always what `sessionBusSelf`
+   *  stamps on a bus address today: that reads `project.name`, which prefers
+   *  `antgrid.yaml`'s `name:` over the basename. The two agree only for a
+   *  project that does not name itself, so whichever commit feeds this into
+   *  `SessionMemberRef.projectLabel` owes that difference a decision rather
+   *  than inheriting it silently. */
   projectLabel?: string;
   sessionName?: string;
 }
 
 export interface SessionBusSessionIndexDeps {
   /** The live session list for a project with a warm core right now — the same
-   *  synchronous accessor the control-plane peek already uses to choose
-   *  warm-vs-disk (`ProjectCore.listSessions`, host-server.ts:862-864). Null
-   *  means this project has no warm core, which is what sends `lookup` to the
-   *  hydrated disk snapshot instead of treating an unlisted id as unknown. */
+   *  synchronous accessor `HostServer.handleSessionsListRpc`'s peek already
+   *  uses to choose warm-vs-disk (`ProjectCore.listSessions`). Null means this
+   *  project has no warm core (or one that has not finished initialising),
+   *  which is what sends `lookup` to the hydrated disk snapshot instead of
+   *  treating an unlisted id as unknown. */
   liveSessions(projectId: string): readonly SessionEntry[] | null;
 }
 
@@ -41,9 +48,10 @@ export interface SessionBusSessionIndexDeps {
  *
  * There is no per-session note/forget: a warm project is always read live, so
  * nothing needs to invalidate a cache that a warm lookup never consults, and
- * a cold project's snapshot is refreshed wholesale by `noteProject` — see
- * that method's own doc for when it runs and what it accepts staying stale
- * against.
+ * a cold project's snapshot is refreshed wholesale by `noteProject` — which
+ * must therefore run on the edge where a project goes cold, not only where it
+ * warms up. See that method's own doc for when it runs and what it accepts
+ * staying stale against.
  */
 export class SessionBusSessionIndex {
   private readonly labels = new Map<string, string | undefined>();
@@ -70,16 +78,30 @@ export class SessionBusSessionIndex {
   /**
    * Register (or refresh) one project's label and disk-fallback session set.
    *
-   * Called at `hydrate` and again whenever a project's core starts, keyed by
-   * the CORE'S OWN id — never the `cores` map key, which can be a
-   * grandfathered legacy alias (host-server.ts:1655-1664) that disagrees with
-   * it. The start-time call is what makes a project this host has never seen
-   * before addressable without waiting for the next restart's hydrate, and it
-   * refreshes the fallback set a later eviction will read once this project
-   * goes cold again — a warm project's own lookups never consult it.
+   * Runs at three points, keyed by the CORE'S OWN id — never the `cores` map
+   * key, which can be a grandfathered legacy alias (`HostServer.open`'s
+   * warm-core early return) that disagrees with it:
+   *   - `hydrate`, for every project this machine has ever opened;
+   *   - when a core STARTS, which is what makes a project this host has never
+   *     seen before addressable without waiting for the next restart;
+   *   - when a core goes COLD, immediately before it leaves the warm map. That
+   *     one is load-bearing rather than tidy: every session created while the
+   *     project was warm was answered live and is absent from the snapshot
+   *     taken at start, so without a refresh here each one becomes
+   *     unresolvable the instant the project is stopped or evicted — the exact
+   *     unreachability keeping rows across an eviction exists to prevent.
+   *
+   * `entries` of null means the core could not answer (it has not finished
+   * initialising), which is NOT the same claim as an empty list: the recorded
+   * set is left alone rather than overwritten with an emptiness nothing
+   * observed.
    */
-  noteProject(projectId: string, label: string | undefined, entries: readonly SessionEntry[]): void {
+  noteProject(projectId: string, label: string | undefined, entries: readonly SessionEntry[] | null): void {
     this.labels.set(projectId, label);
+    if (!entries) {
+      if (!this.disk.has(projectId)) this.disk.set(projectId, new Map());
+      return;
+    }
     const bySession = new Map<string, SessionEntry>();
     for (const entry of entries) bySession.set(entry.id, entry);
     this.disk.set(projectId, bySession);
