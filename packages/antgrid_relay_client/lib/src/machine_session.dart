@@ -215,6 +215,12 @@ class MachineSession {
   /// with no way back.
   final Set<String> _rebindInFlight = {};
 
+  /// Rate-limit state for [_logUnknownStreamDrop] — see there for why this drop
+  /// in particular cannot be left to log per frame.
+  static const Duration _kUnknownStreamLogInterval = Duration(seconds: 30);
+  final Map<String, DateTime> _unknownStreamLoggedAt = {};
+  final Map<String, int> _unknownStreamSuppressed = {};
+
   late final FragReassembler _reassembler = FragReassembler(
     timeoutMs: kTransferTimeoutMs,
     globalBudgetBytes: kGlobalReassemblyBudget,
@@ -1077,11 +1083,7 @@ class MachineSession {
     // mid-flight), not the routine restart case. "0" legitimately has no
     // transport (adverts are snooped above), so it's never a drop.
     if (st == null && sid != kControlStreamId) {
-      _log(
-        RelayLogLevel.warn,
-        'dropping inbound frame for unknown stream',
-        fields: {'streamId': sid, 'msgType': mType},
-      );
+      _logUnknownStreamDrop(sid, mType);
       _dropped(
         'rx',
         'unknown-stream',
@@ -1091,6 +1093,47 @@ class MachineSession {
         frameId: frameId,
       );
     }
+  }
+
+  /// One warn per stream per [_kUnknownStreamLogInterval], carrying how many it
+  /// stands for.
+  ///
+  /// The unbound-stream drop is not self-limiting: nothing in the protocol
+  /// heals an agent pushing onto an id the app holds no transport for (the
+  /// `stream-invalid` notice covers the mirror case — the app sending onto a
+  /// dead id — and [_onStreamInvalid] returns early for an id it has no binding
+  /// for, which is exactly this one). So a live PTY on an unbound stream drops
+  /// one frame per frame, indefinitely: measured at ~13/sec for 20+ minutes,
+  /// which left 5,976 of the last 6,000 lines of one app.log saying this and
+  /// nothing else. Unthrottled, the line added to make the loss visible is what
+  /// buries every other clue about it.
+  ///
+  /// The netwatch tap is deliberately NOT throttled — a capture is opened to
+  /// see every frame, and it is bounded by how long it runs.
+  void _logUnknownStreamDrop(String sid, String? msgType) {
+    final now = DateTime.now();
+    final last = _unknownStreamLoggedAt[sid];
+    if (last != null && now.difference(last) < _kUnknownStreamLogInterval) {
+      _unknownStreamSuppressed[sid] = (_unknownStreamSuppressed[sid] ?? 0) + 1;
+      return;
+    }
+    // Bounded against a peer that sprays ids: the maps exist to rate-limit a
+    // handful of stale streams, not to accumulate one entry per id ever seen.
+    if (_unknownStreamLoggedAt.length > 64) {
+      _unknownStreamLoggedAt.clear();
+      _unknownStreamSuppressed.clear();
+    }
+    _unknownStreamLoggedAt[sid] = now;
+    final suppressed = _unknownStreamSuppressed.remove(sid) ?? 0;
+    _log(
+      RelayLogLevel.warn,
+      'dropping inbound frame for unknown stream',
+      fields: {
+        'streamId': sid,
+        'msgType': msgType,
+        if (suppressed > 0) 'suppressedSince': suppressed,
+      },
+    );
   }
 
   /// Snoop control-plane adverts for project→stream bindings so [bindProject]
