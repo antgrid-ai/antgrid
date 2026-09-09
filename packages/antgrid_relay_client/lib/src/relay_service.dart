@@ -92,6 +92,12 @@ class RelayService {
   Duration _heartbeatInterval = const Duration(seconds: 25);
   Timer? _heartbeatTimer;
   DateTime? _socketOpenedAt;
+
+  /// Stamped at `welcome`, where [_socketOpenedAt] is stamped at dial. A connect
+  /// that gives up after [_connectTimeoutDuration] without ever authenticating
+  /// otherwise logs an age indistinguishable from a socket that really lived
+  /// that long — null here is the only thing separating the two.
+  DateTime? _socketAuthenticatedAt;
   DateTime? _lastInboundAt;
   DateTime? _probeSentAt;
   String? _relaySlotId;
@@ -478,6 +484,7 @@ class RelayService {
     _markInboundHealthy();
 
     if (msg is WelcomeMessage) {
+      _socketAuthenticatedAt = DateTime.now().toUtc();
       // State first, then the completer: whoever awaits connect() re-reads the
       // connection state the instant it resolves.
       _setState(
@@ -672,6 +679,7 @@ class RelayService {
       fields: {
         'machineSlot': _relaySlotId,
         'socketAgeMs': _ageMs(_socketOpenedAt),
+        'authenticatedAgeMs': _ageMs(_socketAuthenticatedAt),
         if (error != null) 'error': '$error',
       },
     );
@@ -883,6 +891,7 @@ class RelayService {
       fields: {
         'machineSlot': _relaySlotId,
         'socketAgeMs': _ageMs(_socketOpenedAt, now),
+        'authenticatedAgeMs': _ageMs(_socketAuthenticatedAt, now),
         'lastInboundAgeMs': _ageMs(_lastInboundAt, now),
         'outstandingProbeAgeMs': _ageMs(_probeSentAt, now),
       },
@@ -902,6 +911,7 @@ class RelayService {
     _lastInboundAt = null;
     _probeSentAt = null;
     _socketOpenedAt = null;
+    _socketAuthenticatedAt = null;
   }
 
   int? _ageMs(DateTime? at, [DateTime? now]) => at == null

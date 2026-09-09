@@ -139,6 +139,72 @@ void main() {
     );
   });
 
+  // `socketAgeMs` is stamped at dial, not at welcome, so a connect that gives
+  // up after the connect timeout logs an age indistinguishable from a socket
+  // that really lived that long. Read as a socket lifetime it makes healthy
+  // dials look like short-lived sockets, which is how a 15s failed connect was
+  // first mistaken for a 15s socket death. The null is the whole signal.
+  test('a dial that never authenticated logs a null authenticatedAgeMs', () async {
+    Map<String, Object?>? disconnectFields;
+    final logged = RelayService(
+      crypto: CryptoService(),
+      logger: (level, message, {fields}) {
+        if (message == 'relay socket disconnected') disconnectFields = fields;
+      },
+    );
+    addTearDown(logged.dispose);
+
+    final connect = logged.connect(
+      server.wsUrl,
+      _identity(),
+      licenseToken: 'tok',
+      epoch: 1,
+    );
+    final rejected = expectLater(
+      connect,
+      throwsA(isA<RelayConnectException>()),
+    );
+    expect(await conns.moveNext(), isTrue);
+    await conns.current.close();
+    await rejected;
+
+    expect(disconnectFields, isNotNull);
+    expect(disconnectFields!['socketAgeMs'], isNotNull);
+    expect(disconnectFields!['authenticatedAgeMs'], isNull);
+  });
+
+  test('a socket that reached welcome logs both ages', () async {
+    Map<String, Object?>? disconnectFields;
+    final logged = RelayService(
+      crypto: CryptoService(),
+      logger: (level, message, {fields}) {
+        if (message == 'relay socket disconnected') disconnectFields = fields;
+      },
+    );
+    addTearDown(logged.dispose);
+
+    final connect = logged.connect(
+      server.wsUrl,
+      _identity(),
+      licenseToken: 'tok',
+      epoch: 1,
+    );
+    expect(await conns.moveNext(), isTrue);
+    final conn = conns.current;
+    conn.sendJson({
+      'type': 'welcome',
+      'deviceId': 'phone-1',
+      'epoch': 1,
+      'serverTime': DateTime.now().toUtc().toIso8601String(),
+    });
+    await connect;
+    await conn.close();
+    await _awaitState(logged, _isDisconnected);
+
+    expect(disconnectFields, isNotNull);
+    expect(disconnectFields!['authenticatedAgeMs'], isNotNull);
+  });
+
   test('a retryable error followed by a close does NOT self-redial', () async {
     final connect = relay.connect(
       server.wsUrl,

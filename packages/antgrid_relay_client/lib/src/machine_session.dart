@@ -1080,7 +1080,7 @@ class MachineSession {
       _log(
         RelayLogLevel.warn,
         'dropping inbound frame for unknown stream',
-        fields: {'streamId': sid},
+        fields: {'streamId': sid, 'msgType': mType},
       );
       _dropped(
         'rx',
