@@ -93,6 +93,11 @@ class MachineSession {
   /// bulk transfer's window reopens.
   final int creditBatchBytes;
 
+  /// How often the unbound-stream drop may take a log line — see
+  /// [_logUnknownStreamDrop]. Tunable only so a test can prove the suppressed
+  /// count actually surfaces without idling out the real interval.
+  final Duration unknownStreamLogInterval;
+
   MachineSession({
     required this.relay,
     required this.machineDeviceId,
@@ -103,6 +108,7 @@ class MachineSession {
     int? channelWindowBytes,
     int? socketInflightBytes,
     this.creditBatchBytes = kCreditBatchBytes,
+    this.unknownStreamLogInterval = const Duration(seconds: 30),
     RelayLogger? logger,
   }) : _handshaker = handshaker,
        _logger = logger,
@@ -217,7 +223,6 @@ class MachineSession {
 
   /// Rate-limit state for [_logUnknownStreamDrop] — see there for why this drop
   /// in particular cannot be left to log per frame.
-  static const Duration _kUnknownStreamLogInterval = Duration(seconds: 30);
   final Map<String, DateTime> _unknownStreamLoggedAt = {};
   final Map<String, int> _unknownStreamSuppressed = {};
 
@@ -1095,8 +1100,9 @@ class MachineSession {
     }
   }
 
-  /// One warn per stream per [_kUnknownStreamLogInterval], carrying how many it
-  /// stands for.
+  /// One warn per stream per [unknownStreamLogInterval], carrying how many
+  /// frames it stands for in `framesDropped`. Sum that field to get the loss —
+  /// counting lines gives the throttle's rate, not the drop rate.
   ///
   /// The unbound-stream drop is not self-limiting: nothing in the protocol
   /// heals an agent pushing onto an id the app holds no transport for (the
@@ -1113,7 +1119,7 @@ class MachineSession {
   void _logUnknownStreamDrop(String sid, String? msgType) {
     final now = DateTime.now();
     final last = _unknownStreamLoggedAt[sid];
-    if (last != null && now.difference(last) < _kUnknownStreamLogInterval) {
+    if (last != null && now.difference(last) < unknownStreamLogInterval) {
       _unknownStreamSuppressed[sid] = (_unknownStreamSuppressed[sid] ?? 0) + 1;
       return;
     }
@@ -1131,7 +1137,11 @@ class MachineSession {
       fields: {
         'streamId': sid,
         'msgType': msgType,
-        if (suppressed > 0) 'suppressedSince': suppressed,
+        // ALWAYS present, and counts this frame as well as the ones it stands
+        // for. Omitting it at 1 would leave a reader summing LINES to get a
+        // loss rate, and one line here can stand for ~750 frames — three orders
+        // of magnitude wrong, in the direction that says the problem is small.
+        'framesDropped': suppressed + 1,
       },
     );
   }
