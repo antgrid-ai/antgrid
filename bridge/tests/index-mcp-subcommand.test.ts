@@ -81,9 +81,8 @@ test("mcp subcommand serves the antgrid tools over stdio against the stamped cor
     expect(initialized.serverInfo.name).toBe("antgrid");
     rpc.send({ jsonrpc: "2.0", method: "notifications/initialized" });
 
-    // The stub answers every route with `[]`, so the role resolves to neither
-    // lead nor peer — which is what a terminal in no bus session gets, and it
-    // must be offered no session-bus tool at all.
+    // One table, the same for every caller: listing it costs no request at all,
+    // and the bus tools are in it whether or not this terminal can use one.
     const listed = await rpc.call(2, "tools/list", {});
     expect(listed.tools.map((t: { name: string }) => t.name)).toEqual([
       "antgrid_init",
@@ -91,6 +90,9 @@ test("mcp subcommand serves the antgrid tools over stdio against the stamped cor
       "antgrid_run_command",
       "antgrid_list_terminals",
       "antgrid_read_terminal",
+      "antgrid_publish_artifact",
+      "antgrid_list_artifacts",
+      "antgrid_get_artifact",
     ]);
 
     const called = await rpc.call(3, "tools/call", {
@@ -102,7 +104,6 @@ test("mcp subcommand serves the antgrid tools over stdio against the stamped cor
     // routes out of the CALLER's checkout, and this is the only thing that
     // names it.
     expect(requested).toEqual([
-      "GET /session-bus/role?terminalId=term-cli",
       "GET /terminals?all=false&terminalId=term-cli",
     ]);
   } finally {

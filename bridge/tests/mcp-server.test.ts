@@ -3,14 +3,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  ROLE_CACHE_MS,
   callSessionBusTool,
-  createBusRoleCache,
   getApiUrl,
   getTerminalId,
   isSessionBusTool,
-  sessionBusTools,
-  type BusRoleView,
 } from "../src/mcp/server";
 
 const saved = {
@@ -92,11 +88,10 @@ describe("getTerminalId", () => {
   });
 });
 
-// The tool table an agent is shown is the whole of what it knows the bus can
-// do, so the role that resolves it is a capability boundary and not a
-// convenience: a session in no bus session must be offered nothing, or the
-// agent spends turns calling tools the bridge can only refuse.
-describe("the session-bus tool table", () => {
+// A bus tool is dispatched by name and answered by the bridge, so what this
+// process owes the agent is the bridge's refusal exactly as it was written, with
+// the code the agent can act on, and a body carrying only what was actually said.
+describe("the session-bus tools", () => {
   function stub(handler: (path: string, body: unknown) => Response) {
     const server = Bun.serve({
       port: 0,
@@ -113,104 +108,13 @@ describe("the session-bus tool table", () => {
     return server;
   }
 
-  function roleStub(role: { lead: boolean; peer: boolean }) {
-    return stub((path) =>
-      path === "/session-bus/role"
-        ? Response.json({ role: role.lead ? "lead" : role.peer ? "peer" : null, ...role })
-        : Response.json({ error: "not stubbed", code: "NOT_MEMBER" }, { status: 403 }),
-    );
-  }
-
-  const names = (role: BusRoleView) => sessionBusTools(role).map((t) => t.name);
-
-  test("a lead is offered the lead table and the shared tools, and no peer tool", () => {
-    const listed = names({ lead: true, peer: false });
-    expect(listed).toContain("antgrid_assign_task");
-    expect(listed).toContain("antgrid_answer_peer");
-    expect(listed).toContain("antgrid_publish_artifact");
-    expect(listed).not.toContain("antgrid_report_complete");
-    expect(listed).not.toContain("antgrid_get_brief");
-  });
-
-  test("a peer is offered the peer table and the shared tools, and no lead tool", () => {
-    const listed = names({ lead: false, peer: true });
-    expect(listed).toContain("antgrid_get_brief");
-    expect(listed).toContain("antgrid_report_complete");
-    expect(listed).toContain("antgrid_ask_lead");
-    expect(listed).toContain("antgrid_get_artifact");
-    expect(listed).not.toContain("antgrid_assign_task");
-    expect(listed).not.toContain("antgrid_answer_peer");
-  });
-
-  // A machine can lead one session and work another at the same time, and the
-  // tables are disjoint apart from the shared block — listing it twice would
-  // put a duplicate tool name in front of the agent.
-  test("both roles get both tables, each tool once", () => {
-    const listed = names({ lead: true, peer: true });
-    expect(listed).toContain("antgrid_assign_task");
-    expect(listed).toContain("antgrid_report_complete");
-    expect(new Set(listed).size).toBe(listed.length);
-  });
-
-  test("a session in no bus session is offered nothing", () => {
-    expect(sessionBusTools({ lead: false, peer: false })).toEqual([]);
-    // The base tools are unaffected, so a plain session keeps its own.
+  // The boundary the call dispatch reads: a name this set does not hold is
+  // answered locally as unknown, and one it does must reach the bridge.
+  test("the bus tools are dispatched by name, and nothing else is", () => {
     expect(isSessionBusTool("antgrid_run_command")).toBe(false);
-    expect(isSessionBusTool("antgrid_assign_task")).toBe(true);
-  });
-
-  test("the role is read from the loopback bridge", async () => {
-    roleStub({ lead: false, peer: true });
-    expect(await createBusRoleCache().get()).toEqual({ lead: false, peer: true });
-  });
-
-  // An unreachable bridge and a member-less terminal must land on the same
-  // answer: absence is never read as a role.
-  test("an unreachable bridge resolves to no role rather than to a guess", async () => {
-    delete process.env.ANTGRID_API_PORT;
-    expect(await createBusRoleCache().get()).toEqual({ lead: false, peer: false });
-  });
-
-  // The watcher that tells a client its tool list moved is the one caller whose
-  // whole job is noticing a change, so the cache must not answer it.
-  test("refresh re-reads inside the window the cache would have served", async () => {
-    let role = { lead: false, peer: false };
-    let asked = 0;
-    stub((path) => {
-      if (path !== "/session-bus/role") return new Response("no", { status: 404 });
-      asked += 1;
-      return Response.json({ lead: role.lead, peer: role.peer });
-    });
-    let clock = 1_000;
-    const cache = createBusRoleCache(() => clock);
-    expect(await cache.get()).toEqual({ lead: false, peer: false });
-    // The machine is added here — inside the window a plain get() would serve
-    // from cache, which is exactly when a lead needs to be told.
-    role = { lead: true, peer: false };
-    expect(await cache.refresh()).toEqual({ lead: true, peer: false });
-    expect(asked).toBe(2);
-    // And the refreshed answer becomes the cached one, so the list the client
-    // asks for next matches the notification it was just sent.
-    expect(await cache.get()).toEqual({ lead: true, peer: false });
-    expect(asked).toBe(2);
-  });
-
-  test("a resolved role is reused inside its window and re-read after it", async () => {
-    let asked = 0;
-    stub((path) => {
-      if (path !== "/session-bus/role") return new Response("no", { status: 404 });
-      asked += 1;
-      return Response.json({ role: "lead", lead: true, peer: false });
-    });
-    let clock = 1_000;
-    const cache = createBusRoleCache(() => clock);
-    await cache.get();
-    clock += ROLE_CACHE_MS - 1;
-    await cache.get();
-    expect(asked).toBe(1);
-    clock += 1;
-    await cache.get();
-    expect(asked).toBe(2);
+    expect(isSessionBusTool("antgrid_publish_artifact")).toBe(true);
+    expect(isSessionBusTool("antgrid_list_artifacts")).toBe(true);
+    expect(isSessionBusTool("antgrid_get_artifact")).toBe(true);
   });
 
   // The bridge authored the refusal and owns the wording; this process appends
@@ -218,176 +122,41 @@ describe("the session-bus tool table", () => {
   // can act on without reading English.
   test("a refusal reaches the caller as the bridge wrote it, with its code", async () => {
     stub(() => Response.json(
-      { error: "no session named \"gateway\" has joined this session; list them with antgrid_list_peers", code: "UNKNOWN_PEER" },
+      { error: "no artifact with that id here; artifact ids are local to where they were published", code: "UNKNOWN_ARTIFACT" },
       { status: 404 },
     ));
-    const result = await callSessionBusTool("antgrid_assign_task", {
-      peer: "gateway",
-      summary: "wire the codec",
-      instruction: "do the thing",
-    });
+    const result = await callSessionBusTool("antgrid_get_artifact", { artifactId: "a-elsewhere" });
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toBe(
-      "no session named \"gateway\" has joined this session; list them with antgrid_list_peers (UNKNOWN_PEER)",
+      "no artifact with that id here; artifact ids are local to where they were published (UNKNOWN_ARTIFACT)",
     );
   });
 
   test("a refusal with no code is rendered unchanged", async () => {
     stub(() => Response.json({ error: "Invalid body" }, { status: 400 }));
-    const result = await callSessionBusTool("antgrid_report_finding", { taskId: "t-1", finding: "x" });
+    const result = await callSessionBusTool("antgrid_publish_artifact", { name: "diff.txt" });
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toBe("Invalid body");
   });
 
   test("a tool call with no core reachable says so instead of failing silently", async () => {
     delete process.env.ANTGRID_API_PORT;
-    const result = await callSessionBusTool("antgrid_list_peers", {});
+    const result = await callSessionBusTool("antgrid_list_artifacts", {});
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain("Antgrid agent is not running");
-  });
-
-  // What an agent is TOLD is the whole interface here: it cannot see the outbox,
-  // so a sentence that overstates delivery is the only thing standing between a
-  // lost report and a retry it would otherwise have made.
-  test("a held finding says it has not arrived and that resending is not the answer", async () => {
-    stub(() => Response.json({ ok: true, sent: false, held: true }));
-    const result = await callSessionBusTool("antgrid_report_finding", {
-      summary: "the codec is little-endian",
-      text: "checked against the fixtures",
-    });
-    // Not an error: it is retried, and an error here is what makes an agent
-    // compose a second copy of a finding that is already on its way.
-    expect(result.isError).toBeUndefined();
-    const text = result.content[0]!.text;
-    expect(text).toContain("has not arrived");
-    expect(text).toContain("retried");
-    expect(text).toContain("do not send it again");
-  });
-
-  // The reply cannot say the task arrived — only an ack can — so it says where
-  // the answer to that question is instead, and forbids the retry an agent
-  // reaches for when it is told nothing.
-  test("an assignment says it is queued, points at the delivery state, and says not to repeat it", async () => {
-    stub(() => Response.json({ ok: true, taskId: "t-9" }));
-    const result = await callSessionBusTool("antgrid_assign_task", {
-      peer: "gateway",
-      summary: "s",
-      instruction: "i",
-    });
-    expect(result.isError).toBeUndefined();
-    const text = result.content[0]!.text;
-    expect(text).toContain("t-9");
-    expect(text).toContain("acknowledges");
-    expect(text).toContain("antgrid_list_tasks");
-    expect(text).toContain("Do not assign it again");
-  });
-
-  // The list is the lead's only account of whether an assignment travelled, so
-  // an unacked task must not read like one in progress on the other machine.
-  test("the task list marks an unacknowledged assignment, and leaves an acknowledged one alone", async () => {
-    stub(() => Response.json({
-      tasks: [
-        { taskId: "t-1", role: "lead", state: "assigned", title: "wire the codec", reachedPeer: false, unacked: 1 },
-        { taskId: "t-2", role: "lead", state: "working", title: "read the fixtures", reachedPeer: true, unacked: 0 },
-        { taskId: "t-3", role: "lead", state: "working", title: "port the tests", reachedPeer: true, unacked: 2 },
-      ],
-    }));
-    const result = await callSessionBusTool("antgrid_list_tasks", {});
-    const lines = result.content[0]!.text.split("\n");
-    expect(lines.find((l: string) => l.includes("t-1"))).toContain("NOT YET DELIVERED");
-    expect(lines.find((l: string) => l.includes("t-2"))).not.toContain("acknowledg");
-    expect(lines.find((l: string) => l.includes("t-3"))).toContain("last update not acknowledged");
-  });
-
-  // An agent handed raw JSON reads the routing identifiers in it as an address,
-  // which is the one thing the bus has to author; prose carries the same task
-  // with nothing addressable in it.
-  test("a task reads as prose, and names no machine or project id", async () => {
-    stub(() => Response.json({
-      taskId: "t-4",
-      role: "lead",
-      state: "working",
-      title: "wire the codec",
-      reachedPeer: true,
-      unacked: 0,
-      peer: { machineId: "m2", projectId: "p2", sessionId: "peer-1", sessionName: "gateway", machineLabel: "build-box" },
-      findings: [{ summary: "the codec is little-endian", text: "checked against the fixtures" }],
-    }));
-    const result = await callSessionBusTool("antgrid_get_task", { taskId: "t-4" });
-    const text = result.content[0]!.text;
-    expect(text).toContain("wire the codec");
-    expect(text).toContain("gateway");
-    expect(text).toContain("build-box");
-    expect(text).toContain("the codec is little-endian");
-    expect(text).not.toContain("m2");
-    expect(text).not.toContain("p2");
-    expect(text).not.toContain("{");
-  });
-
-  // A peer leads nobody, so `members` is empty on every status it reads. Without
-  // the lead line it is told nothing about the one session it is attached to —
-  // and this is the peer's ONLY view of the lead's machine, because a Capability
-  // Card may not ride in a brief that an armed Handler would authorize.
-  test("a peer's status names the lead it answers to, with that machine's card", async () => {
-    stub(() => Response.json({
-      role: "peer",
-      lead: false,
-      peer: true,
-      sessionId: "peer-1",
-      contextId: "lead-1",
-      self: { machineId: "m2", projectId: "p2", sessionId: "peer-1" },
-      memberOf: {
-        machineId: "m1",
-        projectId: "p1",
-        sessionId: "lead-1",
-        sessionName: "lead session",
-        machineLabel: "Studio",
-        projectLabel: "antgrid",
-        role: "lead",
-        joinedAt: 1,
-        state: "active",
-        card: {
-          os: { name: "Windows", version: "11", arch: "x64" },
-          repo: { label: "antgrid", remote: "github.com/acme/antgrid", branch: "main" },
-        },
-      },
-      members: [],
-      scope: [],
-      budget: { tasksRemaining: 5, hourlyRemaining: 5, halted: false },
-      openTaskIds: [],
-    }));
-    const result = await callSessionBusTool("antgrid_session_status", {});
-    const text = result.content[0]!.text;
-    expect(text).toContain('Leader: lead session [active] id=lead-1 machine=Studio project=antgrid');
-    expect(text).toContain("os: Windows, 11, x64");
-    expect(text).toContain("repo: antgrid, github.com/acme/antgrid, main");
-    expect(text).toContain("Members: none");
-  });
-
-  test("a lead's status carries no lead line", async () => {
-    stub(() => Response.json({
-      role: "lead",
-      lead: true,
-      peer: false,
-      sessionId: "lead-1",
-      contextId: "lead-1",
-      self: { machineId: "m1", projectId: "p1", sessionId: "lead-1" },
-      members: [],
-      scope: [],
-      budget: { tasksRemaining: 5, hourlyRemaining: 5, halted: false },
-      openTaskIds: [],
-    }));
-    const result = await callSessionBusTool("antgrid_session_status", {});
-    expect(result.content[0]!.text).not.toContain("Leader:");
   });
 
   test("an unset optional argument is not sent, so a .strict() body still parses", async () => {
     let received: unknown = null;
     stub((path, body) => {
       received = body;
-      return Response.json({ ok: true, taskId: "t-9" });
+      return Response.json({ ok: true, artifact: { artifactId: "a-1", name: "diff.txt", bytes: 10 } });
     });
-    await callSessionBusTool("antgrid_assign_task", { peer: "gateway", summary: "s", instruction: "i" });
-    expect(received).toEqual({ peer: "gateway", summary: "s", instruction: "i" });
+    await callSessionBusTool("antgrid_publish_artifact", {
+      name: "diff.txt",
+      summary: "the codec diff",
+      content: "0123456789",
+    });
+    expect(received).toEqual({ name: "diff.txt", summary: "the codec diff", content: "0123456789" });
   });
 });

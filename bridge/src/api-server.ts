@@ -11,14 +11,7 @@ import type { TerminalManager } from "./terminal-manager";
 import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
 import {
-  AnswerBodySchema,
-  AskBodySchema,
-  AssignBodySchema,
-  CancelBodySchema,
-  FindingBodySchema,
   PublishArtifactBodySchema,
-  RaiseBodySchema,
-  ReportBodySchema,
   type SessionBusApi,
 } from "./session-bus/api";
 import { ARTIFACT_CHUNK_BYTES } from "./session-bus/constants";
@@ -73,13 +66,13 @@ export interface AgentContext {
    *  status. Bridge-internal: this never emits an app-facing frame — unlike
    *  /notify, a turn-start is not a user-facing notification. */
   onTurnStart?: (terminalId?: string) => void;
-  /** The multi-machine session bus, when this core built one. Every decision the
+  /** The session bus, when this core built one. Every decision the
    *  `/session-bus/*` routes make is made in here, so the MCP tools above them
    *  stay a transport and cannot answer differently from the routes. Absent
    *  means the core has no bus at all (a test core, or one built before the
    *  session manager was ready), and every route answers 503 rather than
-   *  reporting the caller as a non-member — which would list an agent no session
-   *  tools with nothing saying why. */
+   *  refusing the caller — which would leave an agent unable to publish with
+   *  nothing saying why. */
   sessionBus?: SessionBusApi;
 }
 
@@ -464,8 +457,8 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
       // The session bus. Every route resolves the CALLER from `?terminalId=` —
       // the slot `ANTGRID_TERMINAL_ID` stamped into the agent's environment,
       // which the MCP server puts on every request. The terminal id IS the
-      // session id for an agent session, which is what turns a request into a
-      // role; a service PTY names none and resolves to a non-member.
+      // session id for an agent session, which is what says whose artifacts are
+      // being asked for; a service PTY names none and resolves to no session.
       if (path.startsWith("/session-bus/")) {
         const bus = ctx.sessionBus;
         if (!bus) return json({ error: "Session bus not available", code: "AGENT_NOT_READY" }, 503);
@@ -473,14 +466,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         const rest = path.slice("/session-bus/".length);
 
         if (req.method === "GET") {
-          if (rest === "role") return json(bus.role(terminalId));
-          if (rest === "session") return sessionBusJson(bus.session(terminalId));
-          if (rest === "brief") return sessionBusJson(bus.brief(terminalId));
-          if (rest === "peers") return sessionBusJson(bus.peers(terminalId));
-          if (rest === "tasks") return sessionBusJson(bus.listTasks(terminalId));
           if (rest === "artifacts") return sessionBusJson(bus.listArtifacts(terminalId));
-          const task = rest.match(/^tasks\/([^/]+)$/);
-          if (task) return sessionBusJson(bus.getTask(terminalId, decodeURIComponent(task[1])));
           const artifact = rest.match(/^artifacts\/([^/]+)$/);
           if (artifact) {
             return sessionBusJson(bus.getArtifact(
@@ -496,37 +482,13 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (req.method !== "POST") return json({ error: "Not found" }, 404);
 
         // An unreadable body is treated as an absent one rather than answered
-        // 400 here: every POST below validates with its own schema, so the
-        // refusal is identical, and `open` carries no body at all.
+        // 400 here: the POST below validates with its own schema, so the refusal
+        // is identical.
         let body: unknown;
         try { body = await req.json(); } catch { body = undefined; }
 
-        if (rest === "tasks") return sessionBusPost(AssignBodySchema, body, (b) => bus.assign(terminalId, b));
-        if (rest === "findings") return sessionBusPost(FindingBodySchema, body, (b) => bus.reportFinding(terminalId, b));
-        // Not `tasks`, which is the LEAD's assign: the two mint the same record
-        // and differ only in who ends up working it, and one route serving both
-        // would have to read the role to know which it was handed.
-        if (rest === "raise") return sessionBusPost(RaiseBodySchema, body, (b) => bus.raiseTask(terminalId, b));
-        if (rest === "ask") return sessionBusPost(AskBodySchema, body, (b) => bus.askLead(terminalId, b));
         if (rest === "artifacts") {
           return sessionBusPost(PublishArtifactBodySchema, body, (b) => bus.publishArtifact(terminalId, b));
-        }
-
-        const verb = rest.match(/^tasks\/([^/]+)\/(cancel|answer|open|complete|fail)$/);
-        if (verb) {
-          const taskId = decodeURIComponent(verb[1]);
-          switch (verb[2]) {
-            case "cancel":
-              return sessionBusPost(CancelBodySchema, body, (b) => bus.cancelTask(terminalId, taskId, b));
-            case "answer":
-              return sessionBusPost(AnswerBodySchema, body, (b) => bus.answerPeer(terminalId, taskId, b));
-            case "open":
-              return sessionBusJson(bus.openTask(terminalId, taskId));
-            case "complete":
-              return sessionBusPost(ReportBodySchema, body, (b) => bus.reportComplete(terminalId, taskId, b));
-            default:
-              return sessionBusPost(ReportBodySchema, body, (b) => bus.reportFailure(terminalId, taskId, b));
-          }
         }
         return json({ error: "Not found" }, 404);
       }
