@@ -326,6 +326,13 @@ var mcRecordsList = [];
 var mcSeen = Object.create(null);
 var mcView = { purpose:"all", query:"", paused:false };
 var mcFollow = true, mcSelected = null, mcShed = 0, mcEvicted = 0;
+/* Whether anything actually ARRIVED since the last repaint. mcRebuild is the
+   one paint path for this feed — a new record, a filter change, an unpause all
+   run it — so without this the "new calls below" button would appear on a
+   scrolled-up pane the moment someone typed in the filter box, asserting a
+   backlog that does not exist. Netwatch keeps the two apart structurally: only
+   its append() raises the button, never its rebuild(). */
+var mcArrived = false;
 var mcPainting = false, mcEverConnected = false;
 var mcArms = { prompts: { on:false, timer:null } };
 
@@ -1201,7 +1208,8 @@ function mcRebuild(){
     }
   }
   if (mcFollow) mcScrollEl.scrollTop = mcScrollEl.scrollHeight;
-  else mcJumpEl.hidden = false;
+  else if (mcArrived) mcJumpEl.hidden = false;
+  mcArrived = false;
   mcPaintCounts(attempts.length);
 }
 
@@ -1371,6 +1379,7 @@ function mcIngest(ev){
     if (!ev || typeof ev !== "object") return;
     if (!mcFresh(ev)) return;
     mcRecordsList.push(ev);
+    mcArrived = true;
     if (mcRecordsList.length > MAX_EVENTS) {
       mcRecordsList.splice(0, mcRecordsList.length - MAX_EVENTS);
       mcSeen = Object.create(null);
@@ -1617,6 +1626,7 @@ function mcExportJsonl(){
 function mcClearAll(){
   mcRecordsList = [];
   mcSeen = Object.create(null);
+  mcArrived = false;
   mcShed = 0;
   mcEvicted = 0;
   mcClearSelection();

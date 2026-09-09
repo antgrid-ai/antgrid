@@ -164,6 +164,25 @@ describe("the calls tab, statically", () => {
     expect(mcSetStatusFn).toContain("mcTabBtn");
     expect(mcSetStatusFn).toContain('"err"');
   });
+
+  it("offers to jump only for calls that actually arrived", () => {
+    // Netwatch keeps this apart structurally — its append() raises the button
+    // and its rebuild() never touches it. This feed has ONE paint path, which a
+    // filter keystroke, a purpose tab and an unpause all reach, so the arrival
+    // has to be carried as a flag or a scrolled-up reader is told about a
+    // backlog that does not exist. Pinned at the source because raising it at
+    // all needs a DOM this suite does not have.
+    const body = script();
+    const rebuild = extractFn(body, "mcRebuild");
+    expect(rebuild).toContain("else if (mcArrived) mcJumpEl.hidden = false;");
+    // Consumed by the paint it belongs to, or every later repaint inherits it.
+    expect(rebuild).toContain("mcArrived = false;");
+    // One writer, and it is a record landing. A second one anywhere else is the
+    // bug back under another name.
+    expect(extractFn(body, "mcIngest")).toContain("mcArrived = true;");
+    expect((body.match(/mcArrived = true;/g) ?? []).length).toBe(1);
+    expect((body.match(/mcJumpEl\.hidden = false/g) ?? []).length).toBe(1);
+  });
 });
 
 describe("prompts arm scheduling and retention, pinned at the source level", () => {
