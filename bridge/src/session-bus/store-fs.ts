@@ -135,7 +135,11 @@ export function writeStoreFile(path: string, dir: string, value: unknown): void 
  * bridge and archiving a session all leave the store readable, which is what
  * "an artifact survives however the session ended" means in practice — survival
  * is a property of where the bytes are, not of a cleanup hook that remembered to
- * skip them. This is called from the session delete path and nowhere else.
+ * skip them. Called from every session-delete path and nowhere else: the
+ * `session:delete` AbMessage arm and `AgentCore.deleteSession` (the control-plane
+ * `sessions.delete` RPC's warm branch, which a cold delete with an open racing in
+ * also funnels through) in agent-core.ts, and `HostServer`'s own cold-delete path
+ * for a project with no warm core at all.
  */
 export function removeSessionBusSession(abDir: string, projectId: string, sessionId: string): void {
   rmSync(sessionBusSessionDir(abDir, projectId, sessionId), { recursive: true, force: true });

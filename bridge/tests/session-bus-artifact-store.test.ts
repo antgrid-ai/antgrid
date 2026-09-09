@@ -123,13 +123,19 @@ test("an artifact survives the session ending: only the delete path removes it",
   }
 });
 
-test("one session's delete leaves another session's artifacts alone", () => {
+test("one session's delete leaves another session's artifacts alone, on this project and on another", () => {
   const abDir = tmpAbDir();
   try {
     saveArtifacts(abDir, "p1", "s1", addArtifact(emptyArtifacts(), rec()));
     saveArtifacts(abDir, "p1", "s2", addArtifact(emptyArtifacts(), rec({ artifactId: "b1" })));
+    // A second project on the SAME machine reusing the SAME session id: the
+    // store path is keyed by projectId first (store-fs.ts), so a delete that
+    // resolved the wrong project would silently remove this one's bytes too —
+    // `rmSync(..., {force:true})` never throws on a path that does not exist.
+    saveArtifacts(abDir, "p2", "s1", addArtifact(emptyArtifacts(), rec({ artifactId: "c1" })));
     removeSessionBusSession(abDir, "p1", "s1");
     expect(loadArtifacts(abDir, "p1", "s2").artifacts).toHaveLength(1);
+    expect(loadArtifacts(abDir, "p2", "s1").artifacts).toHaveLength(1);
   } finally {
     rmSync(abDir, { recursive: true, force: true });
   }

@@ -37,6 +37,7 @@ import { z } from "zod";
 import { SessionManager } from "./session-manager";
 import { SessionBusSessionIndex } from "./session-bus/session-index";
 import { SessionBusCoordinator } from "./session-bus/coordinator";
+import { removeSessionBusSession } from "./session-bus/store-fs";
 import { MAX_BUS_ROUTES } from "./session-bus/constants";
 import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
@@ -2251,7 +2252,7 @@ export class HostServer {
     const session = persisted.find((entry) => entry.id === sessionId);
     if (!session) return false;
     if (!isManagedCheckoutKind(session.checkoutKind)) {
-      return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
+      return this.deleteColdSessionBusThenRow(projectId, sessionId);
     }
     // A forked "current workspace" session shares its checkout with siblings, so
     // removing the worktree here would delete THEIR working tree — with the
@@ -2262,7 +2263,7 @@ export class HostServer {
     // simply go.
     const members = persisted.filter((entry) => entry.checkoutId === session.checkoutId);
     if (members.length > 1) {
-      return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
+      return this.deleteColdSessionBusThenRow(projectId, sessionId);
     }
     if (options.removeCheckout === false) {
       throw new WorktreeError("WORKTREE_CONFLICT", "An isolated session must remove its managed worktree when deleted.");
@@ -2276,7 +2277,7 @@ export class HostServer {
     // refuse a session the warm path deletes — the drawer's delete reaches
     // whichever one is live.
     if (!await manager.recordFor(projectId, session.checkoutId)) {
-      return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
+      return this.deleteColdSessionBusThenRow(projectId, sessionId);
     }
     // The manager repeats the dirty/unpushed preflight and only removes metadata
     // after Git confirms removal. Persist the session row last.
@@ -2285,6 +2286,26 @@ export class HostServer {
       force: options.force === true,
       deleteBranch: options.deleteBranch === true,
     });
+    return this.deleteColdSessionBusThenRow(projectId, sessionId);
+  }
+
+  /** The bus half of a cold-deleted session — no core ever holds a handle on
+   *  this project, so nothing else ever sweeps it. Runs BEFORE
+   *  `SessionManager.deletePersisted`, which persists the row's removal LAST on
+   *  purpose (a failed removal leaves something to retry): sweeping first means
+   *  a crash between the two still leaves the row in place to retry against,
+   *  where sweeping after would let a persisted row-removal outlive the only
+   *  thing that would ever revisit these bytes. Mirrors `forget()`'s own
+   *  `reclaimManagedCheckouts` running before `deleteProjectStores`, "before the
+   *  metadata naming them dies". Idempotent: `removeSessionBusSession` is a
+   *  force-remove, so a retried delete sweeps a no-op. */
+  private deleteColdSessionBusThenRow(projectId: string, sessionId: string): Promise<boolean> {
+    this.sessionBus.forget(sessionId);
+    try {
+      removeSessionBusSession(resolveAbDir(), projectId, sessionId);
+    } catch (err) {
+      log.warn("could not remove the session-bus store for %s: %s", sessionId, err);
+    }
     return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
   }
 

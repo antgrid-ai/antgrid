@@ -1857,9 +1857,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
                 removeCheckout: verb.removeCheckout,
                 deleteBranch: verb.deleteBranch,
               });
-              // The bus half of the row goes with the row. Nothing else ever
-              // removes it: the coordinator would keep retrying held messages
-              // for a session that no longer exists, and the on-disk log and
+              // The bus half of the row goes with the row, on THIS path and on
+              // `deleteSession` (a phone's control-plane delete) — without it
+              // the coordinator would keep retrying held messages for a
+              // session that no longer exists, and the on-disk log and
               // artifact bytes would outlive every reader of them. Deliberately
               // after the delete succeeded — a refused delete (dirty worktree)
               // leaves a live session with an exchange still open.
@@ -4474,7 +4475,27 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     connState,
     deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean> {
       if (!sessions) return false;
-      return sessions.delete(id, options);
+      // The control-plane `sessions.delete` RPC (a phone's own delete) reaches
+      // a warm core through THIS method, never through the session:delete
+      // AbMessage arm above — so the bus sweep has to live here too, or that
+      // route leaks the message log, held store and artifact bytes forever.
+      // Same ordering as the AbMessage arm: only after a confirmed delete,
+      // since a refused delete (dirty worktree) leaves a live session with an
+      // exchange still open.
+      const sweep = (deleted: boolean): boolean => {
+        if (deleted) {
+          sessionBus.forget(id);
+          opts.forgetBusLines?.(id);
+          try {
+            removeSessionBusSession(abDir, project.id, id);
+          } catch (err) {
+            log.warn("could not remove the session-bus store for %s: %s", id, err);
+          }
+        }
+        return deleted;
+      };
+      const result = sessions.delete(id, options);
+      return result instanceof Promise ? result.then(sweep) : sweep(result);
     },
     listSessions(includeArchived: boolean): SessionEntry[] | null {
       return sessions ? sessions.list(includeArchived) : null;
