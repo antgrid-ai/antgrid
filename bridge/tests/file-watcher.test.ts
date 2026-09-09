@@ -273,10 +273,62 @@ describe("FileWatcher", () => {
       expect(msg.type).toBe("file:resolve-path-result");
       if (msg.type === "file:resolve-path-result") {
         expect(msg.relPath).toBeNull();
+        // Non-image, so the narrow external-image exception doesn't apply
+        // either — see the next test for the case where it does.
+        expect(msg.externalImagePath).toBeNull();
       }
     }
 
     watcher.stop();
+  });
+
+  it("reports externalImagePath for a recognized image outside the checkout root", () => {
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+
+    const outsideDir = mkdtempSync(join(tmpdir(), "antgrid-watcher-external-"));
+    const outsidePng = join(outsideDir, "generated.png");
+    writeFileSync(outsidePng, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    try {
+      watcher.handleResolvePathRequest("req-6", outsidePng);
+
+      expect(messages[0].type).toBe("file:resolve-path-result");
+      if (messages[0].type === "file:resolve-path-result") {
+        expect(messages[0].relPath).toBeNull();
+        expect(messages[0].externalImagePath).toBe(outsidePng);
+      }
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+      watcher.stop();
+    }
+  });
+
+  it("does not report externalImagePath for a recognized image that doesn't exist", () => {
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+
+    const outsideDir = mkdtempSync(join(tmpdir(), "antgrid-watcher-external-"));
+    try {
+      watcher.handleResolvePathRequest("req-7", join(outsideDir, "missing.png"));
+
+      expect(messages[0].type).toBe("file:resolve-path-result");
+      if (messages[0].type === "file:resolve-path-result") {
+        expect(messages[0].relPath).toBeNull();
+        expect(messages[0].externalImagePath).toBeNull();
+      }
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+      watcher.stop();
+    }
   });
 
   it("resolves a path already given relative to the checkout", () => {

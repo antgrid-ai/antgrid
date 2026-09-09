@@ -193,6 +193,9 @@ pill; click-for-detail with the full body; and both arming switches, each with
 its own heartbeat and the same dead-man TTL. **export** writes exactly what is on
 screen as JSONL. `--local`/`--relay`/`--limit` set the window's opening state;
 every other flag is refused, because the window owns what it would have answered.
+The window carries a second tab, **calls**, over the model-call ring described
+below; the two feeds share this one document and the one session a ticket buys,
+and nothing else.
 
 ```bash
 antgrid watch --ui                  # a window, and the terminal is yours again
@@ -220,3 +223,216 @@ machine an app-side frame belongs to: the app's recorder is process-wide, so an
 app connected to two machines that are BOTH watching reports every frame to both
 — same account, same user, and the events carry types and sizes, never payloads,
 but the reading is confusing rather than wrong.
+
+**Model-call watcher:** `antgrid calls` (`bridge/src/cli/modelwatch.ts`) is the
+sibling command, over the same plumbing, watching a different thing: the headless
+agent CLIs the bridge spawns on *your own provider accounts*. Three calls exist —
+a session title, and the handler's decision and extraction — and all three funnel
+through `runHeadless` (`bridge/src/agents/headless.ts`), which is where the
+recorder is tapped. It attaches to the already-running host exactly as `watch`
+does (`GET /modelwatch`, the `host.json` bearer, a ring that has been recording
+since the host started), so the call worth reading about is normally already in
+it by the time you attach.
+
+```bash
+antgrid calls                        # replay the ring, then follow
+antgrid calls --purpose decision     # only the handler's judge calls
+antgrid calls --json > calls.jsonl   # the raw records
+antgrid calls --no-follow            # buffered snapshot, then exit
+antgrid calls --limit 0              # no replay; watch what happens next
+```
+
+```
+20:40:06.095  9f8e7d6c  title        #1  codex→claude-code  default   3.1s/45.0s   named
+20:40:12.480  abc123de  decision     #1  claude-code        default  28.4s/45.0s   shape-rejected  16.6s left for the retry  quote not found in RECENT CONTEXT
+20:40:41.220  abc123de  decision    ↳#2  claude-code        default   7.2s/16.6s   retried-parsed
+20:41:07.900  deadbeef  extraction   #1  claude-code        default  19.8s/20.0s   timeout         200ms left for the retry — unreachable  no output
+```
+
+**A row is an attempt, not a record.** The recorder writes three per attempt —
+the spawn starts, the spawn exits with its timings, and the *caller* says what it
+made of the answer, which the spawn cannot know — and the rendered view folds
+them into one row on the call id they share. `--json` does not fold: it prints
+the records as recorded, for a reader piping them somewhere else.
+
+**The same ring, in the capture window's second tab.** `antgrid watch --ui`'s
+document carries a **calls** tab beside the frame capture, folding the same
+records by the same call id and attempt. Two things it does that the terminal
+cannot. It renders an attempt the moment its start record arrives, as an *in
+flight* row updated in place when the end and the outcome land, rather than
+batching until the call is over — a run you are waiting on is the one you most
+want on screen. And the duration cell pairs wall with the vendor's API time
+where the terminal pairs it with the budget; what a retry inherits is on the row
+that owed it, as the retry-budget note. **export** writes the raw records,
+unfolded, exactly as `--json` does. Everything else the tab shows — the arms,
+the vocabulary, the refusals to sum — is what this section already describes,
+with one addition: disarming **prompts** purges the captured text from the
+window and its export too, not only from the host's ring.
+
+**The retry budget is the number this exists for.** A judge gets two attempts
+against ONE budget (`runWithRetry` in `bridge/src/handler/judge.ts`), so what the
+first attempt leaves is the whole of what the second gets — which is why the two
+rows above share a call id, why the retry is indented under the attempt it
+retried, and why attempt #1's leftover is literally attempt #2's budget column. A
+first attempt that leaves a few hundred milliseconds has dispatched a retry that
+was already dead: no vendor CLI has ever finished in that (each loads twelve to
+twenty-three thousand tokens of its own preamble before reading the prompt), so
+anything under five seconds is called unreachable on the row and counted in the
+closing tally. Nothing else on the machine would ever say so.
+
+The other columns answer questions that are equally unanswerable elsewhere. The
+agent **asked for** is shown beside the one that **actually ran** when they differ
+(`codex→claude-code`): a title needs no repo access and therefore borrows
+whichever agent is installed, which bills a vendor this session never chose. And
+`default` in the model column is not a missing value — it is a call that passed no
+`--model` at all and so ran on whatever that CLI defaults to on this machine,
+which for a three-word naming task is the largest single cost lever there is.
+It means exactly that on every row — no `--model` was passed — but only **title**
+rows consult a per-agent default: a title call passes one for the agents that
+declare `AgentSpec.cheapNamingModel` (`bridge/src/agents/registry.ts`), read off
+the agent that **actually ran**, since a borrowed call's model has to match
+whichever CLI serves it and not the one the session asked for. So `default` on a
+title row means either that nobody has verified a model string that vendor's
+account accepts, or that `ANTGRID_NAMING_MODEL=0` is set. On a `decision` or
+`extraction` row it means only that the supervised session set no judge model —
+it says nothing about whether a model is known for that vendor.
+
+`ANTGRID_NAMING_MODEL=0` drops that flag, for the account whose provider does not
+serve the model this machine's build was measured against. It is the naming
+equivalent of `ANTGRID_MODELWATCH_USAGE=0` below and is needed for the same
+reason: a model string an account cannot reach fails the call outright, and after
+two failures a session is never named again.
+
+**The token and cost cell is vendor-reported, and it is not there for every
+agent.** Where the row shows
+`in 901 · cache r 15.2k · cache w 7.2k · out 12 · 0.081095 USD · 2 models`, every
+one of those numbers came out of an envelope the CLI itself emitted for that
+call, asked for by a flag on the same spawn. Cache reads and cache writes are
+separate cells because they are separately priced. Which agents report what, and
+all of it measured against the installed binaries rather than read off anyone's
+docs:
+
+| Agent | Tokens | Cost | Model that ran | How |
+|---|---|---|---|---|
+| `claude-code` | in / cache r / cache w / out / reasoning | US dollars, list price | yes | `--output-format json` rewrites stdout |
+| `codex` | in / cache r / cache w / out / reasoning | none | no | `--json` rewrites stdout |
+| `opencode` | in / cache r / cache w / out / reasoning | none | no | `--format json` rewrites stdout |
+| `github-copilot` | in / cache r / cache w / out / reasoning | nano AI credits | yes | `--usage-output-file`, a side file; stdout untouched |
+| everything else | nothing | nothing | nothing | no captured envelope |
+
+That last row is five of the nine agents, and their absence is deliberate rather
+than pending. `cursor-agent` and `mistral-vibe` declare no headless argv at all,
+`kimi` and `antigravity` neither; `kilo` HAS a `--format json` flag whose event
+shape was read out of the shipped binary, but no successful run has ever been
+captured on a machine with credentials for it, and a descriptor written from a
+schema would put invented numbers on the machine's own spend ledger. A row with
+no numbers means nobody has measured that vendor — never that the call was free.
+
+**Never add two rows' tokens together — and within one row, only where that
+vendor's own arithmetic says you may.** The counts are vendor-tagged in the ring
+for this reason, and they do not mean the same measurement:
+
+- `in` and `cache r` are DISJOINT for `claude-code` — measured, 2 input tokens
+  beside 15232 cache reads — so the prompt is their sum there. For `codex` it is
+  unmeasured whether `in` already contains `cache r`, and its capture (16666
+  against 12544) is consistent with either reading, so adding the two may
+  double-count by the whole cached figure. `opencode` and `github-copilot` both
+  reported zero cache traffic on their captures, which settles nothing either.
+- `reasoning` is ALREADY INSIDE `out` for `claude-code`, which reports thinking
+  as a breakdown of its output, and is NOT for `codex` or `opencode`, which
+  report it as a sibling. The cell is printed only when it is non-zero, and on a
+  reasoning model it is the difference between the output spend shown and the
+  output spend billed.
+
+- `claude-code`'s four counts are summed ACROSS MODELS, because a single headless
+  call can bill two — a one-word prompt measured here billed a background
+  `claude-haiku-4-5` alongside the `claude-opus-5` that answered. The cost is the
+  cross-model total too, which is why the tokens are: the vendor's own top-level
+  token block describes only one of the models, and putting it beside that cost
+  would be one row describing two different sets of API calls. The model column
+  names the one that spent the most, and the `2 models` cell is the row saying
+  out loud that the counts beside it are not that model's alone: on the measured
+  capture the named model spent 2 of the 901 input tokens.
+- `opencode` structurally undercounts by one call per row: it auto-titles each
+  new session, every spawn is a new session, and that call emits no usage event.
+  Its `cost` field is a zero we refuse to record — an OAuth provider carries no
+  price metadata, and a zero there would assert the call was free.
+- `github-copilot` bills in nano AI credits (`273860000` is 0.27386 credits), and
+  its legacy premium-request count is a different currency. The unit is printed
+  beside the amount for that reason and is never folded into anything.
+- Neither `codex` nor `opencode` reports which model answered. Codex never echoes
+  it back, and opencode's shipped binary suppresses the model banner precisely
+  when the json format is asked for.
+
+A missing cell is always "the vendor did not say", never zero: each of these
+CLIs drops fields from its FAILED envelope rather than zeroing them.
+
+**These flags are the one part of the watcher that changes what the CLI does.**
+Three of the four rewrite stdout, so the bridge unwraps the answer before naming
+a session or parsing a judge's decision (`unwrapEnvelope` in
+`bridge/src/agents/usage-envelope.ts`) — and an envelope it does not recognise
+costs the numbers and nothing else. `ANTGRID_MODELWATCH_USAGE=0` is the switch
+that drops the flags entirely, for the machine whose CLI moved on and no longer
+takes the one that was verified against it.
+
+**Prompt text is never recorded unless armed, and the arms are separate.**
+Metadata is always in the ring — that is what makes a call diagnosable hours
+later — but nothing the user typed and nothing the agent read is, until a run
+asks for it:
+
+```bash
+antgrid calls --prompts   # the parts WE wrote: scaffold, handler goal,
+                          # a count for the backlog, a digest for the transcript
+antgrid calls --context   # ...and the transcript and PTY scrollback themselves,
+                          # plus the model's answer, which quotes them back
+```
+
+`--context` is a second flag rather than a stronger setting of the first because
+what it admits is not ours. A decision prompt is built around thousands of
+characters of transcript and PTY scrollback, which can hold a pasted key, an
+`.env` the agent opened, or a password typed at a prompt — there is no list of
+types that could make it safe the way `BODY_REDACTED_MESSAGE_TYPES` makes a frame
+body safe, which is the whole reason `bridge/src/modelwatch.ts` gives it its own
+switch. It implies `--prompts`: transcript text and the model's answer are
+admitted only while both arms are up, so arming it alone would arm the dangerous
+capture and record nothing through it. For the same reason the capture viewer may
+arm the prompt parts and may **not** arm the context arm — it is refused at that
+route with `CONTEXT_ARM_FORBIDDEN` and is reachable only from this CLI. The
+calls tab says that in words rather than leaving a dead-looking control: the
+boundary is on screen before anything is armed, and the refusal — which a
+prompts-only request can also receive, because arming prompts is what starts
+admitting transcript text once the CLI holds context up — is named where the
+toggle is.
+
+Both arms carry the **dead-man TTL** `--bodies` does, renewed while the watcher
+runs and clamped host-side, and both need a live stream (`--no-follow` refuses
+them, since arming records the future). The two ceilings differ, because what the
+arms admit does: `prompts` may be held for up to an hour, `context` for five
+minutes. A run renews well inside either, so the shorter one costs a live watcher
+nothing — what it bounds is the run that is no longer there. One thing these arms
+do that netwatch's does not: a disarm — on exit, on `Ctrl-C`, or when the window
+simply lapses — **purges the text already in the ring**. That ring is sized to
+hold days rather than seconds, so without the purge an excerpt admitted during a
+one-minute window would still be readable a week later by a reader who armed
+nothing.
+
+**Nothing leaves the machine.** `modelwatch:arm` and `modelwatch:ui` are
+`ControlRequest` verbs answered in this process on the loopback plane; they add no
+AbMessage type, so a phone — which speaks AbMessage over the relay and cannot name
+a `ControlRequest` at all — has no way to reach either. There is no outbound
+direction and no `--remote` analogue, by construction rather than by omission. The
+durable feed the recorder also writes (`<ANTGRID_DIR>/model-calls.jsonl`, machine
+level, one rolled generation) holds metadata only, always, armed or not, and
+`--export` writes the same — literally the same field list, `MODEL_CALL_LOG_FIELDS`
+in `bridge/src/modelwatch-log.ts`, so the two cannot drift apart as fields are
+added. The token counts and the cost are NOT among those fields and stay in the
+ring alone: the list is indexed by event key, `usage` is nested under one, and a
+flat column whose meaning changes with the vendor on the row is exactly the
+misreading the table above exists to prevent. What the envelopes DO add to the
+durable feed is the model that actually ran and the vendor-reported API time,
+both of which a human had already named there.
+
+An export file is written to be pasted into a bug report, and it outlives
+the run, the window and the arm's own TTL. `--json` is the mode that withholds
+nothing: it goes to a pipe the operator is watching, not to a file they attach to
+a ticket a week later.

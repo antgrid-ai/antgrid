@@ -258,6 +258,15 @@ class GitPaneState {
   /// sitting on.
   final Set<String> collapsedPaths;
 
+  /// Whether the History section itself is folded shut in the side-by-side
+  /// layout's fixed Changes/History split (`_GitPanelBody._buildLeftColumn`).
+  /// Distinct from [GitHistoryState.expandedShas], which folds individual
+  /// COMMITS within an already-visible list. Ignored (treated as expanded)
+  /// whenever there are no changed files to give the freed space to — see
+  /// that method for why collapsing would otherwise leave blank space with
+  /// nothing to show for it.
+  final bool historyCollapsed;
+
   /// How the branch stands against its upstream. Replayed on reconnect (it is
   /// in `kCheckoutDurableReplayTypes`), so this is durable state rather than a
   /// one-shot — an app that reconnects must not show a synced branch until the
@@ -292,6 +301,7 @@ class GitPaneState {
     this.viewingFile,
     this.viewingLoading = false,
     this.collapsedPaths = const {},
+    this.historyCollapsed = false,
     this.sync = GitSyncState.empty,
     this.syncing,
     this.lastSyncFailure,
@@ -315,6 +325,7 @@ class GitPaneState {
     bool? viewingLoading,
     bool clearViewing = false,
     Set<String>? collapsedPaths,
+    bool? historyCollapsed,
     GitSyncState? sync,
     GitSyncOp? syncing,
     bool clearSyncing = false,
@@ -340,6 +351,7 @@ class GitPaneState {
       // Survives clearDiff/clearViewing: closing a diff is not a reason to
       // reopen every folder the user shut to find it.
       collapsedPaths: collapsedPaths ?? this.collapsedPaths,
+      historyCollapsed: historyCollapsed ?? this.historyCollapsed,
       sync: sync ?? this.sync,
       syncing: clearSyncing ? null : (syncing ?? this.syncing),
       lastSyncFailure: clearSyncFailure
@@ -535,6 +547,15 @@ class FileContentMessage {
 /// request named. [relPath] is null when the path does not resolve inside
 /// that checkout; the app never learns the checkout's absolute root, so only
 /// the bridge can make this call.
+///
+/// [externalImagePath] is set only when [relPath] is null AND the bridge
+/// recognized the path as a safe image type outside the checkout (an
+/// image-generation tool's own output directory, typically) — see
+/// `EXTERNAL_SAFE_IMAGE_MIME` in the bridge's `file-tree.ts`. It carries the
+/// ABSOLUTE path, unlike [relPath]; `file:read` accepts it as-is (the
+/// bridge's traversal guard has the matching narrow exception), so the app
+/// can preview it read-only via [FileService.openPreview] instead of
+/// refusing the link outright.
 class FileResolvePathResultMessage {
   final String id;
   final int timestamp;
@@ -542,6 +563,7 @@ class FileResolvePathResultMessage {
   final String requestId;
   final String? relPath;
   final bool isDirectory;
+  final String? externalImagePath;
 
   const FileResolvePathResultMessage({
     required this.id,
@@ -550,5 +572,6 @@ class FileResolvePathResultMessage {
     required this.requestId,
     this.relPath,
     this.isDirectory = false,
+    this.externalImagePath,
   });
 }

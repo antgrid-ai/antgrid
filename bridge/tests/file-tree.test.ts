@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { buildTree, readFile, loadIgnoreRules, countNodes } from "../src/file-tree";
+import {
+  buildTree,
+  readFile,
+  loadIgnoreRules,
+  countNodes,
+  externalSafeImageMime,
+} from "../src/file-tree";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -314,6 +320,72 @@ describe("file-tree", () => {
       expect(r.encoding).toBe("utf8");
       expect(r.content).toBe("just plain text, not an icon");
       expect(r.mimeType).toBeUndefined();
+    });
+  });
+
+  describe("readFile — external image exception", () => {
+    // The Files-tab-outside-the-checkout link an image-generation tool's own
+    // output directory produces: `readFile`'s traversal guard normally
+    // refuses anything outside `projectRoot` outright, but a recognized
+    // image extension is a narrow, deliberate exception — see
+    // EXTERNAL_SAFE_IMAGE_MIME in file-tree.ts.
+    let externalDir: string;
+
+    beforeEach(() => {
+      externalDir = mkdtempSync(join(tmpdir(), "antgrid-external-test-"));
+    });
+
+    afterEach(() => {
+      rmSync(externalDir, { recursive: true, force: true });
+    });
+
+    it("serves a recognized image from outside the checkout root", () => {
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      const outsidePath = join(externalDir, "generated.png");
+      writeFileSync(outsidePath, png);
+
+      const r = readFile(tempDir, outsidePath);
+      expect(r.error).toBeUndefined();
+      expect(r.encoding).toBe("base64");
+      expect(r.mimeType).toBe("image/png");
+    });
+
+    it("still denies a non-image path outside the checkout root", () => {
+      const outsidePath = join(externalDir, "notes.txt");
+      writeFileSync(outsidePath, "hello");
+
+      const r = readFile(tempDir, outsidePath);
+      expect(r.content).toBeNull();
+      expect(r.error).toBe("Path traversal denied");
+    });
+
+    it("still denies a PDF outside the checkout root (excluded on purpose)", () => {
+      const outsidePath = join(externalDir, "generated.pdf");
+      writeFileSync(outsidePath, "not a real pdf — the extension is what's under test");
+
+      const r = readFile(tempDir, outsidePath);
+      expect(r.content).toBeNull();
+      expect(r.error).toBe("Path traversal denied");
+    });
+  });
+
+  describe("externalSafeImageMime", () => {
+    it("recognizes common raster image extensions", () => {
+      expect(externalSafeImageMime("a.png")).toBe("image/png");
+      expect(externalSafeImageMime("a.JPG")).toBe("image/jpeg");
+      expect(externalSafeImageMime("a.webp")).toBe("image/webp");
+    });
+
+    it("excludes svg, pdf, and ico even though other surfaces can render them", () => {
+      // .svg can embed a script, .pdf is a heavier parser, .ico has no real
+      // "generated output" use case here — none is worth the exposure for a
+      // path this app never chose to trust with a checkout.
+      expect(externalSafeImageMime("a.svg")).toBeUndefined();
+      expect(externalSafeImageMime("a.pdf")).toBeUndefined();
+      expect(externalSafeImageMime("a.ico")).toBeUndefined();
     });
   });
 

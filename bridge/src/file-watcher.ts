@@ -8,6 +8,7 @@ import {
   loadIgnoreRules,
   buildTree,
   readFile,
+  externalSafeImageMime,
   type FileTreeNode,
 } from "./file-tree";
 import type { ConnState } from "./conn-state";
@@ -322,7 +323,14 @@ export class FileWatcher {
    *  `docs/architecture.md` — the checkout path never crosses the session
    *  wire), so it cannot make this relative on its own; a null `relPath`
    *  covers both a path from outside this checkout and one that fails to
-   *  resolve at all. Mirrors [readFile]'s own traversal guard. */
+   *  resolve at all. Mirrors [readFile]'s own traversal guard.
+   *
+   *  A path OUTSIDE the checkout gets one further check: [externalSafeImageMime]
+   *  — an image-generation tool's own output directory is typically outside
+   *  any checkout, and before this the app could only refuse such a link
+   *  outright. `externalImagePath` carries the absolute path for exactly that
+   *  narrow case, gated the same way [readFile] gates the read it enables:
+   *  by extension alone, never by content. */
   handleResolvePathRequest(requestId: string, rawPath: string): void {
     const absPath = resolve(this.projectRoot, rawPath);
     const normalizedRoot = resolve(this.projectRoot);
@@ -338,6 +346,7 @@ export class FileWatcher {
     const insideRoot = cmpPath === cmpRoot || cmpPath.startsWith(cmpRoot + sep);
     let relPath: string | null = null;
     let isDirectory = false;
+    let externalImagePath: string | null = null;
     if (insideRoot) {
       relPath =
         absPath === normalizedRoot ? "" : this.toRelPath(absPath);
@@ -346,6 +355,17 @@ export class FileWatcher {
       } catch {
         // Doesn't exist (yet) — still a valid path to point the Files tab at.
       }
+    } else if (externalSafeImageMime(absPath)) {
+      // Unlike the inside-root case above, there is no "not yet created"
+      // expectation for a path this checkout's watcher knows nothing about —
+      // confirm it exists as a real file before pointing the app at it.
+      try {
+        if (statSync(absPath).isFile()) {
+          externalImagePath = absPath;
+        }
+      } catch {
+        // Doesn't exist — leave both relPath and externalImagePath null.
+      }
     }
     this.sendMessage(
       createMessage("file:resolve-path-result", {
@@ -353,6 +373,7 @@ export class FileWatcher {
         requestId,
         relPath,
         isDirectory,
+        externalImagePath,
       }),
     );
   }

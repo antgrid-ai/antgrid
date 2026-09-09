@@ -1345,6 +1345,18 @@ class FileService {
     );
   }
 
+  /// Fold the whole History section shut in the side-by-side layout, or
+  /// reopen it — see [GitPaneState.historyCollapsed].
+  void toggleHistoryCollapsed() {
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          historyCollapsed: !_state.git.historyCollapsed,
+        ),
+      ),
+    );
+  }
+
   /// History tab: open one file's diff within [sha] — the same viewer
   /// [requestDiff] opens for the working tree, distinguished on screen by
   /// [GitPaneState.diffCommitSha].

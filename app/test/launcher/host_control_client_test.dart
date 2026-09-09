@@ -204,6 +204,36 @@ void main() {
     expect(list.first.mode, 'local');
   });
 
+  test('projectSessions parses the session list', () async {
+    final stub = _StubControlServer();
+    await stub.start(
+      handler: (req) => {
+        'id': req['id'],
+        'ok': true,
+        'type': 'project:sessions',
+        'sessions': [
+          {
+            'id': 's1',
+            'name': 'hello',
+            'createdAt': 0,
+            'lastUsedAt': 0,
+            'archived': false,
+          },
+        ],
+      },
+    );
+    addTearDown(stub.close);
+
+    final client = HostControlClient(port: stub.port, token: 't');
+    final sessions = await client.projectSessions('proj-1');
+    expect(stub.lastBody!['type'], 'project:sessions');
+    expect(stub.lastBody!['projectId'], 'proj-1');
+    expect(stub.lastBody!['includeArchived'], isFalse);
+    expect(sessions, hasLength(1));
+    expect(sessions.single.id, 's1');
+    expect(sessions.single.name, 'hello');
+  });
+
   test('toolsList parses the tool catalog and the agent descriptors', () async {
     final stub = _StubControlServer();
     await stub.start(

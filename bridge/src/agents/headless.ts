@@ -1,12 +1,26 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { logger } from "../logger";
+import {
+  captureStdout, modelwatch,
+  type ModelCallContext, type ModelCallEvent, type ModelCallPhase,
+} from "../modelwatch";
+// Imported for its side effect — the module attaches the durable call log to the
+// ring at import — and imported HERE rather than from an entry point because
+// this file is the one function every model call on the machine passes through.
+// The shipped bridge re-invokes its own executable under hidden subcommands, so
+// an entry point is not a single place; the chokepoint is.
+import "../modelwatch-log";
 import { killChildTree, stripInheritedCertOverrides } from "../terminal-session";
 import { detectInstalledTools } from "../tool-detector";
 import { AGENTS, agentSpec } from "./registry";
-import { pickHeadlessFrom, type HeadlessCommand, type HeadlessNeed, type HeadlessReach } from "./types";
+import {
+  pickHeadlessFrom,
+  type HeadlessCommand, type HeadlessNeed, type HeadlessReach,
+  type HeadlessUsageCapture, type HeadlessUsageReading, type HeadlessUsageTokens,
+} from "./types";
 
 const log = logger.child({ component: "headless" });
 
@@ -85,10 +99,34 @@ export function headlessScratchCwd(): string {
 const ABANDON_GRACE_MS = 2_000;
 
 export interface HeadlessResult {
+  /**
+   * What the process actually wrote, verbatim — including a vendor's usage
+   * envelope when one was asked for, rather than the answer unwrapped out of it.
+   *
+   * Decided deliberately, because the alternative is tempting: unwrapping here
+   * would mean no caller could ever forget to. What it would cost is that
+   * nobody could see what the CLI really said — a debugging session would be
+   * reading our reconstruction — and `stdoutChars` and the "no output" diagnosis
+   * would both describe a string the process never emitted. The unwrap belongs
+   * with the parse instead, where the caller knows what shape of answer it
+   * wants, and it is one shared function so there is one place to get right
+   * (`unwrapEnvelope` in ./usage-envelope.ts). The ring's captured text is the
+   * one exception and states its own reason at the record site: it is read by a
+   * human under the label "answer".
+   */
   stdout: string;
   /** Exit code, or null when the process was killed at the timeout. */
   code: number | null;
   timedOut: boolean;
+  /** Vendor-reported cost of this call, when the command declared a usage
+   *  descriptor and the envelope parsed. Absent otherwise, always. */
+  usage?: HeadlessUsageTokens;
+  /** What the vendor says answered, which may not be what was asked for. */
+  actualModel?: string;
+  /** The envelope's own verdict that the run failed — see
+   *  `HeadlessUsageReading.failed`. Absent is not "it succeeded": it is every
+   *  case where no envelope said either way. */
+  vendorFailed?: boolean;
 }
 
 /**
@@ -111,18 +149,54 @@ export async function runHeadless(
     /** Env vars to point at a directory created for this spawn and deleted
      *  after it — see HeadlessCommand.scratchEnv. */
     scratchEnv?: string[];
+    /** How to ask this CLI what the call cost — see
+     *  HeadlessCommand.usage. Absent leaves the argv and the output exactly as
+     *  they are without it. */
+    usage?: HeadlessUsageCapture;
+    /**
+     * Why this call is being made, for the modelwatch record. Everything in it
+     * is the caller's word because none of it is knowable here: this function
+     * is handed an argv and a budget and nothing about who wants the answer.
+     *
+     * Optional by design rather than by omission. A caller that supplies none
+     * is not recorded and behaves exactly as it did before the recorder
+     * existed, which is what keeps the parameter additive instead of a second
+     * thing every existing call site has to get right.
+     */
+    call?: ModelCallContext;
   },
 ): Promise<HeadlessResult | null> {
   const spawn = opts.spawn ?? Bun.spawn;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let abandonTimer: ReturnType<typeof setTimeout> | undefined;
+  // Hoisted out of the try only so the catch below can report it: that path is
+  // reached both by a spawn that never ran and by a stdout read the timeout's
+  // tree kill broke, and only this flag tells the two apart.
+  let timedOut = false;
   const scratch = makeScratchHome(opts.scratchEnv);
+  const capture = usageCaptureEnabled() ? opts.usage : undefined;
+  // Named before the spawn because the vendor is told where to write it, and
+  // outside the scratch home on purpose: measured, copilot honours an absolute
+  // path anywhere, so owning the file here means reading it can never race the
+  // scratch home's disposal.
+  const usageFile = capture?.from === "side-file" ? usageFilePath() : undefined;
+  const argv = withUsageArgs(cmd, capture, usageFile);
+  const call = opts.call;
+  // The argv is never recorded, here or anywhere downstream: the prompt is one
+  // of its elements, so `cmd` verbatim would put the whole prompt in the ring
+  // past both capture arms. `cmd[0]` is the only part that is safe to name, and
+  // the caller already names it as `actualTool`.
+  if (call) noteCall(() => callEvent(call, "start", {
+    promptChars: call.promptChars, prompt: call.prompt,
+  }));
+  // Started here rather than at the top so `wallMs` measures the child and not
+  // the scratch-home setup that precedes it.
+  const startedAt = Date.now();
   try {
-    const proc = spawn(cmd, {
+    const proc = spawn(argv, {
       cwd: opts.cwd, stdout: "pipe", stderr: "ignore",
       env: headlessEnv({ ...opts.env, ...scratch?.env }),
     });
-    let timedOut = false;
     // Resolves only if the timeout fires AND the tree kill fails to end the
     // reads below. Nothing here is racing the happy path: on it, this promise
     // is simply never settled and both awaits win outright.
@@ -147,8 +221,42 @@ export async function runHeadless(
       new Response(proc.stdout).text(), abandoned.then(() => ""),
     ]);
     const code = await Promise.race([proc.exited, abandoned]);
-    return { stdout, code: timedOut ? null : code, timedOut };
-  } catch {
+    const result: HeadlessResult = { stdout, code: timedOut ? null : code, timedOut };
+    const reading = readUsage(capture, usageFile, stdout);
+    // Assigned only when there is something to say, so a command that declares
+    // no descriptor — and a run whose envelope did not parse — returns the same
+    // object it always did rather than one carrying three empty fields.
+    if (reading?.usage) result.usage = reading.usage;
+    if (reading?.actualModel) result.actualModel = reading.actualModel;
+    if (reading?.failed) result.vendorFailed = true;
+    // `opts.timeoutMs` rather than the context's own budget: what makes a record
+    // readable is the bound THIS attempt was actually held to, and a caller
+    // splitting one budget across retries hands the second spawn what is left.
+    if (call) noteCall(() => callEvent(call, "end", {
+      wallMs: Date.now() - startedAt,
+      exitCode: result.code, timedOut: result.timedOut, budgetMs: opts.timeoutMs,
+      // The count measures the CHANNEL and the captured text is the ANSWER, and
+      // under a stdout-rewriting flag those are two different strings. Capturing
+      // the envelope instead would put roughly 1800 characters of session ids,
+      // per-model tallies and subagent counters under a column that says
+      // "answer", and push the reply itself past the capture cap. A recognised
+      // envelope that carried no answer falls back to the raw output, which is
+      // then the only thing there is to look at.
+      stdoutChars: result.stdout.length,
+      stdout: captureStdout(reading?.text ?? result.stdout),
+      usage: reading?.usage, actualModel: reading?.actualModel, apiMs: reading?.apiMs,
+    }));
+    return result;
+  } catch (err) {
+    // The one leg the caller cannot name for itself: upstream this null is the
+    // same value as an unparseable answer, so a machine where the CLI is not on
+    // PATH at all looks identical to one whose judge talks nonsense. `timedOut`
+    // separates a spawn that never started from a read the tree kill cut short.
+    if (call) noteCall(() => callEvent(call, "end", {
+      wallMs: Date.now() - startedAt,
+      exitCode: null, timedOut, budgetMs: opts.timeoutMs,
+      stdoutChars: 0, outcome: "spawn-failed", outcomeDetail: spawnErrorCode(err),
+    }));
     return null;
   } finally {
     // Must be `finally`, not a tail call: killing the process mid-read rejects
@@ -157,7 +265,122 @@ export async function runHeadless(
     clearTimeout(timer);
     clearTimeout(abandonTimer);
     scratch?.dispose();
+    // The vendor writes this one; nothing else will ever remove it.
+    if (usageFile) { try { rmSync(usageFile, { force: true }); } catch { /* leaked */ } }
   }
+}
+
+/**
+ * The argv with the command's usage flags in it, or the argv untouched.
+ *
+ * The whole augmentation is inside the guard, not just the call: a descriptor
+ * that throws while building the argv must cost the numbers, never the call.
+ * That is the same rule the record sites are under, one step earlier — here it
+ * is the SPAWN itself that would be lost.
+ */
+function withUsageArgs(
+  cmd: string[], capture: HeadlessUsageCapture | undefined, file: string | undefined,
+): string[] {
+  if (!capture) return cmd;
+  try {
+    const argv = capture.from === "side-file"
+      ? capture.argv(cmd, file ?? "")
+      : capture.argv(cmd);
+    // An empty argv would spawn nothing at all, which is the one failure this
+    // must not be able to cause.
+    return argv.length > 0 ? argv : cmd;
+  } catch {
+    return cmd;
+  }
+}
+
+/**
+ * What the vendor said this call cost, or nothing.
+ *
+ * Nothing is the answer for every way this can go wrong — no descriptor, a side
+ * file the CLI never wrote, an envelope in a shape nobody measured, a reader
+ * that throws — and they are deliberately not distinguished. A caller cannot act
+ * on the difference, and the property that matters is the one they share: the
+ * call still returns its stdout and the record still carries its timings.
+ */
+function readUsage(
+  capture: HeadlessUsageCapture | undefined, file: string | undefined, stdout: string,
+): HeadlessUsageReading | null {
+  if (!capture) return null;
+  try {
+    if (capture.from === "stdout") return capture.read(stdout);
+    if (!file) return null;
+    return capture.read(readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/** A path for one spawn's usage file. Never reused: two calls in flight against
+ *  one path would have the second read the first's numbers. */
+function usageFilePath(): string {
+  return join(tmpdir(), `antgrid-headless-usage-${crypto.randomUUID()}.json`);
+}
+
+/**
+ * `ANTGRID_MODELWATCH_USAGE=0` spawns every CLI with the argv it had before any
+ * of this existed.
+ *
+ * The one hazard a descriptor cannot parse its way out of: each flag was
+ * verified against the version installed on the machine it was measured on, and
+ * a CLI that does not recognise its own flag exits before it reaches the prompt.
+ * That is the observer breaking the observed, and the switch is what a user
+ * whose vendor moved underneath them can reach without a new build. Read per
+ * spawn, like the log's own switch, so it applies to a running host.
+ */
+function usageCaptureEnabled(): boolean {
+  return process.env.ANTGRID_MODELWATCH_USAGE !== "0";
+}
+
+/**
+ * Build and record one model-call event, or do neither.
+ *
+ * The event is BUILT inside the guard, not merely recorded inside it: the
+ * capture helpers run during the build, and they are the part a future arm or
+ * redaction rule will grow. `Modelwatch.push` already swallows a subscriber's
+ * throw, which is not the hazard here — every call to this sits inside
+ * `runHeadless`'s own try, whose catch means "the spawn failed" and answers
+ * null, so an unguarded throw would report a model call that ran perfectly as
+ * one that never happened. In the catch block itself it would escape and reject
+ * the caller's promise outright. The observer must never break the observed.
+ */
+function noteCall(build: () => Omit<ModelCallEvent, "seq" | "at">): void {
+  try {
+    modelwatch.record(build());
+  } catch { /* an observer must never fail a spawn */ }
+}
+
+/** The attribution every record of this call carries, plus whatever this phase
+ *  adds. Copied through from the caller rather than derived, because nothing
+ *  about the ids, the tools, the reach or the requested model is visible from
+ *  an argv. */
+function callEvent(
+  call: ModelCallContext, phase: ModelCallPhase, extra: Partial<ModelCallEvent>,
+): Omit<ModelCallEvent, "seq" | "at"> {
+  return {
+    callId: call.callId, phase, purpose: call.purpose, attempt: call.attempt,
+    requestedTool: call.requestedTool, actualTool: call.actualTool, reach: call.reach,
+    requestedModel: call.requestedModel,
+    terminalId: call.terminalId, conversationId: call.conversationId, projectId: call.projectId,
+    ...extra,
+  };
+}
+
+/**
+ * A failed spawn's error CODE, never its message.
+ *
+ * The message is the runtime's text rather than ours, and it is free to quote
+ * the command it could not run — which is the argv, whose tail is the prompt.
+ * A code (`ENOENT`, `EACCES`) answers the same question and cannot carry one.
+ */
+function spawnErrorCode(err: unknown): string | undefined {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" ? code : undefined;
 }
 
 /**

@@ -495,6 +495,75 @@ void main() {
   );
 
   _platformTestWidgets(
+    'Windows: after an injected paste, a later bare C is not swallowed as '
+    'Ctrl+C and a later bare V does not re-paste',
+    TargetPlatform.windows,
+    (tester) async {
+      // Regression test: the injected chord above sets
+      // `_realModifierState[control] = true` to let its own paste through,
+      // but nothing cleared it afterward — no real Ctrl key-up ever comes for
+      // a key that was never physically pressed. Ctrl then read as
+      // permanently held for the rest of the focus session: every later bare
+      // C misread as Ctrl+C (swallowed as the agent-SIGINT shield, never
+      // reaching the PTY) and every later bare V kept re-pasting instead of
+      // typing.
+      //
+      // The embedder's resync runs on EVERY key event, not just the injected
+      // one — so `_synthesizedControl` brackets each subsequent bare key too,
+      // mirroring what a real machine does: a corrective up right before the
+      // key (GetKeyState finally catching HardwareKeyboard up on the Ctrl
+      // that was never really held) and a corrective down right after (the
+      // same resync overshooting again the moment the key's own down/up pair
+      // lands, exactly as it did around the injected V below). Without that
+      // second bracket this test would pass even unfixed: a plain, un-synced
+      // bare keydown leaves `HardwareKeyboard.isControlPressed` at whatever
+      // the injected chord last set it to (true, from the down-after-V step)
+      // and reads the chord AS Ctrl+held from THAT alone — never exercising
+      // the mirror this fix is actually about. No trailing real Ctrl key-up
+      // anywhere in this test, deliberately: on the real bug this is
+      // reproducing, one never comes.
+      final written = await pumpTerminal(
+        tester,
+        't-injected-paste-then-bare-keys',
+        tabType: 'agent',
+        clipboardText: 'pasted',
+      );
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      _synthesizedControl(ui.KeyEventType.up);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV, character: 'v');
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+      _synthesizedControl(ui.KeyEventType.down);
+      await tester.pumpAndSettle();
+      expect(String.fromCharCodes(written), 'pasted');
+
+      written.clear();
+      _synthesizedControl(ui.KeyEventType.up);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyC, character: 'c');
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyC);
+      _synthesizedControl(ui.KeyEventType.down);
+      await tester.pumpAndSettle();
+      expect(
+        written,
+        [0x63],
+        reason: 'a bare c must reach the PTY, not be swallowed as Ctrl+C',
+      );
+
+      written.clear();
+      _synthesizedControl(ui.KeyEventType.up);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV, character: 'v');
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+      _synthesizedControl(ui.KeyEventType.down);
+      await tester.pumpAndSettle();
+      expect(
+        written,
+        [0x76],
+        reason: 'a bare v must type, not re-paste the clipboard',
+      );
+    },
+  );
+
+  _platformTestWidgets(
     'Windows: a numpad key with NumLock off reaches the PTY',
     TargetPlatform.windows,
     (tester) async {
