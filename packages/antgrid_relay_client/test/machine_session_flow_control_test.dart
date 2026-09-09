@@ -107,6 +107,7 @@ void main() {
     int? channelWindowBytes,
     int? socketInflightBytes,
     int creditBatchBytes = kCreditBatchBytes,
+    RelayLogger? logger,
   }) async {
     final session = MachineSession(
       relay: relay,
@@ -116,6 +117,7 @@ void main() {
       channelWindowBytes: channelWindowBytes,
       socketInflightBytes: socketInflightBytes,
       creditBatchBytes: creditBatchBytes,
+      logger: logger,
     );
     session.start();
     await session.ensureEstablished();
@@ -125,6 +127,40 @@ void main() {
     });
     return session;
   }
+
+  test('a stalled send gate reaches the logger', () async {
+    // The scheduler was built without a `log:` for its whole life, so this
+    // canary fired into null and the app could not see its own stalls. Pin the
+    // wiring, not the wording.
+    final logged = <String>[];
+    final session = await establish(
+      channelWindowBytes: 64,
+      logger: (level, message, {fields}) =>
+          logged.add('${level.name}: $message'),
+    );
+    final s = session.debugScheduler;
+
+    // Goes out under the scheduler's "nothing outstanding" deadlock guard, and
+    // stays uncredited because the fake relay never credits.
+    await session.sendOnStream(kControlStreamId, {
+      'type': 'project:list',
+    }, 'control');
+    expect(s.unacked('control'), greaterThan(0));
+
+    // Unawaited: its head blocks the channel, which is the state being tested.
+    unawaited(
+      session.sendOnStream(kControlStreamId, {'type': 'project:list'}, 'control'),
+    );
+    // Backdate rather than idle out the real 5s.
+    s.blockedSince['control'] = DateTime.now().subtract(
+      const Duration(milliseconds: kWindowStallWarnMs + 1000),
+    );
+    s.kick();
+
+    await _waitUntil(
+      () => logged.any((l) => l.startsWith('warn: send gate stalled on control')),
+    );
+  });
 
   test('a session ping is written while app frames are held, and the control '
       'envelope precedes them all once the gate opens', () async {

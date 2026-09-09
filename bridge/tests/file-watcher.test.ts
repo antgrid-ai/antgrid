@@ -386,6 +386,53 @@ describe("FileWatcher pause", () => {
     fw.stop();
   });
 
+  // The throttle is what bounds a remote app's tree-delta bill: sustained churn
+  // otherwise pins it at one frame per narrow window for as long as an agent
+  // keeps writing. Asserted on RATE, not on a constant, so retuning the windows
+  // does not rewrite the test.
+  it("widens its coalescing window under sustained churn", async () => {
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+
+    const churn = setInterval(() => {
+      writeFileSync(join(tempDir, "churn.ts"), `export const n = ${Date.now()}`);
+      watcher.handleNativeEvent("churn.ts");
+    }, 20);
+    await new Promise((r) => setTimeout(r, 2_000));
+    clearInterval(churn);
+
+    const updates = messages.filter((m) => m.type === "tree:update").length;
+    // 2s of continuous churn: ~20 frames on the narrow window alone, ~4 once
+    // widened. Anything at or above 10 means the widening never engaged.
+    expect(updates).toBeGreaterThan(0);
+    expect(updates).toBeLessThan(10);
+
+    watcher.stop();
+  });
+
+  // The narrow window is the one a user watches: a single save must not pay the
+  // storm's latency because an unrelated burst happened to precede it.
+  it("keeps the narrow window for an isolated change", async () => {
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+
+    writeFileSync(join(tempDir, "lone.ts"), "export const a = 1");
+    watcher.handleNativeEvent("lone.ts");
+    await new Promise((r) => setTimeout(r, 250));
+
+    expect(messages.some((m) => m.type === "tree:update")).toBe(true);
+
+    watcher.stop();
+  });
+
   it("getTreeSnapshot returns current tree + fileSeq", () => {
     const connState = createConnState();
     const fw = new FileWatcher(

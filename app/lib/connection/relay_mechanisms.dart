@@ -274,12 +274,34 @@ class RelayMechanisms implements ConnMechanisms {
       ),
       projectStartMessageBuilder: (projectId) =>
           createAbMessage('project:start', {'projectId': projectId}),
+      logger: _logMachineSession,
     );
     session.takeoverEvents.listen((_) => onSessionTakenOver?.call());
     session.sessionDownEvents.listen((_) => onSessionDown?.call());
     session.start();
     _sessionPin = agentEd25519PubB64;
     return _session = session;
+  }
+}
+
+/// Route the (Flutter-free) session's diagnostics into `app.log`. Until this
+/// existed the app was blind to its own send-gate stalls and dropped frames,
+/// so every diagnosis of a wedged connection had to come off the agent's logs.
+void _logMachineSession(
+  RelayLogLevel level,
+  String message, {
+  Map<String, Object?>? fields,
+}) {
+  const component = 'MachineSession';
+  switch (level) {
+    case RelayLogLevel.debug:
+      AbLog.debug(component, message, fields: fields);
+    case RelayLogLevel.info:
+      AbLog.info(component, message, fields: fields);
+    case RelayLogLevel.warn:
+      AbLog.warn(component, message, fields: fields);
+    case RelayLogLevel.error:
+      AbLog.error(component, message, fields: fields);
   }
 }
 

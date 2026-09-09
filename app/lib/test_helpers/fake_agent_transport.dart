@@ -61,6 +61,11 @@ class FakeAgentTransport implements AgentTransport {
   @override
   bool get isEstablished => _established;
 
+  int _establishmentEpoch = 0;
+
+  @override
+  int get establishmentEpoch => _establishmentEpoch;
+
   /// Test control: simulate the E2E session (un)establishing independently of
   /// the socket state — a relay stream can be `connected` yet not yet
   /// established (a send would seal-and-vanish). Transitioning to established
@@ -121,6 +126,9 @@ class FakeAgentTransport implements AgentTransport {
   /// Test helper: simulate a (re)establishment, re-driving every registered
   /// hydrator (what StreamTransport.refreshSnapshot does on each handshake).
   void redriveHydrators() {
+    // Mirrors [BufferedAgentTransport.redriveHydrators]: epoch first, so a
+    // hydrator replayed by this establishment sees it.
+    _establishmentEpoch++;
     for (final run in _hydrators.values) {
       unawaited(_runHydrator(run));
     }

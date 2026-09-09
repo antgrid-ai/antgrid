@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:developer' as developer;
 import 'dart:typed_data';
 
 import 'agent_transport.dart';
@@ -71,6 +70,7 @@ class MachineSession {
   final String machineDeviceId;
 
   final SessionHandshaker _handshaker;
+  final RelayLogger? _logger;
 
   /// Builds the `project:start` control message used to re-bind a project the
   /// agent has declared dead (`stream-invalid`). Injected rather than built here
@@ -103,7 +103,9 @@ class MachineSession {
     int? channelWindowBytes,
     int? socketInflightBytes,
     this.creditBatchBytes = kCreditBatchBytes,
+    RelayLogger? logger,
   }) : _handshaker = handshaker,
+       _logger = logger,
        _channelWindowBytes = channelWindowBytes ?? kChannelWindowBytes,
        _socketInflightBytes = socketInflightBytes ?? kSocketInflightBytes {
     // [ready] is observation-optional: failReady/dispose may completeError
@@ -183,6 +185,12 @@ class MachineSession {
     sink: _sealAndSend,
     window: _channelWindowBytes,
     socketCap: _socketInflightBytes,
+    // A gate stalled with data queued is the one failure here with no other
+    // observable: the socket keeps heartbeating (liveness frames bypass the
+    // queue), the peer keeps crediting, and meanwhile every frame the user
+    // typed sits in this scheduler. Left unwired, the canary fired into null
+    // and only the agent's side of the same stall was ever visible.
+    log: (m) => _log(RelayLogLevel.warn, m),
   );
 
   /// Test-only seam: park the send gate, shrink its limits, release it. Not
@@ -474,6 +482,19 @@ class MachineSession {
         streamId: streamId,
         msgType: type,
         detail: {'frames': frames.length},
+      );
+      // Every send on this path is fire-and-forget, so the caller never learns
+      // its message was discarded; without this the loss is visible only to a
+      // netwatch tap nobody has armed.
+      _log(
+        RelayLogLevel.warn,
+        'send queue full — message dropped',
+        fields: {
+          'channel': channel,
+          'streamId': streamId,
+          'msgType': type,
+          'frames': frames.length,
+        },
       );
       return;
     }
@@ -831,6 +852,14 @@ class MachineSession {
     });
   }
 
+  void _log(
+    RelayLogLevel level,
+    String message, {
+    Map<String, Object?>? fields,
+  }) {
+    _logger?.call(level, message, fields: fields);
+  }
+
   void _dropped(
     String dir,
     String reason, {
@@ -1005,9 +1034,10 @@ class MachineSession {
     // mid-flight), not the routine restart case. "0" legitimately has no
     // transport (adverts are snooped above), so it's never a drop.
     if (st == null && sid != kControlStreamId) {
-      developer.log(
-        'dropping inbound frame for unknown streamId $sid',
-        name: 'antgrid.relay',
+      _log(
+        RelayLogLevel.warn,
+        'dropping inbound frame for unknown stream',
+        fields: {'streamId': sid},
       );
       _dropped(
         'rx',
@@ -1189,10 +1219,7 @@ class MachineSession {
         if ((channel != 'control' && channel != 'preview') ||
             consumed is! int ||
             consumed < 0) {
-          developer.log(
-            'dropping malformed credit frame',
-            name: 'antgrid.relay',
-          );
+          _log(RelayLogLevel.warn, 'dropping malformed credit frame');
           break;
         }
         // A cumulative total only means anything against the session that
@@ -1470,10 +1497,11 @@ class StreamTransport extends BufferedAgentTransport {
       }
       if (await _pullSnapshot(timeout, attempt: attempt)) return;
     }
-    developer.log(
-      'state.snapshot gave up after $_kSnapshotAttempts attempts on stream '
-      '$streamId; its frames stay as they were until the next establishment',
-      name: 'antgrid.relay',
+    session._log(
+      RelayLogLevel.warn,
+      'state.snapshot gave up; frames stay as they were until the next '
+      'establishment',
+      fields: {'streamId': streamId, 'attempts': _kSnapshotAttempts},
     );
   }
 
@@ -1526,10 +1554,15 @@ class StreamTransport extends BufferedAgentTransport {
     } on RpcException catch (e) {
       // Leave the existing cache untouched either way.
       if (e.code != 'E_TIMEOUT') return true;
-      developer.log(
-        'state.snapshot timed out after ${timeout.inMilliseconds}ms on stream '
-        '$streamId (attempt $attempt of $_kSnapshotAttempts)',
-        name: 'antgrid.relay',
+      session._log(
+        RelayLogLevel.info,
+        'state.snapshot timed out',
+        fields: {
+          'streamId': streamId,
+          'timeoutMs': timeout.inMilliseconds,
+          'attempt': attempt,
+          'of': _kSnapshotAttempts,
+        },
       );
       return false;
     }
