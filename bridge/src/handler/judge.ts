@@ -116,7 +116,7 @@ async function runWithRetry<T>(opts: {
       call: {
         callId, purpose: opts.purpose, attempt,
         requestedTool: opts.tool, actualTool: opts.tool, reach: judge.tier,
-        requestedModel: opts.model, budgetMs: timeoutMs, promptChars: p.length,
+        requestedModel: opts.model, promptChars: p.length,
         // The same parts on both attempts. All a retry prompt adds is our own
         // re-ask and the reason for it, and that reason is already the previous
         // attempt's outcome rather than something worth holding twice.

@@ -149,7 +149,6 @@ export interface ModelCallContext {
   terminalId?: string;
   conversationId?: string;
   projectId?: string;
-  budgetMs?: number;
   promptChars?: number;
   /** Already through `capturePrompt` when it arrives here. The raw parts never
    *  cross this boundary, so a caller cannot hand the recorder a prompt the arms

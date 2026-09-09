@@ -260,7 +260,6 @@ export async function generateTitleFromContext(context: string, opts: {
       requestedTool: opts.tool, actualTool: picked.tool, reach: picked.reach,
       requestedModel: model,
       terminalId: opts.terminalId,
-      budgetMs,
       promptChars: prompt.length,
       // The scaffold is ours and safe verbatim; the excerpt is the user's
       // session talking back, so it goes through the context arm rather than
