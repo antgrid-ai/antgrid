@@ -51,6 +51,38 @@ export function renderableBinaryMime(path: string): string | undefined {
   return RENDERABLE_BINARY_MIME[extname(path).toLowerCase()];
 }
 
+/// Raster image types `readFile` will serve from OUTSIDE the checkout root —
+/// deliberately a narrower subset of [RENDERABLE_BINARY_MIME], for a path a
+/// terminal program printed (an OSC 8 `file://` hyperlink target, e.g. an
+/// image-generation tool's own output directory) rather than one the app
+/// found by walking this checkout's tree. That distinction is exactly the
+/// trust boundary: everything ELSE in this file assumes a path came from the
+/// tree or from inside the checkout, and readFile's traversal guard exists
+/// because a hyperlink's target is untrusted (whatever program is running in
+/// the terminal chose it, not the user). Two are withheld even though
+/// RENDERABLE_BINARY_MIME carries them: `.pdf` for its larger parser attack
+/// surface, and `.ico` for having no real "generated output" use case here —
+/// neither is worth the exposure for a path this app never chose to trust
+/// with a checkout. `.svg` was never in RENDERABLE_BINARY_MIME to begin with
+/// (it can embed a script), so it needs no separate exclusion here.
+const EXTERNAL_SAFE_IMAGE_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".apng": "image/apng",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".jfif": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".avif": "image/avif",
+};
+
+/// Whether [path]'s extension is one `readFile` will serve from outside the
+/// checkout root — see [EXTERNAL_SAFE_IMAGE_MIME].
+export function externalSafeImageMime(path: string): string | undefined {
+  return EXTERNAL_SAFE_IMAGE_MIME[extname(path).toLowerCase()];
+}
+
 const DEFAULT_IGNORES = [
   ".git",
   ".antgrid",
@@ -252,10 +284,19 @@ export function readFile(
   projectRoot: string,
   relPath: string,
 ): ReadFileResult {
-  // Path traversal protection
+  // Path traversal protection — except for a recognized image extension,
+  // which may be served from outside the checkout root entirely. See
+  // EXTERNAL_SAFE_IMAGE_MIME for why this narrow carve-out is safe where a
+  // general one would not be: `file:read`'s caller for this case is always
+  // FileService.openPreview off a resolved `externalImagePath` (see
+  // `file-watcher.ts`'s handleResolvePathRequest), never a bare user-typed
+  // path, and the extension gate rules out anything that could carry a
+  // script (.svg) or a heavier parser (.pdf).
   const absPath = resolve(projectRoot, relPath);
   const normalizedRoot = resolve(projectRoot);
-  if (absPath !== normalizedRoot && !absPath.startsWith(normalizedRoot + sep)) {
+  const insideRoot =
+    absPath === normalizedRoot || absPath.startsWith(normalizedRoot + sep);
+  if (!insideRoot && !externalSafeImageMime(absPath)) {
     return { content: null, size: 0, error: "Path traversal denied" };
   }
 

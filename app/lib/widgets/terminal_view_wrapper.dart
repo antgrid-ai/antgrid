@@ -294,15 +294,19 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// and the paste chord below never matches, so Win+V typed a bare `v` into
   /// the agent instead of pasting (measured on Flutter 3.44 / Windows 11).
   ///
-  /// Only SYNTHESIZED events are recorded here, and only for Ctrl/Shift — the
-  /// two that decide the chords below.
+  /// Only NON-synthesized events are recorded here, and only for Ctrl/Shift —
+  /// the two that decide the chords below.
   ///
   /// Three-valued, and that is the safety property: a key ABSENT from the map
   /// means "no real event seen", which defers to `HardwareKeyboard` rather than
   /// contradicting it. Ctrl-clicking into the terminal while already holding
   /// Ctrl is exactly that case, and a two-valued mirror would have called the
   /// chord released and eaten it. Cleared on every focus change, so a key-up
-  /// missed while the window was away leaves "unknown", never a stale answer.
+  /// missed while the window was away leaves "unknown", never a stale answer —
+  /// and cleared by `_handleEarlyKey` itself the moment a Ctrl/Shift-gated
+  /// chord consumes the reading, since an injected chord's Ctrl-down has no
+  /// physical key behind it and so no real key-up ever arrives to clear a
+  /// stuck "held" entry on its own.
   final Map<LogicalKeyboardKey, bool> _realModifierState =
       <LogicalKeyboardKey, bool>{};
 
@@ -560,6 +564,15 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
             defaultTargetPlatform != TargetPlatform.macOS);
 
     if (isPasteChord && !alt) {
+      // The mirror's "real" reading is spent the moment it disambiguates one
+      // chord. An injected paste (Win+V clipboard history) has no physical
+      // key behind its Ctrl-down, so no real key-up ever follows to clear
+      // `_realModifierState` — left set, it would misread every later bare
+      // C/V in this focus session as still Ctrl-held (swallowing C as
+      // agent-SIGINT, re-pasting on V) until the terminal lost and regained
+      // focus. Clearing here hands later events back to `HardwareKeyboard`,
+      // which has by then resynced correctly.
+      _realModifierState.clear();
       // Auto-repeat is swallowed, not acted on. A held chord repeats ~30x/s;
       // each repeat would re-read the clipboard (on Windows, re-synthesizing a
       // multi-megabyte PNG from CF_DIB per repeat) and then lose the uploader's
@@ -585,6 +598,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     //   no selection, agent running → swallow (don't SIGINT the agent)
     //   otherwise → fall through so the PTY gets ^C
     if (event.logicalKey == LogicalKeyboardKey.keyC && ctrl && !alt) {
+      // Same one-shot spend as the paste chord above — see its comment.
+      _realModifierState.clear();
       final selection = _selectedText;
       if (selection != null && selection.isNotEmpty) {
         detached(
