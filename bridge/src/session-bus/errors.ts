@@ -13,6 +13,11 @@ export const SESSION_BUS_ERRORS = {
    *  machine whose control plane is gone has to say which of the two happened. */
   UNKNOWN_PEER: 404,
   PEER_UNREACHABLE: 503,
+  /** The caller's own project cannot be addressed at all: it has no git
+   *  remote, so it has no repo key and therefore no peers (§5.1 fails closed).
+   *  Distinct from an empty directory, which means the key resolved and nobody
+   *  else is on it. */
+  NOT_ADDRESSABLE: 409,
   UNKNOWN_ARTIFACT: 404,
   NO_PROGRESS: 429,
   ENVELOPE_TOO_LARGE: 413,

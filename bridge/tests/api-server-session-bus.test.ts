@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startApiServer, type AgentContext } from "../src/api-server";
 import { createSessionBusApi, type SessionMembership } from "../src/session-bus/api";
+import { SessionDirectory } from "../src/session-bus/directory";
 import { SessionBusCoordinator } from "../src/session-bus/coordinator";
 import type { AbConfig } from "../src/config";
 import type { AbMessage } from "../src/protocol";
@@ -58,6 +59,9 @@ function machine(opts: {
   /** False makes every send fail, which is what a machine with no carrier route
    *  looks like from inside the coordinator. */
   deliverable?: boolean;
+  /** Omitted is a bus with no host above it, which is what most of this file
+   *  exercises; supplied is the machine-level directory a real host injects. */
+  directory?: SessionDirectory;
 }): Machine {
   const outbound: AbMessage[] = [];
   const routes: { contextId: string; role: string }[] = [];
@@ -86,6 +90,7 @@ function machine(opts: {
     machineId: () => opts.machineId,
     membership: membershipOf,
     carrierPresent: () => opts.carrierPresent !== false,
+    ...(opts.directory ? { directory: opts.directory } : {}),
   });
   const ctx: AgentContext = {
     manager: () => null,
@@ -268,3 +273,89 @@ describe("the two machines may know the session by different projects", () => {
     }
   });
 });
+
+describe("GET /session-bus/sessions", () => {
+  /** A directory over one repo key holding `sessions`, all in `projectId`. */
+  function directoryOf(projectId: string, key: string | null, sessions: { id: string; name: string }[]) {
+    return new SessionDirectory({
+      repoKeys: {
+        keyFor: (id) => (id === projectId ? key : null),
+        probed: () => true,
+        projectsSharing: (k) => (k !== null && k === key ? [projectId] : []),
+      },
+      sessionIndex: {
+        *sessionsIn(id) {
+          if (id !== projectId) return;
+          for (const s of sessions) yield { entry: { ...s, running: true, archived: false, deleting: false, lastUsedAt: 1, tool: "claude-code" } as any };
+        },
+      },
+      projectPath: () => "/repo",
+      machineId: () => "m1",
+      readBranch: async () => "main",
+    });
+  }
+
+  test("a caller that names no session is refused, like every other route", async () => {
+    const { peer, stop } = pair();
+    try {
+      const res = await get(peer, "sessions");
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("NOT_MEMBER");
+    } finally { stop(); }
+  });
+
+  test("a bus with no host refuses rather than answering with its own project", async () => {
+    // The dangerous failure is a plausible one: narrowing to this core's
+    // sessions would look like a correct empty directory and would silently
+    // undo the reach the machine-level bus exists to give.
+    const { peer, stop } = pair();
+    try {
+      const res = await get(peer, "sessions", PEER_SESSION);
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe("AGENT_NOT_READY");
+    } finally { stop(); }
+  });
+
+  test("a project with no git remote is refused 409, not served an empty list", async () => {
+    const m = machine({
+      abDir: tempDir("bus-keyless-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [PEER_SESSION],
+      directory: directoryOf("p1", null, [{ id: "other", name: "Other" }]),
+    });
+    try {
+      const res = await get(m, "sessions", PEER_SESSION);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("NOT_ADDRESSABLE");
+      expect(res.body.error).toContain("git remote");
+    } finally { m.stop(); }
+  });
+
+  test("the directory answers a judgeable row and excludes the caller", async () => {
+    const m = machine({
+      abDir: tempDir("bus-dir-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [PEER_SESSION],
+      directory: directoryOf("p1", "github.com/owner/repo", [
+        { id: PEER_SESSION, name: "the caller" },
+        { id: "other-1", name: "Refresh expired OAuth tokens" },
+      ]),
+    });
+    try {
+      const res = await get(m, "sessions", PEER_SESSION);
+      expect(res.status).toBe(200);
+      expect(res.body.truncated).toBe(0);
+      expect(res.body.sessions).toHaveLength(1);
+      // 5.5's whole point: the row names the work, not the directory it is in.
+      expect(res.body.sessions[0]).toMatchObject({
+        sessionId: "other-1",
+        title: "Refresh expired OAuth tokens",
+        branch: "main",
+        canReply: true,
+      });
+    } finally { m.stop(); }
+  });
+});
+

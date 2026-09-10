@@ -37,6 +37,7 @@ import { z } from "zod";
 import { SessionManager } from "./session-manager";
 import { SessionBusSessionIndex } from "./session-bus/session-index";
 import { SessionBusRepoKeys } from "./session-bus/repo-key";
+import { SessionDirectory } from "./session-bus/directory";
 import { SessionBusCoordinator } from "./session-bus/coordinator";
 import { removeSessionBusSession } from "./session-bus/store-fs";
 import { MAX_BUS_ROUTES } from "./session-bus/constants";
@@ -262,6 +263,15 @@ export class HostServer {
   // a session, this says which projects are the same repository. Refreshed on
   // the same three edges as the index, for the reason its `note` doc gives.
   private readonly repoKeys = new SessionBusRepoKeys();
+  // §5.5's directory, assembled from the two machine-level halves above. The
+  // machine id is read live rather than captured: a core can be built before the
+  // relay has one, and a row's address is only ever read after it is.
+  private readonly sessionDirectory = new SessionDirectory({
+    repoKeys: this.repoKeys,
+    sessionIndex: this.sessionIndex,
+    projectPath: (projectId) => this.cores.get(projectId)?.path ?? this.seenProjects.get(projectId)?.path,
+    machineId: () => this.controlPlaneRegistrationId ?? null,
+  });
   // The same latches `agent-core.ts`'s per-core fallback keeps, moved here
   // because the machine-level `send` below is this host's own copy of that
   // fallback's dispatcher — see its doc for why the two absences (no route
@@ -1863,6 +1873,7 @@ export class HostServer {
       // own doc for why the route table and `self()` are keyed off the shared
       // session index rather than this core's own id.
       sessionBus: this.sessionBus,
+      sessionDirectory: this.sessionDirectory,
       ...(mode === "remote" ? { remote } : {}),
     });
     await core.start();

@@ -31,6 +31,7 @@ import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from ".
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
 import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
+import type { SessionDirectory } from "./session-bus/directory";
 import { removeSessionBusSession } from "./session-bus/store-fs";
 import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
 import { lineForEvent } from "./session-bus/deliver-event";
@@ -452,6 +453,12 @@ export interface BuildAgentCoreOptions {
    *  coordinator itself, once, machine-wide, at process start; a fallback
    *  resumes itself on construction — see where `sessionBus` is built below. */
   sessionBus?: SessionBusCoordinator;
+  /** The host's machine-level session directory (§5.5), which answers who else
+   *  shares this project's repository. Travels with `sessionBus` and for the
+   *  same reason: both are machine-wide facts a single core cannot hold. Absent
+   *  means `listSessions` is refused rather than narrowed — see
+   *  `SessionBusApiDeps.directory`. */
+  sessionDirectory?: SessionDirectory;
   /** Hand one rendered line to the turn-boundary queue that owns delivery
    *  (spec 5.2). Absent means there is no queue to hold it: the turn-open set
    *  lives in the reduction ABOVE this core, so a core built without one has
@@ -1133,6 +1140,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // The terminal id IS the session id for every agent session, so a tool
     // caller's slot resolves its own session; a service PTY names none and is
     // answered as having no bus surface at all.
+    ...(opts.sessionDirectory ? { directory: opts.sessionDirectory } : {}),
     membership: (terminalId) => {
       const entry = sessions?.get(terminalId);
       if (!entry) return null;

@@ -23,6 +23,7 @@ import {
   ARTIFACT_CHUNK_BYTES,
   MAX_SUMMARY_CHARS,
 } from "./constants";
+import type { SessionDirectory, SessionDirectoryRow } from "./directory";
 import {
   addArtifact,
   artifactById,
@@ -76,6 +77,13 @@ export interface ArtifactHandleView {
 }
 
 export interface SessionBusApi {
+  /** Every session addressable from this terminal's own (§5.5), sorted. Async
+   *  where the artifact verbs are not: the branch each row is ranked on is read
+   *  fresh, which is a git spawn, and a request is the one place that is
+   *  affordable. */
+  listSessions(
+    terminalId: string | undefined,
+  ): Promise<{ sessions: SessionDirectoryRow[]; truncated: number } | SessionBusRefusal>;
   publishArtifact(
     terminalId: string | undefined,
     body: PublishArtifactBody,
@@ -98,6 +106,12 @@ export interface SessionMembership {
 
 export interface SessionBusApiDeps {
   coordinator: SessionBusCoordinator;
+  /** The machine-level directory (§5.5). Absent for a core with no host above
+   *  it — a bare bus in a unit test — where `listSessions` is REFUSED rather
+   *  than answered from this one project: a directory that silently narrows to
+   *  the caller's own project is the exact reach failure the rescope exists to
+   *  fix, and it would look like a correct empty answer. */
+  directory?: SessionDirectory;
   abDir: string;
   projectId: string;
   projectName?: string;
@@ -232,6 +246,21 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       const m = resolve(terminalId);
       if (!m) return notMember();
       return { artifacts: artifactsOf(m.sessionId).artifacts.map(handleOf) };
+    },
+
+    async listSessions(terminalId) {
+      const m = resolve(terminalId);
+      if (!m) return notMember();
+      if (!deps.directory) {
+        return refuse("AGENT_NOT_READY", "this bridge has no session directory, so it cannot say who else is reachable");
+      }
+      const answer = await deps.directory.list({ projectId: deps.projectId, sessionId: m.sessionId });
+      if (!answer.ok) {
+        return answer.reason === "no-remote"
+          ? refuse("NOT_ADDRESSABLE", "this project has no git remote, so no other session can name it and it can name none")
+          : refuse("AGENT_NOT_READY", "this project's git remote has not been read yet; it becomes addressable on its own");
+      }
+      return { sessions: answer.rows, truncated: answer.truncated };
     },
 
     getArtifact(terminalId, artifactId, offset, length) {

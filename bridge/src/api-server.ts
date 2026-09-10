@@ -467,6 +467,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
 
         if (req.method === "GET") {
           if (rest === "artifacts") return sessionBusJson(bus.listArtifacts(terminalId));
+          if (rest === "sessions") return sessionBusJson(await bus.listSessions(terminalId));
           const artifact = rest.match(/^artifacts\/([^/]+)$/);
           if (artifact) {
             return sessionBusJson(bus.getArtifact(
