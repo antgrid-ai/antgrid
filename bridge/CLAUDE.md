@@ -192,10 +192,12 @@ edit breaks silently.
   and an unacked one is never retried — so the witnesses a frame that goes
   nowhere has still carry the weight: the RECEIVING coordinator says so when
   a frame names a session that bridge does not hold, and the app says the other
-  half (`no leg for addressed member`, `lead project not open`). The sending
-  machine has none at all — a carrier that accepts frames and delivers none is
-  already silent there, which it was, for three hours, across a restart. Take a
-  log line out of either survivor and it is silent in both processes again.
+  half — `no leg for addressed member` when the address was good and the machine
+  was not there, and `refused bus frame` with a `because` field naming the fact
+  it did not have. The sending machine has none at all — a carrier that accepts
+  frames and delivers none is already silent there, which it was, for three
+  hours, across a restart. Take a log line out of either survivor and it is
+  silent in both processes again.
 - **An artifact id from the other machine is a reference, not a handle.**
   `coordinator.onFetch` answers a `session-bus:fetch`; nothing sends one, so the
   requester half of cross-machine fetch does not exist. Every surface has to say
@@ -212,8 +214,9 @@ edit breaks silently.
   stays strict and stays correct for a session the app names on this bridge's
   own row: both sides of that comparison come from one record. When the ids do
   differ, both processes say so once (`the other machine addresses session … as
-  project …`, and the app's `peer addresses this lead by another project`) —
-  routing no longer depends on it, but the row still renders it.
+  project …`, and the app's `this app holds the session under a project the
+  other machine does not address it by`) — routing no longer depends on it, but
+  the row still renders it.
 - **One coordinator now answers for every project a host has open (E9/§5.4),
   which is what makes the invariant above load-bearing rather than academic:**
   a peer admitted onto ANY project's stream can apply a frame naming a session

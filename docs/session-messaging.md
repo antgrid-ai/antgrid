@@ -693,10 +693,13 @@ desktop at rest holds none, so the honest first answer is usually *no peer asked
 at all*. Rather than make that permanent or pay to prevent it, a miss marks the
 peer wanted so the next ask has it: thin once, then real. This keeps E4's
 push-not-pull intact — `list_sessions` still reads memory and never blocks on a
-network — where pinning peers by shared repo key (giving `sessionBusLinksProvider`
-a real source) would hold standing connections on an idle desktop to keep fresh
-an answer nobody has asked for. The cost is that the first ask after a cold start
-under-reports, which the reach line already states rather than hides.
+network — where pinning peers by shared repo key would hold standing connections
+on an idle desktop to keep fresh an answer nobody has asked for. The cost is that
+the first ask after a cold start under-reports, which the reach line already
+states rather than hides. `sessionBusLinksProvider` gets its real source from
+ADDRESSING instead: a leg exists only once an agent has actually reached for one,
+and is released when nothing has been carried over it, so an idle desktop holds
+no peer sockets at all.
 
 **E14 — The card answers the session that asked.**
 A session-bearing capability card was published to the control-plane channel,

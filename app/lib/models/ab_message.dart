@@ -2082,7 +2082,8 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     // an older app. Recognized here (returning the raw map, as the preview
     // tunnel's frames effectively are) only so the classification gate sees a
     // type that is deliberately unrouted; see kUnroutedInboundTypes.
-    case 'session-bus:message':
+    case 'session-bus:post':
+    case 'session-bus:notify':
     case 'session-bus:fetch':
     case 'session-bus:fetch:result':
     case 'session-bus:ack':

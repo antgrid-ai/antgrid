@@ -14,11 +14,11 @@ import 'session_bus_links.dart';
 
 const String _kComponent = 'SessionBusCarrier';
 
-/// How long an attach is left alone after the last dial. Links are recomputed
-/// by ordinary session traffic, so without this a machine that is simply
-/// offline would be re-dialled on every `session:updated` for as long as the
-/// membership lasts — and a transport handed back already closed would be
-/// re-dialled in a tight loop, since its stream ends the instant it is heard.
+/// How long an attach is left alone after the last dial. Legs are re-derived by
+/// ordinary bus traffic, so without this a machine that is simply offline would
+/// be re-dialled on every frame — and a transport handed back already closed
+/// would be re-dialled in a tight loop, since its stream ends the instant it is
+/// heard.
 const Duration kSessionBusAttachRetryCooldown = Duration(seconds: 10);
 
 /// The cooldown the carrier actually uses, as a provider so a test can shrink
@@ -28,6 +28,13 @@ final sessionBusAttachCooldownProvider = Provider<Duration>(
   (ref) => kSessionBusAttachRetryCooldown,
 );
 
+/// Frames held for one leg while its dial is in flight.
+///
+/// Small on purpose: this covers the gap between a frame asking for a leg and
+/// that leg existing, not an offline machine. A peer that never answers has its
+/// held frames dropped and said out loud rather than accumulated.
+const int kSessionBusHeldPerLeg = 16;
+
 /// What the carrier is doing right now. Counters are cumulative for the app's
 /// lifetime and exist so the forwarding decisions are observable — from a test,
 /// and from a diagnostics surface — without reaching into private state.
@@ -35,10 +42,10 @@ final sessionBusAttachCooldownProvider = Provider<Duration>(
 class SessionBusCarrierStatus {
   const SessionBusCarrierStatus({
     this.links = 0,
-    this.attachedLeads = 0,
+    this.attachedLocal = 0,
     this.attachedPeers = 0,
     this.toPeer = 0,
-    this.toLead = 0,
+    this.toLocal = 0,
     this.refused = 0,
     this.dropped = 0,
   });
@@ -46,22 +53,27 @@ class SessionBusCarrierStatus {
   static const SessionBusCarrierStatus empty = SessionBusCarrierStatus();
 
   final int links;
-  final int attachedLeads;
+
+  /// Loopback legs: one per local project the user has open.
+  final int attachedLocal;
+
+  /// Relay legs: one per machine+project a frame has asked to reach.
   final int attachedPeers;
 
-  /// Frames handed from a lead's loopback to a member's relay stream.
+  /// Frames handed from a local project's loopback out to a peer's stream.
   final int toPeer;
 
-  /// Frames handed from a member's relay stream back to the lead's loopback.
-  final int toLead;
+  /// Frames handed from a peer's stream back to a local project's loopback.
+  final int toLocal;
 
-  /// Frames this app carries no membership for. Expected in small numbers: a
-  /// release racing a frame already in flight lands here.
+  /// Frames this app will not route: not a bus type, no address, or addressed
+  /// to a session no open local project carries. Every one of them is a frame
+  /// the sending bridge has already been told left, so none is routine — the
+  /// warn line names which fact was missing.
   final int refused;
 
-  /// Frames that were ours to forward but whose addressed leg is not attached.
-  /// Not an error — the sending bridge holds the frame and retries — but it is
-  /// the difference between "not ours" and "ours, nowhere to put it yet".
+  /// Frames that were ours to forward and whose leg never came up. Distinct
+  /// from [refused]: the address was good and the machine was not there.
   final int dropped;
 
   @override
@@ -69,81 +81,85 @@ class SessionBusCarrierStatus {
       identical(this, other) ||
       other is SessionBusCarrierStatus &&
           other.links == links &&
-          other.attachedLeads == attachedLeads &&
+          other.attachedLocal == attachedLocal &&
           other.attachedPeers == attachedPeers &&
           other.toPeer == toPeer &&
-          other.toLead == toLead &&
+          other.toLocal == toLocal &&
           other.refused == refused &&
           other.dropped == dropped;
 
   @override
   int get hashCode => Object.hash(
     links,
-    attachedLeads,
+    attachedLocal,
     attachedPeers,
     toPeer,
-    toLead,
+    toLocal,
     refused,
     dropped,
   );
 }
 
 class _BusLeg {
-  _BusLeg(this.transport, this.sub);
+  _BusLeg(this.transport, this.sub, {required this.local});
   final AgentTransport transport;
   final StreamSubscription<InboundMessage> sub;
+
+  /// A local project's loopback transport, as opposed to a peer's relay stream.
+  /// Which side a leg is on decides both directions of the hand-off, so it is
+  /// held here rather than re-derived from the shape of the leg's id.
+  final bool local;
 }
 
-/// App-wide relay for `session-bus:*` frames between a lead session's local
-/// bridge and the bridges of the machines that are members of it.
+/// App-wide relay for `session-bus:*` frames between the bridges of two
+/// machines.
 ///
-/// The app is a transport leg and nothing else (spec D7, 4.1): frames are
-/// forwarded VERBATIM, never parsed into a model and rebuilt, so a field a
-/// later bridge adds survives an older app. Sequencing, acks and retry live
-/// entirely in the two bridges; the carrier keeps no task state.
+/// The app is a transport leg and nothing else (§6.1): frames are forwarded
+/// VERBATIM, never parsed into a model and rebuilt, so a field a later bridge
+/// adds survives an older app. Threads, receipts and retry live entirely in the
+/// two bridges; the carrier keeps no bus state.
 ///
-/// Lifetime is the app's, not the focused project's — a lead and its member
-/// keep talking while the user is looking at a third project — which is why the
-/// host widget sits beside the control-plane reaper in `app_shell.dart` rather
-/// than anywhere inside the workspace.
+/// Lifetime is the app's, not the focused project's — two agents keep talking
+/// while the user is looking at a third project — which is why the host widget
+/// sits beside the control-plane reaper in `app_shell.dart` rather than
+/// anywhere inside the workspace.
 class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
-  final Map<String, _BusLeg> _leads = {};
-  final Map<String, _BusLeg> _peers = {};
+  final Map<String, _BusLeg> _legs = {};
   final Set<String> _attaching = {};
   final Map<String, DateTime> _lastAttemptAt = {};
+  final Map<String, List<InboundMessage>> _held = {};
 
   SessionBusLinks _links = SessionBusLinks.empty;
 
-  /// Legs already reported as missing, so a bridge that retries a frame every
-  /// second does not write a line every second. Cleared the moment that leg
-  /// carries something, so a link that breaks twice is said twice.
+  /// Legs already reported as missing, so a peer that is offline for an hour
+  /// does not write a line per frame. Cleared the moment that leg carries
+  /// something, so a link that breaks twice is said twice.
   final Set<String> _dropWarned = {};
 
-  /// Lead sessions already reported as addressed by a project id that is not
-  /// the one this app reaches them through. Latched per session: the condition
-  /// is a permanent property of a stored membership, so it would otherwise be
+  /// (local leg, session) pairs already reported as addressed by a project id
+  /// that is not the one this app holds them under. Latched: the condition is a
+  /// property of what the other machine stored, so it would otherwise be
   /// written on every frame for the life of the session.
-  final Set<String> _driftWarned = {};
+  final Set<(String, String)> _driftWarned = {};
 
-  /// Lead projects last reported as carrying nothing because they are closed.
-  /// Kept so the line is written when the situation CHANGES rather than on
-  /// every reconcile — the link set is re-derived by ordinary session traffic.
-  Set<String> _idleLeadsWarned = const {};
+  /// Legs whose buffer has already been reported full. Its own latch rather
+  /// than [_warnNoLeg]'s, see [_warnHeldOverflow].
+  final Set<String> _overflowWarned = {};
 
   Timer? _retry;
   bool _disposed = false;
   bool _reconciling = false;
   bool _dirty = false;
   int _toPeer = 0;
-  int _toLead = 0;
+  int _toLocal = 0;
   int _refused = 0;
   int _dropped = 0;
 
   @override
   SessionBusCarrierStatus build() {
     ref.listen(sessionBusLinksProvider, (_, _) => _kick('links'));
-    // The warm set decides which lead legs may exist at all (below), so a
-    // project opening is as much a reconcile trigger as a membership change.
+    // The open local projects are the legs a frame can arrive on at all, so a
+    // project opening is as much a reconcile trigger as a peer being addressed.
     ref.listen(projectSessionRegistryProvider, (_, _) => _kick('warm set'));
     ref.onDispose(() {
       _disposed = true;
@@ -168,10 +184,10 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
   /// Schedules the reconcile that a cooled-down attach is owed.
   ///
   /// Without it the cooldown is a permanent refusal rather than a delay: the
-  /// only two reconcile triggers are the link set and the warm set, and neither
-  /// changes while a machine is simply not answering. One pending timer at a
-  /// time, because it kicks a WHOLE reconcile — which re-arms for whatever is
-  /// still throttled — so a second would only duplicate the pass.
+  /// only two reconcile triggers are the link set and the open-project set, and
+  /// neither changes while a machine is simply not answering. One pending timer
+  /// at a time, because it kicks a WHOLE reconcile — which re-arms for whatever
+  /// is still throttled — so a second would only duplicate the pass.
   void _armRetry(Duration delay) {
     if (_disposed || _retry != null) return;
     _retry = Timer(delay, () {
@@ -180,7 +196,7 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
     });
   }
 
-  /// Re-derives both legs and the pin from the current links.
+  /// Re-derives the legs and the pin from the current links and open projects.
   ///
   /// Re-entrant by construction: the pin write can evict a project, which the
   /// registry listener above turns straight back into a reconcile. Looping on a
@@ -205,101 +221,63 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
 
   void _reconcileOnce() {
     _links = ref.read(sessionBusLinksProvider);
-    final warm = ref.read(projectSessionRegistryProvider).toSet();
+    final registry = ref.read(projectSessionRegistryProvider.notifier);
 
-    // Single writer for the whole pin, in the same pass that owns the legs —
-    // the two answer the same question, and splitting them is how a pin outlives
-    // the membership that justified it. Both halves: the lead project (local
-    // bucket) so the loopback leg survives a cold spell, and the peer project
-    // (relay bucket) so its stream — and the transcript a member tab renders
-    // off it — is not evicted under a session that is still running.
-    ref.read(projectSessionRegistryProvider.notifier).setPinned({
-      for (final l in _links.links) ...[l.leadProjectId, l.peerRegistrationId],
-    });
+    // Reading a cold local project's transport spawns a bridge and an agent, so
+    // the carrier must never open one of its own. The registry is what makes
+    // this safe: `projectSessionProvider` touches an id only AFTER its
+    // transport resolved, so every id here is already dialled. A closed project
+    // has no loopback owner for its bridge to hand a frame to either, so there
+    // is nothing to carry for it.
+    final wantedLocal = registry.localOpenProjects().toSet();
+    final wantedPeers = {for (final l in _links.links) l.registrationId};
 
-    // A lead leg is only ever attached to an ALREADY-open project: resolving
-    // the transport for a cold local project spawns a bridge and an agent, so a
-    // carrier that opened its own would start every machine's work at app
-    // launch. The lead bridge holds undelivered frames and retries, so delivery
-    // resumes when the user opens the project.
-    final wantedLeads = <String>{
-      for (final l in _links.links)
-        if (warm.contains(l.leadProjectId)) l.leadProjectId,
-    };
-    // The peer half is opened rather than waited for: it costs a stream binding
-    // on a machine the pin is already holding a socket for, and without it the
-    // first `session-bus:assign` of a membership has nowhere to land. Bounded
-    // by the open lead projects, so a closed lead dials nothing.
-    final wantedPeers = <String>{
-      for (final l in _links.links)
-        if (wantedLeads.contains(l.leadProjectId)) l.peerRegistrationId,
-    };
+    // The peers alone. A relay stream carrying a live exchange must not be
+    // evicted under it; a local project is warm because the user opened it, and
+    // pinning that here would outlive their interest in it.
+    registry.setPinned(wantedPeers);
 
-    // A link whose lead project is closed attaches NOTHING — not the lead leg,
-    // and so not the peer leg either — while the lead's own bridge goes on
-    // handing frames to this app and being told they left. That is the one
-    // failure with no other witness on either side, so it is said here.
-    final idleLeads = <String>{
-      for (final l in _links.links)
-        if (!warm.contains(l.leadProjectId)) l.leadProjectId,
-    };
-    if (!setEquals(idleLeads, _idleLeadsWarned)) {
-      _idleLeadsWarned = idleLeads;
-      if (idleLeads.isNotEmpty) {
-        AbLog.warn(
-          _kComponent,
-          'lead project not open — carrying nothing for its members',
-          fields: {'leads': idleLeads.join(','), 'links': _links.length},
-        );
-      }
+    final wanted = {...wantedLocal, ...wantedPeers};
+    for (final id in _legs.keys.toList()) {
+      if (!wanted.contains(id)) _detach(id);
     }
-
-    _dropLegsOutside(_leads, wantedLeads);
-    _dropLegsOutside(_peers, wantedPeers);
-    // The throttle is per id and is never cleared on success, so a released
-    // membership would leave its timestamp behind for the app's lifetime —
-    // and, worse, make the same machine's NEXT join wait out a cooldown that
-    // belongs to a session it is no longer in.
-    _lastAttemptAt.removeWhere(
-      (id, _) => !wantedLeads.contains(id) && !wantedPeers.contains(id),
-    );
+    // The throttle is per id and is never cleared on success, so a peer that
+    // goes quiet would leave its timestamp behind for the app's lifetime — and,
+    // worse, make its NEXT exchange wait out a cooldown belonging to a finished
+    // one.
+    _lastAttemptAt.removeWhere((id, _) => !wanted.contains(id));
+    for (final id in _held.keys.toList()) {
+      if (!wanted.contains(id)) _dropHeld(id, 'the leg is no longer addressed');
+    }
     // Same reason, one latch further on: a warning left behind for a released
-    // member silences the first drop of its next join.
-    _dropWarned.removeWhere(
-      (id) => !wantedLeads.contains(id) && !wantedPeers.contains(id),
-    );
-    final leadSessions = {for (final l in _links.links) l.leadSessionId};
-    _driftWarned.removeWhere((id) => !leadSessions.contains(id));
-    for (final id in wantedLeads) {
-      _ensureLeg(id, fromLead: true);
+    // peer silences the first drop of its next exchange.
+    _dropWarned.removeWhere((id) => !wanted.contains(id));
+    _overflowWarned.removeWhere((id) => !wanted.contains(id));
+    _driftWarned.removeWhere((pair) => !wantedLocal.contains(pair.$1));
+
+    for (final id in wantedLocal) {
+      _ensureLeg(id, local: true);
     }
     for (final id in wantedPeers) {
-      _ensureLeg(id, fromLead: false);
+      _ensureLeg(id, local: false);
     }
     _publish();
   }
 
-  void _dropLegsOutside(Map<String, _BusLeg> legs, Set<String> wanted) {
-    for (final id in legs.keys.toList()) {
-      if (wanted.contains(id)) continue;
-      _detach(legs, id);
-    }
-  }
-
-  void _detach(Map<String, _BusLeg> legs, String id) {
-    final leg = legs.remove(id);
+  void _detach(String id) {
+    final leg = _legs.remove(id);
     if (leg == null) return;
     detached(_kComponent, 'cancel leg $id failed', () => leg.sub.cancel());
   }
 
   void _detachAll() {
-    _dropLegsOutside(_leads, const {});
-    _dropLegsOutside(_peers, const {});
+    for (final id in _legs.keys.toList()) {
+      _detach(id);
+    }
   }
 
-  void _ensureLeg(String id, {required bool fromLead}) {
-    final legs = fromLead ? _leads : _peers;
-    if (legs.containsKey(id) || _attaching.contains(id)) return;
+  void _ensureLeg(String id, {required bool local}) {
+    if (_legs.containsKey(id) || _attaching.contains(id)) return;
     final cooldown = ref.read(sessionBusAttachCooldownProvider);
     final last = _lastAttemptAt[id];
     if (last != null) {
@@ -311,24 +289,35 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
     }
     _lastAttemptAt[id] = DateTime.now();
     _attaching.add(id);
-    final what = 'attach ${fromLead ? 'lead' : 'peer'} leg $id';
+    final what = 'attach ${local ? 'local' : 'peer'} leg $id';
     detached(_kComponent, what, () async {
       try {
         final transport = await ref.read(agentTransportForProvider(id).future);
-        if (_disposed || transport == null) return;
-        if (legs.containsKey(id)) return;
+        if (_disposed) return;
+        if (transport == null) {
+          // The machine is not reachable. Anything held for it is gone rather
+          // than accumulating against a leg that may never come up.
+          _dropHeld(id, 'no transport for the addressed machine');
+          return;
+        }
+        if (_legs.containsKey(id)) {
+          // A concurrent dial won the race. Anything held arrived while neither
+          // attempt had a leg, and the winner's own flush ran before it landed.
+          _flushHeld(id);
+          return;
+        }
         final sub = transport.messages.listen(
-          (raw) => _onInbound(id, fromLead: fromLead, raw: raw),
+          (raw) => _onInbound(id, raw: raw),
           // A transport that ends (host restart, eviction, sign-out) is
-          // detached and then DIALLED AGAIN: neither the links nor the warm
-          // set moves when a socket dies under a live membership, so nothing
-          // else would ever ask for its replacement and the lead bridge would
+          // detached and then DIALLED AGAIN: neither the links nor the open set
+          // moves when a socket dies under a live exchange, so nothing else
+          // would ever ask for its replacement and the sending bridge would
           // retry into a leg that is gone for good. The dial goes through the
           // same cooldown as any other, which is what keeps a transport handed
           // back already closed — its stream ends the moment it is listened to
           // — from spinning attach/close forever.
           onDone: () {
-            _detach(legs, id);
+            _detach(id);
             _kick('leg $id closed');
           },
           onError: (Object e) => AbLog.warn(
@@ -337,44 +326,49 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
             fields: {'leg': id, 'error': '$e'},
           ),
         );
-        legs[id] = _BusLeg(transport, sub);
+        _legs[id] = _BusLeg(transport, sub, local: local);
+        _flushHeld(id);
       } finally {
         _attaching.remove(id);
-        // A whole reconcile, not a publish: a membership can vanish while the
-        // dial is in flight, and an in-flight attach lives in `_attaching`,
-        // where `_dropLegsOutside` cannot see it — so this is the only pass
-        // that can reap a leg attached for a link that no longer exists.
+        // A whole reconcile, not a publish: a link can expire while the dial is
+        // in flight, and an in-flight attach lives in `_attaching`, where the
+        // reconcile's drop pass cannot see it — so this is the only pass that
+        // can reap a leg attached for a peer nothing is addressing any more.
         _reconcile();
       }
     });
   }
 
-  void _onInbound(
-    String legId, {
-    required bool fromLead,
-    required InboundMessage raw,
-  }) {
+  /// The session ids each open local project carries, which is what an inbound
+  /// frame is placed by.
+  ///
+  /// Every local project a leg is WANTED for, not only the ones already
+  /// attached. A dial is a whole async transport resolution and, after a failed
+  /// one, a cooldown on top; the sending bridge was told the frame left the
+  /// moment its owner socket took it, so nothing retries. Placing by attached
+  /// legs alone would refuse every frame that arrives inside that window — and
+  /// refuse it for good, where holding it costs one buffer slot.
+  Map<String, Set<String>> _localSessions() => {
+    for (final id in ref
+        .read(projectSessionRegistryProvider.notifier)
+        .localOpenProjects())
+      id: ref.read(sessionBusLocalSessionsProvider(id)),
+  };
+
+  void _onInbound(String legId, {required InboundMessage raw}) {
     final json = raw.json;
     if (!isSessionBusFrame(json)) return;
 
-    // Narrowed to the delivering transport: a frame off lead project A's
-    // loopback may only reach a member OF A, and a frame off peer P's stream
-    // may only reach a lead that P is a member of.
-    final relevant = [
-      for (final l in _links.links)
-        if (fromLead ? l.leadProjectId == legId : l.peerRegistrationId == legId)
-          l,
-    ];
-    final decision = classifyBusFrame(
+    final localMachineId = ref.read(localDeviceUuidProvider).value;
+    final byProject = _localSessions();
+    final routing = classifyBusFrame(
       json: json,
-      fromLead: fromLead,
-      localMachineId: ref.read(localDeviceUuidProvider).value,
-      allowedPeerKeys: {for (final l in relevant) l.peer.key},
-      allowedLeadSessionIds: {for (final l in relevant) l.leadSessionId},
+      localMachineId: localMachineId,
+      localSessionIds: {for (final ids in byProject.values) ...ids},
     );
 
     final to = busTo(json);
-    switch (decision) {
+    switch (routing.forward) {
       case BusForward.refuse:
         _refused++;
         AbLog.warn(
@@ -383,88 +377,86 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
           fields: {
             'type': json['type'],
             'leg': legId,
-            'fromLead': fromLead,
             'to': to?.key,
+            'because': routing.because,
           },
         );
       case BusForward.toPeer:
-        _forward(
-          _peers[to!.registrationId],
-          raw,
-          legId: to.registrationId,
-          onSent: () => _toPeer++,
-        );
-      case BusForward.toLead:
-        // The leg comes from the LINK, never from `to.projectId`: that id is
-        // whatever project the peer recorded at join time, and one checkout can
-        // be open as more than one project, so it names a label rather than a
-        // route. `classifyBusFrame` has already established that this leg
-        // carries `to.sessionId`, which is what makes the lookup total.
-        final lead = relevant.firstWhere((l) => l.leadSessionId == to!.sessionId);
-        _noteProjectDrift(lead, to!);
-        _forward(
-          _leads[lead.leadProjectId],
-          raw,
-          legId: lead.leadProjectId,
-          onSent: () => _toLead++,
-        );
+        // Demand IS the leg source: a frame naming a machine+project this app
+        // holds no leg for is what asks for one. Recorded before the forward so
+        // the very first frame of an exchange is held for the leg it opens
+        // rather than being the one frame that cannot be sent.
+        _reach(to!, localMachineId);
+        _forward(to.registrationId, raw);
+      case BusForward.toLocal:
+        // Sound because `classifyBusFrame` was handed the union of this same
+        // snapshot: a toLocal verdict means one of these projects carries the
+        // session. `_forward` holds if that project's leg is still dialling.
+        final target = byProject.entries
+            .firstWhere((e) => e.value.contains(to!.sessionId))
+            .key;
+        _noteProjectDrift(target, to!);
+        // The far side is answering, so its leg is wanted for at least as long
+        // as this app takes to hand the reply back.
+        _reach(busFrom(json)!, localMachineId);
+        _forward(target, raw);
     }
     _publish();
   }
 
-  /// Says once that this app holds the lead under a project id the peer does not
-  /// address it by.
+  /// Records a peer address as wanted, unless it names this machine — a
+  /// self-addressed leg would dial the relay to reach a bridge already on the
+  /// other end of a loopback socket.
+  void _reach(BusEndpoint peer, String? localMachineId) {
+    if (peer.machineId == localMachineId) return;
+    ref
+        .read(sessionBusLinksProvider.notifier)
+        .reach(peer.machineId, peer.projectId);
+  }
+
+  /// Says once that this app holds a session under a project id the other
+  /// machine does not address it by.
   ///
-  /// Worded from THIS app's side deliberately. The peer's id is the one that
-  /// came off a frame the lead's own bridge answered, so it is usually the
-  /// correct one and the app's row is the stale alias — a folder picked before
-  /// any host was warm keeps the selected path's hash while the bridge folds a
+  /// Worded from THIS app's side deliberately. The other machine's id came off
+  /// a frame that session's own bridge answered, so it is usually the correct
+  /// one and this app's row is the stale alias — a folder picked before any
+  /// host was warm keeps the selected path's hash while the bridge folds a
   /// linked worktree into its primary checkout (`reconcileWithHost`,
   /// providers/projects.dart). A reader greps this line precisely when
   /// something is wrong, and pointing them across the wire sends them to the
   /// machine that is right.
   ///
-  /// Routing no longer depends on the id, so this changes nothing about
-  /// delivery — but a peer's row still RENDERS the id it was given, so the two
-  /// sides disagreeing is visible to the other agent even when nothing strands.
-  void _noteProjectDrift(SessionBusLink lead, BusEndpoint to) {
-    if (to.projectId == lead.leadProjectId) return;
-    if (!_driftWarned.add(lead.leadSessionId)) return;
+  /// Routing does not depend on the id, so this changes nothing about delivery
+  /// — but a directory row still RENDERS the id it was given, so the two sides
+  /// disagreeing is visible to the other agent even when nothing strands.
+  void _noteProjectDrift(String legId, BusEndpoint to) {
+    if (to.projectId == legId) return;
+    if (!_driftWarned.add((legId, to.sessionId))) return;
     AbLog.warn(
       _kComponent,
-      'this app holds the lead under a project the peer does not address it by '
-          '— routed by session instead',
+      'this app holds the session under a project the other machine does not '
+          'address it by — routed by session instead',
       fields: {
-        'session': lead.leadSessionId,
+        'session': to.sessionId,
         'addressedByPeer': to.projectId,
-        'heldByThisApp': lead.leadProjectId,
+        'heldByThisApp': legId,
       },
     );
   }
 
-  void _forward(
-    _BusLeg? leg,
-    InboundMessage raw, {
-    required String legId,
-    required void Function() onSent,
-  }) {
+  void _forward(String legId, InboundMessage raw) {
+    final leg = _legs[legId];
     if (leg == null) {
-      _dropped++;
-      // The sending bridge is told this frame LEFT — accepting it is all the
-      // hand-off can report — so this line is the only place either process
-      // records that it went nowhere. Without it a bridge retries under a true
-      // `sent` forever and no log on either machine says why.
-      if (_dropWarned.add(legId)) {
-        AbLog.warn(
-          _kComponent,
-          'no leg for addressed member — frame not carried',
-          fields: {'leg': legId, 'type': raw.json['type']},
-        );
-      }
+      _hold(legId, raw);
       return;
     }
     _dropWarned.remove(legId);
-    onSent();
+    _overflowWarned.remove(legId);
+    if (leg.local) {
+      _toLocal++;
+    } else {
+      _toPeer++;
+    }
     // The same channel it arrived on, and the same map: the app must not decide
     // anything about a frame it is only carrying.
     detached(
@@ -474,14 +466,83 @@ class SessionBusCarrier extends Notifier<SessionBusCarrierStatus> {
     );
   }
 
+  /// Keeps a frame while its leg comes up.
+  ///
+  /// `LocalListener.deliverToOwner` reports success the moment the owner socket
+  /// accepts a frame, so the sending bridge drops it from its held store and
+  /// nothing retries. Without this buffer a demand-attached leg would lose the
+  /// one frame that asked for it, which is the frame that opens every exchange.
+  void _hold(String legId, InboundMessage raw) {
+    final held = _held.putIfAbsent(legId, () => <InboundMessage>[]);
+    if (held.length >= kSessionBusHeldPerLeg) {
+      // The oldest goes, never the arriving frame: what is held is one side of
+      // a conversation, and the turn the other agent is waiting on is the last
+      // one sent. Keeping the first sixteen would deliver the opening of an
+      // exchange and silently swallow the rest of it.
+      held.removeAt(0);
+      _dropped++;
+      _warnHeldOverflow(legId);
+    }
+    held.add(raw);
+  }
+
+  /// Said once per leg, and on its own latch: the leg coming up is a different
+  /// event from it never coming up, and an overflow sharing [_warnNoLeg]'s latch
+  /// would increment `dropped` with no line anywhere — the silence this whole
+  /// family of warnings exists to prevent.
+  void _warnHeldOverflow(String legId) {
+    if (!_overflowWarned.add(legId)) return;
+    AbLog.warn(
+      _kComponent,
+      'held to the cap while its leg came up — oldest frames dropped',
+      fields: {'leg': legId, 'cap': kSessionBusHeldPerLeg},
+    );
+  }
+
+  void _flushHeld(String legId) {
+    final held = _held.remove(legId);
+    if (held == null) return;
+    for (final raw in held) {
+      _forward(legId, raw);
+    }
+  }
+
+  void _dropHeld(String legId, String why) {
+    final held = _held.remove(legId);
+    if (held == null || held.isEmpty) return;
+    _dropped += held.length;
+    _warnNoLeg(legId, why, held.length);
+  }
+
+  /// The only place either process records that a frame went nowhere: the
+  /// sending bridge was told it left, so without this line it retries under a
+  /// true `sent` forever and no log on either machine says why.
+  void _warnNoLeg(String legId, String why, int frames) {
+    if (!_dropWarned.add(legId)) return;
+    AbLog.warn(
+      _kComponent,
+      'no leg for addressed member — frame not carried',
+      fields: {'leg': legId, 'frames': frames, 'why': why},
+    );
+  }
+
   void _publish() {
     if (_disposed) return;
+    var local = 0;
+    var peer = 0;
+    for (final leg in _legs.values) {
+      if (leg.local) {
+        local++;
+      } else {
+        peer++;
+      }
+    }
     state = SessionBusCarrierStatus(
       links: _links.length,
-      attachedLeads: _leads.length,
-      attachedPeers: _peers.length,
+      attachedLocal: local,
+      attachedPeers: peer,
       toPeer: _toPeer,
-      toLead: _toLead,
+      toLocal: _toLocal,
       refused: _refused,
       dropped: _dropped,
     );

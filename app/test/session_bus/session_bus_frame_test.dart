@@ -1,56 +1,62 @@
 import 'package:antgrid/session_bus/session_bus_frame.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-const _lead = {
-  'machineId': 'm-lead',
-  'projectId': 'p-lead',
-  'sessionId': 's-lead',
+const _here = {
+  'machineId': 'm-here',
+  'projectId': 'p-here',
+  'sessionId': 's-here',
 };
-const _peer = {
-  'machineId': 'm-peer',
-  'projectId': 'p-peer',
-  'sessionId': 's-peer',
+const _there = {
+  'machineId': 'm-there',
+  'projectId': 'p-there',
+  'sessionId': 's-there',
 };
 
 Map<String, dynamic> _frame({
-  String type = 'session-bus:message',
-  Map<String, dynamic> from = _lead,
-  Map<String, dynamic> to = _peer,
+  String type = 'session-bus:post',
+  Map<String, dynamic> from = _here,
+  Map<String, dynamic> to = _there,
 }) => {'type': type, 'from': from, 'to': to, 'contextId': 'ctx-1'};
 
-const _allowedPeers = {'m-peer/p-peer/s-peer'};
-const _allowedLeads = {'s-lead'};
+const _carried = {'s-here'};
 
-BusForward _classify(
+BusRouting _classify(
   Map<String, dynamic> json, {
-  required bool fromLead,
-  String? localMachineId = 'm-lead',
-  Set<String> peers = _allowedPeers,
-  Set<String> leads = _allowedLeads,
+  String? localMachineId = 'm-here',
+  Set<String> carried = _carried,
 }) => classifyBusFrame(
   json: json,
-  fromLead: fromLead,
   localMachineId: localMachineId,
-  allowedPeerKeys: peers,
-  allowedLeadSessionIds: leads,
+  localSessionIds: carried,
 );
 
 void main() {
   group('frame vocabulary', () {
-    test('recognizes exactly the four bridge types', () {
-      expect(kSessionBusTypes, hasLength(4));
+    test('recognizes exactly the five bridge types', () {
+      expect(kSessionBusTypes, {
+        'session-bus:post',
+        'session-bus:notify',
+        'session-bus:fetch',
+        'session-bus:fetch:result',
+        'session-bus:ack',
+      });
       for (final type in kSessionBusTypes) {
         expect(isSessionBusFrame({'type': type}), isTrue);
       }
+      expect(
+        isSessionBusFrame({'type': 'session-bus:message'}),
+        isFalse,
+        reason: 'the single message verb was replaced by post and notify',
+      );
       expect(isSessionBusFrame({'type': 'session:updated'}), isFalse);
       expect(isSessionBusFrame(const {}), isFalse);
     });
 
     test('endpoints decode, and a malformed one decodes to null', () {
       final from = busFrom(_frame())!;
-      expect(from.key, 'm-lead/p-lead/s-lead');
-      expect(from.registrationId, 'm-lead.p-lead');
-      expect(busTo(_frame())!.key, 'm-peer/p-peer/s-peer');
+      expect(from.key, 'm-here/p-here/s-here');
+      expect(from.registrationId, 'm-here.p-here');
+      expect(busTo(_frame())!.key, 'm-there/p-there/s-there');
 
       expect(busTo({'type': 'session-bus:ack'}), isNull);
       expect(busTo({'to': 'not-a-map'}), isNull);
@@ -79,21 +85,41 @@ void main() {
   });
 
   group('classifyBusFrame', () {
-    test('a lead frame addressed to a known member goes to the peer', () {
-      expect(_classify(_frame(), fromLead: true), BusForward.toPeer);
+    test('a frame addressed to another machine leaves', () {
+      final routing = _classify(_frame());
+      expect(routing.forward, BusForward.toPeer);
+      expect(routing.because, isNull);
     });
 
-    test('a peer frame addressed to a carried lead goes to the lead', () {
+    test('a frame addressed to a session this app carries lands', () {
       expect(
-        _classify(_frame(from: _peer, to: _lead), fromLead: false),
-        BusForward.toLead,
+        _classify(_frame(from: _there, to: _here)).forward,
+        BusForward.toLocal,
       );
     });
 
-    test('every one of the four types routes', () {
+    test('an unlegged peer is not a refusal — it is what asks for a leg', () {
+      // Nothing about the outbound clause consults the attached legs: refusing
+      // here would make the first frame of every exchange the one that cannot
+      // be sent, since the leg does not exist until that frame asks for it.
+      expect(
+        _classify(
+          _frame(
+            to: const {
+              'machineId': 'm-never-seen',
+              'projectId': 'p-never-seen',
+              'sessionId': 's-never-seen',
+            },
+          ),
+        ).forward,
+        BusForward.toPeer,
+      );
+    });
+
+    test('every one of the five types routes', () {
       for (final type in kSessionBusTypes) {
         expect(
-          _classify(_frame(type: type), fromLead: true),
+          _classify(_frame(type: type)).forward,
           BusForward.toPeer,
           reason: type,
         );
@@ -101,107 +127,63 @@ void main() {
     });
 
     test('a non-bus frame is refused rather than forwarded blind', () {
-      expect(
-        _classify(_frame(type: 'terminal:output'), fromLead: true),
-        BusForward.refuse,
-      );
+      final routing = _classify(_frame(type: 'terminal:output'));
+      expect(routing.forward, BusForward.refuse);
+      expect(routing.because, contains('session-bus'));
     });
 
-    test('a frame missing either endpoint is refused', () {
+    test('a frame missing either endpoint is refused, and says which', () {
       final noTo = _frame()..remove('to');
-      expect(_classify(noTo, fromLead: true), BusForward.refuse);
+      expect(_classify(noTo).because, contains('target'));
       final noFrom = _frame()..remove('from');
-      expect(_classify(noFrom, fromLead: false), BusForward.refuse);
+      expect(_classify(noFrom).because, contains('sender'));
     });
 
-    test(
-      'a lead frame addressed to a machine that is not a member is refused',
-      () {
-        expect(
-          _classify(
-            _frame(
-              to: const {
-                'machineId': 'm-other',
-                'projectId': 'p-peer',
-                'sessionId': 's-peer',
-              },
-            ),
-            fromLead: true,
-          ),
-          BusForward.refuse,
-        );
-      },
-    );
-
-    test('a lead frame from a session this leg does not carry is refused', () {
-      expect(
-        _classify(_frame(), fromLead: true, leads: const {'p-lead/s-other'}),
-        BusForward.refuse,
-        reason:
-            'the delivering loopback carries one lead session; another lead on '
-            'the same bridge must not be routable through it',
-      );
-    });
-
-    test('a peer frame addressed to another machine is refused', () {
-      expect(
-        _classify(
-          _frame(from: _peer, to: _lead),
-          fromLead: false,
-          localMachineId: 'm-someone-else',
+    test('a frame for a session no open project carries names it', () {
+      final routing = _classify(
+        _frame(
+          from: _there,
+          to: const {
+            'machineId': 'm-here',
+            'projectId': 'p-here',
+            'sessionId': 's-closed',
+          },
         ),
-        BusForward.refuse,
       );
+      expect(routing.forward, BusForward.refuse);
+      expect(routing.because, contains('s-closed'));
     });
 
-    test('an unresolved local machine id still routes a reply', () {
-      // The project+session halves of `to` remain the substantive guard, and a
-      // carrier whose own uuid has not resolved must not silently drop replies.
+    test('an unresolved local machine id still lands a reply', () {
+      // The session set remains the substantive guard, and a carrier whose own
+      // uuid has not resolved must not silently drop every reply.
       expect(
-        _classify(
-          _frame(from: _peer, to: _lead),
-          fromLead: false,
-          localMachineId: null,
-        ),
-        BusForward.toLead,
+        _classify(_frame(from: _there, to: _here), localMachineId: null).forward,
+        BusForward.toLocal,
       );
     });
 
-    test('a peer frame from a released member is refused', () {
+    test('an unresolved local machine id still sends a frame outward', () {
       expect(
-        _classify(
-          _frame(from: _peer, to: _lead),
-          fromLead: false,
-          peers: const {},
-        ),
-        BusForward.refuse,
+        _classify(_frame(), localMachineId: null).forward,
+        BusForward.toPeer,
       );
     });
 
-    test('direction is not inferred from the frame', () {
-      // The same frame arriving on the wrong leg is refused: `fromLead` is the
-      // delivering transport's fact, and a peer must not be able to claim it.
-      expect(_classify(_frame(), fromLead: false), BusForward.refuse);
+    test('an inbound frame is placed by session, whatever project names it', () {
+      // One checkout can be open as more than one project, so the other
+      // machine's stored `projectId` for this session is a label the two sides
+      // can legitimately disagree on. Matching on it strands the exchange
+      // permanently, with every frame refused and nothing said.
+      final drifted = _frame(
+        from: _there,
+        to: const {
+          'machineId': 'm-here',
+          'projectId': 'a-project-this-app-never-heard-of',
+          'sessionId': 's-here',
+        },
+      );
+      expect(_classify(drifted).forward, BusForward.toLocal);
     });
-  });
-
-  test('a lead is matched on its session alone, whatever project addresses it', () {
-    // The whole of the fix: one checkout can be open as more than one project,
-    // so the peer's stored `projectId` for its lead is a label the two machines
-    // can legitimately disagree on. Disagreeing on it used to strand the
-    // membership permanently, with every frame refused and nothing said.
-    final drifted = _frame(
-      to: {
-        'machineId': 'm-lead',
-        'projectId': 'a-project-this-app-never-heard-of',
-        'sessionId': 's-lead',
-      },
-      from: {
-        'machineId': 'm-peer',
-        'projectId': 'p-peer',
-        'sessionId': 's-peer',
-      },
-    );
-    expect(_classify(drifted, fromLead: false), BusForward.toLead);
   });
 }
