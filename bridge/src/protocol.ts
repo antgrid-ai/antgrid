@@ -1,6 +1,16 @@
 import { z } from "zod";
 import { AbConfigSchema } from "./config";
 import { KNOWN_TIERS } from "./entitlement";
+// The frame-display payload sub-schemas and their byte/row budgets live with the
+// implementation that has to honour them; only the eight wire ENVELOPES are
+// declared here (see the block below TerminalSnapshotMessage for why).
+import {
+  TERMINAL_HISTORY_PAGE_ROWS,
+  TERMINAL_PROTOCOL_VERSION,
+  TerminalHistoryBoundarySchema,
+  TerminalHistoryRowSchema,
+  TerminalScreenFrameSchema,
+} from "./terminal-frames/protocol";
 
 const BaseMessage = z.object({
   id: z.string().uuid(),
@@ -107,9 +117,17 @@ const HandshakeAgentReadyMessage = BaseMessage.extend({
 const AppReadyMessage = BaseMessage.extend({
   type: z.literal("app:ready"),
   confirm: z.string(),
+  // Neither live reader parses `app:ready` through Zod — relay-client.ts and
+  // local-listener.ts both read the raw JSON — so this object is union typing
+  // and documentation, not the runtime gate. Adding a key here does not make
+  // the bridge honour it; the reads are hand-written on both transports.
   capabilities: z.object({
     checkoutRouting: z.literal(true).optional(),
     pullsTree: z.literal(true).optional(),
+    // The app can render `terminal:frame` display mode. Absent means it cannot,
+    // and the read of it MUST fail closed (unknown peer reads false) or an old
+    // app is switched into a mode it has no renderer for.
+    terminalFramesV1: z.literal(true).optional(),
   }).optional(),
 });
 
@@ -1771,6 +1789,117 @@ const TerminalSnapshotMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+// The frame display protocol (advertised as `terminalFramesV1`). These eight
+// envelopes are declared HERE, as literal source text, rather than imported from
+// terminal-frames/protocol.ts: checkout-protocol-contract.test.ts scrapes this
+// file for `BaseMessage.extend({ ... ...CheckoutScoped ... })` blocks and
+// asserts that set equals CHECKOUT_VARIABLE_MESSAGE_TYPES, and an import is
+// invisible to a textual scraper. The payload sub-schemas and every byte/row
+// budget stay in terminal-frames/protocol.ts, which owns them.
+//
+// All eight name a terminal INSIDE a checkout: PTY slots are namespaced
+// `<checkoutId>:<terminalId>`, so two isolated checkouts legitimately hold
+// same-named terminals. Hence `...CheckoutScoped` on every one, and hence all
+// eight in CHECKOUT_VARIABLE_MESSAGE_TYPES.
+//
+// `sequence`, `revision`, `epoch`, `rowId` and `beforeRowId` are deliberately
+// NOT bounded by the viewer/history budgets. Those budgets bound what may be in
+// flight (TERMINAL_VIEWER_MAX_FRAMES) or how large one payload may be
+// (TERMINAL_VIEWER_MAX_BYTES and TERMINAL_HISTORY_PAGE_ROWS, both enforced by
+// the imported sub-schemas); the counters are monotonic for the life of an
+// attachment or a run, so clamping them to a budget would reject a long-lived
+// terminal's legitimate frames.
+
+const TerminalSubscribeMessage = BaseMessage.extend({
+  type: z.literal("terminal:subscribe"),
+  terminalId: z.string(),
+  // The highest frame protocol version the app can render. Deliberately a plain
+  // int and not a literal: a version this bridge cannot serve is answered with
+  // `terminal:display:status` UPGRADE_REQUIRED, which is only reachable if the
+  // frame parses at all.
+  version: z.number().int().nonnegative(),
+  requestId: z.string().uuid(),
+  ...CheckoutScoped,
+});
+
+const TerminalSubscribedMessage = BaseMessage.extend({
+  type: z.literal("terminal:subscribed"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  version: z.literal(TERMINAL_PROTOCOL_VERSION),
+  requestId: z.string().uuid(),
+  ...CheckoutScoped,
+});
+
+const TerminalFrameMessage = BaseMessage.extend({
+  type: z.literal("terminal:frame"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  sequence: z.number().int().nonnegative(),
+  ...TerminalScreenFrameSchema.shape,
+  ...CheckoutScoped,
+});
+
+const TerminalAckMessage = BaseMessage.extend({
+  type: z.literal("terminal:ack"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  sequence: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+const TerminalUnsubscribeMessage = BaseMessage.extend({
+  type: z.literal("terminal:unsubscribe"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  ...CheckoutScoped,
+});
+
+const TerminalHistoryRequestMessage = BaseMessage.extend({
+  type: z.literal("terminal:history:request"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  requestId: z.string().uuid(),
+  epoch: z.number().int().nonnegative(),
+  beforeRowId: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+const TerminalHistoryPageMessage = BaseMessage.extend({
+  type: z.literal("terminal:history:page"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  requestId: z.string().uuid(),
+  history: TerminalHistoryBoundarySchema,
+  expired: z.boolean(),
+  beforeRowId: z.number().int().nonnegative(),
+  rows: z.array(TerminalHistoryRowSchema).max(TERMINAL_HISTORY_PAGE_ROWS),
+  ...CheckoutScoped,
+});
+
+const TerminalDisplayStatusMessage = BaseMessage.extend({
+  type: z.literal("terminal:display:status"),
+  terminalId: z.string(),
+  // Optional, and it must stay optional: UPGRADE_REQUIRED answers a subscribe
+  // that never produced an attachment, so there is no run or attachment to
+  // name. Requiring either would leave the one failure an old app can trigger
+  // unreportable.
+  runId: z.string().uuid().optional(),
+  attachmentId: z.string().uuid().optional(),
+  requestId: z.string().uuid().optional(),
+  code: z.enum(["UPGRADE_REQUIRED", "DISPLAY_FAILED", "ACK_TIMEOUT", "HISTORY_DISABLED", "ENDED"]),
+  message: z.string().max(1024),
+  finalSequence: z.number().int().nonnegative().optional(),
+  exitCode: z.number().int().nullable().optional(),
+  ...CheckoutScoped,
+});
+
 const FileTreeSnapshotRequestMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot:request"),
   /** The revision the caller's tree is already at. Matched against the
@@ -2334,6 +2463,14 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   ClientFocusStateMessage,
   TerminalSnapshotRequestMessage,
   TerminalSnapshotMessage,
+  TerminalSubscribeMessage,
+  TerminalSubscribedMessage,
+  TerminalFrameMessage,
+  TerminalAckMessage,
+  TerminalUnsubscribeMessage,
+  TerminalHistoryRequestMessage,
+  TerminalHistoryPageMessage,
+  TerminalDisplayStatusMessage,
   FileTreeSnapshotRequestMessage,
   FileTreeSnapshotMessage,
   FileTreeUnchangedMessage,
@@ -2502,6 +2639,20 @@ export type SessionUpdated = z.infer<typeof SessionUpdatedMessage>;
 export type ClientFocusState = z.infer<typeof ClientFocusStateMessage>;
 export type TerminalSnapshotRequest = z.infer<typeof TerminalSnapshotRequestMessage>;
 export type TerminalSnapshot = z.infer<typeof TerminalSnapshotMessage>;
+// The wire types for the frame display protocol. This file is their single
+// home — the same eight names are also exported from terminal-frames/protocol.ts
+// (whose envelopes predate registration and lack CheckoutScoped's `main`
+// default), and `TerminalFrame` is a third name in terminal-frames/source.ts,
+// where it means the CAPTURE payload rather than a wire message. Import the
+// wire types from here; anything created by `createMessage` has these shapes.
+export type TerminalSubscribe = z.infer<typeof TerminalSubscribeMessage>;
+export type TerminalSubscribed = z.infer<typeof TerminalSubscribedMessage>;
+export type TerminalFrame = z.infer<typeof TerminalFrameMessage>;
+export type TerminalAck = z.infer<typeof TerminalAckMessage>;
+export type TerminalUnsubscribe = z.infer<typeof TerminalUnsubscribeMessage>;
+export type TerminalHistoryRequest = z.infer<typeof TerminalHistoryRequestMessage>;
+export type TerminalHistoryPage = z.infer<typeof TerminalHistoryPageMessage>;
+export type TerminalDisplayStatus = z.infer<typeof TerminalDisplayStatusMessage>;
 export type FileTreeSnapshotRequest = z.infer<typeof FileTreeSnapshotRequestMessage>;
 export type FileTreeSnapshot = z.infer<typeof FileTreeSnapshotMessage>;
 export type FileTreeUnchanged = z.infer<typeof FileTreeUnchangedMessage>;
@@ -2569,6 +2720,12 @@ export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
   "agent:enableRelay",
   "agent:question-resolve",
   "terminal:input",
+  // Rendered screen content, which is the same secret class `terminal:input` is
+  // redacted for: whatever the user typed is echoed back into these two, so a
+  // capture would otherwise hold the pasted token that the keystroke frames
+  // withheld. `terminal:snapshot` predates this rule and is knowingly not here.
+  "terminal:frame",
+  "terminal:history:page",
   "tunnel:http-request",
   "tunnel:http-start",
   "tunnel:http-chunk",
@@ -2580,6 +2737,8 @@ export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
 export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "terminal:start", "terminal:stop", "terminal:input", "terminal:resize", "terminal:output", "terminal:started", "terminal:exited", "terminal:notification", "terminal:size",
   "terminal:snapshot:request", "terminal:snapshot",
+  "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
+  "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
   "agent:status",
   "tree:full", "tree:update", "file:read", "file:content",
   "file:resolve-path", "file:resolve-path-result",
@@ -2689,6 +2848,8 @@ const KNOWN_TYPES = new Set<string>([
   "session:result", "session:updated",
   "client:focus-state",
   "terminal:snapshot:request", "terminal:snapshot",
+  "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
+  "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
   "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged",
   "preview:snapshot:request", "preview:snapshot",
   "request", "response",

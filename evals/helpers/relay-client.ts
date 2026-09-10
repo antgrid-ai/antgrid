@@ -660,6 +660,10 @@ export class RelayClient {
       /** Play a pre-`pullsTree` app: omit the capability so the bridge keeps
        *  pushing the file tree on re-sync (gate-lazy-hydration's legacy row). */
       omitPullsTree?: boolean;
+      /** Play a pre-`terminalFramesV1` app: omit the capability so the bridge
+       *  keeps this client on the legacy raw-output display path (old-app
+       *  compatibility eval). */
+      omitTerminalFramesV1?: boolean;
     } = {},
   ): Promise<void> {
     this.e2eMode = true;
@@ -756,13 +760,16 @@ export class RelayClient {
     // `capabilities` mirrors the production Dart client (connection_handshake.dart):
     // without checkoutRouting the bridge treats this app as pre-worktree and
     // refuses to stream any project holding a managed session; `pullsTree` tells
-    // it the app fetches its own file tree, so the re-sync need not push one.
+    // it the app fetches its own file tree, so the re-sync need not push one;
+    // `terminalFramesV1` opts this client into rendered-frame terminal display —
+    // omitting it must fail CLOSED to the legacy raw-output path (never assumed).
+    const capabilities: Record<string, true> = { checkoutRouting: true };
+    if (!opts.omitPullsTree) capabilities.pullsTree = true;
+    if (!opts.omitTerminalFramesV1) capabilities.terminalFramesV1 = true;
     const appReady = {
       type: "app:ready", attemptId,
       confirm: phoneConfirmTag(sessionKeys.confirm).toString("base64"),
-      capabilities: opts.omitPullsTree
-        ? { checkoutRouting: true }
-        : { checkoutRouting: true, pullsTree: true },
+      capabilities,
     };
     if (opts.dropEstablished) this.dropEstablishedAttemptId = attemptId;
     const establishedP = this.waitFor((m: any) => m.type === "established" && m.attemptId === attemptId, timeoutMs);
@@ -855,7 +862,7 @@ export class RelayClient {
       const appReady = {
         type: "app:ready", attemptId,
         confirm: phoneConfirmTag(sessionKeys.confirm).toString("base64"),
-        capabilities: { checkoutRouting: true, pullsTree: true },
+        capabilities: { checkoutRouting: true, pullsTree: true, terminalFramesV1: true },
       };
       const establishedP = this.waitFor((m: any) => m.type === "established" && m.attemptId === attemptId, timeoutMs);
       this.sendSealedFrame(appReady, transport, "control");

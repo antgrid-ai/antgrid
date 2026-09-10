@@ -230,6 +230,55 @@ test("peerPullsTree reads true again once the session is torn down — no app, n
   expect(client.peerPullsTree).toBe(true);
 });
 
+// terminalFramesV1 fail-CLOSES where pullsTree fails open: it selects a display
+// mode, so an app that never named it must keep getting legacy terminal:output.
+test("peerSupportsTerminalFramesV1 is true once the app advertises terminalFramesV1", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, terminalFramesV1: true },
+  });
+  expect(client.peerSupportsTerminalFramesV1).toBe(true);
+});
+
+test("peerSupportsTerminalFramesV1 is false when the app omits terminalFramesV1", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, pullsTree: true },
+  });
+  expect(client.peerSupportsTerminalFramesV1).toBe(false);
+});
+
+test("peerSupportsTerminalFramesV1 is false for a wrong-typed capability", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { terminalFramesV1: 1 },
+  });
+  expect(client.peerSupportsTerminalFramesV1).toBe(false);
+});
+
+test("peerSupportsTerminalFramesV1 reads false once the session is torn down — no app cannot render frames", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, terminalFramesV1: true },
+  });
+  (client as any).tearDownEstablished();
+  expect((client as any).peerAdvertisedTerminalFramesV1).toBe(false);
+  expect(client.peerSupportsTerminalFramesV1).toBe(false);
+});
+
+test("onHandshakeComplete carries terminalFramesV1 alongside the other capabilities", () => {
+  // Collected into an array rather than a nullable let: TS narrows a `let x = null`
+  // to `null` at the assertion because it cannot see the callback run, and the
+  // length also pins that promotion fires the callback exactly once.
+  const seen: Array<{ checkoutRouting: boolean; pullsTree: boolean; terminalFramesV1: boolean }> = [];
+  establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, terminalFramesV1: true },
+    onHandshakeComplete: ((caps: any) => { seen.push(caps); }) as () => void,
+  });
+  expect(seen).toEqual([{ checkoutRouting: true, pullsTree: false, terminalFramesV1: true }]);
+});
+
 test("agent rejects a client-hello with an invalid transcript signature", () => {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();

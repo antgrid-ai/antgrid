@@ -130,7 +130,7 @@ const COLD_ATTACH_PREAMBLE =
   "\x1b[?1049l\x1b[r\x1b[?7h\x1b[4l\x1b[?6l\x1b[?45l\x1b[?66l\x1b[?9l\x1b[0m\x1b[3J\x1b[2J\x1b[H";
 
 export class TerminalScreen {
-  private readonly term: Terminal;
+  protected readonly term: Terminal;
   private readonly addon: SerializeAddon;
   private disposed = false;
 

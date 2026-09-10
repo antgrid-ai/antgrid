@@ -10,7 +10,10 @@ export class LocalTestClient {
   private ws: WebSocket | null = null;
   private listeners = new Set<(msg: AbMessage, channel: string) => void>();
 
-  async connect(disc: LocalConnectInfo, opts: { pullsTree?: boolean } = {}): Promise<void> {
+  async connect(
+    disc: LocalConnectInfo,
+    opts: { pullsTree?: boolean; terminalFramesV1?: boolean } = {},
+  ): Promise<void> {
     this.ws = new WebSocket(`ws://127.0.0.1:${disc.port}`);
     await new Promise<void>((resolve, reject) => {
       this.ws!.onopen = () => resolve();
@@ -37,9 +40,14 @@ export class LocalTestClient {
       type: "hello", token: disc.token, appPid: process.pid, appVersion: "eval",
       // checkoutRouting always: a core holding managed sessions force-closes an
       // owner without it on the next session:updated (project-core.ts).
-      capabilities: opts.pullsTree === false
-        ? { checkoutRouting: true }
-        : { checkoutRouting: true, pullsTree: true },
+      // pullsTree/terminalFramesV1 each default on; pass `false` to play a
+      // pre-capability app (terminalFramesV1: false drives the legacy
+      // raw-output compatibility path — the bridge must fail closed on it).
+      capabilities: {
+        checkoutRouting: true,
+        ...(opts.pullsTree === false ? {} : { pullsTree: true }),
+        ...(opts.terminalFramesV1 === false ? {} : { terminalFramesV1: true }),
+      },
     }));
     await readyPromise;
   }

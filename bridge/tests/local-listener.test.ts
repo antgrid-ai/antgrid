@@ -135,6 +135,33 @@ describe("LocalListener handshake", () => {
     expect(listener.ownerPullsTree).toBe(false);
     ws.close();
   });
+
+  // Opposite polarity to ownerPullsTree above: this one selects a display mode,
+  // so "no owner" and "owner said nothing" must both read false.
+  test("ownerSupportsTerminalFramesV1 is false with no owner attached", () => {
+    expect(listener.ownerSupportsTerminalFramesV1).toBe(false);
+  });
+
+  test("ownerSupportsTerminalFramesV1 reflects a present terminalFramesV1 capability", async () => {
+    const ws = await openWs("secret-token", 1, { checkoutRouting: true, terminalFramesV1: true });
+    await nextMessage(ws);
+    expect(listener.ownerSupportsTerminalFramesV1).toBe(true);
+    ws.close();
+  });
+
+  test("ownerSupportsTerminalFramesV1 is false when the capability is absent", async () => {
+    const ws = await openWs("secret-token", 1, { checkoutRouting: true, pullsTree: true });
+    await nextMessage(ws);
+    expect(listener.ownerSupportsTerminalFramesV1).toBe(false);
+    ws.close();
+  });
+
+  test("ownerSupportsTerminalFramesV1 is false for a wrong-typed capability", async () => {
+    const ws = await openWs("secret-token", 1, { terminalFramesV1: "yes" });
+    await nextMessage(ws);
+    expect(listener.ownerSupportsTerminalFramesV1).toBe(false);
+    ws.close();
+  });
 });
 
 describe("LocalListener routing", () => {

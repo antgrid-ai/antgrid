@@ -11,6 +11,7 @@ interface ConnState {
   appPid?: number;
   checkoutRouting?: boolean;
   pullsTree?: boolean;
+  terminalFramesV1?: boolean;
 }
 
 export interface LocalListenerOptions {
@@ -77,6 +78,15 @@ export class LocalListener implements TransportSubscriber {
    *  there is then nothing the push could reach. */
   get ownerPullsTree(): boolean {
     return this.ownerSocket === null || this.ownerSocket.data.pullsTree === true;
+  }
+
+  /** Whether the loopback owner renders terminals from `terminal:frame`.
+   *  Fail-CLOSED, unlike {@link ownerPullsTree}: no owner, or an owner that
+   *  never named the capability, reads false so the legacy `terminal:output`
+   *  path stays selected — a desktop switched into a display mode it cannot
+   *  render shows nothing at all. */
+  get ownerSupportsTerminalFramesV1(): boolean {
+    return this.ownerSocket?.data.terminalFramesV1 === true;
   }
 
   /** Fail closed before a managed-checkout frame can reach an older desktop. */
@@ -228,6 +238,7 @@ export class LocalListener implements TransportSubscriber {
     const newPid = typeof envelope.appPid === "number" ? envelope.appPid : undefined;
     const checkoutRouting = envelope?.capabilities?.checkoutRouting === true;
     const pullsTree = envelope?.capabilities?.pullsTree === true;
+    const terminalFramesV1 = envelope?.capabilities?.terminalFramesV1 === true;
 
     // A second hello carrying the VALID token is the same trusted app
     // reconnecting (a provider rebuild, retry, or eviction+reopen on the app
@@ -258,6 +269,7 @@ export class LocalListener implements TransportSubscriber {
     ws.data.appPid = newPid;
     ws.data.checkoutRouting = checkoutRouting;
     ws.data.pullsTree = pullsTree;
+    ws.data.terminalFramesV1 = terminalFramesV1;
     this.ownerSocket = ws;
     // The accepted hello and its answer, so a capture opens with the moment the
     // desktop attached rather than with unexplained traffic from a socket the

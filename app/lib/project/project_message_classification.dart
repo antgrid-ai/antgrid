@@ -58,6 +58,14 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'terminal:size',
   'terminal:snapshot:request',
   'terminal:snapshot',
+  'terminal:subscribe',
+  'terminal:subscribed',
+  'terminal:frame',
+  'terminal:ack',
+  'terminal:unsubscribe',
+  'terminal:history:request',
+  'terminal:history:page',
+  'terminal:display:status',
   'agent:status',
   'tree:full',
   'tree:update',
@@ -170,6 +178,12 @@ const Set<String> _statusTypes = <String>{
   'terminal:started',
   'terminal:exited',
   'terminal:notification',
+  // Frame-mode negotiation and its error surface sit beside the terminal
+  // lifecycle for the same reason: a subscription that was refused, timed out
+  // or ended must still reach the UI while the app is paused, or the viewer
+  // waits forever on frames that will never come.
+  'terminal:subscribed',
+  'terminal:display:status',
   'notification:push',
   'terminal:size',
   'git:branches',
@@ -231,6 +245,8 @@ const Set<String> kUnroutedInboundTypes = <String>{
 const Set<String> _heavyTypes = <String>{
   'terminal:output',
   'terminal:snapshot',
+  'terminal:frame',
+  'terminal:history:page',
   'tree:full',
   'tree:update',
   'file:tree:snapshot',

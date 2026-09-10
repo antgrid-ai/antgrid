@@ -28,9 +28,15 @@ const Map<String, List<String>> serviceWireTypes = {
     // heavy
     'terminal:snapshot',
     'terminal:output',
+    // heavy — frame-mode display
+    'terminal:frame',
+    'terminal:history:page',
     // status
     'terminal:started',
     'terminal:exited',
+    // status — frame-mode negotiation and its error surface
+    'terminal:subscribed',
+    'terminal:display:status',
     'agent:status',
     'git:branches',
     'git:checkout-result',

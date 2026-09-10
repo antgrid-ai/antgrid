@@ -251,6 +251,14 @@ export interface AgentCore {
   /** Same question for the loopback owner. Wired once at listener bind — the
    *  listener outlives any single owner. */
   setOwnerPullsTreeProvider(fn: (() => boolean) | null): void;
+  /** Current remote app's `terminal:frame` display capability; cleared when that
+   *  transport detaches. */
+  setPeerTerminalFramesV1Provider(fn: (() => boolean) | null): void;
+  /** Same question for the loopback owner. Wired once at listener bind. */
+  setOwnerTerminalFramesV1Provider(fn: (() => boolean) | null): void;
+  /** Whether the client on `source` renders terminals from `terminal:frame`.
+   *  Per-connection on purpose — see the implementation. */
+  clientSupportsTerminalFramesV1(source: InboundSource): boolean;
   /** Stream-gating state. The transport's peer-online/offline callbacks flip
    *  `peerOnline` to suppress the heavy stream while the paired phone is gone. */
   readonly connState: ConnState;
@@ -748,6 +756,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let peerCheckoutRoutingProvider: (() => boolean) | null = null;
   let peerPullsTreeProvider: (() => boolean) | null = null;
   let ownerPullsTreeProvider: (() => boolean) | null = null;
+  let peerTerminalFramesV1Provider: (() => boolean) | null = null;
+  let ownerTerminalFramesV1Provider: (() => boolean) | null = null;
   function setPeerPubkeyProvider(fn: (() => string | null) | null) {
     peerPubkeyProvider = fn;
   }
@@ -759,6 +769,28 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   }
   function setOwnerPullsTreeProvider(fn: (() => boolean) | null) {
     ownerPullsTreeProvider = fn;
+  }
+  function setPeerTerminalFramesV1Provider(fn: (() => boolean) | null) {
+    peerTerminalFramesV1Provider = fn;
+  }
+  function setOwnerTerminalFramesV1Provider(fn: (() => boolean) | null) {
+    ownerTerminalFramesV1Provider = fn;
+  }
+
+  /** Display mode is exclusive PER VIEWER: a frame-mode client and a legacy
+   *  `terminal:output` client can share a terminal, each rendering the way it
+   *  asked to. Deliberately NOT collapsed into one machine-wide answer the way
+   *  {@link everyClientPullsTrees} is — that question is "may this push be
+   *  skipped", where any client still needing it decides for all; this one
+   *  selects a mode for one connection, and a joint answer would put the other
+   *  transport into a mode it never advertised.
+   *
+   *  Fail-CLOSED: no provider wired, or a provider that says no, reads false so
+   *  the legacy path stays selected. An app pushed into a display mode it cannot
+   *  render shows nothing at all, so absence must never mean yes. */
+  function clientSupportsTerminalFramesV1(source: InboundSource): boolean {
+    const provider = source === "loopback" ? ownerTerminalFramesV1Provider : peerTerminalFramesV1Provider;
+    return provider?.() === true;
   }
 
   // Mobile-access gate, shared by every inbound path (bus verbs AND the
@@ -4145,6 +4177,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     setPeerCheckoutRoutingProvider,
     setPeerPullsTreeProvider,
     setOwnerPullsTreeProvider,
+    setPeerTerminalFramesV1Provider,
+    setOwnerTerminalFramesV1Provider,
+    clientSupportsTerminalFramesV1,
     connState,
     deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean> {
       if (!sessions) return false;
