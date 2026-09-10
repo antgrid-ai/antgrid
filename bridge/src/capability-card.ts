@@ -162,7 +162,15 @@ async function readBranch(projectPath: string): Promise<string | null> {
   }
 }
 
-async function readRemote(projectPath: string): Promise<string | null> {
+/**
+ * The normalized repo key for a checkout, or null when it has none.
+ *
+ * Exported because the session-bus directory keys the addressable set on it
+ * (`docs/session-messaging.md` §5.1) and must reach the SAME answer the
+ * add-machine dialog does — two probes with two caches would let a project be
+ * addressable in one surface and not the other, with nothing to point at.
+ */
+export async function readRepoKey(projectPath: string): Promise<string | null> {
   const cached = remoteCache.get(projectPath);
   if (cached && Date.now() - cached.readAt < REMOTE_CACHE_TTL_MS) return cached.remote;
   let remote: string | null = null;
@@ -183,7 +191,7 @@ async function readRemote(projectPath: string): Promise<string | null> {
  * costs one local `rev-parse` and removes the need to notice a checkout.
  */
 export async function readRepoCard(projectPath: string, label?: string): Promise<RepoCard> {
-  const [remote, branch] = await Promise.all([readRemote(projectPath), readBranch(projectPath)]);
+  const [remote, branch] = await Promise.all([readRepoKey(projectPath), readBranch(projectPath)]);
   return label === undefined ? { remote, branch } : { label, remote, branch };
 }
 

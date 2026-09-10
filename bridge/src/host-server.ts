@@ -36,6 +36,7 @@ import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";
 import { SessionManager } from "./session-manager";
 import { SessionBusSessionIndex } from "./session-bus/session-index";
+import { SessionBusRepoKeys } from "./session-bus/repo-key";
 import { SessionBusCoordinator } from "./session-bus/coordinator";
 import { removeSessionBusSession } from "./session-bus/store-fs";
 import { MAX_BUS_ROUTES } from "./session-bus/constants";
@@ -257,6 +258,10 @@ export class HostServer {
   private readonly sessionIndex = new SessionBusSessionIndex({
     liveSessions: (projectId) => this.cores.get(projectId)?.core.listSessions(true) ?? null,
   });
+  // The other half of §5.1's addressable set: the index says which project holds
+  // a session, this says which projects are the same repository. Refreshed on
+  // the same three edges as the index, for the reason its `note` doc gives.
+  private readonly repoKeys = new SessionBusRepoKeys();
   // The same latches `agent-core.ts`'s per-core fallback keeps, moved here
   // because the machine-level `send` below is this host's own copy of that
   // fallback's dispatcher — see its doc for why the two absences (no route
@@ -421,6 +426,11 @@ export class HostServer {
         this.sessionBus.hydrateRoutes();
         this.sessionBus.resume();
       });
+    // Separately, and deliberately not in that chain: this one spawns git per
+    // project, and nothing the bus resumes is waiting on a repo key.
+    void this.repoKeys
+      .hydrate([...this.seenProjects].map(([id, seen]) => ({ id, path: seen.path })))
+      .catch((err) => log.warn({ err }, "host: repo key hydrate failed"));
   }
 
   /** Self-heal the hint catalog at startup: drop any entry whose folder no
@@ -1866,6 +1876,7 @@ export class HostServer {
     // start-time half only: what a session created LATER in this core needs is
     // the cold-edge refresh in noteColdSnapshot().
     this.sessionIndex.noteProject(core.projectId, basename(projectPath), core.listSessions(true));
+    void this.repoKeys.note(core.projectId, projectPath);
     // Re-advertise on a real work-status transition so the phone's Recent/sidebar
     // track activity (working/attention/error/done) without warming this core
     // themselves. Deduped inside the core, so this fires on transitions only.
@@ -2023,6 +2034,7 @@ export class HostServer {
     const id = entry.core.projectId;
     if (!id) return;
     this.sessionIndex.noteProject(id, basename(entry.path), entry.core.listSessions(true));
+    void this.repoKeys.note(id, entry.path);
   }
 
   async stop(projectId: string): Promise<void> {
@@ -2065,6 +2077,7 @@ export class HostServer {
     await this.reclaimManagedCheckouts(projectId);
     this.deleteProjectStores(projectId);
     this.sessionIndex.forgetProject(projectId);
+    this.repoKeys.forgetProject(projectId);
     // Step 3 removed `agents/<projectId>/` and the index above no longer
     // resolves it, but the machine-level routes.json sits OUTSIDE that tree, so
     // this is the only thing that reclaims the project's carrier rows: it drops
