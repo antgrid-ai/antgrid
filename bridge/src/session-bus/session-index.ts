@@ -144,6 +144,25 @@ export class SessionBusSessionIndex {
     this.disk.set(projectId, next);
   }
 
+  /**
+   * Every session one project holds, under the same warm-live/cold-disk rule
+   * `lookup` applies — a warm project is authoritative and is never answered
+   * from the snapshot, because a session created moments ago is in one and not
+   * the other.
+   *
+   * Separate from `lookup` rather than built on it: `lookup` scans every
+   * project to answer about one session, and a directory that called it per
+   * session would be quadratic in the machine's sessions for an answer this
+   * gets in one pass.
+   */
+  *sessionsIn(projectId: string): Iterable<{ entry: SessionEntry; projectLabel?: string }> {
+    if (!this.labels.has(projectId)) return;
+    const projectLabel = this.labels.get(projectId);
+    const live = this.deps.liveSessions(projectId);
+    const entries = live ?? [...(this.disk.get(projectId)?.values() ?? [])];
+    for (const entry of entries) yield projectLabel === undefined ? { entry } : { entry, projectLabel };
+  }
+
   /** Resolve one session id to its owning project, or null if this machine has
    *  never heard of it. */
   lookup(sessionId: string): SessionIndexEntry | null {

@@ -178,3 +178,32 @@ test("forgetSession leaves another project's identically named session alone", (
   index.forgetSession("proj-a", "sess-shared");
   expect(index.lookup("sess-shared")).toEqual({ projectId: "proj-b", projectLabel: "B", sessionName: "In B" });
 });
+
+test("sessionsIn reads a warm project live and a cold one from its snapshot", () => {
+  const warm = [liveEntry("live-1", "Live one"), liveEntry("live-2", "Live two")];
+  const index = new SessionBusSessionIndex({
+    liveSessions: (projectId) => (projectId === "warm" ? warm : null),
+  });
+  index.noteProject("warm", "Warm", [liveEntry("stale", "Stale snapshot")]);
+  index.noteProject("cold", "Cold", [liveEntry("cold-1", "Cold one")]);
+
+  // The warm project's snapshot is deliberately wrong and deliberately ignored:
+  // a session created since the last flush is in the live list and not in it.
+  expect([...index.sessionsIn("warm")].map((s) => s.entry.id)).toEqual(["live-1", "live-2"]);
+  expect([...index.sessionsIn("warm")][0]!.projectLabel).toBe("Warm");
+  expect([...index.sessionsIn("cold")].map((s) => s.entry.id)).toEqual(["cold-1"]);
+});
+
+test("sessionsIn answers nothing for a project the index has never recorded", () => {
+  // Not the same as an empty project: this one must not be enumerated at all,
+  // or a directory would probe a branch for a path the host cannot name.
+  const index = new SessionBusSessionIndex({ liveSessions: () => [liveEntry("ghost", "Ghost")] });
+  expect([...index.sessionsIn("never-noted")]).toEqual([]);
+});
+
+test("sessionsIn omits the label for a project recorded without one", () => {
+  const index = coldIndex();
+  index.noteProject("unlabelled", undefined, [liveEntry("s", "S")]);
+  const [only] = [...index.sessionsIn("unlabelled")];
+  expect("projectLabel" in only!).toBe(false);
+});
