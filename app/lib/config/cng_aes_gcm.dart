@@ -84,6 +84,10 @@ class CngAesGcm extends AesGcm {
       if (sealed == null || !_constantTimeEquals(sealed, _katSealed)) {
         throw StateError('known-answer test mismatch');
       }
+      // The known-answer key is never used again. Left in the cache it would
+      // hold a live kernel key and a quarter of the four slots the real
+      // directional keys need.
+      evictImportedKeys();
       // Clears a latch a previous run's runtime status may have set: a passing
       // known-answer test is proof the provider works now.
       _disabled = false;
@@ -117,7 +121,21 @@ class CngAesGcm extends AesGcm {
           possibleBuffer: possibleBuffer);
     }
     _checkParameters(keyBytes.length, iv.length);
-    final sealed = _cryptSync(keyBytes, iv, clearText, aad, encrypt: true)!;
+    final Uint8List sealed;
+    try {
+      sealed = _cryptSync(keyBytes, iv, clearText, aad, encrypt: true)!;
+    } catch (_) {
+      // Only the statuses that degrade the process set the latch, and this is
+      // the frame that discovered them: without the retry it dies anyway, and
+      // `E2eTransportDart.seal` does not catch, so the caller sees a send that
+      // threw once for no reason a log can explain.
+      if (!_disabled) rethrow;
+      return _fallback.encrypt(clearText,
+          secretKey: secretKey,
+          nonce: iv,
+          aad: aad,
+          possibleBuffer: possibleBuffer);
+    }
     return SecretBox(
       sealed.sublist(0, sealed.length - _tagBytes),
       nonce: iv,
@@ -145,16 +163,21 @@ class CngAesGcm extends AesGcm {
     if (secretBox.mac.bytes.length != _tagBytes) {
       throw SecretBoxAuthenticationError();
     }
-    final joined = Uint8List(secretBox.cipherText.length + _tagBytes)
-      ..setAll(0, secretBox.cipherText)
-      ..setAll(secretBox.cipherText.length, secretBox.mac.bytes);
-    final opened = _cryptSync(
-      keyBytes,
-      secretBox.nonce,
-      joined,
-      aad,
-      encrypt: false,
-    );
+    final Uint8List? opened;
+    try {
+      opened = _cryptSync(
+        keyBytes,
+        secretBox.nonce,
+        secretBox.cipherText,
+        aad,
+        encrypt: false,
+        tag: secretBox.mac.bytes,
+      );
+    } catch (_) {
+      if (!_disabled) rethrow;
+      return _fallback.decrypt(secretBox,
+          secretKey: secretKey, aad: aad, possibleBuffer: possibleBuffer);
+    }
     if (opened == null) throw SecretBoxAuthenticationError();
     return opened;
   }
@@ -188,6 +211,14 @@ class CngAesGcm extends AesGcm {
 
   @visibleForTesting
   static int get importedKeyCount => _cache.length;
+
+  /// Whether the cache still holds a handle for [keyBytes], without promoting
+  /// it. Exposed because eviction order is otherwise unobservable: a cache that
+  /// silently reverts to insertion order still returns the right plaintext for
+  /// every frame, it just generates a fresh ~15 us key for each one.
+  @visibleForTesting
+  static bool isImported(List<int> keyBytes) =>
+      _cache.any((e) => _constantTimeEquals(e.bytes, keyBytes));
 
   /// Byte size the kernel expects for `BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO`
   /// on 64-bit Windows. Exposed so a test can pin the hand-written struct
@@ -320,7 +351,7 @@ int _ensureProvider() {
   }, malloc);
 }
 
-/// Cached key handles, newest last.
+/// Cached key handles, least-recently-used first.
 ///
 /// Generating a key measured ~15 µs, an order above a small-frame decrypt, and
 /// `E2eTransportDart` is stateless by design — it constructs a transport, and so
@@ -328,7 +359,9 @@ int _ensureProvider() {
 ///
 /// A session holds two directional keys and a rekey briefly adds two more, so
 /// four entries covers steady state without pinning key material from sessions
-/// that have moved on.
+/// that have moved on. Eviction is LRU rather than insertion-order: a second,
+/// idle session must not be able to push the busy session's keys out and turn
+/// every frame back into a ~15 µs key generation.
 final List<_CachedKey> _cache = <_CachedKey>[];
 const int _cacheSize = 4;
 
@@ -350,7 +383,10 @@ class _CachedKey {
 
 int _keyHandle(List<int> keyBytes) {
   for (var i = _cache.length - 1; i >= 0; i--) {
-    if (_constantTimeEquals(_cache[i].bytes, keyBytes)) return _cache[i].handle;
+    if (!_constantTimeEquals(_cache[i].bytes, keyBytes)) continue;
+    final hit = _cache.removeAt(i);
+    _cache.add(hit);
+    return hit.handle;
   }
   final provider = _ensureProvider();
   if (provider == 0) throw StateError('CNG provider unavailable');
@@ -390,18 +426,21 @@ int _keyHandle(List<int> keyBytes) {
 /// reuse for a different key. Best case an invalid-handle status; worst case
 /// real plaintext encrypted under the wrong key and put on the wire.
 ///
-/// [input] is plaintext when encrypting and `ciphertext ‖ tag` when not; the
-/// return is `ciphertext ‖ tag`, or the plaintext, or null for a tag mismatch.
+/// [input] is plaintext when encrypting and bare ciphertext when not, with the
+/// tag passed separately in [tag] — CNG keeps the two apart anyway, and joining
+/// them first would copy a whole 1.5 MB frame on the receive path for nothing.
+/// The return is `ciphertext ‖ tag`, or the plaintext, or null for a tag
+/// mismatch.
 Uint8List? _cryptSync(
   List<int> keyBytes,
   List<int> nonce,
   List<int> input,
   List<int> aad, {
   required bool encrypt,
+  List<int>? tag,
 }) {
   final hKey = _keyHandle(keyBytes);
-  final dataLen = encrypt ? input.length : input.length - CngAesGcm._tagBytes;
-  if (dataLen < 0) return null;
+  final dataLen = input.length;
   // malloc, not calloc: package:ffi zeroes a calloc block with a byte-at-a-time
   // Dart loop, which for a 2 MB frame is millions of native writes into buffers
   // that are about to be fully overwritten. Every field below is set explicitly
@@ -431,7 +470,7 @@ Uint8List? _cryptSync(
       } else {
         pTag
             .asTypedList(CngAesGcm._tagBytes)
-            .setRange(0, CngAesGcm._tagBytes, input, dataLen);
+            .setRange(0, CngAesGcm._tagBytes, tag!);
       }
       if (aad.isNotEmpty) {
         pAad.asTypedList(aad.length).setRange(0, aad.length, aad);
@@ -497,6 +536,9 @@ Object _statusError(int st, bool encrypt, int len) {
     // is dropped WITHOUT destroying — on an invalid handle a double destroy is
     // how a reused handle value becomes a wrong-key encrypt.
     CngAesGcm._disabled = true;
+    for (final entry in _cache) {
+      entry.bytes.fillRange(0, entry.bytes.length, 0);
+    }
     _cache.clear();
     _provider = 0;
   }

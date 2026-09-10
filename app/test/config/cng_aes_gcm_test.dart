@@ -231,6 +231,29 @@ void main() {
       expect(CngAesGcm.importedKeyCount, 4);
     });
 
+    test('eviction is LRU, so a busy key survives an idle one', () async {
+      // Two live sessions hold four directional keys between them, one more
+      // than the cache has slots once a rekey lands. Under insertion-order
+      // eviction the key in constant use is thrown out on schedule regardless,
+      // and every frame pays a fresh ~15 us key generation — the cost the cache
+      // exists to remove.
+      final cipher = CngAesGcm();
+      Future<void> use(int fill) => cipher.encrypt(
+        utf8.encode('x'),
+        secretKey: SecretKeyData(Uint8List(32)..fillRange(0, 32, fill)),
+      );
+      Uint8List key(int fill) => Uint8List(32)..fillRange(0, 32, fill);
+
+      for (var i = 1; i <= 4; i++) {
+        await use(i);
+      }
+      await use(1); // The busy key, touched again after the cache filled.
+      await use(5); // Overflows: something has to go.
+
+      expect(CngAesGcm.isImported(key(1)), isTrue);
+      expect(CngAesGcm.isImported(key(2)), isFalse);
+    });
+
     test('overlapping frames cannot evict a handle mid-call', () async {
       // The eviction hazard is structural, not hypothetical: if anything ever
       // puts an await between the cache lookup and the BCrypt call, one of these

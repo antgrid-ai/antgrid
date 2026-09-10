@@ -6,9 +6,9 @@
 //
 // This exists to settle `BATCH_MAX_BYTES` in `bridge/src/terminal-session.ts`
 // with numbers instead of arithmetic. The bridge coalesces PTY output into one
-// `terminal:output` frame per 4096 bytes or 16 ms, whichever comes first, so
-// raising that constant trades FRAME COUNT for FRAME SIZE. Every stage below is
-// timed separately because they scale differently: `open` (AES-GCM) and
+// `terminal:output` frame per BATCH_MAX_BYTES or 16 ms, whichever comes first,
+// so raising that constant trades FRAME COUNT for FRAME SIZE. Every stage
+// below is timed separately because they scale differently: `open` (AES-GCM) and
 // `jsonDecode` scale with bytes and so barely move, while the envelope parse,
 // the stream lookup and the message parse are FIXED per frame and are the only
 // thing a larger batch actually removes.
