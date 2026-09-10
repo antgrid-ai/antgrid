@@ -83,7 +83,11 @@ export const MAX_ENVELOPE_BYTES = 64 * 1024;
 /** Rows one peer machine's capability card may carry. Separate from
  *  `MAX_DIRECTORY_ROWS` (session-bus/directory.ts): this bounds what one
  *  answering machine spends per request, not what a merged directory reads
- *  back afterward. */
+ *  back afterward. This cap times `MAX_REMOTE_DIRECTORY_MACHINES` is also
+ *  what sizes control-listener.ts's `MAX_CONTROL_BODY_BYTES` — raise one
+ *  without the other and a legitimate full `session-bus:remote-directory`
+ *  push starts 400ing at the socket, before `RemoteDirectoryCache.replace()`
+ *  ever sees it to bound it. */
 export const MAX_MACHINE_CARD_ROWS = 40;
 
 /** Local rows `withLocalFloor` (session-bus/directory.ts) never lets a peer
@@ -97,3 +101,34 @@ export const LOCAL_ROW_FLOOR = 20;
  *  matching key, never an authorization input — the cap bounds how many
  *  cached `readRepoKey` probes one request can spend, not what it may see. */
 export const MAX_DIRECTORY_REPO_KEYS = 8;
+
+/** How long a pushed machine's rows are trusted before `RemoteDirectoryCache`
+ *  drops them and counts the machine stale. Independent of carrier silence
+ *  below: the app can be pushing on schedule while ONE machine's card is old
+ *  because its own per-machine backoff has not re-asked it yet. */
+export const REMOTE_ROWS_TTL_MS = 45_000;
+
+/** Past this much silence since the last push, `SessionDirectory` treats this
+ *  machine as having no carrier at all — a closed desktop, a headless bridge,
+ *  or one too old to know the ingest verb — rather than reporting a network
+ *  with zero live machines. */
+export const REMOTE_CARRIER_SILENCE_MS = 90_000;
+
+/** Machines one `session-bus:remote-directory` push may describe. This is the
+ *  PRODUCT bound, enforced by `RemoteDirectoryCache.replace()`, which slices
+ *  rather than rejects — see `MAX_REMOTE_DIRECTORY_WIRE_MACHINES` for the
+ *  separate, looser bound the wire schema itself enforces. */
+export const MAX_REMOTE_DIRECTORY_MACHINES = 8;
+
+/** Wire-layer ceilings for one `session-bus:remote-directory` push
+ *  (control-protocol.ts's `ControlRequestSchema` arm), deliberately far
+ *  looser than the product bounds above. A tight wire cap turns an ordinary
+ *  account fact — one more open peer machine, one machine's session count
+ *  growing past the product cap — into a whole-request `BAD_REQUEST`, which
+ *  the app reads as "the local bridge predates this verb" and latches the
+ *  pump off (see the degradation table this verb's request arm points at).
+ *  These exist only to bound one POST's size against a DoS, never to express
+ *  a business rule — `replace()` is what actually enforces the product caps,
+ *  by slicing and counting the excess into `dropped`. */
+export const MAX_REMOTE_DIRECTORY_WIRE_MACHINES = 64;
+export const MAX_REMOTE_DIRECTORY_WIRE_ROWS = 200;

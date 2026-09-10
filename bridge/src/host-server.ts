@@ -38,6 +38,7 @@ import { SessionManager } from "./session-manager";
 import { SessionBusSessionIndex } from "./session-bus/session-index";
 import { SessionBusRepoKeys } from "./session-bus/repo-key";
 import { SessionDirectory, directoryRowsFor, machineDirectoryRows } from "./session-bus/directory";
+import { RemoteDirectoryCache } from "./session-bus/remote-directory";
 import { SessionBusCoordinator } from "./session-bus/coordinator";
 import { removeSessionBusProject, removeSessionBusSession } from "./session-bus/store-fs";
 import { MAX_BUS_ROUTES, MAX_DIRECTORY_REPO_KEYS, MAX_MACHINE_CARD_ROWS } from "./session-bus/constants";
@@ -272,6 +273,12 @@ export class HostServer {
   // a session, this says which projects are the same repository. Refreshed on
   // the same three edges as the index, for the reason its `note` doc gives.
   private readonly repoKeys = new SessionBusRepoKeys();
+  // The asking half of the remote directory: an in-memory mirror of what the
+  // app's pump last learned peeking peer capability cards.
+  // Machine-level like `sessionIndex`/`repoKeys` above, filled by the
+  // `session-bus:remote-directory` loopback verb and read by `sessionDirectory`
+  // below — declared first so that construction can hand it over.
+  private readonly remoteDirectory = new RemoteDirectoryCache();
   // §5.5's directory, assembled from the two machine-level halves above. The
   // machine id is read live rather than captured: a core can be built before the
   // relay has one, and a row's address is only ever read after it is.
@@ -280,6 +287,9 @@ export class HostServer {
     sessionIndex: this.sessionIndex,
     projectPath: (projectId) => this.cores.get(projectId)?.path ?? this.seenProjects.get(projectId)?.path,
     machineId: () => this.controlPlaneRegistrationId ?? null,
+    remoteDirectory: this.remoteDirectory,
+    remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
+    now: () => Date.now(),
   });
   // The same latches `agent-core.ts`'s per-core fallback keeps, moved here
   // because the machine-level `send` below is this host's own copy of that
@@ -962,7 +972,15 @@ export class HostServer {
         return { id: req.id, ok: true, type: "mobile-access:get", enabled: this.remoteAccessPolicy.isEnabled() };
       case "mobile-access:set": {
         const changed = this.remoteAccessPolicy.setEnabled(req.enabled);
-        if (changed && !req.enabled) this.demoteAllPromoted();
+        if (changed && !req.enabled) {
+          this.demoteAllPromoted();
+          // A second, independent clear: `handleRemoteDirectoryPush`'s own
+          // refusal path already clears on its next ingest attempt, but that
+          // is a reactive gate — it only fires when a push arrives. This one
+          // is what makes a flip to off empty the mirror immediately, with no
+          // push required, which is the property the test file pins.
+          this.remoteDirectory.clear("remote access turned off");
+        }
         if (changed) {
           // The advert derives from the switch, and `Device.mobileAccessEnabled`
           // in the account inventory must not lag until the next reconnect.
@@ -1625,6 +1643,8 @@ export class HostServer {
           };
         }
       }
+      case "session-bus:remote-directory":
+        return this.handleRemoteDirectoryPush(req);
       case "git:branches": {
         try {
           const catalog = await listLocalBranches(req.projectPath);
@@ -1798,6 +1818,58 @@ export class HostServer {
       return { id: req.id, ok: false, error: { code: "CHECKOUT_MISSING", message: "the working directory no longer exists" } };
     }
     return { id: req.id, ok: true, type: "checkout:path", path };
+  }
+
+  /** The asking half of the remote directory's fill path: the app's pump
+   *  hands over one cycle of what it learned peeking peer capability cards.
+   *  Gated on THIS machine's own remote-access switch even though the rest of
+   *  this plane is exempt from it — see the comment on this arm in
+   *  control-protocol.ts for why. `clear()` on both refusal branches is what
+   *  makes a switch flip take effect immediately rather than riding out the
+   *  mirror's TTL. */
+  private handleRemoteDirectoryPush(
+    req: Extract<ControlRequest, { type: "session-bus:remote-directory" }>,
+  ): ControlResponse {
+    if (!this.remoteAccessPolicy.isEnabled()) {
+      this.remoteDirectory.clear("remote access is off");
+      return {
+        id: req.id,
+        ok: false,
+        error: { code: "NOT_ALLOWED", message: "remote access is disabled on this machine, so it accepts no peer directory" },
+      };
+    }
+    const selfMachineId = this.controlPlaneRegistrationId;
+    if (selfMachineId === null) {
+      // A row offered while this machine has no relay identity is
+      // un-messageable (SessionBusCoordinator.message -> self() refuses
+      // AGENT_NOT_READY on a null machine id), so mirroring it would hand
+      // agents a directory that lies about what it can reach.
+      this.remoteDirectory.clear("no relay identity");
+      return {
+        id: req.id,
+        ok: false,
+        error: { code: "NOT_ADDRESSABLE", message: "this machine has no relay identity yet, so it cannot accept a peer directory" },
+      };
+    }
+    // unservedReads comes off replace()'s own return, not a follow-up
+    // `.unservedReads()` call — replace() drains that counter as part of this
+    // push, so a call made after it would always read back 0.
+    const { accepted, dropped, unservedReads } = this.remoteDirectory.replace(
+      req.machines,
+      req.notConnected,
+      selfMachineId,
+      Date.now(),
+    );
+    return {
+      id: req.id,
+      ok: true,
+      type: "session-bus:remote-directory",
+      accepted,
+      dropped,
+      wantedRepoKeys: this.remoteDirectory.wantedRepoKeys(),
+      unservedReads,
+      lastReadAt: this.remoteDirectory.lastReadAt(),
+    };
   }
 
   private async refreshWarmGitState(projectId: string, projectPath: string): Promise<void> {

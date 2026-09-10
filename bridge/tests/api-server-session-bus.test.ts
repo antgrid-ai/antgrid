@@ -390,5 +390,27 @@ describe("GET /session-bus/sessions", () => {
       });
     } finally { m.stop(); }
   });
+
+  test("a directory that covers only this machine says so instead of narrowing silently", async () => {
+    // `directoryOf` wires no remote deps at all — the same shape a bare core
+    // has today. The reach must name that rather than omit the field, or an
+    // agent reading `sessions` alone cannot tell "nobody else on this repo"
+    // from "nobody else THIS MACHINE COULD ASK".
+    const m = machine({
+      abDir: tempDir("bus-reach-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [PEER_SESSION],
+      directory: directoryOf("p1", "github.com/owner/repo", [
+        { id: PEER_SESSION, name: "the caller" },
+        { id: "other-1", name: "Refresh expired OAuth tokens" },
+      ]),
+    });
+    try {
+      const res = await get(m, "sessions", PEER_SESSION);
+      expect(res.status).toBe(200);
+      expect(res.body.reach).toEqual({ scope: "machine", why: "no-carrier" });
+    } finally { m.stop(); }
+  });
 });
 

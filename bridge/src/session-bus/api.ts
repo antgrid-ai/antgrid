@@ -23,7 +23,7 @@ import {
   ARTIFACT_CHUNK_BYTES,
   MAX_SUMMARY_CHARS,
 } from "./constants";
-import type { SessionDirectory, SessionDirectoryRow } from "./directory";
+import type { DirectoryReach, SessionDirectory, SessionDirectoryRow } from "./directory";
 import {
   addArtifact,
   artifactById,
@@ -83,7 +83,7 @@ export interface SessionBusApi {
    *  affordable. */
   listSessions(
     terminalId: string | undefined,
-  ): Promise<{ sessions: SessionDirectoryRow[]; truncated: number } | SessionBusRefusal>;
+  ): Promise<{ sessions: SessionDirectoryRow[]; truncated: number; reach: DirectoryReach } | SessionBusRefusal>;
   publishArtifact(
     terminalId: string | undefined,
     body: PublishArtifactBody,
@@ -262,7 +262,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
           ? refuse("NOT_ADDRESSABLE", "this project has no git remote, so no other session can name it and it can name none")
           : refuse("AGENT_NOT_READY", "this project's git remote has not been read yet; it becomes addressable on its own");
       }
-      return { sessions: answer.rows, truncated: answer.truncated };
+      return { sessions: answer.rows, truncated: answer.truncated, reach: answer.reach };
     },
 
     getArtifact(terminalId, artifactId, offset, length) {

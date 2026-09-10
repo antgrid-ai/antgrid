@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AgentDescriptor } from "./protocol";
 import type { BranchRemoteStatus, StashEntry } from "./git-branches";
 import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capability-card";
+import { MAX_REMOTE_DIRECTORY_WIRE_MACHINES, MAX_REMOTE_DIRECTORY_WIRE_ROWS } from "./session-bus/constants";
 
 export const ControlRequestSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("project:list") }),
@@ -110,6 +111,41 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     projectId: z.string().min(1),
     checkoutId: z.string().min(1),
   }),
+  // The asking half of the remote session directory: the app's pump hands
+  // over what it learned peeking peer capability cards this cycle. Unlike
+  // every verb above, this ONE is gated behind the remote-access switch at
+  // the handler (host-server.ts) — the rest of this plane is exempt because a
+  // loopback caller is this machine's own desktop asking about its own data;
+  // this verb instead hands ANOTHER machine's session inventory into this
+  // machine's agents' reach, which is precisely what the switch authorizes.
+  // The gate is on the data's provenance, not on the caller.
+  //
+  // `rows` is deliberately `z.unknown()`, not `RemoteDirectoryRowSchema` — a
+  // strict per-row schema here would 400 the WHOLE push over one hostile or
+  // merely-too-long field (a renamed session title is enough), and the app
+  // reads a BAD_REQUEST from this verb as "the local bridge predates it" and
+  // latches the pump off. `RemoteDirectoryCache.replace()` is the real row
+  // gate: it validates and sanitises each row itself and drops only the rows
+  // that fail, never the push. The bounds below are a wire-layer DoS ceiling,
+  // looser than the product caps `replace()` enforces — see
+  // `MAX_REMOTE_DIRECTORY_WIRE_MACHINES`/`_ROWS` in session-bus/constants.ts.
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("session-bus:remote-directory"),
+    machines: z
+      .array(
+        z.object({
+          machineId: z.string().min(1).max(200),
+          machineLabel: z.string().max(120).optional(),
+          observedAt: z.number().int().nonnegative(),
+          outcome: z.enum(["rows", "no-card", "refused", "unreachable"]),
+          rows: z.array(z.unknown()).max(MAX_REMOTE_DIRECTORY_WIRE_ROWS).default([]),
+          truncated: z.number().int().min(0).default(0),
+        }),
+      )
+      .max(MAX_REMOTE_DIRECTORY_WIRE_MACHINES),
+    notConnected: z.number().int().min(0).default(0),
+  }),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 
@@ -191,6 +227,11 @@ export type ControlResponse =
   | { id: string; ok: true; type: "git:remote-state"; status: BranchRemoteStatus }
   | { id: string; ok: true; type: "git:checkout"; current: string; stashed?: StashEntry }
   | { id: string; ok: true; type: "checkout:path"; path: string }
+  | {
+      id: string; ok: true; type: "session-bus:remote-directory";
+      accepted: number; dropped: number;
+      wantedRepoKeys: string[]; unservedReads: number; lastReadAt: number | null;
+    }
   /** `ttlMs` is the window actually armed, which is not always the one asked
    *  for (the host clamps), and `0`/absent while disarmed. A watcher heartbeats
    *  inside it, so echoing the request instead would let a clamped capture lapse

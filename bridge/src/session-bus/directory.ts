@@ -16,6 +16,8 @@
 import { inProbePool, readRepoCard } from "../capability-card";
 import { agentSpec } from "../agents/registry";
 import type { SessionEntry, WorkStatus } from "../protocol";
+import { LOCAL_ROW_FLOOR, REMOTE_CARRIER_SILENCE_MS } from "./constants";
+import type { ReachMachine } from "./remote-directory";
 
 /** Rows one directory read may return. Generous against §5.5's expected 3-15:
  *  the bound exists so a machine that has opened one repository under many
@@ -31,6 +33,10 @@ export type DirectoryActivity = "running" | "idle" | "stopped";
 export interface SessionDirectoryRow {
   /** Null in local mode, where no frame can leave the machine to need one. */
   machineId: string | null;
+  /** OMITTED for a row this machine built itself — it needs no label for
+   *  itself. Present on a merged remote row, stamped by `RemoteDirectoryCache`
+   *  (`remote-directory.ts`) from the machine entry the row arrived under. */
+  machineLabel?: string;
   projectId: string;
   projectLabel?: string;
   sessionId: string;
@@ -80,6 +86,24 @@ export interface DirectorySessions {
   sessionsIn(projectId: string): Iterable<{ entry: SessionEntry; projectLabel?: string }>;
 }
 
+/** The half of a `RemoteDirectoryCache` (`remote-directory.ts`) a directory
+ *  reads. Narrow like {@link DirectoryRepoKeys}: this file never replaces or
+ *  clears the mirror, it only reads a view of it at request time. */
+export interface DirectoryRemote {
+  view(
+    repoKey: string,
+    selfMachineId: string | null,
+    now: number,
+  ): {
+    rows: SessionDirectoryRow[];
+    truncated: number;
+    machines: ReachMachine[];
+    staleMachines: number;
+    notConnected: number;
+    lastPushAt: number | null;
+  };
+}
+
 export interface SessionDirectoryDeps {
   repoKeys: DirectoryRepoKeys;
   sessionIndex: DirectorySessions;
@@ -93,6 +117,19 @@ export interface SessionDirectoryDeps {
    *  default is the same  the capability card uses, which is what
    *  keeps the two surfaces answering one branch. */
   readBranch?(projectPath: string): Promise<string | null>;
+  /** The asking-side mirror of peer machines' capability cards. Absent for a
+   *  bare bus in a unit test or a core with no host above it — {@link
+   *  SessionDirectory.list} then reports `no-carrier` rather than treating a
+   *  wire that was never wired as an empty network. */
+  remoteDirectory?: DirectoryRemote;
+  /** Whether THIS machine's remote-access switch is on — checked first in the
+   *  private `remoteHalfFor`, see its own comment for the ordering. Absent
+   *  behaves as on: keeping the mirror empty while the switch is off is the
+   *  ingest gate's job, not this dependency's default. */
+  remoteAccessEnabled?(): boolean;
+  /** Injectable clock, so a remote-half test can control TTL and silence
+   *  expiry without a real timer. */
+  now?(): number;
 }
 
 function activityOf(entry: SessionEntry): DirectoryActivity {
@@ -227,6 +264,15 @@ export function withLocalFloor(
   return sorted.filter((r) => keep.has(r));
 }
 
+/** Why the remote half is what it is, reported beside the rows in every state
+ *  — including a fully successful one, because a signal that appears only on
+ *  failure teaches an agent to read its absence as completeness. `"machine"`
+ *  reasons mean no network read was attempted at all; `"network"` means one
+ *  was, and names what it found. */
+export type DirectoryReach =
+  | { scope: "machine"; why: "remote-access-off" | "no-machine-id" | "no-carrier" }
+  | { scope: "network"; asOfMs: number; machines: ReachMachine[]; staleMachines: number; notConnected: number };
+
 /**
  * Either the directory, or why there is none.
  *
@@ -241,8 +287,10 @@ export type SessionDirectoryResult =
       rows: SessionDirectoryRow[];
       /** Rows the bound dropped. Never silent: a truncated list that claims to
        *  be complete reads as "there is nobody else", which is the one wrong
-       *  answer a directory can give. */
+       *  answer a directory can give. Sums this machine's own merge overflow
+       *  with whatever the far side's own card cap already dropped. */
       truncated: number;
+      reach: DirectoryReach;
     }
   | { ok: false; reason: "no-remote" | "not-probed" };
 
@@ -265,6 +313,7 @@ export class SessionDirectory {
 
     const projects = this.deps.repoKeys.projectsSharing(key);
     const machineId = this.deps.machineId();
+    const now = this.deps.now?.() ?? Date.now();
 
     // Rows first, branches second. Enumerating is a memory read; a branch is a
     // git spawn, so the set that gets probed has to be the set that can appear
@@ -290,11 +339,67 @@ export class SessionDirectory {
     });
     for (const row of rows) row.branch = branches.get(row.projectId) ?? null;
 
-    const sorted = sortDirectory(rows, branches.get(caller.projectId) ?? null);
+    // AFTER the branch-fill loop, not before: that loop overwrites every LOCAL
+    // row's branch unconditionally, and a remote row can legitimately share a
+    // projectId with a local one — the id is a hash of the checkout path, and
+    // two machines can have the same one checked out. Merging earlier would
+    // clobber a peer's own reported branch with this machine's, including to
+    // null for a project this machine has never opened.
+    const remoteHalf = this.remoteHalfFor(key, machineId, now);
+    const merged = [...rows, ...remoteHalf.rows];
+    const sorted = sortDirectory(merged, branches.get(caller.projectId) ?? null);
+    const bounded = withLocalFloor(sorted, machineId, MAX_DIRECTORY_ROWS, LOCAL_ROW_FLOOR);
     return {
       ok: true,
-      rows: sorted.slice(0, MAX_DIRECTORY_ROWS),
-      truncated: Math.max(0, sorted.length - MAX_DIRECTORY_ROWS),
+      rows: bounded,
+      truncated: merged.length - bounded.length + remoteHalf.truncated,
+      reach: remoteHalf.reach,
+    };
+  }
+
+  /**
+   * The remote half of one directory read: rows this machine's mirror can
+   * currently offer for `repoKey`, plus the reach report that says why there
+   * are or are not any. The four checks run in exactly this order, and the
+   * order is the point — see each arm.
+   */
+  private remoteHalfFor(
+    repoKey: string,
+    machineId: string | null,
+    now: number,
+  ): { rows: SessionDirectoryRow[]; truncated: number; reach: DirectoryReach } {
+    // 1. The switch, first. If this machine's own remote access is off, the
+    //    mirror is kept empty by the ingest gate (`clear()` on the refusal
+    //    path) — but checking carrier presence FIRST would report "no
+    //    carrier" in the one state that is actually "this machine refuses to
+    //    ingest", which reads to a user with a perfectly good desktop app as
+    //    their desktop app being missing.
+    if (this.deps.remoteAccessEnabled?.() === false) {
+      return { rows: [], truncated: 0, reach: { scope: "machine", why: "remote-access-off" } };
+    }
+    // 2. No relay identity: a row this machine cannot be reached at is a row
+    //    that renders as sendable and then refuses at the first reply.
+    if (machineId === null) {
+      return { rows: [], truncated: 0, reach: { scope: "machine", why: "no-machine-id" } };
+    }
+    // 3. No carrier: nothing wired the mirror in this process, or nobody has
+    //    pushed to it recently enough to trust. `lastPushAt` is a fact the app
+    //    proves by pushing, never a capability flag Zod could strip silently.
+    const view = this.deps.remoteDirectory?.view(repoKey, machineId, now);
+    if (view === undefined || view.lastPushAt === null || now - view.lastPushAt > REMOTE_CARRIER_SILENCE_MS) {
+      return { rows: [], truncated: 0, reach: { scope: "machine", why: "no-carrier" } };
+    }
+    // 4. Served: whatever the mirror currently holds for this repo.
+    return {
+      rows: view.rows,
+      truncated: view.truncated,
+      reach: {
+        scope: "network",
+        asOfMs: now,
+        machines: view.machines,
+        staleMachines: view.staleMachines,
+        notConnected: view.notConnected,
+      },
     };
   }
 }

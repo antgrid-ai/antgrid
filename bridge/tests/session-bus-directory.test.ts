@@ -12,6 +12,7 @@ import {
   type SessionDirectoryRow,
 } from "../src/session-bus/directory";
 import { LOCAL_ROW_FLOOR } from "../src/session-bus/constants";
+import type { DirectoryRemote } from "../src/session-bus/directory";
 
 const KEY = "github.com/owner/repo";
 
@@ -421,4 +422,183 @@ test("withLocalFloor never returns more rows than the cap it was given", () => {
   // is the cap — a longer list would be counted as truncated by nobody.
   expect(withLocalFloor(rows, "local", 2, 4).length).toBe(2);
   expect(withLocalFloor(rows, "local", 0, 4)).toEqual([]);
+});
+
+// -- the remote half ---------------------------------------------------------
+
+type RemoteRow = ReturnType<DirectoryRemote["view"]>["rows"][number];
+
+function remoteRow(over: Partial<RemoteRow> & { sessionId: string; projectId: string }): RemoteRow {
+  return {
+    machineId: "peer-1",
+    title: over.sessionId,
+    branch: "main",
+    activity: "idle",
+    lastActiveAt: 0,
+    canReply: true,
+    ...over,
+  };
+}
+
+/** A `DirectoryRemote` that answers one fixed view regardless of the repo key
+ *  or self-machine id it is asked with — the merge and the reach ordering are
+ *  what these tests exercise, not the mirror's own filtering (that is
+ *  `session-bus-remote-directory.test.ts`'s job). */
+function remoteOf(over: Partial<ReturnType<DirectoryRemote["view"]>>): DirectoryRemote {
+  return {
+    view: () => ({
+      rows: [],
+      truncated: 0,
+      machines: [],
+      staleMachines: 0,
+      notConnected: 0,
+      lastPushAt: null,
+      ...over,
+    }),
+  };
+}
+
+test("a same-branch remote row outranks an off-branch local one", async () => {
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["caller", "local-other"] },
+    sessionIndex: {
+      *sessionsIn(projectId) {
+        if (projectId === "caller") yield { entry: session({ id: "me" }) };
+        if (projectId === "local-other") yield { entry: session({ id: "off-branch-local", lastUsedAt: 9_000 }) };
+      },
+    },
+    projectPath: (id) => `/repos/${id}`,
+    machineId: () => "self-machine",
+    readBranch: async (path) => (path.endsWith("caller") ? "fix/auth" : "main"),
+    remoteDirectory: remoteOf({
+      rows: [remoteRow({ sessionId: "peer-sess", projectId: "peer-project", branch: "fix/auth" })],
+      lastPushAt: 1_000,
+    }),
+    now: () => 1_000,
+  });
+  const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
+  // The merge runs before the sort, so the remote row is ranked on equal
+  // footing — same branch beats a more-recent local row on another one.
+  expect(answer.rows.map((r) => r.sessionId)).toEqual(["peer-sess", "off-branch-local"]);
+});
+
+test("a remote row keeps the branch its own machine reported, even when its projectId collides with a local one", async () => {
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["caller"] },
+    sessionIndex: {
+      *sessionsIn(projectId) {
+        if (projectId === "caller") yield { entry: session({ id: "me" }) };
+      },
+    },
+    projectPath: () => "/repos/caller",
+    machineId: () => "self-machine",
+    readBranch: async () => "fix/auth",
+    // Deliberately the SAME projectId as the caller's own — `projectId` is a
+    // hash of the checkout path, so two machines with the same path checked
+    // out produce the same id. This is the trap the merge ordering exists to
+    // make unconstructible: if the branch-fill loop ran over the merged list
+    // instead of the local one, this row's branch would be overwritten to
+    // "fix/auth" (the caller's own branch) rather than kept as reported.
+    remoteDirectory: remoteOf({
+      rows: [remoteRow({ sessionId: "peer-sess", projectId: "caller", branch: "release" })],
+      lastPushAt: 1_000,
+    }),
+    now: () => 1_000,
+  });
+  const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
+  const peer = answer.rows.find((r) => r.sessionId === "peer-sess")!;
+  expect(peer.branch).toBe("release");
+});
+
+test("truncated counts the far side's own cap plus the merge overflow", async () => {
+  const remoteRows = Array.from({ length: MAX_DIRECTORY_ROWS + 5 }, (_, i) =>
+    remoteRow({ sessionId: `peer-${String(i).padStart(3, "0")}`, projectId: "peer-project", lastActiveAt: i }));
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["caller"] },
+    sessionIndex: {
+      *sessionsIn(projectId) {
+        if (projectId === "caller") yield { entry: session({ id: "me" }) };
+      },
+    },
+    projectPath: () => "/repos/caller",
+    machineId: () => "self-machine",
+    readBranch: async () => "main",
+    // The far side already reported 7 of its OWN card cap's drops — separate
+    // from anything this merge overflows, and both must show up together.
+    remoteDirectory: remoteOf({ rows: remoteRows, truncated: 7, lastPushAt: 1_000 }),
+    now: () => 1_000,
+  });
+  const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
+  expect(answer.rows.length).toBe(MAX_DIRECTORY_ROWS);
+  expect(answer.truncated).toBe(5 + 7);
+});
+
+test("list() applies the local floor to the merged list, not just to an all-local one", async () => {
+  // Before this wave every row `list()` ever sorted was local, so the floor
+  // was inert — nothing could evict this machine's own rows. The remote half
+  // succeeding is what makes eviction possible: a peer with enough same-
+  // branch running sessions legitimately outranks every local, off-branch,
+  // idle row. If `list()` ever stopped calling `withLocalFloor` (a plain
+  // `sorted.slice(0, MAX_DIRECTORY_ROWS)` would still pass every OTHER test
+  // in this file, since they hold too few rows to hit the cap), this machine
+  // would vanish from its own directory.
+  const localRows: SessionEntry[] = Array.from({ length: 3 }, (_, i) =>
+    session({ id: `local-${i}`, running: false, lastUsedAt: 1 }));
+  const remoteRows = Array.from({ length: MAX_DIRECTORY_ROWS + 10 }, (_, i) =>
+    remoteRow({ sessionId: `peer-${String(i).padStart(3, "0")}`, projectId: "peer-project", branch: "fix/auth", lastActiveAt: 1_000 + i }));
+
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["caller", "local-other"] },
+    sessionIndex: {
+      *sessionsIn(projectId) {
+        if (projectId === "caller") yield { entry: session({ id: "me" }) };
+        if (projectId === "local-other") for (const s of localRows) yield { entry: s };
+      },
+    },
+    projectPath: (id) => `/repos/${id}`,
+    machineId: () => "self-machine",
+    // The caller is on the SAME branch the remote rows report, so nothing
+    // but the floor stands between the local rows and eviction.
+    readBranch: async () => "fix/auth",
+    remoteDirectory: remoteOf({ rows: remoteRows, lastPushAt: 1_000 }),
+    now: () => 1_000,
+  });
+  const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
+  const localIds = new Set(localRows.map((r) => r.id));
+  const survivingLocal = answer.rows.filter((r) => localIds.has(r.sessionId));
+  expect(survivingLocal.length).toBe(3);
+});
+
+test("reach says remote-access-off before it says no-carrier", async () => {
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["caller"] },
+    sessionIndex: { *sessionsIn(projectId) { if (projectId === "caller") yield { entry: session({ id: "me" }) }; } },
+    projectPath: () => "/repos/caller",
+    machineId: () => "self-machine",
+    readBranch: async () => "main",
+    remoteAccessEnabled: () => false,
+    // No `remoteDirectory` at all — both conditions are true at once, and the
+    // switch has to win, or a user with a perfectly good desktop app reads
+    // "no desktop app is carrying this" instead of the true reason.
+  });
+  const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
+  expect(answer.reach).toEqual({ scope: "machine", why: "remote-access-off" });
+});
+
+test("reach says no-machine-id rather than offering rows that cannot be sent to", async () => {
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["caller"] },
+    sessionIndex: { *sessionsIn(projectId) { if (projectId === "caller") yield { entry: session({ id: "me" }) }; } },
+    projectPath: () => "/repos/caller",
+    machineId: () => null,
+    readBranch: async () => "main",
+    remoteDirectory: remoteOf({
+      rows: [remoteRow({ sessionId: "peer-sess", projectId: "peer-project" })],
+      lastPushAt: 1_000,
+    }),
+    now: () => 1_000,
+  });
+  const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
+  expect(answer.reach).toEqual({ scope: "machine", why: "no-machine-id" });
+  expect(answer.rows).toEqual([]);
 });
