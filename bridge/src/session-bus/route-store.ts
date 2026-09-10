@@ -70,14 +70,39 @@ export function loadBusRoutes(abDir: string, ttlMs: number, now: number): BusRou
   return map;
 }
 
-export function saveBusRoutes(abDir: string, routes: BusRouteMap): void {
+/** The file's raw rows, keyed by contextId, with no TTL filtering — the merge
+ *  functions below need the row as it actually sits on disk (including one a
+ *  live TTL check would already drop) so a slow writer never mistakes "expired"
+ *  for "absent" and re-adds what the file already agrees is gone. */
+function readOnDiskRoutes(abDir: string): Map<string, BusRoute> {
+  const file = readStoreFile<z.infer<typeof BusRoutesFileSchema> | null>(
+    routesPath(abDir),
+    BusRoutesFileSchema,
+    null,
+  );
+  return new Map((file?.routes ?? []).map((r) => [r.contextId, r]));
+}
+
+/** Combine on-disk rows with one writer's own table, newest `at` per contextId
+ *  wins. A key only one side has is kept as-is — this is what makes the merge
+ *  safe for a writer that does not (and cannot) hold the whole machine's
+ *  routes: two bridges sharing one `ANTGRID_DIR` each persist only what they
+ *  personally learned, and a save must not read the other one's silence on a
+ *  context as permission to delete it. */
+function mergeRoutes(onDisk: Map<string, BusRoute>, incoming: BusRouteMap): Map<string, BusRoute> {
+  const merged = new Map(onDisk);
+  for (const [contextId, r] of incoming) {
+    const existing = merged.get(contextId);
+    if (!existing || r.at >= existing.at) {
+      merged.set(contextId, { contextId, peerId: r.peerId, projectId: r.projectId, at: r.at });
+    }
+  }
+  return merged;
+}
+
+function writeRoutes(abDir: string, merged: Map<string, BusRoute>): void {
   const dir = sessionBusMachineDir(abDir);
-  const rows: BusRoute[] = [...routes.entries()].map(([contextId, r]) => ({
-    contextId,
-    peerId: r.peerId,
-    projectId: r.projectId,
-    at: r.at,
-  }));
+  const rows = [...merged.values()];
   // Freshest kept, oldest FIRST in the file: the cap is reached by a project
   // accumulating contexts over time, so what drops is what nothing has carried
   // in longest — and the reader rebuilds a Map whose iteration order is the
@@ -87,4 +112,35 @@ export function saveBusRoutes(abDir: string, routes: BusRouteMap): void {
     version: ROUTE_STORE_VERSION,
     routes: rows.slice(0, MAX_BUS_ROUTES).reverse(),
   });
+}
+
+/**
+ * Merge [routes] into whatever is currently on disk and write the result —
+ * never a wholesale replace. The file is machine-level (E9/§5.4/C5) and
+ * nothing enforces one host process per `ANTGRID_DIR` (the documented
+ * dev-stack-beside-installed-bridge setup is exactly this), so a caller's own
+ * table is only ITS view, never the machine's whole one; overwriting the file
+ * with it would erase every row a sibling process learned since this one last
+ * read.
+ *
+ * [purgeProjectId], when given, drops every row naming that project from the
+ * MERGED result before it is written — used by `forgetProjectRoutes` alone.
+ * A plain merge cannot express a deletion (a row this table no longer
+ * mentions reads as "unknown to me", not "gone"), so without this a forgotten
+ * project's rows — still sitting on disk from an earlier save — would survive
+ * the very save meant to erase them, straight back into the merged set.
+ *
+ * The read-merge-write here is not atomic across processes — two saves racing
+ * between their own read and write can still lose one side's update — but the
+ * failure shrinks from "the whole table" to "one row", and a lost row costs a
+ * relearn, never a misdelivery (route-store.ts's header).
+ */
+export function saveBusRoutes(abDir: string, routes: BusRouteMap, purgeProjectId?: string): void {
+  const merged = mergeRoutes(readOnDiskRoutes(abDir), routes);
+  if (purgeProjectId !== undefined) {
+    for (const [contextId, r] of merged) {
+      if (r.projectId === purgeProjectId) merged.delete(contextId);
+    }
+  }
+  writeRoutes(abDir, merged);
 }

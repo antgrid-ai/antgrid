@@ -17,7 +17,7 @@ import { createMessage, type AbMessage, type SessionMemberKey, type SessionMembe
 import { setLogLevel } from "../src/logger";
 import { BUS_ROUTE_TTL_MS, MAX_BUS_ROUTES } from "../src/session-bus/constants";
 import { SessionBusCoordinator } from "../src/session-bus/coordinator";
-import { loadBusRoutes } from "../src/session-bus/route-store";
+import { loadBusRoutes, saveBusRoutes } from "../src/session-bus/route-store";
 import { SessionBusSessionIndex } from "../src/session-bus/session-index";
 import { SessionManager } from "../src/session-manager";
 
@@ -465,4 +465,26 @@ test("forgetting a project erases its carrier routes from the machine file, not 
   // takes no project list), so a row still on disk is a row resurrected.
   const onDisk = loadBusRoutes(abDir, BUS_ROUTE_TTL_MS, Date.now());
   expect([...onDisk.keys()]).toEqual(["ctx-kept"]);
+});
+
+test("hydrating routes does not regress a fresher one already learned live", () => {
+  // HostServer's own call site runs hydrateRoutes off a `.finally()` on an
+  // async sessionIndex.hydrate() (host-server.ts), so an inbound frame can
+  // already have called noteRoute for a context before that disk read
+  // resolves. Reproduced directly, without the async indirection: a stale row
+  // sits on disk, the coordinator learns a fresher one live, then hydrates —
+  // hydrating must not overwrite what live traffic just proved.
+  saveBusRoutes(abDir, new Map([["ctx-1", { peerId: "app-stale", projectId: "p1", at: 1_000 }]]));
+  const now = 2_000;
+  const coordinator = new SessionBusCoordinator({
+    abDir,
+    projectIdFor: () => null,
+    self: () => null,
+    send: () => true,
+    now: () => now,
+  });
+  coordinator.noteRoute("ctx-1", "app-fresh", "p1");
+  coordinator.hydrateRoutes();
+  expect(coordinator.routeFor("ctx-1")?.peerId).toBe("app-fresh");
+  coordinator.stop();
 });

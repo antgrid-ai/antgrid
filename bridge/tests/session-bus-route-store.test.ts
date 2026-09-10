@@ -99,6 +99,60 @@ test("multiple projects' routes share one machine-level table, not one file each
   }
 });
 
+test("two writers sharing one machine file keep each other's rows", () => {
+  const abDir = tmpAbDir();
+  try {
+    // Writer A's own table has only ever heard of ctx-a.
+    saveBusRoutes(abDir, routes([["ctx-a", "app-a", "proj-a", T0]]));
+    // Writer B is a separate process (or the same one, later) whose table has
+    // only ever heard of ctx-b — its save must not read ctx-a's absence from
+    // ITS table as reason to drop what writer A already persisted.
+    saveBusRoutes(abDir, routes([["ctx-b", "app-b", "proj-b", T0 + 1]]));
+    const loaded = loadBusRoutes(abDir, TTL * 1_000, T0 + 1_000);
+    expect(loaded.get("ctx-a")).toEqual({ peerId: "app-a", projectId: "proj-a", at: T0 });
+    expect(loaded.get("ctx-b")).toEqual({ peerId: "app-b", projectId: "proj-b", at: T0 + 1 });
+  } finally {
+    rmSync(abDir, { recursive: true, force: true });
+  }
+});
+
+test("a save never lets a stale row it still holds regress a fresher one on disk", () => {
+  const abDir = tmpAbDir();
+  try {
+    // A fresher row is already on disk — written by a sibling process, or by
+    // this same one moments ago.
+    saveBusRoutes(abDir, routes([["ctx-1", "app-fresh", "p1", T0 + 1_000]]));
+    // This writer's own table still carries an older row for the same context
+    // (e.g. loaded at hydrate and never re-learned since) and saves again.
+    saveBusRoutes(abDir, routes([["ctx-1", "app-stale", "p1", T0]]));
+    const loaded = loadBusRoutes(abDir, TTL * 1_000, T0 + 2_000);
+    expect(loaded.get("ctx-1")).toEqual({ peerId: "app-fresh", projectId: "p1", at: T0 + 1_000 });
+  } finally {
+    rmSync(abDir, { recursive: true, force: true });
+  }
+});
+
+test("a purge drops a project's rows even when the writer's own table never held them", () => {
+  const abDir = tmpAbDir();
+  try {
+    saveBusRoutes(
+      abDir,
+      routes([
+        ["ctx-gone", "app-a", "p-forgotten", T0],
+        ["ctx-kept", "app-b", "p-kept", T0],
+      ]),
+    );
+    // The forgetting writer's in-memory table has already dropped ctx-gone, so
+    // its save carries only what remains — a plain merge would read that
+    // absence as "unknown to me", not "gone", and write ctx-gone straight back.
+    saveBusRoutes(abDir, routes([["ctx-kept", "app-b", "p-kept", T0]]), "p-forgotten");
+    const loaded = loadBusRoutes(abDir, TTL * 1_000, T0 + 1_000);
+    expect([...loaded.keys()]).toEqual(["ctx-kept"]);
+  } finally {
+    rmSync(abDir, { recursive: true, force: true });
+  }
+});
+
 test("an unreadable routes file loads as no routes rather than throwing", () => {
   const abDir = tmpAbDir();
   try {

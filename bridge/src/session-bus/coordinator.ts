@@ -195,7 +195,13 @@ export class SessionBusCoordinator {
    */
   hydrateRoutes(): void {
     for (const [contextId, route] of loadBusRoutes(this.deps.abDir, BUS_ROUTE_TTL_MS, this.now())) {
-      this.routes.set(contextId, route);
+      // The host's own call site runs this off a `.finally()` on an async
+      // hydrate, so live inbound traffic can already have called `noteRoute`
+      // for [contextId] before this resolves — newest `at` wins, same rule as
+      // the write-side merge in route-store.ts, or a route learned live is
+      // silently overwritten by whatever a slower disk read turns up.
+      const existing = this.routes.get(contextId);
+      if (!existing || route.at > existing.at) this.routes.set(contextId, route);
     }
   }
 
@@ -288,19 +294,19 @@ export class SessionBusCoordinator {
 
   /** Persist the map, throttled: a binding change or a prune is written at
    *  once, a bare restamp only every {@link BUS_ROUTE_PERSIST_INTERVAL_MS}.
-   *  One machine-level file (E9/§5.4/C5) — every row, from every project, in
-   *  one wholesale write — which is why this table may only ever have the one
-   *  in-memory owner this coordinator is: two writers here would erase each
-   *  other's rows with valid JSON and no error. That single-owner bound is per
-   *  PROCESS (`HostServer` builds exactly one), not per abDir — two hosts
-   *  pointed at one ANTGRID_DIR still overwrite each other wholesale, which is
-   *  survivable only because a lost route costs a relearn (route-store.ts's
-   *  header) and never a misdelivery. */
-  private saveRoutesIfDue(now: number, force: boolean): void {
+   *  One machine-level file (E9/§5.4/C5), so this table's own rows are only
+   *  ONE process's view of it — two hosts pointed at one ANTGRID_DIR is a
+   *  documented setup (dev stack beside an installed bridge), not a
+   *  once-per-abDir guarantee this coordinator can lean on. `saveBusRoutes`
+   *  merges into whatever the other one last wrote rather than replacing it,
+   *  which is what makes that sharing safe. [purgeProjectId], threaded through
+   *  from `forgetProjectRoutes`, is the one case a merge cannot express on its
+   *  own — see `saveBusRoutes`'s doc. */
+  private saveRoutesIfDue(now: number, force: boolean, purgeProjectId?: string): void {
     if (!force && now - this.routesSavedAt < BUS_ROUTE_PERSIST_INTERVAL_MS) return;
     this.routesSavedAt = now;
     try {
-      saveBusRoutes(this.deps.abDir, this.routes);
+      saveBusRoutes(this.deps.abDir, this.routes, purgeProjectId);
     } catch (err) {
       // A route that outlives this process is an optimisation over relearning
       // one; a bridge must not fail to carry a frame because it could not
@@ -315,14 +321,18 @@ export class SessionBusCoordinator {
    * machine routes.json (`sessionBusMachineDir`) lives outside
    * `agents/<projectId>/`, so the tree delete that reclaims everything else the
    * project owned cannot reach these rows — this is their only reclaim. The
-   * write is FORCED rather than throttled, and is the half that makes the drop
-   * durable: `forget` may be the last bus-relevant thing this process ever
-   * does, and an in-memory drop nothing persisted is undone wholesale by the
-   * next process start, since `hydrateRoutes` sets every row it finds without
-   * asking whether the machine still holds that project. Never called on an
-   * eviction: a merely-cold project is still real, and its routes must survive
-   * for the coordinator to keep dispatching against once it warms again, the
-   * same way its sessions survive in the session index.
+   * write is FORCED rather than throttled, and passes [projectId] through as
+   * `saveRoutesIfDue`'s purge — a plain merge-on-write would read this
+   * project's absence from the in-memory table as "unknown", not "gone", and
+   * write the very rows this call means to erase straight back from disk. The
+   * drop must be durable on its own: `forget` may be the last bus-relevant
+   * thing this process ever does, and an in-memory drop nothing persisted is
+   * undone wholesale by the next process start, since `hydrateRoutes` sets
+   * every row it finds without asking whether the machine still holds that
+   * project. Never called on an eviction: a merely-cold project is still real,
+   * and its routes must survive for the coordinator to keep dispatching
+   * against once it warms again, the same way its sessions survive in the
+   * session index.
    */
   forgetProjectRoutes(projectId: string): void {
     let dropped = false;
@@ -332,7 +342,7 @@ export class SessionBusCoordinator {
         dropped = true;
       }
     }
-    if (dropped) this.saveRoutesIfDue(this.now(), true);
+    if (dropped) this.saveRoutesIfDue(this.now(), true, projectId);
   }
 
   /** Register (or, with null, clear) the per-project consumer that turns a bus
