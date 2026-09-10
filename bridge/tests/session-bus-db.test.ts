@@ -7,6 +7,9 @@ import { setLogLevel } from "../src/logger";
 import { BUS_DB_VERSION, busDbPath, resetBusDbAnnouncements, tryBusDb, withBusDb } from "../src/session-bus/bus-db";
 import { emptyDeliveries, enqueueLine, loadDeliveries, saveDeliveries } from "../src/session-bus/delivery-queue";
 import { emptyHeld, holdMessage, loadHeld, saveHeld } from "../src/session-bus/held-store";
+import { appendLog, emptyLog, loadMessageLog, saveMessageLog } from "../src/session-bus/message-log";
+import { stampEnvelope } from "../src/session-bus/envelope";
+import { MAX_LOG_ENTRIES } from "../src/session-bus/constants";
 
 setLogLevel("error");
 
@@ -183,4 +186,73 @@ test("a bad row costs that row in every store built on this seam", () => {
 
   expect(loadHeld(abDir, "p1", "s1").held.map((h) => h.messageId)).toEqual(["h-good"]);
   expect(loadDeliveries(abDir, "p1").lines.map((l) => l.id)).toEqual(["l-good"]);
+});
+
+const PEER = { machineId: "m2", projectId: "p-remote", sessionId: "s-remote" };
+
+function logOf(count: number, from = 0) {
+  let state = emptyLog();
+  for (let i = from; i < from + count; i += 1) {
+    state = appendLog(state, {
+      at: i + 1,
+      direction: "out",
+      peer: PEER,
+      envelope: stampEnvelope(
+        { taskId: null, contextId: "ctx-1", parts: [{ kind: "text", text: `m${i}` }], summary: "s" },
+        { messageId: `m-${i}`, peer: { ...PEER, sessionName: "remote" }, now: i + 1 },
+      ),
+    });
+  }
+  return state;
+}
+
+function seqs(): number[] {
+  const raw = new Database(busDbPath(abDir), { readonly: true });
+  try {
+    return (raw.query("SELECT seq FROM bus_messages ORDER BY seq").all() as { seq: number }[]).map((r) => r.seq);
+  } finally {
+    raw.close();
+  }
+}
+
+test("appending at the cap rewrites the rows that changed, not the whole store", () => {
+  // `seq` is AUTOINCREMENT, so a row that kept its seq was never deleted and
+  // re-inserted. That is the only way to tell the difference from outside: the
+  // store's contract is a whole-scope replace either way, and both paths leave
+  // exactly the same records behind. What differs is a few hundred writes per
+  // message on the loop that serves every PTY on the machine.
+  saveMessageLog(abDir, "p1", "s1", logOf(MAX_LOG_ENTRIES));
+  const before = seqs();
+  expect(before).toHaveLength(MAX_LOG_ENTRIES);
+
+  saveMessageLog(abDir, "p1", "s1", logOf(MAX_LOG_ENTRIES + 1));
+  const after = seqs();
+
+  expect(after).toHaveLength(MAX_LOG_ENTRIES);
+  // The oldest row is gone, every survivor kept its identity, and exactly one
+  // row is new.
+  expect(after.slice(0, -1)).toEqual(before.slice(1));
+  expect(after[after.length - 1]).toBeGreaterThan(before[before.length - 1]!);
+
+  expect(loadMessageLog(abDir, "p1", "s1").entries.map((e) => e.envelope.messageId))
+    .toEqual(Array.from({ length: MAX_LOG_ENTRIES }, (_, i) => `m-${i + 1}`));
+});
+
+test("a record removed from the middle does not survive the write", () => {
+  // The case the fast path must never take: it can only skip rewriting rows it
+  // has proved are the ones wanted, and a hole in the middle is not provable —
+  // so the whole scope goes. A delivery line that survived its own removal is
+  // one the agent is handed twice.
+  saveDeliveries(abDir, "p1", enqueueLine(
+    enqueueLine(
+      enqueueLine(emptyDeliveries(), { id: "l-1", sessionId: "s1", kind: "wake", text: "a", queuedAt: 1 }),
+      { id: "l-2", sessionId: "s1", kind: "wake", text: "b", queuedAt: 2 },
+    ),
+    { id: "l-3", sessionId: "s1", kind: "wake", text: "c", queuedAt: 3 },
+  ));
+
+  const kept = loadDeliveries(abDir, "p1");
+  saveDeliveries(abDir, "p1", { ...kept, lines: kept.lines.filter((l) => l.id !== "l-2") });
+
+  expect(loadDeliveries(abDir, "p1").lines.map((l) => l.id)).toEqual(["l-1", "l-3"]);
 });

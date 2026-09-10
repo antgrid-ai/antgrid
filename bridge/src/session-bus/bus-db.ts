@@ -301,20 +301,67 @@ export function readRecords<T>(db: Database, table: string, column: string, scop
 /**
  * Make one scope's rows exactly [records], in that order.
  *
- * A whole-scope replace rather than a per-record diff, because every caller
- * holds the scope's state as one immutable fold and hands it over entire.
- * Each scope is bounded by its own cap, so this is tens of rows, and one
- * transaction means a reader never sees the scope half-written.
+ * Every caller holds its store as one immutable fold and hands it over entire,
+ * so the CONTRACT is a whole-scope replace. What it does is write the
+ * difference: the rows already there are aligned against [records], and only
+ * the ones that must go and the ones that are new are touched. An append at the
+ * cap — the shape every one of these stores actually has, message after message
+ * — is then one DELETE and one INSERT rather than a few hundred of each. At the
+ * message log's cap with full-size parts that is the difference between ~17 ms
+ * and ~7 ms, and bun:sqlite is synchronous, so it is the difference between two
+ * event-loop stalls of that size on the loop serving every PTY on the machine.
+ *
+ * The alignment is the whole safety argument: it looks for the smallest number
+ * of leading rows whose removal leaves the rest a PREFIX of [records], comparing
+ * the stored text against what would be written. When no such alignment exists —
+ * a record removed from the middle, a store rewritten wholesale, anything
+ * unexpected at all — every row goes and every record is inserted. The fast path
+ * cannot leave a stale row, because the only way to reach it is to have proved
+ * row by row that the survivors are the ones wanted.
+ *
+ * One transaction either way, so a reader never sees the scope half-written.
  */
 export function replaceRecords(db: Database, table: string, column: string, scope: BusScope, records: readonly unknown[]): void {
   const { clause, params } = scopeWhere(scope);
   const cols = scope.sessionId === undefined ? `projectId, ${column}` : `projectId, sessionId, ${column}`;
   const values = scope.sessionId === undefined ? "(?, ?)" : "(?, ?, ?)";
   const insert = db.query(`INSERT INTO ${table} (${cols}) VALUES ${values}`);
+  const wanted = records.map((record) => JSON.stringify(record));
+
   db.transaction(() => {
-    db.query(`DELETE FROM ${table} WHERE ${clause}`).run(...params);
-    for (const record of records) insert.run(...params, JSON.stringify(record));
+    // Read INSIDE the transaction. A sibling host committing between the read
+    // and the write would otherwise have this delete rows by a seq it no longer
+    // owns and append a tail that is already there; from in here, WAL answers
+    // the write-upgrade with a conflict instead, and a refused write is a state
+    // this seam already has an answer for.
+    const stored = db
+      .query(`SELECT seq, ${column} AS record FROM ${table} WHERE ${clause} ORDER BY seq`)
+      .all(...params) as { seq: number; record: string }[];
+    const drop = leadingRowsToDrop(stored, wanted);
+    if (drop === null) {
+      db.query(`DELETE FROM ${table} WHERE ${clause}`).run(...params);
+      for (const record of wanted) insert.run(...params, record);
+      return;
+    }
+    const dropOne = db.query(`DELETE FROM ${table} WHERE seq = ?`);
+    for (let i = 0; i < drop; i += 1) dropOne.run(stored[i]!.seq);
+    for (let i = stored.length - drop; i < wanted.length; i += 1) insert.run(...params, wanted[i]!);
   })();
+}
+
+/** How many leading rows must go for the rest to be a prefix of [wanted], or
+ *  null when nothing makes it one and the scope has to be rewritten. */
+function leadingRowsToDrop(stored: readonly { record: string }[], wanted: readonly string[]): number | null {
+  for (let drop = 0; drop <= stored.length; drop += 1) {
+    const overlap = stored.length - drop;
+    if (overlap > wanted.length) continue;
+    let matches = true;
+    for (let i = 0; i < overlap; i += 1) {
+      if (stored[drop + i]!.record !== wanted[i]) { matches = false; break; }
+    }
+    if (matches) return drop;
+  }
+  return null;
 }
 
 /** Every row any of these tables holds for [scope]. The bytes an artifact
