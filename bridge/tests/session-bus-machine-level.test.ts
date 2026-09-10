@@ -8,7 +8,7 @@
 // here — `self()`, a route, and `resume()` all spanning a project boundary —
 // gets its own suite rather than living as an implicit case there.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
@@ -17,8 +17,9 @@ import { createMessage, type AbMessage, type SessionMemberKey, type SessionMembe
 import { setLogLevel } from "../src/logger";
 import { BUS_ROUTE_TTL_MS, MAX_BUS_ROUTES } from "../src/session-bus/constants";
 import { SessionBusCoordinator } from "../src/session-bus/coordinator";
-import { loadBusRoutes, saveBusRoutes } from "../src/session-bus/route-store";
+import { loadBusRoutes, ROUTE_STORE_VERSION, saveBusRoutes } from "../src/session-bus/route-store";
 import { SessionBusSessionIndex } from "../src/session-bus/session-index";
+import { sessionBusMachineDir } from "../src/session-bus/store-fs";
 import { SessionManager } from "../src/session-manager";
 
 setLogLevel("error");
@@ -471,10 +472,10 @@ test("hydrating routes does not regress a fresher one already learned live", () 
   // HostServer's own call site runs hydrateRoutes off a `.finally()` on an
   // async sessionIndex.hydrate() (host-server.ts), so an inbound frame can
   // already have called noteRoute for a context before that disk read
-  // resolves. Reproduced directly, without the async indirection: a stale row
-  // sits on disk, the coordinator learns a fresher one live, then hydrates —
-  // hydrating must not overwrite what live traffic just proved.
-  saveBusRoutes(abDir, new Map([["ctx-1", { peerId: "app-stale", projectId: "p1", at: 1_000 }]]));
+  // resolves. Reproduced directly, without the async indirection: the
+  // coordinator learns a route live, the file it is about to hydrate from
+  // holds an older one, and hydrating must not overwrite what live traffic
+  // just proved.
   const now = 2_000;
   const coordinator = new SessionBusCoordinator({
     abDir,
@@ -484,7 +485,79 @@ test("hydrating routes does not regress a fresher one already learned live", () 
     now: () => now,
   });
   coordinator.noteRoute("ctx-1", "app-fresh", "p1");
+  // Written AFTER noteRoute, and by hand rather than through saveBusRoutes:
+  // noteRoute forces a save of its own, and the write path merges newest-`at`
+  // first, so any stale row seeded before it is gone from the file by the time
+  // hydrate reads it — which is exactly what made an earlier version of this
+  // test pass with the freshness guard deleted.
+  mkdirSync(sessionBusMachineDir(abDir), { recursive: true });
+  writeFileSync(
+    join(sessionBusMachineDir(abDir), "routes.json"),
+    JSON.stringify({
+      version: ROUTE_STORE_VERSION,
+      routes: [{ contextId: "ctx-1", peerId: "app-stale", projectId: "p1", at: 1_000 }],
+    }),
+    "utf8",
+  );
+
   coordinator.hydrateRoutes();
   expect(coordinator.routeFor("ctx-1")?.peerId).toBe("app-fresh");
   coordinator.stop();
+});
+
+test("an expired route's drop is written to disk, not just to the table", () => {
+  // routeFor forces a save precisely so the drop outlives the process. The
+  // machine file is merged into, never replaced, so a row this table simply
+  // stops mentioning reads as "unknown to me" and is copied back off disk —
+  // the drop only lands because it is NAMED in the save.
+  let now = 1_000_000;
+  saveBusRoutes(abDir, new Map([["ctx-lapsed", { peerId: "phone#m1", projectId: "p1", at: now }]]));
+  const coordinator = new SessionBusCoordinator({
+    abDir,
+    projectIdFor: () => null,
+    self: () => null,
+    send: () => true,
+    now: () => now,
+  });
+  coordinator.hydrateRoutes();
+  now += BUS_ROUTE_TTL_MS + 1;
+  expect(coordinator.routeFor("ctx-lapsed")).toBeNull();
+  coordinator.stop();
+
+  // Read back with an effectively infinite TTL: loadBusRoutes' own TTL filter
+  // would hide the row and prove nothing about whether the save erased it.
+  expect([...loadBusRoutes(abDir, Number.MAX_SAFE_INTEGER, now).keys()]).toEqual([]);
+});
+
+test("an evicted route does not come back on the next hydrate", () => {
+  // The cap case is the one an on-read TTL cannot cover: an evicted row can
+  // carry a live `at` (a successful send restamps it by reference without
+  // moving its LRU position), so if the eviction is not persisted the row
+  // survives the file cap AND the load filter, and the next process start
+  // hydrates the very entry this one evicted for space.
+  let now = 1_000_000;
+  const coordinator = new SessionBusCoordinator({
+    abDir,
+    projectIdFor: () => null,
+    self: () => null,
+    send: () => true,
+    now: () => now,
+  });
+  coordinator.noteRoute("ctx-victim", "peer-v", "p1");
+  for (let i = 0; i < MAX_BUS_ROUTES - 1; i++) {
+    now += 1;
+    coordinator.noteRoute(`ctx-${i}`, `peer-${i}`, "p1");
+  }
+  now += 1;
+  const live = coordinator.routeFor("ctx-victim");
+  expect(live).not.toBeNull();
+  live!.at = now; // what a send that actually got out does (routeFor's doc)
+  now += 1;
+  coordinator.noteRoute("ctx-0", "peer-0-rebound", "p1"); // forces a save carrying the restamp
+  now += 1;
+  coordinator.noteRoute("ctx-over", "peer-over", "p1"); // ctx-victim is the front: evicted
+  expect(coordinator.routeFor("ctx-victim")).toBeNull();
+  coordinator.stop();
+
+  expect(loadBusRoutes(abDir, BUS_ROUTE_TTL_MS, now).get("ctx-victim")).toBeUndefined();
 });

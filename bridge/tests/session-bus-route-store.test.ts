@@ -132,6 +132,36 @@ test("a save never lets a stale row it still holds regress a fresher one on disk
   }
 });
 
+test("a named drop erases the row a bare absence would have resurrected", () => {
+  const abDir = tmpAbDir();
+  try {
+    saveBusRoutes(abDir, routes([["ctx-lapsed", "app-a", "p1", T0], ["ctx-live", "app-b", "p1", T0]]));
+    // What a TTL expiry or an LRU eviction leaves behind: a table that simply
+    // no longer mentions the row. Only the explicit drop makes it gone.
+    saveBusRoutes(abDir, routes([["ctx-live", "app-b", "p1", T0]]), { contextIds: ["ctx-lapsed"] });
+    const loaded = loadBusRoutes(abDir, TTL * 1_000, T0 + 1_000);
+    expect([...loaded.keys()]).toEqual(["ctx-live"]);
+  } finally {
+    rmSync(abDir, { recursive: true, force: true });
+  }
+});
+
+test("a dropped context relearned before the save wins over the drop", () => {
+  const abDir = tmpAbDir();
+  try {
+    saveBusRoutes(abDir, routes([["ctx-1", "app-old", "p1", T0]]));
+    // noteRoute prunes on a TTL sweep and can re-set the very context it just
+    // pruned, in that order, before one save. The incoming row is proof the
+    // route is live again, so the drop must not outrank it — which is why
+    // contextIds are applied to the DISK rows, before the merge.
+    saveBusRoutes(abDir, routes([["ctx-1", "app-new", "p1", T0 + 500]]), { contextIds: ["ctx-1"] });
+    const loaded = loadBusRoutes(abDir, TTL * 1_000, T0 + 1_000);
+    expect(loaded.get("ctx-1")).toEqual({ peerId: "app-new", projectId: "p1", at: T0 + 500 });
+  } finally {
+    rmSync(abDir, { recursive: true, force: true });
+  }
+});
+
 test("a purge drops a project's rows even when the writer's own table never held them", () => {
   const abDir = tmpAbDir();
   try {
@@ -145,7 +175,7 @@ test("a purge drops a project's rows even when the writer's own table never held
     // The forgetting writer's in-memory table has already dropped ctx-gone, so
     // its save carries only what remains — a plain merge would read that
     // absence as "unknown to me", not "gone", and write ctx-gone straight back.
-    saveBusRoutes(abDir, routes([["ctx-kept", "app-b", "p-kept", T0]]), "p-forgotten");
+    saveBusRoutes(abDir, routes([["ctx-kept", "app-b", "p-kept", T0]]), { projectId: "p-forgotten" });
     const loaded = loadBusRoutes(abDir, TTL * 1_000, T0 + 1_000);
     expect([...loaded.keys()]).toEqual(["ctx-kept"]);
   } finally {

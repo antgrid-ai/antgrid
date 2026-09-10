@@ -70,10 +70,15 @@ export function loadBusRoutes(abDir: string, ttlMs: number, now: number): BusRou
   return map;
 }
 
-/** The file's raw rows, keyed by contextId, with no TTL filtering — the merge
- *  functions below need the row as it actually sits on disk (including one a
- *  live TTL check would already drop) so a slow writer never mistakes "expired"
- *  for "absent" and re-adds what the file already agrees is gone. */
+/** The file's raw rows, keyed by contextId, with no TTL filtering. An `at` that
+ *  reads as lapsed on disk is not proof the route is dead: a bare restamp is
+ *  only flushed when a save comes due (`BUS_ROUTE_PERSIST_INTERVAL_MS`), so a
+ *  sibling process's row can look expired here while that process is still
+ *  carrying frames on it — and this writer has no standing to delete another's
+ *  row on a clock it cannot see. The cost is that a dead row rides along in
+ *  every save until its own writer drops it (`drops` below) or the file cap
+ *  sorts it off the end; nothing ever acts on one, because `loadBusRoutes`
+ *  applies the TTL on the way back in. */
 function readOnDiskRoutes(abDir: string): Map<string, BusRoute> {
   const file = readStoreFile<z.infer<typeof BusRoutesFileSchema> | null>(
     routesPath(abDir),
@@ -115,31 +120,56 @@ function writeRoutes(abDir: string, merged: Map<string, BusRoute>): void {
 }
 
 /**
+ * What a writer means to REMOVE from the shared file, as opposed to merely not
+ * mentioning. A plain merge cannot express a deletion — a row this writer's
+ * table no longer holds reads as "unknown to me", not "gone" — so every drop
+ * that has to be durable names itself here.
+ *
+ * Both kinds delete rows a sibling process may still be using: `contextIds`
+ * because the sibling's own row for that context is the same row, `projectId`
+ * because the purge runs over the merged set, which by design contains the
+ * sibling's rows too. Both are self-healing at the cost of one relearn — the
+ * sibling restamps from its own table on its next save — and both are the
+ * lesser evil against a forgotten project's routes surviving forever.
+ */
+export interface BusRouteDrops {
+  /** Rows this writer deleted from its own table and needs gone from disk:
+   *  a TTL expiry, an LRU eviction, a context whose route lapsed at lookup. */
+  contextIds?: Iterable<string>;
+  /** Every row naming this project, used by `forgetProjectRoutes` alone. */
+  projectId?: string;
+}
+
+/**
  * Merge [routes] into whatever is currently on disk and write the result —
  * never a wholesale replace. The file is machine-level (E9/§5.4/C5) and
  * nothing enforces one host process per `ANTGRID_DIR` (the documented
  * dev-stack-beside-installed-bridge setup is exactly this), so a caller's own
  * table is only ITS view, never the machine's whole one; overwriting the file
  * with it would erase every row a sibling process learned since this one last
- * read.
+ * read. Silence about a context is therefore never permission to delete it —
+ * [drops] is how a writer says it means one gone, and `BusRouteDrops` carries
+ * what that costs a sibling.
  *
- * [purgeProjectId], when given, drops every row naming that project from the
- * MERGED result before it is written — used by `forgetProjectRoutes` alone.
- * A plain merge cannot express a deletion (a row this table no longer
- * mentions reads as "unknown to me", not "gone"), so without this a forgotten
- * project's rows — still sitting on disk from an earlier save — would survive
- * the very save meant to erase them, straight back into the merged set.
+ * `drops.contextIds` is applied to the DISK rows BEFORE the merge, while
+ * `drops.projectId` is applied to the merged result after it. The difference
+ * is deliberate: a context dropped and then relearned before the save comes
+ * due is present in [routes], and the incoming row is proof it is live again,
+ * so it must win; a forgotten project has nothing that could relearn it in
+ * this process at all.
  *
  * The read-merge-write here is not atomic across processes — two saves racing
  * between their own read and write can still lose one side's update — but the
  * failure shrinks from "the whole table" to "one row", and a lost row costs a
  * relearn, never a misdelivery (route-store.ts's header).
  */
-export function saveBusRoutes(abDir: string, routes: BusRouteMap, purgeProjectId?: string): void {
-  const merged = mergeRoutes(readOnDiskRoutes(abDir), routes);
-  if (purgeProjectId !== undefined) {
+export function saveBusRoutes(abDir: string, routes: BusRouteMap, drops?: BusRouteDrops): void {
+  const onDisk = readOnDiskRoutes(abDir);
+  for (const contextId of drops?.contextIds ?? []) onDisk.delete(contextId);
+  const merged = mergeRoutes(onDisk, routes);
+  if (drops?.projectId !== undefined) {
     for (const [contextId, r] of merged) {
-      if (r.projectId === purgeProjectId) merged.delete(contextId);
+      if (r.projectId === drops.projectId) merged.delete(contextId);
     }
   }
   writeRoutes(abDir, merged);

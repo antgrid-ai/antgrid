@@ -30,7 +30,7 @@ import { artifactById, loadArtifacts, readArtifactContent, type ArtifactState } 
 import { ARTIFACT_CHUNK_BYTES, BUS_ROUTE_PERSIST_INTERVAL_MS, BUS_ROUTE_TTL_MS, MAX_BUS_ROUTES } from "./constants";
 import { checkEnvelopeSize, stampEnvelope, type EnvelopeDraft } from "./envelope";
 import { refuse, type SessionBusRefusal } from "./errors";
-import { loadBusRoutes, saveBusRoutes, type BusRouteMap } from "./route-store";
+import { loadBusRoutes, saveBusRoutes, type BusRouteDrops, type BusRouteMap } from "./route-store";
 import {
   emptyHeld,
   expireHeld,
@@ -237,11 +237,14 @@ export class SessionBusCoordinator {
   noteRoute(contextId: string, peerId: string | undefined, projectId: string): void {
     if (!peerId) return;
     const now = this.now();
-    let pruned = false;
+    // Named, not counted: the save below has to say which rows it means gone,
+    // or the merge reads their absence from this table as "unknown" and copies
+    // them straight back off disk.
+    const dropped: string[] = [];
     for (const [key, origin] of this.routes) {
       if (now - origin.at >= BUS_ROUTE_TTL_MS) {
         this.routes.delete(key);
-        pruned = true;
+        dropped.push(key);
       }
     }
     const previous = this.routes.get(contextId)?.peerId;
@@ -254,9 +257,9 @@ export class SessionBusCoordinator {
       const oldest = this.routes.keys().next();
       if (oldest.done) break;
       this.routes.delete(oldest.value);
-      pruned = true;
+      dropped.push(oldest.value);
     }
-    this.saveRoutesIfDue(now, pruned || previous !== peerId);
+    this.saveRoutesIfDue(now, dropped.length > 0 || previous !== peerId, { contextIds: dropped });
     // Logged because a carrier attach is otherwise invisible: nothing else
     // records which app session a bus context routes through, which makes a
     // peer that cannot answer indistinguishable from one that was never
@@ -286,27 +289,28 @@ export class SessionBusCoordinator {
     const now = this.now();
     if (now - origin.at >= BUS_ROUTE_TTL_MS) {
       this.routes.delete(contextId);
-      this.saveRoutesIfDue(now, true);
+      this.saveRoutesIfDue(now, true, { contextIds: [contextId] });
       return null;
     }
     return origin;
   }
 
-  /** Persist the map, throttled: a binding change or a prune is written at
+  /** Persist the map, throttled: a binding change or a drop is written at
    *  once, a bare restamp only every {@link BUS_ROUTE_PERSIST_INTERVAL_MS}.
    *  One machine-level file (E9/§5.4/C5), so this table's own rows are only
    *  ONE process's view of it — two hosts pointed at one ANTGRID_DIR is a
    *  documented setup (dev stack beside an installed bridge), not a
    *  once-per-abDir guarantee this coordinator can lean on. `saveBusRoutes`
    *  merges into whatever the other one last wrote rather than replacing it,
-   *  which is what makes that sharing safe. [purgeProjectId], threaded through
-   *  from `forgetProjectRoutes`, is the one case a merge cannot express on its
-   *  own — see `saveBusRoutes`'s doc. */
-  private saveRoutesIfDue(now: number, force: boolean, purgeProjectId?: string): void {
+   *  which is what makes that sharing safe — and is why every DELETION has to
+   *  be named in [drops]: a merge cannot read a row's absence from this table
+   *  as anything but "unknown to me", so a forced write of a pruned map would
+   *  otherwise persist nothing at all. */
+  private saveRoutesIfDue(now: number, force: boolean, drops?: BusRouteDrops): void {
     if (!force && now - this.routesSavedAt < BUS_ROUTE_PERSIST_INTERVAL_MS) return;
     this.routesSavedAt = now;
     try {
-      saveBusRoutes(this.deps.abDir, this.routes, purgeProjectId);
+      saveBusRoutes(this.deps.abDir, this.routes, drops);
     } catch (err) {
       // A route that outlives this process is an optimisation over relearning
       // one; a bridge must not fail to carry a frame because it could not
@@ -321,18 +325,18 @@ export class SessionBusCoordinator {
    * machine routes.json (`sessionBusMachineDir`) lives outside
    * `agents/<projectId>/`, so the tree delete that reclaims everything else the
    * project owned cannot reach these rows — this is their only reclaim. The
-   * write is FORCED rather than throttled, and passes [projectId] through as
-   * `saveRoutesIfDue`'s purge — a plain merge-on-write would read this
-   * project's absence from the in-memory table as "unknown", not "gone", and
-   * write the very rows this call means to erase straight back from disk. The
-   * drop must be durable on its own: `forget` may be the last bus-relevant
-   * thing this process ever does, and an in-memory drop nothing persisted is
-   * undone wholesale by the next process start, since `hydrateRoutes` sets
-   * every row it finds without asking whether the machine still holds that
-   * project. Never called on an eviction: a merely-cold project is still real,
-   * and its routes must survive for the coordinator to keep dispatching
-   * against once it warms again, the same way its sessions survive in the
-   * session index.
+   * write is FORCED rather than throttled, and names [projectId] as a
+   * `BusRouteDrops` — a plain merge-on-write would read this project's absence
+   * from the in-memory table as "unknown", not "gone", and write the very rows
+   * this call means to erase straight back from disk. The drop must be durable
+   * on its own: `forget` may be the last bus-relevant thing this process ever
+   * does, and an in-memory drop nothing persisted is undone by the next process
+   * start, since `hydrateRoutes` reads the file without asking whether the
+   * machine still holds the projects it names.
+   *
+   * Never called on an eviction: a merely-cold project is still real, and its
+   * routes must survive for the coordinator to keep dispatching against once it
+   * warms again, the same way its sessions survive in the session index.
    */
   forgetProjectRoutes(projectId: string): void {
     let dropped = false;
@@ -342,7 +346,7 @@ export class SessionBusCoordinator {
         dropped = true;
       }
     }
-    if (dropped) this.saveRoutesIfDue(this.now(), true, projectId);
+    if (dropped) this.saveRoutesIfDue(this.now(), true, { projectId });
   }
 
   /** Register (or, with null, clear) the per-project consumer that turns a bus
