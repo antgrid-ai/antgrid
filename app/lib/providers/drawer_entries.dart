@@ -82,9 +82,11 @@ List<DrawerEntry> applyDrawerOrder(
 /// Merged + user-ordered drawer list. Re-derives whenever projects, recent
 /// agents, inventory, or the persisted order change.
 ///
-/// When [accountAgentsProvider] is loading or has errored the inventory source
-/// is treated as empty so the drawer still renders immediately with local +
-/// recent data.
+/// A loading or errored [accountAgentsProvider] keeps its PREVIOUS inventory —
+/// `AsyncValue.value` retains it — so the drawer renders immediately with
+/// local + recent data and survives an offline refresh without blanking.
+/// Emptying it on sign-out is therefore that provider's job, not this one's:
+/// it resolves signed-out to empty DATA.
 final drawerEntriesProvider = Provider<List<DrawerEntry>>((ref) {
   // The sample project is the whole drawer while the demo is on, and none of
   // the real sources below are watched: `accountAgentsProvider` reads the
