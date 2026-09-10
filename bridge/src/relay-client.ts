@@ -391,6 +391,13 @@ export class RelayClient {
     return this.mux.attach(bus, opts);
   }
 
+  /** We just told the app which stream a project is on (`stream-ready`), so any
+   *  `stream-unbound` mute on it is answered. Call it BEFORE publishing, or the
+   *  frames the re-advert is meant to unblock ride out while still muted. */
+  noteStreamBound(streamId: string): void {
+    this.mux.markBound(streamId);
+  }
+
   /**
    * Outbound app frames go through one queue per channel so that per-channel
    * order is the queue's order and nothing else, and so a frame is sealed only
@@ -1096,6 +1103,13 @@ export class RelayClient {
       // hand every project core a message type it has no case for. The frame
       // that CARRIED it is already in the ring from routeAppEnvelope above, so
       // the batch's own arrival stays visible either way.
+      // Consumed here like `netwatch:events` below: this is a statement about
+      // the SOCKET's stream table, not a verb, and the bus it would reach is
+      // the one whose stream the app just said it cannot receive.
+      if (msg.type === "stream-unbound") {
+        this.mux.markUnbound(msg.streamId);
+        return;
+      }
       if (msg.type === "netwatch:events") {
         // Dropped unless a `netwatch:remote` on this machine asked for it.
         // Account trust alone gets a peer to this line, and this line runs

@@ -94,5 +94,51 @@ void main() {
       expect(w['frameId'], frameIdOf(sealed[0], FrameKind.sealed));
       expect(w['openedUnder'], 1);
     });
+
+    test('answers the agent with stream-unbound, once per id per window', () async {
+      // The log records that we are losing frames; this is what asks the agent
+      // to stop sending them. Nothing else does — the agent's `stream-invalid`
+      // covers only the opposite direction, so without this a live PTY on a
+      // stream we never bound drops a frame per frame for as long as it runs.
+      Future<void> injectGhost() async =>
+          inject(await _sealFromAgent(keys, jsonEncode(_ghostEnvelope)));
+
+      for (var i = 0; i < 4; i++) {
+        await injectGhost();
+      }
+
+      final notices = <Map<String, dynamic>>[];
+      for (final f in relay.sent) {
+        final plain = await E2eTransportDart(
+          sendKey: keys.a2p,
+          recvKey: keys.p2a,
+        ).open(f.payload);
+        if (plain == null) continue;
+        final env = jsonDecode(plain) as Map<String, dynamic>;
+        // The notice is a control-plane statement about the stream table, so it
+        // rides stream "0" — sending it ON the dead stream would be circular.
+        if (env['s'] != null) continue;
+        final m = env['m'];
+        if (m is Map<String, dynamic> && m['type'] == 'stream-unbound') {
+          notices.add(m);
+        }
+      }
+
+      expect(notices, hasLength(1));
+      expect(notices.single['streamId'], 'ghost-stream');
+      // `id` is z.string().uuid() on the wire (bridge/src/protocol.ts) and this
+      // package carries no uuid dependency, so the shape is worth pinning.
+      expect(
+        notices.single['id'],
+        matches(
+          r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+        ),
+      );
+      // The notice is a request, not a repair: all four frames were still
+      // dropped. The log is throttled on its own window, so the remaining three
+      // are carried in the suppressed count and reported by the next line.
+      expect(warns, hasLength(1));
+      expect(warns.single!['framesDropped'], 1);
+    });
   });
 }
