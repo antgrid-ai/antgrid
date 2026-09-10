@@ -20,6 +20,7 @@ import '../providers/sessions.dart';
 import '../providers/session_workspace_state.dart';
 import '../providers/visible_surface.dart';
 import '../services/terminal_service.dart';
+import '../util/detached.dart';
 import 'terminal_detail_view.dart';
 import 'terminal_view_wrapper.dart';
 import 'workspace_tab_bar.dart';
@@ -149,6 +150,13 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
 
   Widget _buildBody(TerminalService terminalService, SessionUiKey? key) {
     final tabs = _adHocTerminals;
+    // `select` so the list is not rebuilt by per-terminal hydration churn on
+    // the same state object.
+    final attach = ref.watch(
+      terminalStateProvider.select(
+        (s) => s.value?.attach ?? CheckoutAttachStatus.unknown,
+      ),
+    );
 
     // Push navigation — fullscreen terminal output.
     if (_pushedTerminalId != null) {
@@ -196,7 +204,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
       final remaining = tabs
           .where((t) => t.terminalId != _pinnedTerminalId)
           .toList();
-      return _buildPinnedView(pinnedTab, remaining, terminalService);
+      return _buildPinnedView(pinnedTab, remaining, terminalService, attach);
     }
 
     // List with header.
@@ -205,7 +213,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
         _buildHeader(terminalService, tabs),
         Expanded(
           child: tabs.isEmpty
-              ? _buildEmptyState(terminalService, tabs)
+              ? _buildEmptyOrAttaching(terminalService, tabs, attach)
               : _buildList(tabs, terminalService),
         ),
       ],
@@ -214,22 +222,77 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
 
   // ── Empty state ──────────────────────────────────────────────────────────
 
+  /// The nothing-to-list surface, forked on whether the checkout has actually
+  /// finished attaching.
+  ///
+  /// "No terminals" is a claim about the project, so it may only be made once
+  /// the app knows there are none; while terminals are still being attached the
+  /// same emptiness means nothing yet.
+  Widget _buildEmptyOrAttaching(
+    TerminalService service,
+    List<TerminalTab> tabs,
+    CheckoutAttachStatus attach,
+  ) {
+    switch (attach) {
+      case CheckoutAttachStatus.attaching:
+        return const AbEmptyState.compact(title: 'attaching terminals…');
+      case CheckoutAttachStatus.failed:
+        // Retry re-asks for the checkout's status, not one terminal's screen:
+        // a checkout-wide failure means no `agent:status` ever arrived, so
+        // there is no per-terminal pull to name. New Terminal stays — opening
+        // a shell works whether or not the re-ask lands.
+        return AbEmptyState.error(
+          title: "Couldn't load terminals",
+          subtitle: 'the agent has not answered yet',
+          // Wrapped, not a Row: the empty state centres its action inside the
+          // pane's own padding, and two buttons do not fit a pinned split at
+          // its narrowest.
+          action: Wrap(
+            spacing: AbTokens.space8,
+            alignment: WrapAlignment.center,
+            children: [
+              // No in-flight label: the re-ask clears the verdict
+              // synchronously, so this arm is gone before one could paint.
+              AbButton(
+                label: 'Retry',
+                color: context.antgrid.accent,
+                onTap: () => detached(
+                  'TerminalListView',
+                  'retry checkout attach failed',
+                  service.retryCheckoutAttach,
+                ),
+                compact: true,
+              ),
+              _newTerminalButton(service, tabs),
+            ],
+          ),
+        );
+      case CheckoutAttachStatus.unknown:
+      case CheckoutAttachStatus.ready:
+        return _buildEmptyState(service, tabs);
+    }
+  }
+
   Widget _buildEmptyState(TerminalService service, List<TerminalTab> tabs) {
-    final existingIds = tabs.map((t) => t.terminalId).toSet();
     return AbEmptyState(
       icon: AbIcons.terminal,
       title: 'No terminals',
       subtitle: 'Open a shell to interact with your project',
-      action: AbButton(
-        label: 'New Terminal',
-        leading: AbIcon(AbIcons.add, size: 12, color: context.antgrid.accent),
-        onTap: () {
-          final id = _nextAdHocTerminalId(existingIds);
-          final name = _terminalName(id);
-          service.createAdHocTerminal(id, name: name);
-          _setPushedTerminal(id);
-        },
-      ),
+      action: _newTerminalButton(service, tabs),
+    );
+  }
+
+  Widget _newTerminalButton(TerminalService service, List<TerminalTab> tabs) {
+    final existingIds = tabs.map((t) => t.terminalId).toSet();
+    return AbButton(
+      label: 'New Terminal',
+      leading: AbIcon(AbIcons.add, size: 12, color: context.antgrid.accent),
+      onTap: () {
+        final id = _nextAdHocTerminalId(existingIds);
+        final name = _terminalName(id);
+        service.createAdHocTerminal(id, name: name);
+        _setPushedTerminal(id);
+      },
     );
   }
 
@@ -341,6 +404,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
     TerminalTab pinnedTab,
     List<TerminalTab> remaining,
     TerminalService service,
+    CheckoutAttachStatus attach,
   ) {
     return ColoredBox(
       color: context.antgrid.bgDeepest,
@@ -403,7 +467,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
           Expanded(
             flex: 2,
             child: remaining.isEmpty
-                ? _buildEmptyState(service, remaining)
+                ? _buildEmptyOrAttaching(service, remaining, attach)
                 : _buildList(remaining, service),
           ),
         ],

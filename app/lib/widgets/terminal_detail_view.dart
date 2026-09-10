@@ -1,8 +1,8 @@
 import 'package:flutter/widgets.dart';
 
+import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
-import '../design/ab_colors.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/terminal_models.dart';
@@ -44,6 +44,13 @@ class TerminalDetailView extends StatelessWidget {
                     onTap: onBack,
                   ),
                   const SizedBox(width: AbTokens.space8),
+                  // Process liveness, never conflated with attach progress —
+                  // see sessionStateTone's own doc. A hydrating tab is
+                  // legitimately `running`. Attach progress is named by the
+                  // hydration strip inside the TerminalViewWrapper below,
+                  // which also carries the elapsed readout and the Retry; a
+                  // second copy of that label one row above it says nothing
+                  // the user cannot already see.
                   AbStatusDot(tone: sessionStateTone(tab.sessionState)),
                   const SizedBox(width: AbTokens.space8),
                   Expanded(

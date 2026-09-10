@@ -18,7 +18,7 @@ import { resolveApprovalPolicy } from "./agent-approval-policy";
 import type { AgentSpec as RegistryAgentSpec } from "./agents/types";
 import type { ApprovalPolicy } from "./agents/types";
 import { stripAnsi } from "./handler/context";
-import { resumeArgv, sessionResumable } from "./agent-resume";
+import { agentSessionGone, resumeArgv, sessionResumable } from "./agent-resume";
 import { isChatCapableTool } from "./structured/chat-capable";
 import { initialPromptArgv } from "./initial-prompt";
 import { TITLE_RANKS, titleRankValue, type TitleRank } from "./session-namer";
@@ -113,10 +113,14 @@ export interface SessionManagerOpts {
    *  exactly one per-session reduction; absent for a bare core with no owner,
    *  which then advertises no status at all. */
   sessionWorkStatusFor?: (sessionId: string) => WorkStatus | undefined;
-  /** Override for the codex thread store dir (availability hints). Unset in
-   *  production → defaults to ~/.codex; tests inject an isolated dir. */
+  /** Override for the codex thread store dir. Read for availability hints and —
+   *  codex being the one `sessionStoreIsAuthoritative` agent — for the disown
+   *  verdict setAgentSession and a launch act on, so a test that lets this
+   *  default through changes what the manager DOES, not just what it reports.
+   *  Unset in production → $CODEX_HOME or ~/.codex. */
   codexHome?: string;
-  /** Override for the Copilot session store dir (availability hints). */
+  /** Override for the Copilot session store dir (availability hints only: its
+   *  store is not authoritative, so a miss there refuses nothing). */
   copilotHome?: string;
   /** Override for how long setMode waits on the old runtime's teardown. Unset in
    *  production → TEARDOWN_TIMEOUT_MS; tests inject a short one to exercise the
@@ -538,7 +542,8 @@ export class SessionManager {
   // agentSessionId they were computed for. toWire() runs per entry on every
   // changed() emit and the real check does existsSync + a bun:sqlite query, so
   // it must never reach that path. Invalidated whenever setAgentSession writes
-  // something new. Launches let the provider validate the saved identity.
+  // something new. Launches let the provider validate the saved identity, save
+  // for the one verdict agentSessionGone acts on: a positive disown.
   private resumableCache = new Map<string, { agentSessionId: string; resumable: boolean }>();
   /** Sessions launched to CONTINUE their previous conversation, until the agent
    *  reports the identity it continued under. Per-run and therefore in memory:
@@ -1089,10 +1094,48 @@ export class SessionManager {
    * (overwrite-latest). Called from the /session-title pipeline every turn.
    * No-ops for unknown ids (service PTYs) so callers can fire it freely.
    * `id` is the slot id (== the hook's terminalId == the spawned PTY id).
+   *
+   * Returns whether the slot now holds this id. A caller that acts on the id it
+   * just posted must gate on that: the refusal below is silent otherwise, and
+   * every such caller would go on treating a disowned thread as the slot's own.
    */
-  setAgentSession(id: string, agentSessionId: string, agentTranscriptPath?: string): void {
+  setAgentSession(id: string, agentSessionId: string, agentTranscriptPath?: string): boolean {
     const entry = this.entries.get(id);
-    if (!entry) return;
+    if (!entry) return false;
+    // An agent reports the thread that fired the turn, which is not always the
+    // thread the user is in: codex's TUI runs helper threads of its own inside
+    // the same process (the "catch-up" blurb it writes when you reopen a
+    // session is one), and they are ephemeral — no rollout, no row in the
+    // thread store, nothing `codex resume` can ever find. Letting one land here
+    // replaces a real conversation with an id that bricks every later launch,
+    // and because it arrives at turn END it is usually the LAST thing reported
+    // before the PTY closes, so it is the one that sticks.
+    //
+    // Scoped to a report that would DISPLACE an id already held — the whole of
+    // that case and none of its cost. A FIRST report has nothing to overwrite
+    // and is the only chance codex gives us to learn a thread at all (its
+    // `/session-title` post fires on after-agent alone), so refusing one a
+    // just-created thread has not reached the store yet would leave that
+    // session with no identity for good. A re-report of the id already stored
+    // is what every turn sends, and this check is a readdir plus a synchronous
+    // sqlite open — the work `resumableCache` exists to keep off such a path.
+    //
+    // Only a positive "I do not hold this" refuses; a store that cannot answer
+    // still reports freely, and the next turn re-reports the live thread
+    // regardless, so a false refusal costs one update rather than an identity.
+    const displaces = entry.agentSessionId !== undefined && entry.agentSessionId !== agentSessionId;
+    const reportingTool = displaces ? this.resumeToolFor(entry) : undefined;
+    if (reportingTool && agentSessionGone({
+      tool: reportingTool,
+      agentSessionId,
+      codexHome: this.opts.codexHome,
+      copilotHome: this.opts.copilotHome,
+    })) {
+      log.warn(
+        `session ${id}: ${reportingTool} disowns reported conversation ${agentSessionId}; keeping ${entry.agentSessionId}`,
+      );
+      return false;
+    }
     // A conversation change releases the slot's title — the name describes what
     // was being worked on, not the slot. Ordered BEFORE the unchanged early-out
     // below so a resume that comes back under the SAME id still consumes the
@@ -1111,7 +1154,7 @@ export class SessionManager {
         ? (agentTranscriptPath ?? entry.agentTranscriptPath)
         : agentTranscriptPath;
     if (entry.agentSessionId === agentSessionId && entry.agentTranscriptPath === nextPath) {
-      return; // unchanged — avoid a redundant flush/emit
+      return true; // unchanged — avoid a redundant flush/emit
     }
     entry.agentSessionId = agentSessionId;
     entry.agentTranscriptPath = nextPath;
@@ -1122,6 +1165,7 @@ export class SessionManager {
     // real provider fork.
     if (this.awaitingNativeForkIdentity(entry)) this.completeForkLaunch(entry);
     this.changed();
+    return true;
   }
 
   /** Handler-judge lookup. agentTranscriptPath is deliberately ABSENT from
@@ -1419,10 +1463,32 @@ export class SessionManager {
     queueMicrotask(() => this.notifyObservers());
   }
 
-  private resumeArgsFor(tool: string, entry: PersistedEntry): string[] {
-    // Only the provider can decide whether its saved identity is resumable.
-    // A missing local index row must not replace the user's conversation.
+  /**
+   * The identity to hand THIS launch, or undefined when the agent positively
+   * disowns it. Shared by the per-session-tool and the default-spec (copilot)
+   * launch paths, and by the chat path below.
+   *
+   * Deliberately does not clear `entry.agentSessionId`: an id the store cannot
+   * vouch for today may be one unarchive away, and erasing it in place is what
+   * used to cost users a live conversation. But handing a CLI an id it has
+   * already disowned is not "letting the provider decide" either — `codex
+   * resume <unknown>` prints "Resuming session…", exits 1 about two seconds in,
+   * and the app is left holding a session that never loads. Skip the resume for
+   * this launch, keep the id, re-ask next time.
+   */
+  private launchResumeId(tool: string, entry: PersistedEntry): string | undefined {
     const resumeId = entry.agentSessionId;
+    if (!resumeId) return undefined;
+    return agentSessionGone({
+      tool,
+      agentSessionId: resumeId,
+      codexHome: this.opts.codexHome,
+      copilotHome: this.opts.copilotHome,
+    }) ? undefined : resumeId;
+  }
+
+  private resumeArgsFor(tool: string, entry: PersistedEntry): string[] {
+    const resumeId = this.launchResumeId(tool, entry);
     return resumeId ? resumeArgv(tool, resumeId) : [];
   }
 
@@ -1931,7 +1997,7 @@ export class SessionManager {
       this.runningChat.add(id);
       const chatTool = entry.tool ?? "codex";
       resolveApprovalPolicy(chatTool, "chat", entry.approvalPolicy);
-      const resumeId = entry.conversationStart === "fork" ? undefined : entry.agentSessionId;
+      const resumeId = entry.conversationStart === "fork" ? undefined : this.launchResumeId(chatTool, entry);
       this.noteConversationStart(entry, resumeId !== undefined);
       this.opts.onStartChat?.({
         sessionId: id,

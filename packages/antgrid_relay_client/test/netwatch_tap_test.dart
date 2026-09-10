@@ -246,15 +246,25 @@ void main() {
     late FakeLiveRelay relay;
     late SessionKeys keys;
     late MachineSession session;
+    late List<Map<String, Object?>?> warns;
 
     setUp(() async {
       capture = _Capture();
       relay = FakeLiveRelay(netTap: capture.tap);
       keys = fixedKeys(1);
+      warns = [];
       session = MachineSession(
         relay: relay,
         machineDeviceId: 'machine-1',
         handshaker: FakeHandshaker(keys),
+        // Short enough that a test can cross the window without idling out the
+        // shipped 30s.
+        unknownStreamLogInterval: const Duration(milliseconds: 500),
+        logger: (level, message, {fields}) {
+          if (message == 'dropping inbound frame for unknown stream') {
+            warns.add(fields);
+          }
+        },
       );
       session.start();
       await session.ensureEstablished();
@@ -359,6 +369,51 @@ void main() {
       expect(drop['reason'], 'unknown-stream');
       expect(drop['streamId'], 'ghost-stream');
       expect(drop['msgType'], 'terminal:output');
+    });
+
+    test('a drop storm on one stream throttles the log, never the tap', () async {
+      // Nothing heals an agent pushing onto an id this app holds no transport
+      // for, so a live PTY on a stale stream drops one frame per frame with no
+      // end. A capture is bounded by how long it runs; app.log is not.
+      Future<void> injectGhost() async {
+        final payload = await _sealFromAgent(
+          keys,
+          jsonEncode({
+            's': 'ghost-stream',
+            'm': {'type': 'terminal:output'},
+          }),
+        );
+        relay.inject(
+          IncomingRouteMessage(
+            from: 'machine-1',
+            channel: 'control',
+            kind: FrameKind.sealed,
+            payload: payload,
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+
+      await injectGhost();
+      await injectGhost();
+      await injectGhost();
+
+      expect(capture.drops, hasLength(3));
+      expect(warns, hasLength(1));
+      expect(warns.single!['streamId'], 'ghost-stream');
+      expect(warns.single!['msgType'], 'terminal:output');
+      expect(warns.single!['framesDropped'], 1);
+
+      // The two the throttle swallowed are not lost to the reader — they land on
+      // the next line. This is the assertion that matters: `framesDropped` is
+      // the ONLY thing carrying magnitude once the throttle is on, so summing
+      // lines instead of this field understates the loss by orders of magnitude.
+      await Future<void>.delayed(const Duration(milliseconds: 550));
+      await injectGhost();
+
+      expect(capture.drops, hasLength(4));
+      expect(warns, hasLength(2));
+      expect(warns.last!['framesDropped'], 3);
     });
   });
 }

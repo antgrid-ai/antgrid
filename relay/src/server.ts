@@ -131,6 +131,14 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
    *  was already backlogged. The only vantage point from which account fan-in
    *  toward one bridge is visible. */
   let backpressureDrops = 0;
+  /** Monotonic since start: ROUTED frames refused by the per-(pair, channel)
+   *  token bucket. Scoped to routing deliberately — the control-plane and push
+   *  limiters reject under the same `MESSAGE_RATE_LIMITED` code and are not
+   *  counted here, so this is not a total. Kept apart from `backpressureDrops`
+   *  because the two name different faults — a sender outrunning its budget
+   *  versus a recipient that cannot keep up — and a storm of one reads as zero
+   *  on the other. */
+  let routeRateLimitDrops = 0;
 
   function recordMessage(): void {
     const now = Date.now();
@@ -585,6 +593,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     const key = `${pairKey(sender.deviceId, header.to)}|${header.channel}`;
     if (!routeRateLimiter.allow(key)) {
       recordDroppedFrame(key);
+      routeRateLimitDrops++;
       sendError(ws, "MESSAGE_RATE_LIMITED", "Message rate limit exceeded", true, {
         channel: header.channel,
         bytes: decoded.payload.length,
@@ -660,6 +669,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
           activeConnections: connections.getConnectionCount(),
           messagesPerSec: Math.round(messagesPerSec * 100) / 100,
           backpressureDrops,
+          routeRateLimitDrops,
           uptime: Math.floor((t - startTime) / 1000),
         });
       }

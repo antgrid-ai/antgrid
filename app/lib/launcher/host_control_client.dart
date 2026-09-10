@@ -7,6 +7,7 @@ import '../services/control_plane_client.dart'
 import '../models/agent_descriptor.dart';
 import '../models/branch_remote_status.dart';
 import '../models/git_branch.dart';
+import '../models/session_entry.dart';
 
 /// Loopback data-plane connect info from a `project:open` response.
 /// Non-null for all modes — every core binds a loopback listener. Mirror of
@@ -418,6 +419,25 @@ class HostControlClient {
           );
         })
         .toList(growable: false);
+  }
+
+  /// Session list for a LOCAL project, warm or cold, over the loopback plane —
+  /// the local-poll counterpart of [ControlPlaneClient.listSessions], which
+  /// only reaches a project over an already-open RELAY control-plane socket.
+  /// Used to refresh a background local project's cached Recent/drawer rows
+  /// when its work status changes while the app hasn't opened it this run
+  /// (see `_peekLocalProjectSessions` in app_shell.dart).
+  Future<List<SessionEntry>> projectSessions(
+    String projectId, {
+    bool includeArchived = false,
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    final m = await _post({
+      'type': 'project:sessions',
+      'projectId': projectId,
+      'includeArchived': includeArchived,
+    }, timeout: timeout);
+    return SessionEntry.listFromJson(m['sessions'] as List?);
   }
 
   Future<ToolsList> toolsList({

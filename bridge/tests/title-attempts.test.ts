@@ -51,6 +51,15 @@ describe("budget", () => {
     expect(a.refused(T, C)).toBe(true);
   });
 
+  test("a skipped verdict ends the budget too", () => {
+    // An installed agent could have served it and deliberately was not asked, so
+    // there is nothing a later turn could do differently either.
+    const a = new TitleAttempts(2);
+    a.begin(T, C);
+    a.settle(T, C, "skipped");
+    expect(a.refused(T, C)).toBe(true);
+  });
+
   test("a name is final", () => {
     const a = new TitleAttempts();
     a.begin(T, C);

@@ -811,6 +811,13 @@ const FileResolvePathResultMessage = BaseMessage.extend({
   // path from elsewhere, a symlink escape, or unparsable garbage).
   relPath: z.string().nullable(),
   isDirectory: z.boolean(),
+  // Absolute path, set only when relPath is null AND the path is a
+  // recognized image outside the checkout (see file-tree.ts's
+  // EXTERNAL_SAFE_IMAGE_MIME) — an image-generation tool's own output
+  // directory, typically. Lets the app preview it read-only via `file:read`
+  // (which applies the same extension gate again) instead of refusing the
+  // link outright.
+  externalImagePath: z.string().nullable(),
   ...CheckoutScoped,
 });
 

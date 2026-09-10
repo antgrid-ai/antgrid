@@ -199,6 +199,16 @@ class DemoTransport extends BufferedAgentTransport {
         };
       case 'sessions.list':
         result = <String, Object?>{'sessions': _entries};
+      case 'terminal.snapshot':
+        final s = _terminalSnapshot(params['terminalId'] as String?);
+        result = <String, Object?>{
+          'snapshot': <String, Object?>{
+            'terminalId': s['terminalId'],
+            'scrollback': s['scrollback'],
+            'seq': s['seq'],
+            'composed': s['composed'] ?? false,
+          },
+        };
       default:
         _enqueueAll(_kReplyDelay, <Map<String, Object?>>[
           <String, Object?>{

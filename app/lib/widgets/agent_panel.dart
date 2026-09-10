@@ -57,6 +57,7 @@ import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
 import 'window_title_bar.dart';
 import 'workspace_menu_button.dart';
+import 'workspace_readiness_chip.dart';
 
 class AgentPanel extends ConsumerWidget {
   const AgentPanel({super.key});
@@ -119,6 +120,7 @@ class AgentPanel extends ConsumerWidget {
               const Expanded(
                 child: TitleBarBreadcrumb(showBranchPill: false),
               ),
+              const WorkspaceReadinessChip(),
               const SizedBox(width: AbTokens.space6),
               const _SessionOverflowButton(),
             ],
@@ -361,6 +363,7 @@ class AgentBar extends ConsumerWidget {
         // mobile header above.
         const SizedBox(width: AbTokens.space12),
         const Expanded(child: TitleBarBreadcrumb()),
+        const WorkspaceReadinessChip(),
         const SizedBox(width: AbTokens.space6),
         const SessionModeControl(),
         const SizedBox(width: AbTokens.space8),

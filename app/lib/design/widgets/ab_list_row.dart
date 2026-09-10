@@ -335,7 +335,7 @@ class _AbListRowState extends State<AbListRow> {
 
     if (!widget.enabled) {
       // Disabled: visual only, dimmed, no interaction.
-      return Opacity(opacity: 0.4, child: content);
+      return Opacity(opacity: AbTokens.opacityDisabled, child: content);
     }
 
     if (_tracksFocus) {

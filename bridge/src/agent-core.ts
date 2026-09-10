@@ -38,6 +38,7 @@ import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
 import { detectInstalledTools } from "./tool-detector";
+import { modelwatch } from "./modelwatch";
 import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
@@ -50,7 +51,7 @@ import { SessionNamer } from "./session-namer";
 import { antigravityCliHome } from "./agents/antigravity/title";
 import { AntigravityTitleWatcher } from "./agents/antigravity/title-watcher";
 import { resolveStructuredTitle } from "./agents/title-dispatch";
-import { buildTitleContext, generateTitleFromContext } from "./agents/title-generate";
+import { buildTitleContext, generateTitleFromContext, type TitleGeneration } from "./agents/title-generate";
 import { TitleAttempts, type TitleOutcome } from "./agents/title-attempts";
 import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
@@ -3704,10 +3705,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // title thrown away for reasons unrelated to generating it, which releases
     // the claim without spending the budget.
     let outcome: TitleOutcome = "abandoned";
+    // Held out here so the record below can name the call the verdict belongs
+    // to: the two exits after a successful spawn settle as `abandoned`, and
+    // those are the calls that were paid for and their answer thrown away.
+    let result: TitleGeneration | undefined;
     try {
       // No cwd: a naming spawn runs in a throwaway directory of its own
       // (headlessScratchCwd), never this session's checkout.
-      const result = await generateTitleFromContext(context, { tool });
+      result = await generateTitleFromContext(context, { tool, terminalId: target.terminalId });
       if (!result.ok) {
         outcome = result.reason;
         return;
@@ -3727,6 +3732,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       namer?.onStructuredTitle(target.terminalId, result.title, "self");
     } finally {
       titleAttempts.settle(target.terminalId, key, outcome);
+      // After the settle and inside a catch of its own: that call decides
+      // whether this session may ever be named again, and an observer must
+      // never be what breaks it. `abandoned` is recorded like any other verdict
+      // — it is the one outcome nothing else counts, and the only place the
+      // spawn's own records can be told a paid-for answer was discarded.
+      try {
+        if (result) modelwatch.record({
+          callId: result.callId, phase: "outcome", purpose: "title", attempt: 1,
+          requestedTool: tool, actualTool: result.actualTool, reach: result.reach,
+          terminalId: target.terminalId, outcome,
+        });
+      } catch { /* an observer must never fail a naming run */ }
     }
   }
 
@@ -3752,14 +3769,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // Persist the agent's native resume id for this slot every turn
       // (overwrite-latest), independent of title resolution. terminalId is the
       // slot id (stamped as ANTGRID_TERMINAL_ID at spawn).
-      if (!body.titleOnly) {
-        const prevAgentSession = sessions?.get(body.terminalId)?.agentSessionId;
-        sessions?.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
+      // True only when the manager REFUSED this id — an ephemeral thread the
+      // agent's own store disowns. The slot still holds a different
+      // conversation, so nothing below may name it after the id in this post.
+      // An UNKNOWN slot is not a refusal: a service PTY never had an identity.
+      let idRefused = false;
+      if (!body.titleOnly && sessions) {
+        const slot = sessions.get(body.terminalId);
+        const prevAgentSession = slot?.agentSessionId;
+        idRefused = slot !== undefined
+          && !sessions.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
         // A new conversation under a STILL-LIVE PTY (`/clear`, `/new`) reaches
         // no exit path, so this is the only place the previous conversation's
         // title rank can be released. Left latched, it vetoes every
         // first-message title the new conversation resolves.
-        if (prevAgentSession && prevAgentSession !== body.sessionId) {
+        if (!idRefused && prevAgentSession && prevAgentSession !== body.sessionId) {
           namer?.forgetStructuredTitle(body.terminalId);
         }
       }
@@ -3772,7 +3796,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       const hookTool = body.agent ? BY_HOOK_NAME[body.agent] : undefined;
       const chatSlot = sessions?.get(body.terminalId)?.mode === "chat";
       const nameFromHook = (fallback?: string) => {
-        if (!hookTool || !body.sessionId || chatSlot) return;
+        if (!hookTool || !body.sessionId || chatSlot || idRefused) return;
         maybeGenerateTitle(hookTool, {
           terminalId: body.terminalId,
           agentSessionId: body.sessionId,
@@ -3821,6 +3845,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });
 
+  // `params` is z.unknown() on RequestMessage, so `...CheckoutScoped`'s default
+  // never runs on this path -- the "main" default has to live here instead.
+  const TerminalSnapshotRpcParams = z.object({
+    terminalId: z.string().min(1),
+    checkoutId: z.string().default("main"),
+    history: z.boolean().default(false),
+  });
+
   // Intercepted before the generic dispatchRpc registry — like sessions.list/
   // sessions.delete's own special-casing — because it needs `structured`
   // (StructuredAgentManager) in closure scope, which rpc/methods.ts's registry
@@ -3841,6 +3873,87 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
     const frames = (await structured?.getTranscriptSnapshot(parsed.data.sessionId)) ?? [];
     return createMessage("response", { requestId: msg.requestId, ok: true, result: { frames } });
+  }
+
+  // Correlated RPC twin of `terminal:snapshot:request` (see that case below,
+  // which stays untouched -- old apps and `resyncState`'s unsolicited push
+  // still need it). This is intercepted here rather than registered in
+  // rpc/methods.ts for the same reason session.transcriptSnapshot is: a
+  // MethodDef handler cannot see `manager`, `checkoutRuntimes`, `mainRuntime`,
+  // `internalTerminalId`, `prepareCheckoutRuntime` or `sessions`, all of which
+  // are closure-scoped here.
+  async function handleTerminalSnapshotRpc(msg: RpcRequest): Promise<AbMessage> {
+    const parsed = TerminalSnapshotRpcParams.safeParse(msg.params ?? {});
+    if (!parsed.success) {
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: {
+          code: "E_BAD_PARAMS",
+          message: parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; "),
+        },
+      });
+    }
+    const { terminalId, checkoutId, history } = parsed.data;
+    if (!manager) {
+      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
+    }
+    if (sessions?.isCheckoutDeleting(checkoutId) === true) {
+      log.warn("Refusing terminal.snapshot for checkout %s: its delete is in flight (project %s)", checkoutId, project.id);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "CHECKOUT_DELETING", message: "This session's workspace is being deleted." },
+      });
+    }
+    const checkout = await checkoutRuntimes.resolve(checkoutId);
+    if (!checkout) {
+      log.warn("Rejecting terminal.snapshot for unknown checkout %s (project %s)", checkoutId, project.id);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "UNKNOWN_CHECKOUT", message: "The requested checkout is not available." },
+      });
+    }
+    // Re-checked after the store lookup: a delete that started during that
+    // await would otherwise have this checkout re-prepared right here.
+    if (sessions?.isCheckoutDeleting(checkoutId) === true) {
+      log.warn("Refusing terminal.snapshot for checkout %s: its delete is in flight (project %s)", checkoutId, project.id);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "CHECKOUT_DELETING", message: "This session's workspace is being deleted." },
+      });
+    }
+    // Never `runtimeFor`/`terminalOwner`/`?? mainRuntime` -- see the guard this
+    // mirrors at the `terminal:snapshot:request` case below. `internalTerminalId`
+    // WRITES `runtime.configuredTerminalIds` and the module-level
+    // `terminalOwners`, so resolving the wrong runtime here would permanently
+    // corrupt `sendTerminalFrame`'s id rewrite for this terminal.
+    const runtime = checkoutId === "main" ? mainRuntime : await prepareCheckoutRuntime(checkout);
+    if (runtime.disposed) {
+      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
+    }
+    let snap: { text: string; seq: number } | null;
+    try {
+      snap = await manager.getAttachSnapshot(internalTerminalId(runtime, terminalId), { history });
+    } catch (err) {
+      log.warn("terminal.snapshot for terminal %s failed: %s", terminalId, err);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "E_HANDLER", message: "terminal snapshot failed" },
+      });
+    }
+    if (!snap) {
+      log.warn("terminal.snapshot requested for unknown terminal %s", terminalId);
+      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
+    }
+    return createMessage("response", {
+      requestId: msg.requestId,
+      ok: true,
+      result: { snapshot: { terminalId, scrollback: snap.text, seq: snap.seq, composed: true } },
+    });
   }
 
   function attachTransport(bus: MessageBus) {
@@ -3901,6 +4014,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         if (msg.method === "session.transcriptSnapshot") {
           void handleTranscriptSnapshotRequest(msg).then((res) => bus.publish(res, channel));
+          return;
+        }
+        if (msg.method === "terminal.snapshot") {
+          // `.catch` before the publish, not after: the handler awaits
+          // `checkoutRuntimes.resolve` (a store read) and
+          // `prepareCheckoutRuntime` (config load + runtime start), neither of
+          // which is guarded inside it. An unhandled rejection here reaches
+          // `index.ts`'s `unhandledRejection` hook, which shuts the whole host
+          // down over one failed screen pull.
+          void handleTerminalSnapshotRpc(msg)
+            .catch((err) => {
+              log.warn("terminal.snapshot failed for project %s: %s", project.id, err);
+              return createMessage("response", {
+                requestId: msg.requestId,
+                ok: false,
+                error: { code: "E_HANDLER", message: "terminal snapshot failed" },
+              });
+            })
+            .then((res) => bus.publish(res, channel));
           return;
         }
         void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));

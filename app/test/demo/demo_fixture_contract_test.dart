@@ -244,6 +244,57 @@ void main() {
     }
   });
 
+  // `_answerRpc`'s method table, driven through the correlated `request` path
+  // `TerminalService`, `SessionsService` and friends actually call — the verbs
+  // list above only reaches the message-typed replies, so a method added here
+  // with no case in the switch would answer every caller with the refusal and
+  // nothing above would notice.
+  test(
+    'every method in the RPC table answers ok, never the demo refusal',
+    () async {
+      final transport = DemoTransport(now: now);
+      addTearDown(transport.dispose);
+      await transport.connect();
+      transport.drainScript();
+      await Future<void>.delayed(Duration.zero);
+
+      Future<void> expectAnswered(
+        String method,
+        Map<String, dynamic>? params,
+        String resultKey,
+      ) async {
+        final reply = transport.request(method, params: params);
+        transport.drainScript();
+        Object? error;
+        Map<String, dynamic>? result;
+        try {
+          result = await reply;
+        } on RpcException catch (e) {
+          error = e;
+        }
+        expect(
+          error,
+          isNull,
+          reason: '"$method" fell through to the demo refusal ($error)',
+        );
+        expect(result, contains(resultKey));
+      }
+
+      await expectAnswered('state.snapshot', null, 'frames');
+      await expectAnswered(
+        'session.transcriptSnapshot',
+        {'sessionId': kDemoSessionCheckoutId},
+        'frames',
+      );
+      await expectAnswered('sessions.list', null, 'sessions');
+      await expectAnswered(
+        'terminal.snapshot',
+        {'terminalId': kDemoTerminalId},
+        'snapshot',
+      );
+    },
+  );
+
   // The parser-less set, checked against its real consumer instead.
   group('session status frames', () {
     test('the list result decodes into SessionEntry rows', () {

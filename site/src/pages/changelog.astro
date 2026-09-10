@@ -1,0 +1,118 @@
+---
+import { Icon } from "astro-icon/components";
+import Base from "../layouts/Base.astro";
+import Chip from "../components/ui/Chip.astro";
+import Eyebrow from "../components/ui/Eyebrow.astro";
+import { links } from "../config";
+import { ENTRIES, formatDate } from "../data/changelog";
+
+// Three render states, one per release, and which one a release gets is decided
+// in data/changelog.ts rather than here. The page's only job is to make all
+// three look deliberate, because on a two-day release cadence most entries will
+// never be written up and a layout that only looks finished when every row has
+// prose would spend the rest of its life looking broken.
+//
+// The version is the heading, not the date. A reader arrives here from an
+// update prompt or a release URL holding a version string, and that is the
+// thing they are scanning for; the date is context they read second. It is also
+// what the anchor is built from, so a support reply can link at the exact build
+// someone is asking about.
+//
+// Newest first and no pagination. Eleven releases today, and at this cadence
+// this page has a couple of years before length is a real problem — by which
+// point the answer is a year filter, not a page-2 nobody clicks.
+const [latest] = ENTRIES;
+---
+<Base
+  title="Changelog — antgrid"
+  description="Every antgrid release, newest first: what changed in each build, what it fixed, and the full generated notes for anything we haven't written up."
+  path="/changelog"
+>
+  <main class="mx-auto max-w-3xl px-6 py-16">
+    <header class="mb-14">
+      <Eyebrow class="mb-4">changelog</Eyebrow>
+      <h1 class="mb-5 font-display text-title font-semibold text-ink">Changelog</h1>
+      {/* Sets expectations for all three states in the order a reader meets
+          them, so a run of link-only entries further down reads as a policy
+          rather than as a page someone stopped maintaining. */}
+      <p class="max-w-[46rem] text-lede text-muted">
+        Every build we ship, newest first. We release every couple of days, so most entries
+        are small. Where a build only moved plumbing around we say so rather than dressing it
+        up, and where we haven't written notes the full generated list is one link away.
+      </p>
+    </header>
+
+    <div class="flex flex-col">
+      {ENTRIES.map((entry) => (
+        <article
+          id={entry.version}
+          class="grid scroll-mt-28 gap-x-8 gap-y-3 border-t border-edge-inner py-8 md:grid-cols-[11rem_1fr]"
+        >
+          {/* The rail. Sticky on desktop only: on a phone the two halves are
+              stacked, so pinning the version would park it over the prose it
+              belongs to. */}
+          <div class="md:sticky md:top-24 md:self-start">
+            <h2 class="font-mono text-row text-ink2">
+              {/* The anchor is on the version itself rather than on a hover
+                  glyph beside it. This page's readers arrive from support
+                  replies and update prompts, so the deep link is the point of
+                  the row, not an affordance for people who already know the
+                  convention. */}
+              <a href={`#${entry.version}`} class="transition-colors hover:text-signal">{entry.version}</a>
+            </h2>
+            <p class="mt-1 text-meta text-faint">{formatDate(entry.date)}</p>
+            {entry === latest && (
+              <Chip class="mt-2.5">
+                <Icon name="tabler:arrow-up-right" width="12" height="12" />latest
+              </Chip>
+            )}
+          </div>
+
+          <div class="min-w-0">
+            {entry.note?.title && (
+              <h3 class="mb-3 font-display text-kicker font-semibold text-ink">{entry.note.title}</h3>
+            )}
+
+            {entry.note ? (
+              <div class="flex flex-col gap-3">
+                {entry.note.lines.map((line) => (
+                  <p class="text-note text-muted">{line}</p>
+                ))}
+              </div>
+            ) : entry.maintenance ? (
+              // The release said this itself. Stated plainly rather than hidden,
+              // because a missing version is a question ("did I miss one?") and
+              // this answers it in a line.
+              <p class="text-note text-muted2">
+                Maintenance build. Nothing here changes what you'd notice using it.
+              </p>
+            ) : (
+              <p class="text-note text-muted2">
+                We haven't written this one up. The generated notes list every change.
+              </p>
+            )}
+
+            {/* On every entry, including the written ones: the notes above are a
+                selection, and a reader chasing a specific fix needs the full
+                list rather than our edit of it. */}
+            <a
+              href={entry.url}
+              class="mt-4 inline-flex items-center gap-1.5 text-meta text-muted transition-colors hover:text-ink"
+            >
+              <Icon name="tabler:brand-github" width="14" height="14" />
+              Full notes for {entry.version}
+            </a>
+          </div>
+        </article>
+      ))}
+    </div>
+
+    <div class="mt-14 border-t border-edge-inner pt-8">
+      <p class="text-note text-muted">
+        Running an older build? The app checks for new ones and tells you when there is one, or you can
+        <a href={links.download} class="text-signal hover:text-signal2 hover:underline">download the latest</a>
+        directly.
+      </p>
+    </div>
+  </main>
+</Base>
