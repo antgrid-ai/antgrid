@@ -339,6 +339,14 @@ test(
   30_000,
 );
 
+// Slow by construction, not by accident: this walks the whole MAX_BUS_ROUTES
+// cap, and noteRoute forces a save on every binding CHANGE — a context seen
+// for the first time always is one. Each forced save re-reads and rewrites
+// the whole machine file (the merge that makes two hosts on one ANTGRID_DIR
+// safe), so the loop costs O(rows) of disk per iteration and lands just under
+// bun's 5 s default. A real bridge binds one context at a time; only a test
+// does the entire cap back to back. The explicit timeout keeps that
+// arithmetic from reading as a flake.
 test(
   "a legitimate re-stamp of its own context still moves it to the back of the LRU",
   () => {
@@ -374,6 +382,7 @@ test(
 
     coordinator.stop();
   },
+  20_000,
 );
 
 test(
@@ -529,6 +538,14 @@ test("an expired route's drop is written to disk, not just to the table", () => 
   expect([...loadBusRoutes(abDir, Number.MAX_SAFE_INTEGER, now).keys()]).toEqual([]);
 });
 
+// Slow by construction, not by accident: this walks the whole MAX_BUS_ROUTES
+// cap, and noteRoute forces a save on every binding CHANGE — a context seen
+// for the first time always is one. Each forced save re-reads and rewrites
+// the whole machine file (the merge that makes two hosts on one ANTGRID_DIR
+// safe), so the loop costs O(rows) of disk per iteration and lands just under
+// bun's 5 s default. A real bridge binds one context at a time; only a test
+// does the entire cap back to back. The explicit timeout keeps that
+// arithmetic from reading as a flake.
 test("an evicted route does not come back on the next hydrate", () => {
   // The cap case is the one an on-read TTL cannot cover: an evicted row can
   // carry a live `at` (a successful send restamps it by reference without
@@ -560,7 +577,7 @@ test("an evicted route does not come back on the next hydrate", () => {
   coordinator.stop();
 
   expect(loadBusRoutes(abDir, BUS_ROUTE_TTL_MS, now).get("ctx-victim")).toBeUndefined();
-});
+}, 20_000);
 
 test("resume()'s fallback-style resolver does not pin a foreign project's held state under its own id", () => {
   // Two sessions, two projects, persisted the normal way (a coordinator whose

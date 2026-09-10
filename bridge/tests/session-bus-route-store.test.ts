@@ -1,6 +1,6 @@
 // bridge/tests/session-bus-route-store.test.ts
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MAX_BUS_ROUTES } from "../src/session-bus/constants";
@@ -178,6 +178,22 @@ test("a purge drops a project's rows even when the writer's own table never held
     saveBusRoutes(abDir, routes([["ctx-kept", "app-b", "p-kept", T0]]), { projectId: "p-forgotten" });
     const loaded = loadBusRoutes(abDir, TTL * 1_000, T0 + 1_000);
     expect([...loaded.keys()]).toEqual(["ctx-kept"]);
+  } finally {
+    rmSync(abDir, { recursive: true, force: true });
+  }
+});
+
+test("routes.json lives at the machine root, not under any project", () => {
+  const abDir = tmpAbDir();
+  try {
+    saveBusRoutes(abDir, routes([["ctx-1", "app#machine", "p1", T0]]));
+    // Pinned as a literal on purpose. Every other case in this file writes
+    // and reads through `sessionBusMachineDir`, so a relocation carries both
+    // halves with it and none of them go red — the same blind spot the
+    // delivery queue had. routes.json is the one file E9 actually moved out
+    // of `agents/<projectId>/`, which makes this the assertion that would
+    // catch it moving again.
+    expect(existsSync(join(abDir, "session-bus", "routes.json"))).toBe(true);
   } finally {
     rmSync(abDir, { recursive: true, force: true });
   }

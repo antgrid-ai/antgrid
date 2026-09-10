@@ -191,12 +191,21 @@ on `onPeerOnline` and on `onWorkStatusChange`.
 
 ### 5.4 The directory is machine-level, not project-level
 
-The session-bus stores are currently per project
-(`sessionBusProjectDir(abDir, projectId)` in `store-fs.ts`). Repo-scoped
-addressing spans project ids on one machine, so the directory, the route table
-and the budget counters move up to the host server. **This is the largest
-structural change in the rescope** and it is not optional: leaving them in the
-project core makes a worktree session unable to reach its own parent.
+Repo-scoped addressing spans project ids on one machine, so the directory, the
+route table and the budget counters belong to the host server rather than to a
+project core. **This is the largest structural change in the rescope** and it
+is not optional: leaving them in the project core makes a worktree session
+unable to reach its own parent.
+
+**Shipped.** One `SessionBusCoordinator` is owned by the host for the life of
+the process, and `routes.json` moved to `<abDir>/session-bus/`. The transport
+did not move with it: each outbound frame still leaves through the owning
+project core, which is what keeps the machine's remote-access switch and the
+per-device gates in front of it. The per-session stores stay under
+`agents/<projectId>/session-bus/`, since the reach failure was an addressing
+failure and nothing about those bytes had to move to fix it. The budget
+counters are not a relocation at all — there is nothing on disk to move — so
+they are built with the budget itself (§7.4).
 
 ### 5.5 Relevance: the bridge sorts, the agent judges
 
