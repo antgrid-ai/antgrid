@@ -637,21 +637,128 @@ void main() {
     });
 
     // The case every caller has to degrade around: a bridge predating the card
-    // answers UNKNOWN_VERB, and the dialog above this shows no card rather than
-    // refusing to open.
-    test('propagates UNKNOWN_VERB from a bridge predating the card', () async {
+    // answers E_UNKNOWN_METHOD (the generic unrecognised-RPC-method reply),
+    // and the dialog above this shows no card rather than refusing to open.
+    test('propagates E_UNKNOWN_METHOD from a bridge predating the card', () async {
       final t = FakeAgentTransport();
       final client = ControlPlaneClient(transport: t);
       addTearDown(client.dispose);
 
-      t.requestHandler = (_, _) => throw RpcException('UNKNOWN_VERB', 'no');
+      t.requestHandler = (_, _) => throw RpcException('E_UNKNOWN_METHOD', 'no');
 
       await expectLater(
         client.capabilityCard(),
         throwsA(
-          isA<RpcException>().having((e) => e.code, 'code', 'UNKNOWN_VERB'),
+          isA<RpcException>().having((e) => e.code, 'code', 'E_UNKNOWN_METHOD'),
         ),
       );
     });
+  });
+
+  group('capabilityCard sessions', () {
+    Map<String, dynamic> sessionRow({
+      String repoKey = 'github.com/owner/repo',
+      String projectId = 'p1',
+      String sessionId = 's1',
+    }) => {
+      'repoKey': repoKey,
+      'projectId': projectId,
+      'projectLabel': 'antgrid',
+      'sessionId': sessionId,
+      'title': 'Wire identity wave 6',
+      'branch': 'feat/wire-identity',
+      'activity': 'running',
+      'workStatus': 'working',
+      'lastActiveAt': 1234567890,
+      'canReply': true,
+    };
+
+    test(
+      'a card with no sessions key parses as null, not as an empty list',
+      () async {
+        final t = FakeAgentTransport();
+        final client = ControlPlaneClient(transport: t);
+        addTearDown(client.dispose);
+
+        t.requestHandler = (method, params) => {
+          'os': {'name': 'Windows', 'version': '10.0.26200', 'arch': 'x64'},
+          'projects': <String, dynamic>{},
+        };
+
+        final result = await client.capabilityCard();
+        expect(result.sessions, isNull);
+        expect(result.sessionsTruncated, 0);
+      },
+    );
+
+    test(
+      'a card with an empty sessions array parses as empty, not as null',
+      () async {
+        final t = FakeAgentTransport();
+        final client = ControlPlaneClient(transport: t);
+        addTearDown(client.dispose);
+
+        t.requestHandler = (method, params) => {
+          'os': {'name': 'Windows', 'version': '10.0.26200', 'arch': 'x64'},
+          'projects': <String, dynamic>{},
+          'sessions': <Object>[],
+          'sessionsTruncated': 0,
+        };
+
+        final result = await client.capabilityCard(includeSessions: true);
+        expect(result.sessions, isNotNull);
+        expect(result.sessions, isEmpty);
+      },
+    );
+
+    test(
+      'a session row missing its address is skipped and the rest of the '
+      'card survives',
+      () async {
+        final t = FakeAgentTransport();
+        final client = ControlPlaneClient(transport: t);
+        addTearDown(client.dispose);
+
+        final withoutSessionId = sessionRow()..remove('sessionId');
+        t.requestHandler = (method, params) => {
+          'os': {'name': 'Windows', 'version': '10.0.26200', 'arch': 'x64'},
+          'projects': <String, dynamic>{},
+          'sessions': [sessionRow(sessionId: 's-good'), withoutSessionId],
+          'sessionsTruncated': 0,
+        };
+
+        final result = await client.capabilityCard(includeSessions: true);
+        expect(result.sessions, hasLength(1));
+        expect(result.sessions!.single.sessionId, 's-good');
+        expect(result.sessions!.single.repoKey, 'github.com/owner/repo');
+        expect(result.sessions!.single.title, 'Wire identity wave 6');
+        expect(result.sessions!.single.branch, 'feat/wire-identity');
+        expect(
+          result.sessions!.single.activity,
+          MachineSessionActivity.running,
+        );
+        expect(result.sessions!.single.workStatus, AgentWorkStatus.working);
+        expect(result.sessions!.single.canReply, isTrue);
+      },
+    );
+
+    test(
+      'capabilityCard sends no new keys when includeSessions is not asked',
+      () async {
+        final t = FakeAgentTransport();
+        final client = ControlPlaneClient(transport: t);
+        addTearDown(client.dispose);
+
+        t.requestHandler = (method, params) => {
+          'os': {'name': 'Windows', 'version': '10.0.26200', 'arch': 'x64'},
+          'projects': <String, dynamic>{},
+        };
+
+        await client.capabilityCard(projectIds: ['p1']);
+        expect(t.requests.single.params, {
+          'projectIds': ['p1'],
+        });
+      },
+    );
   });
 }
