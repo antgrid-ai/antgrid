@@ -5,7 +5,8 @@ import 'package:cryptography_flutter/cryptography_flutter.dart'
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform;
 
-import 'webcrypto_aes_gcm.dart';
+import '../util/ab_log.dart';
+import 'cng_aes_gcm.dart';
 
 /// Route the E2E transport cipher at the OS crypto APIs.
 ///
@@ -17,32 +18,26 @@ import 'webcrypto_aes_gcm.dart';
 ///
 /// The layering is the package's own and degrades on its own:
 /// native method channel on Android/iOS/macOS for payloads past ~2 KB → a
-/// `compute` isolate past ~10 KB where no plugin exists (Windows/Linux, so the
-/// work is at least off the UI isolate) → the pure Dart cipher in-isolate for
-/// the small control frames, where a channel hop would cost more than it saves.
+/// `compute` isolate past ~10 KB where no plugin exists (Linux, so the work is
+/// at least off the UI isolate) → the pure Dart cipher in-isolate for the small
+/// control frames, where a channel hop would cost more than it saves.
+///
+/// Windows is the exception: `cryptography_flutter` declares no plugin there, so
+/// [CngAesGcm] takes the frame straight to `bcrypt.dll`. It is probed rather
+/// than assumed — see [CngAesGcm.probe] — and any failure falls back to the same
+/// [FlutterAesGcm] every other platform gets. Linux keeps the package default;
+/// its equivalent (`libcrypto.so.3` over `dlopen`) is a separate decision.
 ///
 /// Scoped to the transport cipher on purpose. The handshake's Ed25519/X25519/
 /// HKDF stay on their Dart implementations: they run a handful of times per
 /// connection, so they are not worth a behavioural risk in the bytes the bridge
 /// verifies a transcript signature over.
 void installNativeE2eCipher() {
-  if (_useWebcryptoCipher && _lacksCryptographyFlutterPlugin) {
-    E2eTransportDart.useAlgorithm(WebcryptoAesGcm());
+  if (defaultTargetPlatform == TargetPlatform.windows && CngAesGcm.probe()) {
+    E2eTransportDart.useAlgorithm(CngAesGcm());
+    AbLog.info('NativeCrypto', 'transport cipher: CNG (bcrypt.dll)');
     return;
   }
   E2eTransportDart.useAlgorithm(FlutterAesGcm(secretKeyLength: 32));
+  AbLog.info('NativeCrypto', 'transport cipher: cryptography_flutter');
 }
-
-/// Opt in to the BoringSSL cipher on the platforms that have no plugin:
-/// `--dart-define=WEBCRYPTO_E2E_CIPHER=true`. Off by default while the
-/// BoringSSL build hook is being proven out in CI — see
-/// `docs/spikes/webcrypto-cipher.md`.
-const bool _useWebcryptoCipher = bool.fromEnvironment('WEBCRYPTO_E2E_CIPHER');
-
-/// The two platforms `cryptography_flutter` declares no plugin for, and so the
-/// only two where swapping in BoringSSL wins anything. Everywhere else its
-/// method channel already reaches the OS, and this would trade a proven path
-/// for an unproven one.
-bool get _lacksCryptographyFlutterPlugin =>
-    defaultTargetPlatform == TargetPlatform.windows ||
-    defaultTargetPlatform == TargetPlatform.linux;

@@ -1775,14 +1775,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.0.3"
-  webcrypto:
-    dependency: "direct main"
-    description:
-      name: webcrypto
-      sha256: "6b43001c4110856ff7fa5e5e65e7b2d44bec1d8b54a4d84d5fa2c7622267c5c1"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.6.0"
   webdriver:
     dependency: transitive
     description:

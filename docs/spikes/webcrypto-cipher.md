@@ -1,10 +1,10 @@
 # Spike: BoringSSL for the E2E transport cipher on Windows/Linux
 
-Status: **spike, and it MUST NOT MERGE as it stands.** The cipher works and is
-fast, but the dependency alone breaks `flutter build windows` on any machine
-without NASM — the default-off dart-define does not gate that, because merely
-depending on the package registers its plugin. See "The Windows build fails"
-below.
+Status: **CLOSED — rejected, and the code is removed.** Kept as the record of
+why BoringSSL is not the answer here and of the two findings that outlived it
+(the NASM build failure, and the key-cache/`zeroize` hazard). Windows now uses
+Win32 CNG instead; see the Outcome at the bottom. Nothing in this document
+describes shipping code.
 
 ## Why
 
@@ -151,3 +151,28 @@ Linux) at a far lower toolchain cost.
 5. **Not measured on Windows.** Every number here is Linux. AES-NI is the same
    instruction, but the plugin, the build and the threshold are not.
 6. **`THIRD-PARTY.md`** needs a BoringSSL entry once this ships.
+
+## Outcome
+
+Rejected. `app/lib/config/cng_aes_gcm.dart` seals Windows frames through
+`bcrypt.dll` (Win32 CNG) instead, and every artifact this spike added is gone:
+the `webcrypto` dependency, `WebcryptoAesGcm`, its test, and the CI BoringSSL
+setup step.
+
+The decisive number is not throughput, it is the **per-call floor: CNG ~1 µs
+against BoringSSL's ~24 µs**. That is what removes open item 4's threshold —
+CNG beats the pure Dart cipher at *every* size from 64 B to 2 MB, so there is no
+`minBytesWorthFfi`, no small-frame fallback path, and none of the routing the
+threshold implied. Open item 1 (NASM everywhere) disappears with the dependency,
+2 (CI build cost) with the setup step, and 6 (`THIRD-PARTY.md`) with the vendored
+BoringSSL. Item 5 is closed by measuring on Windows directly.
+
+What did **not** change: item 3. The CNG key cache holds live kernel key handles
+that `SessionKeys.zeroize` cannot reach, `evictImportedKeys()` exists and nothing
+calls it, and the bound is still four entries.
+
+CNG buys nothing for Linux — removing this dependency returns Linux to
+`FlutterAesGcm` (compute isolate above ~10 KB, pure Dart below), which is the
+status quo ante, not a regression, since the spike never shipped. The Linux
+equivalent (`dlopen("libcrypto.so.3")`, the same five-function surface) is a
+separate decision and has not been taken.
