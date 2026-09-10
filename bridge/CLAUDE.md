@@ -268,7 +268,8 @@ edit breaks silently.
 Known gaps, stated rather than papered over: a codex CHAT session gets no MCP
 server at all (`codexNotifyOnlyArgs`), so nothing in it can reach the bus; and
 artifacts (`session-bus/artifact-store.ts`) are session-scoped with no
-cross-context fetch and nothing that reclaims them.
+cross-context fetch, and are reclaimed only by the delete of the session that
+published them — nothing bounds them by age or total size while it lives.
 
 ## The MCP subcommand
 
