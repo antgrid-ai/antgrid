@@ -25,6 +25,7 @@ import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
 import '../session_bus/session_bus_carrier.dart';
+import '../session_bus/remote_directory_pump.dart';
 import '../storage/cached_sessions_store.dart';
 import '../launcher/host_control_client.dart';
 import '../launcher/project_resolve.dart';
@@ -303,7 +304,11 @@ class _AppShellState extends ConsumerState<AppShell> {
     // for a machine de-selected in the picker is still reaped — the picker swaps
     // WorkspaceShell out entirely, so a reaper lower than here is unmounted
     // exactly when de-selection happens.
-    return ControlPlaneReaper(child: SessionBusCarrierHost(child: body));
+    return ControlPlaneReaper(
+      child: SessionBusCarrierHost(
+        child: RemoteDirectoryPumpHost(child: body),
+      ),
+    );
   }
 }
 

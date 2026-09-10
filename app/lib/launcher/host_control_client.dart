@@ -247,6 +247,54 @@ class RemoteAccessPolicy {
       RemoteAccessPolicy(enabled: json['enabled'] == true);
 }
 
+/// `session-bus:remote-directory` response. Mirror of the
+/// `"session-bus:remote-directory"` arm of `control-protocol.ts`'s
+/// `ControlResponse` union. [wantedRepoKeys] is what feeds the PUMP's next
+/// cycle's `repoKeys` ask — the bridge echoes back the keys a LOCAL read
+/// actually asked `SessionDirectory.list` for, so the app never guesses which
+/// repos matter. [unservedReads] is a count since the last push (or since
+/// construction), drained by this call — a positive value is what shortens
+/// the pump's next tick.
+class RemoteDirectoryAck {
+  final int accepted;
+  final int dropped;
+  final List<String> wantedRepoKeys;
+  final int unservedReads;
+  final int? lastReadAt;
+
+  const RemoteDirectoryAck({
+    required this.accepted,
+    required this.dropped,
+    required this.wantedRepoKeys,
+    required this.unservedReads,
+    this.lastReadAt,
+  });
+
+  factory RemoteDirectoryAck.fromJson(Map<String, dynamic> json) {
+    final accepted = json['accepted'];
+    final dropped = json['dropped'];
+    final unservedReads = json['unservedReads'];
+    if (accepted is! num || dropped is! num || unservedReads is! num) {
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed session-bus:remote-directory response: $json',
+      );
+    }
+    final rawKeys = json['wantedRepoKeys'];
+    final wantedRepoKeys = <String>[
+      if (rawKeys is List) for (final k in rawKeys) if (k is String) k,
+    ];
+    final lastReadAt = json['lastReadAt'];
+    return RemoteDirectoryAck(
+      accepted: accepted.toInt(),
+      dropped: dropped.toInt(),
+      wantedRepoKeys: wantedRepoKeys,
+      unservedReads: unservedReads.toInt(),
+      lastReadAt: lastReadAt is num ? lastReadAt.toInt() : null,
+    );
+  }
+}
+
 /// Thrown on a transport error, a non-200 status, or an `ok:false` body.
 class HostControlException implements Exception {
   final String code;
@@ -536,6 +584,32 @@ class HostControlClient {
       );
     }
     return card;
+  }
+
+  /// The asking half of the remote session directory (`session-bus:remote-
+  /// directory`, `docs/session-messaging.md` §5.3): hand the local bridge
+  /// what this cycle's pump learned peeking peer capability cards. `machines`
+  /// is sent verbatim — the bridge's own `RemoteDirectoryCache.replace`
+  /// validates and sanitises each row, so nothing here re-checks one.
+  /// `BAD_REQUEST` covers ANY rejection of `ControlRequestSchema`, not only an
+  /// unrecognised verb — `RemoteDirectoryPumpEngine` is what tells a bridge
+  /// that predates this verb apart from a payload bug on this side, by
+  /// requiring several in a row before it latches off.
+  ///
+  /// A REPLACE, not a merge: [machines] must be the pump's whole current
+  /// candidate set — a machine omitted from one call is a machine the bridge
+  /// drops from its mirror on THIS call, not one left to expire on its own.
+  Future<RemoteDirectoryAck> pushRemoteDirectory({
+    required List<Map<String, dynamic>> machines,
+    required int notConnected,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    final m = await _post({
+      'type': 'session-bus:remote-directory',
+      'machines': machines,
+      'notConnected': notConnected,
+    }, timeout: timeout);
+    return RemoteDirectoryAck.fromJson(m);
   }
 
   Future<GitBranchCatalog> gitBranches({
