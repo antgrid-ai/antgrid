@@ -219,7 +219,14 @@ edit breaks silently.
   reads the ARRIVING core's own `hasIsolatedSessions()`, so a peer admitted to a
   project holding no isolated session passes it and may then name a session in
   a project that does — the one refusal the move genuinely widened, left to
-  Wave 2 rather than described here as cover it does not give. Net: WHO may
+  Wave 2 rather than described here as cover it does not give. The carrier
+  route table is keyed by CONTEXT id alone, so the same already-admitted peer
+  can re-point another project's context at itself by stamping that context id
+  on a frame addressed to a session it may legitimately name — refusing the
+  mismatch at `noteRoute` is not the fix, because E9's own case (a worktree
+  session answering its parent) is that mismatch, and the two are
+  indistinguishable there; it narrows with the admission gap above or not at
+  all. Net: WHO may
   address this machine is unchanged (an account-trusted peer, mobile access on,
   on a project in the host's catalog); what an already-admitted peer may NAME
   once inside is now every session on the machine, and the isolated-session

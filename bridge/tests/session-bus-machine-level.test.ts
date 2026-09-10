@@ -283,47 +283,59 @@ test(
 );
 
 test(
-  "noteRoute refuses to re-point a context whose owning project differs from the arriving frame's project",
-  () => {
-    // No cores: the property under test is what `noteRoute` does with the ids
-    // it is handed, and a hand-fed `projectIdFor` says session-b is project
-    // B's own without needing a live core to answer it.
-    const coordinator = new SessionBusCoordinator({
-      abDir,
-      projectIdFor: (sessionId) => (sessionId === "session-b" ? "project-b" : null),
-      self: () => null,
-      send: () => true,
+  "a lead's own context routes home on the PEER project's stream, not its owner's",
+  async () => {
+    const sent: { frame: AbMessage; role: string; contextId: string }[] = [];
+    const { coreA, coreB, sessionA, sessionB } = await setUpMachine(sent);
+    const sessionBus = sharedCoordinator();
+
+    // E9/§5.4's own case, end to end on one machine: session A leads, session B
+    // (another project — a worktree of the same repo, in the shape that
+    // motivated the move) is the peer. A lead names its context after itself,
+    // so the frame that reaches B carries A's session id as contextId while
+    // arriving on B's stream — the two projects disagree by construction, and
+    // noteRoute must record the stream that actually carried it.
+    const inbound = createMessage("session-bus:message", {
+      from: { machineId: "m1", projectId: coreA.projectId, sessionId: sessionA },
+      to: { machineId: "m1", projectId: coreB.projectId, sessionId: sessionB },
+      contextId: sessionA,
+      taskId: null,
+      envelope: {
+        messageId: "msg-lead-to-peer",
+        taskId: null,
+        contextId: sessionA,
+        parts: [{ kind: "text", text: "work on this" }],
+        metadata: {
+          peer: { machineId: "m1", projectId: coreA.projectId, sessionId: sessionA },
+          summary: "work on this",
+          timestamp: Date.now(),
+        },
+      },
     });
+    expect(sessionBus.handleInbound(inbound)).toBe("applied");
+    sessionBus.noteRoute(sessionA, "app-session-carrier", coreB.projectId);
 
-    // An app session admitted on project A's stream claims session-b's own
-    // (lead) context as if it had carried it in. session-b belongs to project
-    // B, so this is exactly what an already-admitted peer could otherwise use
-    // to steal another project's exchange.
-    coordinator.noteRoute("session-b", "attacker-app-session", "project-a");
-    expect(coordinator.routeFor("session-b")).toBeNull();
-
-    // Project B's own stream is the one entitled to establish it.
-    coordinator.noteRoute("session-b", "legit-app-session", "project-b");
-    expect(coordinator.routeFor("session-b")).toEqual(
-      expect.objectContaining({ peerId: "legit-app-session", projectId: "project-b" }),
+    // Refusing this pair as a project mismatch is what strands the parent's
+    // replies: the reply below is peer-role, and a peer with no route holds
+    // its frames until they expire rather than falling back to anything.
+    expect(sessionBus.routeFor(sessionA)).toEqual(
+      expect.objectContaining({ peerId: "app-session-carrier", projectId: coreB.projectId }),
     );
 
-    // The same forged frame, retried once a legitimate route exists, still
-    // cannot steal it.
-    coordinator.noteRoute("session-b", "attacker-app-session", "project-a");
-    expect(coordinator.routeFor("session-b")).toEqual(
-      expect.objectContaining({ peerId: "legit-app-session", projectId: "project-b" }),
-    );
-
-    // A context this index cannot attribute to any local session at all — the
-    // ordinary shape of a genuinely remote peer's context, whose lead lives on
-    // the OTHER machine — is unaffected: there is no local claim on it to
-    // violate, so it establishes exactly as before this fix.
-    coordinator.noteRoute("ctx-foreign", "some-app-session", "project-a");
-    expect(coordinator.routeFor("ctx-foreign")?.projectId).toBe("project-a");
-
-    coordinator.stop();
+    const res = sessionBus.message({
+      sessionId: sessionB,
+      taskId: null,
+      to: { machineId: "m1", projectId: coreA.projectId, sessionId: sessionA },
+      contextId: sessionA,
+      summary: "done",
+      parts: [{ kind: "text", text: "done" }],
+    });
+    expect("ok" in res && res.ok).toBe(true);
+    const dispatched = sent.filter((s) => s.contextId === sessionA);
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]!.role).toBe("peer");
   },
+  30_000,
 );
 
 test(
@@ -347,10 +359,10 @@ test(
     }
     expect(coordinator.routeFor("session-b")).not.toBeNull();
 
-    // A legitimate re-stamp from session-b's own project must still move it to
-    // the back: if the new same-owner check short-circuited before the
-    // existing delete-then-set restamp, the next insertion over the cap would
-    // evict session-b as the least recently carried instead of `ctx-0`.
+    // A re-stamp must move the entry to the back: without the delete-then-set,
+    // the next insertion over the cap would evict session-b as the least
+    // recently carried instead of `ctx-0`, because a Map keeps FIRST-insertion
+    // order and a plain set() on an existing key does not disturb it.
     now += 1;
     coordinator.noteRoute("session-b", "peer-1", "project-b");
     now += 1;
