@@ -3,6 +3,26 @@
 // peer sessions on one machine are distinguishable only by all three.
 
 import type { SessionMemberKey } from "../protocol";
+import { LOCAL_MACHINE_ID } from "./constants";
+
+/**
+ * Whether [machineId] names the machine answering as [selfMachineId].
+ *
+ * [LOCAL_MACHINE_ID] names it too, under whatever network name it later
+ * acquires. A bridge with no relay identity stamps its own frames with the
+ * sentinel, and those frames are PERSISTED — a mailbox row, a thread row, the
+ * log's peer — so on plain equality a pair that exchanged before the control
+ * plane came up would stop matching the moment it did, and two sessions in one
+ * process would become permanently unreachable to each other over a name only
+ * one of them ever saw change.
+ *
+ * This only ever widens what THIS machine answers for. A frame still has to
+ * name a session the bridge actually holds, so the sentinel buys a sender no
+ * reach it did not already have.
+ */
+export function namesMachine(machineId: string, selfMachineId: string): boolean {
+  return machineId === selfMachineId || machineId === LOCAL_MACHINE_ID;
+}
 
 /**
  * Identity, and only identity. The labels beside an address are display text
@@ -21,7 +41,17 @@ export function sameAddress(a: SessionMemberKey, b: SessionMemberKey): boolean {
 /**
  * The half of an address a receiver may MATCH a frame on.
  *
- * `projectId` is deliberately not compared. It is whatever the sender recorded
+ * NOT symmetric: [a] is this machine's own answer for the session and [b] is
+ * what the frame claims, which is the only side the local sentinel may appear
+ * on. Passing them the other way round would let a machine be reached by the
+ * name "local" from anywhere.
+ *
+ * `projectId` is deliberately not compared, and the machine id is compared
+ * through {@link namesMachine} rather than directly — both for the same reason:
+ * the two sides of this comparison are copied, not derived, so each can hold a
+ * value the other never had and both be right.
+ *
+ * `projectId` is whatever the sender recorded
  * when it joined, and one checkout can be open as more than one project — a
  * managed worktree opened in its own right hashes to an id of its own — so two
  * machines can hold different project ids for the same session and both be
@@ -36,7 +66,7 @@ export function sameAddress(a: SessionMemberKey, b: SessionMemberKey): boolean {
  * so they cannot legitimately differ.
  */
 export function addressesSameSession(a: SessionMemberKey, b: SessionMemberKey): boolean {
-  return a.machineId === b.machineId && a.sessionId === b.sessionId;
+  return namesMachine(b.machineId, a.machineId) && a.sessionId === b.sessionId;
 }
 
 /**

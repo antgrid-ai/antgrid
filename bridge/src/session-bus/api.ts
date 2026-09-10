@@ -128,6 +128,14 @@ export interface SessionBusApiDeps {
   /** Whether this machine's own desktop app — the carrier for a remote leg — is
    *  attached. */
   carrierPresent: () => boolean;
+  /** Whether this machine is reachable from mobile at all — the same switch
+   *  {@link SessionBusApiDeps.carrierPresent}'s frame delivery answers to. Read
+   *  by the verb layer's own gate (§6.3): a leg that leaves this machine with
+   *  the switch off is refused where the agent can see the refusal, rather than
+   *  queued and silently undelivered. Per-pair spend is NOT here — the
+   *  coordinator charges and refuses it at the single point every frame
+   *  leaves through, so no caller of this API can spend around it. */
+  remoteAccessEnabled: () => boolean;
   now?: () => number;
   newId?: () => string;
 }

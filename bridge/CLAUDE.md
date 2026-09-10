@@ -273,11 +273,12 @@ edit breaks silently.
 - **The no-progress halt is per (sender, target) PAIR** — two agents can trade
   messages that advance nothing forever; a per-machine ceiling would let one
   session spend another's budget, and a per-session one would let a halted pair
-  carry on through a third. Nothing counts an exchange into it yet:
-  `session-bus/task-guard.ts` lost its caller when the task lifecycle went, and
-  `SessionBusCoordinator.clearHalt` delegates to a dep nothing supplies, so the
-  ceiling is declared and dormant until the counters land on the host beside the
-  directory.
+  carry on through a third. `session-bus/pair-budget.ts` is pure and the host
+  holds the one store (beside the directory), because a halt "cleared only by a
+  human" has to outlive a restart. Both ceilings are charged and refused inside
+  `SessionBusCoordinator.message`, which is the single point every verb leaves
+  through — a gate in the loopback API or the MCP tools instead would be one a
+  new caller could be written around without noticing.
 - **`/session-bus/*` in `api-server.ts` is the loopback route table**, keyed off
   `?terminalId=` — which is what says whose session a request is about, and the
   same slot that resolves an isolated session's checkout. Bus frames route by

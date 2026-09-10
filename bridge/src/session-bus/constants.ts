@@ -151,3 +151,30 @@ export const MAX_REMOTE_DIRECTORY_MACHINES = 8;
  *  by slicing and counting the excess into `dropped`. */
 export const MAX_REMOTE_DIRECTORY_WIRE_MACHINES = 64;
 export const MAX_REMOTE_DIRECTORY_WIRE_ROWS = 200;
+
+/** A bridge's name for ITSELF on a purely local exchange (§6.1) when it has no
+ *  relay identity to be addressed by — a machine launched local-only, or one
+ *  whose control-plane registration never landed. Two sessions one bridge
+ *  spawned need no network to reach each other, so refusing them an address
+ *  refuses the one exchange that cannot fail for transport reasons.
+ *
+ *  Reserved, and never a real machine id: a relay device id is a uuid. It is
+ *  PERSISTED into mailbox rows, thread rows and log peers like any other
+ *  address, which is why `SessionBusCoordinator` treats it as naming this
+ *  machine under whatever name the machine later acquires. */
+export const LOCAL_MACHINE_ID = "local";
+
+/** Rolling-hour `notify` ceiling per (sender, target) pair (§7.4). `post` is
+ *  unbudgeted, so this is deliberately tight: it pushes agents onto `post` for
+ *  anything but the genuinely urgent, rather than onto the channel that
+ *  interrupts a turn. A product decision, not a default — do not raise it back
+ *  toward a "more generous" number without a decision to match. */
+export const MAX_NOTIFIES_PER_PAIR_HOUR = 4;
+
+/** Sends one (sender, target) pair may make with no artifact and no new thread
+ *  between them before a halt trips (§7.4). Counted on the OUTBOUND side only:
+ *  the halt refuses sends, so what it bounds is what this session sent, and the
+ *  peer holds its own row for its own half. Tight on purpose — it only bites
+ *  where nobody is watching, because a human typing into either session clears
+ *  it (`SessionBusCoordinator.clearHalt`). */
+export const NO_PROGRESS_EXCHANGES = 6;

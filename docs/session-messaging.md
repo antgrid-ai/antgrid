@@ -378,9 +378,10 @@ reaches.
 Per **(sender, target) pair**, per rolling hour:
 
 - A `notify` ceiling. Exceeding it refuses and names `post`.
-- A no-progress counter across the pair, carried over from `task-guard.ts`: bus
-  exchanges that produce no artifact and no new thread trip a halt. A halt
-  refuses further sends and is cleared only by a human, exactly as today.
+- A no-progress counter across the pair: bus exchanges that produce no artifact
+  and no new thread trip a halt. A halt refuses further sends — every verb, not
+  only `notify`, or a halted pair relabels its notifies as posts and carries on
+  — and is cleared only by a human, exactly as today.
 - `post` is unbudgeted but the mailbox is bounded; the oldest is dropped and the
   drop is visible to the reader.
 

@@ -42,7 +42,20 @@ import { SessionDirectory, directoryRowsFor, machineDirectoryRows } from "./sess
 import { RemoteDirectoryCache } from "./session-bus/remote-directory";
 import { SessionBusCoordinator } from "./session-bus/coordinator";
 import { removeSessionBusProject, removeSessionBusSession } from "./session-bus/store-fs";
-import { MAX_BUS_ROUTES, MAX_DIRECTORY_REPO_KEYS, MAX_MACHINE_CARD_ROWS } from "./session-bus/constants";
+import {
+  MAX_BUS_ROUTES,
+  MAX_DIRECTORY_REPO_KEYS,
+  MAX_MACHINE_CARD_ROWS,
+  BUS_ROUTE_PERSIST_INTERVAL_MS,
+  LOCAL_MACHINE_ID,
+} from "./session-bus/constants";
+import {
+  loadPairBudgets,
+  savePairBudgets,
+  upsertPairBudget,
+  clearHalt as clearPairHalt,
+  type PairBudgetState,
+} from "./session-bus/pair-budget";
 import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
 import type { BranchRemoteStatus } from "./git-branches";
@@ -223,6 +236,99 @@ const HEARTBEAT_REFRESH_INTERVAL_MS = 60_000;
  */
 const NETWATCH_MAX_TTL_MS = 3_600_000;
 
+/**
+ * Host-side, memory-first cache over `session-bus/pair-budget.ts`'s per-session
+ * store (§7.4): one row array per session, hydrated from disk on first touch
+ * and kept in memory after that, written back throttled like
+ * `SessionBusCoordinator`'s own route table beside it
+ * (`BUS_ROUTE_PERSIST_INTERVAL_MS`), because every send charges the budget and
+ * a disk write per send would put the ceiling in the path of typing. Held at
+ * the host level, beside `sessionIndex`/`repoKeys`/`sessionBus`, because the
+ * ceiling it backs is per (sender, target) PAIR, machine-wide, not per project
+ * core.
+ *
+ * A HALT is the one thing here that must not wait for a throttle window, in
+ * either direction: {@link write} forces the write that sets one and
+ * {@link clearHalt} the write that lifts one, so the state §7.4 says only a
+ * human may change is never the state a crash decides.
+ */
+class PairBudgetStore {
+  private readonly bySession = new Map<string, PairBudgetState[]>();
+  private readonly savedAtMs = new Map<string, number>();
+
+  constructor(
+    private readonly abDir: string,
+    private readonly projectIdFor: (sessionId: string) => string | null,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  /** Nothing is cached for a session the index cannot place yet. A `[]` cached
+   *  on that path would answer "unbudgeted" for the life of the process, and
+   *  the direction it fails in is no ceiling at all. */
+  private load(sessionId: string): PairBudgetState[] {
+    const cached = this.bySession.get(sessionId);
+    if (cached) return cached;
+    const projectId = this.projectIdFor(sessionId);
+    if (!projectId) return [];
+    const records = loadPairBudgets(this.abDir, projectId, sessionId, this.now());
+    this.bySession.set(sessionId, records);
+    return records;
+  }
+
+  /** [sessionId]'s rows, already pruned of expired notify timestamps
+   *  (`loadPairBudgets`'s own contract). A copy: the caller is handed the
+   *  budget to READ, and the backing array is what every later check answers
+   *  from. */
+  recordsFor(sessionId: string): readonly PairBudgetState[] {
+    return [...this.load(sessionId)];
+  }
+
+  /** Record what one send spent. Forced to disk when it set a halt, throttled
+   *  otherwise — losing a few notify timestamps to a crash costs a pair part of
+   *  one hour's ceiling, where losing a halt costs the halt entirely. */
+  write(sessionId: string, next: PairBudgetState): void {
+    const records = upsertPairBudget(this.load(sessionId), next);
+    this.bySession.set(sessionId, records);
+    this.flush(sessionId, records, next.haltedAt !== null);
+  }
+
+  /**
+   * Lift every halt [sessionId] is a SENDER in (§7.4: "cleared only by a
+   * human"). Reads the memory-first cache, never disk: the budget belongs to
+   * the host, not to any one project's core, so a keystroke has to be able to
+   * lift a halt on a session whose project is not currently warm — a
+   * per-keystroke file read here would make the ceiling itself the thing that
+   * stalls typing. Only an actual change reaches disk, and it is FORCED rather
+   * than throttled — the same rule a route drop follows in
+   * `SessionBusCoordinator.saveRoutesIfDue`.
+   */
+  clearHalt(sessionId: string): void {
+    const records = this.load(sessionId);
+    let changed = false;
+    const next = records.map((r) => {
+      if (r.haltedAt === null) return r;
+      changed = true;
+      return clearPairHalt(r);
+    });
+    if (!changed) return;
+    this.bySession.set(sessionId, next);
+    this.flush(sessionId, next, true);
+  }
+
+  private flush(sessionId: string, records: PairBudgetState[], force: boolean): void {
+    const now = this.now();
+    if (!force && now - (this.savedAtMs.get(sessionId) ?? 0) < BUS_ROUTE_PERSIST_INTERVAL_MS) return;
+    const projectId = this.projectIdFor(sessionId);
+    if (!projectId) return;
+    this.savedAtMs.set(sessionId, now);
+    try {
+      savePairBudgets(this.abDir, projectId, sessionId, records);
+    } catch (err) {
+      log.warn("session bus: could not persist pair budget for %s: %s", sessionId, err);
+    }
+  }
+}
+
 export class HostServer {
   private readonly cores = new Map<string, CatalogEntry>();
   // In-flight open() promises keyed by projectId, so concurrent opens of the
@@ -303,6 +409,14 @@ export class HostServer {
   // home for a peer, no desktop attached to this machine) get separate sets.
   private readonly busRouteMissWarned = new Set<string>();
   private readonly busOwnerMissWarned = new Set<string>();
+  // The host-side no-progress-halt store (§7.4), machine-wide like
+  // `sessionIndex`/`repoKeys` beside it — see PairBudgetStore's own doc.
+  // `sessionIndex.lookup` is what lets it answer for a session whose project
+  // is not currently warm.
+  private readonly pairBudgetStore = new PairBudgetStore(
+    resolveAbDir(),
+    (sessionId) => this.sessionIndex.lookup(sessionId)?.projectId ?? null,
+  );
   // The ONE session bus for this machine (E9/§5.4): every project core built
   // by `startCore` below is handed this exact instance rather than building
   // its own, so a route learned while handling project A's inbound frame is
@@ -316,8 +430,16 @@ export class HostServer {
     abDir: resolveAbDir(),
     projectIdFor: (sessionId) => this.sessionIndex.lookup(sessionId)?.projectId ?? null,
     self: (sessionId) => {
-      const machineId = this.controlPlaneRegistrationId;
-      if (!machineId) return null;
+      // A relay registration is the NETWORK address; LOCAL_MACHINE_ID is this
+      // bridge's name for itself when it has none. The two sessions a purely
+      // local exchange (§6.1) involves never leave this machine, so a host
+      // launched local-only — or one whose control-plane mint threw — must
+      // still be able to name itself for that exchange rather than refuse it
+      // `AGENT_NOT_READY` over an address neither side needs. `addressable()`
+      // below is left reading the real registration on purpose: it is what a
+      // REMOTE caller's honesty depends on, and nothing here should make a
+      // peer think this machine is reachable when it is not.
+      const machineId = this.controlPlaneRegistrationId ?? LOCAL_MACHINE_ID;
       const entry = this.sessionIndex.lookup(sessionId);
       if (!entry) return null;
       // The project's REAL name (antgrid.yaml's `name:` when set) is only known
@@ -339,6 +461,58 @@ export class HostServer {
       };
     },
     addressable: () => this.controlPlaneRegistrationId !== null,
+    // §6.1: a target on THIS host is handed straight into the SAME fold the
+    // remote path folds through (`handleInbound`) — no relay, no carrier, no
+    // route table — so wrapping, queueing and turn-boundary injection are
+    // byte-identical for both paths. `dispatch()` (coordinator.ts) already
+    // confines this to a same-machine context (`ctx.to.machineId ===
+    // frame.from.machineId`); this only adds "and a core for it is actually
+    // loaded here right now" — a session this host merely KNOWS about (a cold
+    // project in the catalog) cannot be folded into in process, and falling
+    // through to `send` below holds the frame, which `flushHeld` then retries
+    // through this same decision — so a project that comes back warm delivers
+    // what was held for it, rather than offering it to a carrier forever.
+    //
+    // `handleInbound` can throw on a session-store write failure, and it is
+    // called RE-ENTRANTLY — the receipt `onMessage` dispatches back out
+    // through this very function, for a DIFFERENT session, from inside this
+    // call — so an uncaught throw here would unwind through a fold that
+    // already committed and report ITS delivery as failed too. Caught and
+    // turned into `false`, which is what makes the failure cost one retry
+    // rather than a wrongly-failed, already-applied send.
+    //
+    // `"applied"` is the whole answer for every verb `dispatch()` ever hands
+    // this (post, notify, ack): the store commit it implies (mailbox for a
+    // post, the log/thread row for a notify or ack) has already landed by the
+    // time `handleInbound` returns it, and what happens to a notify's
+    // rendered line downstream (`deliverBusEvent`/`lineForEvent`) is a
+    // separate, deliberately swallowed best-effort concern — `lineForEvent`
+    // returns null for every post ON PURPOSE, so answering "true iff a line
+    // was queued" here would read every local post as failed and retry it
+    // forever.
+    deliverLocal: (frame, to) => {
+      const projectId = this.sessionIndex.lookup(to.sessionId)?.projectId ?? null;
+      if (projectId === null || !this.cores.has(projectId)) return false;
+      try {
+        return this.sessionBus.handleInbound(frame) === "applied";
+      } catch (err) {
+        log.warn(
+          "session bus: local delivery to %s failed: %s",
+          to.sessionId,
+          err instanceof Error ? err.message : String(err),
+        );
+        return false;
+      }
+    },
+    // The one human signal that lifts a no-progress halt (§7.4) — delegated to
+    // the host-wide store so it can answer for a session this host is not
+    // currently holding warm; see PairBudgetStore.clearHalt.
+    clearHalt: (sessionId) => this.pairBudgetStore.clearHalt(sessionId),
+    // The one budget for the machine, for the same reason there is one
+    // coordinator: a pair is (sender, target) across every project, so a store
+    // per core would let the same two sessions spend a fresh ceiling by
+    // exchanging on a different project's stream.
+    pairBudget: this.pairBudgetStore,
     send: (frame, ctx) => {
       if (ctx.role === "peer") {
         // There is exactly one way home and it is the carrier — on WHICHEVER

@@ -1183,6 +1183,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       };
     },
     carrierPresent: () => opts.carrierPresent?.() ?? false,
+    // The same live read `remoteFrameAllowed` gates inbound frames with, so the
+    // switch answers one way for both directions at any instant.
+    remoteAccessEnabled,
   });
 
   /** A re-sync push reaches EVERY bus subscriber, so it may only be skipped when

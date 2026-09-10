@@ -24,10 +24,25 @@ import {
   type SessionMemberKey,
   type SessionMemberRef,
 } from "../protocol";
-import { addressesSameSession } from "./address";
+import { addressesSameSession, namesMachine } from "./address";
 import { listSessionBusSessions } from "./store-fs";
 import { artifactById, loadArtifacts, readArtifactContent, type ArtifactState } from "./artifact-store";
-import { ARTIFACT_CHUNK_BYTES, BUS_ROUTE_PERSIST_INTERVAL_MS, BUS_ROUTE_TTL_MS, MAX_BUS_ROUTES } from "./constants";
+import {
+  ARTIFACT_CHUNK_BYTES,
+  BUS_ROUTE_PERSIST_INTERVAL_MS,
+  BUS_ROUTE_TTL_MS,
+  MAX_BUS_ROUTES,
+} from "./constants";
+import {
+  budgetFor,
+  checkHalt,
+  checkNotify,
+  noteExchange,
+  noteNotify,
+  noteProgress,
+  pairKey,
+  type PairBudgetState,
+} from "./pair-budget";
 import { checkEnvelopeSize, stampEnvelope, type EnvelopeDraft } from "./envelope";
 import { refuse, type SessionBusRefusal } from "./errors";
 import { loadBusRoutes, saveBusRoutes, type BusRouteDrops, type BusRouteMap } from "./route-store";
@@ -154,6 +169,16 @@ export interface CoordinatorDeps {
    *  held rather than lost. Absent means this coordinator has no local path at
    *  all, which is every caller until the host wires one. */
   deliverLocal?: (frame: AbMessage, to: SessionMemberKey) => boolean;
+  /** The per-pair send budget (§7.4), read before a send and charged after one.
+   *  Held by whoever owns every project's rather than by this class: a halt
+   *  "cleared only by a human" has to survive a restart, and a counter kept in
+   *  memory here would be cleared by one. Absent means unbudgeted — the honest
+   *  answer for a bare bus with no host above it, and the reason a unit test
+   *  that wires none is not silently subject to a ceiling it never asked for. */
+  pairBudget?: {
+    recordsFor(sessionId: string): readonly PairBudgetState[];
+    write(sessionId: string, next: PairBudgetState): void;
+  };
   /** Lift the no-progress halt every pair this session SENDS in is subject to.
    *  Held by whoever owns the budget rather than here: a halt cleared only by a
    *  human has to survive a restart, and a counter this class kept in memory
@@ -244,10 +269,10 @@ export class SessionBusCoordinator {
   // machine-wide. Moved here (from a per-core closure) so a route learned while
   // handling project A's inbound frame is the SAME table project B's outbound
   // send for that context consults; see noteRoute/routeFor. This table does not
-  // decide anything on its own — message()/fetch()/flushHeld()/onFetch() still
-  // hand every frame to `deps.send` unconditionally, exactly as before the
-  // move — because the lookup-then-dispatch decision belongs to whoever wired
-  // `send`: only it knows what a `sendToAppSession`/`sendToOwner` call means.
+  // decide anything on its own: every frame leaves through `dispatch`, which
+  // consults `deliverLocal` first and this table not at all — the
+  // lookup-then-send decision belongs to whoever wired `send`, because only it
+  // knows what a `sendToAppSession`/`sendToOwner` call means.
   private routes: BusRouteMap = new Map();
   private routesSavedAt = 0;
   // Per-project bus-event consumers, registered via `setListener` (the seam
@@ -589,9 +614,30 @@ export class SessionBusCoordinator {
     if (addressesSameSession(self.key, to)) {
       return refuse("UNKNOWN_PEER", "a session cannot address itself; name another session on this repository");
     }
+    // A bridge with no relay identity names itself by the local sentinel so the
+    // sessions it spawned can reach each other (§6.1). It can reach nothing
+    // else, and a frame stamped with the sentinel and held for a carrier that
+    // attaches later would arrive carrying a `from` no reply can route back to.
+    if (!namesMachine(to.machineId, self.key.machineId) && this.deps.addressable?.() === false) {
+      return refuse("AGENT_NOT_READY", "this machine has no relay identity, so it can only reach sessions on itself");
+    }
     const s = this.stateFor(input.sessionId);
 
     const now = this.now();
+    // Both ceilings of §7.4, read BEFORE anything is stamped or logged: a
+    // refusal must leave no trace of the message it refused, or a halted pair
+    // accumulates thread rows for exchanges that never happened.
+    const budget = this.deps.pairBudget
+      ? budgetFor(this.deps.pairBudget.recordsFor(input.sessionId), pairKey(self.key, to))
+      : null;
+    if (budget) {
+      const halted = checkHalt(budget);
+      if (halted) return halted;
+      if (input.verb === "notify") {
+        const tooOften = checkNotify(budget, now);
+        if (tooOften) return tooOften;
+      }
+    }
     const contextId = input.contextId ?? input.sessionId;
     // Minted here when the caller has none, and RETURNED either way: §4.3 makes
     // the id bridge-owned except when replying, so an agent that is not told it
@@ -641,7 +687,32 @@ export class SessionBusCoordinator {
       ? after.held
       : holdMessage(after.held, { messageId: envelope.messageId, contextId, role, to, frame, heldAt: now });
     if (held !== after.held) this.commit(input.sessionId, { held });
+    // Charged whether or not it left: a held frame is retried, so a pair with no
+    // route would otherwise talk to itself forever outside every ceiling.
+    if (budget) this.spendBudget(input.sessionId, budget, input.verb, opensThread || carriesArtifact(input.parts), now);
     return { ok: true, sent, held: hasHeld(held, envelope.messageId), messageId: envelope.messageId, threadId, opensThread };
+  }
+
+  /**
+   * Charge one send to the pair's budget (§7.4).
+   *
+   * Progress is §7.4's own definition and nothing wider — a NEW thread, or an
+   * artifact part — because a reply on a thread already open is exactly the
+   * exchange the no-progress counter exists to notice. Reset before the
+   * increment, so the send that made the progress starts the next count at one
+   * rather than being forgiven retroactively.
+   */
+  private spendBudget(
+    sessionId: string,
+    budget: PairBudgetState,
+    verb: "post" | "notify",
+    progressed: boolean,
+    now: number,
+  ): void {
+    let next = progressed ? noteProgress(budget) : budget;
+    next = noteExchange(next, now);
+    if (verb === "notify") next = noteNotify(next, now);
+    this.deps.pairBudget?.write(sessionId, next);
   }
 
   /**
@@ -655,7 +726,11 @@ export class SessionBusCoordinator {
    * leaves the frame held and retried instead of dropped.
    */
   private dispatch(frame: BusFrame, ctx: { contextId: string; role: BusRole; to: SessionMemberKey }): boolean {
-    if (ctx.to.machineId === frame.from.machineId && this.deps.deliverLocal?.(frame, ctx.to)) return true;
+    // `namesMachine`, not plain equality, for the reason its own doc gives; a
+    // peer that stamps the sentinel itself reaches nothing by it, because
+    // `deliverLocal` still resolves the target through this bridge's own
+    // session index and falls through to the carrier when it cannot.
+    if (namesMachine(ctx.to.machineId, frame.from.machineId) && this.deps.deliverLocal?.(frame, ctx.to)) return true;
     return this.deps.send(frame, ctx);
   }
 
@@ -683,7 +758,7 @@ export class SessionBusCoordinator {
       length: Math.min(Math.max(1, input.length), ARTIFACT_CHUNK_BYTES),
     });
     const role = this.roleForContext(input.sessionId, input.contextId);
-    const sent = this.deps.send(frame, { contextId: input.contextId, role, to: keyOf(input.to) });
+    const sent = this.dispatch(frame, { contextId: input.contextId, role, to: keyOf(input.to) });
     return { ok: true, requestId, sent };
   }
 
@@ -879,6 +954,11 @@ export class SessionBusCoordinator {
    * duplicate at the receiver. A route belongs to a context and fails whole, so
    * stopping that context at its first refusal is what keeps a sender's messages
    * arriving in the order it wrote them.
+   *
+   * Through `dispatch`, never `deps.send`: a frame held because its target's
+   * project was cold is delivered by the LOCAL arm once that project is warm
+   * again, and a retry that went straight to `send` would keep offering it to a
+   * carrier that has no route for it until the hold aged out.
    */
   private flushHeld(sessionId: string, now: number): void {
     const s = this.stateFor(sessionId);
@@ -887,7 +967,7 @@ export class SessionBusCoordinator {
     const refused = new Set<string>();
     for (const m of live.held) {
       if (refused.has(m.contextId)) continue;
-      if (this.deps.send(m.frame as AbMessage, { contextId: m.contextId, role: m.role, to: m.to })) {
+      if (this.dispatch(m.frame as BusFrame, { contextId: m.contextId, role: m.role, to: m.to })) {
         sent.push(m.messageId);
       } else {
         refused.add(m.contextId);
@@ -1030,7 +1110,10 @@ export class SessionBusCoordinator {
             error: "no artifact with that id on this session",
           }),
     });
-    this.deps.send(frame, {
+    // Through `dispatch` for the same reason the ack is: a slice answered
+    // between two sessions on ONE machine travels a peer-role context nothing
+    // taught a route for, and the ordinary send would drop it with a warning.
+    this.dispatch(frame, {
       contextId: msg.contextId,
       role: this.roleForContext(sessionId, msg.contextId),
       to: msg.from,
@@ -1059,6 +1142,13 @@ const ENVELOPE_TOO_LARGE_REASON =
 
 function notMember(): SessionBusRefusal {
   return refuse("NOT_MEMBER", "this bridge does not hold a session with that id");
+}
+
+/** Whether a message carries something durable, which is half of §7.4's
+ *  definition of progress. An artifact outlives the exchange that produced it;
+ *  text does not, which is why text alone never resets the counter. */
+function carriesArtifact(parts: readonly BusPart[]): boolean {
+  return parts.some((p) => p.kind === "artifact");
 }
 
 function keyOf(ref: SessionMemberKey | SessionMemberRef): SessionMemberKey {

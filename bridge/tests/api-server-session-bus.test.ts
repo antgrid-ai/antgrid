@@ -93,6 +93,7 @@ function machine(opts: {
     machineId: () => opts.machineId,
     membership: membershipOf,
     carrierPresent: () => opts.carrierPresent !== false,
+    remoteAccessEnabled: () => true,
     ...(opts.directory ? { directory: opts.directory } : {}),
   });
   const ctx: AgentContext = {

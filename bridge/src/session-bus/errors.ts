@@ -19,7 +19,12 @@ export const SESSION_BUS_ERRORS = {
    *  else is on it. */
   NOT_ADDRESSABLE: 409,
   UNKNOWN_ARTIFACT: 404,
+  /** The two per-pair ceilings of 7.4. `NO_PROGRESS` is the halt: it refuses
+   *  every verb and only a human lifts it. `NOTIFY_RATE` refuses one verb and
+   *  names `post` as the one that still reaches, so the caller has somewhere to
+   *  go rather than a wall. */
   NO_PROGRESS: 429,
+  NOTIFY_RATE: 429,
   ENVELOPE_TOO_LARGE: 413,
   ARTIFACT_TOO_LARGE: 413,
   AGENT_NOT_READY: 503,
