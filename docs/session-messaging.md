@@ -265,9 +265,12 @@ desktop app's relay connection down and with remote access off.
 **Remote — another machine.** The existing path: the sending machine's desktop
 app carries the leg to the target bridge, exactly as the lead's app did (D7),
 because a bridge still cannot dial another bridge. The route table
-(`route-store.ts`) already keys `contextId → relay slot id` and already learns
-routes from inbound traffic rather than from a role, so it generalizes with no
-change to its shape.
+(`route-store.ts`) already keyed `contextId → relay slot id` and already
+learned routes from inbound traffic rather than from a role — generalizing it
+still widened the row with a `projectId` (E9/§5.4: one machine-level table can
+now hold a route for any project this host has open, and the row is the only
+thing that says which project's stream a peer-role dispatch may use), which
+bumped `ROUTE_STORE_VERSION` and discarded `routes.json` on upgrade.
 
 ### 6.2 Why the split is worth its cost
 

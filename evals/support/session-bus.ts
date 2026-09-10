@@ -4,7 +4,7 @@ import type { AbMessage } from "../../bridge/src/protocol";
 import type { RelayClient } from "../helpers/relay-client";
 
 /**
- * Session-bus test glue: the PTY sink, the delivery-queue reader, and the
+ * Session-bus test glue: the PTY sink, the persisted-session reader, and the
  * loopback HTTP callers every bus scenario needs.
  *
  * Outside `evals/helpers/` for the reason `stream.ts` is — the harness is a
@@ -25,25 +25,6 @@ setInterval(() => {}, 1 << 30);
 export const SINK_SCRIPT_NAME = "antgrid-eval-sink.cjs";
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
-export function deliveriesPath(abDir: string, projectId: string): string {
-  return join(abDir, "agents", encodeURIComponent(projectId), "session-bus", "deliveries.json");
-}
-
-/** The lines the bridge is holding for a session, as the queue persisted them.
- *  A line is written before delivery is attempted and removed only once the
- *  submit succeeded, so this file IS the held-vs-submitted distinction. */
-export function queuedLines(abDir: string, projectId: string, sessionId: string): any[] {
-  const path = deliveriesPath(abDir, projectId);
-  if (!existsSync(path)) return [];
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
-    return (parsed.lines ?? []).filter((l: any) => l.sessionId === sessionId);
-  } catch {
-    // A concurrent atomic rewrite is the only reader error worth tolerating.
-    return [];
-  }
-}
 
 /** One project's persisted session rows, read off disk rather than the wire:
  *  an advert is a push, so what it stopped carrying is no evidence of what the

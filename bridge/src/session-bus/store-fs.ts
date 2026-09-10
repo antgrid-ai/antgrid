@@ -46,7 +46,7 @@ export function sessionBusSessionDir(abDir: string, projectId: string, sessionId
 /** Where one project's delivery queue lives. Named separately from
  *  `sessionBusProjectDir` even though the path is identical today: the queue is
  *  per-project BY DESIGN, because the turn-open set it drains against is one
- *  `ProjectCore`'s own reduction (delivery-queue.ts:170-175) — a machine-level
+ *  `ProjectCore`'s own reduction (`DeliveryQueueDeps.isTurnOpen`) — a machine-level
  *  move that later relocates the rest of session-bus state must not carry the
  *  queue with it as an incidental side effect. */
 export function sessionBusDeliveryDir(abDir: string, projectId: string): string {

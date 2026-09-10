@@ -4,7 +4,7 @@
 // moment it does, so a line dropped here is one nothing on either side can
 // notice is missing.
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -254,5 +254,12 @@ describe("turn-boundary delivery", () => {
 
     expect(loadDeliveries(abDir, "project-one").lines.map((l) => l.id)).toEqual(["p1-line"]);
     expect(loadDeliveries(abDir, "project-two").lines.map((l) => l.id)).toEqual(["p2-line"]);
+
+    // Pinned to the literal path, not just to `sessionBusDeliveryDir`'s
+    // return value: reading and writing through the same helper would still
+    // pass if the queue moved directories, so this is the only thing in the
+    // suite that would notice a relocation of `agents/<projectId>/session-bus/`.
+    expect(existsSync(join(abDir, "agents", "project-one", "session-bus", "deliveries.json"))).toBe(true);
+    expect(existsSync(join(abDir, "agents", "project-two", "session-bus", "deliveries.json"))).toBe(true);
   });
 });
