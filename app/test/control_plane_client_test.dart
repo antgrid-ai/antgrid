@@ -743,6 +743,39 @@ void main() {
     );
 
     test(
+      'a full ask arrives under the exact names the bridge declares',
+      () async {
+        final t = FakeAgentTransport();
+        final client = ControlPlaneClient(transport: t);
+        addTearDown(client.dispose);
+
+        t.requestHandler = (method, params) => {
+          'os': {'name': 'Windows', 'version': '10.0.26200', 'arch': 'x64'},
+          'projects': <String, dynamic>{},
+          'sessions': <Object>[],
+          'sessionsTruncated': 0,
+        };
+
+        await client.capabilityCard(
+          projectIds: ['p1'],
+          repoKeys: ['github.com/owner/repo'],
+          includeSessions: true,
+        );
+
+        // Spelled out rather than derived: this map is the hand-mirrored half
+        // of `CapabilityCardParams` (bridge/src/host-server.ts), and Zod drops
+        // a key it does not declare without erroring — so a rename on either
+        // side degrades to an unasked card rather than to a failure.
+        expect(t.requests.single.method, 'machine.capability-card');
+        expect(t.requests.single.params, {
+          'projectIds': ['p1'],
+          'repoKeys': ['github.com/owner/repo'],
+          'includeSessions': true,
+        });
+      },
+    );
+
+    test(
       'capabilityCard sends no new keys when includeSessions is not asked',
       () async {
         final t = FakeAgentTransport();
