@@ -12,6 +12,10 @@ import '../util/netwatch.dart';
 import 'device_revocation.dart';
 import 'providers.dart';
 
+/// Window the dropped-frame count in [RelayConnection._noteDroppedFrame] is
+/// accumulated over. Reported on the line so the count reads as a rate.
+const Duration _kDropLogBurstWindow = Duration(seconds: 1);
+
 /// Owns exactly one relay socket (one [RelayService]) and its single
 /// [MachineSession] for one bare machine `deviceUuid`. v3: there is ONE socket
 /// per machine — the control plane and every project ride sealed streams inside
@@ -254,7 +258,7 @@ class RelayConnection {
     _droppedFramesTotal++;
     // Drops arrive in bursts (a page load overruns the bucket for as long as it
     // takes to issue its subresources); one line per frame buries the count.
-    _dropLogBurst ??= Timer(const Duration(seconds: 1), () {
+    _dropLogBurst ??= Timer(_kDropLogBurstWindow, () {
       _dropLogBurst = null;
       AbLog.warn(
         'relay',
@@ -262,6 +266,7 @@ class RelayConnection {
         fields: {
           'machine': machineDeviceId,
           'frames': _droppedFrames,
+          'windowMs': _kDropLogBurstWindow.inMilliseconds,
           'total': _droppedFramesTotal,
         },
       );

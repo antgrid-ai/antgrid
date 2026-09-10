@@ -38,6 +38,7 @@ import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
 import { detectInstalledTools } from "./tool-detector";
+import { modelwatch } from "./modelwatch";
 import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
@@ -50,7 +51,7 @@ import { SessionNamer } from "./session-namer";
 import { antigravityCliHome } from "./agents/antigravity/title";
 import { AntigravityTitleWatcher } from "./agents/antigravity/title-watcher";
 import { resolveStructuredTitle } from "./agents/title-dispatch";
-import { buildTitleContext, generateTitleFromContext } from "./agents/title-generate";
+import { buildTitleContext, generateTitleFromContext, type TitleGeneration } from "./agents/title-generate";
 import { TitleAttempts, type TitleOutcome } from "./agents/title-attempts";
 import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
@@ -3703,10 +3704,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // title thrown away for reasons unrelated to generating it, which releases
     // the claim without spending the budget.
     let outcome: TitleOutcome = "abandoned";
+    // Held out here so the record below can name the call the verdict belongs
+    // to: the two exits after a successful spawn settle as `abandoned`, and
+    // those are the calls that were paid for and their answer thrown away.
+    let result: TitleGeneration | undefined;
     try {
       // No cwd: a naming spawn runs in a throwaway directory of its own
       // (headlessScratchCwd), never this session's checkout.
-      const result = await generateTitleFromContext(context, { tool });
+      result = await generateTitleFromContext(context, { tool, terminalId: target.terminalId });
       if (!result.ok) {
         outcome = result.reason;
         return;
@@ -3726,6 +3731,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       namer?.onStructuredTitle(target.terminalId, result.title, "self");
     } finally {
       titleAttempts.settle(target.terminalId, key, outcome);
+      // After the settle and inside a catch of its own: that call decides
+      // whether this session may ever be named again, and an observer must
+      // never be what breaks it. `abandoned` is recorded like any other verdict
+      // — it is the one outcome nothing else counts, and the only place the
+      // spawn's own records can be told a paid-for answer was discarded.
+      try {
+        if (result) modelwatch.record({
+          callId: result.callId, phase: "outcome", purpose: "title", attempt: 1,
+          requestedTool: tool, actualTool: result.actualTool, reach: result.reach,
+          terminalId: target.terminalId, outcome,
+        });
+      } catch { /* an observer must never fail a naming run */ }
     }
   }
 
@@ -3751,14 +3768,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // Persist the agent's native resume id for this slot every turn
       // (overwrite-latest), independent of title resolution. terminalId is the
       // slot id (stamped as ANTGRID_TERMINAL_ID at spawn).
-      if (!body.titleOnly) {
-        const prevAgentSession = sessions?.get(body.terminalId)?.agentSessionId;
-        sessions?.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
+      // True only when the manager REFUSED this id — an ephemeral thread the
+      // agent's own store disowns. The slot still holds a different
+      // conversation, so nothing below may name it after the id in this post.
+      // An UNKNOWN slot is not a refusal: a service PTY never had an identity.
+      let idRefused = false;
+      if (!body.titleOnly && sessions) {
+        const slot = sessions.get(body.terminalId);
+        const prevAgentSession = slot?.agentSessionId;
+        idRefused = slot !== undefined
+          && !sessions.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
         // A new conversation under a STILL-LIVE PTY (`/clear`, `/new`) reaches
         // no exit path, so this is the only place the previous conversation's
         // title rank can be released. Left latched, it vetoes every
         // first-message title the new conversation resolves.
-        if (prevAgentSession && prevAgentSession !== body.sessionId) {
+        if (!idRefused && prevAgentSession && prevAgentSession !== body.sessionId) {
           namer?.forgetStructuredTitle(body.terminalId);
         }
       }
@@ -3771,7 +3795,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       const hookTool = body.agent ? BY_HOOK_NAME[body.agent] : undefined;
       const chatSlot = sessions?.get(body.terminalId)?.mode === "chat";
       const nameFromHook = (fallback?: string) => {
-        if (!hookTool || !body.sessionId || chatSlot) return;
+        if (!hookTool || !body.sessionId || chatSlot || idRefused) return;
         maybeGenerateTitle(hookTool, {
           terminalId: body.terminalId,
           agentSessionId: body.sessionId,

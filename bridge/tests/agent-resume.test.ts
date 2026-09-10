@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resumeArgv, sessionResumable } from "../src/agent-resume";
+import { agentSessionGone, resumeArgv, sessionResumable } from "../src/agent-resume";
 
 const dirs: string[] = [];
 function newDir() { const d = mkdtempSync(join(tmpdir(), "ab-resume-")); dirs.push(d); return d; }
@@ -35,6 +35,50 @@ describe("resumeArgv", () => {
   });
   test("unknown / unsupported tool yields no resume args", () => {
     expect(resumeArgv("nope", "x")).toEqual([]);
+  });
+});
+
+function seedCodexThreads(home: string, ids: string[]) {
+  const db = new Database(join(home, "state_5.sqlite"));
+  db.run("CREATE TABLE threads (id TEXT PRIMARY KEY)");
+  const insert = db.query("INSERT INTO threads (id) VALUES (?)");
+  for (const id of ids) insert.run(id);
+  db.close();
+}
+
+// agentSessionGone is NOT !sessionResumable: they agree on both certainties and
+// split on the middle one, which is the only reason the spec verdict is
+// tri-state. A caller that refuses work acts on this one.
+describe("agentSessionGone", () => {
+  test("a store that answers and lacks the id → gone", () => {
+    const codexHome = newDir();
+    seedCodexThreads(codexHome, ["other"]);
+    expect(agentSessionGone({ tool: "codex", agentSessionId: "missing", codexHome })).toBe(true);
+  });
+  test("a store that answers and holds the id → not gone", () => {
+    const codexHome = newDir();
+    seedCodexThreads(codexHome, ["uuid-1"]);
+    expect(agentSessionGone({ tool: "codex", agentSessionId: "uuid-1", codexHome })).toBe(false);
+  });
+  test("a store that cannot be read → not gone, where sessionResumable is also optimistic", () => {
+    const codexHome = join(newDir(), "no-such-home");
+    expect(agentSessionGone({ tool: "codex", agentSessionId: "uuid-1", codexHome })).toBe(false);
+    expect(sessionResumable({ tool: "codex", agentSessionId: "uuid-1", codexHome })).toBe(true);
+  });
+  // github-copilot has the store check but has NOT claimed its store is what
+  // `--resume` consults: its sessions outlive the local index, so a miss is a
+  // stale index and the CLI is still asked. Deliberately divergent from
+  // sessionResumable, which reports the same miss as a display hint.
+  test("a store check alone is not authority — copilot is never gone", () => {
+    const copilotHome = newDir();
+    seedCopilotSessions(copilotHome, ["uuid-c"]);
+    expect(agentSessionGone({ tool: "github-copilot", agentSessionId: "missing", copilotHome })).toBe(false);
+    expect(sessionResumable({ tool: "github-copilot", agentSessionId: "missing", copilotHome })).toBe(false);
+  });
+  test("an agent with no store-existence check is never gone", () => {
+    expect(agentSessionGone({ tool: "opencode", agentSessionId: "ses_1" })).toBe(false);
+    expect(agentSessionGone({ tool: "claude-code", agentSessionId: "sess-x" })).toBe(false);
+    expect(agentSessionGone({ tool: "some-future-agent", agentSessionId: "x" })).toBe(false);
   });
 });
 

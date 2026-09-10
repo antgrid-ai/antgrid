@@ -1,0 +1,97 @@
+name: Sync changelog spine
+
+# A published release adds a row to site/src/data/changelog-releases.ts, and
+# this opens the PR that carries it. Deliberately a PR rather than a push:
+#
+#  - The site deploys from `main` (azure-static-web-apps.yml), work lands on
+#    `development`, and this repo has already paid twice for the two diverging
+#    (see the "Fold main back in" and "DO NOT SQUASH" PRs). A bot committing
+#    straight to either branch is how that happens a third time.
+#  - The PR is also the prompt. The spine lands as a bare version-and-date row,
+#    and the moment to write the note is while the release is still fresh in
+#    someone's head. A green PR sitting there asking for two sentences gets
+#    them; a silent auto-push does not, and the page fills with link-only rows.
+#
+# Merging it unchanged is correct and takes ten seconds: the row renders as
+# "we haven't written this one up" with a link to the generated notes, which is
+# a finished state, not a placeholder. Notes are an optional extra commit on the
+# same PR, written into site/src/data/changelog.ts.
+#
+# No third-party actions on purpose. The org Actions policy is
+# `allowed_actions: selected` with an explicit patterns_allowed list, so a
+# create-pull-request action would fail to resolve with an error that reads like
+# a typo. `gh` is pre-installed on the runner and needs no allowlist entry.
+
+on:
+  # GITHUB_TOKEN release events do not start workflows, so build-desktop calls
+  # this workflow explicitly after publishing.
+  workflow_call:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One at a time. Two releases published minutes apart would otherwise race on
+# the same branch name and the loser would fail its push.
+concurrency:
+  group: sync-changelog
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: development
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Sync the release spine
+        run: node site/scripts/sync-changelog.mjs
+        env:
+          # The runner token, so API calls are authenticated and never
+          # lands in the shared unauthenticated rate-limit pool.
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Open a PR if the spine moved
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- site/src/data/changelog-releases.ts; then
+            echo "Spine already current; nothing to do."
+            exit 0
+          fi
+
+          BRANCH="changelog/sync-${{ github.run_id }}"
+          git config user.name "antgrid-bot"
+          git config user.email "bot@antgrid.ai"
+          git checkout -b "$BRANCH"
+          git add site/src/data/changelog-releases.ts
+          git commit -m "chore(site): sync changelog spine"
+          git push origin "$BRANCH"
+
+          # Body is written to a file rather than passed inline: the release name
+          # is attacker-controllable text in the general case, and `gh pr create
+          # --body "$(...)"` would hand it to the shell.
+          cat > /tmp/pr-body.md <<'BODY'
+          The changelog spine picked up a new release. Merging this as-is is fine:
+          the new row renders with a link to the generated notes.
+
+          If it deserves a note, add one to `site/src/data/changelog.ts` on this
+          branch before merging. Human register, British spelling, no em dashes:
+          what changed, and where it helps, what was wrong before.
+          BODY
+
+          gh pr create \
+            --base development \
+            --head "$BRANCH" \
+            --title "chore(site): sync changelog spine" \
+            --body-file /tmp/pr-body.md
