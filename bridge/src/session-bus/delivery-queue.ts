@@ -10,10 +10,10 @@
 // as a new instruction rather than as an answer to whatever the agent last
 // asked.
 //
-// Why it is persisted: the wake for a completed task is the ONLY thing that
-// tells a lead its peer finished. A bridge restart between the transition
-// landing and the turn closing would otherwise drop it silently, and D11 forbids
-// the lead inferring the outcome from the absence.
+// Why it is persisted: a queued line is the only trace an arrival leaves that
+// the receiving agent ever sees, and the wait for a turn boundary is unbounded.
+// A bridge restart between the arrival landing and the turn closing would drop
+// it with the sender already told it was sent.
 //
 // Ordering is FIFO per session, and exactly ONE line goes in per turn boundary:
 // the turn a submitted line opens is only observed asynchronously, so a second
@@ -30,43 +30,27 @@ import { readBusDb, readRecords, replaceRecords, withBusDb } from "./bus-db";
 const log = logger.child({ component: "session-bus" });
 
 /** Lines held across every session of one project. Small on purpose: past it the
- *  agent is not reading its queue at all, and a hundred stale wakes delivered at
- *  once is a worse prompt than the newest few. */
+ *  agent is not reading its queue at all, and a hundred stale arrivals delivered
+ *  at once is a worse prompt than the newest few. */
 export const MAX_QUEUED_LINES = 64;
 
 /** Which template produced the line. Recorded so a queue dumped after a restart
  *  says what is waiting without re-parsing the rendered text.
  *
- *  A `brief` reaches its peer one of two ways. An ARMED Handler takes it as an
- *  instruction at arm time (`flushPendingBrief`), which is a boundary by
- *  construction and queues nothing. Everything else queues it here: a machine
- *  added to a session starts its agent in terminal mode, where no Handler ever
- *  arms, and a brief with no other route would otherwise be held on disk
- *  forever while the dialog that collected it reported success. `joined` is the
- *  same brief travelling the other way, to the LEAD, where it is context rather
- *  than a mandate to adopt.
- *
- *  `raised` is `task` pointing the other way: a peer's self-assigned task (4.5)
- *  arriving at the LEAD. Its own kind rather than a `task` with the roles
- *  swapped, because the two cards ask for opposite things — one is work to do,
- *  the other is work already being done. */
-export const DeliveryKindSchema = z.enum(["brief", "joined", "task", "raised", "wake", "answer", "cancel", "note"]);
+ *  Only a notify produces a line at all — a post is read when the target chooses
+ *  (§7.1) — and the two kinds split on whether the RECEIVER already held the
+ *  thread when the message landed, which is what decides whether the reader is
+ *  being introduced to an exchange or continued in one. */
+export const DeliveryKindSchema = z.enum(["notify", "reply"]);
 export type DeliveryKind = z.infer<typeof DeliveryKindSchema>;
 
 export const QueuedLineSchema = z.object({
-  /** The message or task id the line was rendered from. Idempotency key: a
-   *  duplicate frame the coordinator re-emits must not queue a second copy. */
+  /** The message id the line was rendered from. Idempotency key: a duplicate
+   *  frame the coordinator re-emits must not queue a second copy. */
   id: z.string().min(1).max(300),
   sessionId: z.string().min(1).max(200),
   kind: DeliveryKindSchema,
   text: z.string().max(MAX_DELIVERY_CHARS),
-  /** The task this line was rendered from, and that task's state at the moment
-   *  it was rendered. A queued line is a FROZEN render, and the turn boundary it
-   *  waits for can outlast the state it describes — a card can ask a lead to
-   *  answer a peer whose task has since completed. Read again at delivery, these
-   *  two say so. Absent for a brief or a join, which name no task. */
-  taskId: z.string().min(1).max(300).optional(),
-  taskState: z.string().min(1).max(40).optional(),
   queuedAt: z.number(),
 });
 export type QueuedLine = z.infer<typeof QueuedLineSchema>;
@@ -79,17 +63,13 @@ export function emptyDeliveries(): DeliveryQueueState {
   return { lines: [] };
 }
 
-/** Which lines may be dropped to make room. A `task` is an assignment and a
- *  `cancel` is its withdrawal: lose either and the two machines disagree about
- *  what is being worked, which is the exact failure the sequenced half of the
- *  protocol exists to prevent. A `joined` is load-bearing for a third reason —
- *  it is the ONLY place the human's brief for a peer is ever shown on the lead's
- *  machine, since the durable brief record lives on the peer — so losing one
- *  leaves the lead a machine it was never told the mandate for. A `brief` is
- *  that same mandate on the peer's own side and the only one it is ever given.
- *  A `wake`, an `answer` and a `note` only narrate something the task record
- *  already holds. */
-const EVICTABLE_KINDS: ReadonlySet<DeliveryKind> = new Set<DeliveryKind>(["wake", "answer", "note"]);
+/** Which lines may be dropped to make room. Both kinds are: a message is
+ *  conversation and is allowed to be lost (§4.1), and the durable half of what
+ *  a session says is an artifact, which this queue never carries. A kind added
+ *  to the enum without being added HERE is treated as load-bearing instead, and
+ *  the eviction below then drops the oldest line outright — possibly another
+ *  session's. The enum forces a type edit; this Set does not. */
+const EVICTABLE_KINDS: ReadonlySet<DeliveryKind> = new Set<DeliveryKind>(["notify", "reply"]);
 
 /** Append, or return the state unchanged when the id is already queued. The
  *  no-op is what makes a redelivered transition — the outbox retries until
@@ -98,12 +78,11 @@ export function enqueueLine(s: DeliveryQueueState, line: QueuedLine): DeliveryQu
   if (s.lines.some((l) => l.id === line.id)) return s;
   const lines = [...s.lines, line];
   if (lines.length <= MAX_QUEUED_LINES) return { lines };
-  // Over the cap something has to go, and it goes by KIND before age. The cap is
-  // one project's whole queue, so a chatty session's wakes would otherwise evict
-  // another session's assign — and the coordinator acked whatever produced this
-  // line before it ever got here, so a dropped one is gone with nothing to
-  // retry it. Oldest evictable first; oldest outright only when every held line
-  // is load-bearing.
+  // Over the cap something has to go, and it goes by KIND before age: the cap is
+  // one project's whole queue, so a kind that may not be lost has to survive one
+  // chatty session filling it. A dropped line is gone outright — the sender was
+  // answered before this line existed and nothing retries it. Oldest evictable
+  // first; oldest outright only when every held line is load-bearing.
   const evictable = lines.findIndex((l) => EVICTABLE_KINDS.has(l.kind));
   const drop = evictable === -1 ? 0 : evictable;
   return { lines: lines.filter((_, i) => i !== drop) };

@@ -907,7 +907,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  the lead test the coordinator's own `roleForContext` applies. */
   function peerBusReachAllowed(msg: AbMessage, source: InboundSource): boolean {
     switch (msg.type) {
-      case "session-bus:message":
+      case "session-bus:post":
+      case "session-bus:notify":
       case "session-bus:fetch":
       case "session-bus:fetch:result":
       case "session-bus:ack":
@@ -1257,7 +1258,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // cannot dial each other, so this bridge is an endpoint, never a hop: the
       // coordinator applies only frames addressed to a session it holds, and a
       // frame naming any other session is dropped rather than forwarded.
-      case "session-bus:message":
+      case "session-bus:post":
+      case "session-bus:notify":
       case "session-bus:fetch":
       case "session-bus:fetch:result":
       case "session-bus:ack":

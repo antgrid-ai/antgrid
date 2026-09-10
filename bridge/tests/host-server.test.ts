@@ -515,7 +515,8 @@ test(
     const sessionBus = (host as unknown as { sessionBus: SessionBusCoordinator }).sessionBus;
     const res = sessionBus.message({
       sessionId,
-      taskId: null,
+      verb: "post",
+      threadId: null,
       to: { machineId: "m-remote", projectId: "p-remote", sessionId: "s-remote" },
       summary: "hi",
       parts: [{ kind: "text", text: "hi" }],

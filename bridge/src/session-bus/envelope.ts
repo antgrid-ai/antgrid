@@ -19,9 +19,11 @@ export { BusEnvelopeSchema, BusPartSchema, type BusEnvelope, type BusPart };
 
 /** The agent-authored half of an envelope: everything an agent may name. What is
  *  missing from it is the point — `messageId`, `peer` and `timestamp` are minted
- *  or stamped by the bridge in {@link stampEnvelope}. */
+ *  or stamped by the bridge in {@link stampEnvelope}. `threadId` is the one
+ *  half-and-half field (spec 4.3): an agent supplies it only to reply on a
+ *  thread it was told about, and the coordinator mints one when it is absent. */
 export interface EnvelopeDraft {
-  taskId: string | null;
+  threadId: string | null;
   contextId: string;
   parts: BusPart[];
   summary: string;
@@ -43,7 +45,7 @@ export function stampEnvelope(
 ): BusEnvelope {
   return {
     messageId: stamp.messageId,
-    taskId: draft.taskId,
+    threadId: draft.threadId,
     contextId: draft.contextId,
     parts: draft.parts,
     metadata: {

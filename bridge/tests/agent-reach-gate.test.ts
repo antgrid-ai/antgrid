@@ -259,15 +259,15 @@ async function bootReachable(reach: () => boolean): Promise<{
   return { bus, sessionId, sessionBus };
 }
 
-function inbound(sessionId: string, contextId: string, text: string) {
-  return createMessage("session-bus:message", {
+function inbound(sessionId: string, contextId: string, text: string, verb: "post" | "notify" = "post") {
+  return createMessage(verb === "notify" ? "session-bus:notify" : "session-bus:post", {
     from: REMOTE,
     to: { machineId: "m1", projectId: "label-only", sessionId },
     contextId,
-    taskId: null,
+    threadId: null,
     envelope: {
       messageId: `msg-${text}`,
-      taskId: null,
+      threadId: null,
       contextId,
       parts: [{ kind: "text", text }],
       metadata: { peer: REMOTE, summary: text, timestamp: 1 },
@@ -287,6 +287,23 @@ test("a peer opening an exchange is dropped while agent reach is off, and lands 
   reach = true;
   bus.dispatchInbound(inbound(sessionId, REMOTE.sessionId, "while-on"), "control", "relay", "app-1");
   await waitFor(() => sessionBus.messages(sessionId).entries.length === 1, "the frame sent once reach was on");
+}, 30_000);
+
+test("the gate covers both verbs, so a notify cannot walk past what a post is refused", async () => {
+  // The gate switches on the frame TYPE, and this wave split one type into two.
+  // A verb left out of that switch falls to `return true` and reaches the
+  // session with reach off — the interruption half of E12 open on one verb and
+  // shut on the other, with nothing to say so.
+  let reach = false;
+  const { bus, sessionId, sessionBus } = await bootReachable(() => reach);
+
+  bus.dispatchInbound(inbound(sessionId, REMOTE.sessionId, "notify-while-off", "notify"), "control", "relay", "app-1");
+  await new Promise((r) => setTimeout(r, 100));
+  expect(sessionBus.messages(sessionId).entries).toHaveLength(0);
+
+  reach = true;
+  bus.dispatchInbound(inbound(sessionId, REMOTE.sessionId, "notify-while-on", "notify"), "control", "relay", "app-1");
+  await waitFor(() => sessionBus.messages(sessionId).entries.length === 1, "the notify sent once reach was on");
 }, 30_000);
 
 test("an answer on a context this machine LEADS still lands while agent reach is off", async () => {

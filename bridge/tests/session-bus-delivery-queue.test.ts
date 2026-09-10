@@ -8,6 +8,7 @@ import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DeliveryKindSchema,
   MAX_QUEUED_LINES,
   SessionBusDeliveryQueue,
   closedTurns,
@@ -37,7 +38,7 @@ const PROJECT = "p1";
 const SESSION = "s1";
 
 function line(over: Partial<QueuedLine> = {}): Omit<QueuedLine, "queuedAt"> {
-  return { id: "l-1", sessionId: SESSION, kind: "task", text: "a line", ...over };
+  return { id: "l-1", sessionId: SESSION, kind: "notify", text: "a line", ...over };
 }
 
 /** The queue plus the two things `ProjectCore` supplies it: the turn-open set
@@ -76,28 +77,36 @@ describe("the delivery queue folds", () => {
     expect(again.lines).toHaveLength(1);
   });
 
-  test("past the cap the oldest EVICTABLE goes, never an assignment", () => {
+  test("past the cap the oldest goes, whichever kind is holding the head", () => {
     let s = emptyDeliveries();
-    s = enqueueLine(s, { ...line({ id: "assign", kind: "task" }), queuedAt: 0 });
+    s = enqueueLine(s, { ...line({ id: "oldest", kind: "reply" }), queuedAt: 0 });
     for (let i = 0; i < MAX_QUEUED_LINES; i += 1) {
-      s = enqueueLine(s, { ...line({ id: `w-${i}`, kind: "wake" }), queuedAt: i + 1 });
+      s = enqueueLine(s, { ...line({ id: `n-${i}`, kind: "notify" }), queuedAt: i + 1 });
     }
     expect(s.lines).toHaveLength(MAX_QUEUED_LINES);
-    // The cap is one project's whole queue, so the evictable kinds reach it
-    // first. Evicting by age alone would drop whatever sits at the head, and
-    // nothing re-sends a line this queue accepted: the sending machine was told
-    // it left as soon as it did.
-    expect(s.lines[0]!.id).toBe("assign");
-    expect(s.lines.map((l) => l.id)).not.toContain("w-0");
+    // Both surviving kinds are conversation and both are allowed to be lost, so
+    // nothing at the head is protected: the cap is plain oldest-first. Nothing
+    // re-sends what this queue accepted — the sending machine was told the
+    // message left as soon as it did — so the loss is real either way.
+    expect(s.lines.map((l) => l.id)).not.toContain("oldest");
+    expect(s.lines[0]!.id).toBe("n-0");
   });
 
-  test("with nothing evictable left the oldest goes anyway, rather than growing without bound", () => {
-    let s = emptyDeliveries();
-    for (let i = 0; i < MAX_QUEUED_LINES + 3; i += 1) {
-      s = enqueueLine(s, { ...line({ id: `l-${i}`, kind: "task" }), queuedAt: i });
+  test("no kind is exempt from eviction, so the cap can never drop a line out of order", () => {
+    // The trap: a kind added to the enum but left out of EVICTABLE_KINDS is
+    // treated as load-bearing, and the eviction then falls back to dropping
+    // index 0 outright — a line that may belong to a different session
+    // altogether. The enum forces a type edit; the Set does not, so this is what
+    // holds the two in lockstep.
+    for (const kind of DeliveryKindSchema.options) {
+      let s = emptyDeliveries();
+      s = enqueueLine(s, { ...line({ id: "head", kind }), queuedAt: 0 });
+      for (let i = 0; i < MAX_QUEUED_LINES; i += 1) {
+        s = enqueueLine(s, { ...line({ id: `n-${i}`, kind: "notify" }), queuedAt: i + 1 });
+      }
+      expect(s.lines).toHaveLength(MAX_QUEUED_LINES);
+      expect(s.lines.map((l) => l.id), `a ${kind} line at the head outlived the cap`).not.toContain("head");
     }
-    expect(s.lines).toHaveLength(MAX_QUEUED_LINES);
-    expect(s.lines[0]!.id).toBe("l-3");
   });
 
   test("lines are read and removed per session", () => {

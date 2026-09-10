@@ -10,6 +10,7 @@
 // test phrased against `existsSync` would move with the implementation and
 // keep passing; one phrased against the loaders cannot.
 import { test, expect, beforeEach, afterEach } from "bun:test";
+import { z } from "zod";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,9 +28,11 @@ import {
 import { emptyDeliveries, enqueueLine, loadDeliveries, saveDeliveries } from "../src/session-bus/delivery-queue";
 import { emptyHeld, holdMessage, loadHeld, saveHeld } from "../src/session-bus/held-store";
 import { appendLog, emptyLog, loadMessageLog, saveMessageLog } from "../src/session-bus/message-log";
+import { appendPost, emptyMailbox, loadMailbox, saveMailbox } from "../src/session-bus/mailbox";
+import { emptyThreads, loadThreads, saveThreads, upsertThread } from "../src/session-bus/thread-store";
 import { stampEnvelope } from "../src/session-bus/envelope";
 import { removeSessionBusSession } from "../src/session-bus/store-fs";
-import { busDbPath } from "../src/session-bus/bus-db";
+import { busDbPath, readBusDb, readRecords, replaceRecords, withBusDb } from "../src/session-bus/bus-db";
 import { Database } from "bun:sqlite";
 
 setLogLevel("error");
@@ -58,7 +61,7 @@ function artifact(id: string): ArtifactRecord {
   return {
     artifactId: id,
     contextId: "ctx-1",
-    taskId: null,
+    threadId: null,
     author: { ...PEER, sessionName: "remote" },
     name: `${id}.txt`,
     mediaType: "text/plain",
@@ -80,7 +83,7 @@ function seedSession(projectId: string, sessionId: string): void {
       direction: "out",
       peer: PEER,
       envelope: stampEnvelope(
-        { taskId: null, contextId: "ctx-1", parts: [{ kind: "text", text: "hello" }], summary: "a summary" },
+        { threadId: null, contextId: "ctx-1", parts: [{ kind: "text", text: "hello" }], summary: "a summary" },
         { messageId: "m-1", peer: { ...PEER, sessionName: "remote" }, now: 1 },
       ),
     }),
@@ -94,7 +97,7 @@ function seedSession(projectId: string, sessionId: string): void {
       contextId: "ctx-1",
       role: "lead",
       to: PEER,
-      frame: { type: "session-bus:message" },
+      frame: { type: "session-bus:post" },
       heldAt: 1,
     }),
   );
@@ -119,7 +122,7 @@ function seedDeliveries(projectId: string, sessionId: string): void {
     enqueueLine(emptyDeliveries(), {
       id: "line-1",
       sessionId,
-      kind: "wake",
+      kind: "notify",
       text: "a rendered line",
       queuedAt: 1,
     }),
@@ -139,6 +142,86 @@ test("deleting one session reclaims all four of its stores and leaves its siblin
   // as an empty artifact (artifact-store.ts's own note on readArtifactContent).
   expect(readSession(projectId, "s-doomed")).toEqual({ log: 0, held: 0, artifacts: 0, content: null });
   expect(readSession(projectId, "s-kept")).toEqual({ log: 1, held: 1, artifacts: 1, content: 3 });
+});
+
+/** The three stores this wave added, written the way the bus writes them.
+ *  `bus_pair_budget` has no loader yet — W3's budget is what fills it — so it is
+ *  written and read through the record seam directly: a table a session delete
+ *  cannot reach is a leak whether or not anything reads it yet, and it stops
+ *  every OTHER session delete on the machine while it is unreachable. */
+const PairBudgetRowSchema = z.object({ pairKey: z.string(), haltedAt: z.number().nullable() });
+
+function seedThreadedSession(projectId: string, sessionId: string): void {
+  const envelope = stampEnvelope(
+    { threadId: "th-1", contextId: "ctx-1", parts: [{ kind: "text", text: "hello" }], summary: "a summary" },
+    { messageId: `mail-${sessionId}`, peer: { ...PEER, sessionName: "remote" }, now: 1 },
+  );
+  saveMailbox(
+    abDir,
+    projectId,
+    sessionId,
+    appendPost(
+      emptyMailbox(),
+      {
+        kind: "post",
+        messageId: `mail-${sessionId}`,
+        threadId: "th-1",
+        contextId: "ctx-1",
+        at: 1,
+        from: PEER,
+        summary: "a summary",
+        envelope,
+        read: false,
+      },
+      1,
+    ),
+  );
+  saveThreads(
+    abDir,
+    projectId,
+    sessionId,
+    upsertThread(emptyThreads(), { threadId: "th-1", contextId: "ctx-1", peer: PEER, lastAt: 1, openedByPeer: true }),
+  );
+  withBusDb(
+    abDir,
+    (db) =>
+      replaceRecords(db, "bus_pair_budget", "budget", { projectId, sessionId }, [
+        { pairKey: `m1/${sessionId}->m2/s-remote`, haltedAt: null },
+      ]),
+    undefined,
+  );
+}
+
+function readThreadedSession(projectId: string, sessionId: string) {
+  return {
+    mailbox: loadMailbox(abDir, projectId, sessionId, 1).posts.length,
+    threads: loadThreads(abDir, projectId, sessionId, 1).threads.length,
+    budgets: readBusDb(
+      abDir,
+      (db) => readRecords(db, "bus_pair_budget", "budget", { projectId, sessionId }, 16, PairBudgetRowSchema).length,
+      0,
+    ),
+  };
+}
+
+test("deleting one session reclaims its mailbox, its thread rows and its pair budgets", () => {
+  // Not merely a leak if one of these is missed. `deleteScope` runs a single
+  // `WHERE projectId = ? AND sessionId = ?` across every table it knows, so a
+  // new table without both columns raises "no such column", throws the
+  // transaction, and makes EVERY session delete on the machine fail — and
+  // leaving it out of that list instead means a row from an older schema
+  // survives the version drop holding a shape this code no longer has.
+  const projectId = "p-threads";
+  seedThreadedSession(projectId, "s-doomed");
+  seedThreadedSession(projectId, "s-kept");
+  expect(readThreadedSession(projectId, "s-doomed")).toEqual({ mailbox: 1, threads: 1, budgets: 1 });
+
+  removeSessionBusSession(abDir, projectId, "s-doomed");
+
+  expect(readThreadedSession(projectId, "s-doomed")).toEqual({ mailbox: 0, threads: 0, budgets: 0 });
+  // Every assertion above is also true of a session that was never seeded, so
+  // the untouched sibling is what makes them mean anything.
+  expect(readThreadedSession(projectId, "s-kept")).toEqual({ mailbox: 1, threads: 1, budgets: 1 });
 });
 
 test("deleting one session leaves the project's delivery queue standing", () => {

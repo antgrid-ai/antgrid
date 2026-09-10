@@ -42,7 +42,7 @@ const PEER_KEY: SessionMemberKey = { machineId: "m-peer", projectId: "p-peer", s
 
 const ENVELOPE = {
   messageId: "msg-1",
-  taskId: "t1",
+  threadId: "t1",
   contextId: "ctx-1",
   parts: [{ kind: "text" as const, text: "run the suite" }],
   metadata: { peer: LEAD_REF, summary: "run the suite", timestamp: 1_000_000 },
@@ -52,8 +52,17 @@ const ENVELOPE = {
 // puts on the wire.
 const SAMPLES: { msg: AbMessage; wire: { safeParse: (v: unknown) => { success: boolean } } }[] = [
   {
-    msg: createMessage("session-bus:message", {
-      from: PEER_KEY, to: LEAD_KEY, contextId: "ctx-1", taskId: null, envelope: ENVELOPE,
+    msg: createMessage("session-bus:post", {
+      from: PEER_KEY, to: LEAD_KEY, contextId: "ctx-1", threadId: null, envelope: ENVELOPE,
+    }),
+    wire: SessionBusMessageWire,
+  },
+  {
+    // The same body under a different verb, which is the whole of the
+    // difference: a bridge that does not know a verb refuses the frame, where a
+    // bridge that did not know a flag would silently treat it as the other one.
+    msg: createMessage("session-bus:notify", {
+      from: PEER_KEY, to: LEAD_KEY, contextId: "ctx-1", threadId: "t1", envelope: ENVELOPE,
     }),
     wire: SessionBusMessageWire,
   },
@@ -73,7 +82,7 @@ const SAMPLES: { msg: AbMessage; wire: { safeParse: (v: unknown) => { success: b
   },
   {
     msg: createMessage("session-bus:ack", {
-      from: PEER_KEY, to: LEAD_KEY, contextId: "ctx-1", taskId: "t1", seq: 0, ok: true,
+      from: PEER_KEY, to: LEAD_KEY, contextId: "ctx-1", messageId: "msg-1", ok: true,
     }),
     wire: SessionBusAckWire,
   },
@@ -93,7 +102,7 @@ describe("session-bus protocol", () => {
   });
 
   test("a body that violates its wire schema is refused", () => {
-    const bad = { ...SAMPLES[0]!.msg, taskId: "" };
+    const bad = { ...SAMPLES[0]!.msg, threadId: "" };
     expect(SessionBusMessageWire.safeParse(bad).success).toBe(false);
   });
 
@@ -253,7 +262,8 @@ describe("session-bus coordinator across a carrier", () => {
   function post(): string {
     const res = lead.message({
       sessionId: LEAD_REF.sessionId,
-      taskId: null,
+      verb: "post",
+      threadId: null,
       to: PEER_REF,
       summary: "run the suite",
       parts: [{ kind: "text", text: "run the suite" }],
@@ -262,26 +272,80 @@ describe("session-bus coordinator across a carrier", () => {
     return res.messageId;
   }
 
-  test("a message is delivered, raised as an event, and never acked", () => {
-    post();
+  test("a post is delivered, raised as an event, and answered with a receipt", () => {
+    const messageId = post();
     const sent = drain();
     expect(sent).toHaveLength(1);
-    expect(sent[0]!.type).toBe("session-bus:message");
+    expect(sent[0]!.type).toBe("session-bus:post");
     expect((sent[0] as { to: SessionMemberKey }).to).toEqual(PEER_KEY);
-    expect(peerEvents.map((e) => e.kind)).toEqual(["message"]);
-    // Nothing comes back: an ack would make a lossy post stop-and-wait, and
-    // there is no record on either side for a receipt to retire.
-    expect(carried).toEqual([]);
+    expect(peerEvents.map((e) => e.kind)).toEqual(["post"]);
+
+    // E6: the receipt is keyed by the message it answers and is the only honest
+    // witness that the frame arrived, since everything on the sending side can
+    // report only that it left.
+    expect(carried).toHaveLength(1);
+    expect(carried[0]!.type).toBe("session-bus:ack");
+    expect((carried[0] as unknown as { messageId: string }).messageId).toBe(messageId);
+  });
+
+  test("the receipt stamps the sender's own log entry, and only the outbound one", () => {
+    const messageId = post();
+    drain();
+    // The second drain carries home the ack the peer raised while folding, which
+    // is what turns "it left" into "it arrived".
+    drain();
+
+    const out = lead.messages(LEAD_REF.sessionId).entries.filter((e) => e.direction === "out");
+    expect(out).toHaveLength(1);
+    expect(out[0]!.envelope.messageId).toBe(messageId);
+    expect(out[0]!.deliveredAt).toBe(now);
+    // The receiver logged the same message inbound; a stamp there would read as
+    // a receipt for its own delivery.
+    expect(peer.messages(PEER_REF.sessionId).entries.every((e) => e.deliveredAt === undefined)).toBe(true);
+  });
+
+  test("a first send mints a thread id and a second send carrying it reuses it", () => {
+    // Nothing minted one before this wave, so a reply had no thread to name and
+    // there was no way to tell a fresh exchange from a continuing one.
+    const first = lead.message({
+      sessionId: LEAD_REF.sessionId,
+      verb: "post",
+      threadId: null,
+      to: PEER_REF,
+      summary: "run the suite",
+      parts: [{ kind: "text", text: "run the suite" }],
+    });
+    expect("ok" in first && first.ok).toBe(true);
+    const opened = first as { threadId: string; opensThread: boolean };
+    expect(opened.threadId).toBeTruthy();
+    expect(opened.opensThread).toBe(true);
+
+    const second = lead.message({
+      sessionId: LEAD_REF.sessionId,
+      verb: "notify",
+      threadId: opened.threadId,
+      to: PEER_REF,
+      summary: "and one more thing",
+      parts: [{ kind: "text", text: "and one more thing" }],
+    });
+    expect("ok" in second && second.ok).toBe(true);
+    expect((second as { threadId: string }).threadId).toBe(opened.threadId);
+    expect((second as { opensThread: boolean }).opensThread).toBe(false);
+
+    // The id the caller was told has to be the id on the wire, or it cannot be
+    // replied on.
+    const threads = carried.map((f) => (f as unknown as { threadId: string | null }).threadId);
+    expect(threads).toEqual([opened.threadId, opened.threadId]);
   });
 
   test("a frame naming a session this bridge does not hold is dropped without an ack", () => {
     // Reported as DROPPED, not merely "a bus frame": the agent core binds the
     // only route home on this answer, so a frame naming somebody else's session
     // must not be able to claim it.
-    const stray = createMessage("session-bus:message", {
+    const stray = createMessage("session-bus:post", {
       from: LEAD_KEY,
       to: { machineId: "m-peer", projectId: "p-peer", sessionId: "s-nobody" },
-      contextId: "ctx-x", taskId: null, envelope: ENVELOPE,
+      contextId: "ctx-x", threadId: null, envelope: ENVELOPE,
     });
     expect(peer.handleInbound(stray)).toBe("dropped");
     expect(carried).toEqual([]);
@@ -309,7 +373,8 @@ describe("session-bus coordinator across a carrier", () => {
     // desktop app, which accepts it and reports it sent.
     const res = peer.message({
       sessionId: PEER_REF.sessionId,
-      taskId: null,
+      verb: "post",
+      threadId: null,
       to: LEAD_REF,
       contextId: LEAD_REF.sessionId,
       summary: "an aside",
@@ -328,7 +393,8 @@ describe("session-bus coordinator across a carrier", () => {
   test("a session this bridge does not hold is refused rather than given an address", () => {
     const res = lead.message({
       sessionId: "s-not-here",
-      taskId: null,
+      verb: "post",
+      threadId: null,
       to: PEER_REF,
       summary: "x",
       parts: [{ kind: "text", text: "x" }],
@@ -347,7 +413,8 @@ describe("session-bus coordinator across a carrier", () => {
 
     const res = peer.message({
       sessionId: PEER_REF.sessionId,
-      taskId: null,
+      verb: "post",
+      threadId: null,
       to: LEAD_REF,
       contextId: LEAD_REF.sessionId,
       summary: "a finding",
@@ -359,7 +426,7 @@ describe("session-bus coordinator across a carrier", () => {
     carrierUp = true;
     peer.pump();
     expect(carried).toHaveLength(1);
-    expect(carried[0]!.type).toBe("session-bus:message");
+    expect(carried[0]!.type).toBe("session-bus:post");
 
     carried.length = 0;
     peer.pump();
@@ -370,7 +437,8 @@ describe("session-bus coordinator across a carrier", () => {
     carrierUp = false;
     peer.message({
       sessionId: PEER_REF.sessionId,
-      taskId: null,
+      verb: "post",
+      threadId: null,
       to: LEAD_REF,
       contextId: LEAD_REF.sessionId,
       summary: "a finding",
@@ -395,14 +463,15 @@ describe("session-bus coordinator across a carrier", () => {
     resumed.stop();
 
     expect(carried).toHaveLength(1);
-    expect(carried[0]!.type).toBe("session-bus:message");
+    expect(carried[0]!.type).toBe("session-bus:post");
   });
 
   test("a held message stops being worth delivering once its life has lapsed", () => {
     carrierUp = false;
     peer.message({
       sessionId: PEER_REF.sessionId,
-      taskId: null,
+      verb: "post",
+      threadId: null,
       to: LEAD_REF,
       contextId: LEAD_REF.sessionId,
       summary: "a finding",
@@ -414,6 +483,6 @@ describe("session-bus coordinator across a carrier", () => {
     peer.pump();
     // The lossiness a message plane asks for, spent where it costs least: a note
     // about a conversation this old arrives as noise, not as news.
-    expect(carried.filter((f) => f.type === "session-bus:message")).toEqual([]);
+    expect(carried.filter((f) => f.type === "session-bus:post")).toEqual([]);
   });
 });

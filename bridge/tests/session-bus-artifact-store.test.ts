@@ -34,7 +34,7 @@ function rec(over: Partial<ArtifactRecord> = {}): ArtifactRecord {
   return {
     artifactId: "a1",
     contextId: "c1",
-    taskId: "t1",
+    threadId: "t1",
     author: AUTHOR,
     name: "fix.patch",
     mediaType: "text/x-diff",
@@ -53,13 +53,13 @@ function tmpAbDir(): string {
 test("a handle is added once and is addressable by id and by context", () => {
   let s = addArtifact(emptyArtifacts(), rec());
   s = addArtifact(s, rec({ summary: "a redelivered publish" }));
-  s = addArtifact(s, rec({ artifactId: "a2", contextId: "c2", taskId: null }));
+  s = addArtifact(s, rec({ artifactId: "a2", contextId: "c2", threadId: null }));
 
   expect(s.artifacts).toHaveLength(2);
   expect(artifactById(s, "a1")!.summary).toBe("the patch that made the suite pass");
   expect(artifactById(s, "nope")).toBeNull();
   expect(artifactsFor(s, "c1").map((a) => a.artifactId)).toEqual(["a1"]);
-  expect(artifactsFor(s, "c2")[0]!.taskId).toBeNull();
+  expect(artifactsFor(s, "c2")[0]!.threadId).toBeNull();
 });
 
 test("the size ceiling is a refusal code, never a throw", () => {

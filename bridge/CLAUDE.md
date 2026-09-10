@@ -185,10 +185,12 @@ edit breaks silently.
   capability flag Zod could strip in silence.
 - **Nothing this side of the relay may be reported as delivery.** The carrier
   taking a frame says only that it left this machine, so a post answers `sent`
-  and never "received". The one honest answer is the other side's ack, and
-  `session-bus:ack` is a reserved verb nothing on this bridge emits yet — so
-  until it is re-keyed to a message id, the only witnesses a frame that goes
-  nowhere has are downstream of the send: the RECEIVING coordinator says so when
+  and never "received". The one honest answer is the other side's ack: the
+  receiving coordinator emits a `session-bus:ack` keyed to the message id for
+  every post and notify it folds, and the sender stamps it onto its own log
+  entry. An unstamped entry is not a failed one — a receipt is fire-and-forget
+  and an unacked one is never retried — so the witnesses a frame that goes
+  nowhere has still carry the weight: the RECEIVING coordinator says so when
   a frame names a session that bridge does not hold, and the app says the other
   half (`no leg for addressed member`, `lead project not open`). The sending
   machine has none at all — a carrier that accepts frames and delivers none is
@@ -265,12 +267,14 @@ edit breaks silently.
   hostname and a repo path — precisely what `authorizeInstruction` reads as a
   grant — so no template may put it in a wrapper, and any kind that carries it
   must stay on the `injectReply` path rather than reaching `instruct`.
-- **The no-progress halt is `session-bus/task-guard.ts`, and it is per SESSION,
-  not per machine** — two agents can trade messages that advance nothing
-  forever, and a per-machine ceiling would let one session spend another's
-  budget. Nothing counts an exchange into it today: the guard state is
-  in-memory and only the human clear is wired, so the ceiling is declared and
-  dormant until there is a notion of progress on a message plane to feed it.
+- **The no-progress halt is per (sender, target) PAIR** — two agents can trade
+  messages that advance nothing forever; a per-machine ceiling would let one
+  session spend another's budget, and a per-session one would let a halted pair
+  carry on through a third. Nothing counts an exchange into it yet:
+  `session-bus/task-guard.ts` lost its caller when the task lifecycle went, and
+  `SessionBusCoordinator.clearHalt` delegates to a dep nothing supplies, so the
+  ceiling is declared and dormant until the counters land on the host beside the
+  directory.
 - **`/session-bus/*` in `api-server.ts` is the loopback route table**, keyed off
   `?terminalId=` — which is what says whose session a request is about, and the
   same slot that resolves an isolated session's checkout. Bus frames route by

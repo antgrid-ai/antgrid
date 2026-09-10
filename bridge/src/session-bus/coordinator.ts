@@ -45,10 +45,26 @@ import {
   appendLog,
   emptyLog,
   loadMessageLog,
+  markDelivered,
   saveMessageLog,
   type MessageLogState,
 } from "./message-log";
-import { clearHalt as clearGuardHalt, emptyGuard, type GuardState } from "./task-guard";
+import {
+  appendPost,
+  emptyMailbox,
+  loadMailbox,
+  markRead,
+  saveMailbox,
+  type MailboxState,
+} from "./mailbox";
+import {
+  emptyThreads,
+  loadThreads,
+  saveThreads,
+  upsertThread,
+  threadById,
+  type ThreadState,
+} from "./thread-store";
 
 const log = logger.child({ component: "session-bus" });
 
@@ -87,8 +103,21 @@ export type SessionBusSend = (
 /** What the coordinator learned from an inbound frame, for the layer that turns
  *  it into a line an agent reads. Emitted AFTER the store is written, so a
  *  consumer that throws cannot cost the fold. */
-export type SessionBusEvent =
-  | { kind: "message"; sessionId: string; taskId: string | null; peer: SessionMemberRef; envelope: BusEnvelope };
+export type SessionBusEvent = {
+  /** The verb the sender chose, carried through unchanged: a post is read when
+   *  the target chooses and a notify interrupts, and only the sender knows
+   *  which it meant. */
+  kind: "post" | "notify";
+  sessionId: string;
+  threadId: string | null;
+  /** Whether this arrival is the first one on its thread at THIS receiver, which
+   *  is not the same question as whether the frame carries a thread id: every
+   *  send mints one, so an id is always present and only the thread store can
+   *  say whether the exchange is new here. */
+  opensThread: boolean;
+  peer: SessionMemberRef;
+  envelope: BusEnvelope;
+};
 
 export interface CoordinatorDeps {
   abDir: string;
@@ -112,6 +141,18 @@ export interface CoordinatorDeps {
    *  the wrong place. Absent means addressable, so a core that never wires it
    *  keeps today's answer. */
   addressable?: () => boolean;
+  /** Hand a frame straight to the session it names on THIS machine, bypassing
+   *  the relay, the carrier and the route table entirely (§6.1). False means it
+   *  could not be delivered in process — the target's project is not loaded, or
+   *  a store write failed — and the frame takes the ordinary send path so it is
+   *  held rather than lost. Absent means this coordinator has no local path at
+   *  all, which is every caller until the host wires one. */
+  deliverLocal?: (frame: AbMessage, to: SessionMemberKey) => boolean;
+  /** Lift the no-progress halt every pair this session SENDS in is subject to.
+   *  Held by whoever owns the budget rather than here: a halt cleared only by a
+   *  human has to survive a restart, and a counter this class kept in memory
+   *  would be cleared by one. */
+  clearHalt?: (sessionId: string) => void;
   onEvent?: (event: SessionBusEvent) => void;
   now?: () => number;
   newId?: () => string;
@@ -123,9 +164,14 @@ interface SessionState {
    *  because a `send` that returned false never reached the relay, so putting
    *  the frame out later is a delivery and not a second copy. */
   held: HeldState;
-  /** In-memory and deliberately unpersisted: nothing counts an exchange while
-   *  the no-progress halt is dormant, so a file would only record a zero. */
-  guard: GuardState;
+  /** Posts parked for this session to read when it chooses (§7.1). Loaded with
+   *  the log rather than lazily like artifacts: an inbound post writes it, and a
+   *  session that has one waiting is exactly the session a restart must find. */
+  mailbox: MailboxState;
+  /** Which exchange each thread this session is part of rides on — the only
+   *  thing that can tell a reply where to go, for a thread a peer opened over a
+   *  notify that left no mail. */
+  threads: ThreadState;
   /** Read on the first fetch this session answers: most sessions publish nothing
    *  and never pay for the file. */
   artifacts: ArtifactState | null;
@@ -140,16 +186,44 @@ interface SessionState {
 
 export interface MessageInput {
   sessionId: string;
-  /** The thread this turn belongs to, or null to start one. Correlation only —
-   *  a thread has no state machine (`docs/session-messaging.md` §4.2) — so it is
-   *  carried and never validated. */
-  taskId: string | null;
+  /** Which verb the caller chose (§7.1). A post is parked in the target's
+   *  mailbox and interrupts nothing; a notify becomes a line at the target's
+   *  next turn boundary. Everything after the send decision is identical, which
+   *  is why the two travel as one shape. */
+  verb: "post" | "notify";
+  /** The thread this turn belongs to, or null to open a new one. The coordinator
+   *  MINTS an id when this is null and returns it, because an agent that was
+   *  never told the id cannot reply on the thread (§4.3). Correlation only — a
+   *  thread has no state machine (§4.2) — so a supplied id is carried and never
+   *  validated. */
+  threadId: string | null;
   to: SessionMemberRef;
   summary: string;
   parts: BusPart[];
   unexpected?: string;
   contextId?: string;
 }
+
+export interface MessageResult {
+  ok: true;
+  /** That the frame LEFT, never that it arrived: everything this side of the
+   *  relay can only report departure, and the other end's receipt is the one
+   *  honest witness (E6). */
+  sent: boolean;
+  held: boolean;
+  messageId: string;
+  /** Always a real id — minted here when the caller supplied none — because it
+   *  is what the caller replies on. */
+  threadId: string;
+  /** Whether this send OPENED that thread, which is §7.4's definition of
+   *  progress and so the signal the budget resets on. */
+  opensThread: boolean;
+}
+
+/** Anything this coordinator sends. Every bus frame carries both endpoints, and
+ *  the local branch of {@link SessionBusCoordinator.dispatch} needs the sender's
+ *  machine id to know whether the target shares it. */
+type BusFrame = Extract<AbMessage, { type: `session-bus:${string}` }>;
 
 /** How often held messages are retried. One second is the shortest step worth
  *  taking, so a slower tick would round every retry up to itself. */
@@ -451,30 +525,41 @@ export class SessionBusCoordinator {
     return this.stateFor(sessionId).log;
   }
 
+  mailbox(sessionId: string): MailboxState {
+    return this.stateFor(sessionId).mailbox;
+  }
+
+  threads(sessionId: string): ThreadState {
+    return this.stateFor(sessionId).threads;
+  }
+
+  /** Mark what a reader was just handed. Separate from {@link mailbox} because
+   *  reading is what spends the unread flag, and a getter that marked would make
+   *  every incidental peek destroy the inbox. */
+  markMailboxRead(sessionId: string, messageIds: readonly string[]): void {
+    const s = this.stateFor(sessionId);
+    const mailbox = markRead(s.mailbox, messageIds);
+    if (mailbox !== s.mailbox) this.commit(sessionId, { mailbox });
+  }
+
   /**
    * Lift a no-progress halt (`docs/session-messaging.md` §7.4).
    *
    * A human's own submitted reply into the halted session is what reaches here.
    * The halt says two agents exchanged messages while the work stood still, and
-   * the guard holds out for a human to look — a person typing into that very
-   * session is exactly that, and it is the only such signal a bridge can
-   * observe. An agent cannot forge it: nothing an agent submits arrives as
-   * terminal input.
+   * it holds out for a human to look — a person typing into that very session is
+   * exactly that, and it is the only such signal a bridge can observe. An agent
+   * cannot forge it: nothing an agent submits arrives as terminal input.
    *
-   * Dormant until the per-pair counters of §7.4 are rebuilt: nothing counts an
-   * exchange today, so nothing halts and this clears nothing. Kept wired because
-   * it is the human's entry point and re-finding it later is how a halt ships
-   * with no way out.
+   * Delegated rather than answered here, and with no loaded-session check in
+   * front of it: the budget is per PAIR and belongs to whoever holds every
+   * project's, so a keystroke has to be able to lift a halt on a session this
+   * coordinator is not currently holding — which is exactly the signal §7.4 says
+   * lifts it. A coordinator with no budget wired clears nothing, which is the
+   * honest answer for a bare bus with no host above it.
    */
   clearHalt(sessionId: string): void {
-    // Loaded sessions only. This runs on every human submit in the project, and
-    // hydrating a store for a session that has never sent would put two file
-    // reads behind every keypress.
-    const s = this.sessions.get(sessionId);
-    if (!s) return;
-    const guard = clearGuardHalt(s.guard);
-    if (guard === s.guard) return;
-    this.commit(sessionId, { guard });
+    this.deps.clearHalt?.(sessionId);
   }
 
   // -- outbound ---------------------------------------------------------------
@@ -483,18 +568,32 @@ export class SessionBusCoordinator {
    * Send one message to another session.
    *
    * Lossy on purpose: a send that does not leave is HELD, not queued for
-   * unbounded retry, and a message carries no seq and expects no ack. Anything
-   * that must survive is an Artifact (§4.1).
+   * unbounded retry, and a message carries no seq and expects no reliable
+   * delivery. Anything that must survive is an Artifact (§4.1).
    */
-  message(input: MessageInput): { ok: true; sent: boolean; held: boolean; messageId: string } | SessionBusRefusal {
+  message(input: MessageInput): MessageResult | SessionBusRefusal {
     const self = this.deps.self(input.sessionId);
     if (!self) return this.noSelf();
+    const to = keyOf(input.to);
+    // Structural, not defensive. `dispatch` delivers a local target in process
+    // by re-entering `handleInbound`, so a self-addressed send would fold this
+    // one session's state twice inside a single call and commit the half read
+    // before the fold over the half written by it. The directory never offers
+    // the caller its own row, so refusing costs nothing legitimate.
+    if (addressesSameSession(self.key, to)) {
+      return refuse("UNKNOWN_PEER", "a session cannot address itself; name another session on this repository");
+    }
     const s = this.stateFor(input.sessionId);
 
     const now = this.now();
     const contextId = input.contextId ?? input.sessionId;
+    // Minted here when the caller has none, and RETURNED either way: §4.3 makes
+    // the id bridge-owned except when replying, so an agent that is not told it
+    // has no way to answer on the thread it just opened.
+    const opensThread = input.threadId === null;
+    const threadId = input.threadId ?? this.newId();
     const envelope = this.stamp(self, {
-      taskId: input.taskId,
+      threadId,
       contextId,
       parts: input.parts,
       summary: input.summary,
@@ -503,28 +602,55 @@ export class SessionBusCoordinator {
     const tooLarge = checkEnvelopeSize(envelope);
     if (tooLarge) return refuse(tooLarge, ENVELOPE_TOO_LARGE_REASON);
 
-    const frame = createMessage("session-bus:message", {
+    const frame = createMessage(input.verb === "notify" ? "session-bus:notify" : "session-bus:post", {
       from: self.key,
-      to: keyOf(input.to),
+      to,
       contextId,
-      taskId: input.taskId,
+      threadId,
       envelope,
     });
     const role = this.roleForContext(input.sessionId, contextId);
-    const to = keyOf(input.to);
-    const sent = this.deps.send(frame, { contextId, role, to });
+
+    // Written BEFORE the send, which is not the order it reads in: `dispatch`
+    // may deliver in process and bring the receipt back inside this very call,
+    // and a receipt that arrives before its message was logged finds no entry to
+    // stamp. The thread row rides the same commit — it is what a reply on this
+    // thread later routes on, and it must not depend on the send succeeding.
+    this.commit(input.sessionId, {
+      log: appendLog(s.log, { at: now, direction: "out", peer: to, envelope }),
+      // Advanced on every send rather than only on the one that opened the
+      // thread: the row ages on `lastAt`, so a long exchange would otherwise
+      // expire underneath itself.
+      threads: upsertThread(s.threads, { threadId, contextId, peer: to, lastAt: now, openedByPeer: false }),
+    });
+
+    const sent = this.dispatch(frame, { contextId, role, to });
 
     // A false return is this bridge refusing before the frame reached the relay,
     // so keeping it is redelivery rather than a duplicate — the one retry an
-    // unacked message can safely have (held-store).
+    // unacked message can safely have (held-store). Re-read rather than taken
+    // from `s`: the dispatch above may have folded this session's own state.
+    const after = this.stateFor(input.sessionId);
     const held = sent
-      ? s.held
-      : holdMessage(s.held, { messageId: envelope.messageId, contextId, role, to, frame, heldAt: now });
-    this.commit(input.sessionId, {
-      log: appendLog(s.log, { at: now, direction: "out", peer: to, envelope }),
-      ...(held === s.held ? {} : { held }),
-    });
-    return { ok: true, sent, held: hasHeld(held, envelope.messageId), messageId: envelope.messageId };
+      ? after.held
+      : holdMessage(after.held, { messageId: envelope.messageId, contextId, role, to, frame, heldAt: now });
+    if (held !== after.held) this.commit(input.sessionId, { held });
+    return { ok: true, sent, held: hasHeld(held, envelope.messageId), messageId: envelope.messageId, threadId, opensThread };
+  }
+
+  /**
+   * The one send decision, taken by everything that leaves this coordinator —
+   * a message and the receipt that answers one alike.
+   *
+   * A target on this machine is handed straight to it (§6.1): no relay, no
+   * carrier, no route table, and nothing that can fail for transport reasons.
+   * Local delivery that does not take the frame FALLS THROUGH to the ordinary
+   * send rather than reporting failure, so a target whose project is not loaded
+   * leaves the frame held and retried instead of dropped.
+   */
+  private dispatch(frame: BusFrame, ctx: { contextId: string; role: BusRole; to: SessionMemberKey }): boolean {
+    if (ctx.to.machineId === frame.from.machineId && this.deps.deliverLocal?.(frame, ctx.to)) return true;
+    return this.deps.send(frame, ctx);
   }
 
   /** Ask the machine that published an artifact for one slice of it. Unheld and
@@ -589,7 +715,8 @@ export class SessionBusCoordinator {
 
   handleInbound(msg: AbMessage): InboundOutcome {
     switch (msg.type) {
-      case "session-bus:message":
+      case "session-bus:post":
+      case "session-bus:notify":
       case "session-bus:fetch":
       case "session-bus:fetch:result":
       case "session-bus:ack":
@@ -608,11 +735,20 @@ export class SessionBusCoordinator {
     const sessionId = msg.to.sessionId;
     this.warnIfProjectDrifted(self, msg.to);
     switch (msg.type) {
-      case "session-bus:message":
-        this.onMessage(sessionId, msg.from, msg.taskId, msg.envelope);
+      case "session-bus:post":
+      case "session-bus:notify":
+        this.onMessage(
+          sessionId,
+          self,
+          msg.from,
+          msg.type === "session-bus:notify" ? "notify" : "post",
+          msg.threadId,
+          msg.contextId,
+          msg.envelope,
+        );
         return "applied";
       case "session-bus:ack":
-        this.onAck();
+        this.onAck(sessionId, msg.messageId);
         return "applied";
       case "session-bus:fetch":
         this.onFetch(sessionId, self, msg);
@@ -652,12 +788,14 @@ export class SessionBusCoordinator {
         // it being forgotten must not crash the coordinator over one message.
         // Kept in memory only — see the field's own doc on SessionState.
         log.warn("session-bus: no owning project for session %s — state kept in memory only, not persisted", sessionId);
-        s = { log: emptyLog(), held: emptyHeld(), guard: emptyGuard(), artifacts: null, projectId: null };
+        s = { log: emptyLog(), held: emptyHeld(), mailbox: emptyMailbox(), threads: emptyThreads(), artifacts: null, projectId: null };
       } else {
+        const now = this.now();
         s = {
           log: loadMessageLog(this.deps.abDir, projectId, sessionId),
           held: loadHeld(this.deps.abDir, projectId, sessionId),
-          guard: emptyGuard(),
+          mailbox: loadMailbox(this.deps.abDir, projectId, sessionId, now),
+          threads: loadThreads(this.deps.abDir, projectId, sessionId, now),
           artifacts: null,
           projectId,
         };
@@ -678,6 +816,8 @@ export class SessionBusCoordinator {
     if (next.projectId !== null) {
       if (next.log !== s.log) saveMessageLog(this.deps.abDir, next.projectId, sessionId, next.log);
       if (next.held !== s.held) saveHeld(this.deps.abDir, next.projectId, sessionId, next.held);
+      if (next.mailbox !== s.mailbox) saveMailbox(this.deps.abDir, next.projectId, sessionId, next.mailbox);
+      if (next.threads !== s.threads) saveThreads(this.deps.abDir, next.projectId, sessionId, next.threads);
     }
     this.ensureTimer();
   }
@@ -753,30 +893,82 @@ export class SessionBusCoordinator {
 
   private onMessage(
     sessionId: string,
+    self: SessionBusSelf,
     from: SessionMemberKey,
-    taskId: string | null,
+    verb: "post" | "notify",
+    threadId: string | null,
+    contextId: string,
     envelope: BusEnvelope,
   ): void {
     const now = this.now();
     const s = this.stateFor(sessionId);
+    // Read before the upsert below, which would otherwise make the answer no for
+    // everything. It is the thread STORE and not the presence of an id that says
+    // whether this exchange is new here: every send mints an id, so one is always
+    // on the wire.
+    const opensThread = threadId === null || threadById(s.threads, threadId) === null;
     this.commit(sessionId, {
       log: appendLog(s.log, { at: now, direction: "in", peer: from, envelope }),
+      // A post is parked for the target to read when it chooses (§7.1); a notify
+      // is rendered into its session instead, and a mailbox row for one would
+      // re-offer a message the agent has already been handed.
+      ...(verb === "post"
+        ? {
+            mailbox: appendPost(
+              s.mailbox,
+              {
+                kind: "post",
+                messageId: envelope.messageId,
+                threadId,
+                contextId,
+                at: now,
+                from,
+                summary: envelope.metadata.summary,
+                envelope,
+                read: false,
+              },
+              now,
+            ),
+          }
+        : {}),
+      // BOTH verbs, because a notify leaves no mailbox row and this is then the
+      // only record of the context a reply on that thread has to go back out on.
+      // Without it the reply falls back to this session's own id, which
+      // `roleForContext` reads as "lead" and posts to this machine's own desktop.
+      ...(threadId === null
+        ? {}
+        : { threads: upsertThread(s.threads, { threadId, contextId, peer: from, lastAt: now, openedByPeer: true }) }),
     });
-    this.emit({
-      kind: "message",
-      sessionId,
-      taskId,
-      peer: envelope.metadata.peer,
-      envelope,
-    });
+    // The receipt takes the same send decision a message does, so it must go
+    // through `dispatch` and never `deps.send`: two sessions on ONE machine
+    // exchange on a peer-role context nothing ever taught a route for, and the
+    // ordinary send finds nowhere to put it and drops it with a warning.
+    // Fire-and-forget — an unacked ack is not retried, and `ok: false` would
+    // still be a receipt.
+    this.dispatch(
+      createMessage("session-bus:ack", {
+        from: self.key,
+        to: from,
+        contextId,
+        messageId: envelope.messageId,
+        ok: true,
+      }),
+      { contextId, role: this.roleForContext(sessionId, contextId), to: from },
+    );
+    this.emit({ kind: verb, sessionId, threadId, opensThread, peer: envelope.metadata.peer, envelope });
   }
 
-  /** Reserved and dark. E6 keeps the receipt verb, but nothing on this bridge
-   *  emits an ack and nothing holds an unacked frame for one to retire, so an
-   *  empty body is the honest one until the receipt is re-keyed to a message id.
-   *  The frame is still reported `applied`, which is what lets the caller bind
-   *  the route it arrived on. */
-  private onAck(): void {}
+  /** Stamp the outbound entry a receipt answers (E6).
+   *
+   *  Nothing to stamp is not a failure: a message already trimmed out of the
+   *  ring, or a second receipt for one already stamped, both leave the log where
+   *  it was. The receipt says the frame arrived; the log is a rendering aid and
+   *  is allowed to have moved on. */
+  private onAck(sessionId: string, messageId: string): void {
+    const s = this.stateFor(sessionId);
+    const log = markDelivered(s.log, messageId, this.now());
+    if (log !== s.log) this.commit(sessionId, { log });
+  }
 
   private onFetch(sessionId: string, self: SessionBusSelf, msg: Extract<AbMessage, { type: "session-bus:fetch" }>): void {
     const s = this.stateFor(sessionId);

@@ -26,9 +26,9 @@ export const ArtifactRecordSchema = z.object({
   artifactId: z.string().min(1).max(200),
   contextId: z.string().min(1).max(200),
   /** The thread this artifact was published under, or null for one published
-   *  outside any. Nothing writes it today — the publish body carries no thread —
-   *  and it is kept nullable as the slot the thread id re-keys into. */
-  taskId: z.string().max(200).nullable(),
+   *  outside any. Nullable rather than required: an artifact is evidence, and
+   *  evidence may exist before there is a conversation about it. */
+  threadId: z.string().max(200).nullable(),
   /** Who published it, labels included: the row must render on a machine that
    *  can never reach the one that wrote it. */
   author: SessionMemberRefSchema,

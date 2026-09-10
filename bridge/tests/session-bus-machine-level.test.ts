@@ -201,10 +201,10 @@ test(
     const sessionBus = sharedCoordinator();
 
     const resA = sessionBus.message({
-      sessionId: sessionA, taskId: null, to: REMOTE, summary: "hi from A", parts: [{ kind: "text", text: "hi" }],
+      sessionId: sessionA, verb: "post", threadId: null, to: REMOTE, summary: "hi from A", parts: [{ kind: "text", text: "hi" }],
     });
     const resB = sessionBus.message({
-      sessionId: sessionB, taskId: null, to: REMOTE, summary: "hi from B", parts: [{ kind: "text", text: "hi" }],
+      sessionId: sessionB, verb: "post", threadId: null, to: REMOTE, summary: "hi from B", parts: [{ kind: "text", text: "hi" }],
     });
     // Neither is NOT_MEMBER/AGENT_NOT_READY: a refusal there is exactly what a
     // debounce-lagged snapshot (must-fix 3) or a single-project `self` would
@@ -230,14 +230,14 @@ test(
     // Addressed by machine + session alone — the project id on the wire is a
     // LABEL (bridge/CLAUDE.md's existing address invariant) and deliberately
     // wrong here, to prove that label is not what admits the frame.
-    const inbound = createMessage("session-bus:message", {
+    const inbound = createMessage("session-bus:post", {
       from: REMOTE,
       to: { machineId: "m1", projectId: "not-really-project-b", sessionId: sessionB },
       contextId: sessionB,
-      taskId: null,
+      threadId: null,
       envelope: {
         messageId: "msg-cross-project",
-        taskId: null,
+        threadId: null,
         contextId: sessionB,
         parts: [{ kind: "text", text: "reached across projects" }],
         metadata: { peer: REMOTE, summary: "reached across projects", timestamp: Date.now() },
@@ -270,7 +270,7 @@ test(
     // whichever project is dispatching rather than the one the route names,
     // this would resolve to project B.
     const res = sessionBus.message({
-      sessionId: sessionB, taskId: null, to: REMOTE, contextId, summary: "reply", parts: [{ kind: "text", text: "reply" }],
+      sessionId: sessionB, verb: "post", threadId: null, to: REMOTE, contextId, summary: "reply", parts: [{ kind: "text", text: "reply" }],
     });
     expect("ok" in res && res.ok).toBe(true);
 
@@ -299,14 +299,14 @@ test(
     // so the frame that reaches B carries A's session id as contextId while
     // arriving on B's stream — the two projects disagree by construction, and
     // noteRoute must record the stream that actually carried it.
-    const inbound = createMessage("session-bus:message", {
+    const inbound = createMessage("session-bus:post", {
       from: { machineId: "m1", projectId: coreA.projectId, sessionId: sessionA },
       to: { machineId: "m1", projectId: coreB.projectId, sessionId: sessionB },
       contextId: sessionA,
-      taskId: null,
+      threadId: null,
       envelope: {
         messageId: "msg-lead-to-peer",
-        taskId: null,
+        threadId: null,
         contextId: sessionA,
         parts: [{ kind: "text", text: "work on this" }],
         metadata: {
@@ -328,16 +328,57 @@ test(
 
     const res = sessionBus.message({
       sessionId: sessionB,
-      taskId: null,
+      verb: "post",
+      threadId: null,
       to: { machineId: "m1", projectId: coreA.projectId, sessionId: sessionA },
       contextId: sessionA,
       summary: "done",
       parts: [{ kind: "text", text: "done" }],
     });
     expect("ok" in res && res.ok).toBe(true);
+    // Two frames leave on this context, and both must take the peer route: the
+    // E6 receipt the inbound message raised, then the reply itself. A receipt
+    // that took the sender's own project instead would land on THIS machine's
+    // desktop app, which accepts it and reports it delivered.
     const dispatched = sent.filter((s) => s.contextId === sessionA);
-    expect(dispatched).toHaveLength(1);
-    expect(dispatched[0]!.role).toBe("peer");
+    expect(dispatched.map((d) => d.frame.type)).toEqual(["session-bus:ack", "session-bus:post"]);
+    expect(dispatched.map((d) => d.role)).toEqual(["peer", "peer"]);
+  },
+  30_000,
+);
+
+test(
+  "a thread is minted once per session and reused, and no two sessions share one",
+  async () => {
+    const sent: { frame: AbMessage; role: string; contextId: string }[] = [];
+    const { sessionA, sessionB } = await setUpMachine(sent);
+    const sessionBus = sharedCoordinator();
+
+    const opened = sessionBus.message({
+      sessionId: sessionA, verb: "post", threadId: null, to: REMOTE, summary: "open", parts: [{ kind: "text", text: "open" }],
+    });
+    if (!opened.ok) throw new Error(`message refused: ${JSON.stringify(opened)}`);
+    // Nothing minted one before this wave, so every message carried null and a
+    // reply had no thread to name.
+    expect(opened.threadId).toBeTruthy();
+    expect(opened.opensThread).toBe(true);
+
+    const again = sessionBus.message({
+      sessionId: sessionA, verb: "post", threadId: opened.threadId, to: REMOTE, summary: "more", parts: [{ kind: "text", text: "more" }],
+    });
+    if (!again.ok) throw new Error(`message refused: ${JSON.stringify(again)}`);
+    expect(again.threadId).toBe(opened.threadId);
+    expect(again.opensThread).toBe(false);
+
+    // The thread store is per SESSION even though one coordinator answers for
+    // the whole machine, so a second project's first send opens its own thread
+    // rather than joining the one already on the machine.
+    const other = sessionBus.message({
+      sessionId: sessionB, verb: "post", threadId: null, to: REMOTE, summary: "elsewhere", parts: [{ kind: "text", text: "elsewhere" }],
+    });
+    if (!other.ok) throw new Error(`message refused: ${JSON.stringify(other)}`);
+    expect(other.opensThread).toBe(true);
+    expect(other.threadId).not.toBe(opened.threadId);
   },
   30_000,
 );
@@ -419,8 +460,8 @@ test(
     const sessionB = await createSession(busB, sentB, "session-b");
 
     const warm = sharedCoordinator();
-    const resA = warm.message({ sessionId: sessionA, taskId: null, to: REMOTE, summary: "a", parts: [{ kind: "text", text: "a" }] });
-    const resB = warm.message({ sessionId: sessionB, taskId: null, to: REMOTE, summary: "b", parts: [{ kind: "text", text: "b" }] });
+    const resA = warm.message({ sessionId: sessionA, verb: "post", threadId: null, to: REMOTE, summary: "a", parts: [{ kind: "text", text: "a" }] });
+    const resB = warm.message({ sessionId: sessionB, verb: "post", threadId: null, to: REMOTE, summary: "b", parts: [{ kind: "text", text: "b" }] });
     if (!resA.ok || !resB.ok) throw new Error(`message refused: ${JSON.stringify({ resA, resB })}`);
     expect(resA.held).toBe(true);
     expect(resB.held).toBe(true);
@@ -641,8 +682,8 @@ test("resume()'s fallback-style resolver does not pin a foreign project's held s
     send: () => false, // no carrier — both messages land in held-store on disk
     now: () => now,
   });
-  const resOwn = setup.message({ sessionId: "session-own", taskId: null, to: REMOTE, summary: "own", parts: [{ kind: "text", text: "own" }] });
-  const resForeign = setup.message({ sessionId: "session-foreign", taskId: null, to: REMOTE, summary: "foreign", parts: [{ kind: "text", text: "foreign" }] });
+  const resOwn = setup.message({ sessionId: "session-own", verb: "post", threadId: null, to: REMOTE, summary: "own", parts: [{ kind: "text", text: "own" }] });
+  const resForeign = setup.message({ sessionId: "session-foreign", verb: "post", threadId: null, to: REMOTE, summary: "foreign", parts: [{ kind: "text", text: "foreign" }] });
   if (!resOwn.ok || !resForeign.ok) throw new Error("message refused");
   expect(resOwn.held).toBe(true);
   expect(resForeign.held).toBe(true);
@@ -697,8 +738,8 @@ test("forgetting a project drops its pinned session state, so a later retry cann
     },
   });
 
-  const resA = coordinator.message({ sessionId: "session-a", taskId: null, to: REMOTE, summary: "a", parts: [{ kind: "text", text: "a" }] });
-  const resB = coordinator.message({ sessionId: "session-b", taskId: null, to: REMOTE, summary: "b", parts: [{ kind: "text", text: "b" }] });
+  const resA = coordinator.message({ sessionId: "session-a", verb: "post", threadId: null, to: REMOTE, summary: "a", parts: [{ kind: "text", text: "a" }] });
+  const resB = coordinator.message({ sessionId: "session-b", verb: "post", threadId: null, to: REMOTE, summary: "b", parts: [{ kind: "text", text: "b" }] });
   if (!resA.ok || !resB.ok) throw new Error("message refused");
   expect(resA.held).toBe(true);
   expect(resB.held).toBe(true);

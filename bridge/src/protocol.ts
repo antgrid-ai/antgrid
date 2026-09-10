@@ -2268,8 +2268,10 @@ export type BusPart = z.infer<typeof BusPartSchema>;
 
 export const BusEnvelopeSchema = z.object({
   messageId: z.string().min(1).max(200),
-  /** The task this belongs to, or null for something nobody asked for. */
-  taskId: z.string().min(1).max(200).nullable(),
+  /** The thread this belongs to, or null to open a new one. A correlation id
+   *  with no state machine (spec 4.2): it is carried and never validated, and
+   *  a thread is simply garbage once both sides stop writing to it. */
+  threadId: z.string().min(1).max(200).nullable(),
   contextId: z.string().min(1).max(200),
   parts: z.array(BusPartSchema).min(1).max(MAX_PARTS),
   metadata: z.object({
@@ -2298,12 +2300,14 @@ const SessionBusBaseWire = {
   contextId: z.string().min(1).max(200),
 };
 
-/** No `seq`, and never acked: spec 6 makes messages lossy on purpose. Reliable
- *  delivery behind text that changes no state would be unbounded retry buying
- *  nothing. */
+/** The body both verbs carry, since spec 6.2 makes everything after the send
+ *  decision identical for the two. No `seq`: spec 6 makes messages lossy on
+ *  purpose, and reliable delivery behind text that changes no state would be
+ *  unbounded retry buying nothing. The E6 receipt witnesses arrival without
+ *  making it reliable — it is never retried either. */
 export const SessionBusMessageWire = z.object({
   ...SessionBusBaseWire,
-  taskId: z.string().min(1).max(200).nullable(),
+  threadId: z.string().min(1).max(200).nullable(),
   envelope: BusEnvelopeSchema,
 });
 
@@ -2327,21 +2331,29 @@ export const SessionBusFetchResultWire = z.object({
   dataBase64: z.string().max(ARTIFACT_CHUNK_B64_MAX),
 });
 
-/** Reserved and dark: nothing on this bridge emits a receipt and the inbound
- *  case is a documented no-op, so the verb and its shape are held rather than
- *  removed and re-added when they are re-keyed to a message id
- *  (`docs/session-messaging.md`). `ok: false` still retires the seq — an ack
- *  means "this seq will never reach me again", not "I liked it". */
+/** The delivery receipt (E6), keyed by the id of the message it answers — the
+ *  only honest witness that a frame arrived, since everything this side of the
+ *  relay reports only that it left. It is fire-and-forget: an unacked ack is
+ *  never retried, and `ok: false` is still a receipt — "this reached me", not
+ *  "I liked it". No `seq`, because messages have none. */
 export const SessionBusAckWire = z.object({
   ...SessionBusBaseWire,
-  taskId: z.string().min(1).max(200),
-  seq: z.number().int().nonnegative(),
+  messageId: z.string().min(1).max(200),
   ok: z.boolean(),
   error: z.string().max(500).optional(),
 });
 
-const SessionBusMessageMessage = BaseMessage.extend({
-  type: z.literal("session-bus:message"),
+/** Two verbs rather than one verb and a flag (spec 7.1), and the shape is
+ *  identical because everything after the send decision is: a bridge that does
+ *  not know a verb REFUSES it, where a bridge that does not know a flag would
+ *  silently do the wrong thing — and a required Zod field is only fail-closed
+ *  in the old→new direction, which is the wrong one. */
+const SessionBusPostMessage = BaseMessage.extend({
+  type: z.literal("session-bus:post"),
+}).extend(SessionBusMessageWire.shape);
+
+const SessionBusNotifyMessage = BaseMessage.extend({
+  type: z.literal("session-bus:notify"),
 }).extend(SessionBusMessageWire.shape);
 
 const SessionBusFetchMessage = BaseMessage.extend({
@@ -2541,7 +2553,8 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentPermissionResolveMessage,
   AgentQuestionResolveMessage,
   AgentTaskStopMessage,
-  SessionBusMessageMessage,
+  SessionBusPostMessage,
+  SessionBusNotifyMessage,
   SessionBusFetchMessage,
   SessionBusFetchResultMessage,
   SessionBusAckMessage,
@@ -2722,7 +2735,8 @@ export type AgentSetConfig = z.infer<typeof AgentSetConfigMessage>;
 export type AgentSessionAction = z.infer<typeof AgentSessionActionMessage>;
 export type AgentPermissionResolve = z.infer<typeof AgentPermissionResolveMessage>;
 export type AgentQuestionResolve = z.infer<typeof AgentQuestionResolveMessage>;
-export type SessionBusMessage = z.infer<typeof SessionBusMessageMessage>;
+export type SessionBusPost = z.infer<typeof SessionBusPostMessage>;
+export type SessionBusNotify = z.infer<typeof SessionBusNotifyMessage>;
 export type SessionBusFetch = z.infer<typeof SessionBusFetchMessage>;
 export type SessionBusFetchResult = z.infer<typeof SessionBusFetchResultMessage>;
 export type SessionBusAck = z.infer<typeof SessionBusAckMessage>;
@@ -2887,7 +2901,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
-  "session-bus:message", "session-bus:fetch", "session-bus:fetch:result", "session-bus:ack",
+  "session-bus:post", "session-bus:notify", "session-bus:fetch", "session-bus:fetch:result", "session-bus:ack",
   "netwatch:configure", "netwatch:events",
 ]);
 

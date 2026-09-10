@@ -4,10 +4,12 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setLogLevel } from "../src/logger";
-import { BUS_DB_VERSION, busDbPath, resetBusDbAnnouncements, tryBusDb, withBusDb } from "../src/session-bus/bus-db";
+import { BUS_DB_VERSION, busDbPath, deleteScope, resetBusDbAnnouncements, tryBusDb, withBusDb } from "../src/session-bus/bus-db";
 import { emptyDeliveries, enqueueLine, loadDeliveries, saveDeliveries } from "../src/session-bus/delivery-queue";
 import { listSessionBusSessions, removeSessionBusProject, removeSessionBusSession } from "../src/session-bus/store-fs";
 import { emptyHeld, holdMessage, loadHeld, saveHeld } from "../src/session-bus/held-store";
+import { loadMailbox } from "../src/session-bus/mailbox";
+import { loadThreads } from "../src/session-bus/thread-store";
 import { appendLog, emptyLog, loadMessageLog, saveMessageLog } from "../src/session-bus/message-log";
 import { stampEnvelope } from "../src/session-bus/envelope";
 import { MAX_LOG_ENTRIES } from "../src/session-bus/constants";
@@ -67,6 +69,60 @@ test("a database written under another version is dropped, never read", () => {
   } finally {
     db.close();
   }
+});
+
+const SESSION_SCOPED = ["bus_messages", "bus_held", "bus_artifacts", "bus_mailbox", "bus_threads", "bus_pair_budget"] as const;
+
+function fillEverySessionTable(): void {
+  withBusDb(
+    abDir,
+    (db) => {
+      for (const table of SESSION_SCOPED) {
+        const column = db.query(`SELECT name FROM pragma_table_info('${table}') WHERE name NOT IN ('seq', 'projectId', 'sessionId')`)
+          .get() as { name: string };
+        db.query(`INSERT INTO ${table} (projectId, sessionId, ${column.name}) VALUES (?, ?, ?)`).run("p1", "s1", "{}");
+      }
+    },
+    null,
+  );
+}
+
+function rowsPerSessionTable(): number[] {
+  return withBusDb(
+    abDir,
+    (db) => SESSION_SCOPED.map((table) => (db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n),
+    [],
+  );
+}
+
+test("every session-scoped table can be reached by a session delete", () => {
+  // `deleteScope` interpolates each table name into ONE
+  // `WHERE projectId = ? AND sessionId = ?`, with hand-written skips for the two
+  // tables that are not session-scoped. A table added without both columns does
+  // not fail on itself — it raises "no such column", throws the transaction, and
+  // makes EVERY session delete on the machine throw, whether or not that session
+  // ever touched the bus.
+  fillEverySessionTable();
+  expect(rowsPerSessionTable()).toEqual(SESSION_SCOPED.map(() => 1));
+
+  expect(tryBusDb(abDir, "a session delete", (db) => deleteScope(db, { projectId: "p1", sessionId: "s1" }))).toBe(true);
+
+  expect(rowsPerSessionTable()).toEqual(SESSION_SCOPED.map(() => 0));
+});
+
+test("a database from before this version is dropped, the tables this one added included", () => {
+  // The other half of the same trap: leaving a new table OUT of TABLES to dodge
+  // the delete would leave its rows to survive a version bump holding a shape
+  // this build no longer reads.
+  fillEverySessionTable();
+  const raw = new Database(busDbPath(abDir));
+  try {
+    raw.exec(`PRAGMA user_version = ${BUS_DB_VERSION - 1}`);
+  } finally {
+    raw.close();
+  }
+
+  expect(rowsPerSessionTable()).toEqual(SESSION_SCOPED.map(() => 0));
 });
 
 test("a database that cannot be opened answers the fallback rather than throwing", () => {
@@ -169,12 +225,12 @@ test("a bad row costs that row in every store built on this seam", () => {
   // left — emptying either store on one bad row loses work nothing can notice
   // is missing.
   saveHeld(abDir, "p1", "s1", holdMessage(
-    holdMessage(emptyHeld(), { messageId: "h-good", contextId: "c", role: "lead", to: { machineId: "m", projectId: "p", sessionId: "s" }, frame: { type: "session-bus:message" }, heldAt: 1 }),
-    { messageId: "h-bad", contextId: "c", role: "lead", to: { machineId: "m", projectId: "p", sessionId: "s" }, frame: { type: "session-bus:message" }, heldAt: 2 },
+    holdMessage(emptyHeld(), { messageId: "h-good", contextId: "c", role: "lead", to: { machineId: "m", projectId: "p", sessionId: "s" }, frame: { type: "session-bus:post" }, heldAt: 1 }),
+    { messageId: "h-bad", contextId: "c", role: "lead", to: { machineId: "m", projectId: "p", sessionId: "s" }, frame: { type: "session-bus:post" }, heldAt: 2 },
   ));
   saveDeliveries(abDir, "p1", enqueueLine(
-    enqueueLine(emptyDeliveries(), { id: "l-good", sessionId: "s1", kind: "wake", text: "a", queuedAt: 1 }),
-    { id: "l-bad", sessionId: "s1", kind: "wake", text: "b", queuedAt: 2 },
+    enqueueLine(emptyDeliveries(), { id: "l-good", sessionId: "s1", kind: "notify", text: "a", queuedAt: 1 }),
+    { id: "l-bad", sessionId: "s1", kind: "notify", text: "b", queuedAt: 2 },
   ));
 
   const raw = new Database(busDbPath(abDir));
@@ -199,7 +255,7 @@ function logOf(count: number, from = 0) {
       direction: "out",
       peer: PEER,
       envelope: stampEnvelope(
-        { taskId: null, contextId: "ctx-1", parts: [{ kind: "text", text: `m${i}` }], summary: "s" },
+        { threadId: null, contextId: "ctx-1", parts: [{ kind: "text", text: `m${i}` }], summary: "s" },
         { messageId: `m-${i}`, peer: { ...PEER, sessionName: "remote" }, now: i + 1 },
       ),
     });
@@ -246,10 +302,10 @@ test("a record removed from the middle does not survive the write", () => {
   // one the agent is handed twice.
   saveDeliveries(abDir, "p1", enqueueLine(
     enqueueLine(
-      enqueueLine(emptyDeliveries(), { id: "l-1", sessionId: "s1", kind: "wake", text: "a", queuedAt: 1 }),
-      { id: "l-2", sessionId: "s1", kind: "wake", text: "b", queuedAt: 2 },
+      enqueueLine(emptyDeliveries(), { id: "l-1", sessionId: "s1", kind: "notify", text: "a", queuedAt: 1 }),
+      { id: "l-2", sessionId: "s1", kind: "notify", text: "b", queuedAt: 2 },
     ),
-    { id: "l-3", sessionId: "s1", kind: "wake", text: "c", queuedAt: 3 },
+    { id: "l-3", sessionId: "s1", kind: "notify", text: "c", queuedAt: 3 },
   ));
 
   const kept = loadDeliveries(abDir, "p1");
@@ -267,6 +323,8 @@ test("nothing that only reads or reclaims brings the database into being", () =>
   expect(loadHeld(abDir, "p1", "s1").held).toEqual([]);
   expect(loadDeliveries(abDir, "p1").lines).toEqual([]);
   expect(loadMessageLog(abDir, "p1", "s1").entries).toEqual([]);
+  expect(loadMailbox(abDir, "p1", "s1").posts).toEqual([]);
+  expect(loadThreads(abDir, "p1", "s1").threads).toEqual([]);
   expect(listSessionBusSessions(abDir)).toEqual([]);
   removeSessionBusProject(abDir, "p1");
   removeSessionBusSession(abDir, "p1", "s1");
@@ -277,7 +335,7 @@ test("nothing that only reads or reclaims brings the database into being", () =>
   saveHeld(abDir, "p1", "s1", holdMessage(emptyHeld(), {
     messageId: "h-1", contextId: "c", role: "lead",
     to: { machineId: "m", projectId: "p", sessionId: "s" },
-    frame: { type: "session-bus:message" }, heldAt: 1,
+    frame: { type: "session-bus:post" }, heldAt: 1,
   }));
   expect(existsSync(busDbPath(abDir))).toBe(true);
 });

@@ -229,7 +229,7 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       const rec: ArtifactRecord = {
         artifactId: newId(),
         contextId: contextOf(m),
-        taskId: null,
+        threadId: null,
         author: selfRef(m) ?? { machineId: "local", projectId: deps.projectId, sessionId: m.sessionId },
         name: body.name,
         mediaType: body.mediaType,

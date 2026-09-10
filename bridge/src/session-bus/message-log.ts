@@ -21,6 +21,11 @@ export const LoggedEnvelopeSchema = z.object({
    *  address, and a label is display text that goes stale under a rename. */
   peer: SessionMemberKeySchema,
   envelope: BusEnvelopeSchema,
+  /** When the other end's receipt arrived, on an outbound entry. Absent is "no
+   *  receipt yet" and never "it failed": a receipt is fire-and-forget and an
+   *  unacked one is not retried, so its absence is the only thing a reader may
+   *  conclude from it. */
+  deliveredAt: z.number().optional(),
 });
 export type LoggedEnvelope = z.infer<typeof LoggedEnvelopeSchema>;
 
@@ -52,10 +57,23 @@ export function appendLog(s: MessageLogState, e: LogInput): MessageLogState {
   return { entries: [...s.entries, entry].slice(-MAX_LOG_ENTRIES) };
 }
 
-/** Every entry on one exchange. Uncalled today: the reader that asks a mailbox
- *  "what has this thread said" is what §7.1 builds on top of it. */
-export function entriesForContext(s: MessageLogState, contextId: string): LoggedEnvelope[] {
-  return s.entries.filter((e) => e.envelope.contextId === contextId);
+/** Every entry on one thread, both directions. Keyed by the thread and not by
+ *  the context: one context carries every exchange with a peer, so filtering by
+ *  it would answer "what has this thread said" with the whole conversation. */
+export function entriesForThread(s: MessageLogState, threadId: string): LoggedEnvelope[] {
+  return s.entries.filter((e) => e.envelope.threadId === threadId);
+}
+
+/** Stamp a receipt onto the outbound entry it answers, or return the state
+ *  unchanged when there is nothing to stamp — a message already trimmed out of
+ *  the ring, or a second receipt for one already stamped. Outbound only: a peer
+ *  mints its own message ids, so an inbound entry can carry the same one. */
+export function markDelivered(s: MessageLogState, messageId: string, at: number): MessageLogState {
+  const i = s.entries.findIndex((e) => e.direction === "out" && e.envelope.messageId === messageId);
+  if (i === -1 || s.entries[i]!.deliveredAt !== undefined) return s;
+  const entries = [...s.entries];
+  entries[i] = { ...entries[i]!, deliveredAt: at };
+  return { entries };
 }
 
 export function loadMessageLog(abDir: string, projectId: string, sessionId: string): MessageLogState {

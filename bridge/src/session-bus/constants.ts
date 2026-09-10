@@ -20,6 +20,25 @@ export const BUS_ROUTE_TTL_MS = 6 * 60 * 60_000;
  *  growing a file that loads as empty. */
 export const MAX_HELD_MESSAGES = 32;
 
+/** Unread posts one session's mailbox holds. A post interrupts nothing, so a
+ *  chatty peer can fill this while its target is mid-turn; past it the OLDEST
+ *  goes and the drop is COUNTED, because §7.4 makes the loss visible to the
+ *  reader rather than merely bounded. */
+export const MAX_MAILBOX_POSTS = 50;
+
+/** How long an unread post, and the thread it belongs to, stay worth reading.
+ *  Also the whole of §13 Q2's answer: a thread is garbage once its last message
+ *  has aged out, so the thread store runs on this clock rather than growing an
+ *  expiry of its own. */
+export const MAILBOX_TTL_MS = 3 * 24 * 60 * 60_000;
+
+/** Threads one session correlates at once. Above the mailbox bound on purpose:
+ *  a notify leaves a thread row and no mail, so threads accrue from exchanges
+ *  the mailbox never saw. Past it the oldest `lastAt` goes, and losing a row
+ *  costs a reply the only record of where it goes — which is why the cap is
+ *  loose rather than tight. */
+export const MAX_THREADS_PER_SESSION = 100;
+
 /** How stale the persisted copy of a carrier route may get while the live one is
  *  being refreshed. Every applied inbound frame restamps a route, and writing
  *  the file each time would put a disk write behind every ack; skipping the

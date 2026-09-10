@@ -7,8 +7,9 @@ import { join } from "node:path";
 import {
   appendLog,
   emptyLog,
-  entriesForContext,
+  entriesForThread,
   loadMessageLog,
+  markDelivered,
   saveMessageLog,
 } from "../src/session-bus/message-log";
 import { checkEnvelopeSize, envelopeBytes, stampEnvelope } from "../src/session-bus/envelope";
@@ -24,10 +25,10 @@ const PEER_KEY: SessionMemberKey = { machineId: "m2", projectId: "p2", sessionId
 const PEER: SessionMemberRef = { ...PEER_KEY, machineLabel: "Laptop" };
 const T0 = 4_000_000;
 
-function env(over: { taskId?: string | null; contextId?: string; text?: string; messageId?: string } = {}) {
+function env(over: { threadId?: string | null; contextId?: string; text?: string; messageId?: string } = {}) {
   return stampEnvelope(
     {
-      taskId: over.taskId === undefined ? "t1" : over.taskId,
+      threadId: over.threadId === undefined ? "t1" : over.threadId,
       contextId: over.contextId ?? "c1",
       parts: [{ kind: "text", text: over.text ?? "the suite is green" }],
       summary: "reporting back",
@@ -40,7 +41,7 @@ function tmpAbDir(): string {
   return mkdtempSync(join(tmpdir(), "ab-bus-log-"));
 }
 
-test("entries append in order and are addressable by context", () => {
+test("entries append in order and are addressable by thread", () => {
   let s = emptyLog();
   s = appendLog(s, { at: T0, direction: "out", peer: PEER_KEY, envelope: env() });
   s = appendLog(s, { at: T0 + 1, direction: "in", peer: PEER_KEY, envelope: env({ messageId: "m-2" }) });
@@ -48,11 +49,31 @@ test("entries append in order and are addressable by context", () => {
     at: T0 + 2,
     direction: "in",
     peer: PEER_KEY,
-    envelope: env({ taskId: null, contextId: "c2", messageId: "m-3" }),
+    envelope: env({ threadId: "t2", contextId: "c1", messageId: "m-3" }),
   });
 
   expect(s.entries.map((e) => e.direction)).toEqual(["out", "in", "in"]);
-  expect(entriesForContext(s, "c2").map((e) => e.envelope.messageId)).toEqual(["m-3"]);
+  // One context carries every exchange with a peer, so the thread is the only
+  // key that answers "what has THIS exchange said" — both entries below share
+  // a context and only one shares the thread.
+  expect(entriesForThread(s, "t2").map((e) => e.envelope.messageId)).toEqual(["m-3"]);
+  expect(entriesForThread(s, "t1").map((e) => e.envelope.messageId)).toEqual(["m-1", "m-2"]);
+});
+
+test("a receipt stamps the outbound entry it answers, and nothing else", () => {
+  let s = appendLog(emptyLog(), { at: T0, direction: "out", peer: PEER_KEY, envelope: env() });
+  // A peer mints its own message ids, so an inbound entry may carry the one an
+  // outbound entry already used.
+  s = appendLog(s, { at: T0 + 1, direction: "in", peer: PEER_KEY, envelope: env() });
+
+  s = markDelivered(s, "m-1", T0 + 5);
+  expect(s.entries[0]!.deliveredAt).toBe(T0 + 5);
+  expect(s.entries[1]!.deliveredAt).toBeUndefined();
+
+  // A second receipt does not restamp, and one for a message the ring has
+  // already dropped is not an error.
+  expect(markDelivered(s, "m-1", T0 + 9).entries[0]!.deliveredAt).toBe(T0 + 5);
+  expect(markDelivered(s, "m-gone", T0 + 9)).toBe(s);
 });
 
 test("a long text part is trimmed on the way in", () => {

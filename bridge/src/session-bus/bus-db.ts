@@ -35,23 +35,40 @@ const log = logger.child({ component: "session-bus" });
  *  a schema check that quietly reads rows written under a shape this code no
  *  longer holds. Losing bus state costs a relearned route and a redelivered
  *  message, both of which the protocol already tolerates. */
-export const BUS_DB_VERSION = 1;
+export const BUS_DB_VERSION = 2;
 
 /** See `prepare`: this is an event-loop stall, not a background wait. */
 const BUSY_TIMEOUT_MS = 250;
 
-const TABLES = ["bus_routes", "bus_messages", "bus_held", "bus_artifacts", "bus_deliveries"] as const;
+const TABLES = [
+  "bus_routes",
+  "bus_messages",
+  "bus_held",
+  "bus_artifacts",
+  "bus_deliveries",
+  "bus_mailbox",
+  "bus_threads",
+  "bus_pair_budget",
+] as const;
 
 // Columns for what is QUERIED, one JSON blob for what is only ever read back
 // whole. `bus_routes` is filtered and ordered by `at`, so its fields are
-// columns; the four scoped stores are always read for one session (or one
-// project) at a time and folded in memory, so their rows carry the record as
+// columns; every scoped store is always read for one session (or one project)
+// at a time and folded in memory, so their rows carry the record as
 // written and the Zod schema that already defines it stays the only definition
 // of shape — a field added there needs no DDL here.
 //
-// `seq` is the insertion order, and for three of these it IS the semantics:
-// a message log is a ring, a held queue goes out in the order it was written,
-// and a delivery queue is FIFO per session.
+// `seq` is the insertion order, and for most of these it IS the semantics: a
+// message log is a ring, a held queue goes out in the order it was written, a
+// mailbox spends its bound on the oldest post, and a delivery queue is FIFO per
+// session.
+//
+// EVERY SESSION-SCOPED TABLE CARRIES BOTH projectId AND sessionId, which is a
+// requirement and not a convention: `deleteScope` runs one
+// `WHERE projectId = ? AND sessionId = ?` across TABLES with hand-written skips
+// for the two that are not session-scoped, so a table missing either column
+// raises "no such column", throws the transaction, and makes every session
+// delete on the machine fail.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS bus_routes (
   contextId TEXT PRIMARY KEY,
@@ -85,6 +102,33 @@ CREATE TABLE IF NOT EXISTS bus_artifacts (
   record     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS bus_artifacts_session ON bus_artifacts (projectId, sessionId, seq);
+
+CREATE TABLE IF NOT EXISTS bus_mailbox (
+  seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+  projectId TEXT NOT NULL,
+  sessionId TEXT NOT NULL,
+  item      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bus_mailbox_session ON bus_mailbox (projectId, sessionId, seq);
+
+CREATE TABLE IF NOT EXISTS bus_threads (
+  seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+  projectId TEXT NOT NULL,
+  sessionId TEXT NOT NULL,
+  thread    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bus_threads_session ON bus_threads (projectId, sessionId, seq);
+
+-- The sessionId is the SENDER's session; the pair a budget is keyed by lives
+-- inside the record, because a budget is spent per (sender, target) and a
+-- session delete has to reclaim every pair its own sends opened.
+CREATE TABLE IF NOT EXISTS bus_pair_budget (
+  seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+  projectId TEXT NOT NULL,
+  sessionId TEXT NOT NULL,
+  budget    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bus_pair_budget_session ON bus_pair_budget (projectId, sessionId, seq);
 
 CREATE TABLE IF NOT EXISTS bus_deliveries (
   seq       INTEGER PRIMARY KEY AUTOINCREMENT,

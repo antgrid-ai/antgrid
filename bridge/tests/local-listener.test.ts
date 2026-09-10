@@ -198,14 +198,13 @@ describe("LocalListener.deliverToOwner", () => {
     from: { machineId: "m1", projectId: "p1", sessionId: "s1" },
     to: { machineId: "m2", projectId: "p2", sessionId: "s2" },
     contextId: "ctx-1",
-    taskId: "t1",
-    seq: 0,
+    messageId: "msg-1",
     ok: true,
   });
 
   test("reaches the owner socket without touching the bus", async () => {
     // The whole point of the method: a bus subscriber sitting beside the owner
-    // must never see task traffic (spec 4.1). The human's phone is such a
+    // must never see bus traffic (spec 4.1). The human's phone is such a
     // subscriber on the very same bus.
     const seen: string[] = [];
     bus.subscribe({ deliver: (msg) => { seen.push(msg.type); } });
@@ -216,6 +215,10 @@ describe("LocalListener.deliverToOwner", () => {
     expect(listener.deliverToOwner(frame())).toBe(true);
     const got = await nextMessage(ws);
     expect(got.type).toBe("session-bus:ack");
+    // The receipt is keyed by the message it answers and by nothing else, so a
+    // carrier that dropped that key would hand the far side an ack it cannot
+    // match to anything it sent.
+    expect(got.messageId).toBe("msg-1");
     expect(got.channel).toBe("control");
     expect(seen).toEqual([]);
     ws.close();

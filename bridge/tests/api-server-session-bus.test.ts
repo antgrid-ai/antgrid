@@ -257,7 +257,8 @@ describe("a self with no address is not a session this bridge does not hold", ()
   const post = (c: SessionBusCoordinator) =>
     c.message({
       sessionId: LEAD_SESSION,
-      taskId: null,
+      verb: "post",
+      threadId: null,
       to: { machineId: "m2", projectId: "p2", sessionId: PEER_SESSION },
       summary: "go",
       parts: [{ kind: "text", text: "go" }],
@@ -295,8 +296,7 @@ describe("the two machines may know the session by different projects", () => {
       const stray = {
         type: "session-bus:ack",
         contextId: "ctx-1",
-        taskId: "t-1",
-        seq: 1,
+        messageId: "msg-1",
         from: { machineId: "m2", projectId: "p2", sessionId: PEER_SESSION },
         to: { machineId: "m1", projectId: "p1", sessionId: "not-a-session-here" },
       };

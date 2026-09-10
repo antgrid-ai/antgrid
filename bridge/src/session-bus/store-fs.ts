@@ -1,6 +1,7 @@
 // Where the session bus touches the filesystem, which is now only the artifact
-// BYTES. Every record it keeps — routes, message logs, held messages, artifact
-// handles, queued deliveries — lives in one machine-level database
+// BYTES. Every record it keeps — routes, message logs, held messages,
+// mailboxes, threads, artifact handles, queued deliveries — lives in one
+// machine-level database
 // (`bus-db.ts`); what is left here is the content those handles point at, and
 // the two deletes that have to reclaim both halves together.
 //
@@ -28,26 +29,34 @@ export function sessionBusSessionDir(abDir: string, projectId: string, sessionId
 }
 
 /**
- * Every session this MACHINE still holds a message for, across every project.
+ * Every session this MACHINE still holds live bus state for, across every
+ * project.
  *
  * The restart path needs this: a fresh process holds no sessions in memory, so
  * without it nothing would re-arm the retries a killed bridge left queued, and
  * a held message would sit unsent until some unrelated call happened to name
  * that session.
  *
- * HELD messages alone, because a held message is the only thing a resume can
- * act on. A session with a message log and nothing queued has nothing to
- * retry, and hydrating it would only pin its state in memory. The caller still
- * has to check who OWNS each pair — the row says which project the state was
- * FILED under, and the session index is the authority on who holds it now (see
- * `SessionBusCoordinator.resume`).
+ * Held messages, unread mail and thread rows, and nothing else. Those three are
+ * the state a resume has to ACT on: a held message is retried, a mailbox is read
+ * back and expired, and a thread row is the only record of the context a reply
+ * routes on. A session whose bus state is a message log and some artifact
+ * handles has nothing to do, and hydrating it would pin that state in memory for
+ * nothing. The caller still has to check who OWNS each pair — the row says which
+ * project the state was FILED under, and the session index is the authority on
+ * who holds it now (see `SessionBusCoordinator.resume`).
  */
 export function listSessionBusSessions(abDir: string): { projectId: string; sessionId: string }[] {
   return readBusDb(
     abDir,
     (db) =>
       db
-        .query("SELECT DISTINCT projectId, sessionId FROM bus_held ORDER BY projectId, sessionId")
+        .query(
+          `SELECT projectId, sessionId FROM bus_held
+           UNION SELECT projectId, sessionId FROM bus_mailbox
+           UNION SELECT projectId, sessionId FROM bus_threads
+           ORDER BY projectId, sessionId`,
+        )
         .all() as { projectId: string; sessionId: string }[],
     [],
   );
