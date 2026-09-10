@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile } from "./discovery";
 
@@ -29,8 +29,11 @@ import { atomicWriteFile } from "./discovery";
  */
 export interface AgentReachPolicyStore {
   isEnabled(): boolean;
-  /** True if the value changed — callers use it to skip work a no-op set does
-   *  not warrant. */
+  /** True if the value changed. Unlike `RemoteAccessPolicyStore`'s, nothing
+   *  branches on it: flipping this bit claws nothing back by design (E12), so
+   *  there is no re-advertise or mirror clear for a no-op to skip. It is
+   *  reported because "set to what it already was" and "set to something new"
+   *  are different facts, not because a caller acts on the difference. */
   setEnabled(enabled: boolean): boolean;
 }
 
@@ -74,12 +77,23 @@ export function loadAgentReachPolicy(abDir: string): AgentReachPolicyStore {
  * There is no v0 to migrate from — the switch has never had another shape — so
  * unlike `remote-access-policy.ts` this needs no absence re-check: a missing
  * file routes to a default, not to a derivation that would be persisted.
+ *
+ * Absence is decided by the read that fails, never by a separate `existsSync`:
+ * between such a check and the read sits the rename `atomicWriteFile` finishes
+ * with, and a file that vanished for that instant is not a file nobody has
+ * written — reading it as the default would be the one direction that re-grants
+ * something the user turned off.
  */
 function readStored(path: string): boolean {
-  if (!existsSync(path)) return AGENT_REACH_DEFAULT;
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? AGENT_REACH_DEFAULT : false;
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
+    parsed = JSON.parse(raw);
   } catch {
     return false;
   }

@@ -466,8 +466,11 @@ class _Body extends ConsumerWidget {
 
 /// Pull-to-refresh / refresh-button handler for the drawer. Re-fetches the
 /// machine inventory (HTTPS) and re-pulls the live project advert for every
-/// machine whose control-plane socket is already open (the reaper's alive set —
-/// refreshing never force-opens sockets for machines the user isn't viewing).
+/// machine in the reaper's alive set. That is not the same as "already open":
+/// since E13 the set also carries machines a directory read missed, which this
+/// app has decided it wants a socket to and is dialling anyway — so the gesture
+/// can push one of those dials rather than only refreshing what is up. It still
+/// opens nothing for a machine the app has made no such decision about.
 /// Also re-lists the focused project's sessions (data plane).
 ///
 /// The session re-list is FIRE-AND-FORGET: its reply carries a 15s timeout

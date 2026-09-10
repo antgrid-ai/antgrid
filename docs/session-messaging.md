@@ -424,15 +424,32 @@ That widening is why: the remote-access boolean alone would mean *an agent on
 another of my machines may read this machine's session titles and work status,
 and may interrupt an agent here, unattended*. Disclosure, not only interruption.
 The subordinate bit gates both halves together — off means a peer agent can
-neither read a directory row from this machine nor post into a session on it.
+neither read a directory row from this machine nor open an exchange with a
+session on it.
+
+**Where the gate stops, stated rather than implied.** Two carve-outs, both
+deliberate:
+
+- *A context this machine leads.* An inbound frame whose `contextId` is a
+  session id here is an answer to something an agent here asked for, and it
+  lands with the bit off. Refusing it would mean this machine's own agents may
+  not finish a sentence they started. So "off" is not "no agent-authored text
+  can enter my sessions" — it is "nobody else starts one".
+- *`sessions.list` is gated by remote access alone.* It is the drawer's session
+  peek: a `projectId` the asking device named, answered to a device a human is
+  holding, and it is on no path an agent can reach — the directory pump asks for
+  the capability card, and the MCP tools read the mirror that card fills. Gating
+  it on the subordinate bit would take the recent-sessions list off the user's
+  own phone in exchange for closing nothing.
 
 ### 8.2 What an addressable session cannot do
 
 - Read another session's transcript, files, or context.
 - Start, stop, fork or configure another session.
 - Reach another session's human (E7).
-- Address a session outside its repo key, or on a machine with remote access off,
-  or on a machine that is not connected.
+- Address a session outside its repo key, or on a machine that is not connected,
+  or on a machine with remote access off — or with *reachable by agents* off,
+  unless the context is one that machine leads (§8.1).
 - Exceed its notify budget, or send at all once the pair is halted.
 
 ### 8.3 Content trust
@@ -684,8 +701,22 @@ under-reports, which the reach line already states rather than hides.
 **E14 — The card answers the session that asked.**
 A session-bearing capability card was published to the control-plane channel,
 which reaches every established app session on the answering machine, phone
-included, correlated only by `requestId` at the client. That is a volume change
-rather than a class change — `machine.sessions-list` already discloses
-`SessionEntry.name` to the same set under the same gates — but it was an
-oversight rather than a decision, and the asking `peerId` is already threaded
-into the control-plane dispatch with `sendToAppSession` already beside it.
+included, correlated only by `requestId` at the client. Not a new class of
+disclosure — `sessions.list` already hands `SessionEntry.name` to the same set,
+though on the remote-access gate alone (§8.1) rather than this one — but it was
+an oversight rather than a decision, and the asking `peerId` is already threaded
+into the control-plane dispatch, where `RelayClient.sendOnChannel` takes a
+`SendTarget`.
+
+The fallback is the bus, and *only* when the asker cannot be named: a loopback
+frame carries no `peerId`. A named asker whose session has since gone resolves
+to no recipient and the frame is dropped, which is right — the asker it was
+assembled for left. Testing that liveness first and falling back to the bus
+would broadcast precisely the answer that lost its reader.
+
+Every other verb answered from one asker's params travels the same way, for a
+second reason: a client correlates a response by `requestId` alone, and those
+are per-transport counters that two devices on one bridge both start at zero, so
+a fanned answer can complete a different device's pending request with a payload
+it never asked for. `state.snapshot` stays on the bus — every session would have
+asked for it anyway.
