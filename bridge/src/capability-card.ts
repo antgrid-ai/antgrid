@@ -209,6 +209,29 @@ export async function readCapabilityCard(targets: CapabilityCardTarget[]): Promi
   return { os: readOsCard(), projects };
 }
 
+/** Narrows `targets` to those whose `readRepoKey` is in `keys`, at the same
+ *  cached cost and concurrency `readCapabilityCard` pays. Order-preserving, so
+ *  a caller that builds rows off the result gets a stable answer across calls
+ *  rather than one shuffled by which probe settled first. Meant to run AFTER a
+ *  free, synchronous narrowing (a session-bearing filter): this is the one
+ *  that can spawn git, so it should only ever be spent on a target the rest of
+ *  the request could still use. */
+export async function filterByRepoKeys(
+  targets: readonly CapabilityCardTarget[],
+  keys: readonly string[],
+): Promise<CapabilityCardTarget[]> {
+  const wanted = new Set(keys);
+  const kept: (CapabilityCardTarget | undefined)[] = new Array(targets.length);
+  await inProbePool(
+    targets.map((target, index) => ({ target, index })),
+    async ({ target, index }) => {
+      const key = await readRepoKey(target.path);
+      if (key !== null && wanted.has(key)) kept[index] = target;
+    },
+  );
+  return kept.filter((t): t is CapabilityCardTarget => t !== undefined);
+}
+
 /** Runs `job` over `items` at most [PROBE_CONCURRENCY] at a time.
  *
  *  Its own function because the width is the whole point of it and is invisible

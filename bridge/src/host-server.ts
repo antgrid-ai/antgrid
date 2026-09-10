@@ -37,16 +37,17 @@ import { z } from "zod";
 import { SessionManager } from "./session-manager";
 import { SessionBusSessionIndex } from "./session-bus/session-index";
 import { SessionBusRepoKeys } from "./session-bus/repo-key";
-import { SessionDirectory } from "./session-bus/directory";
+import { SessionDirectory, directoryRowsFor, machineDirectoryRows } from "./session-bus/directory";
 import { SessionBusCoordinator } from "./session-bus/coordinator";
 import { removeSessionBusProject, removeSessionBusSession } from "./session-bus/store-fs";
-import { MAX_BUS_ROUTES } from "./session-bus/constants";
+import { MAX_BUS_ROUTES, MAX_DIRECTORY_REPO_KEYS, MAX_MACHINE_CARD_ROWS } from "./session-bus/constants";
 import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
 import type { BranchRemoteStatus } from "./git-branches";
 import {
   MAX_CAPABILITY_CARD_PROJECTS,
   readCapabilityCard,
+  filterByRepoKeys,
   type CapabilityCardTarget,
 } from "./capability-card";
 import { resolveProject } from "./worktrees/project-resolver";
@@ -94,6 +95,14 @@ function logRemoteStateDetail(projectPath: string, status: BranchRemoteStatus): 
  *  has to cost the same as an explicit list. */
 const CapabilityCardParams = z.object({
   projectIds: z.array(z.string()).max(MAX_CAPABILITY_CARD_PROJECTS).optional(),
+  /** Answer only about these repositories. Keys are `readRepoKey` output from
+   *  BOTH machines, so nothing here is re-derived by a caller; the cached
+   *  remote is what bounds the never-cached branch probe. A matching key and
+   *  never an authorization input. */
+  repoKeys: z.array(z.string().min(1).max(512)).max(MAX_DIRECTORY_REPO_KEYS).optional(),
+  /** Session rows beside the repo half. Also narrows the target set to
+   *  projects that hold an addressable session. */
+  includeSessions: z.boolean().optional(),
 });
 
 const GitCheckoutParams = z.object({
@@ -1097,7 +1106,13 @@ export class HostServer {
    *  projects — which is what "the card exists before any agent runs" means. An
    *  id the catalog does not hold is OMITTED from `projects` rather than failing
    *  the request: the dialog asks about a catalog it was advertised, and one
-   *  stale id must not blank the card for every other project. */
+   *  stale id must not blank the card for every other project.
+   *
+   *  `includeSessions` widens the answer with the session half of
+   *  `docs/session-messaging.md` §5.5's directory: `sessions` (possibly `[]`)
+   *  is present iff it was asked AND honoured — that presence is the only
+   *  signal a caller has that it is talking to a bridge old enough not to
+   *  know the flag, so an unasked card must never carry the key. */
   async handleCapabilityCardRpc(req: RpcRequest): Promise<AbMessage> {
     const parsed = CapabilityCardParams.safeParse(req.params ?? {});
     if (!parsed.success) {
@@ -1107,7 +1122,7 @@ export class HostServer {
         error: { code: "E_BAD_PARAMS", message: parsed.error.issues.map((i) => i.message).join("; ") },
       });
     }
-    const { projectIds } = parsed.data;
+    const { projectIds, repoKeys, includeSessions } = parsed.data;
     if (projectIds?.some((id) => !isSafeProjectId(id))) {
       return createMessage("response", {
         requestId: req.requestId,
@@ -1128,10 +1143,35 @@ export class HostServer {
       if (!seen?.path) continue;
       targets.push({ projectId, path: seen.path, label: seen.label });
     }
+    if (!includeSessions) {
+      const scoped = repoKeys === undefined ? targets : await filterByRepoKeys(targets, repoKeys);
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: true,
+        result: await readCapabilityCard(scoped),
+      });
+    }
+    // Session-bearing first: it is a synchronous read of memory already held,
+    // where the repo-key filter can spawn git — so the probe budget is only
+    // ever spent on a project this response could still carry a row for.
+    const bearing = targets.filter((t) => directoryRowsFor(this.sessionIndex, t.projectId).length > 0);
+    const keyed = repoKeys === undefined ? bearing : await filterByRepoKeys(bearing, repoKeys);
+    const card = await readCapabilityCard(keyed);
+    // `branch`/`repoKey` ride the same probe the card just paid for — a
+    // session row costs no git spawn of its own.
+    const { rows, truncated } = machineDirectoryRows(
+      this.sessionIndex,
+      keyed.map((t) => ({
+        projectId: t.projectId,
+        repoKey: card.projects[t.projectId]?.remote ?? null,
+        branch: card.projects[t.projectId]?.branch ?? null,
+      })),
+      MAX_MACHINE_CARD_ROWS,
+    );
     return createMessage("response", {
       requestId: req.requestId,
       ok: true,
-      result: await readCapabilityCard(targets),
+      result: { ...card, sessions: rows, sessionsTruncated: truncated },
     });
   }
 
