@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Terminal } from "@xterm/headless";
 import { installTerminalQueries } from "../src/terminal-frames/queries";
+import { XtermFrameAdapter } from "../src/terminal-frames/xterm-adapter";
 import { VtCapabilityResponder } from "../src/vt-capability-responder";
 
 const COLORS = {
@@ -27,7 +28,11 @@ interface Harness {
 }
 
 function harness(
-  opts: { cols?: number; rows?: number; keyboardFlags?: number } = {},
+  opts: {
+    cols?: number; rows?: number; keyboardFlags?: number;
+    /** Stands in for a PTY that has gone away under the parser. */
+    onReply?: (data: string) => void;
+  } = {},
 ): Harness {
   const term = new Terminal({
     cols: opts.cols ?? 80,
@@ -37,10 +42,14 @@ function harness(
   const replies: string[] = [];
   const xtermSaid: string[] = [];
   term.onData((data) => xtermSaid.push(data));
+  // The real adapter, not a stub: the margins CPR is relative to are private
+  // xterm state, and reading them anywhere else is what this is checking.
+  const adapter = new XtermFrameAdapter(term);
   const detach = installTerminalQueries(
     term,
-    (data) => replies.push(data),
+    (data) => { replies.push(data); opts.onReply?.(data); },
     () => opts.keyboardFlags ?? 0,
+    () => adapter.margins().top,
     COLORS,
   );
   return {
@@ -199,6 +208,58 @@ describe("terminal frame queries", () => {
     h.detach();
     await h.write("\x1b[c\x1b[6n\x1b[?u\x1b[5n");
     expect(h.replies).toEqual([]);
+  });
+
+  test("a reply the PTY refuses does not stop the parser", async () => {
+    // `reply` runs inside xterm's parse loop, which retires neither the escape
+    // it is answering nor the chunk carrying it until the handler returns — so
+    // a throw here freezes the terminal for the rest of the process.
+    const h = harness({ cols: 20, rows: 4, onReply: () => { throw new Error("pty gone"); } });
+    const settled = await Promise.race([
+      h.write("before\x1b[6n\x1b[cafter").then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    expect(settled).toBe(true);
+    expect(h.term.buffer.active.getLine(0)?.translateToString(true)).toBe("beforeafter");
+  });
+
+  for (const [label, input, expected] of [
+    // The alternate screen has its own margins, and neither buffer's survive a
+    // switch — a region a shell set on the primary must not offset a CPR the
+    // TUI on the alternate screen asks for, in either direction.
+    ["a region set on the primary does not follow the guest to the alternate",
+      "\x1b[2;6r\x1b[?1049h\x1b[?6h\x1b[3;5H\x1b[6n", "\x1b[3;5R"],
+    ["a region set on the alternate does not follow it back to the primary",
+      "\x1b[2;6r\x1b[?1049h\x1b[4;7r\x1b[?1049l\x1b[?6h\x1b[3;3H\x1b[6n", "\x1b[3;3R"],
+    ["a primary with no region is not offset by the alternate's",
+      "\x1b[?1049h\x1b[4;7r\x1b[?6h\x1b[?1049l\x1b[3;2H\x1b[6n", "\x1b[3;2R"],
+    ["the alternate's own region is what its own CPR is relative to",
+      "\x1b[2;6r\x1b[?1049h\x1b[4;7r\x1b[?6h\x1b[3;3H\x1b[6n", "\x1b[3;3R"],
+  ] as const) {
+    test(`origin-mode CPR is relative to the active buffer's region: ${label}`, async () => {
+      const h = harness({ cols: 20, rows: 8 });
+      await h.write(input);
+      expect(h.replies).toEqual([expected]);
+    });
+  }
+
+  test("query acceptance follows xterm's own parameter rule, not the byte responder's", async () => {
+    // xterm answers whenever the leading parameter is absent or 0 and ignores
+    // what follows it; vt-capability-responder.ts matches whole byte strings, so
+    // it is silent on every form below. Answering is the xterm-correct half, and
+    // the divergence is pinned here rather than left to be discovered on
+    // promotion.
+    for (const [input, expected] of [
+      ["\x1b[;1c", DA1], ["\x1b[0:1c", DA1], ["\x1b[0;0c", DA1], ["\x9bc", DA1],
+      ["\x1b[>0;1c", DA2], ["\x1b[=;1c", DA3], ["\x1b[>0;1q", XTVERSION],
+      ["\x1b[5;1n", "\x1b[0n"], ["\x1b[?7;25$p", "\x1b[?7;1$y"],
+    ] as const) {
+      const h = harness({ cols: 20, rows: 4 });
+      await h.write(input);
+      expect(h.replies).toEqual([expected]);
+      expect(new VtCapabilityResponder(COLORS).feed(input)).toBe("");
+      h.detach();
+    }
   });
 
   test("plain output produces nothing", async () => {

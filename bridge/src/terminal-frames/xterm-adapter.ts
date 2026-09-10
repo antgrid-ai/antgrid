@@ -42,6 +42,13 @@ export interface TerminalArchiveSink {
   discarded(count: number): void;
 }
 
+/** Buffer services already carrying a scroll patch. A second one would capture
+ *  the first adapter's replacement as its own "original", so the first detach
+ *  could restore nothing and the last would reinstate a detached adapter's sink
+ *  for the life of the terminal. Refused at install, where a caller owns the
+ *  failure — never at parse time, where nothing can. */
+const patched = new WeakSet<BufferService>();
+
 /** All xterm 6 private metadata access lives here. A dependency upgrade must
  * pass the scroll-boundary and native rendering fixtures before qualification. */
 export class XtermFrameAdapter {
@@ -161,16 +168,34 @@ export class XtermFrameAdapter {
         else sink.discarded(count);
       }),
       // ED. Only the whole-screen erase evicts; ED(3) is the source's own
-      // history-clear rule and ED(0)/ED(1) erase in place.
-      this.onCsi("J", sink, (params) => {
+      // history-clear rule and ED(0)/ED(1) erase in place. Both forms, because
+      // xterm dispatches DECSED (`CSI ? J`) to the same erase and a handler
+      // keyed on the bare final never sees it.
+      ...["", "?"].map((prefix) => this.onCsi("J", sink, (params) => {
         if (this.clamp(params, 0, 3) !== 2) return;
         this.archiveRows(sink, 0, this.usedRows());
-      }),
+      }, prefix)),
       // insertLines and scrollDown push rows off the BOTTOM edge, where no
-      // terminal's scrollback model can follow them.
-      this.onCsi("L", sink, (params) => this.dropBottom(sink, params)),
-      this.onCsi("T", sink, (params) => this.dropBottom(sink, params)),
-      this.onEsc({ final: "M" }, sink, () => this.dropBottom(sink, [1])),
+      // terminal's scrollback model can follow them. They differ in what bounds
+      // the loss: insertLines opens a gap AT the cursor, so only the rows below
+      // it can fall off, while scrollDown moves the whole region and ignores the
+      // cursor entirely.
+      this.onCsi("L", sink, (params) => {
+        const { top, bottom } = this.margins();
+        const cursor = this.term.buffer.active.cursorY;
+        if (cursor < top || cursor > bottom) return;
+        sink.discarded(this.clamp(params, 1, bottom - cursor + 1));
+      }),
+      this.onCsi("T", sink, (params) => {
+        const { top, bottom } = this.margins();
+        sink.discarded(this.clamp(params, 1, bottom - top + 1));
+      }),
+      // Reverse index scrolls the region only when the cursor is ON the top
+      // margin; from anywhere else it just steps the cursor up, destroying
+      // nothing that a count should claim.
+      this.onEsc({ final: "M" }, sink, () => {
+        if (this.term.buffer.active.cursorY === this.margins().top) sink.discarded(1);
+      }),
       // DECALN overpaints the whole screen in place.
       this.onEsc({ intermediates: "#", final: "8" }, sink, () => sink.discarded(this.usedRows())),
     ];
@@ -179,14 +204,18 @@ export class XtermFrameAdapter {
 
   private patchScroll(sink: TerminalArchiveSink): () => void {
     const service = this.core._bufferService;
+    if (patched.has(service)) throw new Error("Terminal frame archive already installed");
     const original = service.scroll;
     const term = this.term;
     const adapter = this;
     const replacement = function(this: BufferService, ...args: unknown[]): void {
-      // The alternate buffer has no scrollback, and a region whose top is not
-      // row 0 discards by VT semantics. Both are measured, both are correct.
-      if (term.buffer.active.type === "normal" && this.buffer.scrollTop === 0) {
+      // The alternate buffer has no scrollback at all.
+      if (term.buffer.active.type === "normal") {
         adapter.guard(sink, () => {
+          // A region whose top is not row 0 splices the row at its top margin
+          // out with nowhere to put it — the same destruction `CSI S` reports
+          // through the same sink, and the commonest way it happens.
+          if (this.buffer.scrollTop !== 0) return sink.discarded(1);
           const line = term.buffer.normal.getLine(term.buffer.normal.baseY);
           if (!line) return sink.gap(1);
           // Copy before recycle() mutates the ring, including every scroll in a
@@ -197,12 +226,17 @@ export class XtermFrameAdapter {
       original.apply(this, args);
     };
     service.scroll = replacement;
-    return () => { if (service.scroll === replacement) service.scroll = original; };
+    patched.add(service);
+    return () => {
+      if (service.scroll !== replacement) return;
+      service.scroll = original;
+      patched.delete(service);
+    };
   }
 
   private onCsi(final: string, sink: TerminalArchiveSink,
-    apply: (params: (number | number[])[]) => void): () => void {
-    const handler = this.term.parser.registerCsiHandler({ final }, (params) => {
+    apply: (params: (number | number[])[]) => void, prefix = ""): () => void {
+    const handler = this.term.parser.registerCsiHandler({ ...(prefix ? { prefix } : {}), final }, (params) => {
       if (this.term.buffer.active.type === "normal") this.guard(sink, () => apply(params));
       return false;
     });
@@ -222,17 +256,13 @@ export class XtermFrameAdapter {
    * Handlers and the scroll patch run inside xterm's asynchronous parse loop,
    * outside every caller's try/catch — a throw there is an uncaughtException
    * that takes down every PTY on the machine. Losing a row is the small failure;
-   * report it as a gap and let the parse continue.
+   * report it as a gap and let the parse continue. The report itself is guarded
+   * too: a sink that fails on the way in fails the same way on the way out, and
+   * the one hook that exists to stop a throw reaching the parse loop must not be
+   * how one gets there.
    */
   private guard(sink: TerminalArchiveSink, work: () => void): void {
-    try { work(); } catch { sink.gap(1); }
-  }
-
-  private dropBottom(sink: TerminalArchiveSink, params: (number | number[])[]): void {
-    const { top, bottom } = this.margins();
-    const cursor = this.term.buffer.active.cursorY;
-    if (cursor < top || cursor > bottom) return;
-    sink.discarded(this.clamp(params, 1, bottom - cursor + 1));
+    try { work(); } catch { try { sink.gap(1); } catch { /* nothing left to tell */ } }
   }
 
   private archiveRows(sink: TerminalArchiveSink, first: number, count: number): void {
