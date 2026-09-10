@@ -853,19 +853,26 @@ export class HostServer {
    *  `bus.publish` fans a response out to the desktop and the phone alike, and a
    *  client tells its own answer from a sibling's only by `requestId` — fine for
    *  a verb whose answer every session would have asked for anyway, wrong for
-   *  the session-bearing capability card, which is this machine's session titles
-   *  and work status assembled for ONE asker (E14, `docs/session-messaging.md`).
+   *  any answer assembled from ONE asker's params (E14,
+   *  `docs/session-messaging.md`). The session-bearing capability card is the
+   *  loudest case — this machine's session titles and work status — but the
+   *  quieter reason covers the rest: a client correlates a response by
+   *  `requestId` alone, and those are per-transport counters that two devices
+   *  attached to this bridge both start at zero, so a fanned answer can complete
+   *  a DIFFERENT device's pending request with a payload it never asked for.
    *
-   *  Falls back to the bus when the asker cannot be named — a loopback frame
-   *  carries no peerId — so an answer is never lost to targeting. When the peer
-   *  IS named but its session has gone, the send resolves to no recipient and the
-   *  frame is dropped, which is correct: the asker it was assembled for left. */
+   *  Falls back to the bus ONLY when the asker cannot be named — a loopback
+   *  frame carries no peerId — so an answer is never lost to targeting. A named
+   *  asker whose session has gone resolves to no recipient and the frame is
+   *  dropped, which is correct: the asker it was assembled for left. Testing
+   *  liveness first and falling back to the bus would broadcast exactly the
+   *  answer that lost its reader. */
   private answerAsker(res: AbMessage, channel: Channel, bus: MessageBus, peerId?: string): void {
-    if (peerId && this.controlPlaneRelay?.peerSession(peerId)) {
-      this.controlPlaneRelay.sendOnChannel(res, channel, { kind: "peer", peerId });
+    if (peerId === undefined) {
+      bus.publish(res, channel);
       return;
     }
-    bus.publish(res, channel);
+    this.controlPlaneRelay?.sendOnChannel(res, channel, { kind: "peer", peerId });
   }
 
   /** Route one inbound control-plane frame from the paired phone: either the
@@ -904,27 +911,27 @@ export class HostServer {
         // dispatchRpc) because authz needs the host's mobile-access policy and
         // seen-catalog, which dispatchRpc's (bus, params) signature can't see.
         // Async: the handler reads sessions.json off the event loop (see
-        // SessionManager.readPersisted), so publish on resolve.
+        // SessionManager.readPersisted), so answer on resolve.
         void this.handleSessionsListRpc(msg)
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("sessions.list handler threw: %s", err));
         return;
       }
       if (msg.method === "sessions.delete") {
         void this.handleSessionsDeleteRpc(msg)
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("sessions.delete handler threw: %s", err));
         return;
       }
       if (msg.method === "git.branches") {
         void this.handleGitBranchesRpc(msg)
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("git.branches handler threw: %s", err));
         return;
       }
       if (msg.method === "git.remote-state") {
         void this.handleGitRemoteStateRpc(msg)
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("git.remote-state handler threw: %s", err));
         return;
       }
@@ -936,7 +943,7 @@ export class HostServer {
       }
       if (msg.method === "git.checkout") {
         void this.handleGitCheckoutRpc(msg)
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("git.checkout handler threw: %s", err));
         return;
       }
