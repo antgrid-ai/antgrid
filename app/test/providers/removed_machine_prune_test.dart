@@ -205,4 +205,77 @@ void main() {
 
     expect(calls, 1);
   });
+
+  test('runs at cold start, before /account/me has resolved', () async {
+    // AppShell.initState: `currentUserProvider` is still in flight and
+    // `hasStoredSessionProvider` has not read the cookie back yet, so the
+    // synchronous `signedInProvider` answers null rather than true. Gating the
+    // prune on that read makes the launch probe a guaranteed no-op and leaves
+    // an OS resume as the feature's only trigger — which on desktop may not
+    // arrive for the whole session.
+    useInMemoryPrefs();
+    final stores = await buildTestStoreOverrides();
+    await stores.recentAgentsStore.upsert(_recent('removed'));
+    final container = ProviderContainer(
+      overrides: [
+        ...stores.overrides,
+        devicesApiProvider.overrideWithValue(
+          DevicesApi(
+            licenseApiUrl: 'https://lic.test',
+            cookieProvider: () async => 'session=abc',
+            httpClient: _listing([_localUuid]),
+          ),
+        ),
+        currentUserProvider.overrideWith((ref) async {
+          await Future<void>.delayed(Duration.zero);
+          return CurrentUser(userId: 'u-1', email: 'a@b.test', tier: 'pro');
+        }),
+        localDeviceUuidProvider.overrideWith((ref) async => _localUuid),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    // Guards the premise the rest of the test rests on.
+    expect(container.read(signedInProvider), isNot(true));
+
+    await pruneRemovedMachines(container);
+
+    expect(_ids(stores.recentAgentsStore), isEmpty);
+  });
+
+  test('a signed-out probe does not burn the cooldown', () async {
+    useInMemoryPrefs();
+    final stores = await buildTestStoreOverrides();
+    await stores.recentAgentsStore.upsert(_recent('removed'));
+    CurrentUser? user;
+    final container = ProviderContainer(
+      overrides: [
+        ...stores.overrides,
+        devicesApiProvider.overrideWithValue(
+          DevicesApi(
+            licenseApiUrl: 'https://lic.test',
+            cookieProvider: () async => 'session=abc',
+            httpClient: _listing([_localUuid]),
+          ),
+        ),
+        currentUserProvider.overrideWith((ref) => user),
+        localDeviceUuidProvider.overrideWith((ref) async => _localUuid),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(currentUserProvider.future);
+
+    await pruneRemovedMachines(container);
+    expect(_ids(stores.recentAgentsStore), ['removed']);
+
+    // Signing in right after a signed-out probe must not have to wait out a
+    // cooldown that no account request was ever spent on.
+    user = CurrentUser(userId: 'u-1', email: 'a@b.test', tier: 'pro');
+    container.invalidate(currentUserProvider);
+    await container.read(currentUserProvider.future);
+
+    await pruneRemovedMachines(container);
+
+    expect(_ids(stores.recentAgentsStore), isEmpty);
+  });
 }

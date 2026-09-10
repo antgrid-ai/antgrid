@@ -79,4 +79,35 @@ void main() {
       reason: 'the signed-out account inventory must not survive sign-out',
     );
   });
+
+  test('a failed /account/me does not poison the inventory', () async {
+    final api = _RecordingAgentsApi([_agent('machine-a')]);
+    final container = ProviderContainer(
+      overrides: [
+        accountAgentsApiProvider.overrideWithValue(api),
+        // A socket-level failure — the ONLY way `/account/me` errors rather
+        // than answering null (see AuthService.fetchCurrentUser, which reads
+        // every non-200 as signed out).
+        currentUserProvider.overrideWith(
+          (ref) => Future<CurrentUser?>.error(Exception('offline')),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    expect(await container.read(accountAgentsProvider.future), hasLength(1));
+
+    // The error is STICKY: `currentUserProvider` carries `noProviderRetry` and
+    // is invalidated only by sign-in/sign-out, so rethrowing it from here would
+    // make every later refresh re-throw the same cached failure — an inventory
+    // that never returns until the app restarts.
+    container.invalidate(accountAgentsProvider);
+
+    expect(
+      await container.read(accountAgentsProvider.future),
+      hasLength(1),
+      reason: 'a pull-to-refresh after the network returns must answer',
+    );
+    expect(api.calls, 2);
+  });
 }

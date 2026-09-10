@@ -56,8 +56,25 @@ Future<void> pruneRemovedMachines(ProviderContainer ref) async {
   final now = DateTime.now();
   final last = coordinator.lastRun;
   if (last != null && now.difference(last) < _kPruneCooldown) return;
-  if (ref.read(signedInProvider) != true) return;
   coordinator.lastRun = now;
+
+  // AWAITED, not a synchronous `signedInProvider` read: the cold-start caller
+  // runs from `initState`, where `/account/me` has not resolved and the
+  // synchronous signal is still `null` — reading it there would make the launch
+  // probe a guaranteed no-op and leave resume as the feature's only trigger.
+  final bool signedIn;
+  try {
+    signedIn = await ref.read(currentUserProvider.future) != null;
+  } catch (error) {
+    AbLog.debug('MachinePrune', 'account unresolved: $error');
+    return;
+  }
+  if (!signedIn) {
+    // Nothing was asked of the account, so nothing is owed to the cooldown: a
+    // sign-in a minute later must not have to wait it out.
+    coordinator.lastRun = last;
+    return;
+  }
 
   final List<DeviceSummary> devices;
   try {

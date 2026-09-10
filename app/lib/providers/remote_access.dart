@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../launcher/host_control_client.dart';
 import '../services/devices_api.dart';
+import 'auth.dart';
 import 'control_plane.dart';
 import 'device_provisioning.dart';
 
@@ -97,21 +98,18 @@ class RemoteDevicesNotifier extends AsyncNotifier<PhonesList> {
 /// row on the next connect. Only revoking the account device — which deletes
 /// its OAuth client and kicks it off the relay — actually cuts it off.
 ///
-/// Empty while signed out or unreachable; a row with no match is a device the
-/// account no longer has, so there is nothing left to revoke.
+/// Empty while signed out — a row with no match is then a device the account no
+/// longer has, so there is nothing left to revoke. Unreachable is UNRESOLVED,
+/// never empty: `remote_access_panel.dart` reads the three states apart, and an
+/// empty map tells a roster row the device is gone from the account — offering
+/// "Forget" ("nothing left to revoke") for a phone that still has full access.
 final accountDevicesByBridgeIdProvider =
     FutureProvider<Map<String, DeviceSummary>>((ref) async {
-      try {
-        final devices = await ref.watch(devicesApiProvider).list();
-        return {for (final d in devices) d.deviceId: d};
-      } catch (_) {
-        // Unreachable or signed out is EMPTY here, per this provider's
-        // contract above: with no join there is no remedy to offer, which
-        // is the honest answer when the account cannot be read. Only
-        // `pruneRemovedMachines` needs to tell failure from absence, and
-        // it reads the API directly.
+      if (ref.watch(signedInProvider) == false) {
         return const <String, DeviceSummary>{};
       }
+      final devices = await ref.watch(devicesApiProvider).list();
+      return {for (final d in devices) d.deviceId: d};
     });
 
 final remoteAccessPolicyProvider =
