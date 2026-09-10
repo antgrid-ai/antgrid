@@ -1,7 +1,10 @@
 # Spike: BoringSSL for the E2E transport cipher on Windows/Linux
 
-Status: **spike, merged behind a default-off flag.** Not enabled in any shipped
-build. Read this before turning it on.
+Status: **spike, and it MUST NOT MERGE as it stands.** The cipher works and is
+fast, but the dependency alone breaks `flutter build windows` on any machine
+without NASM — the default-off dart-define does not gate that, because merely
+depending on the package registers its plugin. See "The Windows build fails"
+below.
 
 ## Why
 
@@ -89,22 +92,54 @@ many large assets back to back, where those 12 ms slices land on the UI isolate
 one after another. If that shows up in practice, the answer is not to revert —
 it is BoringSSL *inside* a background isolate, which nothing here does yet.
 
+## The Windows build fails: BoringSSL needs NASM
+
+Measured, not predicted — a cold `flutter build windows` on Windows 11 with no
+`app/build/` present:
+
+```
+CMake Error at flutter/ephemeral/.plugin_symlinks/webcrypto/windows/CMakeLists.txt:14 (enable_language):
+  No CMAKE_ASM_NASM_COMPILER could be found.
+```
+
+`enable_language(ASM_NASM)` is unconditional and runs *before* the block thirty
+lines below it that would otherwise degrade to `-DOPENSSL_NO_ASM` when a target
+has no assembly sources. The graceful path exists and is unreachable. So
+**NASM becomes a hard toolchain prerequisite** — for every contributor building
+the Windows app, and for the CI and release runners — bought for a cipher that
+is a performance optimization. That is the cost to weigh, not the CMake error.
+
+**The dart-define does not gate this.** That build ran with
+`WEBCRYPTO_E2E_CIPHER` unset, which is how the failure was found: the Flutter
+tool registers every dependency that declares a Windows platform into
+`generated_plugins.cmake`, so the plugin's CMake runs whether or not a single
+Dart symbol references it. A flag can keep a cipher out of the transport; it
+cannot keep a plugin out of the build.
+
+It also **poisons `app/build/` exactly as the root `CLAUDE.md` gotcha
+describes**, now confirmed rather than feared: after the failed configure,
+`app/build/windows/x64/CMakeCache.txt` carried
+`CMAKE_INSTALL_PREFIX:PATH=C:/Program Files/antgrid`, and no later successful
+configure corrects it. Recovery is `Remove-Item -Recurse -Force app\build\windows`.
+
+Given this, the Win32 CNG route sketched in the original comparison deserves a
+second look before anyone installs NASM everywhere: `bcrypt.dll` ships with
+Windows, needs no build step and no prerequisite, and the binding surface is
+about five functions. It buys less than BoringSSL (Windows only, nothing for
+Linux) at a far lower toolchain cost.
+
 ## Open before this can ship
 
-1. **`webcrypto` is pinned to 0.6.0, not 0.6.1.** 0.6.1 moved to Dart build
-   hooks and pins `hooks: ^1.0.0`; our `portable_pty` needs `hooks: ^2.1.0`, so
-   0.6.1 does not resolve. 0.6.0 is the older Flutter-plugin form and builds
-   BoringSSL through **CMake as a registered Windows plugin** — which is exactly
-   the shape the `app/build/` poisoning gotcha in the root `CLAUDE.md` is about.
-   A failed first configure there is not recoverable by rebuilding. Prove a cold
-   `flutter build windows` on a clean checkout before enabling.
+1. **NASM everywhere, or a different cipher on Windows.** See above. Unblocking
+   the build means adding NASM to `DEVELOPMENT.md`'s prerequisites and to the
+   Windows CI and release runners. Not attempted here — the finding is the
+   decision, and it is not the spike's to make.
 2. **CI build cost is only half measured.** The host-test build the new CI step
    adds (`flutter pub run webcrypto:setup`, needed because `flutter test` runs
    on the host VM and never registers the plugin) takes **~16 s cold** on the
    CI container, and `ci-android.yml` caches nothing, so that is ~16 s on every
-   run. Cheap. The *app* build is the unmeasured one: the Windows and Linux
-   plugin compiles BoringSSL again through its own CMake, and no runner has
-   done it yet.
+   run. Cheap. The *app* build is the unmeasured one: Windows does not get far
+   enough to measure (above), and no Linux runner has built the plugin yet.
 3. **Key material outlives `zeroize`.** The cache holds imported keys inside
    BoringSSL, where `SessionKeys.zeroize` cannot reach. Bounded to four entries,
    and `WebcryptoAesGcm.evictImportedKeys()` exists, but nothing calls it — wire

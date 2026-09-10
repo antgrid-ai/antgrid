@@ -54,6 +54,13 @@ dependencies:
   # until --dart-define=WEBCRYPTO_E2E_CIPHER=true; see config/native_crypto.dart
   # and docs/spikes/webcrypto-cipher.md.
   #
+  # BREAKS `flutter build windows` ON ANY MACHINE WITHOUT NASM, and the
+  # dart-define does not gate that: merely depending on this registers the plugin
+  # in generated_plugins.cmake, whose CMakeLists calls enable_language(ASM_NASM)
+  # unconditionally. The failed configure then poisons app/build/ per the root
+  # CLAUDE.md gotcha (both measured -- see the spike doc). Removing this line is
+  # the only thing that makes the Windows build work again without NASM.
+  #
   # Resolves to 0.6.0, not the current 0.6.1: 0.6.1 moved to Dart build hooks and
   # pins `hooks: ^1.0.0`, which cannot co-resolve with portable_pty's
   # `hooks: ^2.1.0`. So this range takes the older Flutter-plugin form, which
