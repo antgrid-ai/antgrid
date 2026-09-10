@@ -145,8 +145,12 @@ export class TerminalScreen {
    * and a caller replaying everything it watched arrive paints those bytes
    * twice. Only xterm can say which chunks it has consumed, and the per-write
    * callback is how it says so.
+   *
+   * Protected because a subclass overriding `feed()` must push onto THIS
+   * array: keeping its own would leave both tail accessors reading a queue
+   * that nothing ever fills.
    */
-  private readonly unparsed: string[] = [];
+  protected readonly unparsed: string[] = [];
 
   constructor(cols: number, rows: number) {
     this.term = new Terminal({

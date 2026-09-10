@@ -157,9 +157,13 @@ describe("snapshot-only terminal prototype", () => {
     expect(delivery.pending).toBe(false);
   });
 
-  test("parser overload fails explicitly instead of emitting silently corrupted state", () => {
+  test("parser overload latches at feed and is raised at capture", () => {
     const host = source();
-    expect(() => host.feed("x".repeat(1_000_001))).toThrow("backlog");
+    // feed() is reached from the PTY flush timer, where a throw is an
+    // uncaughtException that ends every terminal on the machine. An overload is
+    // a display failure, so it surfaces where a viewer owns it instead.
+    expect(() => host.feed("x".repeat(1_000_001))).not.toThrow();
+    expect(() => host.feed("more")).not.toThrow();
     expect(() => host.capture(0)).toThrow("backlog");
   });
 
