@@ -1,6 +1,6 @@
 // bridge/tests/session-bus-artifact-store.test.ts
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -21,7 +21,9 @@ import {
   MAX_ARTIFACTS,
   MAX_ARTIFACT_BYTES,
 } from "../src/session-bus/constants";
-import { removeSessionBusSession, sessionBusSessionDir } from "../src/session-bus/store-fs";
+import { removeSessionBusSession } from "../src/session-bus/store-fs";
+import { busDbPath } from "../src/session-bus/bus-db";
+import { Database } from "bun:sqlite";
 import type { SessionMemberRef } from "../src/protocol";
 
 const AUTHOR: SessionMemberRef = { machineId: "m2", projectId: "p2", sessionId: "s2", machineLabel: "Laptop" };
@@ -151,21 +153,25 @@ test("past the cap the oldest handle is dropped", () => {
   expect(artifactById(s, `a${MAX_ARTIFACTS + 4}`)).not.toBeNull();
 });
 
-test("a corrupt or wrong-version artifact file loads as empty", () => {
+test("one unreadable artifact row costs one artifact, not the session's whole index", () => {
+  // The index is what makes bytes reachable, so emptying it on one bad record
+  // orphans every artifact the session ever published. Written by raw SQL
+  // because `saveArtifacts` cannot produce a record it would then refuse.
   const abDir = tmpAbDir();
   try {
-    const dir = sessionBusSessionDir(abDir, "p1", "s1");
-    mkdirSync(dir, { recursive: true });
-    const path = join(dir, "artifacts.json");
+    let s = emptyArtifacts();
+    s = addArtifact(s, rec({ artifactId: "a-good" }));
+    s = addArtifact(s, rec({ artifactId: "a-bad" }));
+    saveArtifacts(abDir, "p1", "s1", s);
 
-    writeFileSync(path, "]not json[");
-    expect(loadArtifacts(abDir, "p1", "s1").artifacts).toEqual([]);
+    const raw = new Database(busDbPath(abDir));
+    try {
+      raw.query("UPDATE bus_artifacts SET record = ? WHERE record LIKE ?").run("{truncat", "%a-bad%");
+    } finally {
+      raw.close();
+    }
 
-    writeFileSync(path, JSON.stringify({ version: 1, artifacts: [{ artifactId: "a1" }] }));
-    expect(loadArtifacts(abDir, "p1", "s1").artifacts).toEqual([]);
-
-    writeFileSync(path, JSON.stringify({ version: 99, artifacts: [] }));
-    expect(loadArtifacts(abDir, "p1", "s1").artifacts).toEqual([]);
+    expect(loadArtifacts(abDir, "p1", "s1").artifacts.map((a) => a.artifactId)).toEqual(["a-good"]);
   } finally {
     rmSync(abDir, { recursive: true, force: true });
   }

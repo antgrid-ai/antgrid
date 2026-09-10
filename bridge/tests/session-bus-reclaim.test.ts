@@ -29,6 +29,8 @@ import { emptyHeld, holdMessage, loadHeld, saveHeld } from "../src/session-bus/h
 import { appendLog, emptyLog, loadMessageLog, saveMessageLog } from "../src/session-bus/message-log";
 import { stampEnvelope } from "../src/session-bus/envelope";
 import { removeSessionBusSession } from "../src/session-bus/store-fs";
+import { busDbPath } from "../src/session-bus/bus-db";
+import { Database } from "bun:sqlite";
 
 setLogLevel("error");
 
@@ -204,4 +206,30 @@ test("forgetting a project reclaims every session's bus state and its delivery q
   // the untouched neighbour is what makes them mean anything.
   expect(readSession(kept.projectId, "s1")).toEqual({ log: 1, held: 1, artifacts: 1, content: 3 });
   expect(loadDeliveries(abDir, kept.projectId).lines).toHaveLength(1);
+});
+
+test("a reclaim the database refuses throws, rather than reporting a delete that did not happen", () => {
+  // Every call site already wraps this in a try/catch that warns `could not
+  // remove the session-bus store`. A reclaim routed through the read path's
+  // fallback would answer success with the records standing, and that warn —
+  // the only per-session signal there is — could never fire again.
+  seedSession("p1", "s1");
+
+  // A second connection holding the write lock past `busy_timeout`: the two
+  // hosts on one ANTGRID_DIR that bus-db.ts documents, reduced to one process.
+  const blocker = new Database(busDbPath(abDir));
+  try {
+    blocker.exec("BEGIN EXCLUSIVE");
+    expect(() => removeSessionBusSession(abDir, "p1", "s1")).toThrow();
+  } finally {
+    blocker.exec("ROLLBACK");
+    blocker.close();
+  }
+
+  const after = readSession("p1", "s1");
+  expect(after.held).toBe(1);
+  // The bytes went anyway, and that ordering is deliberate: the session is being
+  // deleted either way, and bytes with no handle are merely unreferenced where a
+  // handle with no bytes answers every fetch with nothing.
+  expect(after.content).toBeNull();
 });

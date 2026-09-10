@@ -20,7 +20,7 @@ import { z } from "zod";
 import { SessionMemberRefSchema } from "../protocol";
 import { MAX_ARTIFACTS, MAX_ARTIFACT_BYTES, MAX_SUMMARY_CHARS } from "./constants";
 import { sessionBusSessionDir } from "./store-fs";
-import { readRecords, replaceRecords, withBusDb } from "./bus-db";
+import { readRecords, replaceRecords, tryBusDb, withBusDb } from "./bus-db";
 
 export const ArtifactRecordSchema = z.object({
   artifactId: z.string().min(1).max(200),
@@ -89,11 +89,13 @@ export function loadArtifacts(abDir: string, projectId: string, sessionId: strin
   );
 }
 
-export function saveArtifacts(abDir: string, projectId: string, sessionId: string, s: ArtifactState): void {
-  withBusDb(
-    abDir,
-    (db) => replaceRecords(db, "bus_artifacts", "record", { projectId, sessionId }, s.artifacts.slice(-MAX_ARTIFACTS)),
-    undefined,
+/** Answers whether the index was actually written. `publishArtifact` hands the
+ *  agent a handle on the strength of it: the bytes are on disk by then, so a
+ *  false here is an id that resolves to nothing rather than a lost artifact,
+ *  and the one thing that must not happen is reporting it as published. */
+export function saveArtifacts(abDir: string, projectId: string, sessionId: string, s: ArtifactState): boolean {
+  return tryBusDb(abDir, `the artifact index for session ${sessionId}`, (db) =>
+    replaceRecords(db, "bus_artifacts", "record", { projectId, sessionId }, s.artifacts.slice(-MAX_ARTIFACTS)),
   );
 }
 

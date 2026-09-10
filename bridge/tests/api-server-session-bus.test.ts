@@ -11,6 +11,8 @@ import { startApiServer, type AgentContext } from "../src/api-server";
 import { createSessionBusApi, type SessionMembership } from "../src/session-bus/api";
 import { SessionDirectory } from "../src/session-bus/directory";
 import { SessionBusCoordinator } from "../src/session-bus/coordinator";
+import { busDbPath } from "../src/session-bus/bus-db";
+import { Database } from "bun:sqlite";
 import type { AbConfig } from "../src/config";
 import type { AbMessage } from "../src/protocol";
 
@@ -34,6 +36,7 @@ const PEER_SESSION = "peer-1";
  *  cannot tell the difference. */
 interface Machine {
   coordinator: SessionBusCoordinator;
+  abDir: string;
   port: number;
   stop(): void;
   outbound: AbMessage[];
@@ -102,6 +105,7 @@ function machine(opts: {
   const server = startApiServer(ctx);
   return {
     coordinator,
+    abDir: opts.abDir,
     port: server.port,
     outbound,
     routes,
@@ -176,6 +180,35 @@ describe("session-bus routes", () => {
 
       const slice = await get(peer, `artifacts/${artifactId}?offset=4&length=3`, PEER_SESSION);
       expect(slice.body).toMatchObject({ offset: 4, eof: false, text: "456" });
+    } finally {
+      stop();
+    }
+  });
+
+  test("an artifact whose handle could not be written is refused, never reported as published", async () => {
+    // The bytes land before the handle on purpose, so the failure this covers
+    // leaves them unreferenced rather than leaving an id that resolves to
+    // nothing. What must not happen is the agent being handed that id anyway:
+    // it would carry it into a message the other machine then cannot fetch.
+    const { peer, stop } = pair();
+    const first = await post(peer, "artifacts", PEER_SESSION, { name: "a.txt", summary: "s", content: "aaa" });
+    expect(first.status).toBe(200);
+
+    const blocker = new Database(busDbPath(peer.abDir));
+    try {
+      blocker.exec("BEGIN EXCLUSIVE");
+      const res = await post(peer, "artifacts", PEER_SESSION, {
+        name: "diff.txt", summary: "the codec diff", content: "0123456789",
+      });
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe("STORE_UNAVAILABLE");
+    } finally {
+      blocker.exec("ROLLBACK");
+      blocker.close();
+    }
+    try {
+      const list = await get(peer, "artifacts", PEER_SESSION);
+      expect(list.body.artifacts.map((a: { name: string }) => a.name)).toEqual(["a.txt"]);
     } finally {
       stop();
     }

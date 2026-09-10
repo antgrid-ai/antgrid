@@ -23,6 +23,11 @@ export const SESSION_BUS_ERRORS = {
   ENVELOPE_TOO_LARGE: 413,
   ARTIFACT_TOO_LARGE: 413,
   AGENT_NOT_READY: 503,
+  /** The bus could not persist what the caller is about to be told it did. A
+   *  refusal rather than a success with a warning in the log, because the agent
+   *  acts on the answer: an artifact id it cannot resolve later is worse than a
+   *  publish it knows to retry. */
+  STORE_UNAVAILABLE: 503,
 } as const;
 
 export type SessionBusErrorCode = keyof typeof SESSION_BUS_ERRORS;

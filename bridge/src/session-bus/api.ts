@@ -238,7 +238,9 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       // Bytes first, handle second — a handle with nothing under it answers every
       // fetch with nothing, while bytes with no handle are merely unreferenced.
       writeArtifactContent(deps.abDir, deps.projectId, m.sessionId, rec.artifactId, data);
-      saveArtifacts(deps.abDir, deps.projectId, m.sessionId, addArtifact(artifactsOf(m.sessionId), rec));
+      if (!saveArtifacts(deps.abDir, deps.projectId, m.sessionId, addArtifact(artifactsOf(m.sessionId), rec))) {
+        return refuse("STORE_UNAVAILABLE", "this artifact's bytes were written but its handle was not, so it is not published");
+      }
       return { ok: true, artifact: handleOf(rec) };
     },
 

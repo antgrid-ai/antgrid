@@ -23,7 +23,7 @@
 
 import { Database } from "bun:sqlite";
 import type { z } from "zod";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { logger } from "../logger";
 
@@ -141,22 +141,117 @@ function prepare(db: Database): void {
  * (see the module header) is what keeps that from being silent.
  */
 export function withBusDb<T>(abDir: string, fn: (db: Database) => T, fallback: T): T {
+  try {
+    return run(abDir, fn);
+  } catch (err) {
+    if (recoverIfCorrupt(abDir, err)) {
+      try {
+        return run(abDir, fn);
+      } catch (second) {
+        announceOnce(abDir, second);
+        return fallback;
+      }
+    }
+    announceOnce(abDir, err);
+    return fallback;
+  }
+}
+
+/**
+ * Run [fn] against the bus database, and say so when it could not.
+ *
+ * For the operations `withBusDb`'s contract is wrong for: a DELETE, or a write
+ * whose caller answers for it. An empty store is a truthful answer to a read
+ * and to a save that the next message event rewrites anyway; for these two
+ * there is no next event and no empty-store reading of the failure — it simply
+ * did not happen, and something is about to report success on its behalf.
+ *
+ * Said EVERY time rather than once per abDir: these run on a delete or a
+ * publish, not on every message, and each one names a different thing that was
+ * lost.
+ */
+export function tryBusDb(abDir: string, what: string, fn: (db: Database) => void): boolean {
+  try {
+    run(abDir, fn);
+    return true;
+  } catch (err) {
+    if (recoverIfCorrupt(abDir, err)) {
+      try {
+        run(abDir, fn);
+        return true;
+      } catch { /* fall through to the report below */ }
+    }
+    log.warn({ err }, `session-bus: ${what} — the bus database refused, so it did not happen`);
+    return false;
+  }
+}
+
+function run<T>(abDir: string, fn: (db: Database) => T): T {
   let db: Database | null = null;
   try {
     const dir = sessionBusMachineDir(abDir);
-    mkdirSync(dir, { recursive: true });
-    db = new Database(join(dir, "bus.db"), { create: true });
+    // 0700/0600, the mode every durable store under the state dir is written
+    // with (`discovery.ts`, `handler/session-store.ts`, `host-discovery.ts`).
+    // One file now holds every message body, held frame, rendered delivery line
+    // and peer relay slot id on the machine, so it is the LAST of them that may
+    // be left at the umask default. SQLite gives `-wal` and `-shm` the mode of
+    // the database file, so this has to land before the first write, not after.
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const path = join(dir, "bus.db");
+    db = new Database(path, { create: true });
+    restrict(path);
     prepare(db);
     return fn(db);
-  } catch (err) {
-    if (!announced.has(abDir)) {
-      announced.add(abDir);
-      log.warn({ err }, `session-bus: cannot use ${busDbPath(abDir)} — bus state is not durable this run`);
-    }
-    return fallback;
   } finally {
     try { db?.close(); } catch { /* a close that fails has nothing left to protect */ }
   }
+}
+
+function restrict(path: string): void {
+  if (process.platform === "win32") return;
+  try { chmodSync(path, 0o600); } catch { /* best effort, as everywhere else */ }
+}
+
+function announceOnce(abDir: string, err: unknown): void {
+  if (announced.has(abDir)) return;
+  announced.add(abDir);
+  log.warn({ err }, `session-bus: cannot use ${busDbPath(abDir)} — bus state is not durable this run`);
+}
+
+/**
+ * Move a database this build cannot read at all out of the way, so the next
+ * call builds a fresh one.
+ *
+ * Only for CORRUPTION, never for a lock we lost or a permission we lack: those
+ * heal on their own and moving the file would throw away good rows. A corrupt
+ * one heals never — every store on the machine is in it, so one truncated write
+ * from a power cut would otherwise cost this abDir its routes, its held
+ * messages, its logs, its artifact handles and its delivery queue for the life
+ * of the install. The JSON stores this replaced recovered on their next write
+ * without anyone deciding they should; taking that away silently is the part
+ * that had to be answered rather than the corruption itself.
+ *
+ * Kept, not deleted, because a database this reached is the only evidence of
+ * whatever produced it.
+ */
+function recoverIfCorrupt(abDir: string, err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code ?? "";
+  const message = err instanceof Error ? err.message : String(err);
+  const corrupt =
+    code === "SQLITE_NOTADB" ||
+    code === "SQLITE_CORRUPT" ||
+    /not a database|disk image is malformed/i.test(message);
+  if (!corrupt) return false;
+  const path = busDbPath(abDir);
+  try {
+    for (const suffix of ["-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
+    renameSync(path, `${path}.corrupt`);
+  } catch (moveErr) {
+    log.warn({ err: moveErr }, `session-bus: ${path} is corrupt and could not be moved aside`);
+    return false;
+  }
+  log.warn(`session-bus: ${path} was corrupt — kept as bus.db.corrupt, starting a new one`);
+  return true;
 }
 
 /** One store's rows: a session's, or — for the delivery queue, which is owned
