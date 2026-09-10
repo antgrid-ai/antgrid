@@ -153,6 +153,14 @@ jobs:
           done
           exit $fail
 
+      # package:webcrypto resolves BoringSSL from the plugin the Flutter build
+      # registers, which `flutter test` never runs — from the host VM it looks
+      # in .dart_tool instead, and that is what this populates. Without it
+      # test/config/webcrypto_aes_gcm_test.dart cannot load its library.
+      - name: Build BoringSSL for host tests
+        working-directory: app
+        run: flutter pub run webcrypto:setup
+
       - name: Flutter test
         working-directory: app
         run: flutter test

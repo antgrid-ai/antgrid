@@ -49,6 +49,20 @@ dependencies:
   # No Dart symbol outside that file references it, but removing it drops every
   # relay frame back onto the pure-Dart cipher on the UI isolate.
   cryptography_flutter: ^2.3.4
+  # AES-GCM for the E2E transport on Windows/Linux, where cryptography_flutter
+  # ships no plugin and every frame falls back to a pure Dart cipher. Inert
+  # until --dart-define=WEBCRYPTO_E2E_CIPHER=true; see config/native_crypto.dart
+  # and docs/spikes/webcrypto-cipher.md.
+  #
+  # Resolves to 0.6.0, not the current 0.6.1: 0.6.1 moved to Dart build hooks and
+  # pins `hooks: ^1.0.0`, which cannot co-resolve with portable_pty's
+  # `hooks: ^2.1.0`. So this range takes the older Flutter-plugin form, which
+  # compiles BoringSSL through CMake as a registered Windows/Linux plugin — read
+  # the app/build/ poisoning gotcha in the root CLAUDE.md before touching it.
+  # The range admits 0.6.1, so the day portable_pty's `hooks` constraint moves,
+  # the build mechanism changes underneath a `pub upgrade` with nothing failing:
+  # re-verify a cold `flutter build windows` then.
+  webcrypto: ^0.6.0
   uuid: ^4.5.1
   # Ghostty's VT engine in Flutter — production terminal renderer.
   # Wins decisively on TUI block-element rendering (▀ ▄ █ etc) over the
