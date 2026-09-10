@@ -380,7 +380,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // them.
     final agentBarNotifier = ref.read(agentBarMountedProvider.notifier);
     // The reveal callback closes over this State (setState + _pageController),
-    // so leaving it published would let the agent header's NEEDS YOU pill call
+    // so leaving it published would let the session kebab's attention row call
     // into a disposed shell after a project switch.
     final revealNotifier = ref.read(revealHandlerTabProvider.notifier);
     // Same lifetime again: a stale tab left published here would let a back
@@ -972,9 +972,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   void switchToAgentPage() => _goToPage(_MobilePage.agent);
 
-  /// Reveal the Handler workspace tab from anywhere (e.g. the agent header's
-  /// NEEDS YOU pill). Desktop: selects the sidebar view, un-hiding the panel
-  /// first if the user had it closed — a pill that selected a tab nobody can
+  /// Reveal the Handler workspace tab from anywhere (e.g. the session kebab's
+  /// attention row). Desktop: selects the sidebar view, un-hiding the panel
+  /// first if the user had it closed — a row that selected a tab nobody can
   /// see would answer a call to action with nothing at all. Mobile: also swipes
   /// to the workspace page.
   void revealHandlerTab() {
@@ -1688,8 +1688,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   /// Put [view] in front of the user in the docked context panel, un-hiding it
   /// first if the user had it closed — the same recovery [revealHandlerTab]
-  /// gives the NEEDS YOU pill, since the menu is reachable from panel modes
-  /// where the context panel is off screen entirely.
+  /// gives the kebab's attention row, since the menu is reachable from panel
+  /// modes where the context panel is off screen entirely.
   ///
   /// The entry point for every caller that names a view from outside the tab
   /// strip: the agent bar's workspace menu.
@@ -1735,8 +1735,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       return;
     }
     // Desktop un-hides the docked context panel and selects the view there —
-    // same recovery [revealHandlerTab] gives the NEEDS YOU pill, since a
-    // navigation can land while the panel is off screen entirely.
+    // same recovery [revealHandlerTab] gives the kebab's attention row, since
+    // a navigation can land while the panel is off screen entirely.
     _revealWorkspaceView(pending.value);
   }
 

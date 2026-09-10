@@ -18,10 +18,10 @@ class MobileBottomNav extends StatelessWidget {
   final ValueChanged<WorkspaceView> onSelected;
 
   /// Same map the desktop [WorkspaceTabBar] renders. Mobile is the surface
-  /// Handler exists for, and its `NEEDS YOU` pill lives in the agent header —
-  /// the OTHER swipe page — so without a count here the focused session's
-  /// unanswered escalation has nothing standing for it on the page the user is
-  /// looking at.
+  /// Handler exists for, and the kebab's attention row lives in the agent
+  /// header — the OTHER swipe page — so without a count here the focused
+  /// session's unanswered escalation has nothing standing for it on the page
+  /// the user is looking at.
   ///
   /// The focused session's, not the project's: the Handler tab renders one
   /// session, so a badge counting the rest would name a number that tab cannot

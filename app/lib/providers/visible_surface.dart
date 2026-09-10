@@ -35,9 +35,9 @@ final visibleWorkspaceViewProvider =
 /// change, and clears it on consumption.
 ///
 /// Also the only safe way to reveal a view in the same turn as a SESSION
-/// switch, which is why the agent bar's NEEDS YOU pill writes here rather than
-/// calling `revealHandlerTab`: a focus change arms the shell's per-session UI
-/// restore, and that restore re-applies the target session's own saved tab
+/// switch, which is why the session kebab's attention row writes here rather
+/// than calling `revealHandlerTab`: a focus change arms the shell's per-session
+/// UI restore, and that restore re-applies the target session's own saved tab
 /// after any tab the caller selected first. The drain runs after it.
 ///
 /// Null is a written value, not just an absence: a location naming no view
@@ -91,7 +91,7 @@ final pendingFilePathProvider =
 /// Both are scoped to what their tab actually shows — the focused checkout for
 /// git, the focused session for the handler. A handler badge counting the whole
 /// project would send the user to a tab narrowed past the escalation it
-/// promised; the agent bar's NEEDS YOU pill is what carries the project-wide
+/// promised; the session kebab's attention row is what carries the project-wide
 /// count, and it moves focus to the session it counted on the way in.
 ///
 /// A provider rather than a WorkspaceShell method because the agent bar's

@@ -8,12 +8,14 @@ import '../constants/breakpoints.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
+import '../design/ab_status_tone.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../design/widgets/ab_toolbar.dart';
@@ -146,6 +148,114 @@ class AgentPanel extends ConsumerWidget {
   }
 }
 
+/// Escalations waiting on sessions OTHER than the focused one, carried with
+/// the session a tap on them should land in.
+///
+/// The Handler tab and the badge over it are both narrowed to the focused
+/// session on purpose — see [workspaceBadgesProvider], which explains why a
+/// project-wide count there would send the user to a tab narrowed past the
+/// escalation it promised. That leaves a sibling's unanswered question with
+/// nothing to speak for it in the header, and this is what does: the count
+/// travels WITH its target precisely because the only surface allowed to name
+/// it is one that moves focus to the session it counted on the way in.
+///
+/// The target is the first escalation belonging to another session, taken in
+/// `state.escalations` order — `compareEscalations` bands that list by
+/// urgency, so the tap lands on the most urgent sibling rather than merely the
+/// oldest one.
+typedef _OtherSessionEscalations = ({int count, String? target});
+
+/// A record, so the fresh value built here compares by VALUE and a rebuild of
+/// the unnarrowed handler state notifies nothing unless the count or the
+/// target actually moved — the same churn guard [workspaceBadgesProvider]
+/// documents.
+final _otherSessionEscalationsProvider = Provider<_OtherSessionEscalations>((
+  ref,
+) {
+  final activeId = ref.watch(activeSessionIdProvider);
+  final state =
+      ref.watch(handlerStateProvider).value ?? const HandlerState.initial();
+  final own = activeId == null
+      ? 0
+      : state.sessions[activeId]?.pendingEscalations ?? 0;
+  final count = state.pendingEscalations - own;
+  if (count <= 0) return (count: 0, target: null);
+  return (
+    count: count,
+    target: state.escalations
+        .firstWhereOrNull((e) => e.terminalId != activeId)
+        ?.terminalId,
+  );
+});
+
+/// The project-wide half of the Handler's attention, as an ACTION rather than
+/// the status pill it used to be.
+///
+/// Earns its place in an action menu by moving focus to the session it counted
+/// before landing, which is the whole reason a count this wide is allowed to
+/// exist anywhere: the Handler tab renders one session, so a number naming the
+/// rest has to bring that session with it or it opens a tab that cannot
+/// account for what it promised.
+class _OtherSessionsMenuItem extends ConsumerWidget {
+  const _OtherSessionsMenuItem();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final waiting = ref.watch(_otherSessionEscalationsProvider);
+    if (waiting.count == 0) return const SizedBox.shrink();
+
+    void go() {
+      // The popup route closes first — its own doc says the content pops
+      // itself — and everything past the pop runs on the container rather than
+      // this widget's ref, the same contract [_HandlerMenuItem.toggleArm] has.
+      final container = ref.container;
+      Navigator.of(context).pop();
+      // Every branch below lands on the Handler tab, by handover or by call,
+      // so a pending agent-page stamp left by an earlier navigation must not
+      // survive any of them: its drain runs last and would override the tab.
+      container.read(pendingAgentPageProvider.notifier).set(null);
+      final target = waiting.target;
+      if (target == null) {
+        container.read(revealHandlerTabProvider)?.call();
+        return;
+      }
+      container.read(activeSessionIdProvider.notifier).set(target);
+      // Read back rather than assumed: `ActiveSessionId.set` REFUSES a session
+      // the bridge is already deleting, and such a session keeps its replayed
+      // escalations for the seconds before its row goes. Focus then stays put,
+      // and the handover below would stamp the session still in focus with a
+      // destination picked for a different one.
+      if (container.read(activeSessionIdProvider) != target) {
+        container.read(revealHandlerTabProvider)?.call();
+        return;
+      }
+      // A focus change cannot reveal the tab by calling: moving focus arms
+      // WorkspaceShell's per-session UI restore, which re-applies the TARGET
+      // session's own saved workspace tab from a post-frame callback, and any
+      // tab selected before that lands is silently undone by it. Handed over
+      // as pending state instead — the same handover a deep link naming a view
+      // uses, drained by the shell after the restore.
+      container.read(pendingWorkspaceViewProvider.notifier).set((
+        target: container.read(selectedTargetProvider),
+        value: WorkspaceView.handler,
+      ));
+    }
+
+    return AbLiveMenuRow(
+      label: waiting.count == 1
+          ? 'Answer another session'
+          : 'Answer ${waiting.count} in other sessions',
+      icon: AbIcons.bell,
+      tooltip: waiting.count == 1
+          ? 'Handler is waiting on an answer in a session that is not in '
+                'focus.'
+          : 'Handler is waiting on ${waiting.count} answers in sessions that '
+                'are not in focus.',
+      onTap: go,
+    );
+  }
+}
+
 /// Overflow trigger for everything about the session that has no inline home:
 /// the terminal/chat mode switch and the Handler arm/disarm row. On a phone
 /// (see the comment above its call site in [AgentPanel.build]) it also takes
@@ -166,6 +276,10 @@ class _SessionOverflowButton extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // The menu is closed by default, so a row inside it cannot call for
+    // attention by itself. This dot is what the inline pill used to be: the
+    // always-visible sign that a session which is NOT in focus is waiting.
+    final waiting = ref.watch(_otherSessionEscalationsProvider).count;
     final button = Builder(
       // AbCompactTapTargets: the toolbar row already owns its height, so the
       // button's mobile tap-target inflation (24px visual -> 44px hit box)
@@ -174,14 +288,32 @@ class _SessionOverflowButton extends ConsumerWidget {
       // stray gap between the kebab and the menu instead of Chrome's flush
       // hang-under.
       builder: (anchor) => AbCompactTapTargets(
-        child: AbIconButton(
-          icon: AbIcons.more,
-          tooltip: 'Session options',
-          onTap: () => detached(
-            'AgentPanel',
-            'session overflow menu failed',
-            () => _open(anchor),
-          ),
+        // Positioned rather than laid out beside the icon, so the dot never
+        // widens the box abMenuAnchorRect measures off this Builder and the
+        // popup keeps hanging flush under the kebab.
+        child: Stack(
+          clipBehavior: Clip.none,
+          alignment: Alignment.center,
+          children: [
+            AbIconButton(
+              icon: AbIcons.more,
+              tooltip: 'Session options',
+              onTap: () => detached(
+                'AgentPanel',
+                'session overflow menu failed',
+                () => _open(anchor),
+              ),
+            ),
+            if (waiting > 0)
+              const Positioned(
+                right: -1,
+                top: -1,
+                child: AbStatusDot(
+                  key: Key('session-attention-dot'),
+                  tone: AbStatusTone.agentAttention,
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -240,6 +372,7 @@ class _SessionOverflowMenu extends ConsumerWidget {
         if (compact && branch != null) AbMenuHeaderLabel(branch),
         const SessionModeMenuItem(),
         const _HandlerMenuItem(),
+        const _OtherSessionsMenuItem(),
       ],
     );
   }
@@ -508,8 +641,16 @@ String parkedPillLabel(int? parkedUntil) {
 bool shieldShowsLabel({required bool armedOnce, required bool sessionArmed}) =>
     !armedOnce && !sessionArmed;
 
-/// Handler status pill + shield rendered in the agent panel header, scoped to
-/// the FOCUSED session — arming is per-terminal, not per-project.
+/// Handler status pill + shield, scoped to the FOCUSED session — arming is
+/// per-terminal, not per-project.
+///
+/// NOT MOUNTED: nothing in `app/lib` constructs this. The arm/disarm half now
+/// lives in [_HandlerMenuItem] and the project-wide count in
+/// [_OtherSessionsMenuItem], both behind the session kebab; what has no home
+/// any more is the focused session's own status word (WATCHING / HANDLING /
+/// PARKED / NOT WATCHED) and the first-run labelled button. Kept only so that
+/// decision stays visible — a reader reaching for a header pill should know it
+/// was removed, not that it was never written.
 ///
 /// Shows a state pill (WATCHING / HANDLING / NEEDS YOU `n`) for the focused
 /// session when armed, falling back to the project-wide pending count so
