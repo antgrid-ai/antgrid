@@ -101,8 +101,17 @@ class RemoteDevicesNotifier extends AsyncNotifier<PhonesList> {
 /// account no longer has, so there is nothing left to revoke.
 final accountDevicesByBridgeIdProvider =
     FutureProvider<Map<String, DeviceSummary>>((ref) async {
-      final devices = await ref.watch(devicesApiProvider).list();
-      return {for (final d in devices) d.deviceId: d};
+      try {
+        final devices = await ref.watch(devicesApiProvider).list();
+        return {for (final d in devices) d.deviceId: d};
+      } catch (_) {
+        // Unreachable or signed out is EMPTY here, per this provider's
+        // contract above: with no join there is no remedy to offer, which
+        // is the honest answer when the account cannot be read. Only
+        // `pruneRemovedMachines` needs to tell failure from absence, and
+        // it reads the API directly.
+        return const <String, DeviceSummary>{};
+      }
     });
 
 final remoteAccessPolicyProvider =
