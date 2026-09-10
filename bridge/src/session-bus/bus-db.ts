@@ -23,7 +23,7 @@
 
 import { Database } from "bun:sqlite";
 import type { z } from "zod";
-import { chmodSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { logger } from "../logger";
 
@@ -252,6 +252,34 @@ function recoverIfCorrupt(abDir: string, err: unknown): boolean {
   }
   log.warn(`session-bus: ${path} was corrupt — kept as bus.db.corrupt, starting a new one`);
   return true;
+}
+
+/**
+ * Like {@link withBusDb}, for an operation that can only READ.
+ *
+ * A read never brings the store into being. Nothing to read is the same answer
+ * as a store with nothing in it, and creating one to say so is not free: a
+ * bridge that has never carried a bus message would stamp a database at every
+ * boot, and each file under the state dir is a handle another process on this
+ * machine can be holding when the next rename lands there. That is not
+ * hypothetical — it cost this suite two separate Windows failures, in tests
+ * that never used the bus at all.
+ */
+export function readBusDb<T>(abDir: string, fn: (db: Database) => T, fallback: T): T {
+  if (!existsSync(busDbPath(abDir))) return fallback;
+  return withBusDb(abDir, fn, fallback);
+}
+
+/**
+ * Like {@link tryBusDb}, for a RECLAIM.
+ *
+ * A store that was never written has nothing to reclaim, and says so truthfully
+ * without creating one — which is what every session delete on the machine was
+ * doing, whether or not that session had ever sent a bus message.
+ */
+export function reclaimBusDb(abDir: string, what: string, fn: (db: Database) => void): boolean {
+  if (!existsSync(busDbPath(abDir))) return true;
+  return tryBusDb(abDir, what, fn);
 }
 
 /** One store's rows: a session's, or — for the delivery queue, which is owned

@@ -25,7 +25,7 @@
 
 import { z } from "zod";
 import { MAX_BUS_ROUTES } from "./constants";
-import { withBusDb } from "./bus-db";
+import { readBusDb, withBusDb } from "./bus-db";
 
 export const BusRouteSchema = z.object({
   contextId: z.string().min(1).max(200),
@@ -64,7 +64,7 @@ export type BusRouteMap = Map<string, { peerId: string; projectId: string; at: n
  * carrier bindings with it.
  */
 export function loadBusRoutes(abDir: string, ttlMs: number, now: number): BusRouteMap {
-  return withBusDb(
+  return readBusDb(
     abDir,
     (db) => {
       const rows = db

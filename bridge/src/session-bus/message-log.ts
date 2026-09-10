@@ -12,7 +12,7 @@ import { z } from "zod";
 import { BusEnvelopeSchema, trimEnvelopeForLog, type BusEnvelope } from "./envelope";
 import { MAX_LOG_ENTRIES } from "./constants";
 import { SessionMemberKeySchema, type SessionMemberKey } from "../protocol";
-import { readRecords, replaceRecords, withBusDb } from "./bus-db";
+import { readBusDb, readRecords, replaceRecords, withBusDb } from "./bus-db";
 
 export const LoggedEnvelopeSchema = z.object({
   at: z.number(),
@@ -59,7 +59,7 @@ export function entriesForContext(s: MessageLogState, contextId: string): Logged
 }
 
 export function loadMessageLog(abDir: string, projectId: string, sessionId: string): MessageLogState {
-  return withBusDb(
+  return readBusDb(
     abDir,
     (db) => ({ entries: readRecords(db, "bus_messages", "entry", { projectId, sessionId }, MAX_LOG_ENTRIES, LoggedEnvelopeSchema) }),
     emptyLog(),

@@ -16,7 +16,7 @@
 import { z } from "zod";
 import { SessionMemberKeySchema } from "../protocol";
 import { BUS_MESSAGE_TTL_MS, MAX_HELD_MESSAGES } from "./constants";
-import { readRecords, replaceRecords, withBusDb } from "./bus-db";
+import { readBusDb, readRecords, replaceRecords, withBusDb } from "./bus-db";
 
 export const HELD_MESSAGE_TTL_MS = BUS_MESSAGE_TTL_MS;
 
@@ -68,7 +68,7 @@ export function releaseHeld(s: HeldState, messageIds: readonly string[]): HeldSt
 }
 
 export function loadHeld(abDir: string, projectId: string, sessionId: string): HeldState {
-  return withBusDb(
+  return readBusDb(
     abDir,
     (db) => ({ held: readRecords(db, "bus_held", "held", { projectId, sessionId }, MAX_HELD_MESSAGES, HeldMessageSchema) }),
     emptyHeld(),

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { setLogLevel } from "../src/logger";
 import { BUS_DB_VERSION, busDbPath, resetBusDbAnnouncements, tryBusDb, withBusDb } from "../src/session-bus/bus-db";
 import { emptyDeliveries, enqueueLine, loadDeliveries, saveDeliveries } from "../src/session-bus/delivery-queue";
+import { listSessionBusSessions, removeSessionBusProject, removeSessionBusSession } from "../src/session-bus/store-fs";
 import { emptyHeld, holdMessage, loadHeld, saveHeld } from "../src/session-bus/held-store";
 import { appendLog, emptyLog, loadMessageLog, saveMessageLog } from "../src/session-bus/message-log";
 import { stampEnvelope } from "../src/session-bus/envelope";
@@ -255,4 +256,28 @@ test("a record removed from the middle does not survive the write", () => {
   saveDeliveries(abDir, "p1", { ...kept, lines: kept.lines.filter((l) => l.id !== "l-2") });
 
   expect(loadDeliveries(abDir, "p1").lines.map((l) => l.id)).toEqual(["l-1", "l-3"]);
+});
+
+test("nothing that only reads or reclaims brings the database into being", () => {
+  // Every session delete on the machine runs the reclaim, and most sessions
+  // never send a bus message. Creating a database to delete nothing from is not
+  // free: each file under the state dir is a handle another process can be
+  // holding when the next rename lands there, and this suite lost two runs to
+  // exactly that — in tests that never touched the bus.
+  expect(loadHeld(abDir, "p1", "s1").held).toEqual([]);
+  expect(loadDeliveries(abDir, "p1").lines).toEqual([]);
+  expect(loadMessageLog(abDir, "p1", "s1").entries).toEqual([]);
+  expect(listSessionBusSessions(abDir)).toEqual([]);
+  removeSessionBusProject(abDir, "p1");
+  removeSessionBusSession(abDir, "p1", "s1");
+
+  expect(existsSync(busDbPath(abDir))).toBe(false);
+
+  // And a write still creates it, or none of the above would mean anything.
+  saveHeld(abDir, "p1", "s1", holdMessage(emptyHeld(), {
+    messageId: "h-1", contextId: "c", role: "lead",
+    to: { machineId: "m", projectId: "p", sessionId: "s" },
+    frame: { type: "session-bus:message" }, heldAt: 1,
+  }));
+  expect(existsSync(busDbPath(abDir))).toBe(true);
 });

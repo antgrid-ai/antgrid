@@ -25,7 +25,7 @@
 import { z } from "zod";
 import { logger } from "../logger";
 import { MAX_DELIVERY_CHARS } from "./delivery";
-import { readRecords, replaceRecords, withBusDb } from "./bus-db";
+import { readBusDb, readRecords, replaceRecords, withBusDb } from "./bus-db";
 
 const log = logger.child({ component: "session-bus" });
 
@@ -130,7 +130,7 @@ export function forgetSession(s: DeliveryQueueState, sessionId: string): Deliver
 }
 
 export function loadDeliveries(abDir: string, projectId: string): DeliveryQueueState {
-  return withBusDb(
+  return readBusDb(
     abDir,
     (db) => ({ lines: readRecords(db, "bus_deliveries", "line", { projectId }, MAX_QUEUED_LINES, QueuedLineSchema) }),
     emptyDeliveries(),

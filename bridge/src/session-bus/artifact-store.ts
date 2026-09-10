@@ -20,7 +20,7 @@ import { z } from "zod";
 import { SessionMemberRefSchema } from "../protocol";
 import { MAX_ARTIFACTS, MAX_ARTIFACT_BYTES, MAX_SUMMARY_CHARS } from "./constants";
 import { sessionBusSessionDir } from "./store-fs";
-import { readRecords, replaceRecords, tryBusDb, withBusDb } from "./bus-db";
+import { readBusDb, readRecords, replaceRecords, tryBusDb, withBusDb } from "./bus-db";
 
 export const ArtifactRecordSchema = z.object({
   artifactId: z.string().min(1).max(200),
@@ -82,7 +82,7 @@ function contentPath(abDir: string, projectId: string, sessionId: string, id: st
 }
 
 export function loadArtifacts(abDir: string, projectId: string, sessionId: string): ArtifactState {
-  return withBusDb(
+  return readBusDb(
     abDir,
     (db) => ({ artifacts: readRecords(db, "bus_artifacts", "record", { projectId, sessionId }, MAX_ARTIFACTS, ArtifactRecordSchema) }),
     emptyArtifacts(),

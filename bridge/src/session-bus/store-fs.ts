@@ -12,7 +12,7 @@
 
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { deleteScope, tryBusDb, withBusDb } from "./bus-db";
+import { deleteScope, readBusDb, reclaimBusDb } from "./bus-db";
 
 /** Where one project's artifact bytes live. Ids are bridge-issued but encoded
  *  anyway: a path separator inside one must not escape the project directory. */
@@ -43,7 +43,7 @@ export function sessionBusSessionDir(abDir: string, projectId: string, sessionId
  * `SessionBusCoordinator.resume`).
  */
 export function listSessionBusSessions(abDir: string): { projectId: string; sessionId: string }[] {
-  return withBusDb(
+  return readBusDb(
     abDir,
     (db) =>
       db
@@ -80,7 +80,7 @@ export function listSessionBusSessions(abDir: string): { projectId: string; sess
  * every fetch with nothing (`publishArtifact` orders itself the same way).
  */
 export function removeSessionBusSession(abDir: string, projectId: string, sessionId: string): void {
-  const recordsGone = tryBusDb(abDir, `the records for session ${sessionId}`, (db) =>
+  const recordsGone = reclaimBusDb(abDir, `the records for session ${sessionId}`, (db) =>
     deleteScope(db, { projectId, sessionId }),
   );
   rmSync(sessionBusSessionDir(abDir, projectId, sessionId), { recursive: true, force: true });
@@ -102,5 +102,5 @@ export function removeSessionBusSession(abDir: string, projectId: string, sessio
  * already said what survived by the time this returns false.
  */
 export function removeSessionBusProject(abDir: string, projectId: string): boolean {
-  return tryBusDb(abDir, `the bus records for project ${projectId}`, (db) => deleteScope(db, { projectId }));
+  return reclaimBusDb(abDir, `the bus records for project ${projectId}`, (db) => deleteScope(db, { projectId }));
 }
