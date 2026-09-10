@@ -65,6 +65,17 @@ void main() {
         isA<RemoteMachineRefused>(),
       );
 
+      // The second refusal is a DIFFERENT switch on the peer, and it survives
+      // to the reach line as its own sentence: a machine that refused here has
+      // remote access on, so the other line would send its user to a setting
+      // they will find already correct.
+      final reachOff = _clientThrowing(
+        RpcException('NOT_ALLOWED_AGENT_REACH', 'agent reach is disabled'),
+      );
+      final reachOutcome = await classifyMachine(reachOff, const []);
+      expect(reachOutcome, isA<RemoteMachineReachRefused>());
+      expect(reachOutcome.wireValue, 'reach-refused');
+
       final timedOut = _clientThrowing(
         RpcException('E_TIMEOUT', 'request timed out'),
       );

@@ -190,6 +190,7 @@ describe("the session-bus tools", () => {
         machines: [
           { machineId: "m1", machineLabel: "thinkpad", status: "refused", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
           { machineId: "m2", machineLabel: "old-mini", status: "no-card", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
+          { machineId: "m3", machineLabel: "studio", status: "reach-refused", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
         ],
         staleMachines: 0,
         notConnected: 2,
@@ -198,6 +199,10 @@ describe("the session-bus tools", () => {
     const text = (await callSessionBusTool("antgrid_list_sessions", {})).content[0]!.text;
     expect(text).toContain("thinkpad: remote access is off there");
     expect(text).toContain("old-mini: running a bridge older than this feature");
+    // The two refusals name DIFFERENT switches. A machine that got as far as
+    // the second one has remote access ON, so sending its user to that setting
+    // is sending them somewhere they will find nothing to change.
+    expect(text).toContain("studio: reachable by agents is off there");
     expect(text).toContain("2 machines in your account are not connected to this desktop and were not asked");
   });
 

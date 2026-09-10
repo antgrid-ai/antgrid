@@ -85,7 +85,7 @@ const int kRemoteDirectoryMaxRowsPerMachine = 40;
 /// only who pays the wire bytes for the overflow.
 const int kRemoteDirectoryMaxMachinesPerPush = 8;
 
-/// What one candidate machine turned out to be, this cycle. Four members,
+/// What one candidate machine turned out to be, this cycle. Five members,
 /// deliberately never collapsed into one another: a caller that cannot tell
 /// "the peer said no" from "nobody answered" from "it has nothing running"
 /// renders every one of them as the same "nobody else is there".
@@ -98,6 +98,7 @@ sealed class RemoteMachineOutcome {
     RemoteMachineRows() => 'rows',
     RemoteMachineNoCard() => 'no-card',
     RemoteMachineRefused() => 'refused',
+    RemoteMachineReachRefused() => 'reach-refused',
     RemoteMachineUnreachable() => 'unreachable',
   };
 }
@@ -122,6 +123,17 @@ final class RemoteMachineNoCard extends RemoteMachineOutcome {
 /// (`RpcException('NOT_ALLOWED')`). Named, never silently absent.
 final class RemoteMachineRefused extends RemoteMachineOutcome {
   const RemoteMachineRefused();
+}
+
+/// The peer is on the air but its subordinate "reachable by agents" bit is off
+/// (`RpcException('NOT_ALLOWED_AGENT_REACH')`) — a DIFFERENT switch from
+/// [RemoteMachineRefused], on a machine whose remote access is by definition
+/// already on, since a machine that refused for the first reason never reached
+/// the second gate. Kept apart the whole way to the reach line an agent reads:
+/// the two refusals are one sentence of prose there, and naming the wrong
+/// switch sends the user to a setting they will find already correct.
+final class RemoteMachineReachRefused extends RemoteMachineOutcome {
+  const RemoteMachineReachRefused();
 }
 
 /// No live client to peek, or the ask did not complete at all — a timeout, a
@@ -155,6 +167,9 @@ Future<RemoteMachineOutcome> classifyMachine(
       truncated: card.sessionsTruncated,
     );
   } on RpcException catch (e) {
+    if (e.code == 'NOT_ALLOWED_AGENT_REACH') {
+      return const RemoteMachineReachRefused();
+    }
     if (e.code == 'NOT_ALLOWED') return const RemoteMachineRefused();
     // A bridge old enough to lack this method, or new enough to disagree on
     // its params, cannot say whether it has sessions — that is a DIFFERENT
@@ -334,6 +349,7 @@ class RemoteMachineTracker {
     _last[uuid] = report;
     final backoff = switch (report.outcome) {
       RemoteMachineRefused() => refusedBackoff,
+      RemoteMachineReachRefused() => refusedBackoff,
       RemoteMachineUnreachable() => unreachableBackoff,
       RemoteMachineNoCard() => noCardBackoff,
       RemoteMachineRows() => null,

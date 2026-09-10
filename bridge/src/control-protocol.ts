@@ -142,7 +142,7 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
           machineId: z.string().min(1).max(200),
           machineLabel: z.string().max(120).optional(),
           observedAt: z.number().int().nonnegative(),
-          outcome: z.enum(["rows", "no-card", "refused", "unreachable"]),
+          outcome: z.enum(["rows", "no-card", "refused", "reach-refused", "unreachable"]),
           rows: z.array(z.unknown()).max(MAX_REMOTE_DIRECTORY_WIRE_ROWS).default([]),
           truncated: z.number().int().min(0).default(0),
         }),

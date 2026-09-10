@@ -77,9 +77,13 @@ export function sanitizeRow(row: RemoteDirectoryRow): RemoteDirectoryRow | null 
 
 /** What the pushing app classified one machine as, this cycle. `"rows"` means a
  *  card came back (however many sessions it held, including zero) — {@link
- *  RemoteDirectoryCache.view} renders it as `"answered"`; the other three
- *  travel unchanged into {@link ReachMachineStatus}. */
-export type RemoteMachineOutcome = "rows" | "no-card" | "refused" | "unreachable";
+ *  RemoteDirectoryCache.view} renders it as `"answered"`; the other four travel
+ *  unchanged into {@link ReachMachineStatus}.
+ *
+ *  `"refused"` and `"reach-refused"` are kept apart all the way to the agent's
+ *  reach line because they name DIFFERENT switches on the peer, and a line that
+ *  names the wrong one sends the user to a setting that is already on. */
+export type RemoteMachineOutcome = "rows" | "no-card" | "refused" | "reach-refused" | "unreachable";
 
 /** One machine's report, as the loopback ingest verb
  *  (`session-bus:remote-directory`) hands it to {@link
@@ -120,7 +124,7 @@ export interface RemoteDirectoryReplaceResult {
   unservedReads: number;
 }
 
-export type ReachMachineStatus = "answered" | "no-card" | "refused" | "unreachable";
+export type ReachMachineStatus = "answered" | "no-card" | "refused" | "reach-refused" | "unreachable";
 
 /** One line of the reach report `directory.ts` renders beside the merged rows
  *  — never the rows themselves, which is why `rows` here is a COUNT. */

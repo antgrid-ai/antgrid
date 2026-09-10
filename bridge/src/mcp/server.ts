@@ -248,6 +248,8 @@ function reachMachineClause(m: any): string {
         : `${name}: nothing on this repository as of ${seconds(m.ageMs)} ago${dropped}`;
     case "refused":
       return `${name}: remote access is off there`;
+    case "reach-refused":
+      return `${name}: reachable by agents is off there`;
     case "no-card":
       return `${name}: running a bridge older than this feature`;
     default:

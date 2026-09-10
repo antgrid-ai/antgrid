@@ -136,11 +136,16 @@ test("a session-bearing card is refused while agent reach is off", async () => {
 
   const res = (await host.handleCapabilityCardRpc(cardRequest({ includeSessions: true }))) as any;
 
-  // NOT_ALLOWED, not a card with the key omitted: omitting is already how a
-  // bridge too old to know the flag degrades, and reusing it here would say
-  // "that machine cannot" where the truth is "that machine will not".
+  // Refused, not a card with the key omitted: omitting is already how a bridge
+  // too old to know the flag degrades, and reusing it here would say "that
+  // machine cannot" where the truth is "that machine will not".
+  //
+  // Its own code, not the plain NOT_ALLOWED remote access refuses with. Both
+  // reach the asking agent as one line naming a switch, and a machine that got
+  // this far has remote access ON — so pointing its user there points them at
+  // nothing to change.
   expect(res.ok).toBe(false);
-  expect(res.error.code).toBe("NOT_ALLOWED");
+  expect(res.error.code).toBe("NOT_ALLOWED_AGENT_REACH");
 });
 
 test("the repo half of the card still answers while agent reach is off", async () => {

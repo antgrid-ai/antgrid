@@ -1223,13 +1223,19 @@ export class HostServer {
     // Refused rather than answered without the key. Omitting `sessions` is
     // already how a bridge too old to know the flag degrades, and reusing it
     // here would tell the asker "that machine cannot say" when the truth is
-    // "that machine will not". The app maps NOT_ALLOWED to a named `refused`
-    // outcome that survives into the reach line.
+    // "that machine will not".
+    //
+    // Its OWN code, not the plain NOT_ALLOWED the remote-access gate above
+    // returns: both refusals travel to an agent as one line of prose naming a
+    // switch, and a machine whose remote access is on has nothing to fix where
+    // that line would send them. An app too old to know this code buckets it
+    // with the other refusals it cannot read, which is a weaker answer than
+    // this one and never a wrong one.
     if (includeSessions && !this.agentReachPolicy.isEnabled()) {
       return createMessage("response", {
         requestId: req.requestId,
         ok: false,
-        error: { code: "NOT_ALLOWED", message: "agent reach is disabled on this machine" },
+        error: { code: "NOT_ALLOWED_AGENT_REACH", message: "agent reach is disabled on this machine" },
       });
     }
     const targets: CapabilityCardTarget[] = [];
