@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { MAX_CAPABILITY_CARD_PROJECTS } from "../src/capability-card";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import type { SessionEntry } from "../src/protocol";
+import { MessageBus } from "../src/message-bus";
 
 function session(over: Partial<SessionEntry> & { id: string }): SessionEntry {
   return {
@@ -371,4 +372,65 @@ test("NOT_ALLOWED when mobile access is off covers session rows too", async () =
 
   expect(res.ok).toBe(false);
   expect(res.error.code).toBe("NOT_ALLOWED");
+});
+
+/** Stands in for the control-plane relay so a response's DESTINATION is
+ *  observable without a socket. `peerSession` is what `answerAsker` consults to
+ *  decide the asker is still there, so a peer absent from this set is the
+ *  "asker left" case. */
+function fakeControlPlaneRelay(h: HostServer, livePeers: string[]) {
+  const sent: { msg: any; channel: string; target: any }[] = [];
+  (h as any).controlPlaneRelay = {
+    peerSession: (peerId: string) => (livePeers.includes(peerId) ? { peerId } : null),
+    sendOnChannel: (msg: any, channel: string, target: any) => sent.push({ msg, channel, target }),
+    close: () => {},
+  };
+  return sent;
+}
+
+async function flushCard(): Promise<void> {
+  // The handler awaits a git probe, so one microtask turn is not enough.
+  for (let i = 0; i < 50; i++) await new Promise((r) => setTimeout(r, 10));
+}
+
+// The card is this machine's session titles and work status assembled for one
+// asker. Published on the bus it reached the desktop AND the phone, each of
+// which could tell its own answer from a sibling's only by `requestId`.
+test("a session-bearing card reaches the app session that asked, and no other", async () => {
+  const h = host!;
+  seedCatalog(h, "p1", gitDir, "repo");
+  seedSessions(h, "p1", "repo", [session({ id: "s1" })]);
+  await setMobileAccess(h, true);
+  const sent = fakeControlPlaneRelay(h, ["peer-a"]);
+  const bus = new MessageBus();
+  const broadcast: any[] = [];
+  bus.subscribe({ deliver: (m) => broadcast.push(m) });
+
+  h.dispatchControlPlaneInbound(cardRequest({ projectIds: ["p1"], includeSessions: true }), "control", bus, "peer-a");
+  await flushCard();
+
+  expect(broadcast).toEqual([]);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]!.target).toEqual({ kind: "peer", peerId: "peer-a" });
+  expect(sent[0]!.msg.requestId).toBe("r1");
+  expect(sent[0]!.msg.result.sessions).toHaveLength(1);
+});
+
+// A loopback frame carries no peerId. Targeting must never be the reason an
+// answer goes nowhere.
+test("a card asked for with no nameable asker still goes out on the bus", async () => {
+  const h = host!;
+  seedCatalog(h, "p1", gitDir, "repo");
+  await setMobileAccess(h, true);
+  const sent = fakeControlPlaneRelay(h, []);
+  const bus = new MessageBus();
+  const broadcast: any[] = [];
+  bus.subscribe({ deliver: (m) => broadcast.push(m) });
+
+  h.dispatchControlPlaneInbound(cardRequest({ projectIds: ["p1"] }), "control", bus);
+  await flushCard();
+
+  expect(sent).toEqual([]);
+  expect(broadcast).toHaveLength(1);
+  expect(broadcast[0].requestId).toBe("r1");
 });

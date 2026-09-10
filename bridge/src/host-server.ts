@@ -841,6 +841,27 @@ export class HostServer {
     );
   }
 
+  /** Answer one control-plane RPC to the app session that ASKED, rather than to
+   *  every established session on this machine.
+   *
+   *  `bus.publish` fans a response out to the desktop and the phone alike, and a
+   *  client tells its own answer from a sibling's only by `requestId` — fine for
+   *  a verb whose answer every session would have asked for anyway, wrong for
+   *  the session-bearing capability card, which is this machine's session titles
+   *  and work status assembled for ONE asker (E14, `docs/session-messaging.md`).
+   *
+   *  Falls back to the bus when the asker cannot be named — a loopback frame
+   *  carries no peerId — so an answer is never lost to targeting. When the peer
+   *  IS named but its session has gone, the send resolves to no recipient and the
+   *  frame is dropped, which is correct: the asker it was assembled for left. */
+  private answerAsker(res: AbMessage, channel: Channel, bus: MessageBus, peerId?: string): void {
+    if (peerId && this.controlPlaneRelay?.peerSession(peerId)) {
+      this.controlPlaneRelay.sendOnChannel(res, channel, { kind: "peer", peerId });
+      return;
+    }
+    bus.publish(res, channel);
+  }
+
   /** Route one inbound control-plane frame from the paired phone: either the
    *  welcome-replay `state.snapshot` RPC or a project verb. Extracted from the
    *  bus inbound handler so the request/verb split is unit-testable without a
@@ -903,7 +924,7 @@ export class HostServer {
       }
       if (msg.method === "machine.capability-card") {
         void this.handleCapabilityCardRpc(msg)
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("machine.capability-card handler threw: %s", err));
         return;
       }
