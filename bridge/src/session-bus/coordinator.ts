@@ -209,11 +209,43 @@ export class SessionBusCoordinator {
    * with one syntactically valid frame carrying someone else's contextId, and
    * take the next answer for itself.
    *
+   * That address check proves only that the frame's `to` names a session this
+   * bridge holds — it says nothing about the caller-supplied [contextId],
+   * which the sender is otherwise free to set to anything. A lead context's id
+   * IS a local session id (`roleForContext`'s own rule below), so when the
+   * machine session index already attributes [contextId] to a project, that
+   * project is the only one entitled to carry it: an admitted peer on project
+   * A's stream must not be able to make project B's own lead context answer on
+   * A's stream just by stamping B's session id into an otherwise-legitimate
+   * frame addressed to one of A's own sessions. This table widened to the
+   * whole machine in E9/§5.4 without this check, which is exactly what made
+   * that rebind possible — a per-project table never faced another project's
+   * contexts at all. A context the index cannot attribute to any local
+   * session — the ordinary shape of a genuinely remote peer's context, whose
+   * lead lives on the OTHER machine — carries no such claim to violate, so it
+   * is left to establish or refresh exactly as before.
+   *
    * No peerId means the loopback owner — this machine's own desktop app,
    * already reachable without a route.
    */
   noteRoute(contextId: string, peerId: string | undefined, projectId: string): void {
     if (!peerId) return;
+    const owner = this.deps.projectIdFor(contextId);
+    if (owner !== null && owner !== projectId) {
+      // Refused, not merely ignored: touching nothing here is what keeps an
+      // existing legitimate route (or the absence of one) intact against a
+      // forged frame. Latched like `warnIfProjectDrifted` and
+      // `HostServer.latchBusWarn` — a hostile or confused peer retrying the
+      // same contextId must say so once, not on every frame it sends.
+      if (this.latchRebindRefused(contextId)) {
+        log.warn(
+          "session bus: refused to route context %s onto project %s's stream — it belongs to project %s",
+          contextId, projectId, owner,
+        );
+      }
+      return;
+    }
+    this.rebindRefusedWarned.delete(contextId);
     const now = this.now();
     let pruned = false;
     for (const [key, origin] of this.routes) {
@@ -502,6 +534,20 @@ export class SessionBusCoordinator {
    *  bridge's own. A stored address does not change its mind, so without the
    *  latch this is a line per retry for the life of the session. */
   private readonly driftWarned = new Set<string>();
+
+  /** Contexts whose most recent rebind attempt `noteRoute` refused. Bounded
+   *  the same way `HostServer.latchBusWarn` bounds its own sets: a latch
+   *  tracking more refusals than {@link MAX_BUS_ROUTES} is tracking more than
+   *  this machine has contexts for, so clearing it costs nothing but a
+   *  possible repeat of an already-said line. */
+  private readonly rebindRefusedWarned = new Set<string>();
+
+  private latchRebindRefused(contextId: string): boolean {
+    if (this.rebindRefusedWarned.has(contextId)) return false;
+    if (this.rebindRefusedWarned.size >= MAX_BUS_ROUTES) this.rebindRefusedWarned.clear();
+    this.rebindRefusedWarned.add(contextId);
+    return true;
+  }
 
   /** Says once that the far side knows this session by a different project.
    *

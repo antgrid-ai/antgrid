@@ -15,7 +15,7 @@ import { buildAgentCore, type AgentCore } from "../src/agent-core";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage, type SessionMemberKey, type SessionMemberRef } from "../src/protocol";
 import { setLogLevel } from "../src/logger";
-import { BUS_ROUTE_TTL_MS } from "../src/session-bus/constants";
+import { BUS_ROUTE_TTL_MS, MAX_BUS_ROUTES } from "../src/session-bus/constants";
 import { SessionBusCoordinator } from "../src/session-bus/coordinator";
 import { loadBusRoutes } from "../src/session-bus/route-store";
 import { SessionBusSessionIndex } from "../src/session-bus/session-index";
@@ -280,6 +280,87 @@ test(
     expect(sessionBus.routeFor(contextId)?.projectId).not.toBe(coreB.projectId);
   },
   30_000,
+);
+
+test(
+  "noteRoute refuses to re-point a context whose owning project differs from the arriving frame's project",
+  () => {
+    // No cores: the property under test is what `noteRoute` does with the ids
+    // it is handed, and a hand-fed `projectIdFor` says session-b is project
+    // B's own without needing a live core to answer it.
+    const coordinator = new SessionBusCoordinator({
+      abDir,
+      projectIdFor: (sessionId) => (sessionId === "session-b" ? "project-b" : null),
+      self: () => null,
+      send: () => true,
+    });
+
+    // An app session admitted on project A's stream claims session-b's own
+    // (lead) context as if it had carried it in. session-b belongs to project
+    // B, so this is exactly what an already-admitted peer could otherwise use
+    // to steal another project's exchange.
+    coordinator.noteRoute("session-b", "attacker-app-session", "project-a");
+    expect(coordinator.routeFor("session-b")).toBeNull();
+
+    // Project B's own stream is the one entitled to establish it.
+    coordinator.noteRoute("session-b", "legit-app-session", "project-b");
+    expect(coordinator.routeFor("session-b")).toEqual(
+      expect.objectContaining({ peerId: "legit-app-session", projectId: "project-b" }),
+    );
+
+    // The same forged frame, retried once a legitimate route exists, still
+    // cannot steal it.
+    coordinator.noteRoute("session-b", "attacker-app-session", "project-a");
+    expect(coordinator.routeFor("session-b")).toEqual(
+      expect.objectContaining({ peerId: "legit-app-session", projectId: "project-b" }),
+    );
+
+    // A context this index cannot attribute to any local session at all — the
+    // ordinary shape of a genuinely remote peer's context, whose lead lives on
+    // the OTHER machine — is unaffected: there is no local claim on it to
+    // violate, so it establishes exactly as before this fix.
+    coordinator.noteRoute("ctx-foreign", "some-app-session", "project-a");
+    expect(coordinator.routeFor("ctx-foreign")?.projectId).toBe("project-a");
+
+    coordinator.stop();
+  },
+);
+
+test(
+  "a legitimate re-stamp of its own context still moves it to the back of the LRU",
+  () => {
+    let now = 1_000_000;
+    const coordinator = new SessionBusCoordinator({
+      abDir,
+      projectIdFor: (sessionId) => (sessionId === "session-b" ? "project-b" : null),
+      self: () => null,
+      send: () => true,
+      now: () => now,
+    });
+
+    coordinator.noteRoute("session-b", "peer-1", "project-b");
+    // Fill the table with foreign contexts so session-b's own entry — the
+    // very first one written — is the front: next in line for eviction.
+    for (let i = 0; i < MAX_BUS_ROUTES - 1; i++) {
+      now += 1;
+      coordinator.noteRoute(`ctx-${i}`, `peer-${i}`, "project-a");
+    }
+    expect(coordinator.routeFor("session-b")).not.toBeNull();
+
+    // A legitimate re-stamp from session-b's own project must still move it to
+    // the back: if the new same-owner check short-circuited before the
+    // existing delete-then-set restamp, the next insertion over the cap would
+    // evict session-b as the least recently carried instead of `ctx-0`.
+    now += 1;
+    coordinator.noteRoute("session-b", "peer-1", "project-b");
+    now += 1;
+    coordinator.noteRoute("ctx-overflow", "peer-overflow", "project-a");
+
+    expect(coordinator.routeFor("session-b")?.peerId).toBe("peer-1");
+    expect(coordinator.routeFor("ctx-0")).toBeNull();
+
+    coordinator.stop();
+  },
 );
 
 test(
