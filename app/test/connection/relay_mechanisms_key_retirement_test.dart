@@ -9,6 +9,7 @@
 // which is what these tests pin. Nothing else observes the eviction, so a
 // dropped call here is silent.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -26,10 +27,20 @@ class _StubRelay extends RelayService {
 
   final _states = StreamController<AppState>.broadcast();
   final _presence = StreamController<bool>.broadcast();
+  final _messages = StreamController<IncomingRouteMessage>.broadcast();
   AppState _cur = const AppState();
 
+  /// The agent going away and coming back is what arms a rekey.
+  void presence(bool online) {
+    if (!_presence.isClosed) _presence.add(online);
+  }
+
+  void inject(IncomingRouteMessage msg) {
+    if (!_messages.isClosed) _messages.add(msg);
+  }
+
   @override
-  Stream<IncomingRouteMessage> get messageStream => const Stream.empty();
+  Stream<IncomingRouteMessage> get messageStream => _messages.stream;
   @override
   Stream<AppState> get stateStream => _states.stream;
   @override
@@ -71,8 +82,34 @@ class _StubRelay extends RelayService {
   Future<void> closeStreams() async {
     if (!_states.isClosed) await _states.close();
     if (!_presence.isClosed) await _presence.close();
+    if (!_messages.isClosed) await _messages.close();
   }
 }
+
+/// Hands back a scripted sequence of results, so a test can reach the teardowns
+/// that only a rekey outcome can produce. A null entry is an attempt that never
+/// confirmed.
+class _FakeHandshaker implements SessionHandshaker {
+  _FakeHandshaker(this._results);
+
+  final List<SessionKeys?> _results;
+  int calls = 0;
+
+  @override
+  Future<SessionKeys?> perform() async {
+    final i = calls++;
+    return _results[i < _results.length ? i : _results.length - 1];
+  }
+
+  @override
+  void abort() {}
+}
+
+SessionKeys _keys(int fill) => SessionKeys(
+  a2p: Uint8List(32)..fillRange(0, 32, fill),
+  p2a: Uint8List(32)..fillRange(0, 32, fill + 1),
+  confirm: Uint8List(32)..fillRange(0, 32, fill + 2),
+);
 
 DeviceIdentity _identity() => DeviceIdentity(
   deviceId: 'phone-1',
@@ -95,7 +132,10 @@ void main() {
     CngAesGcm.evictImportedKeys();
   });
 
-  RelayMechanisms build() => RelayMechanisms(
+  RelayMechanisms build({List<SessionKeys?>? handshakes}) => RelayMechanisms(
+    buildHandshaker: handshakes == null
+        ? null
+        : (_) => _FakeHandshaker(handshakes),
     relay: relay,
     crypto: CryptoService(),
     machineDeviceId: 'M',
@@ -198,6 +238,70 @@ void main() {
         ),
         'tok',
       );
+
+      expect(CngAesGcm.importedKeyCount, 0);
+    });
+
+    /// Drives a real session to `established` through the handshaker seam, which
+    /// is the only way to reach a teardown that does not dispose the session.
+    Future<RelayMechanisms> established(List<SessionKeys?> handshakes) async {
+      final mech = build(handshakes: handshakes);
+      addTearDown(mech.release);
+      const coords = ConnCoords(
+        relayUrl: 'ws://relay.test',
+        agentEd25519PubB64: _pinA,
+      );
+      await mech.dial(coords, 'tok');
+      await mech.resolveCoords();
+      await mech.establishSession();
+      expect(mech.session!.isEstablished, isTrue);
+      return mech;
+    }
+
+    test('an agent takeover retires the keys it just invalidated', () async {
+      // The agent handed the session to another device and dropped these keys.
+      // It is reported, never auto-repaired, so no later handshake comes along
+      // to push the dead keys out of the cache by use.
+      final keys = _keys(0x10);
+      final mech = await established([keys]);
+      await sealOneFrame(0x44);
+      expect(CngAesGcm.importedKeyCount, 1);
+
+      relay.inject(
+        IncomingRouteMessage(
+          from: 'M',
+          channel: 'control',
+          kind: FrameKind.sealed,
+          payload: await E2eTransportDart(
+            sendKey: keys.a2p,
+            recvKey: keys.p2a,
+          ).seal(jsonEncode({'type': 'session-takeover'})),
+        ),
+      );
+      await pumpEventQueue();
+
+      expect(
+        mech.session!.isEstablished,
+        isFalse,
+        reason: 'the real teardown must have run, not merely the event',
+      );
+      expect(CngAesGcm.importedKeyCount, 0);
+    });
+
+    test('a rekey that never confirmed retires the keys it tore down',
+        () async {
+      final mech = await established([_keys(0x20), null]);
+      await sealOneFrame(0x45);
+      expect(CngAesGcm.importedKeyCount, 1);
+
+      // The agent bounces: coming back arms a rekey, and this attempt fails.
+      relay.presence(false);
+      relay.presence(true);
+      for (var i = 0; i < 50 && mech.session!.isEstablished; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(mech.session!.isEstablished, isFalse);
+      await pumpEventQueue();
 
       expect(CngAesGcm.importedKeyCount, 0);
     });

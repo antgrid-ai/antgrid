@@ -42,7 +42,9 @@ class RelayMechanisms implements ConnMechanisms {
     required int epoch,
     required Future<ConnCoords?> Function() resolveCoords,
     required Future<String> Function() mintToken,
-  }) : _relay = relay,
+    SessionHandshaker Function(String agentEd25519PubB64)? buildHandshaker,
+  }) : _buildHandshaker = buildHandshaker,
+       _relay = relay,
        _crypto = crypto,
        _machineDeviceId = machineDeviceId,
        _identity = identity,
@@ -61,6 +63,12 @@ class RelayMechanisms implements ConnMechanisms {
   final int _epoch;
   final Future<ConnCoords?> Function() _resolveCoords;
   final Future<String> Function() _mintToken;
+
+  /// A test seam — production passes nothing and gets [AppSessionHandshaker].
+  /// Exists because the handshake is the only way to reach the teardowns that
+  /// retire session keys WITHOUT disposing the session, and those are the
+  /// majority of them.
+  final SessionHandshaker Function(String agentEd25519PubB64)? _buildHandshaker;
 
   MachineSession? _session;
 
@@ -280,7 +288,8 @@ class RelayMechanisms implements ConnMechanisms {
     final session = MachineSession(
       relay: _relay,
       machineDeviceId: _machineDeviceId,
-      handshaker: AppSessionHandshaker(
+      handshaker: _buildHandshaker?.call(agentEd25519PubB64) ??
+          AppSessionHandshaker(
         relay: _relay,
         crypto: _crypto,
         machineDeviceId: _machineDeviceId,
