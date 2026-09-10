@@ -168,26 +168,59 @@ This is not a limitation being accepted; it is the correct definition. The bridg
 dies with its desktop app, so a machine nobody is at can neither answer nor be
 answered. Listing it would offer a peer that cannot be reached.
 
-### 5.3 The advert
+### 5.3 The row, and what carries it
 
-The capability card joins the existing control-plane advert
-(`sendProjectsAdvertisement`, `bridge/src/host-server.ts:293`), which is already
-pushed over the **E2E** channel to connected app peers and already re-advertised
-on `onPeerOnline` and on `onWorkStatusChange`.
+A directory row carries **OS, normalized remote and branch per project**, plus
+the generated title, activity and work status of each session (§5.5). That
+content is what the original design specified. What carries it is not.
 
-- **No server-side index and no new disclosure.** The card rides the encrypted
-  channel; the relay still sees opaque blobs and web still holds identity only
-  (`deviceUuid`, `displayName`, `platform`, `ed25519Pub`, `lastSeenAt`).
-- **No polling.** Push on change is already the transport's shape.
-- The advert carries **OS, normalized remote, and branch per project**, plus the
-  generated title and work status of each running session (§5.5).
-- **`branch` is advertised but does not itself trigger a re-advertise.** It is
-  read fresh on every card and moves on every checkout, so re-advertising on it
-  would make the advert chatty. It rides the next `onWorkStatusChange` or
-  `onPeerOnline` instead. A branch a few minutes stale is fine here because it is
-  a ranking hint, never an identity — nothing is matched or routed on it.
-- The advert fans out to every connected app peer **including phones**, which
-  need none of it. Gated to app-kind peers.
+**Shipped.** The card does **not** ride the projects advert. A machine answers
+for its own sessions on demand, through the `machine.capability-card` RPC it
+already served — widened with `repoKeys` (answer only about these
+repositories) and `includeSessions` (attach the rows). `sessions` and
+`sessionsTruncated` are additive keys, so a bridge predating them answers as it
+always did, and a caller asking for neither sends a byte-identical request.
+
+The delivery changed because **a bridge cannot dial another bridge.** There is
+no bridge→app request direction anywhere in `bridge/src`; the plane is
+app-initiated. So the remote half is filled by a **push, not a pull**, and the
+desktop app — the only party holding sessions to more than one machine — is the
+carrier:
+
+- The app **peeks** at control-plane sessions that are already open, and never
+  dials a machine to fill the directory. Eager connect-everywhere is capped for
+  a reason (`kEagerControlPlaneCap`); a machine nobody has opened contributes
+  nothing and is *named* as not asked rather than silently omitted.
+- It asks each for a session-bearing card and pushes every answer down loopback
+  as one `session-bus:remote-directory` control request. That verb is
+  loopback-only, behind the host's bearer token, and unreachable from the relay
+  — which is the point. `bus.setInboundHandler` accepts relay-origin frames from
+  any account-trusted peer whenever the machine switch is on, so resolving this
+  through an `AbMessage` arm instead would have let a phone forge directory rows.
+- The bridge **mirrors, and never trusts.** Every row is re-validated on
+  arrival; one that fails is dropped and counted alone rather than failing the
+  push, because the push's error code is the one a carrier latches off on. A
+  machine id carrying a control or format character is *refused*, not cleaned:
+  `machineId` and `sessionId` together are the address, so a stripped id either
+  resolves nowhere or resolves to a different machine.
+- The mirror expires on its own after `REMOTE_ROWS_TTL_MS` without being asked
+  again, and `list_sessions` reads memory. The read never blocks on the network,
+  so a peer that went quiet costs the answer nothing but its own rows.
+
+Because being pushed to is what proves a carrier exists, the app re-pushes on a
+heartbeat even when nothing changed. There is no capability flag for this on
+either hello: presence is `lastPushAt`, a fact, rather than a boolean that Zod
+could strip in silence.
+
+**No relay polling, no server-side index and no new disclosure.** The card
+travels the same E2E control plane it always did; the relay still sees opaque
+blobs and web still holds identity only (`deviceUuid`, `displayName`,
+`platform`, `ed25519Pub`, `lastSeenAt`).
+
+**`branch` is a ranking hint, never an identity.** Nothing is matched or routed
+on it, so one a few minutes stale is fine, and it is deliberately not a sort key
+on the answering side — that machine does not know which branch the asking agent
+is on.
 
 ### 5.4 The directory is machine-level, not project-level
 
@@ -220,7 +253,7 @@ make a wrong guess cheap.
 |---|---|
 | Generated title | `title-generate.ts` — a headless model over a transcript excerpt, prompted for "a title for the session's overall task: 3 to 6 words naming the task, not the wording", capped at 60 chars and re-resolved from hook posts as the session runs, so it tracks drift rather than freezing at the first message. |
 | Branch | Capability card (§5.3). |
-| Work status, last activity | Already on the control-plane advert. |
+| Work status, last activity | The answering machine's session index, carried on the card (§5.3). |
 | Can reply | Whether the agent declares an `mcp` profile (§9). |
 | Address, labels | §4.1. |
 
@@ -436,7 +469,7 @@ The title axis degrades more gently than the send axis: the five `titleSource:
 antigravity produces none worth showing — `oscTitleUnusable` is set because `agy`
 publishes its own executable path. Those rows fall back to the session label and
 lean on branch and last-activity to stay judgeable, which is precisely why §5.3
-advertises branch.
+carries branch.
 
 **Rollout is one MCP profile per vendor**, ordered by what each already has:
 `opencode` first (it declares a `hookDir`, so a hook-based send path exists as a
@@ -500,8 +533,8 @@ negotiable.
 
 **In**
 
-- Repo-keyed directory over connected machines; capability card on the
-  control-plane advert
+- Repo-keyed directory over connected machines; capability card served on
+  demand and mirrored by the app (§5.3)
 - Directory rows carrying generated title, branch, status and last activity, with
   the objective sort of §5.5
 - Machine-level bus stores, routes and counters (§5.4)
@@ -529,10 +562,18 @@ negotiable.
 1. **The consent widening (§8.1).** One boolean now authorizes unattended
    agent-to-agent interruption. Is a per-machine "reachable by agents" default of
    *on when remote access is on* correct, or does first contact from a new peer
-   machine deserve a one-time notice?
-2. **Directory staleness.** The advert is push-on-change; a session that stops
-   between advert and send produces a refusal the sender must handle gracefully.
-   Acceptable, but the wording matters.
+   machine deserve a one-time notice? **Now load-bearing rather than
+   prospective:** with the remote half shipped, that same boolean is what lets a
+   peer machine's agent read this machine's session titles and work status —
+   disclosure, not only interruption. Nothing notices a first contact today.
+2. **Directory staleness.** The remote half is a mirror with a TTL, not a live
+   read: a row can be `REMOTE_ROWS_TTL_MS` old, and a session that stops inside
+   that window produces a refusal the sender must handle gracefully. The reach
+   line reports how long ago the read actually reached, so staleness is stated
+   rather than implied — but the refusal wording still matters. A peek-only
+   carrier also means the ordinary state of a desktop at rest is *no peer asked
+   at all*: honest, and thin. Is naming it enough, or should the app pin the
+   peers whose repo keys the bridge asked for?
 3. **Mailbox bound.** How many posts, and is a dropped oldest post visible enough?
 4. **Thread garbage.** Nothing closes a thread. Time-based expiry, or unbounded
    with a cap?
@@ -546,6 +587,13 @@ negotiable.
    answering from live use rather than in advance — E11 argues against building a
    topic tool speculatively.
 7. **Pricing.** Unchanged from the old spec's open question.
+8. **Who sees the answer.** A session-bearing card is `bus.publish`ed to every
+   established app session on the answering machine, phone included, and is
+   correlated only by `requestId` at the client. This is a volume change rather
+   than a class change — `machine.sessions-list` already discloses
+   `SessionEntry.name` to the same set under the same gates — but targeting the
+   response at the asking `peerId` is a small change, and it deserves to be a
+   decision rather than an oversight.
 
 ---
 

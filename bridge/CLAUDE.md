@@ -171,6 +171,18 @@ edit breaks silently.
   attached carrier means the frame is HELD and retried by the coordinator, never
   dropped, so a closed desktop is an indefinitely delayed exchange rather than a
   failed one.
+- **The remote half of the directory arrives by loopback push and by nothing
+  else.** The app peeks at control-plane sessions it already holds, asks each
+  machine for a session-bearing `machine.capability-card`, and pushes the
+  answers to the `session-bus:remote-directory` control verb. Never give it a
+  relay-side arm: `bus.setInboundHandler` accepts frames from any
+  account-trusted peer while the machine switch is on, so a directory verb
+  reachable there lets a phone write rows a local agent then reads as peers.
+  Mirrored rows are re-validated on arrival and decay on a TTL
+  (`REMOTE_ROWS_TTL_MS`, `session-bus/constants.ts`) rather than persisting,
+  because a bridge cannot dial another bridge and so can never ask again — and
+  the near end proves a carrier exists by having been pushed to, not by a
+  capability flag Zod could strip in silence.
 - **Nothing this side of the relay may be reported as delivery.** The carrier
   taking a frame says only that it left this machine, so a post answers `sent`
   and never "received". The one honest answer is the other side's ack, and
