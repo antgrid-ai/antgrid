@@ -222,6 +222,14 @@ export class TerminalFrameSource extends TerminalScreen {
     };
   }
 
+  /** Records rows lost to something OUTSIDE this source's own archiving — the
+   *  only such case today is `TerminalManager`'s rebuild, which reconstructs a
+   *  replacement from a bounded scrollback tail and so cannot re-derive every
+   *  row the failed source had already passed. The count is unknowable there,
+   *  so this takes none: `degraded` is the signal that matters, and reporting
+   *  a made-up number would be worse than reporting one gap. */
+  noteHistoryGap(): void { this.gaps++; }
+
   onParsed(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };

@@ -1,3 +1,5 @@
+import { mkdirSync, rmSync, chmodSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   TerminalSession,
   buildSpawnEnv,
@@ -8,6 +10,9 @@ import { ScrollbackBuffer } from "./scrollback";
 import { TerminalModeTracker } from "./terminal-modes";
 import { MAX_ATTACH_BLOB, TerminalScreen } from "./terminal-screen";
 import { TerminalFrameSource } from "./terminal-frames/source";
+import { TerminalHistoryStore, type HistoryPage, type TerminalRunHistory } from "./terminal-frames/history";
+import type { TerminalHistoryBoundary, TerminalHistoryRow } from "./terminal-frames/protocol";
+import { resolveTerminalHistoryPath } from "./antgrid-dir";
 import { ANTGRID_QUERY_COLORS } from "./vt-capability-responder";
 import { logger } from "./logger";
 const log = logger.child({ component: "terminal-manager" });
@@ -29,6 +34,218 @@ import type { ConnState } from "./conn-state";
  * (and reseed from scrollback) on every single output chunk after that.
  */
 const MAX_SCREEN_REBUILDS = 3;
+
+// --- Terminal history store (D3: the real run lifecycle) ---------------------
+//
+// One SQLite-backed row archive, shared by every `TerminalManager` on the
+// process (one per project core): a run's rowIds mean nothing outside this
+// one store, and its machine-wide 2GiB cap (`TerminalHistoryStore.evict`) has
+// to see every project's rows for the cap to mean anything.
+
+/**
+ * Bun sets `NODE_ENV=test` for every `bun test` run. A bare terminal test
+ * must not have spawning a terminal start writing a SQLite file into a
+ * developer's real `~/.antgrid` the moment this module lazily opens the
+ * store — that rules out gating on `ANTGRID_DIR` alone: plenty of test files
+ * across this suite override it for unrelated reasons (an isolated-checkout
+ * sandbox, a session store) with no idea a terminal-history store exists,
+ * and never call `closeTerminalHistoryStore()`. Since the store is a
+ * process-wide singleton (by design — see the block comment above), such a
+ * test would leak an open SQLite handle under whatever temp directory it
+ * mounts, which its own `afterEach` then fails to `rmSync` on Windows
+ * (EBUSY: a directory with an open file handle inside it cannot be removed).
+ * So opting in under test needs a SEPARATE, explicit flag, set only by the
+ * test file that actually means to exercise the store and that takes on the
+ * matching duty of closing it — see `terminal-manager-history.test.ts`.
+ */
+function historyStoreAllowed(): boolean {
+  return process.env.NODE_ENV !== "test" || process.env.ANTGRID_TERMINAL_HISTORY_TEST === "1";
+}
+
+let historyStore: { path: string; store: TerminalHistoryStore } | undefined;
+
+/**
+ * Opens the store fresh at `path`: directory `0o700`, file `0o600` on POSIX —
+ * this file holds terminal OUTPUT (command text, program results), the same
+ * sensitivity as a session transcript, so it gets the same treatment as every
+ * other per-user store under abDir (see `handler/session-store.ts`,
+ * `remote-access-policy.ts`). Windows has no POSIX mode bit; the file
+ * inherits the user profile's ACL like the rest of `.antgrid`.
+ *
+ * Swept before opening, by deleting the file (and WAL mode's `-wal`/`-shm`
+ * siblings) rather than by walking its rows: a run id lives only in
+ * `TerminalManager.runIds`, in memory, which a fresh process always starts
+ * empty — `retainScrollbackOnExit` included, since that flag keeps a *live*
+ * process's memory around, not anything that survives a restart. So every row
+ * already on disk at open time belongs to a run nothing on THIS boot can ever
+ * name again, and deleting the file is the exact sweep the wave 4 spec asks
+ * for, not an approximation of one. It is also the only sweep available
+ * without widening `TerminalHistoryStore`'s frozen public surface with a
+ * list-runs method it has no other reason to carry.
+ */
+function openHistoryStore(path: string): TerminalHistoryStore {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try {
+      rmSync(path + suffix);
+    } catch (error) {
+      // ENOENT is the expected, silent case (a fresh install, or the `-wal`/
+      // `-shm` siblings simply not existing). Anything else — another holder
+      // has the file open, a permissions problem — means the sweep did
+      // nothing, which is exactly the failure mode D3 exists to prevent (see
+      // the block comment above): log it so a swept-nothing boot is at least
+      // observable instead of indistinguishable from a fresh install.
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        log.warn(`Terminal history sweep could not remove "${path}${suffix}": %s`, error);
+      }
+    }
+  }
+  const store = new TerminalHistoryStore(path);
+  if (process.platform !== "win32") {
+    // The directory mode above only applies to a directory `mkdirSync` CREATES,
+    // and abDir already exists on every install that has run setup or paired a
+    // phone — so narrow it explicitly. The `-wal`/`-shm` siblings need the same
+    // treatment for a different reason: WAL mode means the most RECENT rows
+    // (i.e. what the user just typed and what it printed) live in `-wal` until
+    // a checkpoint moves them, and SQLite creates it under the process umask.
+    for (const target of [dirname(path), path, path + "-wal", path + "-shm"]) {
+      try {
+        chmodSync(target, target === dirname(path) ? 0o700 : 0o600);
+      } catch { /* best-effort, matches sibling stores */ }
+    }
+  }
+  return store;
+}
+
+/**
+ * The shared store, opened lazily so a host that spawns no terminal never
+ * touches disk for it. Re-opens whenever the resolved path changes rather
+ * than caching unconditionally by import: only a test changes `ANTGRID_DIR`
+ * mid-process (each file points it at its own temp dir), and reusing a handle
+ * whose file a previous test's cleanup may already have removed would
+ * silently read and write nothing rather than the current test's intent.
+ */
+function terminalHistoryStore(): TerminalHistoryStore | undefined {
+  if (!historyStoreAllowed()) return undefined;
+  const path = resolveTerminalHistoryPath();
+  if (historyStore && historyStore.path !== path) {
+    historyStore.store.close();
+    historyStore = undefined;
+  }
+  historyStore ??= { path, store: openHistoryStore(path) };
+  return historyStore.store;
+}
+
+/**
+ * The store only if one is already open — never opens one. For cleanup paths,
+ * which want to delete a run's rows but have no business creating the file to
+ * do it: `openHistoryStore` SWEEPS on open, so a dispose landing after
+ * `closeTerminalHistoryStore()` (a PTY exit callback or a checkout teardown
+ * outliving `HostServer.shutdown`'s 5s grace) would re-create the database
+ * empty, undoing the checkpoint that just ran and leaving a connection
+ * nothing closes for the rest of the process. With no store open there is
+ * nothing to delete from anyway — the next boot's sweep discards the file
+ * whole.
+ */
+function liveTerminalHistoryStore(): TerminalHistoryStore | undefined {
+  return historyStore?.store;
+}
+
+/**
+ * Closes the shared store, if one is open. Call exactly once, after every
+ * `TerminalManager` on the process has stopped using it — see
+ * `HostServer.shutdown` for the real host-shutdown call site, and any test
+ * that opts into `ANTGRID_DIR` for the per-test one. `close()` already
+ * tolerates a failing checkpoint/vacuum on its own; safe to call when nothing
+ * was ever opened.
+ */
+export function closeTerminalHistoryStore(): void {
+  historyStore?.store.close();
+  historyStore = undefined;
+}
+
+/**
+ * Suppresses `append`/`clear` for exactly the span of a rebuild's reseed.
+ * `ensureLiveScreen` replays up to 10,000 chars of RAW scrollback into a
+ * fresh `TerminalFrameSource` reattached to the SAME history run, purely to
+ * reconstruct the live screen for display — that replayed content was
+ * already archived (in full or in part) by the source that just failed, so
+ * letting `append`/`clear` through here would re-apply events the real
+ * handle already recorded: a duplicate row under a FRESH rowId, or (worse) a
+ * clear sitting in the replayed tail deleting rows the original clear
+ * already removed itself, taking every row recorded SINCE that clear with
+ * it. This is the trap the wave 4 spec calls out by name: wave 3 could not
+ * catch it because no history was attached yet.
+ *
+ * `append` is suppressed only for the rows the FAILED source already
+ * archived, not unconditionally: `remaining`, captured before the reseed
+ * starts, is exactly how many rows `real` already has. The replayed tail
+ * re-derives content in the same order the live source originally produced
+ * it, so a genuine duplicate is always among the first `remaining` appends —
+ * once they are consumed, anything further is content the failed source
+ * never reached at all (most often the tail of `unparsed`, discarded by
+ * `TerminalFrameSource.fail()`), which must be archived for real rather than
+ * silently lost with it. `clear` has no equivalent partial case — a clear
+ * either already ran against `real` or it did not reach it before the
+ * failure, and either way replaying it here must not run it a second time —
+ * so it stays suppressed for the WHOLE span, exactly like a not-yet-consumed
+ * `append`.
+ *
+ * `flush`/`boundary` pass straight through — flushing is idempotent and
+ * boundary reads are never destructive — until `release()`, called once the
+ * reseed has actually been PARSED (`settle()`) and the replacement is about
+ * to start receiving genuinely new PTY output (see `ensureLiveScreen`).
+ *
+ * Composition, not a subclass: `TerminalRunHistory`'s constructor takes a
+ * store-internal record type `history.ts` does not export, so there is no
+ * supported way to build one outside that file. That forces a cast at the
+ * construction site, which is exactly the kind that hides a missing member —
+ * so every one of `TerminalRunHistory`'s public members is forwarded here,
+ * not just the four `TerminalFrameSource` happens to call today. `page` in
+ * particular is what wave 5's delivery path exists to call, and `runId` would
+ * otherwise answer `undefined` rather than fail.
+ */
+class ReplayGuardedHistory {
+  private suppressed = true;
+  private remaining: number;
+  readonly runId: string;
+
+  constructor(private readonly real: TerminalRunHistory) {
+    this.runId = real.runId;
+    this.remaining = real.boundary().nextRowId;
+  }
+
+  append(row: Omit<TerminalHistoryRow, "rowId">): void {
+    if (this.suppressed && this.remaining > 0) { this.remaining--; return; }
+    this.real.append(row);
+  }
+  flush(): void { this.real.flush(); }
+  clear(): void { if (!this.suppressed) this.real.clear(); }
+  boundary(): TerminalHistoryBoundary { return this.real.boundary(); }
+  page(epoch: number, beforeRowId: number): HistoryPage { return this.real.page(epoch, beforeRowId); }
+  retire(): void { this.real.retire(); }
+
+  /**
+   * Called once the reseed that motivated this guard has settled. Answers
+   * whether the rebuild may have COST rows, which the caller reports as a
+   * history gap.
+   *
+   * `remaining` reaching zero means the replay re-derived at least as many
+   * rows as the archive holds, so everything past them — the only place
+   * never-archived content can be — was forwarded for real. Anything left
+   * over means the replay produced FEWER rows than the archive holds and all
+   * of them were suppressed, and nothing here can tell a row the failed
+   * source already recorded from one it dropped with `unparsed`. The
+   * scrollback is 10,000 chars against a run that may have printed
+   * megabytes, so on a long run this is the ordinary answer, not an edge
+   * case: a parser-backlog rebuild really does lose the rows between the last
+   * archived one and what that tail can reconstruct.
+   */
+  release(): boolean {
+    this.suppressed = false;
+    return this.remaining > 0;
+  }
+}
 
 export interface TerminalSpawnConfig {
   terminalId?: string;
@@ -342,14 +559,18 @@ export class TerminalManager {
     // 80x24 defaults, and a VT sized differently from the PTY serializes a
     // screen the guest never drew. A same-id respawn replaces the previous
     // screen, whose own exit lands too late to release it (the duplicate gate
-    // in the exit handler returns before the bookkeeping).
+    // in the exit handler returns before the bookkeeping) — `disposeScreen`
+    // below also deletes the OLD run's history rows, which is why the new run
+    // id is minted AFTER it, not before: `disposeScreen` reads the id out of
+    // `runIds`, so the delete must still find the run this respawn is
+    // REPLACING there, never the one it is about to start.
     this.disposeScreen(terminalId);
-    screen = this.constructScreen(terminalId, session.cols, session.rows);
-    this.screens.set(terminalId, screen);
     // Fresh identity every spawn, same-id respawn included — a new PTY run
-    // even when nothing else about the slot changed. `disposeScreen` above
-    // already cleared the previous run's id (and rebuild budget) if any.
-    this.runIds.set(terminalId, crypto.randomUUID());
+    // even when nothing else about the slot changed.
+    const runId = crypto.randomUUID();
+    this.runIds.set(terminalId, runId);
+    screen = this.constructScreen(terminalId, session.cols, session.rows, this.openHistoryRun(terminalId, runId));
+    this.screens.set(terminalId, screen);
     // Before `session.spawn()`, which is what actually starts the PTY: the
     // session's own byte-level responder must already be narrowed to
     // OSC-colors-only by the time the guest's first query byte can arrive,
@@ -444,6 +665,18 @@ export class TerminalManager {
    * The dispose runs under its own guard so a throw leaves every map
    * consistent anyway: `resetMaps`' loop and all four exit-time cleanup sites
    * route through this rather than repeating `get(id)?.dispose(); delete(id)`.
+   *
+   * Also deletes the run's history rows (D3), because every ordinary call
+   * site is exactly a "this run is over" signal: a same-id respawn's old
+   * run, `forget()`'s teardown, and a non-retained exit (the retained case
+   * skips this call entirely — see the `retainScrollback` guard around the
+   * `terminal:exited` handler's own `disposeScreen` call). A LIVE reattach
+   * never routes through here; it is `ensureLiveScreen`'s rebuild, which
+   * disposes the failed screen directly and reopens the SAME run. Deleting
+   * here doubles as the only eviction `TerminalHistoryStore`'s internal
+   * handle map ever gets outside the machine-wide byte cap — without it,
+   * every terminal ever spawned in the process's life would leave its handle
+   * cached there forever.
    */
   private disposeScreen(terminalId: string): void {
     try {
@@ -452,8 +685,16 @@ export class TerminalManager {
       log.warn(`Terminal "${terminalId}" screen dispose failed: %s`, error);
     }
     this.screens.delete(terminalId);
+    const runId = this.runIds.get(terminalId);
     this.runIds.delete(terminalId);
     this.rebuildCounts.delete(terminalId);
+    if (runId) {
+      try {
+        liveTerminalHistoryStore()?.deleteRun(runId);
+      } catch (error) {
+        log.warn(`Terminal "${terminalId}" history cleanup failed for run ${runId}: %s`, error);
+      }
+    }
   }
 
   /**
@@ -462,17 +703,50 @@ export class TerminalManager {
    * `patchScroll`'s "already installed" refusal) where `TerminalScreen`'s
    * cannot — and both callers (`spawn`, `ensureLiveScreen`) need a terminal
    * that still works on a host whose xterm build doesn't support it, so a
-   * throw here falls back rather than propagating.
+   * throw here falls back rather than propagating. `history` is dropped
+   * silently on the fallback path: a plain `TerminalScreen` has nowhere to
+   * put it, and the caller has already logged the construction failure.
    */
-  private constructScreen(terminalId: string, cols: number, rows: number): TerminalScreen {
+  private constructScreen(
+    terminalId: string, cols: number, rows: number, history?: TerminalRunHistory,
+  ): TerminalScreen {
     try {
-      return new TerminalFrameSource(cols, rows);
+      return new TerminalFrameSource(cols, rows, history);
     } catch (error) {
       log.error(
         `Terminal "${terminalId}" frame source construction failed, falling back to a plain screen: %s`,
         error,
       );
       return new TerminalScreen(cols, rows);
+    }
+  }
+
+  /**
+   * Opens `runId`'s history handle with an `onFailure` that records the
+   * failure without touching the terminal itself — D3's guarantee that a
+   * disk problem degrades ONE run's history, never the terminal it belongs
+   * to (`TerminalRunHistory` already guarantees its own methods never throw
+   * once opened; this guards the OPEN itself, which can still fail — a
+   * literally-full disk on the very first write, most plausibly). Returns
+   * `undefined` in a bare test run (`historyStoreAllowed`) or when opening
+   * genuinely fails; either way the terminal spawns exactly as it would with
+   * no history feature at all.
+   */
+  private openHistoryRun(terminalId: string, runId: string): TerminalRunHistory | undefined {
+    // `terminalHistoryStore()` does the real work of a lazy open (mkdir, the
+    // sweep, `new Database`) and so can throw exactly like `store.openRun`
+    // below — it belongs INSIDE this try, not resolved beforehand. Spawning a
+    // terminal must degrade to "no history for this run", never fail outright,
+    // over a disk problem that has nothing to do with the PTY.
+    try {
+      const store = terminalHistoryStore();
+      if (!store) return undefined;
+      return store.openRun(runId, (error) => {
+        log.warn(`Terminal "${terminalId}" history unavailable for run "${runId}": %s`, error);
+      });
+    } catch (error) {
+      log.warn(`Terminal "${terminalId}" failed to open history for run "${runId}": %s`, error);
+      return undefined;
     }
   }
 
@@ -541,7 +815,22 @@ export class TerminalManager {
     if (!geometry) return current;
     const failure = current.failure;
     this.rebuildCounts.set(terminalId, rebuilds + 1);
-    const replacement = this.constructScreen(terminalId, geometry.cols, geometry.rows);
+    // Reattach to the SAME run (D3) — never a fresh `openHistoryRun`-minted
+    // id, since this is a new EMULATOR for the same PTY run, not a new run —
+    // but guarded: the reseed below replays raw scrollback that the FAILED
+    // source (mostly) already archived, and an unguarded `append` here would
+    // duplicate every row the replay re-derives under fresh rowIds. See
+    // `ReplayGuardedHistory`'s own doc for the full trap this avoids.
+    const runId = this.runIds.get(terminalId);
+    const realHistory = runId ? this.openHistoryRun(terminalId, runId) : undefined;
+    const historyGuard = realHistory ? new ReplayGuardedHistory(realHistory) : undefined;
+    const replacement = this.constructScreen(
+      terminalId, geometry.cols, geometry.rows,
+      // `ReplayGuardedHistory` composes rather than subclasses `TerminalRunHistory`
+      // (see its own doc for why) — safe because `TerminalFrameSource` only
+      // calls the four methods this class defines on whatever it is handed.
+      historyGuard as unknown as TerminalRunHistory | undefined,
+    );
     try {
       current.dispose();
     } catch (error) {
@@ -560,17 +849,33 @@ export class TerminalManager {
     const seed = this.scrollbacks.get(terminalId)?.getContents();
     if (seed) replacement.feed(seed);
     const session = this.sessions.get(terminalId);
-    if (session) {
-      if (replacement instanceof TerminalFrameSource) {
-        void replacement.settle().then(() => {
-          // The slot may have moved on by the time the reseed settles — a
-          // fast follow-up rebuild or dispose must not wire a live session
-          // onto a generation it no longer owns.
-          if (this.screens.get(terminalId) === replacement) this.wireFrameQueries(session, replacement);
-        });
-      } else {
-        this.wireFrameQueries(session, replacement);
-      }
+    if (replacement instanceof TerminalFrameSource) {
+      void replacement.settle().then(() => {
+        // The slot may have moved on by the time the reseed settles — a
+        // fast follow-up rebuild or dispose must not wire a live session (or
+        // release history archiving) onto a generation it no longer owns.
+        if (this.screens.get(terminalId) !== replacement) return;
+        // Only now does the replacement start archiving NEW rows — see
+        // `ReplayGuardedHistory`. Unconditional (not gated on `session`):
+        // the reseed above ran regardless of whether a session is live (a
+        // retained, already-exited run has none), so the guard must lift
+        // regardless too, or a subsequent respawn's live output through
+        // this same generation would stay suppressed forever. Shares the
+        // same narrow race the query-wiring below already accepts: a live
+        // chunk fed in the instant between this `settle()` call and its own
+        // callback firing can be parsed (and so archived or not) before this
+        // `.then()` microtask runs — bounded to that one window on one
+        // rebuild, never a steady leak.
+        // A rebuild that could not re-derive everything the archive already
+        // held is a hole in the row history, and the replacement starts with a
+        // clean `historyStatus` that would otherwise report the archive as
+        // complete — the plan's rule is that a parser overflow must surface as
+        // a recoverable error, never as silently-wrong authoritative state.
+        if (historyGuard?.release()) replacement.noteHistoryGap();
+        if (session) this.wireFrameQueries(session, replacement);
+      });
+    } else if (session) {
+      this.wireFrameQueries(session, replacement);
     }
     log.warn(
       `Terminal "${terminalId}" frame source failed (rebuild %d/%d): %s`,
