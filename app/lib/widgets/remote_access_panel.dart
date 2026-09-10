@@ -158,7 +158,10 @@ class _AccessSection extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: AbTokens.space10),
-          _AgentReachRow(remoteAccessOn: enabled),
+          // The nullable policy, not the coerced `enabled` above: this row
+          // says what the bit does RIGHT NOW, and "remote access is off" is a
+          // claim about the machine that an unread policy cannot support.
+          _AgentReachRow(remoteAccessOn: policy?.enabled),
         ],
       ),
     );
@@ -181,11 +184,24 @@ class _AccessSection extends ConsumerWidget {
 class _AgentReachRow extends ConsumerWidget {
   const _AgentReachRow({required this.remoteAccessOn});
 
-  final bool remoteAccessOn;
+  /// Null when this machine's remote access could not be read at all — a
+  /// third state, never folded into off.
+  final bool? remoteAccessOn;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final p = context.antgrid;
+    // A failed write leaves the switch where it was with nothing said, exactly
+    // as the sibling switch would (see RemoteAccessControl) — and this one has
+    // no chip elsewhere to report for it.
+    ref.listen<AsyncValue<AgentReachPolicy>>(agentReachPolicyProvider, (
+      prev,
+      next,
+    ) {
+      if (next is AsyncError && prev is! AsyncError) {
+        showAbSnackBar(context, 'Could not update agent reach. Try again.');
+      }
+    });
     final async = ref.watch(agentReachPolicyProvider);
     final policy = async.value;
     // Unreadable is not off. A bridge predating the verb refuses the ask, and
@@ -237,19 +253,30 @@ class _AgentReachRow extends ConsumerWidget {
   }
 }
 
-String _reachCopy(AgentReachPolicy? policy, bool remoteAccessOn) {
+String _reachCopy(AgentReachPolicy? policy, bool? remoteAccessOn) {
   if (policy == null) {
     return "Couldn't read this machine's setting. It stays as it was.";
   }
   // Says what the bit does even while it does nothing: the user is reading this
   // to decide, and "no effect yet" alone would not tell them what they are
   // deciding about.
+  //
+  // The off case names the carve-out rather than claiming the machine is
+  // sealed. The gate refuses a peer OPENING an exchange here; a reply inside
+  // one an agent here opened is admitted by design, and the sentence promising
+  // outbound still works is exactly what invites those replies.
   final effect = policy.enabled
       ? 'An agent on another of your machines can see the sessions running '
             'here and post into one, with nobody watching.'
       : 'Agents on your other machines can neither see what runs here nor '
-            'post into it. You can still reach out to them.';
-  return remoteAccessOn ? effect : 'Nothing until remote access is on. $effect';
+            'start anything in it. Your own agents can still reach out, and '
+            'the answers they get still land.';
+  return switch (remoteAccessOn) {
+    true => effect,
+    false => 'Nothing until remote access is on. $effect',
+    null => "Couldn't read remote access, so whether this is in effect right "
+        'now is unknown. $effect',
+  };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

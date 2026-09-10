@@ -44,12 +44,19 @@ class _EmptyNotifier extends RemoteDevicesNotifier {
 }
 
 class _FakePolicyNotifier extends RemoteAccessPolicyNotifier {
-  _FakePolicyNotifier(this._enabled);
+  _FakePolicyNotifier(this._enabled, {this.unreadable = false});
   final bool _enabled;
+
+  /// The loopback host could not be reached at all — a third state the reach
+  /// row below must not speak as "remote access is off".
+  final bool unreadable;
   final List<bool> writes = [];
   @override
-  Future<RemoteAccessPolicy> build() async =>
-      RemoteAccessPolicy(enabled: _enabled);
+  Future<RemoteAccessPolicy> build() async {
+    if (unreadable) throw StateError('TRANSPORT');
+    return RemoteAccessPolicy(enabled: _enabled);
+  }
+
   @override
   Future<void> setEnabled(bool enabled) async => writes.add(enabled);
 }
@@ -248,5 +255,40 @@ void main() {
     // writing a value nothing on that machine reads.
     expect(tester.widget<AbSwitch>(_reachSwitch).onChanged, isNull);
     expect(find.textContaining("Couldn't read"), findsWidgets);
+  });
+
+  // Nothing in the app ever invalidates the remote-access read, so a host that
+  // was down when the panel first opened leaves it unknown for the rest of the
+  // run — and the machine default for agent reach is ON, which makes "nothing
+  // until remote access is on" a positive claim that the bit is inert while a
+  // peer agent may be reading this machine's session titles.
+  testWidgets('an unreadable remote access is not spoken as off', (
+    tester,
+  ) async {
+    await _pumpPanel(
+      tester,
+      devices: _FakeNotifier.new,
+      policy: () => _FakePolicyNotifier(false, unreadable: true),
+      reach: () => _FakeReachNotifier(true),
+    );
+
+    expect(find.textContaining('Nothing until remote access is on'), findsNothing);
+    expect(find.textContaining("Couldn't read remote access"), findsOne);
+  });
+
+  // The gate refuses a peer OPENING an exchange here; an answer inside one an
+  // agent here started is admitted by design. Copy that claims the machine is
+  // sealed is wrong in exactly the case the next sentence invites.
+  testWidgets('the off copy does not promise more than the gate does', (
+    tester,
+  ) async {
+    await _pumpPanel(
+      tester,
+      devices: _FakeNotifier.new,
+      policy: () => _FakePolicyNotifier(true),
+      reach: () => _FakeReachNotifier(false),
+    );
+
+    expect(find.textContaining('the answers they get still land'), findsOne);
   });
 }
