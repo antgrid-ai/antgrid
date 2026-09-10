@@ -103,6 +103,13 @@ class _RemoteDirectoryPumpHostState
     if (_running) return;
     _running = true;
     try {
+      final now = DateTime.now();
+      // Pruned before the host peek, and on the pump's tick rather than by a
+      // timer of its own. A warm mark pins a peer socket past the reaper, and a
+      // desktop whose local bridge went down returns from the peek below every
+      // tick — pruning after it would hold those sockets for the rest of the
+      // app's life.
+      ref.read(directoryWarmTargetsProvider.notifier).prune(now);
       final host = ref.read(hostControllerProvider);
       final hostFile = await host.peekHost(); // peek only — never spawns
       if (!mounted || hostFile == null) return;
@@ -118,11 +125,6 @@ class _RemoteDirectoryPumpHostState
         token: hostFile.token,
       );
       final refreshRef = RefreshRef.of(ref);
-      final now = DateTime.now();
-      // Pruned on the pump's tick rather than by a timer of its own: nothing
-      // reads the warm set until the reaper's next reconcile, so an expiry
-      // polled for by nobody changes nothing anyone can observe.
-      ref.read(directoryWarmTargetsProvider.notifier).prune(now);
       final RemoteDirectoryCycleResult? cycle;
       try {
         cycle = await _engine.maybeRunCycle(

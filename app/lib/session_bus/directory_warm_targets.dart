@@ -32,6 +32,20 @@ const Duration kDirectoryWarmWindow = Duration(minutes: 5);
 /// were.
 const int kDirectoryWarmCap = 3;
 
+/// Ceiling on machines held warm at once, across every miss.
+///
+/// [kDirectoryWarmCap] bounds ONE miss; without this, successive misses recruit
+/// disjoint threes — a peer already warm but not yet connected is not "open", so
+/// the next miss skips past it — and a large account is dialled in full over a
+/// few minutes. That is the same connection storm
+/// `eagerControlPlanesEnabledProvider` keeps off desktop, reached gradually
+/// instead of at launch.
+///
+/// Twice one miss's cut, so a first three that never answers can still be rotated
+/// off in favour of others, and under `kRemoteDirectoryMaxMachinesPerPush`: a
+/// machine past that clamp never reaches the wire, so its socket buys nothing.
+const int kDirectoryWarmTotalCap = 6;
+
 /// The account machines a read just missed: everything in [inventory] that is
 /// neither this machine nor already open, most recently seen first, capped.
 ///
@@ -78,10 +92,22 @@ class DirectoryWarmTargets extends Notifier<Set<String>> {
   /// Warm [uuids] until [now] + [kDirectoryWarmWindow], extending any that are
   /// already warm. A machine asked about again keeps its socket rather than
   /// losing it mid-conversation.
+  ///
+  /// Over [kDirectoryWarmTotalCap] the coldest deadlines are evicted first —
+  /// the machines wanted longest ago. Evicting rather than refusing the new
+  /// ones is what lets a first pick that never answered be rotated off; the cap
+  /// is what stops the union growing to the whole account.
   void warm(Iterable<String> uuids, DateTime now) {
     final deadline = now.add(kDirectoryWarmWindow);
     for (final uuid in uuids) {
       _until[uuid] = deadline;
+    }
+    if (_until.length > kDirectoryWarmTotalCap) {
+      final coldest = _until.entries.toList()
+        ..sort((a, b) => a.value.compareTo(b.value));
+      for (final e in coldest.take(_until.length - kDirectoryWarmTotalCap)) {
+        _until.remove(e.key);
+      }
     }
     _emit();
   }

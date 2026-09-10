@@ -87,6 +87,37 @@ void main() {
       expect(container.read(directoryWarmTargetsProvider), {'m1'});
     });
 
+    // kDirectoryWarmCap bounds ONE miss. A peer already warm but not yet
+    // connected is not "open", so the next miss picks past it — successive
+    // misses recruit disjoint threes, and an account of offline machines is
+    // dialled in full over a few minutes without this.
+    test('successive misses cannot dial the whole account', () {
+      var t = DateTime(2024, 1, 1);
+      for (var round = 0; round < 8; round++) {
+        t = t.add(const Duration(seconds: 5));
+        notifier().warm({'a$round', 'b$round', 'c$round'}, t);
+        expect(
+          container.read(directoryWarmTargetsProvider).length,
+          lessThanOrEqualTo(kDirectoryWarmTotalCap),
+        );
+      }
+    });
+
+    // Evicting rather than refusing: a first pick that never answers has to be
+    // rotatable, or a machine ranked fourth by recency is never reached at all.
+    test('the coldest deadline is what makes room', () {
+      final t0 = DateTime(2024, 1, 1);
+      notifier().warm({'old1', 'old2', 'old3'}, t0);
+      notifier().warm({'mid1', 'mid2', 'mid3'}, t0.add(const Duration(seconds: 5)));
+      notifier().warm({'new1'}, t0.add(const Duration(seconds: 10)));
+
+      final held = container.read(directoryWarmTargetsProvider);
+      expect(held, hasLength(kDirectoryWarmTotalCap));
+      expect(held, contains('new1'));
+      expect(held, containsAll({'mid1', 'mid2', 'mid3'}));
+      expect(held.where((id) => id.startsWith('old')), hasLength(2));
+    });
+
     // This set is unioned into `controlPlaneAliveTargetsProvider`, whose fan-in
     // has crashed a frame before. A fresh Set is never `==` to the last one, so
     // an unguarded emit would ripple a no-op rebuild into the reaper on every
