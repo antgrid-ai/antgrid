@@ -1,135 +1,60 @@
-// The one place the session bus touches disk. Every store above it is a pure
-// fold; this is the thin wrapper the repo already splits out
-// (`handler/session-store.ts` is the same shape), which is what lets those folds
-// be tested with no filesystem at all.
+// Where the session bus touches the filesystem, which is now only the artifact
+// BYTES. Every record it keeps — routes, message logs, held messages, artifact
+// handles, queued deliveries — lives in one machine-level database
+// (`bus-db.ts`); what is left here is the content those handles point at, and
+// the two deletes that have to reclaim both halves together.
 //
-// A parse failure returns the EMPTY store, never a throw and never a partial. A
-// half-read file would put a message back on the wire under a state nothing
-// wrote; for a per-session store an empty one costs at most a held message
-// that was allowed to be lost. `sessionBusMachineDir`'s routes.json is the
-// exception: it is machine-level (E9/§5.4), so the same fallback there empties
-// every project's carrier bindings at once, not one session's.
+// The split is deliberate rather than incidental. An artifact is the durable
+// half of the protocol and can be megabytes; a row is small and is read back by
+// whichever session happens to hold the context next. Putting the bytes in the
+// database would make every reclaim a rewrite of the file that holds every
+// other project's state.
 
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
-import type { z } from "zod";
-import { logger } from "../logger";
+import { deleteScope, withBusDb } from "./bus-db";
 
-const log = logger.child({ component: "session-bus" });
-
-/** The machine-level session-bus root (E9/§5.4). One file lives here today —
- *  routes.json — because a carrier route is looked up by context id, which may
- *  name a session in any project this machine has open, so no single project's
- *  directory can hold it. Waves 2-3 add siblings here (directory.json,
- *  mailbox/, budget.json), never a subdirectory keyed by project. */
-export function sessionBusMachineDir(abDir: string): string {
-  return join(abDir, "session-bus");
-}
-
-/** Where one project's bus state lives — the per-session message log, held
- *  store and artifact bytes, plus the delivery queue (`sessionBusDeliveryDir`,
- *  same path today, named separately by design). Carrier routes moved out to
- *  `sessionBusMachineDir` (E9/§5.4); this directory holds none. Ids are
- *  bridge-issued but encoded anyway: a path separator inside one must not
- *  escape the project directory. */
+/** Where one project's artifact bytes live. Ids are bridge-issued but encoded
+ *  anyway: a path separator inside one must not escape the project directory. */
 export function sessionBusProjectDir(abDir: string, projectId: string): string {
   return join(abDir, "agents", encodeURIComponent(projectId), "session-bus");
 }
 
-/** Where one LOCAL session's bus state lives. Each bridge persists only what its
- *  own sessions said and were told; neither directory is ever a mirror of the
- *  other machine's. */
+/** Where one LOCAL session's artifact bytes live. Each bridge persists only what
+ *  its own sessions published; neither machine's directory is ever a mirror of
+ *  the other's. */
 export function sessionBusSessionDir(abDir: string, projectId: string, sessionId: string): string {
   return join(sessionBusProjectDir(abDir, projectId), encodeURIComponent(sessionId));
 }
 
-/** Where one project's delivery queue lives. Named separately from
- *  `sessionBusProjectDir` even though the path is identical today: the queue is
- *  per-project BY DESIGN, because the turn-open set it drains against is one
- *  `ProjectCore`'s own reduction (`DeliveryQueueDeps.isTurnOpen`) — a machine-level
- *  move that later relocates the rest of session-bus state must not carry the
- *  queue with it as an incidental side effect. */
-export function sessionBusDeliveryDir(abDir: string, projectId: string): string {
-  return join(abDir, "agents", encodeURIComponent(projectId), "session-bus");
-}
-
 /**
- * Every session this MACHINE has bus state on disk for, across every project.
+ * Every session this MACHINE still holds a message for, across every project.
  *
  * The restart path needs this: a fresh process holds no sessions in memory, so
- * without enumerating the directory nothing would re-arm the retries a killed
- * bridge left queued, and a held message would sit unsent until some unrelated
- * call happened to name that session. Machine-wide since E9/§5.4: one
- * coordinator now resumes for every project a host has open, not one project's
- * own directory, so the shape widens from a bare session id to the pair the
- * caller needs to resolve a store path from (`sessionBusSessionDir`).
+ * without it nothing would re-arm the retries a killed bridge left queued, and
+ * a held message would sit unsent until some unrelated call happened to name
+ * that session.
+ *
+ * HELD messages alone, because a held message is the only thing a resume can
+ * act on. A session with a message log and nothing queued has nothing to
+ * retry, and hydrating it would only pin its state in memory. The caller still
+ * has to check who OWNS each pair — the row says which project the state was
+ * FILED under, and the session index is the authority on who holds it now (see
+ * `SessionBusCoordinator.resume`).
  */
 export function listSessionBusSessions(abDir: string): { projectId: string; sessionId: string }[] {
-  const root = join(abDir, "agents");
-  let projectDirs: string[];
-  try {
-    projectDirs = readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
-  } catch (err) {
-    // Distinct from "no project has bus state": an unreadable root is
-    // otherwise indistinguishable from a machine that has never held anything.
-    log.warn({ err }, "session-bus: could not enumerate agents/ while resuming — treating as no sessions");
-    return [];
-  }
-  const out: { projectId: string; sessionId: string }[] = [];
-  for (const encProjectId of projectDirs) {
-    let projectId: string;
-    try {
-      projectId = decodeURIComponent(encProjectId);
-    } catch {
-      continue; // A directory name this bridge did not encode.
-    }
-    const dir = sessionBusProjectDir(abDir, projectId);
-    let sessionEntries;
-    try {
-      sessionEntries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue; // This project has no session-bus subdirectory at all.
-    }
-    for (const e of sessionEntries) {
-      if (!e.isDirectory()) continue;
-      try {
-        out.push({ projectId, sessionId: decodeURIComponent(e.name) });
-      } catch {
-        // A directory name this bridge did not encode. Skipping is right:
-        // there is no session id it could name.
-      }
-    }
-  }
-  return out;
-}
-
-/** Read and validate a store file, falling back to [empty] on anything at all:
- *  a missing file, a truncated write, a version this bridge cannot read. */
-export function readStoreFile<T>(path: string, schema: z.ZodType<T>, empty: T): T {
-  if (!existsSync(path)) return empty;
-  try {
-    const parsed = schema.safeParse(JSON.parse(readFileSync(path, "utf8")));
-    return parsed.success ? parsed.data : empty;
-  } catch {
-    return empty;
-  }
-}
-
-/** Write a store file atomically: temp file, rename, then owner-only off
- *  Windows. The rename is what makes a crash mid-write leave the previous
- *  contents rather than a truncated file that loads as empty. */
-export function writeStoreFile(path: string, dir: string, value: unknown): void {
-  mkdirSync(dir, { recursive: true });
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
-  renameSync(tmp, path);
-  if (process.platform !== "win32") {
-    try { chmodSync(path, 0o600); } catch { /* best effort */ }
-  }
+  return withBusDb(
+    abDir,
+    (db) =>
+      db
+        .query("SELECT DISTINCT projectId, sessionId FROM bus_held ORDER BY projectId, sessionId")
+        .all() as { projectId: string; sessionId: string }[],
+    [],
+  );
 }
 
 /**
- * Remove one session's whole bus directory, records and artifact bytes together.
+ * Remove one session's whole bus state, records and artifact bytes together.
  *
  * The ONLY thing that deletes an artifact. Stopping an agent, restarting the
  * bridge and archiving a session all leave the store readable, which is what
@@ -140,7 +65,27 @@ export function writeStoreFile(path: string, dir: string, value: unknown): void 
  * `sessions.delete` RPC's warm branch, which a cold delete with an open racing in
  * also funnels through) in agent-core.ts, and `HostServer`'s own cold-delete path
  * for a project with no warm core at all.
+ *
+ * Two reclaims, not one, and BOTH are required. The directory holds only the
+ * bytes now; every record naming this session is a row somewhere else, under a
+ * project id that nothing on the machine would be able to name again once the
+ * session row itself is gone. Gated by session-bus-reclaim.test.ts.
  */
 export function removeSessionBusSession(abDir: string, projectId: string, sessionId: string): void {
+  withBusDb(abDir, (db) => deleteScope(db, { projectId, sessionId }), undefined);
   rmSync(sessionBusSessionDir(abDir, projectId, sessionId), { recursive: true, force: true });
+}
+
+/**
+ * Remove every bus record a project owns — its sessions' logs, held messages
+ * and artifact handles, its delivery queue, and its carrier routes.
+ *
+ * The bytes are NOT this function's business: `HostServer.forget` deletes
+ * `agents/<projectId>/` wholesale, which takes them with it. What that delete
+ * can no longer reach is the database, which is why this exists at all — the
+ * rows would otherwise outlive every other trace of the project, filed under an
+ * id nothing left on the machine could name.
+ */
+export function removeSessionBusProject(abDir: string, projectId: string): void {
+  withBusDb(abDir, (db) => deleteScope(db, { projectId }), undefined);
 }

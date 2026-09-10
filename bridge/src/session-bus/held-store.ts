@@ -13,13 +13,10 @@
 // The lossiness is still spent, just deliberately: past the cap the oldest goes,
 // and past the TTL the stale go.
 
-import { join } from "node:path";
 import { z } from "zod";
 import { SessionMemberKeySchema } from "../protocol";
 import { BUS_MESSAGE_TTL_MS, MAX_HELD_MESSAGES } from "./constants";
-import { readStoreFile, sessionBusSessionDir, writeStoreFile } from "./store-fs";
-
-export const HELD_STORE_VERSION = 1;
+import { readRecords, replaceRecords, withBusDb } from "./bus-db";
 
 export const HELD_MESSAGE_TTL_MS = BUS_MESSAGE_TTL_MS;
 
@@ -37,11 +34,6 @@ export const HeldMessageSchema = z.object({
   heldAt: z.number().int().nonnegative(),
 });
 export type HeldMessage = z.infer<typeof HeldMessageSchema>;
-
-export const HeldFileSchema = z.object({
-  version: z.literal(HELD_STORE_VERSION),
-  held: z.array(HeldMessageSchema).max(MAX_HELD_MESSAGES),
-});
 
 export interface HeldState {
   readonly held: readonly HeldMessage[];
@@ -75,23 +67,18 @@ export function releaseHeld(s: HeldState, messageIds: readonly string[]): HeldSt
   return { held: s.held.filter((m) => !gone.has(m.messageId)) };
 }
 
-function heldPath(abDir: string, projectId: string, sessionId: string): string {
-  return join(sessionBusSessionDir(abDir, projectId, sessionId), "held.json");
-}
-
 export function loadHeld(abDir: string, projectId: string, sessionId: string): HeldState {
-  const file = readStoreFile<z.infer<typeof HeldFileSchema> | null>(
-    heldPath(abDir, projectId, sessionId),
-    HeldFileSchema,
-    null,
+  return withBusDb(
+    abDir,
+    (db) => ({ held: readRecords(db, "bus_held", "held", { projectId, sessionId }, MAX_HELD_MESSAGES, HeldMessageSchema) }),
+    emptyHeld(),
   );
-  return file ? { held: file.held } : emptyHeld();
 }
 
 export function saveHeld(abDir: string, projectId: string, sessionId: string, s: HeldState): void {
-  const dir = sessionBusSessionDir(abDir, projectId, sessionId);
-  writeStoreFile(join(dir, "held.json"), dir, {
-    version: HELD_STORE_VERSION,
-    held: s.held.slice(-MAX_HELD_MESSAGES),
-  });
+  withBusDb(
+    abDir,
+    (db) => replaceRecords(db, "bus_held", "held", { projectId, sessionId }, s.held.slice(-MAX_HELD_MESSAGES)),
+    undefined,
+  );
 }

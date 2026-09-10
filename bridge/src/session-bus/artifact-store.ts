@@ -19,9 +19,8 @@ import { join } from "node:path";
 import { z } from "zod";
 import { SessionMemberRefSchema } from "../protocol";
 import { MAX_ARTIFACTS, MAX_ARTIFACT_BYTES, MAX_SUMMARY_CHARS } from "./constants";
-import { readStoreFile, sessionBusSessionDir, writeStoreFile } from "./store-fs";
-
-export const ARTIFACT_STORE_VERSION = 1;
+import { sessionBusSessionDir } from "./store-fs";
+import { readRecords, replaceRecords, withBusDb } from "./bus-db";
 
 export const ArtifactRecordSchema = z.object({
   artifactId: z.string().min(1).max(200),
@@ -41,11 +40,6 @@ export const ArtifactRecordSchema = z.object({
   createdAt: z.number(),
 });
 export type ArtifactRecord = z.infer<typeof ArtifactRecordSchema>;
-
-export const ArtifactFileSchema = z.object({
-  version: z.literal(ARTIFACT_STORE_VERSION),
-  artifacts: z.array(ArtifactRecordSchema).max(MAX_ARTIFACTS),
-});
 
 export interface ArtifactState {
   readonly artifacts: readonly ArtifactRecord[];
@@ -81,10 +75,6 @@ export function checkArtifactSize(bytes: number): "ARTIFACT_TOO_LARGE" | null {
   return bytes > MAX_ARTIFACT_BYTES ? "ARTIFACT_TOO_LARGE" : null;
 }
 
-function artifactsPath(abDir: string, projectId: string, sessionId: string): string {
-  return join(sessionBusSessionDir(abDir, projectId, sessionId), "artifacts.json");
-}
-
 /** Ids are bridge-issued but encoded anyway: a path separator inside one must
  *  not escape the session's own directory. */
 function contentPath(abDir: string, projectId: string, sessionId: string, id: string): string {
@@ -92,20 +82,19 @@ function contentPath(abDir: string, projectId: string, sessionId: string, id: st
 }
 
 export function loadArtifacts(abDir: string, projectId: string, sessionId: string): ArtifactState {
-  const file = readStoreFile<z.infer<typeof ArtifactFileSchema> | null>(
-    artifactsPath(abDir, projectId, sessionId),
-    ArtifactFileSchema,
-    null,
+  return withBusDb(
+    abDir,
+    (db) => ({ artifacts: readRecords(db, "bus_artifacts", "record", { projectId, sessionId }, MAX_ARTIFACTS, ArtifactRecordSchema) }),
+    emptyArtifacts(),
   );
-  return file ? { artifacts: file.artifacts } : emptyArtifacts();
 }
 
 export function saveArtifacts(abDir: string, projectId: string, sessionId: string, s: ArtifactState): void {
-  const dir = sessionBusSessionDir(abDir, projectId, sessionId);
-  writeStoreFile(join(dir, "artifacts.json"), dir, {
-    version: ARTIFACT_STORE_VERSION,
-    artifacts: s.artifacts.slice(-MAX_ARTIFACTS),
-  });
+  withBusDb(
+    abDir,
+    (db) => replaceRecords(db, "bus_artifacts", "record", { projectId, sessionId }, s.artifacts.slice(-MAX_ARTIFACTS)),
+    undefined,
+  );
 }
 
 /** Write the bytes beside the record. Content first, record second at the call

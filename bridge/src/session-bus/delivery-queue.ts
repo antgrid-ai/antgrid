@@ -22,15 +22,12 @@
 // whose agent is down keeps its queue in the order the events happened rather
 // than skipping ahead to whatever the adapter happens to accept.
 
-import { join } from "node:path";
 import { z } from "zod";
 import { logger } from "../logger";
 import { MAX_DELIVERY_CHARS } from "./delivery";
-import { readStoreFile, sessionBusDeliveryDir, writeStoreFile } from "./store-fs";
+import { readRecords, replaceRecords, withBusDb } from "./bus-db";
 
 const log = logger.child({ component: "session-bus" });
-
-export const DELIVERY_QUEUE_VERSION = 1;
 
 /** Lines held across every session of one project. Small on purpose: past it the
  *  agent is not reading its queue at all, and a hundred stale wakes delivered at
@@ -73,11 +70,6 @@ export const QueuedLineSchema = z.object({
   queuedAt: z.number(),
 });
 export type QueuedLine = z.infer<typeof QueuedLineSchema>;
-
-export const DeliveryQueueFileSchema = z.object({
-  version: z.literal(DELIVERY_QUEUE_VERSION),
-  lines: z.array(QueuedLineSchema).max(MAX_QUEUED_LINES),
-});
 
 export interface DeliveryQueueState {
   readonly lines: readonly QueuedLine[];
@@ -137,25 +129,20 @@ export function forgetSession(s: DeliveryQueueState, sessionId: string): Deliver
   return lines.length === s.lines.length ? s : { lines };
 }
 
-function queuePath(abDir: string, projectId: string): string {
-  return join(sessionBusDeliveryDir(abDir, projectId), "deliveries.json");
-}
-
 export function loadDeliveries(abDir: string, projectId: string): DeliveryQueueState {
-  const file = readStoreFile<z.infer<typeof DeliveryQueueFileSchema> | null>(
-    queuePath(abDir, projectId),
-    DeliveryQueueFileSchema,
-    null,
+  return withBusDb(
+    abDir,
+    (db) => ({ lines: readRecords(db, "bus_deliveries", "line", { projectId }, MAX_QUEUED_LINES, QueuedLineSchema) }),
+    emptyDeliveries(),
   );
-  return file ? { lines: file.lines } : emptyDeliveries();
 }
 
 export function saveDeliveries(abDir: string, projectId: string, s: DeliveryQueueState): void {
-  const dir = sessionBusDeliveryDir(abDir, projectId);
-  writeStoreFile(join(dir, "deliveries.json"), dir, {
-    version: DELIVERY_QUEUE_VERSION,
-    lines: s.lines.slice(-MAX_QUEUED_LINES),
-  });
+  withBusDb(
+    abDir,
+    (db) => replaceRecords(db, "bus_deliveries", "line", { projectId }, s.lines.slice(-MAX_QUEUED_LINES)),
+    undefined,
+  );
 }
 
 export interface DeliveryQueueDeps {

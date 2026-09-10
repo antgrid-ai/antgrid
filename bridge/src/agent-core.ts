@@ -1058,10 +1058,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   });
   if (!opts.sessionBus) {
     // Fallback path only: a standalone/test core with no host to have hydrated
-    // this on its behalf. Routes live in one machine-level file regardless of
-    // which core loads them (`sessionBusMachineDir`), so this reads whatever
-    // this abDir holds — for a fallback core that is exactly what the pre-E9
-    // coordinator always loaded for itself, since nothing else shares its abDir.
+    // this on its behalf. Routes live in one machine-level table regardless of
+    // which core loads them (`bus-db.ts`), so this reads whatever this abDir
+    // holds — for a fallback core that is exactly what the pre-E9 coordinator
+    // always loaded for itself, since nothing else shares its abDir.
     sessionBus.hydrateRoutes();
     // Hydrate whatever a previous process left in flight. Without it a cold
     // coordinator holds no sessions, so nothing re-arms the retries a killed

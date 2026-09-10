@@ -1,6 +1,7 @@
 // bridge/tests/session-bus-message-log.test.ts
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,12 +12,12 @@ import {
   saveMessageLog,
 } from "../src/session-bus/message-log";
 import { checkEnvelopeSize, envelopeBytes, stampEnvelope } from "../src/session-bus/envelope";
+import { busDbPath } from "../src/session-bus/bus-db";
 import {
   MAX_ENVELOPE_BYTES,
   MAX_LOGGED_PART_CHARS,
   MAX_LOG_ENTRIES,
 } from "../src/session-bus/constants";
-import { sessionBusSessionDir } from "../src/session-bus/store-fs";
 import type { SessionMemberKey, SessionMemberRef } from "../src/protocol";
 
 const PEER_KEY: SessionMemberKey = { machineId: "m2", projectId: "p2", sessionId: "s2" };
@@ -71,27 +72,36 @@ test("the ring drops the oldest past the cap", () => {
   expect(s.entries[0]!.envelope.messageId).toBe("m-10");
 });
 
-test("the log round-trips, and a corrupt or wrong-version file loads as empty", () => {
+test("the log round-trips, and one unreadable row costs one entry rather than the log", () => {
   const abDir = tmpAbDir();
   try {
-    const s = appendLog(emptyLog(), { at: T0, direction: "out", peer: PEER_KEY, envelope: env() });
+    let s = appendLog(emptyLog(), { at: T0, direction: "out", peer: PEER_KEY, envelope: env() });
+    s = appendLog(s, { at: T0 + 1, direction: "in", peer: PEER_KEY, envelope: env({ messageId: "m-2" }) });
     saveMessageLog(abDir, "p1", "s1", s);
     const back = loadMessageLog(abDir, "p1", "s1");
-    expect(back.entries).toHaveLength(1);
+    expect(back.entries).toHaveLength(2);
     expect(back.entries[0]!.peer).toEqual(PEER_KEY);
     expect(back.entries[0]!.envelope.metadata.summary).toBe("reporting back");
+    // Append order is the ring's order, and it has to survive the round trip:
+    // the cap drops from the front, so a log that came back reversed would
+    // evict the newest entries first.
+    expect(back.entries.map((e) => e.envelope.messageId)).toEqual(["m-1", "m-2"]);
 
-    const dir = sessionBusSessionDir(abDir, "p1", "s1");
-    mkdirSync(dir, { recursive: true });
-    const path = join(dir, "messages.json");
-
-    writeFileSync(path, "{half a wri");
-    expect(loadMessageLog(abDir, "p1", "s1").entries).toEqual([]);
-
-    writeFileSync(path, JSON.stringify({ version: 99, entries: [] }));
-    expect(loadMessageLog(abDir, "p1", "s1").entries).toEqual([]);
+    // A record this bridge cannot read, written the only way one can be. The
+    // JSON store this replaced answered a single bad entry by emptying the
+    // whole log; this one loses the entry alone.
+    const raw = new Database(busDbPath(abDir));
+    try {
+      raw.query("UPDATE bus_messages SET entry = ? WHERE sessionId = ? AND seq = (SELECT MIN(seq) FROM bus_messages)")
+        .run("{half a wri", "s1");
+    } finally {
+      raw.close();
+    }
+    expect(loadMessageLog(abDir, "p1", "s1").entries.map((e) => e.envelope.messageId)).toEqual(["m-2"]);
 
     expect(loadMessageLog(abDir, "p1", "never-written").entries).toEqual([]);
+    // Another session's log is not this one's, even under the same project.
+    expect(loadMessageLog(abDir, "p-other", "s1").entries).toEqual([]);
   } finally {
     rmSync(abDir, { recursive: true, force: true });
   }

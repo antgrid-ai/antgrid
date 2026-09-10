@@ -242,7 +242,7 @@ describe("turn-boundary delivery", () => {
     expect(h.queue.lines.map((l) => l.id)).toEqual(["b"]);
   });
 
-  test("two projects on one machine write distinct files and never see each other's lines", () => {
+  test("two projects on one machine keep distinct queues and never see each other's lines", () => {
     const abDir = tempDir();
     let p1 = emptyDeliveries();
     p1 = enqueueLine(p1, { ...line({ id: "p1-line" }), queuedAt: 1 });
@@ -255,11 +255,13 @@ describe("turn-boundary delivery", () => {
     expect(loadDeliveries(abDir, "project-one").lines.map((l) => l.id)).toEqual(["p1-line"]);
     expect(loadDeliveries(abDir, "project-two").lines.map((l) => l.id)).toEqual(["p2-line"]);
 
-    // Pinned to the literal path, not just to `sessionBusDeliveryDir`'s
-    // return value: reading and writing through the same helper would still
-    // pass if the queue moved directories, so this is the only thing in the
-    // suite that would notice a relocation of `agents/<projectId>/session-bus/`.
-    expect(existsSync(join(abDir, "agents", "project-one", "session-bus", "deliveries.json"))).toBe(true);
-    expect(existsSync(join(abDir, "agents", "project-two", "session-bus", "deliveries.json"))).toBe(true);
+    // Pinned to the literal path, not just to a helper's return value: reading
+    // and writing through the same helper would still pass if the queue moved,
+    // so this is the only thing in the suite that would notice a relocation.
+    expect(existsSync(join(abDir, "session-bus", "bus.db"))).toBe(true);
+    // The queue is keyed by project INSIDE that one table. A per-project
+    // directory reappearing here would mean a reclaim had gone back to being a
+    // directory delete, which is what stopped covering these rows.
+    expect(existsSync(join(abDir, "agents", "project-one"))).toBe(false);
   });
 });

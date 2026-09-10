@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MAX_BUS_ROUTES } from "../src/session-bus/constants";
 import { loadBusRoutes, saveBusRoutes, type BusRouteMap } from "../src/session-bus/route-store";
-import { sessionBusMachineDir } from "../src/session-bus/store-fs";
+import { busDbPath } from "../src/session-bus/bus-db";
+import { Database } from "bun:sqlite";
 
 const T0 = 2_000_000;
 const TTL = 60_000;
@@ -183,35 +184,47 @@ test("a purge drops a project's rows even when the writer's own table never held
   }
 });
 
-test("routes.json lives at the machine root, not under any project", () => {
+test("the route table lives at the machine root, not under any project", () => {
   const abDir = tmpAbDir();
   try {
     saveBusRoutes(abDir, routes([["ctx-1", "app#machine", "p1", T0]]));
-    // Pinned as a literal on purpose. Every other case in this file writes
-    // and reads through `sessionBusMachineDir`, so a relocation carries both
-    // halves with it and none of them go red — the same blind spot the
-    // delivery queue had. routes.json is the one file E9 actually moved out
-    // of `agents/<projectId>/`, which makes this the assertion that would
-    // catch it moving again.
-    expect(existsSync(join(abDir, "session-bus", "routes.json"))).toBe(true);
+    // Pinned as a literal on purpose. Every other case in this file writes and
+    // reads through the same helper, so a relocation carries both halves with
+    // it and none of them go red — the same blind spot the delivery queue had.
+    // This is the assertion that caught the move off routes.json, and it is
+    // kept as a literal for the next one.
+    expect(existsSync(join(abDir, "session-bus", "bus.db"))).toBe(true);
+    // Nothing this store writes may land under a project: a route is looked up
+    // by context id, which can name a session in any project on the machine.
+    expect(existsSync(join(abDir, "agents"))).toBe(false);
   } finally {
     rmSync(abDir, { recursive: true, force: true });
   }
 });
 
-test("an unreadable routes file loads as no routes rather than throwing", () => {
+test("one unreadable row costs one route, not the machine's whole table", () => {
+  // The JSON store this replaced had no way to say this: a single malformed
+  // record failed the file's schema, and the read answered EMPTY — every
+  // project's carrier bindings gone at once, for one bad row, with nothing
+  // logged. Written by raw SQL because saveBusRoutes cannot produce it.
   const abDir = tmpAbDir();
   try {
-    const dir = sessionBusMachineDir(abDir);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "routes.json"), "{ not json", "utf8");
-    expect(loadBusRoutes(abDir, TTL, T0).size).toBe(0);
+    saveBusRoutes(abDir, routes([["ctx-good", "app-a", "p1", T0]]));
+    const raw = new Database(busDbPath(abDir));
+    try {
+      raw.query("INSERT INTO bus_routes (contextId, peerId, projectId, at) VALUES (?, ?, ?, ?)")
+        .run("ctx-bad", "", "p1", T0);
+    } finally {
+      raw.close();
+    }
+
+    expect([...loadBusRoutes(abDir, TTL * 1_000, T0).keys()]).toEqual(["ctx-good"]);
   } finally {
     rmSync(abDir, { recursive: true, force: true });
   }
 });
 
-test("a machine with no routes file yet has no routes", () => {
+test("a machine with no routes yet has no routes", () => {
   const abDir = tmpAbDir();
   try {
     expect(loadBusRoutes(abDir, TTL, T0).size).toBe(0);

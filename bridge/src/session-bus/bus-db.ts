@@ -23,10 +23,10 @@
 // with no line anywhere to name why.
 
 import { Database } from "bun:sqlite";
+import type { z } from "zod";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { logger } from "../logger";
-import { sessionBusMachineDir } from "./store-fs";
 
 const log = logger.child({ component: "session-bus" });
 
@@ -43,6 +43,16 @@ const BUSY_TIMEOUT_MS = 250;
 
 const TABLES = ["bus_routes", "bus_messages", "bus_held", "bus_artifacts", "bus_deliveries"] as const;
 
+// Columns for what is QUERIED, one JSON blob for what is only ever read back
+// whole. `bus_routes` is filtered and ordered by `at`, so its fields are
+// columns; the four scoped stores are always read for one session (or one
+// project) at a time and folded in memory, so their rows carry the record as
+// written and the Zod schema that already defines it stays the only definition
+// of shape — a field added there needs no DDL here.
+//
+// `seq` is the insertion order, and for three of these it IS the semantics:
+// a message log is a ring, a held queue goes out in the order it was written,
+// and a delivery queue is FIFO per session.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS bus_routes (
   contextId TEXT PRIMARY KEY,
@@ -57,10 +67,7 @@ CREATE TABLE IF NOT EXISTS bus_messages (
   seq       INTEGER PRIMARY KEY AUTOINCREMENT,
   projectId TEXT NOT NULL,
   sessionId TEXT NOT NULL,
-  at        INTEGER NOT NULL,
-  direction TEXT NOT NULL,
-  peer      TEXT NOT NULL,
-  envelope  TEXT NOT NULL
+  entry     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS bus_messages_session ON bus_messages (projectId, sessionId, seq);
 
@@ -68,12 +75,7 @@ CREATE TABLE IF NOT EXISTS bus_held (
   seq       INTEGER PRIMARY KEY AUTOINCREMENT,
   projectId TEXT NOT NULL,
   sessionId TEXT NOT NULL,
-  messageId TEXT NOT NULL,
-  contextId TEXT NOT NULL,
-  role      TEXT NOT NULL,
-  recipient TEXT NOT NULL,
-  frame     TEXT NOT NULL,
-  heldAt    INTEGER NOT NULL
+  held      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS bus_held_session ON bus_held (projectId, sessionId, seq);
 
@@ -81,7 +83,6 @@ CREATE TABLE IF NOT EXISTS bus_artifacts (
   seq        INTEGER PRIMARY KEY AUTOINCREMENT,
   projectId  TEXT NOT NULL,
   sessionId  TEXT NOT NULL,
-  artifactId TEXT NOT NULL,
   record     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS bus_artifacts_session ON bus_artifacts (projectId, sessionId, seq);
@@ -89,8 +90,6 @@ CREATE INDEX IF NOT EXISTS bus_artifacts_session ON bus_artifacts (projectId, se
 CREATE TABLE IF NOT EXISTS bus_deliveries (
   seq       INTEGER PRIMARY KEY AUTOINCREMENT,
   projectId TEXT NOT NULL,
-  sessionId TEXT NOT NULL,
-  lineId    TEXT NOT NULL,
   line      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS bus_deliveries_project ON bus_deliveries (projectId, seq);
@@ -100,6 +99,15 @@ CREATE INDEX IF NOT EXISTS bus_deliveries_project ON bus_deliveries (projectId, 
  *  an unreachable database would otherwise write the same line thousands of
  *  times and bury the first one, which is the only one that carries the cause. */
 const announced = new Set<string>();
+
+/** The machine-level session-bus root. Every bus record on this machine lives
+ *  in one file here, keyed by project — never in a directory named after one.
+ *  A carrier route is looked up by context id, which may name a session in any
+ *  project the machine has open, so no project's directory could hold it; the
+ *  rest followed when a reclaim narrower than an `rm -rf` was needed. */
+export function sessionBusMachineDir(abDir: string): string {
+  return join(abDir, "session-bus");
+}
 
 export function busDbPath(abDir: string): string {
   return join(sessionBusMachineDir(abDir), "bus.db");
@@ -150,6 +158,90 @@ export function withBusDb<T>(abDir: string, fn: (db: Database) => T, fallback: T
   } finally {
     try { db?.close(); } catch { /* a close that fails has nothing left to protect */ }
   }
+}
+
+/** One store's rows: a session's, or — for the delivery queue, which is owned
+ *  by a project rather than by any session in it — a project's. */
+export interface BusScope {
+  projectId: string;
+  sessionId?: string;
+}
+
+function scopeWhere(scope: BusScope): { clause: string; params: string[] } {
+  return scope.sessionId === undefined
+    ? { clause: "projectId = ?", params: [scope.projectId] }
+    : { clause: "projectId = ? AND sessionId = ?", params: [scope.projectId, scope.sessionId] };
+}
+
+// `table` and `column` are module constants at every call site, never anything a
+// peer or an agent can name — which is what makes interpolating them into the
+// SQL below safe. Every VALUE is bound.
+
+/**
+ * One scope's records, newest [cap] of them, OLDEST FIRST.
+ *
+ * Oldest first because for all three callers the order is the semantics, not
+ * presentation: a message log is a ring, a held queue goes out in the order it
+ * was written, and a delivery queue is FIFO. Newest [cap] because the cap keeps
+ * the recent ones — a reader that took the oldest would pin a session to
+ * whatever it said first and never show what it is saying now.
+ *
+ * A row that does not validate is skipped ALONE. The JSON stores this replaced
+ * could answer a single bad record only by emptying the whole file.
+ */
+export function readRecords<T>(db: Database, table: string, column: string, scope: BusScope, cap: number, schema: z.ZodType<T>): T[] {
+  const { clause, params } = scopeWhere(scope);
+  const rows = db
+    .query(`SELECT ${column} AS record FROM ${table} WHERE ${clause} ORDER BY seq DESC LIMIT ?`)
+    .all(...params, cap) as { record: string }[];
+  const out: T[] = [];
+  for (const row of rows.reverse()) {
+    let raw: unknown;
+    try { raw = JSON.parse(row.record); } catch { continue; }
+    const parsed = schema.safeParse(raw);
+    if (parsed.success) out.push(parsed.data);
+  }
+  return out;
+}
+
+/**
+ * Make one scope's rows exactly [records], in that order.
+ *
+ * A whole-scope replace rather than a per-record diff, because every caller
+ * holds the scope's state as one immutable fold and hands it over entire — the
+ * shape `store-fs.ts` was built around and that the move off JSON deliberately
+ * keeps. Each scope is bounded by its own cap, so this is tens of rows, and one
+ * transaction means a reader never sees the scope half-written.
+ */
+export function replaceRecords(db: Database, table: string, column: string, scope: BusScope, records: readonly unknown[]): void {
+  const { clause, params } = scopeWhere(scope);
+  const cols = scope.sessionId === undefined ? `projectId, ${column}` : `projectId, sessionId, ${column}`;
+  const values = scope.sessionId === undefined ? "(?, ?)" : "(?, ?, ?)";
+  const insert = db.query(`INSERT INTO ${table} (${cols}) VALUES ${values}`);
+  db.transaction(() => {
+    db.query(`DELETE FROM ${table} WHERE ${clause}`).run(...params);
+    for (const record of records) insert.run(...params, JSON.stringify(record));
+  })();
+}
+
+/** Every row any of these tables holds for [scope]. The bytes an artifact
+ *  points at are NOT here — they are still files, and still reclaimed by the
+ *  directory delete in `store-fs.ts`. */
+export function deleteScope(db: Database, scope: BusScope): void {
+  const { clause, params } = scopeWhere(scope);
+  db.transaction(() => {
+    for (const table of TABLES) {
+      // The delivery queue is per project and has no sessionId to narrow by, so
+      // a session-scoped delete must not reach it: its lines belong to every
+      // other session in the project too.
+      if (table === "bus_routes") continue;
+      if (table === "bus_deliveries" && scope.sessionId !== undefined) continue;
+      db.query(`DELETE FROM ${table} WHERE ${clause}`).run(...params);
+    }
+    if (scope.sessionId === undefined) {
+      db.query("DELETE FROM bus_routes WHERE projectId = ?").run(scope.projectId);
+    }
+  })();
 }
 
 /** Forget that this abDir's failure was already announced. For tests, which

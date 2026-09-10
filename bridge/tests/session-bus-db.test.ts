@@ -70,9 +70,12 @@ test("a database that cannot be opened answers the fallback rather than throwing
   // unopenable path there is, and it behaves the same on every platform.
   mkdirSync(busDbPath(abDir), { recursive: true });
 
-  const answer = withBusDb(abDir, (db) => db.query("SELECT contextId FROM bus_routes").all(), "the fallback");
+  // Identity, not equality: a fallback that merely LOOKS like the query's own
+  // empty answer would prove nothing about which of the two came back.
+  const fallback = { fellBack: true };
+  const answer = withBusDb<unknown>(abDir, (db) => db.query("SELECT contextId FROM bus_routes").all(), fallback);
 
-  expect(answer).toBe("the fallback");
+  expect(answer).toBe(fallback);
 });
 
 test("a failure does not take the next operation with it", () => {

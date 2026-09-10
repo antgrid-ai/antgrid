@@ -39,7 +39,7 @@ import { SessionBusSessionIndex } from "./session-bus/session-index";
 import { SessionBusRepoKeys } from "./session-bus/repo-key";
 import { SessionDirectory } from "./session-bus/directory";
 import { SessionBusCoordinator } from "./session-bus/coordinator";
-import { removeSessionBusSession } from "./session-bus/store-fs";
+import { removeSessionBusProject, removeSessionBusSession } from "./session-bus/store-fs";
 import { MAX_BUS_ROUTES } from "./session-bus/constants";
 import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
@@ -2069,11 +2069,12 @@ export class HostServer {
    *    2. reclaim the project's managed worktrees,
    *    3. delete the on-disk store dir (`agents/<id>/`, holding sessions.json),
    *    4. drop what the project owns that step 3's disk delete cannot reach:
-   *       its session index rows, its session-bus carrier routes (a
-   *       MACHINE-level store living outside `agents/<id>/`), and any of its
-   *       session-bus states the shared coordinator still holds IN MEMORY —
-   *       a session loaded before this call pins its owning project at load
-   *       time and does not notice the delete,
+   *       its session index rows, any session-bus state the shared coordinator
+   *       still holds IN MEMORY — a session loaded before this call pins its
+   *       owning project at load time and does not notice the delete — and
+   *       every session-bus ROW it owns, which live in one MACHINE-level
+   *       database outside `agents/<id>/` and would otherwise outlive every
+   *       other trace of the project,
    *    5. drop the seen-catalog hint (also clears the stale projects.json entry).
    *  Step 2's position is the invariant, not a preference: it reads
    *  `agents/<id>/checkouts.json`, which step 3 deletes, and it resolves the
@@ -2104,6 +2105,13 @@ export class HostServer {
     // drop above on purpose — see forgetProjectStates's own doc on why it must
     // not re-derive ownership through `projectIdFor`.
     this.sessionBus.forgetProjectStates(projectId);
+    // Last of the bus reclaims, and after BOTH in-memory drops above on
+    // purpose: this is the durable one, and a session state or route still
+    // cached here could otherwise write its rows straight back behind it. What
+    // step 3 deleted was `agents/<projectId>/`, which holds only the artifact
+    // bytes now — every record the project owned is a row in the machine-level
+    // database, filed under an id nothing left on this machine could name.
+    removeSessionBusProject(resolveAbDir(), projectId);
     if (this.seenProjects.delete(projectId)) this.flushSeen();
     // Unconditional: the advert IS the seen catalog now, so a forgotten project
     // must vanish from a live phone's picker without waiting for a reconnect
@@ -2135,9 +2143,12 @@ export class HostServer {
   }
 
   /** Delete a project's on-disk per-project dirs (best-effort). Two locations,
-   *  both keyed by projectId under the `~/.antgrid` root:
+   *  both keyed by projectId under the `~/.antgrid` root. Directories only:
+   *  what the session bus keeps is rows, and `removeSessionBusProject` in
+   *  `forget()` is what reclaims those.
    *    - `agents/<id>/`   — SessionManager's `sessions.json` (the authoritative
-   *      session list); MUST mirror `join(storeDir, "agents", projectId)`.
+   *      session list) and the session bus's artifact BYTES; MUST mirror
+   *      `join(storeDir, "agents", projectId)`.
    *    - `projects/<id>/` — legacy ephemeral-pubkey dir. No longer written (the
    *      pubkey is in-memory only), but older bridges left these behind; clean
    *      them so a forgotten project leaves nothing on disk. */

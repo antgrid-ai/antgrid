@@ -36,9 +36,9 @@ export const DELIVERY_TEMPLATE_VERSION = 2;
 
 /** Sanity ceiling on the whole rendered delivery. A literal rather than a sum,
  *  because `delivery-queue.ts` bounds the persisted `QueuedLineSchema.text`
- *  with it: lowering this value makes every longer line already on disk fail
- *  Zod, and `readStoreFile` answers a parse failure by emptying the queue. It
- *  may be raised, never lowered, until something migrates that file.
+ *  with it: lowering this value makes every longer line already persisted fail
+ *  Zod, and a row that fails Zod is dropped on the way back in. It may be
+ *  raised, never lowered, until something migrates those rows.
  *
  *  Past it the wrapper is still never trimmed — the fenced content is, with a
  *  marker saying so — because a delivery that lost its provenance or its fence

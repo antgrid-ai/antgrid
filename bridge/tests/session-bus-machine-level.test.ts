@@ -8,6 +8,7 @@
 // here — `self()`, a route, and `resume()` all spanning a project boundary —
 // gets its own suite rather than living as an implicit case there.
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,9 +18,11 @@ import { createMessage, type AbMessage, type SessionMemberKey, type SessionMembe
 import { setLogLevel } from "../src/logger";
 import { BUS_ROUTE_TTL_MS, MAX_BUS_ROUTES } from "../src/session-bus/constants";
 import { SessionBusCoordinator, type SessionBusSelf } from "../src/session-bus/coordinator";
-import { loadBusRoutes, ROUTE_STORE_VERSION, saveBusRoutes } from "../src/session-bus/route-store";
+import { loadBusRoutes, saveBusRoutes } from "../src/session-bus/route-store";
+import { busDbPath } from "../src/session-bus/bus-db";
 import { SessionBusSessionIndex } from "../src/session-bus/session-index";
-import { sessionBusMachineDir, sessionBusSessionDir } from "../src/session-bus/store-fs";
+import { removeSessionBusProject, sessionBusSessionDir } from "../src/session-bus/store-fs";
+import { loadHeld } from "../src/session-bus/held-store";
 import { SessionManager } from "../src/session-manager";
 
 setLogLevel("error");
@@ -494,20 +497,17 @@ test("hydrating routes does not regress a fresher one already learned live", () 
     now: () => now,
   });
   coordinator.noteRoute("ctx-1", "app-fresh", "p1");
-  // Written AFTER noteRoute, and by hand rather than through saveBusRoutes:
-  // noteRoute forces a save of its own, and the write path merges newest-`at`
-  // first, so any stale row seeded before it is gone from the file by the time
-  // hydrate reads it — which is exactly what made an earlier version of this
-  // test pass with the freshness guard deleted.
-  mkdirSync(sessionBusMachineDir(abDir), { recursive: true });
-  writeFileSync(
-    join(sessionBusMachineDir(abDir), "routes.json"),
-    JSON.stringify({
-      version: ROUTE_STORE_VERSION,
-      routes: [{ contextId: "ctx-1", peerId: "app-stale", projectId: "p1", at: 1_000 }],
-    }),
-    "utf8",
-  );
+  // Written AFTER noteRoute, and by raw SQL rather than through saveBusRoutes:
+  // noteRoute forces a save of its own, and the write path keeps the newer
+  // `at`, so any stale row seeded through it is simply refused — which is
+  // exactly what made an earlier version of this test pass with the freshness
+  // guard deleted.
+  const raw = new Database(busDbPath(abDir));
+  try {
+    raw.query("UPDATE bus_routes SET peerId = ?, at = ? WHERE contextId = ?").run("app-stale", 1_000, "ctx-1");
+  } finally {
+    raw.close();
+  }
 
   coordinator.hydrateRoutes();
   expect(coordinator.routeFor("ctx-1")?.peerId).toBe("app-fresh");
@@ -702,27 +702,31 @@ test("forgetting a project drops its pinned session state, so a later retry cann
   if (!resA.ok || !resB.ok) throw new Error("message refused");
   expect(resA.held).toBe(true);
   expect(resB.held).toBe(true);
-  const forgottenDir = sessionBusSessionDir(abDir, "p-forgotten", "session-a");
-  expect(existsSync(forgottenDir)).toBe(true);
+  const heldFor = (projectId: string, sessionId: string) => loadHeld(abDir, projectId, sessionId).held.length;
+  expect(heldFor("p-forgotten", "session-a")).toBe(1);
 
-  // Mirrors HostServer.forget()'s own order: `deleteProjectStores` has already
-  // reclaimed `agents/p-forgotten/` and the session index no longer resolves
-  // session-a at all by the time the coordinator's own drop runs — proving
-  // forgetProjectStates reads the state's PINNED projectId rather than
-  // re-querying a resolver that would now answer null for it.
-  rmSync(join(abDir, "agents", "p-forgotten"), { recursive: true, force: true });
+  // Mirrors HostServer.forget()'s own order: the durable reclaim has already
+  // run and the session index no longer resolves session-a at all by the time
+  // the coordinator's own drop runs — proving forgetProjectStates reads the
+  // state's PINNED projectId rather than re-querying a resolver that would now
+  // answer null for it.
+  removeSessionBusProject(abDir, "p-forgotten");
+  // Checked before the flush below, which legitimately empties session-b's own
+  // held rows by delivering them: a project reclaim must not be a machine wipe,
+  // and after a successful send the two answers are indistinguishable.
+  expect(heldFor("p-kept", "session-b")).toBe(1);
   owners.delete("session-a");
   coordinator.forgetProjectStates("p-forgotten");
 
   // The carrier comes back and the retry timer fires. Without the drop above,
   // session-a's still-cached state would flush its held message straight
   // through this `send` — a project this bridge has otherwise fully forgotten
-  // — and `commit()` would recreate the very directory forget() just erased.
+  // — and `commit()` would write its rows straight back behind the reclaim.
   deliver = true;
   coordinator.pump();
 
   expect(delivered).toEqual(["session-b"]);
-  expect(existsSync(forgottenDir)).toBe(false);
+  expect(heldFor("p-forgotten", "session-a")).toBe(0);
 
   coordinator.stop();
 });

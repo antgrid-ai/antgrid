@@ -8,14 +8,11 @@
 // what it annotates. It is written on the same flush as the held store, so a
 // crash can lose the tail of the log but never a message still waiting to go.
 
-import { join } from "node:path";
 import { z } from "zod";
 import { BusEnvelopeSchema, trimEnvelopeForLog, type BusEnvelope } from "./envelope";
 import { MAX_LOG_ENTRIES } from "./constants";
 import { SessionMemberKeySchema, type SessionMemberKey } from "../protocol";
-import { readStoreFile, sessionBusSessionDir, writeStoreFile } from "./store-fs";
-
-export const MESSAGE_LOG_VERSION = 1;
+import { readRecords, replaceRecords, withBusDb } from "./bus-db";
 
 export const LoggedEnvelopeSchema = z.object({
   at: z.number(),
@@ -26,11 +23,6 @@ export const LoggedEnvelopeSchema = z.object({
   envelope: BusEnvelopeSchema,
 });
 export type LoggedEnvelope = z.infer<typeof LoggedEnvelopeSchema>;
-
-export const MessageLogFileSchema = z.object({
-  version: z.literal(MESSAGE_LOG_VERSION),
-  entries: z.array(LoggedEnvelopeSchema).max(MAX_LOG_ENTRIES),
-});
 
 export interface MessageLogState {
   readonly entries: readonly LoggedEnvelope[];
@@ -66,28 +58,18 @@ export function entriesForContext(s: MessageLogState, contextId: string): Logged
   return s.entries.filter((e) => e.envelope.contextId === contextId);
 }
 
-function logPath(abDir: string, projectId: string, sessionId: string): string {
-  return join(sessionBusSessionDir(abDir, projectId, sessionId), "messages.json");
-}
-
 export function loadMessageLog(abDir: string, projectId: string, sessionId: string): MessageLogState {
-  const file = readStoreFile<z.infer<typeof MessageLogFileSchema> | null>(
-    logPath(abDir, projectId, sessionId),
-    MessageLogFileSchema,
-    null,
+  return withBusDb(
+    abDir,
+    (db) => ({ entries: readRecords(db, "bus_messages", "entry", { projectId, sessionId }, MAX_LOG_ENTRIES, LoggedEnvelopeSchema) }),
+    emptyLog(),
   );
-  return file ? { entries: file.entries } : emptyLog();
 }
 
-export function saveMessageLog(
-  abDir: string,
-  projectId: string,
-  sessionId: string,
-  s: MessageLogState,
-): void {
-  const dir = sessionBusSessionDir(abDir, projectId, sessionId);
-  writeStoreFile(join(dir, "messages.json"), dir, {
-    version: MESSAGE_LOG_VERSION,
-    entries: s.entries.slice(-MAX_LOG_ENTRIES),
-  });
+export function saveMessageLog(abDir: string, projectId: string, sessionId: string, s: MessageLogState): void {
+  withBusDb(
+    abDir,
+    (db) => replaceRecords(db, "bus_messages", "entry", { projectId, sessionId }, s.entries.slice(-MAX_LOG_ENTRIES)),
+    undefined,
+  );
 }
