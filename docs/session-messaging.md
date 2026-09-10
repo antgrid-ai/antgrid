@@ -409,19 +409,25 @@ target's instructions. Templates stay in one module with a test per kind.
 - **Local (same machine): open.** One user, one bridge, both PTYs already spawned
   by it. A gate here would guard a boundary that does not exist — the bridge can
   already write to both sessions.
-- **Remote: the existing remote-access switch.** No new setting. It is already
-  the sole authorization store, already default-off, already machine-wide and
-  immediate, and already what gates every remote verb.
+- **Remote: the existing remote-access switch, plus one subordinate bit.** The
+  remote-access boolean is still the sole authorization store — already
+  default-off, already machine-wide and immediate, already what gates every
+  remote verb. Beside it sits *reachable by agents*, which defaults **on** and
+  has no effect while remote access is off. See E12.
 
-Deliberately **not** a new "agent messaging" bit. A second switch is a second
-thing off by default that a user must find before the feature works at all, and
-its meaning ("may agents reach in") is not separable in practice from the meaning
-the existing bit already carries ("may my other devices reach in").
+The second bit is not a second thing to find: turning remote access on still
+makes the feature work end to end. It exists so that a user who wants
+devices-yes / agents-no can say so, because the widening below is not the same
+promise the first bit made.
 
-The widening is stated honestly: that switch now also means *an agent on another
-of my machines may interrupt an agent here, unattended*. That is a real increase
-in what one boolean authorizes, and §13 carries it as an open question rather
-than pretending it is neutral.
+That widening is why: the remote-access boolean alone would mean *an agent on
+another of my machines may read this machine's session titles and work status,
+and may interrupt an agent here, unattended*. Disclosure, not only interruption.
+The subordinate bit gates both halves together — off means a peer agent can
+neither read a directory row from this machine nor post into a session on it.
+
+**Not built.** `remote-access-policy.ts` is still the only store, so today the
+widening is live and ungated.
 
 ### 8.2 What an addressable session cannot do
 
@@ -559,41 +565,19 @@ negotiable.
 
 ## 13. Open questions
 
-1. **The consent widening (§8.1).** One boolean now authorizes unattended
-   agent-to-agent interruption. Is a per-machine "reachable by agents" default of
-   *on when remote access is on* correct, or does first contact from a new peer
-   machine deserve a one-time notice? **Now load-bearing rather than
-   prospective:** with the remote half shipped, that same boolean is what lets a
-   peer machine's agent read this machine's session titles and work status —
-   disclosure, not only interruption. Nothing notices a first contact today.
-2. **Directory staleness.** The remote half is a mirror with a TTL, not a live
-   read: a row can be `REMOTE_ROWS_TTL_MS` old, and a session that stops inside
-   that window produces a refusal the sender must handle gracefully. The reach
-   line reports how long ago the read actually reached, so staleness is stated
-   rather than implied — but the refusal wording still matters. A peek-only
-   carrier also means the ordinary state of a desktop at rest is *no peer asked
-   at all*: honest, and thin. Is naming it enough, or should the app pin the
-   peers whose repo keys the bridge asked for?
-3. **Mailbox bound.** How many posts, and is a dropped oldest post visible enough?
-4. **Thread garbage.** Nothing closes a thread. Time-based expiry, or unbounded
+1. **Mailbox bound.** How many posts, and is a dropped oldest post visible enough?
+2. **Thread garbage.** Nothing closes a thread. Time-based expiry, or unbounded
    with a cap?
-5. **Same-repo, different fork.** Two forks of one upstream normalize to
+3. **Same-repo, different fork.** Two forks of one upstream normalize to
    different remotes and will not see each other; two clones of one fork will.
    Correct by default, but worth confirming against real usage.
-6. **Judgeable rows for the five `osc` agents (§9).** Four of nine carry a
+4. **Judgeable rows for the five `osc` agents (§9).** Four of nine carry a
    task-naming title; the rest fall back to a label like `"Cursor Agent"` and
    lean entirely on branch and last activity. Is that enough to pick from, or
    does a session on one of those agents need a name the user sets by hand? Worth
    answering from live use rather than in advance — E11 argues against building a
    topic tool speculatively.
-7. **Pricing.** Unchanged from the old spec's open question.
-8. **Who sees the answer.** A session-bearing card is `bus.publish`ed to every
-   established app session on the answering machine, phone included, and is
-   correlated only by `requestId` at the client. This is a volume change rather
-   than a class change — `machine.sessions-list` already discloses
-   `SessionEntry.name` to the same set under the same gates — but targeting the
-   response at the asking `peerId` is a small change, and it deserves to be a
-   decision rather than an oversight.
+5. **Pricing.** Unchanged from the old spec's open question.
 
 ---
 
@@ -672,3 +656,39 @@ agent resolves a half-guess by asking rather than by inferring harder. Claude
 Code's `ListAgents` validates the architecture and, at 149 rows keyed on
 directory name, measures its failure mode — the row breaks first, not the flat
 list.
+
+**E12 — Agent reach is its own bit, subordinate to the remote-access switch.**
+Reverses this spec's earlier "deliberately not a new bit". The argument against a
+second switch was discovery — a second thing off by default that a user must find
+before anything works — and that objection is answered by the default rather than
+by the absence of the switch: *reachable by agents* defaults on and is inert
+while remote access is off, so the working path is unchanged and the bit exists
+only for the user who wants devices-yes / agents-no. What makes it worth having
+is that the two bits do not make the same promise. Remote access says *my other
+devices may drive this machine*, with a human at the far end of every frame.
+Agent reach says *a program on another of my machines may read what I am working
+on and interrupt me about it, with nobody watching* — and the remote half made
+the reading half real, not prospective. It gates disclosure and interruption
+together: separating them would allow an agent to message a session it is not
+allowed to see. Independent of remote access was refused outright — remote access
+is the sole authorization store and off is machine-wide and immediate.
+
+**E13 — A missed peek warms the peer it missed.**
+The directory asks only the peer control planes the desktop already holds, and a
+desktop at rest holds none, so the honest first answer is usually *no peer asked
+at all*. Rather than make that permanent or pay to prevent it, a miss marks the
+peer wanted so the next ask has it: thin once, then real. This keeps E4's
+push-not-pull intact — `list_sessions` still reads memory and never blocks on a
+network — where pinning peers by shared repo key (giving `sessionBusLinksProvider`
+a real source) would hold standing connections on an idle desktop to keep fresh
+an answer nobody has asked for. The cost is that the first ask after a cold start
+under-reports, which the reach line already states rather than hides.
+
+**E14 — The card answers the session that asked.**
+A session-bearing capability card was published to the control-plane channel,
+which reaches every established app session on the answering machine, phone
+included, correlated only by `requestId` at the client. That is a volume change
+rather than a class change — `machine.sessions-list` already discloses
+`SessionEntry.name` to the same set under the same gates — but it was an
+oversight rather than a decision, and the asking `peerId` is already threaded
+into the control-plane dispatch with `sendToAppSession` already beside it.
