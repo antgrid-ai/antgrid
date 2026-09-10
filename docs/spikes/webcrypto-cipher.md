@@ -98,8 +98,13 @@ it is BoringSSL *inside* a background isolate, which nothing here does yet.
    the shape the `app/build/` poisoning gotcha in the root `CLAUDE.md` is about.
    A failed first configure there is not recoverable by rebuilding. Prove a cold
    `flutter build windows` on a clean checkout before enabling.
-2. **CI build cost.** BoringSSL is compiled from source per platform per build.
-   Unmeasured on the Windows and Linux runners.
+2. **CI build cost is only half measured.** The host-test build the new CI step
+   adds (`flutter pub run webcrypto:setup`, needed because `flutter test` runs
+   on the host VM and never registers the plugin) takes **~16 s cold** on the
+   CI container, and `ci-android.yml` caches nothing, so that is ~16 s on every
+   run. Cheap. The *app* build is the unmeasured one: the Windows and Linux
+   plugin compiles BoringSSL again through its own CMake, and no runner has
+   done it yet.
 3. **Key material outlives `zeroize`.** The cache holds imported keys inside
    BoringSSL, where `SessionKeys.zeroize` cannot reach. Bounded to four entries,
    and `WebcryptoAesGcm.evictImportedKeys()` exists, but nothing calls it — wire
