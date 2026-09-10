@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
+import '../config/native_crypto.dart';
 import '../models/ab_message.dart';
 import '../services/license_token_minter.dart';
 import '../util/ab_log.dart';
@@ -234,7 +235,12 @@ class RelayMechanisms implements ConnMechanisms {
     _sessionPin = null;
     _lastCoords = null;
     _agentOnline = false;
-    if (session != null) await session.dispose();
+    if (session != null) {
+      await session.dispose();
+      // dispose() zeroizes the Dart-side keys; the installed native cipher
+      // holds its own copy that nothing else retires.
+      retireNativeE2eCipherKeys();
+    }
     // Guarded, not merely idempotent: `disconnect()` emits a state event, which
     // feeds another evaluation, which releases again — an unguarded call loops.
     if (_relay.currentState.connectionState !=
@@ -256,6 +262,7 @@ class RelayMechanisms implements ConnMechanisms {
       _session = null;
       _sessionPin = null;
       await existing.dispose();
+      retireNativeE2eCipherKeys();
       // After the dispose, so a listener that rebuilds a transport off this
       // signal cannot observe the half-torn-down session it is replacing.
       onSessionReplaced?.call();

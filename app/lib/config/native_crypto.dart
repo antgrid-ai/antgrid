@@ -41,3 +41,21 @@ void installNativeE2eCipher() {
   E2eTransportDart.useAlgorithm(FlutterAesGcm(secretKeyLength: 32));
   AbLog.info('NativeCrypto', 'transport cipher: cryptography_flutter');
 }
+
+/// Release the per-key state the installed native cipher is holding.
+///
+/// Call wherever a session's key material is retired. `SessionKeys.zeroize`
+/// reaches only the Dart-side buffers; a cipher installed through
+/// `E2eTransportDart.useAlgorithm` keeps its own copy so that a stateless
+/// transport does not pay key setup per frame — on Windows that is a raw key
+/// copy plus CNG's expanded schedule, both in THIS process, not the kernel's.
+///
+/// Nothing retires them by itself once a session is down: eviction is by use,
+/// and a torn-down session imports no further keys. Without this call they live
+/// as long as the process, which is exactly the signed-out or idle-overnight
+/// case where a crash dump is most likely to be taken.
+///
+/// The cache is process-wide rather than per-session, so a second machine's
+/// live session pays one key import (~15 us) on its next frame. Teardowns are
+/// rare enough that this is not a throughput question.
+void retireNativeE2eCipherKeys() => CngAesGcm.evictImportedKeys();
