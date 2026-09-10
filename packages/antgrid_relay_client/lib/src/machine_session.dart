@@ -27,6 +27,11 @@ const int _kConsecutiveTimeoutsToRekey = 3;
 /// a stream flooding thousands of frames still costs one control frame.
 const Duration _unboundNoticeInterval = Duration(seconds: 30);
 
+/// How many ids [MachineSession._unboundNotifiedAt] tracks at once. Past it the
+/// notice is skipped rather than the map widened or emptied — see the sweep in
+/// `_notifyStreamUnbound`.
+const int _kMaxTrackedUnboundStreams = 64;
+
 /// A random UUIDv4. The wire's `id` is `z.string().uuid()`
 /// (`bridge/src/protocol.ts`), and this package deliberately carries no uuid
 /// dependency — it stays Flutter-free and near-dependency-free, and the app's
@@ -824,6 +829,14 @@ class MachineSession {
     _scheduler.resetWindows();
     _resetRxFlow();
     _scheduler.kick();
+    // The agent un-mutes EVERY stream on a fresh session (`notifyPeerOnline` in
+    // bridge/src/stream-mux.ts), so a throttle carried across the boundary
+    // would leave a stream it just resumed flooding with nothing asking it to
+    // stop again. Matters most for the rekey a flooded control channel causes:
+    // three timed-out RPCs re-handshake, and the loop would re-open its own
+    // cause. The bound streams below re-announce themselves by transmitting;
+    // the unbound ones have nothing that can.
+    _unboundNotifiedAt.clear();
     // Re-pull durable state on every (re)establish so late subscribers
     // (a ControlPlaneClient, a just-bound project stream) replay it.
     for (final s in _streams.values) {
@@ -1174,9 +1187,16 @@ class MachineSession {
     final now = DateTime.now();
     final last = _unboundNotifiedAt[sid];
     if (last != null && now.difference(last) < _unboundNoticeInterval) return;
-    // Bounded like the log's map and for the same reason: a peer spraying ids
-    // must not turn this into one entry per id ever seen.
-    if (_unboundNotifiedAt.length > 64) _unboundNotifiedAt.clear();
+    // Bounded like the log's map, but SWEPT rather than emptied: this map gates
+    // a control-plane SEND, not a log line. Clearing it wholesale would let a
+    // peer rotating more ids than the cap draw one notice per inbound frame,
+    // onto the channel liveness and credits share. Expired entries suppress
+    // nothing, so dropping them is free; past the cap, skip the notice rather
+    // than widen the map.
+    _unboundNotifiedAt.removeWhere(
+      (_, at) => now.difference(at) >= _unboundNoticeInterval,
+    );
+    if (_unboundNotifiedAt.length >= _kMaxTrackedUnboundStreams) return;
     _unboundNotifiedAt[sid] = now;
     unawaited(
       sendOnStream(kControlStreamId, {

@@ -139,6 +139,11 @@ export class StreamMux {
       // teardown would send is gated too, leaving the browser socket mute for
       // the life of the page), and a cleared queue and a closed switch are
       // different facts to the one consumer that awaits this.
+      // The unbound mute stops at the bus deliberately: a tunnel run is driven
+      // by a request arriving ON this stream, and inbound traffic un-mutes it,
+      // so the muted case is a server-pushed frame on a tunnel that predates
+      // the mute. Refusing it would need a third outcome — tunnel-manager.ts
+      // branches on "sent", and "gated" is spoken for above.
       sendTunnel: (data) =>
         mayDeliver()
           ? this.transport.sendEnvelope(streamId, data, "preview")

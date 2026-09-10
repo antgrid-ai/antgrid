@@ -1098,11 +1098,6 @@ export class RelayClient {
   private dispatchControlPlane(mJson: string, channel: Channel): void {
     const msg = parseMessageFast(mJson);
     if (msg) {
-      // Consumed here and never forwarded: a capture batch is diagnostics about
-      // this socket, not a verb, and letting it reach `onMessage`/the bus would
-      // hand every project core a message type it has no case for. The frame
-      // that CARRIED it is already in the ring from routeAppEnvelope above, so
-      // the batch's own arrival stays visible either way.
       // Consumed here like `netwatch:events` below: this is a statement about
       // the SOCKET's stream table, not a verb, and the bus it would reach is
       // the one whose stream the app just said it cannot receive.
@@ -1110,6 +1105,11 @@ export class RelayClient {
         this.mux.markUnbound(msg.streamId);
         return;
       }
+      // Consumed here and never forwarded: a capture batch is diagnostics about
+      // this socket, not a verb, and letting it reach `onMessage`/the bus would
+      // hand every project core a message type it has no case for. The frame
+      // that CARRIED it is already in the ring from routeAppEnvelope above, so
+      // the batch's own arrival stays visible either way.
       if (msg.type === "netwatch:events") {
         // Dropped unless a `netwatch:remote` on this machine asked for it.
         // Account trust alone gets a peer to this line, and this line runs
