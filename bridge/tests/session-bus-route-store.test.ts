@@ -191,8 +191,7 @@ test("the route table lives at the machine root, not under any project", () => {
     // Pinned as a literal on purpose. Every other case in this file writes and
     // reads through the same helper, so a relocation carries both halves with
     // it and none of them go red — the same blind spot the delivery queue had.
-    // This is the assertion that caught the move off routes.json, and it is
-    // kept as a literal for the next one.
+    // A relocation has to break here or nowhere.
     expect(existsSync(join(abDir, "session-bus", "bus.db"))).toBe(true);
     // Nothing this store writes may land under a project: a route is looked up
     // by context id, which can name a session in any project on the machine.
@@ -203,10 +202,9 @@ test("the route table lives at the machine root, not under any project", () => {
 });
 
 test("one unreadable row costs one route, not the machine's whole table", () => {
-  // The JSON store this replaced had no way to say this: a single malformed
-  // record failed the file's schema, and the read answered EMPTY — every
-  // project's carrier bindings gone at once, for one bad row, with nothing
-  // logged. Written by raw SQL because saveBusRoutes cannot produce it.
+  // The table is machine-level, so a store that answered one malformed row by
+  // emptying itself would take every project's carrier bindings with it, for
+  // one bad row. Written by raw SQL because saveBusRoutes cannot produce one.
   const abDir = tmpAbDir();
   try {
     saveBusRoutes(abDir, routes([["ctx-good", "app-a", "p1", T0]]));

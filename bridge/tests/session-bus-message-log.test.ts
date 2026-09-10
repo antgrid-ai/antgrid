@@ -87,9 +87,8 @@ test("the log round-trips, and one unreadable row costs one entry rather than th
     // evict the newest entries first.
     expect(back.entries.map((e) => e.envelope.messageId)).toEqual(["m-1", "m-2"]);
 
-    // A record this bridge cannot read, written the only way one can be. The
-    // JSON store this replaced answered a single bad entry by emptying the
-    // whole log; this one loses the entry alone.
+    // A record this bridge cannot read, written the only way one can be: a bad
+    // entry costs that entry, never the session's whole log.
     const raw = new Database(busDbPath(abDir));
     try {
       raw.query("UPDATE bus_messages SET entry = ? WHERE sessionId = ? AND seq = (SELECT MIN(seq) FROM bus_messages)")

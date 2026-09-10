@@ -15,12 +15,11 @@
 // first time either is forgotten. The bus writes on message events, not in a
 // loop; if that ever stops being true, measure before caching.
 //
-// Nothing here throws. A caller that cannot reach the database gets the same
-// answer it got when a JSON file failed to parse — the EMPTY store — with one
-// difference that is the point: the failure is SAID, once per process, with the
-// error that caused it. `readStoreFile` said nothing at all, and for the
-// machine-level routes that meant every project's carrier bindings vanishing
-// with no line anywhere to name why.
+// Nothing here throws. A caller that cannot reach the database gets the EMPTY
+// store, which is the answer every one of them already folds from, and the
+// failure is SAID once per process with the error that caused it. A store that
+// empties itself in silence is the trap: for the machine-level routes that is
+// every project's carrier bindings gone with no line anywhere to name why.
 
 import { Database } from "bun:sqlite";
 import type { z } from "zod";
@@ -136,10 +135,10 @@ function prepare(db: Database): void {
 /**
  * Run [fn] against the bus database, and answer [fallback] if it cannot.
  *
- * The fallback is not a convenience: every caller here replaced a JSON store
- * whose read answered EMPTY on any failure at all, and none of them has a
- * throw-shaped path to put a database error on. What changes is that the
- * failure is now announced (see the module header).
+ * The fallback is not a convenience: every caller folds its store from
+ * whatever comes back and has no throw-shaped path to put a database error on.
+ * The empty store is the answer they are all built around; the announcement
+ * (see the module header) is what keeps that from being silent.
  */
 export function withBusDb<T>(abDir: string, fn: (db: Database) => T, fallback: T): T {
   let db: Database | null = null;
@@ -186,8 +185,8 @@ function scopeWhere(scope: BusScope): { clause: string; params: string[] } {
  * the recent ones — a reader that took the oldest would pin a session to
  * whatever it said first and never show what it is saying now.
  *
- * A row that does not validate is skipped ALONE. The JSON stores this replaced
- * could answer a single bad record only by emptying the whole file.
+ * A row that does not validate is skipped ALONE. A store that answered one bad
+ * record by emptying itself would cost a session its whole log for one row.
  */
 export function readRecords<T>(db: Database, table: string, column: string, scope: BusScope, cap: number, schema: z.ZodType<T>): T[] {
   const { clause, params } = scopeWhere(scope);
@@ -208,9 +207,8 @@ export function readRecords<T>(db: Database, table: string, column: string, scop
  * Make one scope's rows exactly [records], in that order.
  *
  * A whole-scope replace rather than a per-record diff, because every caller
- * holds the scope's state as one immutable fold and hands it over entire — the
- * shape `store-fs.ts` was built around and that the move off JSON deliberately
- * keeps. Each scope is bounded by its own cap, so this is tens of rows, and one
+ * holds the scope's state as one immutable fold and hands it over entire.
+ * Each scope is bounded by its own cap, so this is tens of rows, and one
  * transaction means a reader never sees the scope half-written.
  */
 export function replaceRecords(db: Database, table: string, column: string, scope: BusScope, records: readonly unknown[]): void {

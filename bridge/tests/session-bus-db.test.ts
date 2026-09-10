@@ -64,9 +64,9 @@ test("a database written under another version is dropped, never read", () => {
 });
 
 test("a database that cannot be opened answers the fallback rather than throwing", () => {
-  // Every caller of this seam replaced a JSON store whose read answered EMPTY on
-  // any failure at all, and none of them has a throw-shaped path to put a
-  // database error on. A directory standing where the file goes is the cheapest
+  // No caller of this seam has a throw-shaped path to put a database error on:
+  // each folds its store from whatever comes back, so the empty store has to be
+  // an answer. A directory standing where the file goes is the cheapest
   // unopenable path there is, and it behaves the same on every platform.
   mkdirSync(busDbPath(abDir), { recursive: true });
 

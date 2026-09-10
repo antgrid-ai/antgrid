@@ -183,7 +183,7 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * Seed the route table from the machine-level routes.json (E9/§5.4).
+   * Seed the route table from the machine-level store (E9/§5.4).
    *
    * Unlike a session's message log or held store — loaded lazily, the first
    * time THAT session is addressed, because each belongs to exactly one
@@ -322,7 +322,7 @@ export class SessionBusCoordinator {
   /**
    * Drop every route naming [projectId], from the table AND from disk. Called
    * only when the project itself is forgotten (`HostServer.forget`): the
-   * machine routes.json (`sessionBusMachineDir`) lives outside
+   * machine-level route table (`bus-db.ts`) lives outside
    * `agents/<projectId>/`, so the tree delete that reclaims everything else the
    * project owned cannot reach these rows — this is their only reclaim. The
    * write is FORCED rather than throttled, and names [projectId] as a

@@ -422,7 +422,7 @@ export class HostServer {
     // `projectIdFor` through this same index, and a `resume()` that ran first
     // would read every cold project's on-disk session as unaddressable (a
     // warned miss, per the index's own doc) instead of re-arming its held
-    // retries. Route-table hydration reads the one machine-level routes.json
+    // retries. Route-table hydration reads the one machine-level route table
     // (E9/§5.4/C5) and needs no project list to do it, so it has nothing to
     // wait for — it is only kept alongside `resume()` here so both land before
     // the same first inbound frame this process folds. `.finally` rather than
@@ -2091,11 +2091,10 @@ export class HostServer {
     this.sessionIndex.forgetProject(projectId);
     this.repoKeys.forgetProject(projectId);
     // Step 3 removed `agents/<projectId>/` and the index above no longer
-    // resolves it, but the machine-level routes.json sits OUTSIDE that tree, so
-    // this is the only thing that reclaims the project's carrier rows: it drops
-    // them and rewrites the file, without which the next process start hydrates
-    // every one of them back from disk, leaving on disk exactly the kind of
-    // trace this method exists to erase.
+    // resolves it, but the machine-level route table sits OUTSIDE that tree, so
+    // this is the only thing that reclaims the project's carrier rows. Without
+    // it the next process start hydrates every one of them back, leaving on
+    // disk exactly the kind of trace this method exists to erase.
     this.sessionBus.forgetProjectRoutes(projectId);
     // The coordinator's in-memory session states are the other half of the
     // same leak: a session loaded before this forget() (a live exchange, or a

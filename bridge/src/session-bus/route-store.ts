@@ -17,11 +17,11 @@
 // This table is MACHINE-level and has more than one writer: two hosts on one
 // ANTGRID_DIR is a documented setup (a dev stack beside an installed bridge),
 // so a writer holds only ITS OWN view and a row's absence from that view is
-// never permission to delete it. That single sentence used to cost a
-// read-merge-write on every save, with a race between the read and the rename
-// that could lose the other writer's update outright. A row is now written as a
-// row: a writer touches exactly the contexts it learned, and says which ones it
-// means GONE.
+// never permission to delete it. That sentence is why a save touches exactly
+// the contexts this writer learned and names the ones it means GONE, rather
+// than rewriting the table it happens to be able to see: a writer that rewrote
+// the whole table would delete a sibling's live rows on the strength of not
+// knowing about them.
 
 import { z } from "zod";
 import { MAX_BUS_ROUTES } from "./constants";
@@ -59,9 +59,9 @@ export type BusRouteMap = Map<string, { peerId: string; projectId: string; at: n
  * bridge that comes up after a long stop starts from the same map it would have
  * converged to.
  *
- * A row that does not validate is skipped alone. The JSON store this replaced
- * could only answer a bad file by emptying the WHOLE table — every project's
- * carrier bindings at once, for one malformed row.
+ * A row that does not validate is skipped alone. This table is machine-level,
+ * so answering one malformed row by emptying it would take every project's
+ * carrier bindings with it.
  */
 export function loadBusRoutes(abDir: string, ttlMs: number, now: number): BusRouteMap {
   return withBusDb(
@@ -105,7 +105,7 @@ export interface BusRouteDrops {
  * Write [routes] as rows, and apply [drops].
  *
  * `drops.contextIds` is applied BEFORE the upsert, `drops.projectId` after. The
- * difference is deliberate and survives the move off JSON: a context dropped
+ * difference is deliberate: a context dropped
  * and then relearned before the save came due is present in [routes], and the
  * incoming row is proof it is live again, so it must win; a forgotten project
  * has nothing that could relearn it in this process at all.
