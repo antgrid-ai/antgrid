@@ -44,6 +44,7 @@ import {
 import {
   appendLog,
   emptyLog,
+  lastOutboundSummary,
   loadMessageLog,
   markDelivered,
   saveMessageLog,
@@ -117,6 +118,11 @@ export type SessionBusEvent = {
   opensThread: boolean;
   peer: SessionMemberRef;
   envelope: BusEnvelope;
+  /** What this session last said on this thread, when the event continues one
+   *  and the log still holds it. Read here rather than by the layer that
+   *  renders it: the coordinator owns the log, and a second reader would resolve
+   *  the owning project for itself and could answer about a different one. */
+  answering?: string;
 };
 
 export interface CoordinatorDeps {
@@ -955,7 +961,20 @@ export class SessionBusCoordinator {
       }),
       { contextId, role: this.roleForContext(sessionId, contextId), to: from },
     );
-    this.emit({ kind: verb, sessionId, threadId, opensThread, peer: envelope.metadata.peer, envelope });
+    this.emit({
+      kind: verb,
+      sessionId,
+      threadId,
+      opensThread,
+      peer: envelope.metadata.peer,
+      envelope,
+      // Read off the log as it stood BEFORE the append above, which is where
+      // this session's own side of the exchange already is; the entry just
+      // appended is the inbound one and is not an answer to anything.
+      ...(threadId !== null && !opensThread
+        ? { answering: lastOutboundSummary(s.log, threadId) }
+        : {}),
+    });
   }
 
   /** Stamp the outbound entry a receipt answers (E6).

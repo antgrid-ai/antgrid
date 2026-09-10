@@ -338,6 +338,43 @@ describe("session-bus coordinator across a carrier", () => {
     expect(threads).toEqual([opened.threadId, opened.threadId]);
   });
 
+  // The reply template names what it answers, and the coordinator is the only
+  // thing that can source it: it owns the log, and a renderer going back to disk
+  // for it would resolve the owning project for itself and could answer about a
+  // different one.
+  test("an answer on a thread carries what this session last said on it", () => {
+    const first = lead.message({
+      sessionId: LEAD_REF.sessionId,
+      verb: "post",
+      threadId: null,
+      to: PEER_REF,
+      summary: "run the suite",
+      parts: [{ kind: "text", text: "run the suite" }],
+    });
+    const threadId = (first as { threadId: string }).threadId;
+    drain();
+    carried = [];
+
+    const answer = peer.message({
+      sessionId: PEER_REF.sessionId,
+      verb: "notify",
+      threadId,
+      to: LEAD_REF,
+      summary: "it is green",
+      parts: [{ kind: "text", text: "it is green" }],
+    });
+    expect("ok" in answer && answer.ok).toBe(true);
+    drain();
+
+    const arrived = leadEvents.at(-1)!;
+    expect(arrived.opensThread).toBe(false);
+    expect(arrived.answering).toBe("run the suite");
+
+    // A first contact answers nothing, so claiming it did would place the reader
+    // in an exchange that never happened.
+    expect(peerEvents[0]!.answering).toBeUndefined();
+  });
+
   test("a frame naming a session this bridge does not hold is dropped without an ack", () => {
     // Reported as DROPPED, not merely "a bus frame": the agent core binds the
     // only route home on this answer, so a frame naming somebody else's session

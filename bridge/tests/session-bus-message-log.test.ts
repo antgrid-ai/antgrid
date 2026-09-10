@@ -8,6 +8,7 @@ import {
   appendLog,
   emptyLog,
   entriesForThread,
+  lastOutboundSummary,
   loadMessageLog,
   markDelivered,
   saveMessageLog,
@@ -25,13 +26,15 @@ const PEER_KEY: SessionMemberKey = { machineId: "m2", projectId: "p2", sessionId
 const PEER: SessionMemberRef = { ...PEER_KEY, machineLabel: "Laptop" };
 const T0 = 4_000_000;
 
-function env(over: { threadId?: string | null; contextId?: string; text?: string; messageId?: string } = {}) {
+function env(
+  over: { threadId?: string | null; contextId?: string; text?: string; messageId?: string; summary?: string } = {},
+) {
   return stampEnvelope(
     {
       threadId: over.threadId === undefined ? "t1" : over.threadId,
       contextId: over.contextId ?? "c1",
       parts: [{ kind: "text", text: over.text ?? "the suite is green" }],
-      summary: "reporting back",
+      summary: over.summary ?? "reporting back",
     },
     { messageId: over.messageId ?? "m-1", peer: PEER, now: T0 },
   );
@@ -136,4 +139,40 @@ test("stampEnvelope owns every bridge field and the size cap reads the serialize
   const huge = env({ text: "y".repeat(MAX_ENVELOPE_BYTES) });
   expect(envelopeBytes(huge)).toBeGreaterThan(MAX_ENVELOPE_BYTES);
   expect(checkEnvelopeSize(huge)).toBe("ENVELOPE_TOO_LARGE");
+});
+
+// What a reply's header names is what THIS session last put on the thread, so
+// the inbound half of the log must not answer it — a peer's own summary read
+// back as "It answers" would tell the reader their message was a reply to the
+// message that is replying to them.
+test("the last thing this session said on a thread is its own, and the newest of them", () => {
+  let s = appendLog(emptyLog(), {
+    at: T0,
+    direction: "out",
+    peer: PEER_KEY,
+    envelope: env({ messageId: "m-1", summary: "did the down-migration run" }),
+  });
+  s = appendLog(s, {
+    at: T0 + 1,
+    direction: "out",
+    peer: PEER_KEY,
+    envelope: env({ messageId: "m-2", summary: "asking again with the schema version" }),
+  });
+  s = appendLog(s, {
+    at: T0 + 2,
+    direction: "in",
+    peer: PEER_KEY,
+    envelope: env({ messageId: "m-3", summary: "it ran at 12:02" }),
+  });
+  s = appendLog(s, {
+    at: T0 + 3,
+    direction: "out",
+    peer: PEER_KEY,
+    envelope: env({ threadId: "t-other", messageId: "m-4", summary: "unrelated" }),
+  });
+
+  expect(lastOutboundSummary(s, "t1")).toBe("asking again with the schema version");
+  // A thread the ring has already trimmed, or one this session only ever
+  // received on, yields nothing rather than the nearest thing to hand.
+  expect(lastOutboundSummary(s, "t-gone")).toBeUndefined();
 });

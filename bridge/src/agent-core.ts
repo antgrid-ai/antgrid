@@ -1117,11 +1117,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function deliverBusEvent(event: SessionBusEvent): void {
     let line: Omit<QueuedLine, "queuedAt"> | null = null;
     try {
-      line = lineForEvent(event, {
-        abDir,
-        projectId: project.id,
-        now: Date.now,
-      });
+      line = lineForEvent(event);
     } catch (err) {
       // The coordinator has already folded and acked by the time it announces,
       // so throwing back into it would fail a settled fold over a rendering

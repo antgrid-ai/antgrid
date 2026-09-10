@@ -64,6 +64,21 @@ export function entriesForThread(s: MessageLogState, threadId: string): LoggedEn
   return s.entries.filter((e) => e.envelope.threadId === threadId);
 }
 
+/** What this session last said on [threadId], so a reply's header can place it.
+ *
+ *  The outbound half of its own log and nothing else: a thread row carries the
+ *  route, the mailbox carries only posts, and this is the one record of what
+ *  THIS session put on the thread. The log is a bounded ring, so an exchange
+ *  older than it yields nothing and the header omits the clause rather than
+ *  guessing at one. */
+export function lastOutboundSummary(s: MessageLogState, threadId: string): string | undefined {
+  for (let i = s.entries.length - 1; i >= 0; i -= 1) {
+    const e = s.entries[i]!;
+    if (e.direction === "out" && e.envelope.threadId === threadId) return e.envelope.metadata.summary;
+  }
+  return undefined;
+}
+
 /** Stamp a receipt onto the outbound entry it answers, or return the state
  *  unchanged when there is nothing to stamp — a message already trimmed out of
  *  the ring, or a second receipt for one already stamped. Outbound only: a peer
