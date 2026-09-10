@@ -48,6 +48,24 @@ export interface SessionDirectoryRow {
   canReply: boolean;
 }
 
+/** One session on a peer's capability card, before the asking machine stamps
+ *  its own `machineId`/`machineLabel` onto it. `canReply` is computed HERE,
+ *  by the machine that owns the session: re-deriving it against the asking
+ *  machine's own registry would compile for any tool string and go wrong the
+ *  moment the two bridges run different versions. */
+export interface MachineDirectoryRow {
+  repoKey: string;
+  projectId: string;
+  projectLabel?: string;
+  sessionId: string;
+  title: string;
+  branch: string | null;
+  activity: DirectoryActivity;
+  workStatus?: WorkStatus;
+  lastActiveAt: number;
+  canReply: boolean;
+}
+
 /** The half of {@link SessionBusRepoKeys} a directory reads. Narrow on purpose:
  *  nothing here may refresh a key, so a directory read can never turn into the
  *  git spawn its whole design exists to keep off the request path. */
@@ -85,6 +103,80 @@ function activityOf(entry: SessionEntry): DirectoryActivity {
   return entry.workStatus === "working" || entry.workStatus === "attention" ? "running" : "idle";
 }
 
+/** The row-shape one project contributes, before either surface stamps
+ *  identity onto it. One loop, two stamps, so `canReply`, `activity` and the
+ *  archived/deleting exclusion can never drift between the two surfaces. */
+export interface DirectoryRowCore {
+  projectId: string;
+  projectLabel?: string;
+  sessionId: string;
+  title: string;
+  activity: DirectoryActivity;
+  workStatus?: WorkStatus;
+  lastActiveAt: number;
+  canReply: boolean;
+}
+
+/** Every addressable session in one project, unstamped. `excludeSessionId`
+ *  drops the caller's own row where there is a caller; {@link
+ *  machineDirectoryRows} calls with none, since a capability card has no
+ *  caller to exclude. */
+export function directoryRowsFor(
+  sessionIndex: DirectorySessions,
+  projectId: string,
+  excludeSessionId?: string,
+): DirectoryRowCore[] {
+  const rows: DirectoryRowCore[] = [];
+  for (const { entry, projectLabel } of sessionIndex.sessionsIn(projectId)) {
+    if (entry.id === excludeSessionId) continue;
+    if (entry.archived || entry.deleting) continue;
+    rows.push({
+      projectId,
+      ...(projectLabel === undefined ? {} : { projectLabel }),
+      sessionId: entry.id,
+      title: entry.name,
+      activity: activityOf(entry),
+      ...(entry.workStatus === undefined ? {} : { workStatus: entry.workStatus }),
+      lastActiveAt: entry.lastUsedAt,
+      // An unknown tool is receive-only, not a peer: a session whose vendor
+      // this bridge cannot name certainly does not declare an mcp profile.
+      canReply: entry.tool !== undefined && agentSpec(entry.tool)?.mcp !== undefined,
+    });
+  }
+  return rows;
+}
+
+/** The session half of a widened capability card: one row per addressable
+ *  session across the given projects, keyed to the repo key and branch the
+ *  card already paid to read. A project with no repo key contributes no
+ *  row — a session is addressed by repo key, so one it cannot carry is not
+ *  offerable (§5.1 fails closed here too). */
+export function machineDirectoryRows(
+  sessionIndex: DirectorySessions,
+  projects: Array<{ projectId: string; repoKey: string | null; branch: string | null }>,
+  max: number,
+): { rows: MachineDirectoryRow[]; truncated: number } {
+  const rows: MachineDirectoryRow[] = [];
+  for (const { projectId, repoKey, branch } of projects) {
+    if (repoKey === null) continue;
+    for (const core of directoryRowsFor(sessionIndex, projectId)) {
+      rows.push({ repoKey, branch, ...core });
+    }
+  }
+  // Ranked before it is cut, because the cut is what the asking machine can
+  // never undo: an unranked slice can spend all 40 rows on idle sessions and
+  // drop the running one, and no sort on the other side can recover a row that
+  // did not travel. Branch is deliberately not a key here — the answering
+  // machine does not know which branch the asking agent is on.
+  rows.sort(
+    (a, b) =>
+      ACTIVITY_RANK[a.activity] - ACTIVITY_RANK[b.activity]
+      || b.lastActiveAt - a.lastActiveAt
+      || a.sessionId.localeCompare(b.sessionId),
+  );
+  return { rows: rows.slice(0, max), truncated: Math.max(0, rows.length - max) };
+}
+
 const ACTIVITY_RANK: Record<DirectoryActivity, number> = { running: 0, idle: 1, stopped: 2 };
 
 /**
@@ -107,6 +199,32 @@ export function sortDirectory(rows: SessionDirectoryRow[], callerBranch: string 
       // stable order across calls rather than shuffling under the agent.
       || a.sessionId.localeCompare(b.sessionId);
   });
+}
+
+/**
+ * Caps a sorted directory while guaranteeing this machine's own rows a floor
+ * of slots, however far a peer legitimately outranks them. Identity-based (a
+ * `Set` over row objects, not a rebuilt array), so the local rows that survive
+ * stay in `sorted`'s order rather than being re-sorted among themselves.
+ *
+ * The floor is carved OUT OF the cap, never added to it: a caller tuning
+ * either one independently must not be able to ask for a bound and receive a
+ * longer list, since the count it reports as truncated is computed from what
+ * comes back.
+ */
+export function withLocalFloor(
+  sorted: SessionDirectoryRow[],
+  selfMachineId: string | null,
+  cap: number,
+  floor: number,
+): SessionDirectoryRow[] {
+  const local = sorted.filter((r) => r.machineId === selfMachineId);
+  const keep = new Set<SessionDirectoryRow>(local.slice(0, Math.min(floor, cap, local.length)));
+  for (const r of sorted) {
+    if (keep.size >= cap) break;
+    keep.add(r);
+  }
+  return sorted.filter((r) => keep.has(r));
 }
 
 /**
@@ -155,23 +273,8 @@ export class SessionDirectory {
     // where one repository is open under many project ids, that is most of them.
     const rows: SessionDirectoryRow[] = [];
     for (const projectId of projects) {
-      for (const { entry, projectLabel } of this.deps.sessionIndex.sessionsIn(projectId)) {
-        if (entry.id === caller.sessionId) continue;
-        if (entry.archived || entry.deleting) continue;
-        rows.push({
-          machineId,
-          projectId,
-          ...(projectLabel === undefined ? {} : { projectLabel }),
-          sessionId: entry.id,
-          title: entry.name,
-          branch: null,
-          activity: activityOf(entry),
-          ...(entry.workStatus === undefined ? {} : { workStatus: entry.workStatus }),
-          lastActiveAt: entry.lastUsedAt,
-          // An unknown tool is receive-only, not a peer: a session whose vendor
-          // this bridge cannot name certainly does not declare an mcp profile.
-          canReply: entry.tool !== undefined && agentSpec(entry.tool)?.mcp !== undefined,
-        });
+      for (const core of directoryRowsFor(this.deps.sessionIndex, projectId, caller.sessionId)) {
+        rows.push({ machineId, branch: null, ...core });
       }
     }
 

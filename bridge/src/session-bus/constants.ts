@@ -79,3 +79,21 @@ export const MAX_UNEXPECTED_CHARS = 4_000;
  *  publish-artifact, because an unbounded result is an unbounded prompt on the
  *  other machine. */
 export const MAX_ENVELOPE_BYTES = 64 * 1024;
+
+/** Rows one peer machine's capability card may carry. Separate from
+ *  `MAX_DIRECTORY_ROWS` (session-bus/directory.ts): this bounds what one
+ *  answering machine spends per request, not what a merged directory reads
+ *  back afterward. */
+export const MAX_MACHINE_CARD_ROWS = 40;
+
+/** Local rows `withLocalFloor` (session-bus/directory.ts) never lets a peer
+ *  evict. `sortDirectory` has no locality key, so without a floor a peer with
+ *  many same-branch running sessions can legitimately outrank and push every
+ *  local row off a capped list — the remote half SUCCEEDING is what causes
+ *  that, which is what makes it the easiest failure to miss. */
+export const LOCAL_ROW_FLOOR = 20;
+
+/** Repo keys one `includeSessions` capability-card request may name. A
+ *  matching key, never an authorization input — the cap bounds how many
+ *  cached `readRepoKey` probes one request can spend, not what it may see. */
+export const MAX_DIRECTORY_REPO_KEYS = 8;
