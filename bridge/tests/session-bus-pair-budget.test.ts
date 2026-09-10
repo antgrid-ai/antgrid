@@ -316,3 +316,61 @@ test("only a human clears a halt the gate tripped", () => {
     expect(send(bus, "post", { threadId: opening.threadId })).toMatchObject({ ok: true });
   });
 });
+
+// -- the read-only probe ----------------------------------------------------
+//
+// `pairRefusal` exists so a verb layer can put the halt ABOVE its liveness
+// check. That makes it a second reader of the same counters, and the failure it
+// can introduce is silent: a probe that charged what it read would halt a
+// healthy pair in half the exchanges §7.4 allows, and every test above would
+// still pass.
+
+test("pairRefusal answers null for a pair that has never spent anything", () => {
+  withGate((bus) => {
+    expect(bus.pairRefusal(A.sessionId, TO, "post")).toBeNull();
+    expect(bus.pairRefusal(A.sessionId, TO, "notify")).toBeNull();
+  });
+});
+
+test("pairRefusal reports the halt for BOTH verbs — the ordering it exists to enable", () => {
+  withGate((bus) => {
+    const opening = send(bus, "post");
+    if (!("ok" in opening) || !opening.ok) throw new Error("first send refused");
+    for (let i = 1; i < NO_PROGRESS_EXCHANGES; i += 1) send(bus, "post", { threadId: opening.threadId });
+
+    expect(bus.pairRefusal(A.sessionId, TO, "post")?.code).toBe("NO_PROGRESS");
+    expect(bus.pairRefusal(A.sessionId, TO, "notify")?.code).toBe("NO_PROGRESS");
+  });
+});
+
+test("pairRefusal reports the notify ceiling for notify only; post still reads as reachable", () => {
+  withGate((bus) => {
+    for (let i = 0; i < MAX_NOTIFIES_PER_PAIR_HOUR; i += 1) send(bus, "notify");
+
+    expect(bus.pairRefusal(A.sessionId, TO, "notify")?.code).toBe("NOTIFY_RATE");
+    expect(bus.pairRefusal(A.sessionId, TO, "post")).toBeNull();
+  });
+});
+
+test("a session with no address answers null rather than a refusal about the pair", () => {
+  withGate((bus) => {
+    expect(bus.pairRefusal("not-held", TO, "notify")).toBeNull();
+  });
+});
+
+test("asking does not spend: pairRefusal leaves the store untouched and the send still lands", () => {
+  withGate((bus, rows) => {
+    const opening = send(bus, "post");
+    if (!("ok" in opening) || !opening.ok) throw new Error("first send refused");
+    const spent = structuredClone(rows.get(A.sessionId));
+
+    // Far more asks than the no-progress counter has room for: if any of them
+    // charged, the pair would be halted before the send below.
+    for (let i = 0; i < NO_PROGRESS_EXCHANGES * 4; i += 1) {
+      expect(bus.pairRefusal(A.sessionId, TO, i % 2 === 0 ? "post" : "notify")).toBeNull();
+    }
+
+    expect(rows.get(A.sessionId)).toEqual(spent);
+    expect(send(bus, "post", { threadId: opening.threadId })).toMatchObject({ ok: true });
+  });
+});

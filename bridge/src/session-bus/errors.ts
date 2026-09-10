@@ -5,13 +5,21 @@
 // code and reason without inventing either.
 
 export const SESSION_BUS_ERRORS = {
-  /** The single 403. A caller either names a session this bridge holds or it
-   *  does not; there is no second kind of caller left to refuse. */
+  /** Membership is binary: a caller either names a session this bridge holds
+   *  or it does not. Not the only 403 — `REMOTE_ACCESS_OFF` below is the
+   *  other, and it is about the machine rather than the caller, so a surface
+   *  that has lost the code and is reading back from the status alone cannot
+   *  tell the two apart. */
   NOT_MEMBER: 403,
-  /** Two refusals with no producer in the tree today, and neither is dead code:
-   *  a directory row can name a session that has since stopped, and a send to a
-   *  machine whose control plane is gone has to say which of the two happened. */
+  /** A send whose address resolves to nothing: {@link SessionDirectory.rowFor}
+   *  found no row, local or mirrored, for the machine/project/session it was
+   *  given. Covers both of the row's own dead ends — a session that has since
+   *  stopped and been forgotten, and a project this bridge never opened. */
   UNKNOWN_PEER: 404,
+  /** A send addressed at a machine `rowFor` cannot currently resolve a row
+   *  for — no mirrored card for that machine on this repo key, or the mirror
+   *  has gone stale (`REMOTE_CARRIER_SILENCE_MS`). The row may exist on the
+   *  far side; this machine simply has nothing current to route it through. */
   PEER_UNREACHABLE: 503,
   /** The caller's own project cannot be addressed at all: it has no git
    *  remote, so it has no repo key and therefore no peers (§5.1 fails closed).
@@ -19,10 +27,25 @@ export const SESSION_BUS_ERRORS = {
    *  else is on it. */
   NOT_ADDRESSABLE: 409,
   UNKNOWN_ARTIFACT: 404,
-  /** The two per-pair ceilings of 7.4. `NO_PROGRESS` is the halt: it refuses
-   *  every verb and only a human lifts it. `NOTIFY_RATE` refuses one verb and
-   *  names `post` as the one that still reaches, so the caller has somewhere to
-   *  go rather than a wall. */
+  /** §7.3: a `notify` addressed at a session that is not running. Refused
+   *  rather than queued, because a stopped session never reaches the turn
+   *  boundary a notify waits for, and starting it on the sender's behalf is
+   *  not available — the session belongs to someone else. The text must name
+   *  `post` as the verb that still reaches: a post lands in the mailbox
+   *  whether or not anything is running to read it yet. */
+  NOT_RUNNING: 409,
+  /** §6.3's send half: this machine's own remote-access switch is off, so a
+   *  frame addressed at another machine is refused here, where the sending
+   *  agent can see why, rather than accepted and left to queue undelivered
+   *  forever behind a switch nobody is going to flip from in here. */
+  REMOTE_ACCESS_OFF: 403,
+  /** The two per-pair ceilings of §7.4, and they stay two codes on purpose:
+   *  `NOTIFY_RATE` is a rolling-hour rate limit the pair simply waits out and
+   *  refuses one verb, naming `post` as the one that still reaches; `NO_PROGRESS`
+   *  is a halt that time does not clear — only a human does
+   *  (`SessionBusCoordinator.clearHalt`) — and it refuses every verb, not only
+   *  `notify`. Collapsing them into one code would tell a caller who only needs
+   *  to wait an hour that nothing but a human can free it. */
   NO_PROGRESS: 429,
   NOTIFY_RATE: 429,
   ENVELOPE_TOO_LARGE: 413,

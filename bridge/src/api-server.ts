@@ -12,6 +12,8 @@ import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
 import {
   PublishArtifactBodySchema,
+  SendBodySchema,
+  ReplyBodySchema,
   type SessionBusApi,
 } from "./session-bus/api";
 import { ARTIFACT_CHUNK_BYTES } from "./session-bus/constants";
@@ -468,6 +470,14 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (req.method === "GET") {
           if (rest === "artifacts") return sessionBusJson(bus.listArtifacts(terminalId));
           if (rest === "sessions") return sessionBusJson(await bus.listSessions(terminalId));
+          if (rest === "inbox") return sessionBusJson(bus.inbox(terminalId));
+          if (rest === "thread") {
+            // An absent id is passed through as "" rather than answered here:
+            // the api's own thread lookup is what owns "unknown thread", so a
+            // caller that names no id gets that same refusal, not a route-level
+            // shortcut a client could learn to distinguish from a bad id.
+            return sessionBusJson(bus.thread(terminalId, url.searchParams.get("threadId") ?? ""));
+          }
           const artifact = rest.match(/^artifacts\/([^/]+)$/);
           if (artifact) {
             return sessionBusJson(bus.getArtifact(
@@ -490,6 +500,15 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
 
         if (rest === "artifacts") {
           return sessionBusPost(PublishArtifactBodySchema, body, (b) => bus.publishArtifact(terminalId, b));
+        }
+        if (rest === "post") {
+          return sessionBusPost(SendBodySchema, body, (b) => bus.post(terminalId, b));
+        }
+        if (rest === "notify") {
+          return sessionBusPost(SendBodySchema, body, (b) => bus.notify(terminalId, b));
+        }
+        if (rest === "reply") {
+          return sessionBusPost(ReplyBodySchema, body, (b) => bus.reply(terminalId, b));
         }
         return json({ error: "Not found" }, 404);
       }

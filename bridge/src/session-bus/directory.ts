@@ -16,7 +16,8 @@
 import { inProbePool, readRepoCard } from "../capability-card";
 import { agentSpec } from "../agents/registry";
 import type { SessionEntry, WorkStatus } from "../protocol";
-import { LOCAL_ROW_FLOOR, REMOTE_CARRIER_SILENCE_MS } from "./constants";
+import { LOCAL_MACHINE_ID, LOCAL_ROW_FLOOR, REMOTE_CARRIER_SILENCE_MS } from "./constants";
+import { namesMachine } from "./address";
 import type { ReachMachine } from "./remote-directory";
 
 /** Rows one directory read may return. Generous against §5.5's expected 3-15:
@@ -355,6 +356,57 @@ export class SessionDirectory {
       truncated: merged.length - bounded.length + remoteHalf.truncated,
       reach: remoteHalf.reach,
     };
+  }
+
+  /**
+   * The one row a send needs, resolved with no branch probe and no git spawn —
+   * `list()` is documented as the bus's one async read precisely so a send
+   * never goes through it. `branch` is always null here: §5.3 makes branch a
+   * ranking hint, and a lookup by exact address does not rank.
+   *
+   * BOTH halves are scoped to the CALLER's own repo key, and the local one is
+   * the half that matters: the session index is host-wide, so without the
+   * scope a caller in one repository could address a session in an unrelated
+   * one on the same machine — and §8.2 lists exactly that among the things an
+   * addressable session cannot do. E5 names the repo key as one of the three
+   * bounds the bridge enforces rather than an agent's judgment, and E4 makes
+   * the local path the common case, so a bound that held only on the remote
+   * path would be the bound holding where it is least needed.
+   *
+   * A local target (`target.machineId` null, or naming this machine) answers
+   * from the session index, deriving `canReply` the way {@link
+   * directoryRowsFor} always has. A remote target answers from the mirror and
+   * returns the row exactly as the owning machine reported it: `canReply`
+   * there is that machine's own answer, and re-deriving it against this
+   * machine's registry would go wrong the moment the two bridges run different
+   * agent versions.
+   */
+  rowFor(
+    caller: { projectId: string },
+    target: { machineId: string | null; projectId: string; sessionId: string },
+  ): SessionDirectoryRow | null {
+    // §5.1 fails closed here as it does in `list()`, which refuses a keyless
+    // caller outright: a project with no git remote has no key, so it can name
+    // nobody and nobody can name it.
+    const key = this.deps.repoKeys.keyFor(caller.projectId);
+    if (!key) return null;
+    const selfMachineId = this.deps.machineId();
+    if (target.machineId === null || namesMachine(target.machineId, selfMachineId ?? LOCAL_MACHINE_ID)) {
+      if (!this.deps.repoKeys.projectsSharing(key).includes(target.projectId)) return null;
+      for (const core of directoryRowsFor(this.deps.sessionIndex, target.projectId)) {
+        if (core.sessionId === target.sessionId) return { machineId: selfMachineId, branch: null, ...core };
+      }
+      return null;
+    }
+
+    const now = this.deps.now?.() ?? Date.now();
+    const view = this.deps.remoteDirectory?.view(key, selfMachineId, now);
+    return (
+      view?.rows.find(
+        (r) =>
+          r.machineId === target.machineId && r.projectId === target.projectId && r.sessionId === target.sessionId,
+      ) ?? null
+    );
   }
 
   /**

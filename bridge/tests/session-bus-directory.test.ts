@@ -602,3 +602,205 @@ test("reach says no-machine-id rather than offering rows that cannot be sent to"
   expect(answer.reach).toEqual({ scope: "machine", why: "no-machine-id" });
   expect(answer.rows).toEqual([]);
 });
+
+// -- rowFor: the synchronous read a send can afford --------------------------
+
+test("rowFor answers a local hit with no branch probe, branch null", () => {
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["p"] },
+    sessionIndex: {
+      *sessionsIn(projectId) {
+        if (projectId === "p") yield { entry: session({ id: "s-local" }) };
+      },
+    },
+    projectPath: () => "/repos/p",
+    machineId: () => "machine-1",
+    readBranch: async () => {
+      throw new Error("rowFor must never probe a branch");
+    },
+  });
+
+  const row = d.rowFor({ projectId: "caller" }, { machineId: null, projectId: "p", sessionId: "s-local" });
+  expect(row).not.toBeNull();
+  expect(row!.sessionId).toBe("s-local");
+  expect(row!.machineId).toBe("machine-1");
+  expect(row!.branch).toBeNull();
+});
+
+test("rowFor resolves a target naming this machine by the LOCAL_MACHINE_ID sentinel", () => {
+  // The same resolution `namesMachine` gives the coordinator: a sender with no
+  // relay identity yet addresses this machine by the sentinel, and a later
+  // arrival naming the real id must find the same row.
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["p"] },
+    sessionIndex: {
+      *sessionsIn(projectId) {
+        if (projectId === "p") yield { entry: session({ id: "s-local" }) };
+      },
+    },
+    projectPath: () => "/repos/p",
+    machineId: () => "machine-1",
+    readBranch: async () => "main",
+  });
+
+  const bySentinel = d.rowFor({ projectId: "caller" }, { machineId: "local", projectId: "p", sessionId: "s-local" });
+  expect(bySentinel?.sessionId).toBe("s-local");
+  const byRealId = d.rowFor(
+    { projectId: "caller" },
+    { machineId: "machine-1", projectId: "p", sessionId: "s-local" },
+  );
+  expect(byRealId?.sessionId).toBe("s-local");
+});
+
+test("rowFor returns a remote-mirror hit's canReply exactly as the owning machine reported it", () => {
+  // The mirror row carries no `tool` for this bridge to look up in the first
+  // place — that absence is the proof `rowFor` cannot be re-deriving canReply
+  // against its own registry on this path, only returning what arrived.
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["caller"] },
+    sessionIndex: { *sessionsIn() {} },
+    projectPath: () => "/repos/caller",
+    machineId: () => "self-machine",
+    readBranch: async () => "main",
+    remoteDirectory: remoteOf({
+      rows: [remoteRow({ sessionId: "peer-sess", projectId: "peer-project", canReply: true })],
+      lastPushAt: 1_000,
+    }),
+    now: () => 1_000,
+  });
+
+  const row = d.rowFor(
+    { projectId: "caller" },
+    { machineId: "peer-1", projectId: "peer-project", sessionId: "peer-sess" },
+  );
+  expect(row).not.toBeNull();
+  expect(row!.canReply).toBe(true);
+});
+
+test("rowFor returns null for an unknown session in a known local project", () => {
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["p"] },
+    sessionIndex: {
+      *sessionsIn(projectId) {
+        if (projectId === "p") yield { entry: session({ id: "s-real" }) };
+      },
+    },
+    projectPath: () => "/repos/p",
+    machineId: () => "machine-1",
+    readBranch: async () => "main",
+  });
+
+  expect(d.rowFor({ projectId: "caller" }, { machineId: null, projectId: "p", sessionId: "s-ghost" })).toBeNull();
+});
+
+test("rowFor returns null for a remote target no mirrored row matches", () => {
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["caller"] },
+    sessionIndex: { *sessionsIn() {} },
+    projectPath: () => "/repos/caller",
+    machineId: () => "self-machine",
+    readBranch: async () => "main",
+    remoteDirectory: remoteOf({
+      rows: [remoteRow({ sessionId: "peer-sess", projectId: "peer-project" })],
+      lastPushAt: 1_000,
+    }),
+    now: () => 1_000,
+  });
+
+  // A different machine id than anything the mirror carries.
+  const unknownMachine = d.rowFor(
+    { projectId: "caller" },
+    { machineId: "some-other-machine", projectId: "peer-project", sessionId: "peer-sess" },
+  );
+  expect(unknownMachine).toBeNull();
+
+  // A caller whose own project has no repo key: a remote target is never
+  // addressable from a project the bus fails closed on (§5.1).
+  const noRepoKey = new SessionDirectory({
+    repoKeys: { keyFor: () => null, probed: () => true, projectsSharing: () => [] },
+    sessionIndex: { *sessionsIn() {} },
+    projectPath: () => undefined,
+    machineId: () => "self-machine",
+  });
+  expect(
+    noRepoKey.rowFor({ projectId: "keyless" }, { machineId: "peer-1", projectId: "peer-project", sessionId: "peer-sess" }),
+  ).toBeNull();
+});
+
+test("rowFor answers a local hit even when the branch probe would throw", () => {
+  // The whole point of a synchronous read: nothing here may await, so wiring
+  // the probe to throw proves it was never called rather than merely never
+  // awaited.
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => KEY, probed: () => true, projectsSharing: () => ["p"] },
+    sessionIndex: {
+      *sessionsIn(projectId) {
+        if (projectId === "p") yield { entry: session({ id: "s-local" }) };
+      },
+    },
+    projectPath: () => "/repos/p",
+    machineId: () => "machine-1",
+    readBranch: async () => {
+      throw new Error("rowFor must never reach the branch probe");
+    },
+  });
+
+  const row = d.rowFor({ projectId: "caller" }, { machineId: null, projectId: "p", sessionId: "s-local" });
+  expect(row).not.toBeNull();
+  expect(row!.branch).toBeNull();
+});
+
+test("rowFor refuses a local target whose project is on another repo key", () => {
+  // The session index is host-wide, so this row enumerates whoever asks: the
+  // repo key is the only thing stopping a caller in one repository from
+  // addressing a session in an unrelated one on the same machine (§8.2), and E5
+  // names it as a bound the bridge enforces rather than one an agent respects.
+  const d = new SessionDirectory({
+    repoKeys: {
+      keyFor: (id) => (id === "mine" ? KEY : "github.com/other/thing"),
+      probed: () => true,
+      projectsSharing: (key) => (key === KEY ? ["mine"] : ["theirs"]),
+    },
+    sessionIndex: {
+      *sessionsIn(projectId) {
+        if (projectId === "mine") yield { entry: session({ id: "s-mine" }) };
+        if (projectId === "theirs") yield { entry: session({ id: "s-elsewhere" }) };
+      },
+    },
+    projectPath: (id) => `/repos/${id}`,
+    machineId: () => "machine-1",
+    readBranch: async () => "main",
+  });
+
+  expect(d.rowFor({ projectId: "mine" }, { machineId: null, projectId: "theirs", sessionId: "s-elsewhere" })).toBeNull();
+  // The control: same machine, same key. What the refusal above names is the
+  // repo key, not the local path.
+  expect(
+    d.rowFor({ projectId: "mine" }, { machineId: null, projectId: "mine", sessionId: "s-mine" })?.sessionId,
+  ).toBe("s-mine");
+});
+
+test("rowFor refuses a LOCAL target when the caller's own project has no repo key", () => {
+  // §5.1 fails closed in both directions: a project with no git remote can name
+  // nobody, and E4 makes the local path the common one — so a bound that held
+  // only on the remote half would be holding where it is least needed. The
+  // target's project IS in `projectsSharing` here, so nothing but the caller's
+  // own missing key can produce the null.
+  const d = new SessionDirectory({
+    repoKeys: { keyFor: () => null, probed: () => true, projectsSharing: () => ["p"] },
+    sessionIndex: {
+      *sessionsIn(projectId) {
+        if (projectId === "p") yield { entry: session({ id: "s-local" }) };
+      },
+    },
+    projectPath: () => "/repos/p",
+    machineId: () => "machine-1",
+    readBranch: async () => "main",
+  });
+
+  expect(d.rowFor({ projectId: "keyless" }, { machineId: null, projectId: "p", sessionId: "s-local" })).toBeNull();
+  // And by the machine's real name, which takes the same local branch.
+  expect(
+    d.rowFor({ projectId: "keyless" }, { machineId: "machine-1", projectId: "p", sessionId: "s-local" }),
+  ).toBeNull();
+});

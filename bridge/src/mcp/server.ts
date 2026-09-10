@@ -123,10 +123,43 @@ function str(description: string) {
   return { type: "string", description };
 }
 
+/** Where a send is aimed, spelled exactly as a row of antgrid_list_sessions
+ *  spells it. `machineId` is omissible because a directory row on a machine with
+ *  no relay identity carries none, and requiring it would leave a local-mode
+ *  agent unable to name the session next to it. */
+function sendTargetSchema() {
+  return {
+    type: "object",
+    description: "The session to address, copied from a row of antgrid_list_sessions. Optional beside a threadId, which already records the other end.",
+    properties: {
+      machineId: {
+        // A client that validates arguments against this schema before
+        // dispatching would reject an explicit null locally, and the refusal
+        // would be its own — nothing on this machine would log it, and the
+        // route's own handling of null would be unreachable through the only
+        // surface that calls it.
+        type: ["string", "null"],
+        description: "Machine the session runs on. Omit or pass null for a session on this machine.",
+      },
+      projectId: str("Project the session belongs to."),
+      sessionId: str("The session itself."),
+    },
+    required: ["projectId", "sessionId"],
+  };
+}
+
+function artifactIdsSchema() {
+  return {
+    type: "array",
+    items: { type: "string" },
+    description: "Ids from antgrid_publish_artifact. The other side is shown each id, name and summary and cannot read the bytes, so anything it must READ belongs in text.",
+  };
+}
+
 /** The tools that reach the bus. Their own table because the dispatch below
  *  routes them by name to the loopback API instead of answering here; what a
  *  client is offered is BASE_TOOLS, which spreads this in. */
-const SESSION_BUS_TOOLS: McpTool[] = [
+export const SESSION_BUS_TOOLS: McpTool[] = [
   {
     name: "antgrid_list_sessions",
     description: "List the other agent sessions you can address — every session, on this machine or a connected one, whose project is the same git repository as yours. Rows are ordered by how likely they are to matter (same branch, then still working, then recently active), not scored: read the titles and judge. The answer always ends with a line saying how far the read actually reached, so an empty list can be told apart from a read that could not ask.",
@@ -163,6 +196,69 @@ const SESSION_BUS_TOOLS: McpTool[] = [
         length: { type: "number", description: "Bytes to read, clamped to one chunk." },
       },
       required: ["artifactId"],
+    },
+  },
+  {
+    name: "antgrid_post",
+    description: "Leave a message in another session's mailbox. It does not interrupt anything: the other agent reads it when it next chooses to, so this is the verb for anything that is not blocking that session. It is also the unbudgeted one — the mailbox is bounded instead, and its oldest post is dropped when it fills. Address it with a row from antgrid_list_sessions. The answer carries the thread id to continue on.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: sendTargetSchema(),
+        summary: str("One line saying what this message is, shown wherever it is listed."),
+        text: str("The message body — what the other agent actually reads."),
+        artifactIds: artifactIdsSchema(),
+        unexpected: str("Something you found that nobody asked about, kept out of the answer so it reads as a separate claim."),
+        threadId: str("Thread id from an earlier message, to answer that exchange without interrupting. Omit to open a new thread — and when you pass one, `to` is optional, because the thread already records who is on the other end."),
+      },
+      required: ["summary"],
+    },
+  },
+  {
+    name: "antgrid_notify",
+    description: "Interrupt another session: the message is submitted into it at its next turn boundary, landing in the middle of what that agent is doing. It is rate-limited per peer and refused outright when the target is not running, so it is not the verb to reach for by default — antgrid_post is the unbudgeted one and always reaches. Use this only when the other side cannot usefully continue without knowing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: sendTargetSchema(),
+        summary: str("One line saying what this message is, shown wherever it is listed."),
+        text: str("The message body — what the other agent actually reads."),
+        artifactIds: artifactIdsSchema(),
+        unexpected: str("Something you found that nobody asked about, kept out of the answer so it reads as a separate claim."),
+        threadId: str("Thread id from an earlier message, to interrupt on that exchange. Omit to open a new thread — and when you pass one, `to` is optional, because the thread already records who is on the other end."),
+      },
+      required: ["summary"],
+    },
+  },
+  {
+    name: "antgrid_reply",
+    description: "Answer on a thread you were told about, by its id and nothing else — the bridge remembers who is on the other end, so a reply cannot be misaddressed. Interrupts the peer the way antgrid_notify does, and is budgeted the same way.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        threadId: str("The thread being answered, as antgrid_inbox or the line that interrupted you spelled it."),
+        summary: str("One line saying what this message is, shown wherever it is listed."),
+        text: str("The message body — what the other agent actually reads."),
+        artifactIds: artifactIdsSchema(),
+        unexpected: str("Something you found that nobody asked about, kept out of the answer so it reads as a separate claim."),
+      },
+      required: ["threadId", "summary"],
+    },
+  },
+  {
+    name: "antgrid_inbox",
+    description: "Read the posts waiting for this session, and mark them read. Each row names who sent it, the thread to answer on, and any artifacts it points at. The header says how many older posts were dropped unread because the mailbox filled.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "antgrid_thread",
+    description: "Read one exchange end to end — both directions, oldest first. Each message you sent says whether the other side acknowledged it, which is the only confirmation in this design that anything arrived.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        threadId: str("Thread id, from antgrid_inbox or from what a send answered."),
+      },
+      required: ["threadId"],
     },
   },
 ];
@@ -286,6 +382,91 @@ function artifactLine(a: any): string {
   return `- ${a.artifactId} ${a.name} (${a.mediaType}, ${a.bytes} bytes): ${a.summary}`;
 }
 
+/** A member as it can be addressed back, which is the whole of what a
+ *  correspondent is here: there is no name and no human behind it to greet. */
+function memberAddress(ref: any): string {
+  const machine = ref.machineId ? `${ref.machineId}/` : "";
+  return `${machine}${ref.projectId}/${ref.sessionId}`;
+}
+
+/** What a send owes its caller. The thread id because §4.3 makes it
+ *  bridge-owned — an agent never told it cannot answer on the exchange it just
+ *  opened — and whether the frame LEFT this machine, which is never a claim
+ *  that it arrived: the receipt on antgrid_thread is the only witness to that. */
+function sendLine(data: any): string {
+  const opened = data.opensThread ? "Opened thread" : "On thread";
+  const left = data.sent
+    ? "It left this machine; whether it arrived shows as a receipt in antgrid_thread."
+    : "It is held on this machine and has not left yet; it goes when the link is back.";
+  return `${opened} ${data.threadId} (message ${data.messageId}). ${left} Use antgrid_reply with that thread id to answer.`;
+}
+
+/** One mailbox row: sender and thread lead, because together they are how it is
+ *  answered, and the body follows indented under them so a reader needs no
+ *  second call per post. */
+function inboxLine(post: any): string {
+  const thread = post.threadId ? `thread ${post.threadId}` : "no thread — it cannot be answered";
+  const lines = [`- [${memberAddress(post.from)}] ${thread} — ${post.summary}`];
+  for (const text of post.text ?? []) lines.push(`  ${text}`);
+  if (post.unexpected) lines.push(`  Not asked about: ${post.unexpected}`);
+  for (const artifact of post.artifacts ?? []) lines.push(`  ${artifactLine(artifact)}`);
+  return lines.join("\n");
+}
+
+/** One thread entry, in the direction it travelled. An outbound entry always
+ *  says whether it was acknowledged: an unacked message is never retried, so its
+ *  silence is the whole of what the sender gets to know. */
+function threadEntryLine(entry: any, now: number): string {
+  const who = entry.direction === "out" ? "you" : memberAddress(entry.peer);
+  const arrow = entry.direction === "out" ? "->" : "<-";
+  const receipt = entry.direction !== "out"
+    ? ""
+    : entry.deliveredAt === undefined
+      ? " [no receipt yet]"
+      : ` [delivered ${seconds(now - entry.deliveredAt)} ago]`;
+  const lines = [`- ${arrow} ${who}, ${seconds(now - entry.at)} ago${receipt} — ${entry.summary}`];
+  for (const text of entry.text ?? []) lines.push(`  ${text}`);
+  return lines.join("\n");
+}
+
+function argObj(args: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
+  const v = args?.[key];
+  return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
+function argStrArr(args: Record<string, unknown> | undefined, key: string): string[] | undefined {
+  const v = args?.[key];
+  return Array.isArray(v) && v.every((e) => typeof e === "string") ? (v as string[]) : undefined;
+}
+
+/** Rebuilt key by key rather than forwarded whole, for the reason {@link body}
+ *  exists: the target is `.strict()` too, so one key inside it that the route
+ *  does not name refuses the entire send with a bare 400. A null machineId is
+ *  kept — the route reads it as "this machine", the same as an absent one. */
+function sendTarget(args: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  const to = argObj(args, "to");
+  if (!to) return undefined;
+  return body({
+    machineId: to.machineId === null || typeof to.machineId === "string" ? to.machineId : undefined,
+    projectId: typeof to.projectId === "string" ? to.projectId : undefined,
+    sessionId: typeof to.sessionId === "string" ? to.sessionId : undefined,
+  });
+}
+
+/** The fields the three send verbs share. One builder, because the routes share
+ *  one body shape and a per-verb copy is how two of them drift into accepting
+ *  different messages. */
+function messageBody(args: Record<string, unknown> | undefined): Record<string, unknown> {
+  return body({
+    to: sendTarget(args),
+    summary: argStr(args, "summary"),
+    text: argStr(args, "text"),
+    artifactIds: argStrArr(args, "artifactIds"),
+    unexpected: argStr(args, "unexpected"),
+    threadId: argStr(args, "threadId"),
+  });
+}
+
 /**
  * Run one session-bus tool. Every branch is the same shape — build a body, call
  * the route, render what came back — because the route is where the decision was
@@ -343,6 +524,48 @@ export async function callSessionBusTool(
       if (!r.ok) return toolError(busError(r));
       const more = r.data.eof ? "" : "\n\n(more follows — read again with a higher offset)";
       return toolText(`${r.data.text}${more}`);
+    }
+
+    case "antgrid_post":
+    case "antgrid_notify":
+    case "antgrid_reply": {
+      const verb = name.slice("antgrid_".length);
+      const r = await api("POST", `/session-bus/${verb}`, messageBody(args));
+      if (!r.ok) return toolError(busError(r));
+      return toolText(sendLine(r.data));
+    }
+
+    case "antgrid_inbox": {
+      const r = await api("GET", "/session-bus/inbox");
+      if (!r.ok) return toolError(busError(r));
+      const posts = (r.data.posts ?? []) as any[];
+      const dropped = (r.data.dropped ?? 0) as number;
+      // The mailbox is bounded and drops its oldest, so a drop the reader is
+      // never told about is a message that, as far as this session can tell, was
+      // never sent. It rides the header the way the sessions head reports
+      // truncation, and an emptied inbox says it as loudly as a full one.
+      // Worded as the lifetime total it is: the store's counter is never reset,
+      // so phrasing it as a delta would report the same losses on every read
+      // and answer the one question worth asking — was anything lost since I
+      // last looked — wrongly every time.
+      const lost = dropped > 0
+        ? `; ${dropped} post${dropped === 1 ? " has" : "s have"} been dropped unread from this mailbox since it was created`
+        : "";
+      const head = posts.length === 0
+        ? `No unread posts${lost}.`
+        : `Unread posts (${posts.length}${lost}). Reading them here marks them read:`;
+      return toolText([head, ...posts.map(inboxLine)].join("\n"));
+    }
+
+    case "antgrid_thread": {
+      const threadId = argStr(args, "threadId");
+      if (!threadId) return toolError("Missing required argument: threadId");
+      const r = await api("GET", `/session-bus/thread?threadId=${encodeURIComponent(threadId)}`);
+      if (!r.ok) return toolError(busError(r));
+      const entries = (r.data.entries ?? []) as any[];
+      const now = Date.now();
+      const head = `Thread ${r.data.threadId} (${entries.length} message${entries.length === 1 ? "" : "s"}, oldest first):`;
+      return toolText([head, ...entries.map((entry) => threadEntryLine(entry, now))].join("\n"));
     }
 
     default:

@@ -170,7 +170,10 @@ edit breaks silently.
   loopback API as `carrierPresent`). The desktop app is the carrier; no
   attached carrier means the frame is HELD and retried by the coordinator, never
   dropped, so a closed desktop is an indefinitely delayed exchange rather than a
-  failed one.
+  failed one — on every path except the agent-initiated verbs, which read
+  `carrierPresent` up front and refuse `PEER_UNREACHABLE`
+  (`session-bus/api.ts`) rather than report a held frame to an agent that reads
+  every answer but a refusal as delivered.
 - **The remote half of the directory arrives by loopback push and by nothing
   else.** The app peeks at control-plane sessions it already holds, asks each
   machine for a session-bearing `machine.capability-card`, and pushes the
@@ -278,7 +281,11 @@ edit breaks silently.
   human" has to outlive a restart. Both ceilings are charged and refused inside
   `SessionBusCoordinator.message`, which is the single point every verb leaves
   through — a gate in the loopback API or the MCP tools instead would be one a
-  new caller could be written around without noticing.
+  new caller could be written around without noticing. A caller may ASK the same
+  question read-only through `SessionBusCoordinator.pairRefusal`, which charges
+  nothing and exists so the verb layer can order its own ladder (a halted pair
+  aimed at a stopped session has to hear about the halt, which only a human
+  lifts). It never replaces the check inside `message`.
 - **`/session-bus/*` in `api-server.ts` is the loopback route table**, keyed off
   `?terminalId=` — which is what says whose session a request is about, and the
   same slot that resolves an isolated session's checkout. Bus frames route by

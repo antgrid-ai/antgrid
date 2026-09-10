@@ -627,17 +627,9 @@ export class SessionBusCoordinator {
     // Both ceilings of §7.4, read BEFORE anything is stamped or logged: a
     // refusal must leave no trace of the message it refused, or a halted pair
     // accumulates thread rows for exchanges that never happened.
-    const budget = this.deps.pairBudget
-      ? budgetFor(this.deps.pairBudget.recordsFor(input.sessionId), pairKey(self.key, to))
-      : null;
-    if (budget) {
-      const halted = checkHalt(budget);
-      if (halted) return halted;
-      if (input.verb === "notify") {
-        const tooOften = checkNotify(budget, now);
-        if (tooOften) return tooOften;
-      }
-    }
+    const budget = this.pairBudgetFor(input.sessionId, self, to);
+    const refusal = refusalForPair(budget, input.verb, now);
+    if (refusal) return refusal;
     const contextId = input.contextId ?? input.sessionId;
     // Minted here when the caller has none, and RETURNED either way: §4.3 makes
     // the id bridge-owned except when replying, so an agent that is not told it
@@ -691,6 +683,39 @@ export class SessionBusCoordinator {
     // route would otherwise talk to itself forever outside every ceiling.
     if (budget) this.spendBudget(input.sessionId, budget, input.verb, opensThread || carriesArtifact(input.parts), now);
     return { ok: true, sent, held: hasHeld(held, envelope.messageId), messageId: envelope.messageId, threadId, opensThread };
+  }
+
+  /**
+   * Would this pair's §7.4 ceilings refuse [verb] right now? Read-only: it
+   * charges nothing, writes nothing, and loads no session state.
+   *
+   * It exists so a caller can ORDER its own refusals, not so it can gate.
+   * A refusal ladder that asked liveness first would tell a halted pair "that
+   * session is not running", sending it to wait for something that cannot help
+   * when what it needs is a human on the other session — so the ladder has to
+   * be able to see the halt before it looks at anything else.
+   *
+   * {@link message} runs the SAME decision again on the way through and is the
+   * only place that charges it. That second run is not redundant with this one:
+   * it is what makes the ceiling hold for every caller, including ones written
+   * after this method and ones that never ask. Deleting it leaves the budget
+   * enforced only by whoever remembered to call ahead.
+   *
+   * A session with no `self` answers null rather than a refusal — whether that
+   * is `NOT_MEMBER` or `AGENT_NOT_READY` belongs to the caller's ladder, and
+   * this method speaks only about the pair.
+   */
+  pairRefusal(sessionId: string, to: SessionMemberKey, verb: "post" | "notify"): SessionBusRefusal | null {
+    const self = this.deps.self(sessionId);
+    if (!self) return null;
+    return refusalForPair(this.pairBudgetFor(sessionId, self, to), verb, this.now());
+  }
+
+  /** This session's budget record for one peer, or null when nothing above this
+   *  coordinator holds a budget at all — see `deps.pairBudget`. */
+  private pairBudgetFor(sessionId: string, self: SessionBusSelf, to: SessionMemberKey): PairBudgetState | null {
+    if (!this.deps.pairBudget) return null;
+    return budgetFor(this.deps.pairBudget.recordsFor(sessionId), pairKey(self.key, to));
   }
 
   /**
@@ -1142,6 +1167,27 @@ const ENVELOPE_TOO_LARGE_REASON =
 
 function notMember(): SessionBusRefusal {
   return refuse("NOT_MEMBER", "this bridge does not hold a session with that id");
+}
+
+/**
+ * §7.4's two ceilings as ONE decision, in the order they refuse: the halt binds
+ * every verb, the hourly ceiling only `notify`.
+ *
+ * Shared by {@link SessionBusCoordinator.message} and
+ * {@link SessionBusCoordinator.pairRefusal} rather than written twice, so the
+ * answer a caller orders its ladder by and the answer the send is actually
+ * refused with can never drift apart. Pure — a null budget is an unbudgeted
+ * bus, which refuses nothing.
+ */
+function refusalForPair(
+  budget: PairBudgetState | null,
+  verb: "post" | "notify",
+  now: number,
+): SessionBusRefusal | null {
+  if (!budget) return null;
+  const halted = checkHalt(budget);
+  if (halted) return halted;
+  return verb === "notify" ? checkNotify(budget, now) : null;
 }
 
 /** Whether a message carries something durable, which is half of §7.4's
