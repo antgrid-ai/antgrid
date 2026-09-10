@@ -2089,6 +2089,22 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     case 'session-bus:ack':
       return json;
 
+    // The app's own reads of its bridge's session bus, plus the unsolicited
+    // count that keeps their badges true between reads. Handed on raw like the
+    // carried frames above, but for the opposite reason: these ARE this app's
+    // messages, and their one reader (`providers/session_bus_inbox.dart`)
+    // decodes them into the view models its surfaces render. A second set of
+    // models here would be two shapes to keep true against one schema.
+    //
+    // The three REQUESTS they answer (`session-bus:directory`, `:inbox`,
+    // `:thread`) are app→bridge and never arrive, so they have no case here;
+    // their type strings are authored where they are sent.
+    case 'session-bus:directory:result':
+    case 'session-bus:inbox:result':
+    case 'session-bus:thread:result':
+    case 'session-bus:unread':
+      return json;
+
     default:
       return null;
   }

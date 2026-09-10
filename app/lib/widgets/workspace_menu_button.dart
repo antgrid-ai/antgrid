@@ -16,7 +16,7 @@ import '../providers/visible_surface.dart';
 import '../utils/platform_utils.dart';
 import 'workspace_tab_bar.dart';
 
-/// The agent bar's way into the workspace views: a rail naming all five,
+/// The agent bar's way into the workspace views: a rail naming those on offer,
 /// anchored under the icon (see the popup doc below) — the SAME rail on a
 /// touch tablet as on a mouse desktop, since the touch tablet's context panel
 /// is now a docked pane beside the agent (see `WorkspaceShellState._buildTabletTouch`),
@@ -46,7 +46,7 @@ import 'workspace_tab_bar.dart';
 /// as the rail is up.
 ///
 /// The shell keeps it down for as long as the context pane is on screen, since
-/// the pane's own [WorkspaceTabBar] already lists the same five views (see
+/// the pane's own [WorkspaceTabBar] already lists the same views (see
 /// `WorkspaceShellState._syncMenuToContextPane`). What is left for the rail is
 /// the one job nothing else can do — the way back to the workspace once the
 /// pane is closed.
@@ -56,7 +56,7 @@ import 'workspace_tab_bar.dart';
 ///
 /// Renders nothing when [workspaceMenuControlProvider] is null — the New
 /// Session route and the settings overlay have no workspace to reveal, and a
-/// menu there would list five views that don't exist yet.
+/// menu there would list views that don't exist yet.
 class WorkspaceMenuButton extends ConsumerStatefulWidget {
   const WorkspaceMenuButton({super.key});
 
@@ -255,6 +255,7 @@ class _WorkspaceMenuPanelState extends ConsumerState<WorkspaceMenuPanel>
     final control = ref.watch(workspaceMenuControlProvider);
     final badges = ref.watch(workspaceBadgesProvider);
     final gitStat = ref.watch(gitDiffTotalsProvider);
+    final views = ref.watch(visibleWorkspaceViewsProvider);
     if (control == null) return const SizedBox.shrink();
 
     return MouseRegion(
@@ -281,7 +282,7 @@ class _WorkspaceMenuPanelState extends ConsumerState<WorkspaceMenuPanel>
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    for (final view in WorkspaceView.values)
+                    for (final view in views)
                       _RailRow(
                         view: view,
                         selected: view == control.active,
@@ -336,7 +337,7 @@ class _RailRowState extends State<_RailRow> {
   ///
   /// The Git row trades its file count for the worktree's +/-: how much changed
   /// is what the row is read for, and one trailing figure is all it has room
-  /// for. The tab strip deliberately keeps its plain count — five tabs on one
+  /// for. The tab strip deliberately keeps its plain count — several tabs on one
   /// scrolling row have no space for a figure this wide.
   ///
   /// Sized up from [AbDiffStat]'s own default, which is set for the dense

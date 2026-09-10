@@ -2369,6 +2369,197 @@ const SessionBusAckMessage = BaseMessage.extend({
 }).extend(SessionBusAckWire.shape);
 
 
+// ── Session bus: what the APP reads of its OWN bridge ────────────────────────
+// The five frames above are agent-to-agent traffic the app only CARRIES between
+// two bridges that cannot dial each other. These are the opposite: an app
+// asking the bridge it is attached to about its own sessions, and consuming the
+// answer. Same plane all the same — `SessionBusApi` is built inside the project
+// core with the machine-level directory injected into it, so machine-scoped
+// STATE never implied machine-scoped transport (`docs/session-messaging.md`
+// §5.4: "The transport did not move with it").
+//
+// Every one is answered from that single api rather than re-derived here. A
+// human surface and an agent tool that each computed who is reachable would
+// eventually disagree, and nothing would say which of the two was right.
+
+/** The bus's one refusal vocabulary (`session-bus/errors.ts`) as it rides a
+ *  result frame. `code` is a bare string rather than an enum over that map's
+ *  keys: a reader branches on the code and renders the `error` text authored at
+ *  the point of refusal, and one that dropped a whole frame over a code it had
+ *  not learned yet would turn a NEW refusal into silence.
+ *
+ *  Present exactly when the answer fields are absent. Collapsing a refusal into
+ *  an empty answer instead would render "this terminal names no session" as
+ *  "nobody has written to you", which is the one wrong thing an inbox can say. */
+const SessionBusRefusalWire = {
+  error: z.string().max(500).optional(),
+  code: z.string().max(80).optional(),
+};
+
+/** One directory row (§5.5). Mirrors `SessionDirectoryRow`
+ *  (`session-bus/directory.ts`) field for field rather than importing it, the
+ *  same one-way edge that module already keeps against the remote mirror's row:
+ *  the wire vocabulary lives here and the bus's internals must be free to gain
+ *  a field this does not carry. */
+const SessionBusDirectoryRowSchema = z.object({
+  /** Null in local mode, where no frame can leave the machine to need one. */
+  machineId: z.string().max(200).nullable(),
+  machineLabel: z.string().max(120).optional(),
+  projectId: z.string().max(200),
+  projectLabel: z.string().max(120).optional(),
+  sessionId: z.string().max(200),
+  title: z.string().max(200),
+  branch: z.string().max(250).nullable(),
+  activity: z.enum(["running", "idle", "stopped"]),
+  workStatus: WorkStatusSchema.optional(),
+  lastActiveAt: z.number(),
+  /** Whether that session's agent can be messaged back at all (§9). A
+   *  receive-only vendor is offered saying so, never as a peer that will
+   *  silently never answer. */
+  canReply: z.boolean(),
+});
+
+/** One machine in the reach report. It rides beside the rows and never in them:
+ *  a peer whose rows have all expired contributes nothing to the list and must
+ *  still be NAMED, or "that machine is not reachable from here" renders as
+ *  "that machine has nothing running". */
+const SessionBusReachMachineSchema = z.object({
+  machineId: z.string().max(200),
+  machineLabel: z.string().max(120).optional(),
+  status: z.enum(["answered", "no-card", "refused", "reach-refused", "unreachable"]),
+  rows: z.number(),
+  droppedRows: z.number(),
+  truncatedCard: z.number(),
+  ageMs: z.number(),
+});
+
+/** `DirectoryReach` (`session-bus/directory.ts`): either this answer never left
+ *  the machine, and why, or it spans the network and says what each peer
+ *  contributed. */
+const SessionBusDirectoryReachSchema = z.discriminatedUnion("scope", [
+  z.object({
+    scope: z.literal("machine"),
+    why: z.enum(["remote-access-off", "no-machine-id", "no-carrier"]),
+  }),
+  z.object({
+    scope: z.literal("network"),
+    lastPushAgoMs: z.number(),
+    machines: z.array(SessionBusReachMachineSchema),
+    staleMachines: z.number(),
+    notConnected: z.number(),
+  }),
+]);
+
+const SessionBusInboxArtifactSchema = z.object({
+  artifactId: z.string().max(200),
+  name: z.string().max(200),
+  mediaType: z.string().max(120),
+  bytes: z.number(),
+  sha256: z.string().max(64),
+  summary: z.string().max(MAX_SUMMARY_CHARS),
+});
+
+/** One unread post, rendered whole so a reader needs no second call per row. */
+const SessionBusInboxPostSchema = z.object({
+  messageId: z.string().max(200),
+  threadId: z.string().max(200).nullable(),
+  contextId: z.string().max(200),
+  at: z.number(),
+  from: SessionMemberKeySchema,
+  summary: z.string().max(MAX_SUMMARY_CHARS),
+  text: z.array(z.string()),
+  unexpected: z.string().max(MAX_UNEXPECTED_CHARS).optional(),
+  artifacts: z.array(SessionBusInboxArtifactSchema),
+});
+
+const SessionBusThreadEntrySchema = z.object({
+  direction: z.enum(["in", "out"]),
+  at: z.number(),
+  peer: SessionMemberKeySchema,
+  summary: z.string().max(MAX_SUMMARY_CHARS),
+  text: z.array(z.string()),
+  /** Outbound entries only, and its absence is "no receipt yet" rather than a
+   *  failure: a receipt is fire-and-forget and an unacked message is never
+   *  retried. This read is the only surface that stamp is visible on. */
+  deliveredAt: z.number().optional(),
+});
+
+const SessionBusDirectoryMessage = BaseMessage.extend({
+  type: z.literal("session-bus:directory"),
+  requestId: z.string(),
+  /** Whose directory this is. Every bus read is asked ON BEHALF of one session
+   *  — there is no machine-wide "who is out there" answer, because reachability
+   *  is computed from the asking session's own repo key and branch. */
+  sessionId: z.string(),
+});
+
+const SessionBusDirectoryResultMessage = BaseMessage.extend({
+  type: z.literal("session-bus:directory:result"),
+  requestId: z.string(),
+  sessions: z.array(SessionBusDirectoryRowSchema).optional(),
+  /** Rows the bound dropped. Never silent: a truncated list that claims to be
+   *  complete reads as "there is nobody else". */
+  truncated: z.number().optional(),
+  reach: SessionBusDirectoryReachSchema.optional(),
+  /** The asking machine's own id, so a renderer can tell a local row from a
+   *  peer's. Deriving it by elimination from `reach` would be wrong in exactly
+   *  the state that matters — a peer whose rows expired is named there while
+   *  contributing none. */
+  machineId: z.string().nullable().optional(),
+  ...SessionBusRefusalWire,
+});
+
+const SessionBusInboxMessage = BaseMessage.extend({
+  type: z.literal("session-bus:inbox"),
+  requestId: z.string(),
+  sessionId: z.string(),
+});
+
+const SessionBusInboxResultMessage = BaseMessage.extend({
+  type: z.literal("session-bus:inbox:result"),
+  requestId: z.string(),
+  /** A PEEK: answering this does not mark anything read. The agent's own read
+   *  is what spends the unread flag — see `SessionBusApi.inboxPeek`. */
+  posts: z.array(SessionBusInboxPostSchema).optional(),
+  /** Posts this session will never see, zero included (§7.4): a reader that
+   *  cannot tell an empty inbox from an emptied one has been told the wrong
+   *  thing, not merely told less. */
+  dropped: z.number().optional(),
+  unread: z.number().optional(),
+  ...SessionBusRefusalWire,
+});
+
+const SessionBusThreadMessage = BaseMessage.extend({
+  type: z.literal("session-bus:thread"),
+  requestId: z.string(),
+  sessionId: z.string(),
+  threadId: z.string(),
+});
+
+const SessionBusThreadResultMessage = BaseMessage.extend({
+  type: z.literal("session-bus:thread:result"),
+  requestId: z.string(),
+  /** Echoed even on a refusal: a surface holding several open threads has to
+   *  know which one was refused, and `requestId` alone says that only to the
+   *  caller that still remembers what it asked. */
+  threadId: z.string(),
+  contextId: z.string().optional(),
+  entries: z.array(SessionBusThreadEntrySchema).optional(),
+  ...SessionBusRefusalWire,
+});
+
+/** Unsolicited: a mailbox grew. The count is what a badge renders, and it
+ *  exists because a badge that only ever moves when something asks is a badge
+ *  frozen at whatever the last read returned. Coalesced per session on the
+ *  bridge, so a burst of arrivals is one push carrying the final count rather
+ *  than one push per post. */
+const SessionBusUnreadMessage = BaseMessage.extend({
+  type: z.literal("session-bus:unread"),
+  sessionId: z.string(),
+  unread: z.number(),
+  dropped: z.number(),
+});
+
 // ── Netwatch: shipping a remote app's half of the frame capture ───────────────
 // Both ride the machine CONTROL plane and are consumed by relay-client.ts before
 // anything project-scoped sees them. Deliberately absent from
@@ -2558,6 +2749,13 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   SessionBusFetchMessage,
   SessionBusFetchResultMessage,
   SessionBusAckMessage,
+  SessionBusDirectoryMessage,
+  SessionBusDirectoryResultMessage,
+  SessionBusInboxMessage,
+  SessionBusInboxResultMessage,
+  SessionBusThreadMessage,
+  SessionBusThreadResultMessage,
+  SessionBusUnreadMessage,
   NetwatchConfigureMessage,
   NetwatchEventsMessage,
 ]);
@@ -2740,6 +2938,13 @@ export type SessionBusNotify = z.infer<typeof SessionBusNotifyMessage>;
 export type SessionBusFetch = z.infer<typeof SessionBusFetchMessage>;
 export type SessionBusFetchResult = z.infer<typeof SessionBusFetchResultMessage>;
 export type SessionBusAck = z.infer<typeof SessionBusAckMessage>;
+export type SessionBusDirectoryRead = z.infer<typeof SessionBusDirectoryMessage>;
+export type SessionBusDirectoryResult = z.infer<typeof SessionBusDirectoryResultMessage>;
+export type SessionBusInboxRead = z.infer<typeof SessionBusInboxMessage>;
+export type SessionBusInboxResult = z.infer<typeof SessionBusInboxResultMessage>;
+export type SessionBusThreadRead = z.infer<typeof SessionBusThreadMessage>;
+export type SessionBusThreadResult = z.infer<typeof SessionBusThreadResultMessage>;
+export type SessionBusUnread = z.infer<typeof SessionBusUnreadMessage>;
 
 /**
  * Types whose wire text must never be recorded verbatim, however loudly an
@@ -2902,6 +3107,10 @@ const KNOWN_TYPES = new Set<string>([
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
   "session-bus:post", "session-bus:notify", "session-bus:fetch", "session-bus:fetch:result", "session-bus:ack",
+  "session-bus:directory", "session-bus:directory:result",
+  "session-bus:inbox", "session-bus:inbox:result",
+  "session-bus:thread", "session-bus:thread:result",
+  "session-bus:unread",
   "netwatch:configure", "netwatch:events",
 ]);
 

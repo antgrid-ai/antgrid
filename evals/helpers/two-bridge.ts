@@ -138,8 +138,22 @@ async function resolveStream(app: RelayClient, projectId: string): Promise<strin
   throw new Error(`no streamId advertised for project ${projectId}: ${String(lastErr)}`);
 }
 
+// The five frames a bridge actually carries between machines — the same set
+// `SessionBusCoordinator.handleInbound` (bridge/src/session-bus/coordinator.ts)
+// enumerates. NOT a `session-bus:` prefix match: that prefix also covers the
+// app's own reads of its bridge (inbox, directory, unread, …), which carry no
+// `to.machineId` and so would land in `droppedToPeer` on every run — silent
+// today only because nothing asserts on that array yet.
+const BUS_FRAME_TYPES = new Set([
+  "session-bus:post",
+  "session-bus:notify",
+  "session-bus:fetch",
+  "session-bus:fetch:result",
+  "session-bus:ack",
+]);
+
 function isBusFrame(m: any): boolean {
-  return typeof m?.type === "string" && m.type.startsWith("session-bus:");
+  return typeof m?.type === "string" && BUS_FRAME_TYPES.has(m.type);
 }
 
 class TwoBridgeCarrier implements Carrier {

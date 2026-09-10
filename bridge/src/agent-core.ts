@@ -36,6 +36,8 @@ import type { SessionDirectory } from "./session-bus/directory";
 import { removeSessionBusSession } from "./session-bus/store-fs";
 import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
 import { lineForEvent } from "./session-bus/deliver-event";
+import { isRefusal } from "./session-bus/errors";
+import { unreadCount } from "./session-bus/mailbox";
 import { neutralizeFenced } from "./session-bus/delivery";
 import type { QueuedLine } from "./session-bus/delivery-queue";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
@@ -491,6 +493,11 @@ export interface BuildAgentCoreOptions {
  *  Not the watcher path: that is [GIT_REFRESH_DEBOUNCE_MS], and it is what
  *  makes the Git view move while the user is looking at it. */
 const GIT_POLL_BASE_MS = 10_000;
+
+/** How long a session's unread push waits for the rest of a burst. Wide enough
+ *  that a fan-out of arrivals is one badge change, narrow enough that the badge
+ *  still moves while the human who is waiting for it is looking. */
+const BUS_UNREAD_COALESCE_MS = 100;
 
 export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<AgentCore> {
   // The interactive bootstrap (`consoleBootstrapIO` → @inquirer/prompts) reads
@@ -1083,6 +1090,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       return sentToOwner;
     },
   });
+  // Declared ahead of the listener below, unlike the hoisted functions that use
+  // it: a `const` in the temporal dead zone would throw on an event that arrived
+  // during construction.
+  const unreadPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   // The consumer that turns THIS project's bus events into lines its own
   // agents read (defined below; hoisted, so the forward reference is safe).
   // Registered on the coordinator rather than passed at construction, because
@@ -1125,8 +1137,31 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       log.warn("could not render a session-bus delivery: %s", err);
       return;
     }
+    // A notify leaves no mailbox row — it is rendered into the session instead
+    // (coordinator's `onMessage`) — so only a post moves an unread count.
+    if (event.kind === "post") pushUnread(event.sessionId);
     if (!line) return;
     deliverLine(line);
+  }
+
+  /** Tell the app one session's mailbox grew, so a badge moves without being
+   *  asked. A count only ever read on demand is a count frozen at whatever the
+   *  last request returned, which is the whole reason this push exists.
+   *
+   *  Coalesced per session: a task that lands five posts at once is one badge
+   *  change, not five. The count is read at FLUSH time rather than carried from
+   *  the event, so the single push says where the mailbox ENDED UP. */
+  function pushUnread(sessionId: string): void {
+    if (unreadPushTimers.has(sessionId)) return;
+    unreadPushTimers.set(sessionId, setTimeout(() => {
+      unreadPushTimers.delete(sessionId);
+      const mailbox = sessionBus.mailbox(sessionId);
+      sendAb(createMessage("session-bus:unread", {
+        sessionId,
+        unread: unreadCount(mailbox),
+        dropped: mailbox.dropped,
+      }));
+    }, BUS_UNREAD_COALESCE_MS));
   }
 
   /** Hand a rendered line to whoever owns delivery: the turn-boundary queue when
@@ -1269,6 +1304,83 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // carrying someone else's contextId, and take the next answer for itself.
         if (sessionBus.handleInbound(msg) === "applied") sessionBus.noteRoute(msg.contextId, peerId, project.id);
         break;
+      // The app reading THIS machine's bus, as against carrying another
+      // machine's frames above. All three are answered from `sessionBusApi` —
+      // the same object the loopback MCP routes spend — rather than reaching
+      // into the coordinator here: a human surface and an agent tool that each
+      // decided who is reachable would eventually disagree, with nothing to say
+      // which was right.
+      //
+      // The frame names a SESSION and the api takes a terminal id: for an agent
+      // session those are one value (`api-server.ts` resolves every loopback
+      // route on the same identity), and a frame naming anything else resolves
+      // to no session and is REFUSED rather than answered about someone.
+      //
+      // Deliberately outside `peerBusReachAllowed`'s explicit list: that gate is
+      // about a peer machine interrupting a context it did not open, and these
+      // carry no context. What bounds them is the gate every relay-origin frame
+      // already passes — `remoteFrameAllowed` — plus the api's own membership
+      // check, which admits only a session this project holds.
+      case "session-bus:directory": {
+        const { requestId, sessionId } = msg;
+        // Off the switch: the directory reads a branch per project, which is a
+        // git spawn, and every other frame on this stream would queue behind it.
+        void (async () => {
+          const answer = await sessionBusApi.listSessions(sessionId);
+          sendAb(
+            isRefusal(answer)
+              ? createMessage("session-bus:directory:result", { requestId, error: answer.error, code: answer.code })
+              : createMessage("session-bus:directory:result", {
+                requestId,
+                sessions: answer.sessions,
+                truncated: answer.truncated,
+                reach: answer.reach,
+                machineId: answer.machineId,
+              }),
+          );
+        })();
+        break;
+      }
+      case "session-bus:inbox": {
+        // `inboxPeek`, never `inbox`: this is a human looking, and the marking
+        // read belongs to the agent. See the two methods' own docs — a peek that
+        // marked would spend the agent's unread flag and the post would vanish
+        // from its inbox unseen.
+        const view = sessionBusApi.inboxPeek(msg.sessionId);
+        sendAb(
+          isRefusal(view)
+            ? createMessage("session-bus:inbox:result", { requestId: msg.requestId, error: view.error, code: view.code })
+            : createMessage("session-bus:inbox:result", {
+              requestId: msg.requestId,
+              posts: view.posts,
+              dropped: view.dropped,
+              // Every post a peek returns is unread by construction, so the
+              // count is this list's length rather than a second read of the
+              // mailbox that could answer about a later instant.
+              unread: view.posts.length,
+            }),
+        );
+        break;
+      }
+      case "session-bus:thread": {
+        const view = sessionBusApi.thread(msg.sessionId, msg.threadId);
+        sendAb(
+          isRefusal(view)
+            ? createMessage("session-bus:thread:result", {
+              requestId: msg.requestId,
+              threadId: msg.threadId,
+              error: view.error,
+              code: view.code,
+            })
+            : createMessage("session-bus:thread:result", {
+              requestId: msg.requestId,
+              threadId: view.threadId,
+              contextId: view.contextId,
+              entries: view.entries,
+            }),
+        );
+        break;
+      }
       case "agent:prompt":
       case "agent:permission-resolve":
       case "agent:question-resolve":
@@ -4483,6 +4595,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // has already removed. Mirrors the construction guard: whoever built it
       // stops it.
       sessionBus.setListener(project.id, null);
+      // A coalescing window that outlived the core would fire into a torn-down
+      // transport, and on a host-injected coordinator it would also read a
+      // mailbox for a project nothing is serving any more.
+      for (const timer of unreadPushTimers.values()) clearTimeout(timer);
+      unreadPushTimers.clear();
       if (!opts.sessionBus) sessionBus.stop();
       // Before teardownServices, which force-kills through `killAll()` and then
       // nulls `manager` — sequenced after it this could only ever see an empty

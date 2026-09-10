@@ -233,8 +233,18 @@ export interface SessionBusApi {
   notify(terminalId: string | undefined, body: SendBody): SendResultView | SessionBusRefusal;
   reply(terminalId: string | undefined, body: ReplyBody): SendResultView | SessionBusRefusal;
   /** Unread posts, and the count of the ones this session will never see.
-   *  Reading MARKS READ: what was handed over has been delivered. */
+   *  Reading MARKS READ: what was handed over has been delivered. This is the
+   *  AGENT's read — the one an MCP tool call answers. */
   inbox(terminalId: string | undefined): { posts: InboxPostView[]; dropped: number } | SessionBusRefusal;
+  /** The same view, and it marks NOTHING. This is the HUMAN's read — a badge, a
+   *  panel, anything a person can trigger by looking.
+   *
+   *  The split is not a convenience. Reading is what spends the unread flag, so
+   *  a human peek that marked would consume the AGENT's mail: the post would be
+   *  gone from the agent's own inbox before the agent ever saw it, and nothing
+   *  anywhere would report the loss. Whoever adds the next surface picks the
+   *  read by asking who is looking, never by which one is closer to hand. */
+  inboxPeek(terminalId: string | undefined): { posts: InboxPostView[]; dropped: number } | SessionBusRefusal;
   /** One exchange, both directions, with the receipt on each outbound entry. */
   thread(
     terminalId: string | undefined,
@@ -617,6 +627,15 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
       // tell an empty inbox from an emptied one has been told the wrong thing,
       // not merely told less.
       return { posts, dropped: mailbox.dropped };
+    },
+
+    inboxPeek(terminalId) {
+      const m = resolve(terminalId);
+      if (!m) return notMember();
+      const mailbox = deps.coordinator.mailbox(m.sessionId);
+      // No `markMailboxRead`, and that omission is the whole method: the flag
+      // belongs to the agent's read above.
+      return { posts: unreadPosts(mailbox).map(inboxViewOf), dropped: mailbox.dropped };
     },
 
     thread(terminalId, threadId) {

@@ -54,6 +54,7 @@ import 'remote_access_control.dart';
 import 'remote_host_chip.dart';
 import 'session_agent_mark.dart';
 import 'session_approval_badge.dart';
+import 'session_directory_panel.dart';
 import 'session_mode_control.dart';
 import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
@@ -188,6 +189,53 @@ final _otherSessionEscalationsProvider = Provider<_OtherSessionEscalations>((
   );
 });
 
+/// The addressable set (`docs/session-messaging.md` §10.2): every other agent
+/// session working on this repository, on this machine and on any connected
+/// peer.
+///
+/// Reads, never recruits. Sessions are peers that already exist and are
+/// addressed rather than joined, so this row opens a list and offers no action
+/// on any row in it — and none of those rows may become a way to reach the
+/// person behind another session (§10.1).
+///
+/// Live rather than a static [AbMenuItem] because the popup resolves its
+/// entries once at open time, and which session this row is about is settled
+/// by focus that can move while the menu is up.
+class _SessionDirectoryMenuItem extends ConsumerWidget {
+  const _SessionDirectoryMenuItem();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final activeId = ref.watch(activeSessionIdProvider);
+    if (activeId == null) return const SizedBox.shrink();
+
+    void open() {
+      // The popup closes first, and the panel opens on a context that outlives
+      // the popped route — the same contract [_HandlerMenuItem.toggleArm] has,
+      // and the reason nothing past the pop reads this widget's ref.
+      final navigator = Navigator.of(context);
+      final host = navigator.context;
+      navigator.pop();
+      detached(
+        'AgentPanel',
+        'session directory failed to open',
+        () => showSessionDirectory(host, sessionId: activeId),
+      );
+    }
+
+    return AbLiveMenuRow(
+      label: 'Sessions on this repository',
+      // Deliberately not the live-share glyph: that one already means "another
+      // session is in THIS directory" on a session row, and lending it to a
+      // list spanning machines would give it two meanings one row apart.
+      icon: AbIcons.list,
+      tooltip: 'Which other agent sessions are working on this repository, '
+          'and which of them can answer.',
+      onTap: open,
+    );
+  }
+}
+
 /// The project-wide half of the Handler's attention, as an ACTION rather than
 /// the status pill it used to be.
 ///
@@ -257,8 +305,9 @@ class _OtherSessionsMenuItem extends ConsumerWidget {
 }
 
 /// Overflow trigger for everything about the session that has no inline home:
-/// the terminal/chat mode switch and the Handler arm/disarm row. On a phone
-/// (see the comment above its call site in [AgentPanel.build]) it also takes
+/// the terminal/chat mode switch, the Handler arm/disarm row and the directory
+/// of sessions working on the same repository. On a phone (see the comment
+/// above its call site in [AgentPanel.build]) it also takes
 /// the branch pill, which competes with the session title for the one
 /// flexible slot at that width; [AgentBar] has room to keep the pill inside
 /// [TitleBarBreadcrumb] instead, so the same kebab there opens a shorter menu.
@@ -268,8 +317,8 @@ class _SessionOverflowButton extends ConsumerWidget {
   const _SessionOverflowButton({required this.compact});
 
   /// True for the phone header. Both breakpoints open the same menu with the
-  /// same mode switch and Handler row; this only decides whether the branch
-  /// also renders there as a header label — on [AgentBar]
+  /// same rows; this only decides whether the branch also renders there as a
+  /// header label — on [AgentBar]
   /// the branch stays inline in [TitleBarBreadcrumb], so restating it in the
   /// menu would give it two homes.
   final bool compact;
@@ -278,8 +327,15 @@ class _SessionOverflowButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // The menu is closed by default, so a row inside it cannot call for
     // attention by itself. This dot is what the inline pill used to be: the
-    // always-visible sign that a session which is NOT in focus is waiting.
+    // always-visible sign that something behind the kebab is waiting — an
+    // escalation in a session that is not in focus, or mail another session
+    // sent this one. ONE dot for both: a second one beside it would make the
+    // kebab a status area, and the two facts share the same remedy, which is
+    // to open the menu.
     final waiting = ref.watch(_otherSessionEscalationsProvider).count;
+    final unread = ref.watch(
+      focusedSessionInboxProvider.select((s) => s.unread),
+    );
     final button = Builder(
       // AbCompactTapTargets: the toolbar row already owns its height, so the
       // button's mobile tap-target inflation (24px visual -> 44px hit box)
@@ -297,20 +353,33 @@ class _SessionOverflowButton extends ConsumerWidget {
           children: [
             AbIconButton(
               icon: AbIcons.more,
-              tooltip: 'Session options',
+              // The dot cannot carry a number, so the count it stands for is
+              // spelled here rather than left for the menu to reveal.
+              tooltip: switch (unread) {
+                0 => 'Session options',
+                1 => 'Session options — 1 unread message from another session',
+                _ =>
+                  'Session options — $unread unread messages from other '
+                      'sessions',
+              },
               onTap: () => detached(
                 'AgentPanel',
                 'session overflow menu failed',
                 () => _open(anchor),
               ),
             ),
-            if (waiting > 0)
-              const Positioned(
+            if (waiting > 0 || unread > 0)
+              Positioned(
                 right: -1,
                 top: -1,
                 child: AbStatusDot(
-                  key: Key('session-attention-dot'),
-                  tone: AbStatusTone.agentAttention,
+                  key: const Key('session-attention-dot'),
+                  // An escalation has an agent stopped and waiting on a
+                  // person; mail blocks nothing and is read at leisure, so it
+                  // only takes the dot when nothing is blocked.
+                  tone: waiting > 0
+                      ? AbStatusTone.agentAttention
+                      : AbStatusTone.unread,
                 ),
               ),
           ],
@@ -345,8 +414,9 @@ class _SessionOverflowButton extends ConsumerWidget {
   }
 }
 
-/// The overflow popup's content: the mode switch and the Handler arm/disarm
-/// row, rather than the header's own button/segmented-control chrome. On a
+/// The overflow popup's content: the mode switch, the Handler arm/disarm row
+/// and the session directory, rather than the header's own
+/// button/segmented-control chrome. On a
 /// phone this is preceded by the branch as a menu header (Chrome's own
 /// tab-context-menu convention — the thing the menu
 /// is ABOUT, named once at the top); on [AgentBar] the branch stays inline in
@@ -357,9 +427,8 @@ class _SessionOverflowMenu extends ConsumerWidget {
   const _SessionOverflowMenu({required this.compact});
 
   /// See [_SessionOverflowButton.compact]. Gates only the branch header label
-  /// — the mode switch and Handler row below it render on both breakpoints,
-  /// since neither has an inline home on [AgentBar] any more than on the
-  /// phone header.
+  /// — every row below it renders on both breakpoints, since none has an
+  /// inline home on [AgentBar] any more than on the phone header.
   final bool compact;
 
   @override
@@ -372,6 +441,7 @@ class _SessionOverflowMenu extends ConsumerWidget {
         if (compact && branch != null) AbMenuHeaderLabel(branch),
         const SessionModeMenuItem(),
         const _HandlerMenuItem(),
+        const _SessionDirectoryMenuItem(),
         const _OtherSessionsMenuItem(),
       ],
     );
@@ -470,7 +540,7 @@ class _HandlerMenuItem extends ConsumerWidget {
 /// workspace tab bar, and the window title bar's sidebar and panel controls.
 ///
 /// The one exception is [WorkspaceMenuButton]. It selects a view rather than
-/// sizing a pane: a shortcut into the context panel's five tabs from the bar
+/// sizing a pane: a shortcut into the context panel's tabs from the bar
 /// the user is already looking at, staying reachable in the panel modes where
 /// the tab strip is off screen — same popup on a touch tablet as on a mouse
 /// desktop, since the tablet's context panel is a docked pane beside the

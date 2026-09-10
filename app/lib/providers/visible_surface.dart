@@ -4,12 +4,14 @@ import '../models/ab_message.dart' show GitFileStatusEntry;
 import '../models/pending_nav.dart';
 import '../models/workspace_view.dart';
 import 'providers.dart';
+import 'session_bus_inbox.dart';
+import 'sessions.dart' show activeSessionIdProvider;
 import 'value_controller.dart';
 
 /// Which workspace tab is actually ON SCREEN, or null when none is.
 ///
-/// [WorkspacePanel] renders all five tabs inside an `IndexedStack`, so every
-/// tab's widgets stay mounted and their state (an open file, a diff, a pushed
+/// [WorkspacePanel] renders every tab inside an `IndexedStack`, so every tab's
+/// widgets stay mounted and their state (an open file, a diff, a pushed
 /// terminal) survives a tab switch. A back handler registered by an offscreen
 /// tab would otherwise silently mutate it. Handlers gate on this.
 ///
@@ -85,8 +87,80 @@ final pendingFilePathProvider =
       () => ValueController(null),
     );
 
-/// Counts the workspace views advertise on their tab: unstaged git files, and
-/// escalations the handler is waiting on.
+/// The focused session's mailbox, or an empty one while no session is focused.
+///
+/// One narrowing rule for everything that speaks for the Inbox tab — whether
+/// the tab exists, and what its badge says. Two lookups of their own could
+/// answer differently about the same mailbox, which is the failure
+/// [workspaceBadgesProvider] already narrows the handler count to avoid.
+final focusedSessionInboxProvider = Provider<SessionInboxState>((ref) {
+  final sessionId = ref.watch(activeSessionIdProvider);
+  if (sessionId == null) return const SessionInboxState();
+  return ref.watch(sessionInboxProvider(sessionId));
+}, name: 'focusedSessionInbox');
+
+/// Whether the focused session has bus traffic to show — the ONE rule behind
+/// the Inbox tab.
+///
+/// [WorkspaceView.values] is rendered by three surfaces that must never
+/// disagree (the desktop tab strip, the phone's bottom nav, the agent bar's
+/// workspace rail). A condition written into each of them is the bug: an Inbox
+/// item that appeared on the phone and nowhere else would ship green, because
+/// nothing iterating that enum is under test.
+///
+/// LATCHING, and this is the whole reason it is a notifier rather than a
+/// derived value: the mailbox empties when the AGENT reads its mail, which can
+/// land while the user is part-way through a thread. A tab that vanished out
+/// from under them would take what they were reading with it. The latch is
+/// dropped when focus moves to another session, and again whenever this
+/// provider itself is rebuilt.
+class SessionBusActivity extends Notifier<bool> {
+  String? _sessionId;
+  bool _seen = false;
+
+  @override
+  bool build() {
+    final sessionId = ref.watch(activeSessionIdProvider);
+    if (sessionId != _sessionId) {
+      _sessionId = sessionId;
+      _seen = false;
+    }
+    if (sessionId == null) return false;
+    // `dropped` is a lifetime total on the store and posts outlive the count
+    // the agent spends, so all three together answer "has this session ever
+    // been on the bus" where `unread` alone answers only "right now".
+    final active = ref.watch(
+      focusedSessionInboxProvider.select(
+        (s) => s.unread > 0 || s.dropped > 0 || s.posts.isNotEmpty,
+      ),
+    );
+    if (active) _seen = true;
+    return _seen;
+  }
+}
+
+final sessionHasBusActivityProvider =
+    NotifierProvider<SessionBusActivity, bool>(
+      SessionBusActivity.new,
+      name: 'sessionHasBusActivity',
+    );
+
+/// The workspace tabs on offer right now, in tab order.
+///
+/// Every surface that lists tabs reads THIS, never [WorkspaceView.values] —
+/// see [sessionHasBusActivityProvider] for why one list rather than three
+/// conditions. Recomputes only when that boolean flips, so the fresh `List`
+/// returned here notifies no more often than the rule behind it changes.
+final visibleWorkspaceViewsProvider = Provider<List<WorkspaceView>>((ref) {
+  final hasInbox = ref.watch(sessionHasBusActivityProvider);
+  return [
+    for (final view in WorkspaceView.values)
+      if (view != WorkspaceView.inbox || hasInbox) view,
+  ];
+}, name: 'visibleWorkspaceViews');
+
+/// Counts the workspace views advertise on their tab: unstaged git files,
+/// escalations the handler is waiting on, and unread bus posts.
 ///
 /// Both are scoped to what their tab actually shows — the focused checkout for
 /// git, the focused session for the handler. A handler badge counting the whole
@@ -114,9 +188,17 @@ final workspaceBadgesProvider = Provider<Map<WorkspaceView, int>>((ref) {
   final pending = ref.watch(
     focusedSessionHandlerStateProvider.select((s) => s.escalationBadgeCount),
   );
+  // A count, never a tone. `AgentWorkStatus.unread` already paints the blue
+  // "new" on this session's row and clears when the transcript is opened,
+  // where these clear when the AGENT reads its mail — two clears drawn the same
+  // colour in one row read as one state.
+  final unreadPosts = ref.watch(
+    focusedSessionInboxProvider.select((s) => s.unread),
+  );
   return {
     if (gitCount > 0) WorkspaceView.git: gitCount,
     if (pending > 0) WorkspaceView.handler: pending,
+    if (unreadPosts > 0) WorkspaceView.inbox: unreadPosts,
   };
 });
 
@@ -189,7 +271,7 @@ final workspaceMenuControlProvider =
 /// renders nothing there; see [workspaceMenuControlProvider].)
 ///
 /// Defaults to OPEN, but the shell holds it down for as long as the context
-/// pane is on screen — the pane's own [WorkspaceTabBar] lists the same five
+/// pane is on screen — the pane's own [WorkspaceTabBar] lists the same
 /// views, so the rail would be a second switcher floating over the transcript
 /// (`WorkspaceShellState._syncMenuToContextPane`). On a mouse desktop, whose
 /// pane starts open, that means the rail's first appearance is the first time

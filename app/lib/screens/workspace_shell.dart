@@ -654,7 +654,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // switch to persisting WorkspaceView.name, rather than relying on this guard.
     final idx = prefs.workspaceViewIndex;
     if (idx >= 0 && idx < WorkspaceView.values.length) {
-      _selectedView = WorkspaceView.values[idx];
+      _selectedView = _offeredOr(WorkspaceView.values[idx]);
     }
     final key = ref.read(activeSessionUiKeyProvider);
     if (key != null) {
@@ -684,8 +684,20 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     _prefsApplied = true;
   }
 
+  /// Falls back to Files for a tab this session does not currently offer.
+  ///
+  /// Not every [WorkspaceView] is always on the strip — the Inbox exists only
+  /// while the session has a mailbox ([visibleWorkspaceViewsProvider]) — while
+  /// a persisted ordinal, a per-session restore and a deep link can all still
+  /// name one. Left unchecked, the panel shows a body with no tab marked and
+  /// nothing to switch back with.
+  WorkspaceView _offeredOr(WorkspaceView view) =>
+      ref.read(visibleWorkspaceViewsProvider).contains(view)
+      ? view
+      : WorkspaceView.files;
+
   void _restoreSessionUi(SessionWorkspaceState state) {
-    _selectedView = state.selectedView;
+    _selectedView = _offeredOr(state.selectedView);
     _panelMode = state.panelMode == null
         ? null
         : _PanelMode.values.asNameMap()[state.panelMode];
@@ -1048,7 +1060,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         saved = saved.copyWith(
           initialized: true,
           selectedView: idx >= 0 && idx < WorkspaceView.values.length
-              ? WorkspaceView.values[idx]
+              ? _offeredOr(WorkspaceView.values[idx])
               : WorkspaceView.files,
           panelMode: _seedablePanelModeName(prefs.panelMode),
         );
@@ -1657,7 +1669,13 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   /// Switch the context-panel tab. Publishes the new tab so back handlers
   /// registered by the OTHER (still-mounted, offscreen) tabs stay inert.
+  ///
+  /// A view this session does not offer is refused rather than fallen back
+  /// from: a deep link naming a tab that isn't there should leave the user
+  /// where they were, not drop them on Files (see [_offeredOr], whose callers
+  /// are seeding a fresh workspace and have nowhere else to land).
   void _selectView(WorkspaceView view) {
+    if (!ref.read(visibleWorkspaceViewsProvider).contains(view)) return;
     setState(() {
       _selectedView = view;
       _updateSessionUi((s) => s.copyWith(selectedView: view));
@@ -2163,7 +2181,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   }
 
   /// The workspace rail and the context pane's own [WorkspaceTabBar] list the
-  /// same five views, so only ever one of them is up: the pane takes the job
+  /// same views, so only ever one of them is up: the pane takes the job
   /// over as it opens and hands it back as it closes. What is left to the rail
   /// is the one thing the tab strip cannot do — being the way back to a
   /// workspace the user has closed, which otherwise takes its own tab strip

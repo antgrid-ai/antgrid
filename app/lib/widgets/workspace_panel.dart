@@ -5,6 +5,7 @@ import '../screens/file_explorer_screen.dart';
 import '../screens/preview_screen.dart';
 import 'git_panel.dart';
 import 'handler/handler_screen.dart';
+import 'session_inbox_panel.dart';
 import 'terminal_list_view.dart';
 import 'workspace_tab_bar.dart';
 
@@ -48,6 +49,11 @@ class WorkspacePanel extends StatelessWidget {
             ),
           Expanded(
             child: IndexedStack(
+              // Ordinal-indexed against `WorkspaceView`, which is append-only
+              // (see its own doc) — nothing ties an enum member to its slot
+              // here but this comment, so a new view must be appended AND
+              // given a child in the same position or `selectedView.index`
+              // walks past the last one.
               index: selectedView.index,
               children: const [
                 PreviewScreen(),
@@ -55,6 +61,7 @@ class WorkspacePanel extends StatelessWidget {
                 GitPanel(),
                 TerminalListView(),
                 HandlerScreen(),
+                SessionInboxPanel(),
               ],
             ),
           ),

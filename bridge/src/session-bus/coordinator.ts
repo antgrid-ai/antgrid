@@ -253,8 +253,15 @@ export interface MessageResult {
 
 /** Anything this coordinator sends. Every bus frame carries both endpoints, and
  *  the local branch of {@link SessionBusCoordinator.dispatch} needs the sender's
- *  machine id to know whether the target shares it. */
-type BusFrame = Extract<AbMessage, { type: `session-bus:${string}` }>;
+ *  machine id to know whether the target shares it.
+ *
+ *  Matched on those endpoints and not on the type name alone: the `session-bus:`
+ *  prefix also covers the reads an app makes of its OWN bridge, which are
+ *  addressed by session id and carry no `from`/`to` at all. */
+type BusFrame = Extract<
+  AbMessage,
+  { type: `session-bus:${string}`; from: SessionMemberKey; to: SessionMemberKey }
+>;
 
 /** How often held messages are retried. One second is the shortest step worth
  *  taking, so a slower tick would round every retry up to itself. */

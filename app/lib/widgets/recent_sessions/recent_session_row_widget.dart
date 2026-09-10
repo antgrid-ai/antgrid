@@ -29,6 +29,7 @@ import '../../util/relative_time.dart';
 import '../agent_work_status_dot.dart';
 import '../session_delete_flow.dart';
 import '../session_deleting_badge.dart';
+import '../session_inbox_badge.dart';
 import '../session_isolation_badge.dart';
 import '../session_approval_badge.dart';
 import '../session_shared_workspace_badge.dart';
@@ -328,6 +329,10 @@ class _DesktopLayout extends StatelessWidget {
                 SessionIsolationBadge(session: row.session, setup: setup),
                 SessionApprovalBadge(session: row.session),
                 SessionSharedWorkspaceBadge(session: row.session),
+                SessionInboxBadge(
+                  entryId: row.origin.registrationId,
+                  sessionId: row.session.id,
+                ),
                 SessionDeletingBadge(deleting: deleting),
                 const SizedBox(width: AbTokens.space12),
               ],
@@ -443,6 +448,10 @@ class _MobileLayout extends StatelessWidget {
               SessionIsolationBadge(session: row.session, setup: setup),
               SessionApprovalBadge(session: row.session),
               SessionSharedWorkspaceBadge(session: row.session),
+              SessionInboxBadge(
+                entryId: row.origin.registrationId,
+                sessionId: row.session.id,
+              ),
               SessionDeletingBadge(deleting: deleting),
               const SizedBox(width: AbTokens.space8),
               // Only a custom launch command belongs on this line: an agent

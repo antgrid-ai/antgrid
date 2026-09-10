@@ -41,6 +41,7 @@ import 'drawer_entry_row.dart' show activateDrawerEntryById, ensureRemoteOnline;
 import 'session_delete_flow.dart';
 import 'session_deleting_badge.dart';
 import 'session_handler_badge.dart';
+import 'session_inbox_badge.dart';
 import 'session_fork_dialog.dart';
 import 'session_isolation_badge.dart';
 import 'session_approval_badge.dart';
@@ -345,6 +346,10 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                     SessionApprovalBadge(session: session),
                     SessionSharedWorkspaceBadge(session: session),
                     SessionHandlerBadge(
+                      entryId: widget.entryId,
+                      sessionId: session.id,
+                    ),
+                    SessionInboxBadge(
                       entryId: widget.entryId,
                       sessionId: session.id,
                     ),
