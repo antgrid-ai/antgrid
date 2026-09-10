@@ -24,7 +24,9 @@ HostControlClient _fakeClient(
     if (type == failVerb) {
       return http.Response(jsonEncode({'id': body['id'], 'ok': false}), 500);
     }
-    if (type == 'mobile-access:set') enabled = body['enabled'] == true;
+    if (type == 'mobile-access:set' || type == 'agent-reach:set') {
+      enabled = body['enabled'] == true;
+    }
     return http.Response(
       jsonEncode({
         'id': body['id'],
@@ -206,7 +208,68 @@ void main() {
       expect(builds, 1);
     },
   );
+
+  test('agent reach reads and writes its own verbs, never the switch ones', () async {
+    final calls = <String, int>{};
+    final container = ProviderContainer(
+      overrides: [
+        hostControlClientProvider.overrideWith(
+          (ref) async => _fakeClient(calls, initial: true),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    expect((await container.read(agentReachPolicyProvider.future)).enabled, isTrue);
+    expect(calls['agent-reach:get'], 1);
+    // The subordinate bit must never be answered by the authorization store's
+    // verbs: they are two decisions, and reading one for the other would make
+    // turning remote access on silently re-grant agent reach.
+    expect(calls['mobile-access:get'], isNull);
+
+    await container.read(agentReachPolicyProvider.notifier).setEnabled(false);
+
+    expect(container.read(agentReachPolicyProvider).value!.enabled, isFalse);
+    expect(calls['agent-reach:set'], 1);
+    expect(calls['mobile-access:set'], isNull);
+  });
+
+  test('a bridge without the verb reports unreadable, never off', () async {
+    final container = ProviderContainer(
+      overrides: [
+        hostControlClientProvider.overrideWith(
+          (ref) async => _bridgeWithoutAgentReach(),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(agentReachPolicyProvider, (_, _) {}, onError: (_, _) {});
+
+    await _until(() => container.read(agentReachPolicyProvider).hasError);
+
+    // No value at all, so every surface reads `policy == null` and renders the
+    // machine as unable to say — not as having refused.
+    expect(container.read(agentReachPolicyProvider).hasValue, isFalse);
+  });
 }
+
+/// A bridge that predates the `agent-reach:` verbs: the request never parses,
+/// so the host answers BAD_REQUEST rather than a policy.
+HostControlClient _bridgeWithoutAgentReach() => HostControlClient(
+  port: 1,
+  token: 't',
+  httpClient: MockClient((req) async {
+    final body = jsonDecode(req.body) as Map<String, dynamic>;
+    return http.Response(
+      jsonEncode({
+        'id': body['id'],
+        'ok': false,
+        'error': {'code': 'BAD_REQUEST', 'message': 'unknown verb'},
+      }),
+      200,
+    );
+  }),
+);
 
 /// Polls [done] on the event loop; fails the test if it never becomes true.
 Future<void> _until(bool Function() done) async {

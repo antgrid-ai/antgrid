@@ -426,9 +426,6 @@ and may interrupt an agent here, unattended*. Disclosure, not only interruption.
 The subordinate bit gates both halves together — off means a peer agent can
 neither read a directory row from this machine nor post into a session on it.
 
-**Not built.** `remote-access-policy.ts` is still the only store, so today the
-widening is live and ungated.
-
 ### 8.2 What an addressable session cannot do
 
 - Read another session's transcript, files, or context.

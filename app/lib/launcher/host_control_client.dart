@@ -247,6 +247,21 @@ class RemoteAccessPolicy {
       RemoteAccessPolicy(enabled: json['enabled'] == true);
 }
 
+/// The second, subordinate machine-level bit: may an AGENT on another of this
+/// account's machines see what runs here and reach into it. Mirror of
+/// control-protocol.ts's `agent-reach:` arms.
+///
+/// A separate type from [RemoteAccessPolicy] rather than a shared
+/// `{enabled}` record, because the two are never interchangeable: remote
+/// access is the authorization store and this one grants nothing on its own.
+class AgentReachPolicy {
+  final bool enabled;
+  const AgentReachPolicy({required this.enabled});
+
+  factory AgentReachPolicy.fromJson(Map<String, dynamic> json) =>
+      AgentReachPolicy(enabled: json['enabled'] == true);
+}
+
 /// `session-bus:remote-directory` response. Mirror of the
 /// `"session-bus:remote-directory"` arm of `control-protocol.ts`'s
 /// `ControlResponse` union. [wantedRepoKeys] is what feeds the PUMP's next
@@ -550,6 +565,26 @@ class HostControlClient {
   Future<RemoteAccessPolicy> remoteAccessSet(bool enabled) async {
     final m = await _post({'type': 'mobile-access:set', 'enabled': enabled});
     return RemoteAccessPolicy.fromJson(m);
+  }
+
+  /// Read the subordinate agent-reach bit. A bridge predating the verb refuses
+  /// it as `BAD_REQUEST` (the request never parses), which is why callers must
+  /// treat a failure as "this machine cannot say" and not as off — off is a
+  /// refusal the user chose, and rendering an unaskable machine as refusing
+  /// would invite a tap that writes a value nothing reads.
+  Future<AgentReachPolicy> agentReachGet({
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    final m = await _post({'type': 'agent-reach:get'}, timeout: timeout);
+    return AgentReachPolicy.fromJson(m);
+  }
+
+  /// Turn agent reach on or off for the whole machine. Returns the resulting
+  /// state as the bridge sees it, so the caller never has to assume the write
+  /// landed as requested.
+  Future<AgentReachPolicy> agentReachSet(bool enabled) async {
+    final m = await _post({'type': 'agent-reach:set', 'enabled': enabled});
+    return AgentReachPolicy.fromJson(m);
   }
 
   /// This machine's Capability Card for [projects] — the loopback twin of

@@ -11,6 +11,7 @@ import { hostFilePath, writeHostFile, removeHostFile } from "./host-discovery";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { TrustedPeersProvider } from "./trusted-peers";
 import { loadRemoteAccessPolicy, type RemoteAccessPolicyStore } from "./remote-access-policy";
+import { loadAgentReachPolicy, type AgentReachPolicyStore } from "./agent-reach-policy";
 import { resolveAbDir } from "./antgrid-dir";
 import { VERSION } from "./version";
 import type { DeviceIdentity } from "./device";
@@ -252,6 +253,11 @@ export class HostServer {
   // The one authorization gate for remote phones: is this machine reachable
   // from mobile at all. Every project verb from a phone is checked against it.
   private readonly remoteAccessPolicy: RemoteAccessPolicyStore = loadRemoteAccessPolicy(resolveAbDir());
+  // The second half of that gate, subordinate to it: whether a peer machine's
+  // AGENT may see what runs here and reach into it. Read only after the switch
+  // above says yes — see `agent-reach-policy.ts` for why the two are separate
+  // questions.
+  private readonly agentReachPolicy: AgentReachPolicyStore = loadAgentReachPolicy(resolveAbDir());
   private stopPhonesWatch: (() => void) | null = null;
   // projectId → {path, label} for every project this machine has opened. Since
   // the per-phone allowlist went away this is the ONLY per-project bound on what
@@ -1015,6 +1021,32 @@ export class HostServer {
     }
   }
 
+  /** The subordinate half of the gate (E12): whether an agent on another of this
+   *  account's machines may see what runs here and reach into it.
+   *
+   *  INBOUND ONLY, and deliberately not symmetric. Turning it off does not empty
+   *  this machine's mirror of its peers and does not stop an agent here opening
+   *  an exchange with one: what a peer discloses is that peer's user's decision,
+   *  answered by that machine's own copy of this bit. An answer arriving on a
+   *  context this machine LEADS is not an interruption — something here asked
+   *  for it — so it is not what this gate refuses.
+   *
+   *  Nothing is clawed back either. What peers already mirrored about this
+   *  machine expires on their own TTL; nothing here can reach in to clear it,
+   *  and nothing pretends to. */
+  async handleAgentReachVerb(req: ControlRequest): Promise<ControlResponse> {
+    switch (req.type) {
+      case "agent-reach:get":
+        return { id: req.id, ok: true, type: "agent-reach:get", enabled: this.agentReachPolicy.isEnabled() };
+      case "agent-reach:set": {
+        this.agentReachPolicy.setEnabled(req.enabled);
+        return { id: req.id, ok: true, type: "agent-reach:set", enabled: this.agentReachPolicy.isEnabled() };
+      }
+      default:
+        return { id: req.id, ok: false, error: { code: "UNKNOWN_VERB", message: `not an agent-reach verb: ${(req as ControlRequest).type}` } };
+    }
+  }
+
   /** Answer the drawer's `sessions.list` control-plane RPC: a gated, core-free
    *  session-list peek. Reads the persisted sessions.json directly — no
    *  project:start, no data-plane socket, no side effect of running a stopped
@@ -1174,6 +1206,23 @@ export class HostServer {
         requestId: req.requestId,
         ok: false,
         error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" },
+      });
+    }
+    // The disclosure half of E12. Only the SESSION-bearing card is gated: the
+    // repo/OS half answers a device the user is holding, where remote access is
+    // the whole question, while `sessions` is this machine's own titles and work
+    // status assembled for another machine's AGENT.
+    //
+    // Refused rather than answered without the key. Omitting `sessions` is
+    // already how a bridge too old to know the flag degrades, and reusing it
+    // here would tell the asker "that machine cannot say" when the truth is
+    // "that machine will not". The app maps NOT_ALLOWED to a named `refused`
+    // outcome that survives into the reach line.
+    if (includeSessions && !this.agentReachPolicy.isEnabled()) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "NOT_ALLOWED", message: "agent reach is disabled on this machine" },
       });
     }
     const targets: CapabilityCardTarget[] = [];
@@ -1650,6 +1699,9 @@ export class HostServer {
       case "mobile-access:get":
       case "mobile-access:set":
         return this.handleRemoteAccessVerb(req);
+      case "agent-reach:get":
+      case "agent-reach:set":
+        return this.handleAgentReachVerb(req);
       case "machine:capability-card": {
         try {
           const card = await readCapabilityCard(
@@ -1989,6 +2041,9 @@ export class HostServer {
       // Read live, not captured: a `mobile-access:set` must take effect on every
       // already-warm core's gate without restarting it.
       remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
+      // Same rule, one layer down: this bit is read only after the switch above
+      // says yes, so a core sees it live too.
+      agentReachEnabled: () => this.agentReachPolicy.isEnabled(),
       // Same rule, and for a second reason on top of it: the desktop wizard can
       // credential a host that launched local-only, and a core already warm at
       // that moment must move with it rather than stay permanently uncredentialed.

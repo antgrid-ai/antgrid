@@ -386,6 +386,7 @@ export class ProjectCore {
       identity: this.deps.identity,
       pairedPhones: this.deps.pairedPhones,
       remoteAccessEnabled: this.deps.remoteAccessEnabled,
+      agentReachEnabled: this.deps.agentReachEnabled,
       tierClaim: this.deps.tierClaim,
       onTurnStart: (sessionId) => this.noteTurnStart(sessionId),
       onUserReply: (sessionId, replyOpts) => this.noteUserReply(sessionId, replyOpts),

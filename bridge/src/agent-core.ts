@@ -30,6 +30,7 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
+import { AGENT_REACH_DEFAULT } from "./agent-reach-policy";
 import { createSessionBusApi, type SessionBusApi } from "./session-bus/api";
 import type { SessionDirectory } from "./session-bus/directory";
 import { removeSessionBusSession } from "./session-bus/store-fs";
@@ -355,6 +356,13 @@ export interface BuildAgentCoreOptions {
    *  agent with no host omits it and the gate reads FAIL-CLOSED, so an
    *  unwired core can never be driven by a phone. */
   remoteAccessEnabled?: () => boolean;
+  /** Whether an agent on ANOTHER of this account's machines may reach into a
+   *  session here (see agent-reach-policy.ts). Subordinate to
+   *  {@link remoteAccessEnabled}, which is checked first and independently.
+   *  Host-supplied; absent reads as the store's own default, because unlike the
+   *  switch above this one is not the authorization gate — a core with no relay
+   *  wired is already carved out of both. */
+  agentReachEnabled?: () => boolean;
   /** Live reading of this machine's device credential, for the entitlement gate
    *  on paid capabilities (see entitlement.ts). Host-supplied. Absent means a
    *  runtime that never had a token — a bare agent, a signed-out desktop, a
@@ -582,7 +590,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Paired-phone identity/push registry, constructed eagerly so it exists
   // whether the agent runs in local or remote mode.
   const pairedPhones = opts.pairedPhones ?? loadPairedPhones(abDir);
-  const remoteAccessEnabled = opts.remoteAccessEnabled ?? (() => false);
+  const remoteAccessEnabled = opts.remoteAccessEnabled ?? (() => false);  const agentReachEnabled = opts.agentReachEnabled ?? (() => AGENT_REACH_DEFAULT);
 
   // Resolve synthetic agent terminal (if any)
   interface AgentTerminalSpec {
@@ -883,6 +891,34 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (source === "loopback") return true;
     if (!peerSessionProvider) return true;
     return remoteAccessEnabled();
+  }
+
+  /** E12's interruption half: whether an UNSOLICITED session-bus frame from a
+   *  peer machine may reach a session here.
+   *
+   *  Same two carve-outs as {@link remoteFrameAllowed}, for the same reasons,
+   *  and layered under it rather than beside it — a machine that is not
+   *  remote-reachable at all never gets here.
+   *
+   *  Only a peer-INITIATED context is refused. A frame on a context this
+   *  machine leads is the answer to something an agent here asked for, and
+   *  refusing that would not be "nobody may interrupt me", it would be "my own
+   *  agents may not finish a sentence". `contextId === to.sessionId` is exactly
+   *  the lead test the coordinator's own `roleForContext` applies. */
+  function peerBusReachAllowed(msg: AbMessage, source: InboundSource): boolean {
+    switch (msg.type) {
+      case "session-bus:message":
+      case "session-bus:fetch":
+      case "session-bus:fetch:result":
+      case "session-bus:ack":
+        break;
+      default:
+        return true;
+    }
+    if (msg.contextId === msg.to.sessionId) return true;
+    if (source === "loopback") return true;
+    if (!peerSessionProvider) return true;
+    return agentReachEnabled();
   }
 
   // Fail-closed per device: a frame whose session has not declared the
@@ -4333,6 +4369,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
       if (source !== "loopback" && sessions?.hasIsolatedSessions() && !peerCanRouteCheckouts(peerId)) {
         log.warn("Dropping inbound %s: remote app lacks checkout routing (project %s)", msg.type, project.id);
+        return;
+      }
+      if (!peerBusReachAllowed(msg, source)) {
+        log.warn(
+          "Dropping inbound %s: agent reach is disabled on this machine (project %s)",
+          msg.type,
+          project.id,
+        );
         return;
       }
       if (msg.type === "request") {

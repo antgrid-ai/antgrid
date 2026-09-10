@@ -23,6 +23,10 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("phones:unpair"), phonePubkey: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("mobile-access:get") }),
   z.object({ id: z.string().min(1), type: z.literal("mobile-access:set"), enabled: z.boolean() }),
+  // Subordinate to `mobile-access` above, never a replacement for it: with
+  // remote access off this bit grants nothing. See `agent-reach-policy.ts`.
+  z.object({ id: z.string().min(1), type: z.literal("agent-reach:get") }),
+  z.object({ id: z.string().min(1), type: z.literal("agent-reach:set"), enabled: z.boolean() }),
   // The machine half of the Capability Card over the LOOPBACK plane. The relay
   // plane already answers `machine.capability-card`, so without this the app
   // cannot read the NORMALISED remote of a project on its own machine — the key
@@ -222,6 +226,8 @@ export type ControlResponse =
   | { id: string; ok: true; type: "phones:unpair" }
   | { id: string; ok: true; type: "mobile-access:get"; enabled: boolean }
   | { id: string; ok: true; type: "mobile-access:set"; enabled: boolean }
+  | { id: string; ok: true; type: "agent-reach:get"; enabled: boolean }
+  | { id: string; ok: true; type: "agent-reach:set"; enabled: boolean }
   | { id: string; ok: true; type: "machine:capability-card"; os: OsCard; projects: Record<string, RepoCard> }
   | { id: string; ok: true; type: "git:branches"; isRepository: boolean; current: string | null; branches: string[]; worktreeSessionsSupported: boolean }
   | { id: string; ok: true; type: "git:remote-state"; status: BranchRemoteStatus }
