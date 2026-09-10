@@ -8,6 +8,7 @@ import '../launcher/local_agent_launcher.dart';
 import '../launcher/project_resolve.dart';
 import '../project/project_session_registry.dart';
 import '../services/control_plane_client.dart';
+import '../session_bus/directory_warm_targets.dart';
 import '../session_bus/session_bus_links.dart';
 import '../util/device_id.dart';
 import '../util/netwatch.dart';
@@ -426,5 +427,10 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // stubbed, and this edge stays wired rather than being removed and re-added:
   // its fan-in has crashed the frame before.
   alive.addAll(ref.watch(sessionBusLinksProvider).peerMachineIds);
+  // Machines a directory read MISSED, warm until their own deadline (E13). The
+  // link set above covers a peer this app is already carrying an exchange for;
+  // this covers the peer nobody has reached yet, which is the case the
+  // peek-only directory otherwise answers "none asked" forever.
+  alive.addAll(ref.watch(directoryWarmTargetsProvider));
   return alive;
 });

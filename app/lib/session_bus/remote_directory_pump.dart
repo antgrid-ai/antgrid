@@ -17,6 +17,7 @@ import '../providers/device_provisioning.dart';
 import '../providers/relay_connection.dart';
 import '../services/account_agents_api.dart' show InventoryAgent;
 import '../utils/platform_utils.dart';
+import 'directory_warm_targets.dart';
 import 'remote_directory_source.dart';
 
 /// Peek [uuid]'s control-plane client without ever building or dialing it.
@@ -117,9 +118,15 @@ class _RemoteDirectoryPumpHostState
         token: hostFile.token,
       );
       final refreshRef = RefreshRef.of(ref);
+      final now = DateTime.now();
+      // Pruned on the pump's tick rather than by a timer of its own: nothing
+      // reads the warm set until the reaper's next reconcile, so an expiry
+      // polled for by nobody changes nothing anyone can observe.
+      ref.read(directoryWarmTargetsProvider.notifier).prune(now);
+      final RemoteDirectoryCycleResult? cycle;
       try {
-        await _engine.maybeRunCycle(
-          now: DateTime.now(),
+        cycle = await _engine.maybeRunCycle(
+          now: now,
           triggered: triggered,
           controlPort: hostFile.controlPort,
           candidates: candidates,
@@ -134,6 +141,8 @@ class _RemoteDirectoryPumpHostState
       } finally {
         client.close();
       }
+      if (!mounted || cycle == null) return;
+      _warmMissedPeers(refreshRef, cycle, inventory, localUuid, now);
     } catch (_) {
       // peekHost() reads host.json off disk and can throw on a TOCTOU race;
       // the timer/listener call this unawaited, so an escaping throw is an
@@ -141,6 +150,37 @@ class _RemoteDirectoryPumpHostState
     } finally {
       _running = false;
     }
+  }
+
+  /// An agent asked this machine something its mirror could not answer
+  /// (`unservedReads`), so the peers nobody has reached become worth a socket —
+  /// thin once, then real (E13, `docs/session-messaging.md`).
+  ///
+  /// Marking is not connecting: the warm set only stops the reaper closing what
+  /// is already open, so the dial has to happen here. Both halves are bounded by
+  /// the same [directoryWarmCandidates] cut, so a large account cannot turn one
+  /// missed read into a connection storm.
+  void _warmMissedPeers(
+    RefreshRef refreshRef,
+    RemoteDirectoryCycleResult cycle,
+    Iterable<InventoryAgent> inventory,
+    String? localUuid,
+    DateTime now,
+  ) {
+    if (cycle.ack.unservedReads <= 0) return;
+    // Re-read rather than reusing this tick's candidates: the cycle awaited a
+    // per-machine timeout on every peer it asked, and a socket can have opened
+    // or closed in that time.
+    final open = ref.read(relayConnectionManagerProvider).openControlPlaneIds();
+    final missed = directoryWarmCandidates(inventory, localUuid, open);
+    if (missed.isEmpty) return;
+    ref.read(directoryWarmTargetsProvider.notifier).warm(missed, now);
+    // Not awaited: an offline machine's dial walks the supervisor's whole
+    // reconnect ladder, and this tick still owns the re-entry guard — waiting
+    // on it would stop the directory being pushed at all for as long as the
+    // slowest unreachable peer takes to give up. The warm mark above is what
+    // the reaper reads, and it is already written.
+    unawaited(refreshControlPlanes(refreshRef, missed));
   }
 
   @override
