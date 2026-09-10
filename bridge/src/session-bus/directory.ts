@@ -146,14 +146,13 @@ export class SessionDirectory {
     if (!key) return { ok: false, reason: this.deps.repoKeys.probed(caller.projectId) ? "no-remote" : "not-probed" };
 
     const projects = this.deps.repoKeys.projectsSharing(key);
-    const readBranch = this.deps.readBranch ?? (async (path: string) => (await readRepoCard(path)).branch);
-    const branches = new Map<string, string | null>();
-    await inProbePool(projects, async (projectId) => {
-      const path = this.deps.projectPath(projectId);
-      branches.set(projectId, path ? await readBranch(path) : null);
-    });
-
     const machineId = this.deps.machineId();
+
+    // Rows first, branches second. Enumerating is a memory read; a branch is a
+    // git spawn, so the set that gets probed has to be the set that can appear
+    // in the answer. A project sharing the repo key but holding no addressable
+    // session contributes no row and is not worth a process — and on a machine
+    // where one repository is open under many project ids, that is most of them.
     const rows: SessionDirectoryRow[] = [];
     for (const projectId of projects) {
       for (const { entry, projectLabel } of this.deps.sessionIndex.sessionsIn(projectId)) {
@@ -165,7 +164,7 @@ export class SessionDirectory {
           ...(projectLabel === undefined ? {} : { projectLabel }),
           sessionId: entry.id,
           title: entry.name,
-          branch: branches.get(projectId) ?? null,
+          branch: null,
           activity: activityOf(entry),
           ...(entry.workStatus === undefined ? {} : { workStatus: entry.workStatus }),
           lastActiveAt: entry.lastUsedAt,
@@ -175,6 +174,18 @@ export class SessionDirectory {
         });
       }
     }
+
+    // The caller's own project joins the probe set even when it contributed no
+    // row: its branch is the one every other row is RANKED against, so leaving
+    // it out would silently retire the sort's first key.
+    const readBranch = this.deps.readBranch ?? (async (path: string) => (await readRepoCard(path)).branch);
+    const branches = new Map<string, string | null>();
+    const probe = [...new Set([caller.projectId, ...rows.map((r) => r.projectId)])];
+    await inProbePool(probe, async (projectId) => {
+      const path = this.deps.projectPath(projectId);
+      branches.set(projectId, path ? await readBranch(path) : null);
+    });
+    for (const row of rows) row.branch = branches.get(row.projectId) ?? null;
 
     const sorted = sortDirectory(rows, branches.get(caller.projectId) ?? null);
     return {

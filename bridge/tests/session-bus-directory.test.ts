@@ -235,3 +235,48 @@ test("a caller on a detached HEAD ranks nobody on branch, and still sorts", () =
   ).map((r) => r.sessionId);
   expect(ordered).toEqual(["a", "b"]);
 });
+
+test("a project that can contribute no row costs no branch probe", async () => {
+  // The probe is a git spawn per project. A machine with one repository open
+  // under many project ids would otherwise pay for every one of them on every
+  // list_sessions call, for projects that cannot appear in the answer.
+  const probed: string[] = [];
+  const d = new SessionDirectory({
+    repoKeys: {
+      keyFor: () => KEY,
+      probed: () => true,
+      projectsSharing: () => ["caller", "has-a-session", "empty", "only-archived"],
+    },
+    sessionIndex: {
+      *sessionsIn(projectId) {
+        if (projectId === "caller") yield { entry: session({ id: "me" }) };
+        if (projectId === "has-a-session") yield { entry: session({ id: "them" }) };
+        if (projectId === "only-archived") yield { entry: session({ id: "gone", archived: true }) };
+      },
+    },
+    projectPath: (id) => `/repos/${id}`,
+    machineId: () => "m",
+    readBranch: async (path) => {
+      probed.push(path.slice("/repos/".length));
+      return "main";
+    },
+  });
+
+  const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
+  expect(answer.rows.map((r) => r.sessionId)).toEqual(["them"]);
+  // The caller's own project is probed even though it contributed no row: its
+  // branch is what every other row is ranked against.
+  expect(probed.sort()).toEqual(["caller", "has-a-session"]);
+});
+
+test("the caller's branch still ranks the rows after the probe set was narrowed", async () => {
+  const d = directory({
+    caller: { key: KEY, branch: "fix/auth", sessions: [session({ id: "me" })] },
+    onBranch: { key: KEY, branch: "fix/auth", sessions: [session({ id: "same", lastUsedAt: 1 })] },
+    offBranch: { key: KEY, branch: "main", sessions: [session({ id: "other", lastUsedAt: 9_000 })] },
+  });
+  const answer = served(await d.list({ projectId: "caller", sessionId: "me" }));
+  // Same branch outranks a much more recent session elsewhere — proof the
+  // caller's own branch reached the sort.
+  expect(answer.rows.map((r) => r.sessionId)).toEqual(["same", "other"]);
+});
