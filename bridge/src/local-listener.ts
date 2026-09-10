@@ -162,6 +162,10 @@ export class LocalListener implements TransportSubscriber {
     this.ownerSocket = null;
   }
 
+  /** TransportSubscriber — this listener IS the loopback wire, so an
+   *  audience-targeted publish naming `relay` must not reach it. */
+  readonly audience = "loopback" as const;
+
   /** TransportSubscriber — bus -> wire (broadcast to owner only; spec invariant: ≤1 owner). */
   deliver(msg: AbMessage, channel: Channel): void {
     if (!this.ownerSocket) {

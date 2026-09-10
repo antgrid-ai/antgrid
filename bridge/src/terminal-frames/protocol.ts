@@ -22,8 +22,19 @@ export const encodedJsonBytes = (value: unknown): number =>
  *  serialized screen is dense with ESC. Mixing the units means a frame every
  *  producer accepts is rejected by the sender. */
 export const TERMINAL_VIEWER_MAX_BYTES = 1024 * 1024;
-/** In-flight ceiling across every attachment on one connection, same unit. */
-export const TERMINAL_CONNECTION_MAX_BYTES = 2 * 1024 * 1024;
+/** In-flight ceiling across every attachment on one connection, same unit.
+ *
+ *  Equal to the per-attachment budget, not a multiple of it, and that is the
+ *  point: frames ride the PREVIEW channel (see agent-core's `sendPreviewAb`
+ *  wiring), whose credit window is `CHANNEL_WINDOW_BYTES` — 2 MiB in
+ *  packages/antgrid-wire/src/flow.ts, which this file may not import (see the
+ *  header). At 2 MiB a single terminal connection could hold the ENTIRE
+ *  preview window un-acked for up to TERMINAL_ACK_TIMEOUT_MS, and the browser
+ *  preview tunnel shares that window. Half the window still admits any single
+ *  legal frame — a frame is capped at TERMINAL_VIEWER_MAX_BYTES — so lowering
+ *  it costs only pipelining depth, which TERMINAL_VIEWER_MAX_FRAMES already
+ *  bounds at four. */
+export const TERMINAL_CONNECTION_MAX_BYTES = TERMINAL_VIEWER_MAX_BYTES;
 /** Reserve for the frame envelope: ids, counters, geometry, the history
  *  boundary and JSON punctuation. Everything but `ansi` is bounded and small. */
 const TERMINAL_FRAME_ENVELOPE_BYTES = 1024;

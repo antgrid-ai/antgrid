@@ -6,6 +6,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { logger } from "./logger";
 const log = logger.child({ component: "agent-core" });
 import { TerminalManager } from "./terminal-manager";
+import {
+  TerminalFrameHub, TerminalViewerConnection,
+  type TerminalAddress, type TerminalViewerTransport,
+} from "./terminal-frames/delivery";
 import { createKeyedLock } from "./keyed-lock";
 import {
   hasTypedContent,
@@ -608,6 +612,134 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // store nor the raw id can say which checkout it belongs to — only the site
   // that minted it can. Session PTYs are keyed by their own id, unnamespaced.
   const terminalOwners = new Map<string, { checkoutId: string; externalId: string }>();
+
+  // --- Wave 5: terminal-frame delivery -----------------------------------
+  //
+  // One hub per project core, mirroring `manager` (one `TerminalManager` per
+  // core too) — `TerminalAddress` already carries `projectId`, so a
+  // machine-wide hub would work, but a per-core one dies with the core
+  // instead of outliving a project close/reopen with stale `Run`s no spawn
+  // will ever re-register.
+  const frameHub = new TerminalFrameHub();
+  // At most one `TerminalViewerConnection` per authenticated transport this
+  // core has — `InboundSource` names the two that exist. Lazily built (see
+  // `viewerConnectionFor`) so a core that never receives `terminal:subscribe`
+  // never allocates one.
+  const viewerConnections = new Map<InboundSource, TerminalViewerConnection>();
+  // Terminals (INTERNAL, namespaced id — the same one `terminalOwners` and
+  // `runIds` key by) with at least one live frame-mode subscriber, and which
+  // source(s) hold one. Populated by the four inbound cases below, consulted
+  // by `sendTerminalFrame`.
+  //
+  // The set is the AUDIENCE the output stream is withheld from, which is why
+  // it holds sources rather than a boolean: the plan's gate is per viewer ("a
+  // connection with a frame attachment ... while OTHER connections still do"),
+  // so suppressing globally would let a phone subscribing to frames black out
+  // the desktop's live terminal — the same terminal, a different client, a
+  // mode it never opted into. `MessageBus.publishExcept` is what makes the
+  // per-viewer answer expressible; a subscriber that is not a wire at all (the
+  // work-status fold, the push dispatcher) declares no audience and so keeps
+  // seeing every frame, which it must.
+  //
+  // ENTIRELY driven by the hub, never by a wire verb: a mark is added when
+  // `subscribe()` reports a live attachment id and dropped when
+  // `TerminalViewerTransport.retired` fires for it. Marking off the inbound
+  // verbs instead diverged from the truth in both directions — an
+  // `terminal:unsubscribe` carrying an attachmentId the connection does not
+  // hold un-suppressed a terminal whose attachment was still streaming
+  // frames, and every retirement the hub performs on its own clock (ack
+  // timeout, a failed capture, the run being removed) left a terminal marked
+  // frame-mode with nothing left to send frames, i.e. delivering nothing at
+  // all on either protocol.
+  const frameSubscribedTerminals = new Map<string, Set<InboundSource>>();
+  /** The terminal each live attachment is marked against, so `retired` can
+   *  undo exactly what `subscribe` recorded. The hub deals in EXTERNAL,
+   *  wire-facing terminal ids; the marks are keyed by the internal namespaced
+   *  id `sendTerminalFrame` sees, and only the subscribe site holds both. */
+  const frameAttachments = new Map<string, { terminalId: string; source: InboundSource }>();
+
+  function markFrameSubscribed(internalTerminalId: string, source: InboundSource): void {
+    let set = frameSubscribedTerminals.get(internalTerminalId);
+    if (!set) {
+      set = new Set();
+      frameSubscribedTerminals.set(internalTerminalId, set);
+    }
+    set.add(source);
+  }
+
+  function markFrameUnsubscribed(internalTerminalId: string, source: InboundSource): void {
+    const set = frameSubscribedTerminals.get(internalTerminalId);
+    if (!set) return;
+    set.delete(source);
+    if (set.size === 0) frameSubscribedTerminals.delete(internalTerminalId);
+  }
+
+  function releaseFrameAttachment(attachmentId: string): void {
+    const held = frameAttachments.get(attachmentId);
+    if (!held) return;
+    frameAttachments.delete(attachmentId);
+    markFrameUnsubscribed(held.terminalId, held.source);
+  }
+
+  /** Outbound authorization for one viewer connection's transport, rechecked
+   *  by the hub on every tick immediately before it sends (D5). Loopback is
+   *  exempt from the mobile-access switch by the same convention as every
+   *  other inbound gate (`currentPhoneAllowed`) — the desktop drives its own
+   *  machine with the switch off. `connState.suppressed` drops a relay
+   *  viewer's pending work the instant the peer goes offline or the app
+   *  backgrounds, the same edge that already drops the legacy `terminal:output`
+   *  stream in `TerminalManager`'s onMessage — and only that: the hub PAUSES a
+   *  refused attachment rather than ending it, because both of those edges
+   *  come back (see `tickAttachment`). */
+  function viewerTransportFor(source: InboundSource): TerminalViewerTransport {
+    return {
+      authorized(address: TerminalAddress): boolean {
+        if (sessions?.isCheckoutDeleting(address.checkoutId) === true) return false;
+        if (source !== "loopback" && (connState.suppressed || !currentPhoneAllowed())) return false;
+        return true;
+      },
+      retired(_address: TerminalAddress, attachmentId: string): void {
+        releaseFrameAttachment(attachmentId);
+      },
+      async send(message, signal): Promise<void> {
+        if (signal.aborted) return;
+        // Targeted at the wire that subscribed: a frame answers ONE viewer's
+        // subscription, so broadcasting it would charge every other connected
+        // client for a stream it never asked for. `runId`/`attachmentId` still
+        // ride the message so the requester's own stale generation can ignore
+        // one, exactly like `terminal:snapshot`'s `history` label.
+        // D4: only the bulk per-frame payload rides "preview" — `subscribed`/
+        // `display:status` are small, latched, one-shot control replies the
+        // requester is actively waiting on, and belong with the rest of the
+        // control plane's priority instead of queued behind preview traffic.
+        (message.type === "terminal:frame" ? sendPreviewAbTo : sendAbTo)(message, source);
+      },
+    };
+  }
+
+  function viewerConnectionFor(source: InboundSource): TerminalViewerConnection {
+    let connection = viewerConnections.get(source);
+    if (!connection) {
+      connection = frameHub.connect(viewerTransportFor(source));
+      viewerConnections.set(source, connection);
+    }
+    return connection;
+  }
+
+  /** Bumped by `noteClientGone`. A `terminal:subscribe` resolves across the
+   *  checkout-preparation await in `attachTransport`, so a close landing in
+   *  that gap would otherwise hand a socket that no longer exists a fresh
+   *  connection (`viewerConnectionFor` builds lazily) and a mark
+   *  `noteClientGone` has already swept — output suppressed indefinitely for
+   *  whoever reconnects under that same `InboundSource`. */
+  const clientGenerations = new Map<InboundSource, number>();
+
+  function dropViewerConnection(source: InboundSource): void {
+    viewerConnections.get(source)?.close();
+    viewerConnections.delete(source);
+  }
+  // --- end Wave 5 state ----------------------------------------------------
+
   // What each client last said is on screen (`session:focus`), dropped when it
   // declares it can render nothing here (`client:focus-state`) or when its
   // socket goes away (`noteClientGone`). A dropped socket is the app's to
@@ -726,6 +858,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       ? msg.terminalId
       : null;
     if (!terminalId) { sendAb(msg); return; }
+    // D2: the passive `terminal:output` stream, not `terminal:exited` or
+    // `terminal:notification` — those are one-shot lifecycle events a
+    // frame-mode viewer still needs (ENDED aside, the hub raises nothing for
+    // them), and suppressing them would leave a frame-mode client with no way
+    // to learn its terminal exited at all. `terminal:snapshot`'s own explicit
+    // request/reply is untouched too: unlike the unsolicited output stream, a
+    // client that actually asked for one is legacy by its own choice (a
+    // frame-mode client subscribes instead) and already self-filters replies
+    // via its `history` label — see that schema's own comment.
+    // Withheld from the frame-mode wires ONLY, never dropped outright: two
+    // clients can watch the same terminal in different modes, and a phone
+    // subscribing to frames must not black out the desktop's output stream.
+    const withheld = msg.type === "terminal:output"
+      ? frameSubscribedTerminals.get(terminalId)
+      : undefined;
     const { runtime, externalId } = terminalOwner(terminalId);
     const session = msg.type === "terminal:notification" ? sessions?.get(terminalId) : undefined;
     const tool = session?.tool ?? (session?.command ? undefined : runtime.config.agent?.tool);
@@ -742,7 +889,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }));
       return;
     }
-    sendFromRuntime(runtime, { ...msg, terminalId: externalId } as AbMessage);
+    const stamped = { ...msg, terminalId: externalId } as AbMessage;
+    if (withheld?.size) {
+      sendAbExcept({ ...stamped, checkoutId: runtime.checkout.id } as AbMessage, withheld);
+      return;
+    }
+    sendFromRuntime(runtime, stamped);
   }
 
   function nextKeypair(): EphemeralKeypair {
@@ -860,7 +1012,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // [client] is who sent this frame — needed only by the work-status read state,
   // which tracks what each client has on screen separately. Everything else in
   // here is authorized at the bus handler and does not care.
-  function handleAbMessage(msg: AbMessage, client: InboundSource) {
+  /** `clientGeneration` is `client`'s connection generation AS THE FRAME
+   *  ARRIVED, which for a checkout-scoped type is several awaits before this
+   *  function runs — see `clientGenerations`. Only the terminal-frame
+   *  subscribe reads it; the default is for the callers that dispatch
+   *  synthetically rather than off a live socket. */
+  function handleAbMessage(
+    msg: AbMessage,
+    client: InboundSource,
+    clientGeneration = clientGenerations.get(client) ?? 0,
+  ) {
     switch (msg.type) {
       case "agent:prompt":
       case "agent:permission-resolve":
@@ -1588,6 +1749,111 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         })();
         break;
       }
+      // Wave 5: the frame display protocol. All four arrive here already
+      // checkout-resolved — `attachTransport`'s CHECKOUT_VARIABLE_MESSAGE_TYPES
+      // branch (these eight types are all in that set, registered in Wave 1)
+      // has already run `isCheckoutDeleting` -> `checkoutRuntimes.resolve` ->
+      // re-`isCheckoutDeleting` -> `prepareCheckoutRuntime` before calling this
+      // function at all, exactly the dance `handleTerminalSnapshotRpc` runs by
+      // hand for its own RPC entry point. The single re-check below is the
+      // extra one that dance itself documents: a delete can still start in the
+      // gap between that resolution and this switch actually running. Resolved
+      // explicitly here rather than through the `runtime` this switch already
+      // computed above — `runtimeFor` silently falls back to `mainRuntime` for
+      // an unresolved checkout, which would let a request naming a just-deleted
+      // or not-yet-prepared checkout read or drive main's terminal instead.
+      // None of the four carries a viewer/attachment id that is trusted as
+      // authorization — `client` (the authenticated transport) is what
+      // `viewerConnectionFor` and `TerminalViewerTransport.authorized` key on.
+      case "terminal:subscribe": {
+        const checkoutId = checkoutIdOf(msg);
+        if (sessions?.isCheckoutDeleting(checkoutId) === true) break;
+        const owner = checkoutId === "main" ? mainRuntime : checkoutRuntimes.runtime(checkoutId);
+        if (!owner || owner.disposed) break;
+        const internalId = internalTerminalId(owner, msg.terminalId);
+        if ((clientGenerations.get(client) ?? 0) !== clientGeneration) break;
+        const connection = viewerConnectionFor(client);
+        void connection
+          .subscribe({ projectId: project.id, checkoutId, terminalId: msg.terminalId }, msg.version, msg.requestId)
+          .then((attachmentId) => {
+            // Retired already, between the hub reporting the id and this
+            // continuation: the release fired before there was a mark, so
+            // recording one now would leave it set for good.
+            if (!attachmentId || !connection.hasAttachment(attachmentId)) return;
+            if ((clientGenerations.get(client) ?? 0) !== clientGeneration) {
+              // The socket went away while this was resolving. Tear the whole
+              // connection down rather than just this attachment: every
+              // attachment on it belongs to the same dead socket, and a
+              // reconnect gets a fresh one from `viewerConnectionFor`.
+              dropViewerConnection(client);
+              return;
+            }
+            frameAttachments.set(attachmentId, { terminalId: internalId, source: client });
+            markFrameSubscribed(internalId, client);
+          });
+        break;
+      }
+      // `viewerConnections.get`, never `viewerConnectionFor`: an ack or an
+      // unsubscribe for a connection this core does not hold names an
+      // attachment that cannot exist, and building one to answer it would
+      // register an empty connection in the hub that nothing is left to close.
+      case "terminal:ack": {
+        const checkoutId = checkoutIdOf(msg);
+        viewerConnections.get(client)?.acknowledge(
+          { projectId: project.id, checkoutId, terminalId: msg.terminalId },
+          { runId: msg.runId, attachmentId: msg.attachmentId, sequence: msg.sequence },
+        );
+        break;
+      }
+      case "terminal:unsubscribe": {
+        const checkoutId = checkoutIdOf(msg);
+        // The mode-exclusivity mark is NOT dropped here. `unsubscribe` ignores
+        // an attachmentId/runId pair the connection does not hold, so acting
+        // on the wire's word would un-suppress a terminal whose attachment is
+        // still streaming — a stale unsubscribe after a re-subscribe does it
+        // by accident, an invented id does it on purpose. The `retired` hook
+        // fires only if something really was retired.
+        viewerConnections.get(client)?.unsubscribe(
+          { projectId: project.id, checkoutId, terminalId: msg.terminalId }, msg.runId, msg.attachmentId,
+        );
+        break;
+      }
+      case "terminal:history:request": {
+        const checkoutId = checkoutIdOf(msg);
+        if (sessions?.isCheckoutDeleting(checkoutId) === true) break;
+        const owner = checkoutId === "main" ? mainRuntime : checkoutRuntimes.runtime(checkoutId);
+        if (!owner || owner.disposed || !manager) break;
+        const internalId = internalTerminalId(owner, msg.terminalId);
+        // `internalTerminalId` returns a SESSION terminal's id unchanged
+        // whichever runtime it is handed, so the deletion check above ran
+        // against the checkout the CLIENT named while the rows below belong to
+        // whichever checkout actually owns the terminal. The frame path has no
+        // such hole — its address is keyed on the true checkout, so a
+        // mismatched wire id simply misses `hub.find()` — and this makes the
+        // history path agree with it.
+        if (terminalOwner(internalId).runtime.checkout.id !== checkoutId) break;
+        // The runId a client holds names the subscription it made history part
+        // of; a stale one (the run rotated under it — a respawn) names a run
+        // this terminal no longer runs, so the request is dropped exactly like
+        // `acknowledge`'s own `ack.runId !== attachment.run.runId` guard rather
+        // than answered from a history run the app never subscribed to.
+        if (manager.runId(internalId) !== msg.runId) break;
+        const page = manager.historyPage(msg.runId, msg.epoch, msg.beforeRowId);
+        if (!page) break;
+        // D4: bulk row data, same "preview" channel as `terminal:frame`.
+        sendPreviewAb(createMessage("terminal:history:page", {
+          checkoutId,
+          terminalId: msg.terminalId,
+          runId: msg.runId,
+          attachmentId: msg.attachmentId,
+          requestId: msg.requestId,
+          history: page.history,
+          expired: page.expired,
+          beforeRowId: page.beforeRowId,
+          rows: page.rows,
+        }));
+        break;
+      }
       case "file:tree:snapshot:request": {
         // Answer only the checkout that ASKED. `runtimeFor` falls back to
         // mainRuntime for an id with no runtime yet (an isolated session's
@@ -1736,6 +2002,24 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  MessageBus.retain. */
   let retainAb: (msg: AbMessage) => void = (_m) => {};
   let sendPlain: (data: object) => Promise<SendOutcome> = async () => "dropped";
+  /** Same wire as [sendAb] but on the "preview" channel — D4's split so a
+   *  terminal's bulk display payloads (`terminal:frame`, `terminal:history:page`)
+   *  queue and get credited separately from the control plane, behind
+   *  `send-scheduler.ts`'s already-strict control>preview priority, instead of
+   *  competing with it for `CHANNEL_WINDOW_BYTES`: measured against
+   *  `packages/antgrid-wire/src/flow.ts`, `TERMINAL_CONNECTION_MAX_BYTES` (one
+   *  connection's whole terminal-viewer budget) is exactly `CHANNEL_WINDOW_BYTES`
+   *  — terminal traffic sharing "control" could alone occupy an entire credit
+   *  window and starve every other control-plane message behind it. */
+  let sendPreviewAb: (msg: AbMessage) => void = (_m) => {};
+  /** [sendAb]/[sendPreviewAb] narrowed to ONE wire — the terminal-viewer
+   *  replies, which answer the connection that subscribed rather than the
+   *  project. See MessageBus.publishOnly. */
+  let sendAbTo: (msg: AbMessage, only: InboundSource) => void = (_m, _o) => {};
+  let sendPreviewAbTo: (msg: AbMessage, only: InboundSource) => void = (_m, _o) => {};
+  /** [sendAb] withheld from the wires listed — D2's mode exclusivity, which is
+   *  per CLIENT. See MessageBus.publishExcept. */
+  let sendAbExcept: (msg: AbMessage, except: ReadonlySet<InboundSource>) => void = (_m, _e) => {};
   // Replay-cache eviction for torn-down chat sessions; bound with the bus in
   // attachTransport, like sendAb.
   let dropSessionReplay: (sessionId: string) => void = (_s) => {};
@@ -3090,6 +3374,34 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         terminalOwners.delete(id);
         setupTerminalIds.delete(id);
       },
+      // Wave 5: register/evict this terminal's run with the frame-delivery
+      // hub. `terminalOwner` (not `runtimeFor`/`?? mainRuntime`) is the same
+      // resolution `sendTerminalFrame` itself uses for this id, so a hub
+      // `TerminalAddress` and the legacy stream's rewritten checkout can never
+      // disagree about which checkout owns this terminal.
+      onRunStarted: (id, runId, source) => {
+        const { runtime, externalId } = terminalOwner(id);
+        frameHub.register({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId }, source, runId);
+      },
+      // The graceful close, available only where the emulator outlives the PTY
+      // (see the callback's own doc): the hub settles the final screen, sends
+      // what is left, and ends each viewer with the exit code. Every other exit
+      // reaches `onRunEnded` below with the screen already disposed, where
+      // `remove` announces the same ENDED without a final flush. Caught rather
+      // than voided: an unhandled rejection here reaches `index.ts`'s
+      // `unhandledRejection` hook, which takes the whole host down.
+      onRunExited: (id, runId, exitCode) => {
+        const { runtime, externalId } = terminalOwner(id);
+        void frameHub
+          .finish({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId }, runId, exitCode)
+          .catch((error) => log.warn("terminal %s: settling run %s for its viewers failed: %s", id, runId, error));
+      },
+      onRunEnded: (id, _runId, exitCode) => {
+        const { runtime, externalId } = terminalOwner(id);
+        // Each retired attachment releases its own mode-exclusivity mark
+        // through `TerminalViewerTransport.retired`.
+        frameHub.remove({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId }, exitCode);
+      },
       // A notification (osc9/osc777) means the session did something worth
       // surfacing — float it up the drawer. No-ops for non-session terminals.
       onTerminalNotification: (id) => sessions?.touch(id),
@@ -3991,11 +4303,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb = (m) => bus.publish(m, "control");
     republishAb = (m) => bus.republish(m, "control");
     retainAb = (m) => bus.retain(m, "control");
+    sendPreviewAb = (m) => bus.publish(m, "preview");
+    sendAbTo = (m, only) => bus.publishOnly(m, "control", only);
+    sendPreviewAbTo = (m, only) => bus.publishOnly(m, "preview", only);
+    sendAbExcept = (m, except) => bus.publishExcept(m, "control", except);
     dropSessionReplay = (sessionId) => bus.dropSessionReplay(sessionId);
     dropCheckoutReplay = (checkoutId) => bus.dropCheckoutReplay(checkoutId);
     // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.
     sendPlain = (data) => busPlainHook?.(data) ?? Promise.resolve("dropped");
     bus.setInboundHandler((msg, channel, source) => {
+      // Read here, synchronously, and carried through every await below: this
+      // is the only point that observes which connection the frame actually
+      // arrived on (see `clientGenerations`).
+      const generation = clientGenerations.get(source) ?? 0;
       // Mobile-access gate: the single chokepoint through which both RPC
       // requests and plain Ab messages enter the core dispatch. Drops EVERY
       // inbound verb while the machine is not mobile-reachable, so an
@@ -4108,11 +4428,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // await would otherwise have its checkout re-prepared right here.
           if (refuseDeleting()) return;
           if (checkoutId !== "main") await prepareCheckoutRuntime(checkout);
-          handleAbMessage({ ...msg, checkoutId } as AbMessage, source);
+          handleAbMessage({ ...msg, checkoutId } as AbMessage, source, generation);
         }).catch((error) => log.warn("Checkout lookup failed for %s: %s", checkoutId, error));
         return;
       }
-      handleAbMessage(msg, source);
+      handleAbMessage(msg, source, generation);
     });
   }
 
@@ -4133,6 +4453,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       if (isShuttingDown) return 0;
       isShuttingDown = true;
 
+      // Stops the hub's own setInterval (see `TerminalFrameHub.dispose`) and
+      // retires every connection's attachments; nothing else on this core's
+      // shutdown path otherwise reaches that timer.
+      frameHub.dispose();
       apiServer?.stop();
       // Before teardownServices, which force-kills through `killAll()` and then
       // nulls `manager` — sequenced after it this could only ever see an empty
@@ -4200,6 +4524,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // re-declares both halves itself, and holding the id here would leak one
       // entry per client for the life of the core.
       pausedFocusByClient.delete(client);
+      // D5: a dropped connection retires every attachment it held (see
+      // `TerminalViewerConnection.close`) rather than leaving them to time out
+      // one ack-timeout at a time, and a reconnect gets a fresh connection —
+      // `viewerConnectionFor` rebuilds lazily on the next subscribe. Each
+      // retirement releases its own mark through the `retired` hook; the
+      // generation bump is for the subscribe still in flight, which has no
+      // attachment to retire yet.
+      clientGenerations.set(client, (clientGenerations.get(client) ?? 0) + 1);
+      dropViewerConnection(client);
     },
   };
 }

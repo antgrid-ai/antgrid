@@ -101,6 +101,9 @@ export class StreamMux {
     // request; the app times that out and resyncs from a snapshot.
     const mayDeliver = () => opts.mayDeliver?.() ?? true;
     const unsub = bus.subscribe({
+      // This stream IS the relay wire, so an audience-targeted publish meant
+      // for the desktop's loopback socket must not be enveloped onto it.
+      audience: "relay",
       deliver: (msg, channel) => {
         if (!mayDeliver()) return;
         void this.transport.sendEnvelope(streamId, msg, channel);

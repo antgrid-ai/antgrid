@@ -288,6 +288,35 @@ export interface TerminalManagerCallbacks {
    *  it again and `getStatus` will never report it. The one signal an owner of
    *  per-terminal state outside this class can key its own release on. */
   onTerminalForgotten?: (terminalId: string) => void;
+  /** A fresh `TerminalFrameSource` now owns `terminalId`'s slot under `runId` —
+   *  register it with the terminal-frame hub. Fired at every spawn (same-id
+   *  respawn included, under a NEW runId) and at every `ensureLiveScreen`
+   *  rebuild (the SAME runId, a new emulator instance) — see `TerminalManager`'s
+   *  own `runIds` doc for why identity lives with the screen. Never fired for
+   *  the plain-`TerminalScreen` construction fallback: there is no frame source
+   *  to capture from, so there is nothing for the hub to hold. This class has no
+   *  checkout/project context to build a `TerminalAddress` from — only the
+   *  caller (agent-core.ts, via `terminalOwner`) does. */
+  onRunStarted?: (terminalId: string, runId: string, source: TerminalFrameSource) => void;
+  /** `terminalId`'s current run is over — evict it from the hub. Fired from
+   *  `disposeScreen`, which is already the single "this run is over" signal
+   *  (see its own doc): a same-id respawn's old run, `forget()`'s teardown, and
+   *  a non-retained exit. Ordering matters here the same way it does for the
+   *  history-row delete `disposeScreen` performs right beside this: a late exit
+   *  for an ALREADY-REPLACED run never reaches `disposeScreen` at all (the
+   *  `terminal:exited` handler's own `current !== session` guard returns
+   *  first), so this can never fire for a run a fresh `onRunStarted` has
+   *  already superseded at the same terminal id. */
+  onRunEnded?: (terminalId: string, runId: string, exitCode?: number | null) => void;
+  /** The PTY has exited and the emulator SURVIVES it — the
+   *  `retainScrollbackOnExit` case, today only the checkout-setup transcript.
+   *  A frame consumer can settle the run against the real final screen here,
+   *  which is the one place that screen still exists; without retention the
+   *  screen is disposed in the same tick and `onRunEnded` is the only signal
+   *  there can be. Never fired for the non-retained exit, deliberately: a
+   *  consumer that awaited the screen there would be awaiting a disposed
+   *  emulator whose write callbacks never fire again. */
+  onRunExited?: (terminalId: string, runId: string, exitCode: number | null) => void;
 }
 
 /**
@@ -522,7 +551,7 @@ export class TerminalManager {
             this.sessions.delete(terminalId);
             this.scrollbacks.delete(terminalId);
             this.modeTrackers.delete(terminalId);
-            this.disposeScreen(terminalId);
+            this.disposeScreen(terminalId, msg.exitCode);
             this.retainScrollback.delete(terminalId);
             this.connState.clearTerminal(terminalId);
             return;
@@ -536,10 +565,19 @@ export class TerminalManager {
             rows: session.rows,
           });
           this.sessions.delete(terminalId);
-          if (!this.retainScrollback.has(terminalId)) {
+          if (this.retainScrollback.has(terminalId)) {
+            const retainedRunId = this.runIds.get(terminalId);
+            if (retainedRunId) {
+              try {
+                this.callbacks.onRunExited?.(terminalId, retainedRunId, msg.exitCode);
+              } catch (error) {
+                log.warn(`Terminal "${terminalId}" run-exited callback failed for run ${retainedRunId}: %s`, error);
+              }
+            }
+          } else {
             this.scrollbacks.delete(terminalId);
             this.modeTrackers.delete(terminalId);
-            this.disposeScreen(terminalId);
+            this.disposeScreen(terminalId, msg.exitCode);
           }
           this.connState.clearTerminal(terminalId);
           this.callbacks.onTerminalExited?.(terminalId);
@@ -571,6 +609,7 @@ export class TerminalManager {
     this.runIds.set(terminalId, runId);
     screen = this.constructScreen(terminalId, session.cols, session.rows, this.openHistoryRun(terminalId, runId));
     this.screens.set(terminalId, screen);
+    if (screen instanceof TerminalFrameSource) this.callbacks.onRunStarted?.(terminalId, runId, screen);
     // Before `session.spawn()`, which is what actually starts the PTY: the
     // session's own byte-level responder must already be narrowed to
     // OSC-colors-only by the time the guest's first query byte can arrive,
@@ -678,7 +717,7 @@ export class TerminalManager {
    * every terminal ever spawned in the process's life would leave its handle
    * cached there forever.
    */
-  private disposeScreen(terminalId: string): void {
+  private disposeScreen(terminalId: string, exitCode?: number | null): void {
     try {
       this.screens.get(terminalId)?.dispose();
     } catch (error) {
@@ -688,6 +727,13 @@ export class TerminalManager {
     const runId = this.runIds.get(terminalId);
     this.runIds.delete(terminalId);
     this.rebuildCounts.delete(terminalId);
+    if (runId) {
+      try {
+        this.callbacks.onRunEnded?.(terminalId, runId, exitCode);
+      } catch (error) {
+        log.warn(`Terminal "${terminalId}" run-ended callback failed for run ${runId}: %s`, error);
+      }
+    }
     if (runId) {
       try {
         liveTerminalHistoryStore()?.deleteRun(runId);
@@ -837,6 +883,11 @@ export class TerminalManager {
       log.warn(`Terminal "${terminalId}" failed screen dispose during rebuild: %s`, error);
     }
     this.screens.set(terminalId, replacement);
+    if (replacement instanceof TerminalFrameSource && runId) {
+      // Re-registered under the SAME runId — a new emulator for the run the
+      // hub already knows, never a fresh one (see `onRunStarted`'s doc).
+      this.callbacks.onRunStarted?.(terminalId, runId, replacement);
+    }
     if (replacement instanceof TerminalFrameSource) {
       // Discard replies until the reseed below has actually been PARSED:
       // `feed` only queues into xterm's write buffer, so wiring the real
@@ -1162,6 +1213,18 @@ export class TerminalManager {
    *  see `runIds`. */
   runId(terminalId: string): string | undefined {
     return this.runIds.get(terminalId);
+  }
+
+  /** Serve one page of `runId`'s row history — Wave 5's
+   *  `terminal:history:request`. Reads from the STORE rather than from any live
+   *  source's own handle: mid-rebuild, a source's handle is a
+   *  `ReplayGuardedHistory` composed over this same underlying
+   *  `TerminalRunHistory`, and `openRun` returns that identical cached instance
+   *  — see its doc. `undefined` only when no history store is open at all (a
+   *  bare test run, or the feature disabled); an unknown or exhausted runId is
+   *  `page()`'s own job to answer (`expired: true`), never this method's. */
+  historyPage(runId: string, epoch: number, beforeRowId: number): HistoryPage | undefined {
+    return liveTerminalHistoryStore()?.openRun(runId).page(epoch, beforeRowId);
   }
 
   get size(): number {
