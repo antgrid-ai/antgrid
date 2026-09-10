@@ -64,6 +64,12 @@ class RelayMechanisms implements ConnMechanisms {
 
   MachineSession? _session;
 
+  /// Watches the socket for the one key retirement [MachineSession] publishes
+  /// no event for. Tied to [_session]'s lifetime, not the relay's: the relay
+  /// outlives any single session, so a subscription left behind would go on
+  /// retiring keys on behalf of a session that no longer exists.
+  StreamSubscription<AppState>? _socketDownSub;
+
   /// The agent Ed25519 key [_session]'s handshaker was pinned against. The pin
   /// is fixed at construction, so this is what tells a redial whether the live
   /// session can still verify the identity the coords step just returned.
@@ -233,6 +239,8 @@ class RelayMechanisms implements ConnMechanisms {
     final session = _session;
     _session = null;
     _sessionPin = null;
+    await _socketDownSub?.cancel();
+    _socketDownSub = null;
     _lastCoords = null;
     _agentOnline = false;
     if (session != null) {
@@ -261,6 +269,8 @@ class RelayMechanisms implements ConnMechanisms {
       // was derived under.
       _session = null;
       _sessionPin = null;
+      await _socketDownSub?.cancel();
+      _socketDownSub = null;
       await existing.dispose();
       retireNativeE2eCipherKeys();
       // After the dispose, so a listener that rebuilds a transport off this
@@ -283,8 +293,28 @@ class RelayMechanisms implements ConnMechanisms {
           createAbMessage('project:start', {'projectId': projectId}),
       logger: _logMachineSession,
     );
-    session.takeoverEvents.listen((_) => onSessionTakenOver?.call());
-    session.sessionDownEvents.listen((_) => onSessionDown?.call());
+    // A session retires its keys on four paths and is DISPOSED on only two of
+    // them, so the dispose sites alone leave the involuntary majority — a
+    // dropped socket above all — holding key material in the native cipher.
+    // `MachineSession` zeroizes its own buffers on each of these; the cipher's
+    // copy is reachable from here or nowhere.
+    session.takeoverEvents.listen((_) {
+      retireNativeE2eCipherKeys();
+      onSessionTakenOver?.call();
+    });
+    session.sessionDownEvents.listen((_) {
+      retireNativeE2eCipherKeys();
+      onSessionDown?.call();
+    });
+    // The common one, and the only one with no event of its own: the session
+    // tears down on exactly this transition (its `_onState`), so watching the
+    // socket here is reading the same signal it does rather than guessing at a
+    // proxy for it.
+    _socketDownSub = _relay.stateStream.listen((s) {
+      if (s.connectionState == RelayConnectionState.disconnected) {
+        retireNativeE2eCipherKeys();
+      }
+    });
     session.start();
     _sessionPin = agentEd25519PubB64;
     return _session = session;

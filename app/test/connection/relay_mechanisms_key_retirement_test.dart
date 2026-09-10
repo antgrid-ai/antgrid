@@ -147,6 +147,35 @@ void main() {
       );
     });
 
+    test('a dropped socket retires the keys, without disposing the session',
+        () async {
+      // The common case and the one the dispose sites miss entirely: the
+      // supervisor keeps the session for a reconnect, so nothing releases it.
+      // Left uncovered, a laptop that loses wifi and sits idle holds the
+      // session keys for the rest of the process.
+      final mech = build();
+      addTearDown(mech.release);
+      await mech.dial(
+        const ConnCoords(
+          relayUrl: 'ws://relay.test',
+          agentEd25519PubB64: _pinA,
+        ),
+        'tok',
+      );
+      await sealOneFrame(0x43);
+      expect(CngAesGcm.importedKeyCount, 1);
+
+      relay.disconnect();
+      await pumpEventQueue();
+
+      expect(CngAesGcm.importedKeyCount, 0);
+      expect(
+        mech.session,
+        isNotNull,
+        reason: 'the session must survive for the supervisor to reconnect it',
+      );
+    });
+
     test('replacing a stale-pinned session retires its keys too', () async {
       final mech = build();
       addTearDown(mech.release);
