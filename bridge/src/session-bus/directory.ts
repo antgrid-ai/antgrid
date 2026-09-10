@@ -271,7 +271,7 @@ export function withLocalFloor(
  *  was, and names what it found. */
 export type DirectoryReach =
   | { scope: "machine"; why: "remote-access-off" | "no-machine-id" | "no-carrier" }
-  | { scope: "network"; asOfMs: number; machines: ReachMachine[]; staleMachines: number; notConnected: number };
+  | { scope: "network"; lastPushAgoMs: number; machines: ReachMachine[]; staleMachines: number; notConnected: number };
 
 /**
  * Either the directory, or why there is none.
@@ -395,7 +395,9 @@ export class SessionDirectory {
       truncated: view.truncated,
       reach: {
         scope: "network",
-        asOfMs: now,
+        // How stale the mirror is, not when it was read: the read clock is the
+        // caller's own and says nothing an agent could weigh a row against.
+        lastPushAgoMs: now - view.lastPushAt,
         machines: view.machines,
         staleMachines: view.staleMachines,
         notConnected: view.notConnected,

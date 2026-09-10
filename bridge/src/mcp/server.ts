@@ -128,6 +128,11 @@ function str(description: string) {
  *  client is offered is BASE_TOOLS, which spreads this in. */
 const SESSION_BUS_TOOLS: McpTool[] = [
   {
+    name: "antgrid_list_sessions",
+    description: "List the other agent sessions you can address — every session, on this machine or a connected one, whose project is the same git repository as yours. Rows are ordered by how likely they are to matter (same branch, then still working, then recently active), not scored: read the titles and judge. The answer always ends with a line saying how far the read actually reached, so an empty list can be told apart from a read that could not ask.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
     name: "antgrid_publish_artifact",
     description: "Store a file-sized piece of evidence — a diff, a log, a transcript — and get back an id to name in a message. The bytes stay on this machine. The other side is shown the id, name and summary and cannot read the content, so put anything it must actually READ in the message text.",
     inputSchema: {
@@ -210,6 +215,71 @@ function body(fields: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
 }
 
+function seconds(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  return m < 60 ? `${m}m` : `${Math.round(m / 60)}h`;
+}
+
+/** A machine as a human names it, falling back to the id it is addressed by. */
+function machineName(m: { machineLabel?: string; machineId: string }): string {
+  return m.machineLabel || m.machineId;
+}
+
+/** One directory row. Machine and session id lead because together they ARE the
+ *  address — the title is what makes the row judgeable, not what names it. */
+function sessionLine(row: any, selfMachineId: string | null): string {
+  const where = row.machineId === null || row.machineId === selfMachineId ? "this machine" : machineName(row);
+  const facts = [row.branch, row.activity, row.canReply ? "can reply" : "receive-only"].filter(Boolean);
+  return `- [${where}] ${row.sessionId} "${row.title}" — ${facts.join(", ")}`;
+}
+
+/** What one peer contributed, or why it contributed nothing. A machine that
+ *  could not be asked is NAMED here rather than omitted: a peer missing from
+ *  the list reads as a peer with nobody working on it. */
+function reachMachineClause(m: any): string {
+  const name = machineName(m);
+  const dropped = m.droppedRows > 0 ? `, ${m.droppedRows} rows refused` : "";
+  switch (m.status) {
+    case "answered":
+      return m.rows > 0
+        ? `${name}: ${m.rows} session${m.rows === 1 ? "" : "s"}, read ${seconds(m.ageMs)} ago${dropped}`
+        : `${name}: nothing on this repository as of ${seconds(m.ageMs)} ago${dropped}`;
+    case "refused":
+      return `${name}: remote access is off there`;
+    case "no-card":
+      return `${name}: running a bridge older than this feature`;
+    default:
+      return m.rows > 0
+        ? `${name}: did not answer; its ${m.rows} rows above were read ${seconds(m.ageMs)} ago`
+        : `${name}: did not answer`;
+  }
+}
+
+/** Printed in EVERY state, including a fully successful one. A signal that
+ *  appears only on failure teaches an agent to read its absence as
+ *  completeness, and "there is nobody else" is the one wrong answer a directory
+ *  can give. */
+function reachLine(reach: any): string {
+  if (reach.scope === "machine") {
+    switch (reach.why) {
+      case "remote-access-off":
+        return "Reach: remote access is off on this machine, so only its own sessions are listed.";
+      case "no-machine-id":
+        return "Reach: this machine has no relay identity yet, so nothing on it can be addressed from elsewhere and only its own sessions are listed.";
+      default:
+        return "Reach: no desktop app is carrying a cross-machine read for this machine, so only its own sessions are listed.";
+    }
+  }
+  const parts = [`Reach: ${reach.machines.length} other machine${reach.machines.length === 1 ? "" : "s"} read ${seconds(reach.lastPushAgoMs)} ago.`];
+  for (const m of reach.machines) parts.push(`${reachMachineClause(m)}.`);
+  if (reach.notConnected > 0) {
+    parts.push(`${reach.notConnected} machine${reach.notConnected === 1 ? "" : "s"} in your account ${reach.notConnected === 1 ? "is" : "are"} not connected to this desktop and ${reach.notConnected === 1 ? "was" : "were"} not asked.`);
+  }
+  return parts.join(" ");
+}
+
 function artifactLine(a: any): string {
   return `- ${a.artifactId} ${a.name} (${a.mediaType}, ${a.bytes} bytes): ${a.summary}`;
 }
@@ -224,6 +294,19 @@ export async function callSessionBusTool(
   args: Record<string, unknown> | undefined,
 ): Promise<ToolResult> {
   switch (name) {
+    case "antgrid_list_sessions": {
+      const r = await api("GET", "/session-bus/sessions");
+      if (!r.ok) return toolError(busError(r));
+      const rows = (r.data.sessions ?? []) as any[];
+      const self = (r.data.machineId ?? null) as string | null;
+      const hidden = r.data.truncated > 0 ? `; ${r.data.truncated} more not shown` : "";
+      const head = rows.length === 0
+        ? "No other session is addressable from here."
+        : `Sessions you can address (${rows.length}${hidden}):`;
+      const body = rows.map((row) => sessionLine(row, self)).join("\n");
+      return toolText([head, body, reachLine(r.data.reach)].filter(Boolean).join("\n"));
+    }
+
     case "antgrid_publish_artifact": {
       const r = await api("POST", "/session-bus/artifacts", body({
         name: argStr(args, "name"),

@@ -83,7 +83,10 @@ export interface SessionBusApi {
    *  affordable. */
   listSessions(
     terminalId: string | undefined,
-  ): Promise<{ sessions: SessionDirectoryRow[]; truncated: number; reach: DirectoryReach } | SessionBusRefusal>;
+  ): Promise<
+    | { sessions: SessionDirectoryRow[]; truncated: number; reach: DirectoryReach; machineId: string | null }
+    | SessionBusRefusal
+  >;
   publishArtifact(
     terminalId: string | undefined,
     body: PublishArtifactBody,
@@ -262,7 +265,12 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
           ? refuse("NOT_ADDRESSABLE", "this project has no git remote, so no other session can name it and it can name none")
           : refuse("AGENT_NOT_READY", "this project's git remote has not been read yet; it becomes addressable on its own");
       }
-      return { sessions: answer.rows, truncated: answer.truncated, reach: answer.reach };
+      // The caller's own machine, so a renderer can tell a local row from a
+      // peer's. A row carries the machine it belongs to and nothing that says
+      // which one is home, and deriving it by elimination from the reach report
+      // would be wrong in exactly the state that matters: a peer whose rows all
+      // expired is still named there while contributing none.
+      return { sessions: answer.rows, truncated: answer.truncated, reach: answer.reach, machineId: deps.machineId() };
     },
 
     getArtifact(terminalId, artifactId, offset, length) {

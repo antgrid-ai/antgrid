@@ -115,6 +115,7 @@ describe("the session-bus tools", () => {
     expect(isSessionBusTool("antgrid_publish_artifact")).toBe(true);
     expect(isSessionBusTool("antgrid_list_artifacts")).toBe(true);
     expect(isSessionBusTool("antgrid_get_artifact")).toBe(true);
+    expect(isSessionBusTool("antgrid_list_sessions")).toBe(true);
   });
 
   // The bridge authored the refusal and owns the wording; this process appends
@@ -144,6 +145,84 @@ describe("the session-bus tools", () => {
     const result = await callSessionBusTool("antgrid_list_artifacts", {});
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain("Antgrid agent is not running");
+  });
+
+  test("a directory row leads with the address and says whether the peer can answer", async () => {
+    stub(() => Response.json({
+      sessions: [
+        { machineId: "self", projectId: "p1", sessionId: "4f2ac1", title: "Wire identity wave 6", branch: "feat/wire-identity", activity: "running", lastActiveAt: 1, canReply: true },
+        { machineId: "peer", machineLabel: "macbook-pro", projectId: "p2", sessionId: "9c11de", title: "Relay flow control", branch: "development", activity: "idle", lastActiveAt: 1, canReply: false },
+      ],
+      truncated: 0,
+      machineId: "self",
+      reach: { scope: "network", lastPushAgoMs: 12_000, machines: [{ machineId: "peer", machineLabel: "macbook-pro", status: "answered", rows: 1, droppedRows: 0, truncatedCard: 0, ageMs: 12_000 }], staleMachines: 0, notConnected: 0 },
+    }));
+    const result = await callSessionBusTool("antgrid_list_sessions", {});
+    const text = result.content[0]!.text;
+    expect(text).toContain('- [this machine] 4f2ac1 "Wire identity wave 6" — feat/wire-identity, running, can reply');
+    expect(text).toContain('- [macbook-pro] 9c11de "Relay flow control" — development, idle, receive-only');
+  });
+
+  // The one wrong answer a directory can give is "there is nobody else" when the
+  // truth is "I could not ask", so the reach line prints even when every machine
+  // answered — an agent that only ever saw it on failure would read its absence
+  // as completeness.
+  test("the reach line prints when the read fully succeeded", async () => {
+    stub(() => Response.json({
+      sessions: [],
+      truncated: 0,
+      machineId: "self",
+      reach: { scope: "network", lastPushAgoMs: 3_000, machines: [{ machineId: "peer", machineLabel: "thinkpad", status: "answered", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 3_000 }], staleMachines: 0, notConnected: 0 },
+    }));
+    const result = await callSessionBusTool("antgrid_list_sessions", {});
+    expect(result.content[0]!.text).toContain("Reach: 1 other machine read 3s ago.");
+    expect(result.content[0]!.text).toContain("thinkpad: nothing on this repository as of 3s ago");
+  });
+
+  test("a machine that could not be asked is named, never dropped from the report", async () => {
+    stub(() => Response.json({
+      sessions: [],
+      truncated: 0,
+      machineId: "self",
+      reach: {
+        scope: "network",
+        lastPushAgoMs: 1_000,
+        machines: [
+          { machineId: "m1", machineLabel: "thinkpad", status: "refused", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
+          { machineId: "m2", machineLabel: "old-mini", status: "no-card", rows: 0, droppedRows: 0, truncatedCard: 0, ageMs: 1_000 },
+        ],
+        staleMachines: 0,
+        notConnected: 2,
+      },
+    }));
+    const text = (await callSessionBusTool("antgrid_list_sessions", {})).content[0]!.text;
+    expect(text).toContain("thinkpad: remote access is off there");
+    expect(text).toContain("old-mini: running a bridge older than this feature");
+    expect(text).toContain("2 machines in your account are not connected to this desktop and were not asked");
+  });
+
+  test("a machine-scope reach says which of the three reasons it was", async () => {
+    stub(() => Response.json({
+      sessions: [],
+      truncated: 0,
+      machineId: null,
+      reach: { scope: "machine", why: "remote-access-off" },
+    }));
+    const text = (await callSessionBusTool("antgrid_list_sessions", {})).content[0]!.text;
+    expect(text).toContain("Reach: remote access is off on this machine");
+    expect(text).not.toContain("desktop app");
+  });
+
+  test("a directory refusal reaches the caller with its code, not re-worded", async () => {
+    stub(() => Response.json(
+      { error: "this project has no git remote, so no other session can name it and it can name none", code: "NOT_ADDRESSABLE" },
+      { status: 409 },
+    ));
+    const result = await callSessionBusTool("antgrid_list_sessions", {});
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toBe(
+      "this project has no git remote, so no other session can name it and it can name none (NOT_ADDRESSABLE)",
+    );
   });
 
   test("an unset optional argument is not sent, so a .strict() body still parses", async () => {
