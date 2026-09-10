@@ -579,6 +579,47 @@ test("an evicted route does not come back on the next hydrate", () => {
   expect(loadBusRoutes(abDir, BUS_ROUTE_TTL_MS, now).get("ctx-victim")).toBeUndefined();
 }, 20_000);
 
+// The two eviction tests above both start from an EMPTY file, so neither can
+// see the coupling this one exists for: on disk the rows carry no LRU position
+// of their own, and the only thing that re-establishes it is the ORDER the
+// loader hands them back in (`route-store.ts`'s write sorts freshest-first and
+// then reverses, precisely so the file reads oldest-first). `noteRoute` evicts
+// from the FRONT of a Map that keeps first-insertion order, so a loader that
+// returns rows in any other order evicts a live route and keeps a dead one —
+// silently, and only after a restart.
+//
+// Seeded newest-first on purpose: what the caller hands `saveBusRoutes` must
+// not be what decides the answer.
+test("a hydrated table evicts the least recently carried, not the first row it was handed", () => {
+  const now = 1_000_000;
+  const newestFirst = new Map(
+    Array.from({ length: MAX_BUS_ROUTES }, (_, i) => MAX_BUS_ROUTES - 1 - i).map((i) => [
+      `ctx-${i}`,
+      { peerId: `peer-${i}`, projectId: "p1", at: now + i },
+    ]),
+  );
+  saveBusRoutes(abDir, newestFirst);
+
+  const coordinator = new SessionBusCoordinator({
+    abDir,
+    projectIdFor: () => null,
+    self: () => null,
+    send: () => true,
+    now: () => now + MAX_BUS_ROUTES,
+  });
+  coordinator.hydrateRoutes();
+  expect(coordinator.routeFor("ctx-0")).not.toBeNull();
+
+  coordinator.noteRoute("ctx-over", "peer-over", "p1");
+
+  expect(coordinator.routeFor("ctx-0")).toBeNull();
+  expect(coordinator.routeFor(`ctx-${MAX_BUS_ROUTES - 1}`)?.peerId).toBe(`peer-${MAX_BUS_ROUTES - 1}`);
+  expect(coordinator.routeFor("ctx-over")?.peerId).toBe("peer-over");
+
+  coordinator.stop();
+});
+
+
 test("resume()'s fallback-style resolver does not pin a foreign project's held state under its own id", () => {
   // Two sessions, two projects, persisted the normal way (a coordinator whose
   // `projectIdFor` is genuinely session-aware, exactly like a real one before
