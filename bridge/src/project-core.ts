@@ -136,6 +136,10 @@ export class ProjectCore {
   constructor(private readonly deps: ProjectCoreDeps) {}
 
   get projectId(): string { return this.core?.projectId ?? ""; }
+  /** The core's resolved name (antgrid.yaml `name:`, else folder basename) —
+   *  `undefined` before the core has finished starting, which callers must
+   *  treat as "unknown right now", never as "this project has no name". */
+  get projectName(): string | undefined { return this.core?.projectName; }
   get localConnectInfo(): { port: number; token: string } | null { return this._localConnectInfo; }
 
   /** Session-bus outbound for a context this machine opened. A bridge cannot

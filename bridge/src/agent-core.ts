@@ -219,6 +219,12 @@ export interface AgentCore {
   readonly relayUrl: string | null;
   readonly identity: DeviceIdentity;
   readonly projectId: string;
+  /** The resolved project name — antgrid.yaml's `name:` when set, else the
+   *  folder basename (`config.ts`'s `projectName()`). The one place this must
+   *  stay in agreement with is the session-bus wire label a machine-level
+   *  `self()` stamps for THIS project: see `HostServer`'s own `sessionBus.self`
+   *  for why it reads this rather than a project-index snapshot. */
+  readonly projectName: string;
   readonly abDir: string;
   readonly nextKeypair: () => EphemeralKeypair;
   /** Machine-level phone registry (identity, label, push routing), shared across
@@ -4449,6 +4455,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     relayUrl: relayBase,
     identity,
     projectId: project.id,
+    projectName: project.name,
     abDir,
     nextKeypair,
     pairedPhones,

@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { computeProjectId } from "../src/project-id";
-import type { AgentEnableRelay } from "../src/protocol";
+import { createMessage, type AgentEnableRelay } from "../src/protocol";
 import type { RelayClient } from "../src/relay-client";
+import type { SessionBusCoordinator } from "../src/session-bus/coordinator";
 
 // A remote config pointing at unreachable endpoints. The OAuth mint is never hit
 // because these tests inject `remoteRuntimeFactory`; RelayClient.connect() is
@@ -460,3 +461,71 @@ test("prunes seen-catalog entries whose folder no longer exists, on load", () =>
   expect(after.projects.live).toBeDefined();
   expect(after.projects.dead).toBeUndefined();
 });
+
+async function waitFor(predicate: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+// R3: Wave 1's machine-wide sessionBus.self() started stamping the session
+// index's folder-basename label instead of the project's configured name,
+// silently regressing a value that goes out on the wire (session-index.ts's
+// own doc named the gap). This pins the fix at the one seam that actually
+// carries a name onto a frame: the loopback owner creates a real session in a
+// project whose antgrid.yaml names itself, and the envelope self() stamps for
+// it must carry that name, not the temp folder's random basename.
+test(
+  "a session-bus frame carries the project's configured antgrid.yaml name, not its folder name",
+  async () => {
+    host = new HostServer({
+      remote: fakeRemoteConfig(),
+      remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
+      relayClientFactory: () => stubRelayClient(),
+    });
+    const folder = tempFolder();
+    writeFileSync(join(folder, "antgrid.yaml"), "name: configured-project-name\nagent:\n  tool: claude-code\n");
+    const projectId = computeProjectId(folder);
+    const opened = await host.open(projectId, folder, "remote");
+    if (!opened.connect) throw new Error("expected a loopback connect info");
+
+    const ws = new WebSocket(`ws://127.0.0.1:${opened.connect.port}`);
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve();
+      ws.onerror = (e) => reject(e);
+    });
+    const inbox: any[] = [];
+    ws.onmessage = (ev) => inbox.push(JSON.parse(String(ev.data)));
+    ws.send(JSON.stringify({ type: "hello", token: opened.connect.token, appPid: 1, appVersion: "test" }));
+    await waitFor(() => inbox.some((m) => m.type === "ready"), "loopback ready");
+
+    const requestId = crypto.randomUUID();
+    ws.send(JSON.stringify(createMessage("session:create", { requestId, name: "s1" })));
+    await waitFor(
+      () => inbox.some((m) => m.type === "session:result" && m.requestId === requestId),
+      "session:create result",
+    );
+    const result = inbox.find((m) => m.type === "session:result" && m.requestId === requestId);
+    const sessionId = result.session.id as string;
+    ws.close();
+
+    const sessionBus = (host as unknown as { sessionBus: SessionBusCoordinator }).sessionBus;
+    const res = sessionBus.message({
+      sessionId,
+      taskId: null,
+      to: { machineId: "m-remote", projectId: "p-remote", sessionId: "s-remote" },
+      summary: "hi",
+      parts: [{ kind: "text", text: "hi" }],
+    });
+    expect("ok" in res && res.ok).toBe(true);
+
+    const entries = sessionBus.messages(sessionId).entries;
+    expect(entries).toHaveLength(1);
+    const peer = entries[0]!.envelope.metadata.peer as { projectLabel?: string };
+    expect(peer.projectLabel).toBe("configured-project-name");
+  },
+  20_000,
+);

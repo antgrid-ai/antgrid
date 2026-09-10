@@ -280,13 +280,20 @@ export class HostServer {
       if (!machineId) return null;
       const entry = this.sessionIndex.lookup(sessionId);
       if (!entry) return null;
+      // The project's REAL name (antgrid.yaml's `name:` when set) is only known
+      // to its live core — `api.ts`'s per-project selfRef reads it the same
+      // way. The index's own label is a folder-basename snapshot kept for a
+      // project with no core warm right now (SessionIndexEntry's own doc), so
+      // it is the fallback here, never the first answer: preferring it
+      // unconditionally is the Wave 1 regression this resolves.
+      const projectLabel = this.cores.get(entry.projectId)?.core.projectName || entry.projectLabel;
       return {
         key: { machineId, projectId: entry.projectId, sessionId },
         ref: {
           machineId,
           projectId: entry.projectId,
           sessionId,
-          projectLabel: entry.projectLabel,
+          projectLabel,
           sessionName: entry.sessionName,
         },
       };

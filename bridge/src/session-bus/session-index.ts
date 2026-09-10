@@ -13,12 +13,12 @@ const log = logger.child({ component: "session-bus" });
 
 export interface SessionIndexEntry {
   projectId: string;
-  /** The project's FOLDER basename, which is not always what `sessionBusSelf`
-   *  stamps on a bus address today: that reads `project.name`, which prefers
-   *  `antgrid.yaml`'s `name:` over the basename. The two agree only for a
-   *  project that does not name itself, so whichever commit feeds this into
-   *  `SessionMemberRef.projectLabel` owes that difference a decision rather
-   *  than inheriting it silently. */
+  /** The project's FOLDER basename — a cold-project fallback only.
+   *  `HostServer`'s `sessionBus.self` prefers the live core's real
+   *  `AgentCore.projectName` (antgrid.yaml's `name:` when set) and falls back
+   *  to this label solely when no core is warm to ask; the two agree only for
+   *  a project that does not name itself. Do not read this field as the wire
+   *  label on its own — it is not one once a core is warm. */
   projectLabel?: string;
   sessionName?: string;
 }
