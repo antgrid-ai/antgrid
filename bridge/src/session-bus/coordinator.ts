@@ -384,18 +384,56 @@ export class SessionBusCoordinator {
    * call seeded already holds what `resume()` would only rediscover.
    */
   resume(): void {
-    for (const { sessionId } of listSessionBusSessions(this.deps.abDir)) {
+    for (const { projectId, sessionId } of listSessionBusSessions(this.deps.abDir)) {
       // The directory enumeration names the project bytes are FILED under; the
       // index (`projectIdFor`) is the authoritative answer for who OWNS them
       // now — the two can disagree for a session whose project was renamed,
-      // reassigned or forgotten but not yet swept. Trusting the directory here
-      // would resume retries against a project this bridge no longer believes
-      // holds the session.
-      if (this.deps.projectIdFor(sessionId) === null) {
-        log.warn("session-bus: resume found bus state for session %s with no known owning project — skipped", sessionId);
+      // reassigned or forgotten but not yet swept, and comparing against the
+      // enumerated id (rather than only checking non-null) is what tells that
+      // apart from a resolver that isn't session-aware at all: a per-core
+      // fallback (no host) answers `projectIdFor` with a constant closure over
+      // its own project id (CoordinatorDeps's own doc on the field), so a bare
+      // non-null check never skips anything and a hostless core resuming
+      // against the shared machine-wide `agents/` tree would load every OTHER
+      // project's on-disk bus state and pin it under its own project id.
+      const owner = this.deps.projectIdFor(sessionId);
+      if (owner !== projectId) {
+        log.warn(
+          "session-bus: resume found bus state for session %s filed under project %s, but this bridge attributes it to %s — skipped",
+          sessionId, projectId, owner ?? "no known project",
+        );
         continue;
       }
       this.stateFor(sessionId);
+    }
+  }
+
+  /**
+   * Drop every session state this coordinator holds for [projectId], from
+   * memory only — nothing here touches disk. Called only when the project
+   * itself is forgotten (`HostServer.forget`), symmetric with
+   * `forgetProjectRoutes` above and for the same reason: `deleteProjectStores`
+   * has already removed `agents/<projectId>/session-bus/` by the time this
+   * runs, and a `SessionState` left in `this.sessions` is exactly what
+   * recreates it — a held-message retry commits under whatever
+   * `SessionState.projectId` was PINNED to at first load (see that field's own
+   * doc), not under whatever `projectIdFor` answers now, so leaving the entry
+   * in place would write straight back to the directory forget() just
+   * reclaimed.
+   *
+   * Reads the pinned field rather than re-querying `deps.projectIdFor`
+   * deliberately: `HostServer.forget()` drops the project from its session
+   * index before calling this, so by the time this runs `projectIdFor` no
+   * longer resolves any of this project's sessions at all — a live re-query
+   * would find nothing to drop.
+   *
+   * Never called on an eviction, mirroring `forgetProjectRoutes`: a merely-cold
+   * project is still real, and its held state must survive for the coordinator
+   * to keep retrying once it warms again.
+   */
+  forgetProjectStates(projectId: string): void {
+    for (const [sessionId, state] of this.sessions) {
+      if (state.projectId === projectId) this.sessions.delete(sessionId);
     }
   }
 

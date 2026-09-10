@@ -8,7 +8,7 @@
 // here — `self()`, a route, and `resume()` all spanning a project boundary —
 // gets its own suite rather than living as an implicit case there.
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
@@ -16,10 +16,10 @@ import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage, type SessionMemberKey, type SessionMemberRef } from "../src/protocol";
 import { setLogLevel } from "../src/logger";
 import { BUS_ROUTE_TTL_MS, MAX_BUS_ROUTES } from "../src/session-bus/constants";
-import { SessionBusCoordinator } from "../src/session-bus/coordinator";
+import { SessionBusCoordinator, type SessionBusSelf } from "../src/session-bus/coordinator";
 import { loadBusRoutes, ROUTE_STORE_VERSION, saveBusRoutes } from "../src/session-bus/route-store";
 import { SessionBusSessionIndex } from "../src/session-bus/session-index";
-import { sessionBusMachineDir } from "../src/session-bus/store-fs";
+import { sessionBusMachineDir, sessionBusSessionDir } from "../src/session-bus/store-fs";
 import { SessionManager } from "../src/session-manager";
 
 setLogLevel("error");
@@ -560,4 +560,111 @@ test("an evicted route does not come back on the next hydrate", () => {
   coordinator.stop();
 
   expect(loadBusRoutes(abDir, BUS_ROUTE_TTL_MS, now).get("ctx-victim")).toBeUndefined();
+});
+
+test("resume()'s fallback-style resolver does not pin a foreign project's held state under its own id", () => {
+  // Two sessions, two projects, persisted the normal way (a coordinator whose
+  // `projectIdFor` is genuinely session-aware, exactly like a real one before
+  // any restart).
+  let now = 1_000_000;
+  const owners = new Map([["session-own", "p-own"], ["session-foreign", "p-foreign"]]);
+  const selfFor = (sessionId: string): SessionBusSelf | null => {
+    const projectId = owners.get(sessionId);
+    if (!projectId) return null;
+    return {
+      key: { machineId: "m1", projectId, sessionId },
+      ref: { machineId: "m1", projectId, sessionId, sessionName: sessionId },
+    };
+  };
+  const setup = new SessionBusCoordinator({
+    abDir,
+    projectIdFor: (sessionId) => owners.get(sessionId) ?? null,
+    self: selfFor,
+    send: () => false, // no carrier — both messages land in held-store on disk
+    now: () => now,
+  });
+  const resOwn = setup.message({ sessionId: "session-own", taskId: null, to: REMOTE, summary: "own", parts: [{ kind: "text", text: "own" }] });
+  const resForeign = setup.message({ sessionId: "session-foreign", taskId: null, to: REMOTE, summary: "foreign", parts: [{ kind: "text", text: "foreign" }] });
+  if (!resOwn.ok || !resForeign.ok) throw new Error("message refused");
+  expect(resOwn.held).toBe(true);
+  expect(resForeign.held).toBe(true);
+  setup.stop();
+
+  // A restart of a HOSTLESS core: `agent-core.ts`'s own fallback answers
+  // `projectIdFor` with a constant closure over its own project id, regardless
+  // of which session it is asked about — the exact shape that made the old
+  // "no known owning project" guard vacuous, because it never returns null.
+  const delivered: AbMessage[] = [];
+  const fallback = new SessionBusCoordinator({
+    abDir,
+    projectIdFor: () => "p-own",
+    self: () => null, // resume()/pump() only replay held frames; they never call self()
+    send: (frame) => { delivered.push(frame); return true; }, // the carrier is back
+    now: () => now,
+  });
+  fallback.resume();
+  fallback.pump();
+  fallback.stop();
+
+  // Only the session this fallback actually owns gets retried. Session
+  // "foreign" must be skipped outright, never loaded and pinned as "p-own" —
+  // if it were, its held message would flush straight through THIS carrier,
+  // which is a different project's bus content reaching this one's owner.
+  expect(delivered).toHaveLength(1);
+  expect((delivered[0] as { from: SessionMemberKey }).from.sessionId).toBe("session-own");
+});
+
+test("forgetting a project drops its pinned session state, so a later retry cannot resurrect its store", () => {
+  // A map rather than a constant closure — see the resume() test above for why
+  // a constant `projectIdFor` would make this test vacuously pass no matter
+  // what forgetProjectStates does with the id it is handed.
+  const owners = new Map([["session-a", "p-forgotten"], ["session-b", "p-kept"]]);
+  let deliver = false;
+  const delivered: string[] = [];
+  const coordinator = new SessionBusCoordinator({
+    abDir,
+    projectIdFor: (sessionId) => owners.get(sessionId) ?? null,
+    self: (sessionId) => {
+      const projectId = owners.get(sessionId);
+      if (!projectId) return null;
+      return {
+        key: { machineId: "m1", projectId, sessionId },
+        ref: { machineId: "m1", projectId, sessionId, sessionName: sessionId },
+      };
+    },
+    send: (frame, ctx) => {
+      if (!deliver) return false;
+      delivered.push(ctx.contextId);
+      return true;
+    },
+  });
+
+  const resA = coordinator.message({ sessionId: "session-a", taskId: null, to: REMOTE, summary: "a", parts: [{ kind: "text", text: "a" }] });
+  const resB = coordinator.message({ sessionId: "session-b", taskId: null, to: REMOTE, summary: "b", parts: [{ kind: "text", text: "b" }] });
+  if (!resA.ok || !resB.ok) throw new Error("message refused");
+  expect(resA.held).toBe(true);
+  expect(resB.held).toBe(true);
+  const forgottenDir = sessionBusSessionDir(abDir, "p-forgotten", "session-a");
+  expect(existsSync(forgottenDir)).toBe(true);
+
+  // Mirrors HostServer.forget()'s own order: `deleteProjectStores` has already
+  // reclaimed `agents/p-forgotten/` and the session index no longer resolves
+  // session-a at all by the time the coordinator's own drop runs — proving
+  // forgetProjectStates reads the state's PINNED projectId rather than
+  // re-querying a resolver that would now answer null for it.
+  rmSync(join(abDir, "agents", "p-forgotten"), { recursive: true, force: true });
+  owners.delete("session-a");
+  coordinator.forgetProjectStates("p-forgotten");
+
+  // The carrier comes back and the retry timer fires. Without the drop above,
+  // session-a's still-cached state would flush its held message straight
+  // through this `send` — a project this bridge has otherwise fully forgotten
+  // — and `commit()` would recreate the very directory forget() just erased.
+  deliver = true;
+  coordinator.pump();
+
+  expect(delivered).toEqual(["session-b"]);
+  expect(existsSync(forgottenDir)).toBe(false);
+
+  coordinator.stop();
 });

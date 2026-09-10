@@ -2045,9 +2045,12 @@ export class HostServer {
    *    1. stop a warm core (kills its PTYs + any relay slot),
    *    2. reclaim the project's managed worktrees,
    *    3. delete the on-disk store dir (`agents/<id>/`, holding sessions.json),
-   *    4. drop what the project owns in the MACHINE-level stores, which step 3
-   *       cannot reach because they live outside `agents/<id>/`: its session
-   *       index rows and its session-bus carrier routes,
+   *    4. drop what the project owns that step 3's disk delete cannot reach:
+   *       its session index rows, its session-bus carrier routes (a
+   *       MACHINE-level store living outside `agents/<id>/`), and any of its
+   *       session-bus states the shared coordinator still holds IN MEMORY —
+   *       a session loaded before this call pins its owning project at load
+   *       time and does not notice the delete,
    *    5. drop the seen-catalog hint (also clears the stale projects.json entry).
    *  Step 2's position is the invariant, not a preference: it reads
    *  `agents/<id>/checkouts.json`, which step 3 deletes, and it resolves the
@@ -2069,6 +2072,14 @@ export class HostServer {
     // every one of them back from disk, leaving on disk exactly the kind of
     // trace this method exists to erase.
     this.sessionBus.forgetProjectRoutes(projectId);
+    // The coordinator's in-memory session states are the other half of the
+    // same leak: a session loaded before this forget() (a live exchange, or a
+    // boot-time resume()) is still cached with its `projectId` pinned to this
+    // project, and a held-message retry after step 3 deleted the directory
+    // would otherwise recreate it under that pinned id. Called after the index
+    // drop above on purpose — see forgetProjectStates's own doc on why it must
+    // not re-derive ownership through `projectIdFor`.
+    this.sessionBus.forgetProjectStates(projectId);
     if (this.seenProjects.delete(projectId)) this.flushSeen();
     // Unconditional: the advert IS the seen catalog now, so a forgotten project
     // must vanish from a live phone's picker without waiting for a reconnect
