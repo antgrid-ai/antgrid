@@ -85,12 +85,33 @@ export interface VtCapabilityResponderOptions {
   background: string;
   /** Cursor colour, as an xterm OSC 12 `rgb:` value. */
   cursor: string;
+  /**
+   * `"osc-colors"` answers ONLY OSC 10/11/12 and ignores every other form.
+   * For a `TerminalSession` whose `TerminalFrameSource` has installed a
+   * parser-boundary responder (`terminal-frames/queries.ts`) for everything
+   * else, an unnarrowed instance would answer DA1/DA2/DA3/DSR/DECRQM/Kitty a
+   * second time — query protocols are FIFO, so the guest would see that
+   * duplicate where it expects the next reply. Default `"full"`.
+   */
+  scope?: "full" | "osc-colors";
 }
+
+/**
+ * Antgrid's design tokens, and must stay in lockstep with `AbColors`
+ * (`app/lib/design/ab_colors.dart`): they are what the guest picks its own
+ * contrast against.
+ */
+export const ANTGRID_QUERY_COLORS: Pick<VtCapabilityResponderOptions, "foreground" | "background" | "cursor"> = {
+  foreground: "rgb:fafa/fafa/fafa", // ≈ textPrimary
+  background: "rgb:0909/0909/0b0b", // ≈ bgDeepest
+  cursor: "rgb:8181/8c8c/f8f8", //     ≈ accent indigo
+};
 
 export class VtCapabilityResponder {
   private carry = "";
   private readonly decModes = new Map<number, boolean>();
   private readonly colors: Record<string, string>;
+  private scope: "full" | "osc-colors";
 
   constructor(opts: VtCapabilityResponderOptions) {
     this.colors = {
@@ -98,6 +119,32 @@ export class VtCapabilityResponder {
       "11": opts.background,
       "12": opts.cursor,
     };
+    this.scope = opts.scope ?? "full";
+    this.reset();
+  }
+
+  /**
+   * Switches scope in place rather than through a fresh instance — a caller
+   * that narrows and later widens the SAME responder (`TerminalSession`'s
+   * narrow/widen pair) keeps `carry` (a query split across the switch would
+   * otherwise be silently dropped) and `decModes` (every mode the guest had
+   * already set, which a fresh instance would forget and answer RESET for
+   * until the guest happens to touch it again).
+   */
+  setScope(scope: "full" | "osc-colors"): void {
+    this.scope = scope;
+  }
+
+  /**
+   * Returns every tracked DEC mode to its power-on default — what RIS does.
+   * The modes `terminal-frames/queries.ts` reads from xterm's OWN live state
+   * (mode 25, the mouse encodings) never consult `decModes` and so are
+   * unaffected; this is for the modes xterm does not model, which this scan
+   * is the only record of and which a real RIS resets exactly like
+   * everything else this responder answers for.
+   */
+  reset(): void {
+    this.decModes.clear();
     for (const mode of DEFAULT_SET_DEC_MODES) this.decModes.set(mode, true);
   }
 
@@ -146,6 +193,9 @@ export class VtCapabilityResponder {
       const rgb = this.colors[oscWhich];
       return rgb ? `\x1b]${oscWhich};${rgb}${oscTerm}` : null;
     }
+    // Everything past this point belongs to the parser-boundary responder
+    // when one is installed — see the `scope` doc on the constructor option.
+    if (this.scope === "osc-colors") return null;
     // DA2 — xterm-style: terminal id 1, version 1000, no cartridge ROM.
     if (da2 !== undefined) return "\x1b[>1;1000;0c";
     // DA3 — unit id, in the shape libghostty reports.

@@ -210,6 +210,11 @@ export class TerminalFrameSource extends TerminalScreen {
    *  attachment, and the next screen clears it. Never a latch: a display-sized
    *  problem must not destroy the authoritative VT or the row archive. */
   get oversize(): boolean { return this._oversize; }
+  /** Set once `feed()` has given up on this run — see its own doc. The rebuild
+   *  is TerminalManager's: it owns geometry and the reseed source, this class
+   *  only reports that it can no longer be trusted. Never clears itself; a
+   *  fresh run gets a fresh `TerminalFrameSource` instead. */
+  get failure(): Error | undefined { return this.failed; }
   get historyStatus(): TerminalHistoryStatus {
     return {
       degraded: this.gaps > 0 || this.rewraps > 0,
@@ -222,6 +227,27 @@ export class TerminalFrameSource extends TerminalScreen {
     return () => { this.listeners.delete(listener); };
   }
 
+  /**
+   * Installs the parser-boundary query responder (`terminal-frames/queries.ts`)
+   * for everything except OSC 10/11/12 — see that file's header for why those
+   * three stay with the byte-level responder instead.
+   *
+   * `reply` MUST be `TerminalSession.write` (the session's `PtySubmitQueue`),
+   * NEVER a raw `pty.write`. The queue defers a submitted line's trailing CR
+   * onto its own read so nothing can land between the two; a reply written
+   * straight to the pty is the one thing that still could, landing inside an
+   * injected line the instant after it went out and before its CR follows.
+   *
+   * Query protocols are FIFO, but this class only orders ITSELF — DA1, CPR,
+   * DECRQM and Kitty all answer from here, in parser order. OSC 10/11/12
+   * answer from the session's own byte-level responder instead (see
+   * `queries.ts`'s header for why), which `TerminalSession` holds and
+   * releases through `flushCapabilityReplies` at this class's own `onParsed`
+   * boundary — installed by the caller, not by this class — specifically so
+   * an OSC reply cannot leave ahead of a same-batch reply from here. Whether
+   * that is exact byte-for-byte order against a query that arrived BEFORE the
+   * OSC one in the same raw chunk is the caller's contract, not this one's.
+   */
   answerQueries(reply: (data: string) => void, colors: TerminalQueryColors): void {
     this.detachQueries?.();
     this.detachQueries = installTerminalQueries(this.term, reply,

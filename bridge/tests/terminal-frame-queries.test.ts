@@ -132,14 +132,65 @@ describe("terminal frame queries", () => {
     expect(h.replies).toHaveLength(modes.length);
   });
 
-  test("DECRQM keeps answering a recognised mode after a reset", async () => {
-    // Mode state is the byte responder's, and it does not drop it on a RIS.
-    // Both responders must therefore still agree once the guest resets.
+  for (const [name, reset] of [["DECSTR", "\x1b[!p"], ["RIS", "\x1bc"]] as const) {
+    test(`DECRQM follows the reset ${name} performs, unlike the byte responder alone`, async () => {
+      // The byte responder's own scan of the guest's bytes never observes
+      // DECSTR or RIS — neither emits the `CSI ? Pm h|l` it watches for — so
+      // asking IT alone would still report the mode set. queries.ts reads
+      // xterm's own live state for a tracked mode instead, which the two
+      // do NOT agree on here, unlike the untouched case above.
+      const h = harness();
+      const byteResponder = new VtCapabilityResponder(COLORS);
+      await h.write(`\x1b[?2004h${reset}\x1b[?2004$p`);
+      byteResponder.feed(`\x1b[?2004h${reset}`);
+      expect(byteResponder.feed("\x1b[?2004$p")).toBe("\x1b[?2004;1$y");
+      expect(h.replies).toEqual(["\x1b[?2004;2$y"]);
+    });
+  }
+
+  test("DECRQM for cursor visibility follows DECSTR, unlike the byte responder alone", async () => {
     const h = harness();
     const byteResponder = new VtCapabilityResponder(COLORS);
-    await h.write("\x1b[?2004h\x1bc\x1b[?2004$p");
-    byteResponder.feed("\x1b[?2004h\x1bc");
-    expect(h.replies).toEqual([byteResponder.feed("\x1b[?2004$p")]);
+    const guest = "\x1b[?25l\x1b[!p"; // hide the cursor, then soft-reset
+    await h.write(guest);
+    byteResponder.feed(guest);
+    await h.write("\x1b[?25$p");
+    // The byte scan never observes DECSTR, so it still thinks the cursor is
+    // hidden; queries.ts reads xterm's own live cursor-visibility flag instead.
+    expect(byteResponder.feed("\x1b[?25$p")).toBe("\x1b[?25;2$y");
+    expect(h.replies.at(-1)).toBe("\x1b[?25;1$y");
+  });
+
+  test("DECRQM for SGR mouse encoding follows xterm's single active encoding, not the byte scan's independent bits", async () => {
+    const h = harness();
+    const byteResponder = new VtCapabilityResponder(COLORS);
+    // xterm tracks ONE active mouse encoding: enabling 1016 (SGR-pixels)
+    // silently deactivates 1006 (SGR) underneath it, with no `l` for 1006
+    // the byte scan could observe — it still thinks both are set.
+    const guest = "\x1b[?1006h\x1b[?1016h";
+    await h.write(guest);
+    byteResponder.feed(guest);
+    await h.write("\x1b[?1006$p");
+    expect(byteResponder.feed("\x1b[?1006$p")).toBe("\x1b[?1006;1$y");
+    expect(h.replies.at(-1)).toBe("\x1b[?1006;2$y");
+  });
+
+  test("DECRQM for SGR mouse encoding follows the guest's own RIS reset", async () => {
+    const h = harness();
+    // RIS resets xterm's tracked mouse encoding to DEFAULT (measured against
+    // the real engine); the byte scan has no way to observe that either.
+    await h.write("\x1b[?1006h\x1bc\x1b[?1006$p");
+    expect(h.replies).toEqual(["\x1b[?1006;2$y"]);
+  });
+
+  test("RIS resets the byte responder's own tracked modes for what liveDecMode cannot cover", async () => {
+    // 2027/2031 have no live xterm state to read (unlike 25/1006/1016 above),
+    // so they stay on the byte scan — which never sees an ESC sequence at
+    // all. Without an explicit reset hook they would answer SET forever once
+    // the guest turned them on, regardless of an intervening RIS.
+    const h = harness();
+    await h.write("\x1b[?2027h\x1b[?2031h\x1bc\x1b[?2027$p\x1b[?2031$p");
+    expect(h.replies).toEqual(["\x1b[?2027;2$y", "\x1b[?2031;2$y"]);
   });
 
   test("CPR reports the real cursor, not the byte responder's guess", async () => {

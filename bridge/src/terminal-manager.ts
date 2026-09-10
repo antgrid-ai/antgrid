@@ -7,6 +7,8 @@ import type { GracefulExitAsk } from "./agents/types";
 import { ScrollbackBuffer } from "./scrollback";
 import { TerminalModeTracker } from "./terminal-modes";
 import { MAX_ATTACH_BLOB, TerminalScreen } from "./terminal-screen";
+import { TerminalFrameSource } from "./terminal-frames/source";
+import { ANTGRID_QUERY_COLORS } from "./vt-capability-responder";
 import { logger } from "./logger";
 const log = logger.child({ component: "terminal-manager" });
 
@@ -19,6 +21,14 @@ const log = logger.child({ component: "terminal-manager" });
 const SETTLE_ROUNDS = 3;
 import { createMessage, type AbMessage } from "./protocol";
 import type { ConnState } from "./conn-state";
+
+/**
+ * Rebuild attempts per PTY run before a latched `TerminalFrameSource` is left
+ * as-is — see `ensureLiveScreen`. A run that keeps overflowing the parser
+ * backlog is not fixed by trying again, and an unbounded retry would rebuild
+ * (and reseed from scrollback) on every single output chunk after that.
+ */
+const MAX_SCREEN_REBUILDS = 3;
 
 export interface TerminalSpawnConfig {
   terminalId?: string;
@@ -103,6 +113,16 @@ export class TerminalManager {
    *  `Terminal` per PTY costs memory, so every site that drops a scrollback
    *  must dispose one here too. */
   private screens = new Map<string, TerminalScreen>();
+  /** Identity of the CURRENT PTY run, for Wave 4 (history's `z.uuid().parse`)
+   *  and Wave 5 (subscription identity). Lives with the SCREEN, not the
+   *  session — set at every spawn (fresh on a same-id respawn too) and
+   *  cleared only where `disposeScreen` clears the screen, so it survives
+   *  `retainScrollbackOnExit` exactly as the screen it identifies does. */
+  private runIds = new Map<string, string>();
+  /** Rebuild attempts already spent on the CURRENT run — see
+   *  `ensureLiveScreen`. Paired 1:1 with `runIds`: both describe the run, not
+   *  the terminal, and both reset at the same spawn. */
+  private rebuildCounts = new Map<string, number>();
   private terminalTypes = new Map<string, "agent" | "service">();
   /** Metadata for exited terminals so they remain visible in status. */
   private stoppedTerminals = new Map<string, StoppedTerminalInfo>();
@@ -222,19 +242,40 @@ export class TerminalManager {
       onTitle: (title: string) => this.callbacks.onTerminalTitle?.(terminalId, title),
       onMessage: (msg: AbMessage) => {
         if (msg.type === "terminal:output") {
-          scrollback.append(msg.data);
           modes.feed(msg.data);
-          // BEFORE the suppression drop. This placement is what makes a
-          // suppressed window recoverable at all: a socket drop and a
-          // backgrounded app both stop the outbound frame below, and only an
-          // emulator that stayed current through it can hand the app back the
-          // screen it missed. The screen also stays current through a
-          // remote-access flip, which drops at the stream's `mayDeliver`
-          // instead — but nothing raises a recovery for that edge, since it
-          // neither re-establishes the transport nor moves the app's declared
-          // focus, so that window is still stale until the guest repaints of
-          // its own accord.
+          // Rebuild only while THIS generation still owns the map slot, by
+          // SESSION identity rather than by comparing `screen` against the
+          // map entry: `ensureLiveScreen` is ALSO called from
+          // `getAttachSnapshot`, which swaps `this.screens` without touching
+          // this closure's `screen`. A same-object guard then reads that
+          // outside rebuild as "someone else already owns this slot" and
+          // never calls `ensureLiveScreen` from here again for the rest of
+          // the run — the closure keeps feeding the screen the attach path
+          // just disposed, and the live replacement it built never receives
+          // another byte. `!this.sessions.has` covers a retained, already
+          // -exited run (the session row is gone but the screen lives on);
+          // there is no OTHER generation there for a same-id respawn to
+          // protect against.
+          if (this.sessions.get(terminalId) === session || !this.sessions.has(terminalId)) {
+            screen = this.ensureLiveScreen(terminalId) ?? screen;
+          }
           screen?.feed(msg.data);
+          // Appended AFTER the feed above, not before: a rebuild inside
+          // `ensureLiveScreen` reseeds from THIS scrollback, and appending
+          // first would hand it a seed that already ends with the very chunk
+          // `feed` is about to write into the replacement a second time.
+          //
+          // BEFORE the suppression drop below either way. This placement is
+          // what makes a suppressed window recoverable at all: a socket drop
+          // and a backgrounded app both stop the outbound frame below, and
+          // only an emulator (and a scrollback) that stayed current through
+          // it can hand the app back the screen it missed. The screen also
+          // stays current through a remote-access flip, which drops at the
+          // stream's `mayDeliver` instead — but nothing raises a recovery for
+          // that edge, since it neither re-establishes the transport nor
+          // moves the app's declared focus, so that window is still stale
+          // until the guest repaints of its own accord.
+          scrollback.append(msg.data);
           this.callbacks.onTerminalOutput?.(terminalId, msg.data);
           const seq = this.connState.bumpTerminalSeq(terminalId);
           if (this.connState.suppressed) {
@@ -264,8 +305,7 @@ export class TerminalManager {
             this.sessions.delete(terminalId);
             this.scrollbacks.delete(terminalId);
             this.modeTrackers.delete(terminalId);
-            this.screens.get(terminalId)?.dispose();
-            this.screens.delete(terminalId);
+            this.disposeScreen(terminalId);
             this.retainScrollback.delete(terminalId);
             this.connState.clearTerminal(terminalId);
             return;
@@ -282,8 +322,7 @@ export class TerminalManager {
           if (!this.retainScrollback.has(terminalId)) {
             this.scrollbacks.delete(terminalId);
             this.modeTrackers.delete(terminalId);
-            this.screens.get(terminalId)?.dispose();
-            this.screens.delete(terminalId);
+            this.disposeScreen(terminalId);
           }
           this.connState.clearTerminal(terminalId);
           this.callbacks.onTerminalExited?.(terminalId);
@@ -304,9 +343,18 @@ export class TerminalManager {
     // screen the guest never drew. A same-id respawn replaces the previous
     // screen, whose own exit lands too late to release it (the duplicate gate
     // in the exit handler returns before the bookkeeping).
-    this.screens.get(terminalId)?.dispose();
-    screen = new TerminalScreen(session.cols, session.rows);
+    this.disposeScreen(terminalId);
+    screen = this.constructScreen(terminalId, session.cols, session.rows);
     this.screens.set(terminalId, screen);
+    // Fresh identity every spawn, same-id respawn included — a new PTY run
+    // even when nothing else about the slot changed. `disposeScreen` above
+    // already cleared the previous run's id (and rebuild budget) if any.
+    this.runIds.set(terminalId, crypto.randomUUID());
+    // Before `session.spawn()`, which is what actually starts the PTY: the
+    // session's own byte-level responder must already be narrowed to
+    // OSC-colors-only by the time the guest's first query byte can arrive,
+    // or that first chunk answers everything twice.
+    this.wireFrameQueries(session, screen);
     if (config.type) {
       this.terminalTypes.set(terminalId, config.type);
     }
@@ -380,14 +428,157 @@ export class TerminalManager {
     this.sessions.clear();
     this.scrollbacks.clear();
     this.modeTrackers.clear();
-    // Dropped with the rest, but DISPOSED first: a `TerminalScreen` owns an
-    // xterm instance whose internal disposables outlive the map entry.
-    for (const screen of this.screens.values()) screen.dispose();
-    this.screens.clear();
+    // Snapshotted before iterating: `disposeScreen` deletes from
+    // `this.screens` as it goes, and each call is independently guarded, so
+    // one throwing dispose does not stop the rest from being reached.
+    for (const terminalId of [...this.screens.keys()]) this.disposeScreen(terminalId);
     this.retainScrollback.clear();
     this.forgotten.clear();
     this.terminalTypes.clear();
     this.stoppedTerminals.clear();
+  }
+
+  /**
+   * Disposes a terminal's screen, if any, and drops the two per-run map
+   * entries that pair with it — the run id (D1) and the rebuild budget (D4).
+   * The dispose runs under its own guard so a throw leaves every map
+   * consistent anyway: `resetMaps`' loop and all four exit-time cleanup sites
+   * route through this rather than repeating `get(id)?.dispose(); delete(id)`.
+   */
+  private disposeScreen(terminalId: string): void {
+    try {
+      this.screens.get(terminalId)?.dispose();
+    } catch (error) {
+      log.warn(`Terminal "${terminalId}" screen dispose failed: %s`, error);
+    }
+    this.screens.delete(terminalId);
+    this.runIds.delete(terminalId);
+    this.rebuildCounts.delete(terminalId);
+  }
+
+  /**
+   * Builds the per-PTY emulator, preferring a `TerminalFrameSource`. Its
+   * constructor CAN throw (two `XtermFrameAdapter` API-shape checks, plus
+   * `patchScroll`'s "already installed" refusal) where `TerminalScreen`'s
+   * cannot — and both callers (`spawn`, `ensureLiveScreen`) need a terminal
+   * that still works on a host whose xterm build doesn't support it, so a
+   * throw here falls back rather than propagating.
+   */
+  private constructScreen(terminalId: string, cols: number, rows: number): TerminalScreen {
+    try {
+      return new TerminalFrameSource(cols, rows);
+    } catch (error) {
+      log.error(
+        `Terminal "${terminalId}" frame source construction failed, falling back to a plain screen: %s`,
+        error,
+      );
+      return new TerminalScreen(cols, rows);
+    }
+  }
+
+  /**
+   * Installs the frame source's parser-boundary query responder and narrows
+   * the session's own byte-level one down to OSC 10/11/12 — see the doc
+   * comments on `TerminalFrameSource.answerQueries` and
+   * `TerminalSession.narrowCapabilityResponder` for why `session.write` is
+   * the only legal reply path and why the order (install, then narrow)
+   * matters. Also re-flushes the session's held OSC replies at the same
+   * parser boundary the frame source answers everything else from
+   * (`onParsed`) — see `TerminalSession.flushCapabilityReplies`.
+   *
+   * WIDENS back to full scope for a plain `TerminalScreen` — the construction
+   * fallback at spawn, or a rebuild that fell back to one — since that is the
+   * ONLY responder there is in that case; leaving a session narrowed from an
+   * earlier, now-gone frame source would answer nothing but OSC 10/11/12 for
+   * the rest of the run.
+   */
+  private wireFrameQueries(session: TerminalSession, screen: TerminalScreen): void {
+    if (!(screen instanceof TerminalFrameSource)) {
+      session.widenCapabilityResponder();
+      return;
+    }
+    screen.answerQueries((data) => session.write(data), ANTGRID_QUERY_COLORS);
+    session.narrowCapabilityResponder();
+    screen.onParsed(() => session.flushCapabilityReplies());
+  }
+
+  /**
+   * Rebuilds `terminalId`'s screen once its `TerminalFrameSource` has latched
+   * a failure (`TerminalFrameSource.failure`), and otherwise returns it
+   * unchanged. Called from both the `terminal:output` handler (before
+   * `screen.feed`) and the head of `getAttachSnapshot`, so a failed source is
+   * never fed further bytes and never the reason an attach comes back `null`.
+   *
+   * Reseeded from the RAW scrollback tail rather than anything the failed
+   * source itself holds — the failure is a display failure, not proof of what
+   * the emulator last painted, and `ScrollbackBuffer` caps at 10_000 chars,
+   * two orders below the parser-backlog ceiling that likely caused the
+   * failure, so the reseed cannot retrigger it.
+   *
+   * Geometry comes from the live session where there is one, or from the
+   * stopped-terminal row for a retained, already-exited run (both carry
+   * `cols`/`rows`); with neither available there is nothing to rebuild
+   * against, so the latched source is left as the answer. Same run id
+   * throughout — this is a fresh emulator for the SAME PTY run, not a new
+   * one — and rebuilds are capped at `MAX_SCREEN_REBUILDS`: a run that keeps
+   * overflowing the parser is not fixed by trying again.
+   */
+  private ensureLiveScreen(terminalId: string): TerminalScreen | undefined {
+    const current = this.screens.get(terminalId);
+    if (!(current instanceof TerminalFrameSource) || !current.failure) return current;
+    const rebuilds = this.rebuildCounts.get(terminalId) ?? 0;
+    if (rebuilds >= MAX_SCREEN_REBUILDS) {
+      // Nothing will rebuild this run's screen again, so a session left
+      // narrowed from the exhausted source would answer nothing but OSC
+      // 10/11/12 for the rest of the run — see `TerminalSession.widenCapabilityResponder`.
+      this.sessions.get(terminalId)?.widenCapabilityResponder();
+      return current;
+    }
+    // No widen call here: `geometry` falls back to a live session first, so
+    // reaching `undefined` means there IS no live session either — nothing to
+    // widen for.
+    const geometry = this.sessions.get(terminalId) ?? this.stoppedTerminals.get(terminalId);
+    if (!geometry) return current;
+    const failure = current.failure;
+    this.rebuildCounts.set(terminalId, rebuilds + 1);
+    const replacement = this.constructScreen(terminalId, geometry.cols, geometry.rows);
+    try {
+      current.dispose();
+    } catch (error) {
+      log.warn(`Terminal "${terminalId}" failed screen dispose during rebuild: %s`, error);
+    }
+    this.screens.set(terminalId, replacement);
+    if (replacement instanceof TerminalFrameSource) {
+      // Discard replies until the reseed below has actually been PARSED:
+      // `feed` only queues into xterm's write buffer, so wiring the real
+      // reply sink now would answer any query sitting in the replayed
+      // scrollback tail (a startup DA1/CPR, commonly) as if the guest had
+      // just asked it again — straight onto the live PTY as unsolicited
+      // input.
+      replacement.answerQueries(() => {}, ANTGRID_QUERY_COLORS);
+    }
+    const seed = this.scrollbacks.get(terminalId)?.getContents();
+    if (seed) replacement.feed(seed);
+    const session = this.sessions.get(terminalId);
+    if (session) {
+      if (replacement instanceof TerminalFrameSource) {
+        void replacement.settle().then(() => {
+          // The slot may have moved on by the time the reseed settles — a
+          // fast follow-up rebuild or dispose must not wire a live session
+          // onto a generation it no longer owns.
+          if (this.screens.get(terminalId) === replacement) this.wireFrameQueries(session, replacement);
+        });
+      } else {
+        this.wireFrameQueries(session, replacement);
+      }
+    }
+    log.warn(
+      `Terminal "${terminalId}" frame source failed (rebuild %d/%d): %s`,
+      rebuilds + 1,
+      MAX_SCREEN_REBUILDS,
+      failure,
+    );
+    return replacement;
   }
 
   /**
@@ -406,8 +597,7 @@ export class TerminalManager {
     this.retainScrollback.delete(terminalId);
     this.scrollbacks.delete(terminalId);
     this.modeTrackers.delete(terminalId);
-    this.screens.get(terminalId)?.dispose();
-    this.screens.delete(terminalId);
+    this.disposeScreen(terminalId);
     this.stoppedTerminals.delete(terminalId);
     this.terminalTypes.delete(terminalId);
     this.callbacks.onTerminalForgotten?.(terminalId);
@@ -493,6 +683,12 @@ export class TerminalManager {
       return;
     }
     session.resize(clientId, cols, rows);
+    // A TerminalFrameSource defers this into a parser write callback, so the
+    // new geometry is NOT applied when this call returns — but the
+    // `terminal:size` announcement below is PTY truth (session.cols/rows)
+    // regardless of when the emulator catches up, and `getAttachSnapshot`'s
+    // `settle()` already drains any deferred resize before it ever
+    // serializes, so an attach never observes the gap.
     this.screens.get(terminalId)?.resize(session.cols, session.rows);
     this.lastDriverGeometry = { cols: session.cols, rows: session.rows };
     this.sendMessage(
@@ -575,7 +771,12 @@ export class TerminalManager {
     terminalId: string,
     opts: { history?: boolean } = {},
   ): Promise<{ text: string; seq: number } | null> {
-    const screen = this.screens.get(terminalId);
+    // Head of the method: a latched TerminalFrameSource must never be what
+    // this returns `null` for. `null` reads to every caller in agent-core.ts
+    // as "unknown terminal", which would show an EMPTY pane over a terminal
+    // that is very much alive — worse than the frozen-but-present screen a
+    // failed rebuild attempt falls back to.
+    const screen = this.ensureLiveScreen(terminalId);
     if (!screen) return null;
     // Settled repeatedly while the parser is merely behind, because a tail is
     // the expensive answer: those bytes have ALREADY gone out live, so
@@ -650,6 +851,12 @@ export class TerminalManager {
 
   has(terminalId: string): boolean {
     return this.sessions.has(terminalId);
+  }
+
+  /** The current PTY run's identity, or undefined once its screen is gone —
+   *  see `runIds`. */
+  runId(terminalId: string): string | undefined {
+    return this.runIds.get(terminalId);
   }
 
   get size(): number {

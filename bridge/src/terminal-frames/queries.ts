@@ -49,12 +49,61 @@ export function installTerminalQueries(
   colors: TerminalQueryColors,
 ): () => void {
   const bytes = new VtCapabilityResponder(colors);
+  // Private xterm state with no public accessor — same caution as
+  // `XtermFrameAdapter`: read defensively, through `typeof` guards below,
+  // never assumed. A shape miss falls back to `undefined`, which is exactly
+  // what these two modes already answered before this reads them at all —
+  // the byte responder's scan, unimproved but never broken by an upgrade.
+  const core = (term as unknown as {
+    _core?: {
+      coreService?: { isCursorHidden?: boolean };
+      coreMouseService?: { activeEncoding?: string };
+    };
+  })._core;
+  const mouseEncoding = (): string | undefined => core?.coreMouseService?.activeEncoding;
 
   const num = (param: number | number[] | undefined): number =>
     typeof param === "number" ? param : (param?.[0] ?? 0);
   /** A query whose only legal parameter is 0 or omitted. */
   const isDefaulted = (params: (number | number[])[]): boolean =>
     params.length === 0 || num(params[0]) === 0;
+  /**
+   * Real state for the DEC private modes xterm's own `Terminal` tracks,
+   * read fresh for every DECRQM rather than from the byte responder's scan of
+   * the guest's set/reset bytes below. That scan never observes DECSTR or
+   * RIS — neither emits the `CSI ? Pm h|l` it watches for — so a query
+   * answered from its tracked state alone kept reporting a mode the guest had
+   * set long after one of those silently turned it back off. `undefined` for
+   * a mode xterm's model does not expose; that scan is still what answers
+   * those, unchanged.
+   */
+  const liveDecMode = (mode: number): boolean | undefined => {
+    switch (mode) {
+      case 1: return term.modes.applicationCursorKeysMode;
+      case 7: return term.modes.wraparoundMode;
+      case 25: return typeof core?.coreService?.isCursorHidden === "boolean"
+        ? !core.coreService.isCursorHidden : undefined;
+      case 1000: return term.modes.mouseTrackingMode === "vt200";
+      case 1002: return term.modes.mouseTrackingMode === "drag";
+      case 1003: return term.modes.mouseTrackingMode === "any";
+      // xterm tracks one ACTIVE mouse encoding rather than three independent
+      // bits, so these read as mutually exclusive — matching what the guest's
+      // own last `h` actually selected in this engine, which is the same
+      // ground truth every other case here reads from. 1015 (urxvt) is NOT
+      // one of them: measured against the real engine (`_encodings` lists
+      // only DEFAULT/SGR/SGR_PIXELS), enabling it moves nothing this can
+      // read, so claiming a live answer for it would be a confident WRONG one
+      // where the byte scan below is at least right until the guest's next
+      // DECSTR/RIS — left unhandled here on purpose.
+      case 1006: { const enc = mouseEncoding(); return enc === undefined ? undefined : enc === "SGR"; }
+      case 1016: { const enc = mouseEncoding(); return enc === undefined ? undefined : enc === "SGR_PIXELS"; }
+      case 1004: return term.modes.sendFocusMode;
+      case 47: case 1047: case 1049: return term.buffer.active.type === "alternate";
+      case 2004: return term.modes.bracketedPasteMode;
+      case 2026: return term.modes.synchronizedOutputMode;
+      default: return undefined;
+    }
+  };
   /**
    * Handlers run inside xterm's parse loop, which retires neither the escape
    * being answered nor the chunk carrying it until the handler returns — so a
@@ -109,7 +158,13 @@ export function installTerminalQueries(
       return true;
     }),
     term.parser.registerCsiHandler({ prefix: "?", intermediates: "$", final: "p" }, (params) => {
-      answer(`\x1b[?${num(params[0])}$p`);
+      const mode = num(params[0]);
+      const live = liveDecMode(mode);
+      // Sync the byte responder's tracked state to reality for a mode xterm
+      // exposes directly, immediately before it formats the reply from that
+      // state — DECSTR and RIS reach it no other way.
+      if (live !== undefined) bytes.feed(`\x1b[?${mode}${live ? "h" : "l"}`);
+      answer(`\x1b[?${mode}$p`);
       return true;
     }),
     // The guest's own mode changes, so DECRQM answers what it actually set.
@@ -118,6 +173,18 @@ export function installTerminalQueries(
         bytes.feed(`\x1b[?${params.map(num).join(";")}${final}`);
         return false;
       })),
+    // RIS returns every DEC private mode to its power-on default. The modes
+    // above answer from xterm's own live state regardless of this, but the
+    // ones `liveDecMode` returns `undefined` for have no live state to fall
+    // back on except this scan, and a scan never observes an ESC sequence —
+    // without this it would keep reporting whatever the guest set before the
+    // reset forever. A second, independent handler for the same final byte:
+    // `TerminalFrameSource`'s own (source.ts) clears history and mode-tracker
+    // state; this clears the byte responder's, and xterm dispatches both.
+    term.parser.registerEscHandler({ final: "c" }, () => {
+      bytes.reset();
+      return false;
+    }),
   ];
   return () => { for (const subscription of subscriptions) subscription.dispose(); };
 }
