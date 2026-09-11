@@ -16,6 +16,7 @@ import '../providers/agent_transport.dart';
 import '../providers/cached_sessions.dart';
 import '../providers/control_plane.dart';
 import '../providers/device_revocation.dart';
+import '../providers/removed_machine_prune.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/connection_identity.dart';
 import '../providers/device_provisioning.dart';
@@ -87,6 +88,9 @@ class _AppShellState extends ConsumerState<AppShell> {
     // closed — the session cookie outlives the device row, so the account still
     // resolves and desktop may never dial a relay at all.
     unawaited(checkDeviceRevoked(ref.container));
+    // Same window, the other direction: a machine removed from the account
+    // while this app was closed keeps a drawer row that dials and fails.
+    unawaited(pruneRemovedMachines(ref.container));
   }
 
   /// One kick at a time: a single foregrounding fires both onRestart and
@@ -138,6 +142,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     // Own cooldown inside; a revoke that landed while backgrounded has no other
     // way in on a machine whose ladder is already Blocked.
     unawaited(checkDeviceRevoked(ref.container));
+    unawaited(pruneRemovedMachines(ref.container));
     ref.invalidate(licenseTokenMinterProvider);
     AbLog.info('AppShell', 'app resumed — re-evaluating machine ladders');
     ref.invalidate(connectionTokenMinterProvider);

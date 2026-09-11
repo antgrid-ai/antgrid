@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
+import '../config/native_crypto.dart';
 import '../models/ab_message.dart';
 import '../services/license_token_minter.dart';
 import '../util/ab_log.dart';
@@ -41,7 +42,9 @@ class RelayMechanisms implements ConnMechanisms {
     required int epoch,
     required Future<ConnCoords?> Function() resolveCoords,
     required Future<String> Function() mintToken,
-  }) : _relay = relay,
+    SessionHandshaker Function(String agentEd25519PubB64)? buildHandshaker,
+  }) : _buildHandshaker = buildHandshaker,
+       _relay = relay,
        _crypto = crypto,
        _machineDeviceId = machineDeviceId,
        _identity = identity,
@@ -61,7 +64,19 @@ class RelayMechanisms implements ConnMechanisms {
   final Future<ConnCoords?> Function() _resolveCoords;
   final Future<String> Function() _mintToken;
 
+  /// A test seam — production passes nothing and gets [AppSessionHandshaker].
+  /// Exists because the handshake is the only way to reach the teardowns that
+  /// retire session keys WITHOUT disposing the session, and those are the
+  /// majority of them.
+  final SessionHandshaker Function(String agentEd25519PubB64)? _buildHandshaker;
+
   MachineSession? _session;
+
+  /// Watches the socket for the one key retirement [MachineSession] publishes
+  /// no event for. Tied to [_session]'s lifetime, not the relay's: the relay
+  /// outlives any single session, so a subscription left behind would go on
+  /// retiring keys on behalf of a session that no longer exists.
+  StreamSubscription<AppState>? _socketDownSub;
 
   /// The agent Ed25519 key [_session]'s handshaker was pinned against. The pin
   /// is fixed at construction, so this is what tells a redial whether the live
@@ -232,9 +247,16 @@ class RelayMechanisms implements ConnMechanisms {
     final session = _session;
     _session = null;
     _sessionPin = null;
+    await _socketDownSub?.cancel();
+    _socketDownSub = null;
     _lastCoords = null;
     _agentOnline = false;
-    if (session != null) await session.dispose();
+    if (session != null) {
+      await session.dispose();
+      // dispose() zeroizes the Dart-side keys; the installed native cipher
+      // holds its own copy that nothing else retires.
+      retireNativeE2eCipherKeys();
+    }
     // Guarded, not merely idempotent: `disconnect()` emits a state event, which
     // feeds another evaluation, which releases again — an unguarded call loops.
     if (_relay.currentState.connectionState !=
@@ -255,7 +277,10 @@ class RelayMechanisms implements ConnMechanisms {
       // was derived under.
       _session = null;
       _sessionPin = null;
+      await _socketDownSub?.cancel();
+      _socketDownSub = null;
       await existing.dispose();
+      retireNativeE2eCipherKeys();
       // After the dispose, so a listener that rebuilds a transport off this
       // signal cannot observe the half-torn-down session it is replacing.
       onSessionReplaced?.call();
@@ -263,7 +288,8 @@ class RelayMechanisms implements ConnMechanisms {
     final session = MachineSession(
       relay: _relay,
       machineDeviceId: _machineDeviceId,
-      handshaker: AppSessionHandshaker(
+      handshaker: _buildHandshaker?.call(agentEd25519PubB64) ??
+          AppSessionHandshaker(
         relay: _relay,
         crypto: _crypto,
         machineDeviceId: _machineDeviceId,
@@ -276,8 +302,28 @@ class RelayMechanisms implements ConnMechanisms {
           createAbMessage('project:start', {'projectId': projectId}),
       logger: _logMachineSession,
     );
-    session.takeoverEvents.listen((_) => onSessionTakenOver?.call());
-    session.sessionDownEvents.listen((_) => onSessionDown?.call());
+    // A session retires its keys on four paths and is DISPOSED on only two of
+    // them, so the dispose sites alone leave the involuntary majority — a
+    // dropped socket above all — holding key material in the native cipher.
+    // `MachineSession` zeroizes its own buffers on each of these; the cipher's
+    // copy is reachable from here or nowhere.
+    session.takeoverEvents.listen((_) {
+      retireNativeE2eCipherKeys();
+      onSessionTakenOver?.call();
+    });
+    session.sessionDownEvents.listen((_) {
+      retireNativeE2eCipherKeys();
+      onSessionDown?.call();
+    });
+    // The common one, and the only one with no event of its own: the session
+    // tears down on exactly this transition (its `_onState`), so watching the
+    // socket here is reading the same signal it does rather than guessing at a
+    // proxy for it.
+    _socketDownSub = _relay.stateStream.listen((s) {
+      if (s.connectionState == RelayConnectionState.disconnected) {
+        retireNativeE2eCipherKeys();
+      }
+    });
     session.start();
     _sessionPin = agentEd25519PubB64;
     return _session = session;
