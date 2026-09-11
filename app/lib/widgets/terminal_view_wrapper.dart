@@ -142,14 +142,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// Clearing the mirror alone is therefore undone by the very next notify,
   /// which is the harm D10 exists to prevent.
   ///
-  /// KNOWN GAP, because the engine exposes no way to drop a selection: this
-  /// covers everything that reads [_selectedText] (Ctrl+C, the send-to-agent
-  /// overlay) but not the view's OWN copy paths — its selection context menu
-  /// and, on macOS, ⌘C — which resolve text from the surviving anchors at copy
-  /// time, nor the highlight itself, which stays painted over glyphs the user
-  /// did not choose. Closing those needs a selection-clear hook on
-  /// `GhosttyTerminalController`/`GhosttyTerminalView` in the `dart_terminal`
-  /// fork.
+  /// [_selectionController] now drops the view's selection outright, which
+  /// stops the re-offer at its source -- the view re-resolves only while it
+  /// HOLDS a selection. This stays as the mirror's own defence, armed only
+  /// until the view confirms it has nothing selected, because that
+  /// confirmation is the one thing a detached or replaced view would not
+  /// send.
   GhosttyTerminalSelection? _invalidatedAnchors;
 
   /// The OSC 8 link under the pointer and where to park its readout, or null
@@ -192,6 +190,15 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// the Keyboard quick-action, so reading output never pops the keyboard.
   final GhosttyTerminalSoftKeyboardController _softKeyboardController =
       GhosttyTerminalSoftKeyboardController();
+
+  /// D10: the engine's own selection, dropped on every frame that replaces
+  /// the screen its row/col anchors point into. The view cannot do this
+  /// itself -- a frame is ordinary output to it -- and until it does, its
+  /// highlight stays painted over glyphs nobody chose and its native copy
+  /// paths (the selection context menu, the platform copy chord) resolve
+  /// their text from those anchors at copy time.
+  final GhosttyTerminalSelectionController _selectionController =
+      GhosttyTerminalSelectionController();
 
   /// Exact float cell metrics reported post-frame by Ghostty
   /// (`onCellMetricsChanged`), tagged with the inputs they were measured for.
@@ -554,8 +561,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// dropping it is strictly better than a selection that silently retargets
   /// itself.
   ///
-  /// The anchors are remembered as well as cleared, because the engine will
-  /// re-offer them -- see [_invalidatedAnchors].
+  /// The mirror alone is not enough: the engine holds the same anchors,
+  /// paints a highlight from them, and copies from them. [_selectionController]
+  /// drops all three, and is called AFTER the mirror is cleared so the null
+  /// content it reports back finds the mirror already empty -- see
+  /// [_invalidatedAnchors] for what that null then disarms.
   ///
   /// Guarded on an existing selection so a live frame stream (up to 20/s)
   /// costs a rebuild only on the one frame that actually invalidates a
@@ -570,6 +580,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       _selectedAnchors = null;
       _invalidatedAnchors = anchors;
     });
+    _selectionController.clear();
   }
 
   void _requestUserClaim() {
@@ -1092,6 +1103,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // quick-action. Desktop has no IME bridge, so `true` is a no-op there.
       showKeyboardOnInteraction: _hasPhysicalKeyboard,
       softKeyboardController: _softKeyboardController,
+      selectionController: _selectionController,
       fontSize: terminalFontSize,
       // The bundled mono face, so the cell grid measures identically on every
       // platform. Never hardcode a family here: an earlier 'Cascadia Mono'
@@ -1179,9 +1191,27 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       },
       onSelectionContentChanged: (content) {
         final anchors = content?.selection;
+        if (anchors == null) {
+          // The view holds nothing, so nothing it offers next can be a
+          // re-offer: disarm. Otherwise the frame's own clear would leave the
+          // refusal armed for good, and a user deliberately re-selecting the
+          // same region -- to copy what the frame actually wrote there --
+          // would be refused a selection they genuinely made.
+          if (_selectedText == null &&
+              _selectedAnchors == null &&
+              _invalidatedAnchors == null) {
+            return;
+          }
+          setState(() {
+            _selectedText = null;
+            _selectedAnchors = null;
+            _invalidatedAnchors = null;
+          });
+          return;
+        }
         // A re-offer of the anchors a frame invalidated, resolved against
-        // glyphs the user never selected — see [_invalidatedAnchors].
-        if (anchors != null && anchors == _invalidatedAnchors) return;
+        // glyphs the user never selected -- see [_invalidatedAnchors].
+        if (anchors == _invalidatedAnchors) return;
         final text = content?.text;
         if (text == _selectedText && anchors == _selectedAnchors) return;
         setState(() {

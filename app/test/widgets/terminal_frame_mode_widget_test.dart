@@ -425,6 +425,99 @@ void main() {
       expect(find.byType(SendToAgentButton), findsOneWidget);
     });
 
+    testWidgets(
+      'the wrapper hands the view a selection controller, so a frame can drop '
+      'the engine selection and not just the mirror',
+      (tester) async {
+        final h = await _makeService(addTearDown);
+        final tab = _tab(id: 't1', type: 'agent');
+
+        await tester.pumpWidget(
+          _wrap(
+            SizedBox(
+              width: 300,
+              height: 400,
+              child: TerminalViewWrapper(tab: tab, terminalService: h.service),
+            ),
+            terminalState: Stream.value(_stateWith()),
+            agentTab: tab,
+          ),
+        );
+        await tester.pump();
+
+        final view = tester.widget<GhosttyTerminalView>(
+          find.byType(GhosttyTerminalView),
+        );
+        expect(
+          view.selectionController,
+          isNotNull,
+          reason: 'the mirror covers Ctrl+C and SendToAgentButton; the '
+              'engine highlight and the view own copy paths resolve from the '
+              'anchors themselves, and only this handle reaches those',
+        );
+      },
+    );
+
+    testWidgets(
+      'the same anchors are accepted again once the view confirms it cleared',
+      (tester) async {
+        final h = await _makeService(addTearDown);
+        final tab = _tab(id: 't1', type: 'agent');
+
+        await tester.pumpWidget(
+          _wrap(
+            SizedBox(
+              width: 300,
+              height: 400,
+              child: TerminalViewWrapper(tab: tab, terminalService: h.service),
+            ),
+            terminalState: Stream.value(_stateWith()),
+            agentTab: tab,
+          ),
+        );
+        await tester.pump();
+
+        final view = tester.widget<GhosttyTerminalView>(
+          find.byType(GhosttyTerminalView),
+        );
+        const anchors = GhosttyTerminalSelection(
+          base: GhosttyTerminalCellPosition(row: 0, col: 0),
+          extent: GhosttyTerminalCellPosition(row: 0, col: 4),
+        );
+        view.onSelectionContentChanged!(
+          const GhosttyTerminalSelectionContent(
+            selection: anchors,
+            text: 'hello',
+          ),
+        );
+        await tester.pump();
+        expect(find.byType(SendToAgentButton), findsOneWidget);
+
+        tab.replaceEpoch.value++;
+        await tester.pump();
+        expect(find.byType(SendToAgentButton), findsNothing);
+
+        // What _selectionController.clear() reports back once it has dropped
+        // the engine's selection. A view holding nothing can no longer
+        // re-offer, so the refusal has done its job and must stand down.
+        view.onSelectionContentChanged!(null);
+        await tester.pump();
+
+        // The user drags the same region again, deliberately, to copy what
+        // the frame actually wrote there. Refusing that would hide the
+        // selection they just made.
+        view.onSelectionContentChanged!(
+          const GhosttyTerminalSelectionContent(
+            selection: anchors,
+            text: 'what the frame wrote',
+          ),
+        );
+        await tester.pump();
+
+        expect(find.byType(SendToAgentButton), findsOneWidget);
+      },
+    );
+
     testWidgets('a bump with no live selection is a no-op', (tester) async {
       final h = await _makeService(addTearDown);
       final tab = _tab(id: 't1', type: 'agent');
