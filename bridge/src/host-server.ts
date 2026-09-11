@@ -55,6 +55,7 @@ import {
   savePairBudgets,
   upsertPairBudget,
   clearHalt as clearPairHalt,
+  pairEnds,
   type PairBudgetState,
 } from "./session-bus/pair-budget";
 import { isSafeProjectId } from "./project-id";
@@ -285,7 +286,7 @@ function clampCaptureTtl(ttlMs: number): number {
  * {@link clearHalt} the write that lifts one, so the state §7.4 says only a
  * human may change is never the state a crash decides.
  */
-class PairBudgetStore {
+export class PairBudgetStore {
   private readonly bySession = new Map<string, PairBudgetState[]>();
   private readonly savedAtMs = new Map<string, number>();
 
@@ -336,16 +337,35 @@ class PairBudgetStore {
    * `SessionBusCoordinator.saveRoutesIfDue`.
    */
   clearHalt(sessionId: string): void {
+    // The pair's other end holds its OWN mirror of the same record
+    // (`pair-budget.ts`'s header), so lifting only this session's copy leaves a
+    // peer still refusing every send on a pair a human has just cleared. Only a
+    // peer THIS machine holds is reachable from here — `load` answers nothing
+    // for a session it cannot place, which is what makes the remote end a
+    // no-op rather than a special case; there, the same act by that session's
+    // own human is what lifts it.
+    for (const key of this.lift(sessionId)) {
+      for (const end of pairEnds(key) ?? []) {
+        if (end.sessionId !== sessionId) this.lift(end.sessionId, key);
+      }
+    }
+  }
+
+  /** Lift [sessionId]'s halts, or just the one on [onlyPairKey], and answer
+   *  with the pairs actually lifted. */
+  private lift(sessionId: string, onlyPairKey?: string): string[] {
     const records = this.load(sessionId);
-    let changed = false;
+    const lifted: string[] = [];
     const next = records.map((r) => {
       if (r.haltedAt === null) return r;
-      changed = true;
+      if (onlyPairKey !== undefined && r.pairKey !== onlyPairKey) return r;
+      lifted.push(r.pairKey);
       return clearPairHalt(r);
     });
-    if (!changed) return;
+    if (lifted.length === 0) return lifted;
     this.bySession.set(sessionId, next);
     this.flush(sessionId, next, true);
+    return lifted;
   }
 
   private flush(sessionId: string, records: PairBudgetState[], force: boolean): void {

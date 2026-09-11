@@ -278,10 +278,14 @@ edit breaks silently.
   session spend another's budget, and a per-session one would let a halted pair
   carry on through a third. `session-bus/pair-budget.ts` is pure and the host
   holds the one store (beside the directory), because a halt "cleared only by a
-  human" has to outlive a restart. Both ceilings are charged and refused inside
-  `SessionBusCoordinator.message`, which is the single point every verb leaves
-  through — a gate in the loopback API or the MCP tools instead would be one a
-  new caller could be written around without noticing. A caller may ASK the same
+  human" has to outlive a restart. The record is MIRRORED per end, never shared:
+  the two ends can be on two machines, so each charges its own copy — outbound in
+  `SessionBusCoordinator.message`, inbound in its `onMessage` — and an edit that
+  drops either half leaves each end counting only what IT sent, which doubles
+  both ceilings and halts one side of a pair without the other. REFUSAL stays in
+  `message` alone, the single point every verb leaves through; a gate in the
+  loopback API or the MCP tools instead would be one a new caller could be
+  written around without noticing. A caller may ASK the same
   question read-only through `SessionBusCoordinator.pairRefusal`, which charges
   nothing and exists so the verb layer can order its own ladder (a halted pair
   aimed at a stopped session has to hear about the halt, which only a human

@@ -169,7 +169,9 @@ export interface CoordinatorDeps {
    *  held rather than lost. Absent means this coordinator has no local path at
    *  all, which is every caller until the host wires one. */
   deliverLocal?: (frame: AbMessage, to: SessionMemberKey) => boolean;
-  /** The per-pair send budget (§7.4), read before a send and charged after one.
+  /** The per-pair budget (§7.4), read before a send and charged by every
+   *  message this end sends OR receives — see `pair-budget.ts`'s header for why
+   *  both halves have to land on this end's mirror.
    *  Held by whoever owns every project's rather than by this class: a halt
    *  "cleared only by a human" has to survive a restart, and a counter kept in
    *  memory here would be cleared by one. Absent means unbudgeted — the honest
@@ -179,7 +181,8 @@ export interface CoordinatorDeps {
     recordsFor(sessionId: string): readonly PairBudgetState[];
     write(sessionId: string, next: PairBudgetState): void;
   };
-  /** Lift the no-progress halt every pair this session SENDS in is subject to.
+  /** Lift the no-progress halt on every pair this session is an end of, at both
+   *  mirrors of it this machine holds.
    *  Held by whoever owns the budget rather than here: a halt cleared only by a
    *  human has to survive a restart, and a counter this class kept in memory
    *  would be cleared by one. */
@@ -727,13 +730,15 @@ export class SessionBusCoordinator {
   }
 
   /**
-   * Charge one send to the pair's budget (§7.4).
+   * Charge one message to this end's mirror of the pair's budget (§7.4) —
+   * outbound where it was sent, inbound where it landed, so the two mirrors
+   * stay in lockstep.
    *
    * Progress is §7.4's own definition and nothing wider — a NEW thread, or an
    * artifact part — because a reply on a thread already open is exactly the
    * exchange the no-progress counter exists to notice. Reset before the
-   * increment, so the send that made the progress starts the next count at one
-   * rather than being forgiven retroactively.
+   * increment, so the message that made the progress starts the next count at
+   * one rather than being forgiven retroactively.
    */
   private spendBudget(
     sessionId: string,
@@ -1070,6 +1075,15 @@ export class SessionBusCoordinator {
         ? {}
         : { threads: upsertThread(s.threads, { threadId, contextId, peer: from, lastAt: now, openedByPeer: true }) }),
     });
+    // The other half of §7.4's ceilings. The pair's record is mirrored at each
+    // end rather than shared (`pair-budget.ts`'s header), so a message charged
+    // only where it was sent leaves this end counting nothing but its own
+    // outbound traffic — which is the ping-pong `pairKey`'s doc says cannot
+    // happen. Charged AFTER the commit above and before anything renders, so a
+    // halt this message trips is already recorded when the line reaches the
+    // session.
+    const budget = this.pairBudgetFor(sessionId, self, from);
+    if (budget) this.spendBudget(sessionId, budget, verb, opensThread || carriesArtifact(envelope.parts), now);
     // The receipt takes the same send decision a message does, so it must go
     // through `dispatch` and never `deps.send`: two sessions on ONE machine
     // exchange on a peer-role context nothing ever taught a route for, and the

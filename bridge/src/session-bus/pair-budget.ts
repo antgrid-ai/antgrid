@@ -6,6 +6,16 @@
 // another's budget (see "the no-progress halt is per (sender, target) PAIR" in
 // bridge/CLAUDE.md).
 //
+// The record is MIRRORED, not shared: the two ends of a pair can be on two
+// machines, and neither can write the other's store, so each keeps its own copy
+// and every message is charged at BOTH ends — where it is sent
+// (`SessionBusCoordinator.message`) and where it lands (`onMessage`). Charging
+// only the outbound half is what makes the two copies diverge, and divergence
+// is not a cosmetic difference: each end then counts only the messages IT sent,
+// so [NO_PROGRESS_EXCHANGES] takes twice as many exchanges to reach on an
+// alternating pair, [MAX_NOTIFIES_PER_PAIR_HOUR] is spent twice per hour, and a
+// halt binds only whichever side happened to send last.
+//
 // Two different ceilings share one record because §7.4 asks two different
 // questions of the same pair. `notifiesAtMs` bounds how often a pair may
 // INTERRUPT each other's turn — `post` is deliberately unbudgeted, because it
@@ -81,6 +91,28 @@ export function pairKey(from: PairEnd, to: PairEnd): string {
   const a = `${from.machineId}/${from.sessionId}`;
   const b = `${to.machineId}/${to.sessionId}`;
   return a <= b ? `${a}|${b}` : `${b}|${a}`;
+}
+
+/**
+ * The inverse of {@link pairKey}: who the two ends are, in key order.
+ *
+ * Exists so a halt lifted in one session can be lifted in the peer's mirror of
+ * the same record too ({@link loadPairBudgets} scopes rows per session, so a
+ * pair on one machine is TWO rows — see the module header). Splits each half at
+ * its FIRST `/`, which is the assumption `pairKey` itself already makes by
+ * joining on one; a key that does not carry exactly two halves is answered as
+ * unreadable rather than guessed at.
+ */
+export function pairEnds(key: string): [PairEnd, PairEnd] | null {
+  const halves = key.split("|");
+  if (halves.length !== 2) return null;
+  const ends = halves.map((half) => {
+    const cut = half.indexOf("/");
+    if (cut <= 0 || cut === half.length - 1) return null;
+    return { machineId: half.slice(0, cut), sessionId: half.slice(cut + 1) };
+  });
+  if (ends[0] === null || ends[1] === null) return null;
+  return [ends[0], ends[1]];
 }
 
 export function emptyPairBudget(key: string): PairBudgetState {

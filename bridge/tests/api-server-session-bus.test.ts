@@ -782,7 +782,9 @@ describe("the send verbs over the loopback route", () => {
 // which is the failure that reads as enforced and bounds nothing.
 describe("the no-progress halt as the verbs actually charge it", () => {
   /** A thread the PEER opened, so none of the sends under test is the opener:
-   *  opening one is progress and would reset the very counter being watched. */
+   *  opening one is progress and would reset the very counter being watched.
+   *  It is still an exchange on the pair, and the lead charges it on arrival —
+   *  the counts below are one short of the ceiling for that reason. */
   async function peerOpenedThread(lead: Machine, peer: Machine): Promise<string> {
     const opened = await post(peer, "post", PEER_SESSION, { to: TO_LEAD, summary: "opening", text: "one" });
     expect(opened.status).toBe(200);
@@ -794,8 +796,10 @@ describe("the no-progress halt as the verbs actually charge it", () => {
   test("the halt trips through the route, on the send after the ceiling", async () => {
     const { lead, peer, stop } = linkedPair();
     try {
+      // The opener is the pair's first exchange, counted at both ends, so the
+      // ceiling is reached one send sooner than a sender-scoped count would.
       const threadId = await peerOpenedThread(lead, peer);
-      for (let i = 0; i < NO_PROGRESS_EXCHANGES; i += 1) {
+      for (let i = 0; i < NO_PROGRESS_EXCHANGES - 1; i += 1) {
         const res = await post(lead, "post", LEAD_SESSION, {
           to: TO_PEER, threadId, summary: "still going", text: `round ${i}`,
         });

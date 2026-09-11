@@ -14,6 +14,7 @@ import {
   loadPairBudgets,
   noteExchange,
   noteProgress,
+  pairEnds,
   pairKey,
   savePairBudgets,
   upsertPairBudget,
@@ -372,5 +373,137 @@ test("asking does not spend: pairRefusal leaves the store untouched and the send
 
     expect(rows.get(A.sessionId)).toEqual(spent);
     expect(send(bus, "post", { threadId: opening.threadId })).toMatchObject({ ok: true });
+  });
+});
+
+// -- the pair's two mirrors, kept in lockstep by charging BOTH halves --------
+//
+// The record is per END, not per pair: two machines cannot share a row. What
+// makes the two copies agree is that every message is charged where it was sent
+// AND where it landed. These drive a real exchange between two sessions one
+// coordinator holds and assert on both rows at once — charging only the
+// outbound half leaves each side counting its own traffic, which is the
+// ping-pong `pairKey`'s doc says cannot happen.
+
+const LOCAL = "m1";
+const KEY_LOCAL = pairKey({ machineId: LOCAL, sessionId: "s1" }, { machineId: LOCAL, sessionId: "s2" });
+
+function pairedCoordinator(abDir: string): { bus: SessionBusCoordinator; rows: Map<string, PairBudgetState[]> } {
+  const rows = new Map<string, PairBudgetState[]>();
+  let now = T0;
+  let self: SessionBusCoordinator;
+  const keyFor = (sessionId: string) => ({ machineId: LOCAL, projectId: "p1", sessionId });
+  const bus = new SessionBusCoordinator({
+    abDir,
+    projectIdFor: () => "p1",
+    self: (sessionId) =>
+      sessionId === "s1" || sessionId === "s2" ? { key: keyFor(sessionId), ref: keyFor(sessionId) } : null,
+    // Both ends live in one coordinator, so the local hand-off IS the delivery:
+    // this is what turns a `message` call into the inbound fold its peer sees.
+    deliverLocal: (frame) => self.handleInbound(frame) === "applied",
+    send: () => true,
+    pairBudget: {
+      recordsFor: (sessionId) => rows.get(sessionId) ?? [],
+      write: (sessionId, next) => rows.set(sessionId, upsertPairBudget(rows.get(sessionId) ?? [], next)),
+    },
+    now: () => (now += 1),
+  });
+  self = bus;
+  return { bus, rows };
+}
+
+function post(bus: SessionBusCoordinator, from: string, to: string, threadId: string | null) {
+  return bus.message({
+    sessionId: from,
+    verb: "post",
+    threadId,
+    to: { machineId: LOCAL, projectId: "p1", sessionId: to },
+    summary: "s",
+    parts: [{ kind: "text", text: "t" }],
+  });
+}
+
+function withPair(run: (bus: SessionBusCoordinator, rows: Map<string, PairBudgetState[]>) => void): void {
+  const abDir = tmpAbDir();
+  const { bus, rows } = pairedCoordinator(abDir);
+  try {
+    run(bus, rows);
+  } finally {
+    bus.stop();
+    rmSync(abDir, { recursive: true, force: true });
+  }
+}
+
+test("pairEnds is the inverse of pairKey, and refuses a key it cannot read", () => {
+  const ends = pairEnds(pairKey(A, B))!;
+  expect(ends.map((e) => e.sessionId).sort()).toEqual([A.sessionId, B.sessionId]);
+  expect(ends.map((e) => e.machineId).sort()).toEqual([A.machineId, B.machineId]);
+
+  expect(pairEnds("nothing-here")).toBeNull();
+  expect(pairEnds("m1/s1|m2/s2|m3/s3")).toBeNull();
+});
+
+test("an arriving message charges the RECEIVER's mirror, not only the sender's", () => {
+  withPair((bus, rows) => {
+    const opening = post(bus, "s1", "s2", null);
+    if (!("ok" in opening) || !opening.ok) throw new Error("send refused");
+
+    // Both ends now hold a record for the same unordered pair, and both have
+    // counted the one message that has crossed it.
+    for (const sessionId of ["s1", "s2"]) {
+      const record = budgetFor(rows.get(sessionId) ?? [], KEY_LOCAL);
+      expect(record.pairKey).toBe(KEY_LOCAL);
+      expect(record.exchangesSinceProgress).toBe(1);
+    }
+  });
+});
+
+test("an alternating pair reaches the halt in NO_PROGRESS_EXCHANGES messages, not twice that, and both ends halt", () => {
+  withPair((bus, rows) => {
+    const opening = post(bus, "s1", "s2", null);
+    if (!("ok" in opening) || !opening.ok) throw new Error("send refused");
+    const thread = opening.threadId;
+
+    // Alternating replies on the thread already open: nothing published, no new
+    // thread. Counted at both ends, so the pair — not either sender — is what
+    // runs out.
+    let sender = "s2";
+    for (let i = 1; i < NO_PROGRESS_EXCHANGES; i += 1) {
+      const answer = post(bus, sender, sender === "s1" ? "s2" : "s1", thread);
+      expect(answer).toMatchObject({ ok: true });
+      sender = sender === "s1" ? "s2" : "s1";
+    }
+
+    // Charging only the outbound half would leave each side at three here, and
+    // both of these sends would land.
+    expect(post(bus, "s1", "s2", thread)).toMatchObject({ ok: false, code: "NO_PROGRESS" });
+    expect(post(bus, "s2", "s1", thread)).toMatchObject({ ok: false, code: "NO_PROGRESS" });
+    for (const sessionId of ["s1", "s2"]) {
+      expect(budgetFor(rows.get(sessionId) ?? [], KEY_LOCAL).haltedAt).not.toBeNull();
+    }
+  });
+});
+
+test("the notify ceiling is spent by the pair, not by each sender in turn", () => {
+  withPair((bus, rows) => {
+    const notify = (from: string, to: string) =>
+      bus.message({
+        sessionId: from,
+        verb: "notify",
+        threadId: null,
+        to: { machineId: LOCAL, projectId: "p1", sessionId: to },
+        summary: "s",
+        parts: [{ kind: "text", text: "t" }],
+      });
+
+    for (let i = 0; i < MAX_NOTIFIES_PER_PAIR_HOUR; i += 1) {
+      expect(notify(i % 2 === 0 ? "s1" : "s2", i % 2 === 0 ? "s2" : "s1")).toMatchObject({ ok: true });
+    }
+    // Each session sent only half of them; the ceiling is the pair's.
+    expect(notify("s1", "s2")).toMatchObject({ ok: false, code: "NOTIFY_RATE" });
+    expect(notify("s2", "s1")).toMatchObject({ ok: false, code: "NOTIFY_RATE" });
+    for (const sessionId of ["s1", "s2"]) {
+      expect(budgetFor(rows.get(sessionId) ?? [], KEY_LOCAL).notifiesAtMs).toHaveLength(MAX_NOTIFIES_PER_PAIR_HOUR);
+    }
   });
 });
