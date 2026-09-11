@@ -227,6 +227,21 @@ describe("Layout account menu", () => {
 });
 
 describe("Layout support chat", () => {
+  test("renders the custom launcher on signed-out pages", () => {
+    setSalesIqWidgetUrl("https://salesiq.zohopublic.com/widget");
+    try {
+      const html = Layout({ title: "Sign in", children: "x" }).toString();
+      expect(html).toContain('aria-label="Chat with support"');
+      expect(html).toContain('class="support-launcher-button"');
+      expect(html).toContain('data-salesiq-user-id=""');
+      expect(html).toContain('aria-expanded="false"');
+      expect(html).toContain("support-launcher-icon-close");
+      expect(html).not.toContain('<script src="https://salesiq.zohopublic.com');
+    } finally {
+      setSalesIqWidgetUrl(undefined);
+    }
+  });
+
   test("falls back to the public support page when SalesIQ is unconfigured", () => {
     setSalesIqWidgetUrl(undefined);
     const html = Layout({
@@ -248,9 +263,10 @@ describe("Layout support chat", () => {
       }).toString();
       expect(html).toContain('data-salesiq-user-id="user-1"');
       expect(html).toContain('data-salesiq-user-email="gita@example.com"');
+      expect(html).toContain('aria-label="Chat with support"');
       expect(html).not.toContain('<script src="https://salesiq.zohopublic.com');
       expect(html).toContain('data-salesiq-logout="true"');
-      expect(html).toContain("salesiq.reset");
+      expect(html).toContain("salesiq?.reset");
       expect(html).toContain("salesiq.tracking");
     } finally {
       setSalesIqWidgetUrl(undefined);

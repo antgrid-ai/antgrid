@@ -4,7 +4,7 @@ import { BETA } from "../billing/plans.js";
 import { Wordmark } from "./wordmark.js";
 import { Mark } from "./mark.js";
 import { absoluteUrl } from "./origin.js";
-import { SALESIQ_CONTROLLER_SCRIPT, salesIqSupportControl } from "./salesiq.js";
+import { SALESIQ_CONTROLLER_SCRIPT, salesIqSupportLauncher } from "./salesiq.js";
 
 /** Which nav entry the current page IS, so it can be marked. Pages without an
  *  entry of their own (account, sign-in, checkout) pass nothing. */
@@ -142,11 +142,10 @@ export function Layout({ title, user, section, children }: LayoutProps) {
           </div>
         </header>
         <main class="max-w-5xl mx-auto p-6">{children}</main>
+        {salesIqSupportLauncher(user ?? undefined)}
+        <script dangerouslySetInnerHTML={{ __html: SALESIQ_CONTROLLER_SCRIPT }} />
         {user && (
-          <>
-            <script dangerouslySetInnerHTML={{ __html: ACCOUNT_MENU_SCRIPT }} />
-            <script dangerouslySetInnerHTML={{ __html: SALESIQ_CONTROLLER_SCRIPT }} />
-          </>
+          <script dangerouslySetInnerHTML={{ __html: ACCOUNT_MENU_SCRIPT }} />
         )}
       </body>
     </html>
@@ -201,7 +200,6 @@ function AccountMenu({ user }: { user: LayoutUser }) {
             <PersonIcon />
             Account
           </a>
-          {salesIqSupportControl(user)}
         </div>
         <form method="post" action="/logout" class="border-t border-edge-inner p-1" data-salesiq-logout="true">
           {/* Not permanently red. Signing out is routine and reversible; danger

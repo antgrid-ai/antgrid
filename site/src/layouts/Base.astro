@@ -4,6 +4,7 @@ import { Font } from "astro:assets";
 import Seo from "../components/Seo.astro";
 import Nav from "../components/Nav.astro";
 import Footer from "../components/Footer.astro";
+import SalesIqSupport from "../components/SalesIqSupport.astro";
 interface Props {
   title: string;
   description: string;
@@ -87,6 +88,7 @@ const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
     <Nav />
     <slot />
     <Footer />
+    <SalesIqSupport />
     <script>
       // Scroll reveal: the hidden state only applies under html.js, so a failed
       // script leaves the page fully visible rather than permanently blank.

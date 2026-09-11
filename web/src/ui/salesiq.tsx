@@ -15,40 +15,58 @@ export function setSalesIqWidgetUrl(value: string | undefined): void {
   }
 }
 
-export function salesIqSupportControl(user: {
+export function salesIqSupportLauncher(user?: {
   id: string;
   email?: string | null;
 }): Child {
   if (!widgetUrl) {
     return (
-      <a
-        href="https://antgrid.ai/support?chat=1&source=account"
-        class="flex items-center gap-2.5 rounded-field px-2.5 py-2 text-sm text-ink2 hover:bg-chrome hover:text-ink"
-      >
-        <SupportIcon />
-        Support
-      </a>
+      <aside class="support-launcher" aria-label="Support">
+        <a
+          href="https://antgrid.ai/support?chat=1&source=account"
+          class="support-launcher-button"
+          aria-label="Chat with support"
+          title="Chat with support"
+        >
+          <SupportIcon />
+        </a>
+      </aside>
     );
   }
   return (
-    <button
-      type="button"
-      data-salesiq-open
-      data-salesiq-widget-url={widgetUrl}
-      data-salesiq-user-id={user.id ?? ""}
-      data-salesiq-user-email={user.email ?? ""}
-      class="flex w-full items-center gap-2.5 rounded-field px-2.5 py-2 text-sm text-ink2 hover:bg-chrome hover:text-ink"
-    >
-      <SupportIcon />
-      Support
-    </button>
+    <aside class="support-launcher" aria-label="Support">
+      <span class="support-launcher-status" data-salesiq-status role="status" aria-live="polite"></span>
+      <button
+        type="button"
+        data-salesiq-open
+        data-salesiq-widget-url={widgetUrl}
+        data-salesiq-user-id={user?.id ?? ""}
+        data-salesiq-user-email={user?.email ?? ""}
+        class="support-launcher-button"
+        aria-label="Chat with support"
+        aria-expanded="false"
+        title="Chat with support"
+      >
+        <SupportIcon />
+        <CloseIcon />
+      </button>
+    </aside>
   );
 }
 
 function SupportIcon() {
   return (
-    <svg class="h-4 w-4 shrink-0 text-muted2" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M3 7.5a5 5 0 0110 0v3.25A1.25 1.25 0 0111.75 12H10v-4h3M3 8h3v4H4.25A1.25 1.25 0 013 10.75V7.5zM10 13.5H7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+    <svg class="support-launcher-icon support-launcher-icon-chat" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M5.75 4.75h12.5a2.5 2.5 0 0 1 2.5 2.5v7.5a2.5 2.5 0 0 1-2.5 2.5h-6.1L7.5 20.5v-3.25H5.75a2.5 2.5 0 0 1-2.5-2.5v-7.5a2.5 2.5 0 0 1 2.5-2.5Z" />
+      <path d="m7.5 9 2 2-2 2M12 13h4.5" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg class="support-launcher-icon support-launcher-icon-close" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="m6.75 6.75 10.5 10.5M17.25 6.75 6.75 17.25" />
     </svg>
   );
 }
@@ -56,13 +74,22 @@ function SupportIcon() {
 export const SALESIQ_CONTROLLER_SCRIPT = `
 (() => {
   let loading;
+  // Zoho owns the open/closed state — it can close the window from inside the
+  // iframe — so read it off the widget rather than tracking a local boolean.
+  const chatIsOpen = () => !!document.querySelector("#zsiq_chat_wrap.chat-iframe-open");
   document.addEventListener("click", (event) => {
     const button = event.target.closest("[data-salesiq-open]");
     if (!button) return;
-    const show = () => window.$zoho?.salesiq?.chatwindow?.visible("show");
-    if (window.$zoho?.salesiq?.chatwindow) return show();
+    const status = button.parentElement?.querySelector("[data-salesiq-status]");
+    if (window.$zoho?.salesiq?.chatwindow) {
+      const open = !chatIsOpen();
+      window.$zoho.salesiq.chatwindow.visible(open ? "show" : "hide");
+      button.setAttribute("aria-expanded", String(open));
+      return;
+    }
     if (loading) return;
     button.disabled = true;
+    if (status) status.textContent = "Opening support chat…";
     window.$zoho = window.$zoho || {};
     window.$zoho.salesiq = window.$zoho.salesiq || { widgetcode: "siqwidget", values: {}, ready: function () {} };
     window.$zoho.salesiq.ready = function () {
@@ -71,7 +98,9 @@ export const SALESIQ_CONTROLLER_SCRIPT = `
       if (button.dataset.salesiqUserId) window.$zoho.salesiq.visitor?.id(button.dataset.salesiqUserId);
       if (button.dataset.salesiqUserEmail) window.$zoho.salesiq.visitor?.email(button.dataset.salesiqUserEmail);
       button.disabled = false;
-      show();
+      if (status) status.textContent = "";
+      window.$zoho.salesiq.chatwindow?.visible("show");
+      button.setAttribute("aria-expanded", "true");
     };
     const script = document.createElement("script");
     script.id = "zsiqscript";
@@ -85,6 +114,7 @@ export const SALESIQ_CONTROLLER_SCRIPT = `
       script.remove();
       loading = undefined;
       button.disabled = false;
+      if (status) status.textContent = "Chat could not load. Open the support page to contact us.";
     });
   });
   document.addEventListener("submit", (event) => {
