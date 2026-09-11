@@ -7,35 +7,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/models/workspace_view.dart';
-import 'package:antgrid/widgets/session_inbox_panel.dart';
 import 'package:antgrid/widgets/workspace_panel.dart';
 
 void main() {
-  testWidgets('the inbox tab mounts SessionInboxPanel, not a walk off the '
-      'end of the child list', (tester) async {
-    await tester.pumpWidget(
-      ProviderScope(
-        child: MaterialApp(
-          home: Scaffold(
-            body: WorkspacePanel(
-              selectedView: WorkspaceView.inbox,
-              onViewSelected: (_) {},
-            ),
-          ),
-        ),
-      ),
-    );
-    await tester.pump();
-
-    expect(find.byType(SessionInboxPanel), findsOneWidget);
-  });
-
   testWidgets('every WorkspaceView ordinal has a matching IndexedStack child', (
     tester,
   ) async {
-    // Walks the whole enum, not just inbox: a future append with no child in
-    // the same slot is exactly the failure this file exists to catch, and
-    // testing only the tab this wave added would miss it again next time.
+    // Walks the whole enum rather than the view a change happens to touch: an
+    // append with no child in the same slot, or a removal that leaves one
+    // behind, is exactly the failure this file exists to catch.
     for (final view in WorkspaceView.values) {
       await tester.pumpWidget(
         ProviderScope(

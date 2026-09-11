@@ -2,6 +2,10 @@
 // and it has to say it on BOTH surfaces that name a session — the drawer row
 // and the Recent row. The Handler badge it is modelled on is mounted on the
 // first and not the second, so "it works" has to be proven twice.
+//
+// It is also the way IN to that mail, which is what the last group holds: the
+// tap has to reach the sheet for this row's session, and has to do it without
+// the row underneath claiming the same tap and switching sessions.
 import 'dart:async';
 
 import 'package:antgrid/design/ab_colors.dart';
@@ -17,6 +21,7 @@ import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_session_row_widget.dart';
 import 'package:antgrid/widgets/session_inbox_badge.dart';
+import 'package:antgrid/widgets/session_inbox_panel.dart';
 import 'package:antgrid/widgets/session_row.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -291,5 +296,59 @@ void main() {
         expect(channel.sends, 0);
       },
     );
+  });
+
+  group('opening the mail', () {
+    /// The sheet route needs a frame to push and one for its transition.
+    Future<void> settleRoute(WidgetTester tester) async {
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+    }
+
+    testWidgets('a tap opens the sheet for THIS row\'s session', (
+      tester,
+    ) async {
+      final container = await containerFor(_CountingChannel(3));
+      await pump(
+        tester,
+        container,
+        const SessionInboxBadge(entryId: _projectId, sessionId: _sessionId),
+      );
+
+      await tester.tap(find.byType(SessionInboxBadge));
+      await settleRoute(tester);
+
+      // The session id is the assertion, not merely that something opened: the
+      // badge's whole reason to be the entry point is that it can speak for a
+      // session nothing else on screen is scoped to.
+      expect(
+        tester.widget<SessionInboxPanel>(find.byType(SessionInboxPanel))
+            .sessionId,
+        _sessionId,
+      );
+    });
+
+    // Mounted inside a real row, because the hazard is the row and not the
+    // badge: a session row is itself tappable, and a badge that let the tap
+    // through would switch sessions on the way to reading a sibling's mail.
+    testWidgets('the row underneath does not also take the tap', (
+      tester,
+    ) async {
+      final container = await containerFor(
+        _CountingChannel(4),
+        withProjectSession: true,
+      );
+      await pump(
+        tester,
+        container,
+        SessionRow(entryId: _projectId, session: _session()),
+        width: 260,
+      );
+
+      await tester.tap(find.byType(SessionInboxBadge));
+      await settleRoute(tester);
+
+      expect(find.byType(SessionInboxPanel), findsOneWidget);
+    });
   });
 }

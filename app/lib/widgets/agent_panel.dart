@@ -54,6 +54,7 @@ import 'remote_access_control.dart';
 import 'remote_host_chip.dart';
 import 'session_agent_mark.dart';
 import 'session_approval_badge.dart';
+import 'session_inbox_panel.dart';
 import 'session_mode_control.dart';
 import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
@@ -258,12 +259,61 @@ class _OtherSessionsMenuItem extends ConsumerWidget {
   }
 }
 
+/// What this session's peers have written to it, and the thread behind any of
+/// it.
+///
+/// The second door to the same sheet the unread badge opens, and it exists for
+/// what the badge cannot offer: the badge renders on `unread > 0`, so at zero
+/// unread there would be no way to reach the mailbox's own discards or the
+/// delivery receipt on an outbound entry — the only two things on the bus that
+/// reach neither the terminal nor the transcript.
+///
+/// Live rather than a static [AbMenuItem] because the popup resolves its
+/// entries once at open time, and which session this row is about is settled by
+/// focus that can move while the menu is up.
+class _MessagesMenuItem extends ConsumerWidget {
+  const _MessagesMenuItem();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final activeId = ref.watch(activeSessionIdProvider);
+    // Hidden for a session that has never been on the bus, rather than shown
+    // empty: see [sessionHasBusActivityProvider] for what it takes to pass, and
+    // for the send-only case it still cannot.
+    if (activeId == null || !ref.watch(sessionHasBusActivityProvider)) {
+      return const SizedBox.shrink();
+    }
+
+    void open() {
+      // The popup closes first, and the sheet opens on a context that outlives
+      // the popped route — the same contract [_HandlerMenuItem.toggleArm] has,
+      // and the reason nothing past the pop reads this widget's ref.
+      final navigator = Navigator.of(context);
+      final host = navigator.context;
+      navigator.pop();
+      detached(
+        'AgentPanel',
+        'messages failed to open',
+        () => showSessionInbox(host, sessionId: activeId),
+      );
+    }
+
+    return AbLiveMenuRow(
+      label: 'Messages',
+      icon: AbIcons.inbox,
+      tooltip: 'What other sessions have written to this one, and what this '
+          'one sent them.',
+      onTap: open,
+    );
+  }
+}
+
 /// Overflow trigger for everything about the session that has no inline home:
-/// the terminal/chat mode switch, the Handler arm/disarm row and the directory
-/// of sessions working on the same repository. On a phone (see the comment
-/// above its call site in [AgentPanel.build]) it also takes
-/// the branch pill, which competes with the session title for the one
-/// flexible slot at that width; [AgentBar] has room to keep the pill inside
+/// the terminal/chat mode switch, the Handler arm/disarm row and this session's
+/// bus messages. On a phone (see the comment above its call site in
+/// [AgentPanel.build]) it also takes the branch pill, which competes with the
+/// session title for the one flexible slot at that width; [AgentBar] has room
+/// to keep the pill inside
 /// [TitleBarBreadcrumb] instead, so the same kebab there opens a shorter menu.
 /// Mounted unconditionally on both breakpoints — the mode switch and Handler
 /// row are always present, so every session has a kebab.
@@ -395,6 +445,7 @@ class _SessionOverflowMenu extends ConsumerWidget {
         if (compact && branch != null) AbMenuHeaderLabel(branch),
         const SessionModeMenuItem(),
         const _HandlerMenuItem(),
+        const _MessagesMenuItem(),
         const _OtherSessionsMenuItem(),
       ],
     );

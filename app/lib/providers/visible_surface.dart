@@ -89,10 +89,10 @@ final pendingFilePathProvider =
 
 /// The focused session's mailbox, or an empty one while no session is focused.
 ///
-/// One narrowing rule for everything that speaks for the Inbox tab — whether
-/// the tab exists, and what its badge says. Two lookups of their own could
-/// answer differently about the same mailbox, which is the failure
-/// [workspaceBadgesProvider] already narrows the handler count to avoid.
+/// One narrowing rule for everything that speaks for the focused session's bus
+/// state. Two lookups of their own could answer differently about the same
+/// mailbox, which is the failure [workspaceBadgesProvider] already narrows the
+/// handler count to avoid.
 final focusedSessionInboxProvider = Provider<SessionInboxState>((ref) {
   final sessionId = ref.watch(activeSessionIdProvider);
   if (sessionId == null) return const SessionInboxState();
@@ -100,18 +100,24 @@ final focusedSessionInboxProvider = Provider<SessionInboxState>((ref) {
 }, name: 'focusedSessionInbox');
 
 /// Whether the focused session has bus traffic to show — the ONE rule behind
-/// the Inbox tab.
+/// the session kebab's Messages row.
 ///
-/// [WorkspaceView.values] is rendered by three surfaces that must never
-/// disagree (the desktop tab strip, the phone's bottom nav, the agent bar's
-/// workspace rail). A condition written into each of them is the bug: an Inbox
-/// item that appeared on the phone and nowhere else would ship green, because
-/// nothing iterating that enum is under test.
+/// The unread badge on a session row is the other way into the same sheet, and
+/// deliberately a different rule: it renders on `unread > 0` alone, for any
+/// session in the focused project. This one is wider and focus-scoped, because
+/// the kebab is the door for what a badge at zero unread cannot offer — the
+/// mailbox's discards, and the delivery receipt on something this session SENT.
+///
+/// A session that has only ever sent still fails it. The app's two reads are
+/// the mailbox and one thread by id, and a thread id is reachable only from an
+/// inbound post, so there is nothing to open; `session-bus:threads` is the read
+/// that would fix it, and until it exists a row here would promise a sheet with
+/// nothing in it.
 ///
 /// LATCHING, and this is the whole reason it is a notifier rather than a
 /// derived value: the mailbox empties when the AGENT reads its mail, which can
-/// land while the user is part-way through a thread. A tab that vanished out
-/// from under them would take what they were reading with it. The latch is
+/// land while the menu is open and the user is reaching for the row. A row that
+/// vanished under the pointer would take the sheet with it. The latch is
 /// dropped when focus moves to another session, and again whenever this
 /// provider itself is rebuilt.
 class SessionBusActivity extends Notifier<bool> {
@@ -147,20 +153,19 @@ final sessionHasBusActivityProvider =
 
 /// The workspace tabs on offer right now, in tab order.
 ///
-/// Every surface that lists tabs reads THIS, never [WorkspaceView.values] —
-/// see [sessionHasBusActivityProvider] for why one list rather than three
-/// conditions. Recomputes only when that boolean flips, so the fresh `List`
-/// returned here notifies no more often than the rule behind it changes.
+/// Every value, since the Inbox tab became a sheet — and kept rather than
+/// inlined back to [WorkspaceView.values] at three call sites, because it is
+/// the SEAM a conditional view needs. [WorkspaceView.values] is rendered by
+/// three surfaces that must never disagree (the desktop tab strip, the phone's
+/// bottom nav, the agent bar's workspace rail), and a condition written into
+/// each of them is the bug: an item that appeared on the phone and nowhere else
+/// would ship green, because nothing iterating that enum is under test.
 final visibleWorkspaceViewsProvider = Provider<List<WorkspaceView>>((ref) {
-  final hasInbox = ref.watch(sessionHasBusActivityProvider);
-  return [
-    for (final view in WorkspaceView.values)
-      if (view != WorkspaceView.inbox || hasInbox) view,
-  ];
+  return WorkspaceView.values;
 }, name: 'visibleWorkspaceViews');
 
-/// Counts the workspace views advertise on their tab: unstaged git files,
-/// escalations the handler is waiting on, and unread bus posts.
+/// Counts the workspace views advertise on their tab: unstaged git files, and
+/// escalations the handler is waiting on.
 ///
 /// Both are scoped to what their tab actually shows — the focused checkout for
 /// git, the focused session for the handler. A handler badge counting the whole
@@ -188,17 +193,9 @@ final workspaceBadgesProvider = Provider<Map<WorkspaceView, int>>((ref) {
   final pending = ref.watch(
     focusedSessionHandlerStateProvider.select((s) => s.escalationBadgeCount),
   );
-  // A count, never a tone. `AgentWorkStatus.unread` already paints the blue
-  // "new" on this session's row and clears when the transcript is opened,
-  // where these clear when the AGENT reads its mail — two clears drawn the same
-  // colour in one row read as one state.
-  final unreadPosts = ref.watch(
-    focusedSessionInboxProvider.select((s) => s.unread),
-  );
   return {
     if (gitCount > 0) WorkspaceView.git: gitCount,
     if (pending > 0) WorkspaceView.handler: pending,
-    if (unreadPosts > 0) WorkspaceView.inbox: unreadPosts,
   };
 });
 

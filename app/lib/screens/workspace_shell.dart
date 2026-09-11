@@ -704,10 +704,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   /// Falls back to Files for a tab this session does not currently offer.
   ///
-  /// Not every [WorkspaceView] is always on the strip — the Inbox exists only
-  /// while the session has a mailbox ([visibleWorkspaceViewsProvider]) — while
-  /// a persisted ordinal, a per-session restore and a deep link can all still
-  /// name one. Left unchecked, the panel shows a body with no tab marked and
+  /// [visibleWorkspaceViewsProvider] offers every view today, but a persisted
+  /// ordinal, a per-session restore and a deep link can each still name one it
+  /// has stopped offering — a build that dropped a view, or a conditional one
+  /// added back. Left unchecked, the panel shows a body with no tab marked and
   /// nothing to switch back with.
   WorkspaceView _offeredOr(WorkspaceView view) =>
       ref.read(visibleWorkspaceViewsProvider).contains(view)

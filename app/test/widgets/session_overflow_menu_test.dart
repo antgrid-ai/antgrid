@@ -2,8 +2,9 @@
 //
 // Pumped through the real [AgentPanel] rather than the menu widget alone:
 // which header mounts the kebab is half of what these assert, and the kebab
-// itself is unconditional on both — the mode switch, the Handler row and the
-// session directory are always in it, whatever the session is or where it runs.
+// itself is unconditional on both — the mode switch and the Handler row are
+// always in it, whatever the session is or where it runs. The Messages row is
+// the one that is not, and the group at the bottom is what holds it to that.
 import 'dart:async';
 
 import 'package:antgrid/design/ab_status_tone.dart';
@@ -18,6 +19,7 @@ import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
+import 'package:antgrid/widgets/session_inbox_panel.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -239,6 +241,94 @@ void main() {
 
       expect(find.byKey(const Key('session-attention-dot')), findsNothing);
       expect(find.byTooltip('Session options'), findsOneWidget);
+    });
+  });
+
+  // The kebab is the second door to the mailbox sheet, and the one that still
+  // works at zero unread — where the badge on the row has nothing to draw.
+  group('the Messages row', () {
+    Future<_FakeBusChannel> pumpWithBus(WidgetTester tester) async {
+      final channel = _FakeBusChannel();
+      addTearDown(channel.dispose);
+      await _pump(
+        tester,
+        session: _session(),
+        target: const LocalProject(_leadProjectId),
+        size: const Size(1000, 800),
+        platform: TargetPlatform.macOS,
+        busChannel: channel,
+      );
+      return channel;
+    }
+
+    /// Opened BEFORE the push, so the row is proven to arrive on a live rebuild
+    /// rather than to have been resolved once when the popup opened — which is
+    /// the difference between [AbLiveMenuRow] and a static entry, and the
+    /// reason this row is the former.
+    Future<void> emitUnread(
+      WidgetTester tester,
+      _FakeBusChannel channel, {
+      required int unread,
+    }) async {
+      channel.emit({
+        'type': 'session-bus:unread',
+        'sessionId': 'sess-lead',
+        'unread': unread,
+        'dropped': 0,
+      });
+      await tester.pump();
+    }
+
+    testWidgets('is absent while the session has never been on the bus', (
+      tester,
+    ) async {
+      await pumpWithBus(tester);
+      await _openKebab(tester);
+
+      // A row promising a sheet with nothing in it is worse than no row: the
+      // two things it exists for — discards, and an outbound receipt — cannot
+      // be reached for a session the bus has never touched.
+      expect(find.text('Messages'), findsNothing);
+      // The kebab itself is up, so the absence above is an answer rather than
+      // a menu that failed to open.
+      expect(find.text('Arm Handler'), findsOneWidget);
+    });
+
+    testWidgets('appears once the session has bus traffic', (tester) async {
+      final channel = await pumpWithBus(tester);
+      await _openKebab(tester);
+      await emitUnread(tester, channel, unread: 2);
+
+      expect(find.text('Messages'), findsOneWidget);
+    });
+
+    // Latching: the read that empties the mailbox is the AGENT's and can land
+    // at any moment, including while the menu is open and the user is reaching
+    // for this row.
+    testWidgets('survives the agent emptying the mailbox', (tester) async {
+      final channel = await pumpWithBus(tester);
+      await _openKebab(tester);
+      await emitUnread(tester, channel, unread: 1);
+      expect(find.text('Messages'), findsOneWidget);
+
+      await emitUnread(tester, channel, unread: 0);
+
+      expect(find.text('Messages'), findsOneWidget);
+    });
+
+    testWidgets('opens the sheet for this session', (tester) async {
+      final channel = await pumpWithBus(tester);
+      await _openKebab(tester);
+      await emitUnread(tester, channel, unread: 1);
+
+      await tester.tap(find.text('Messages'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final panel = tester.widget<SessionInboxPanel>(
+        find.byType(SessionInboxPanel),
+      );
+      expect(panel.sessionId, 'sess-lead');
     });
   });
 }

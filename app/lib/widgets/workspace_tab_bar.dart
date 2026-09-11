@@ -22,7 +22,6 @@ extension WorkspaceViewUI on WorkspaceView {
     WorkspaceView.git => 'Git',
     WorkspaceView.terminals => 'Terminals',
     WorkspaceView.handler => 'Handler',
-    WorkspaceView.inbox => 'Inbox',
   };
 
   String get icon => switch (this) {
@@ -31,9 +30,6 @@ extension WorkspaceViewUI on WorkspaceView {
     WorkspaceView.git => AbIcons.git,
     WorkspaceView.terminals => AbIcons.terminal,
     WorkspaceView.handler => AbIcons.shield,
-    // Not the bell: that is this session's own agent waiting on its user, and
-    // the two states sit in the same strip.
-    WorkspaceView.inbox => AbIcons.inbox,
   };
 }
 

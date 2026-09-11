@@ -26,12 +26,7 @@ void main() {
       tester,
       MobileBottomNav(selected: WorkspaceView.terminals, onSelected: (_) {}),
     );
-    // Not WorkspaceView.values: Inbox is deliberately absent from the nav
-    // until the focused session has bus activity, and no session is focused
-    // here — asserting the full enum would fail on that correctly-missing tab.
-    for (final view in WorkspaceView.values.where(
-      (v) => v != WorkspaceView.inbox,
-    )) {
+    for (final view in WorkspaceView.values) {
       expect(find.text(view.label), findsOneWidget);
     }
     expect(find.text('0'), findsNothing);

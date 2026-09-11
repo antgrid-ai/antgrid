@@ -528,9 +528,21 @@ No new screen (D14's spirit, carried):
   action it is allowed to offer on any row: a modal spawning a branch read per
   project, to render rows nobody may act on, is cost with no decision behind
   it. `session-bus:directory` stays on the wire for a surface that earns one.
-- **Inbox** — unread `post` count on the session, opening the mailbox.
+- **Mailbox** — not a tab. Most of a bus exchange is already in the primary
+  view: a `notify` is written into the receiving PTY as a prompt (§5.2), and an
+  outbound send is a tool call in the sender's transcript. What reaches neither
+  is a `post` parked for an agent that has not looked, the mailbox's own
+  discards, and the receipt on an outbound entry — so the surface is a SHEET,
+  opened where the signal already is. Two doors, because they answer different
+  questions: the unread badge on a session row, which is the only thing that can
+  speak for a session the user is not looking at, and a **Messages** row in the
+  session kebab, which still opens at zero unread.
 - **Thread view** — reuses the transcript's message rendering; a thread is a list
   of wrapped lines that already render.
+
+A session that has only ever SENT is still unreachable from either door: the
+app's two reads are the mailbox and one thread by id, and a thread id comes only
+from an inbound post. A `session-bus:threads` read is what closes it.
 
 The add-machine dialog, member tabs and the membership menu are removed.
 

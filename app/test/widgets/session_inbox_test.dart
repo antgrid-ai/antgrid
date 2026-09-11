@@ -1,19 +1,19 @@
-// The Inbox is a tab that exists only while the session has a mailbox, and
-// three surfaces render the tab list: the desktop strip, the phone's bottom nav
-// and the agent bar's workspace rail. Nothing else in the suite iterates
-// WorkspaceView.values, so a fourth condition creeping into one of those three
-// would ship green — which is what the agreement test below is for.
+// The mailbox sheet: what the bus does that neither the terminal nor the
+// transcript can show. A `notify` is written into the PTY as a prompt and an
+// outbound send is a tool call in the transcript, so what is only here is a
+// parked post, the mailbox's own discards, and an outbound entry's receipt.
+//
+// It is opened AT A ROW (see session_inbox_badge_test.dart) and from the
+// session kebab (session_overflow_menu_test.dart), never as a tab — so the one
+// property this file guards above all is that it reads the session it was
+// GIVEN, not the session in focus.
 import 'dart:async';
 
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/providers/session_bus_inbox.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
-import 'package:antgrid/providers/visible_surface.dart';
-import 'package:antgrid/widgets/mobile_bottom_nav.dart';
 import 'package:antgrid/widgets/session_inbox_panel.dart';
-import 'package:antgrid/widgets/workspace_menu_button.dart';
-import 'package:antgrid/widgets/workspace_tab_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -40,11 +40,10 @@ class _FakeChannel implements SessionBusChannel {
 
   Future<void> dispose() => _frames.close();
 
-  int get reads => sent.where((m) => m['type'] == 'session-bus:inbox').length;
+  Iterable<Map<String, dynamic>> get reads =>
+      sent.where((m) => m['type'] == 'session-bus:inbox');
 
-  String get lastRequestId =>
-      sent.lastWhere((m) => m['type'] == 'session-bus:inbox')['requestId']
-          as String;
+  String get lastRequestId => reads.last['requestId'] as String;
 }
 
 Map<String, dynamic> _post(String messageId) => {
@@ -62,26 +61,26 @@ Map<String, dynamic> _post(String messageId) => {
   'artifacts': const <Map<String, dynamic>>[],
 };
 
-/// Pumps [child] against a fake bus channel and a focused session.
+/// Pumps [child] against a fake bus channel.
 ///
 /// `activeSessionIdProvider` is overridden with a pre-seeded base controller,
 /// as its own doc invites: the production notifier's write guard reads the
-/// project's live session list, which no widget test stands up.
-Future<_FakeChannel> _pump(WidgetTester tester, Widget child) async {
+/// project's live session list, which no widget test stands up. [focused] is
+/// separate from the session under test on purpose — the sheet is routinely
+/// opened for a row that is NOT in focus, and defaulting them to the same value
+/// would hide a panel that had gone back to reading focus.
+Future<_FakeChannel> _pump(
+  WidgetTester tester,
+  Widget child, {
+  String? focused = _sessionId,
+}) async {
   final channel = _FakeChannel();
   addTearDown(channel.dispose);
   final container = ProviderContainer(
     overrides: [
       sessionBusChannelProvider.overrideWithValue(channel),
       activeSessionIdProvider.overrideWith(
-        () => ValueController<String?>(_sessionId),
-      ),
-      // The rail renders nothing without a published workspace to reveal.
-      workspaceMenuControlProvider.overrideWith(
-        () => ValueController<WorkspaceMenuControl?>((
-          active: WorkspaceView.files,
-          reveal: (_) {},
-        )),
+        () => ValueController<String?>(focused),
       ),
     ],
   );
@@ -118,112 +117,45 @@ Future<void> _answerRead(
   await tester.pumpAndSettle();
 }
 
-/// The bridge's unsolicited arrival push — no request behind it.
-Future<void> _pushUnread(
-  WidgetTester tester,
-  _FakeChannel channel, {
-  required int unread,
-}) async {
-  channel.emit({
-    'type': 'session-bus:unread',
-    'sessionId': _sessionId,
-    'unread': unread,
-    'dropped': 0,
-  });
-  await tester.pumpAndSettle();
-}
-
 void main() {
-  testWidgets('the tab is absent until the session has bus activity', (
-    tester,
-  ) async {
-    final channel = await _pump(
-      tester,
-      WorkspaceTabBar(selected: WorkspaceView.files, onSelected: (_) {}),
-    );
-
-    // An empty mailbox is not a mailbox: a tab standing there with nothing
-    // behind it is the thing this rule exists to prevent.
-    await _answerRead(tester, channel, unread: 0);
-    expect(find.text('Inbox'), findsNothing);
-
-    await _pushUnread(tester, channel, unread: 2);
-    expect(find.text('Inbox'), findsOneWidget);
-  });
-
-  // Once the tab is up it stays up, because the read that empties the mailbox
-  // is the AGENT's and can land at any moment — including while the user is
-  // part-way through a thread on that tab.
-  testWidgets('the tab survives the agent emptying the mailbox', (
-    tester,
-  ) async {
-    final channel = await _pump(
-      tester,
-      WorkspaceTabBar(selected: WorkspaceView.files, onSelected: (_) {}),
-    );
-
-    await _answerRead(tester, channel, unread: 1);
-    expect(find.text('Inbox'), findsOneWidget);
-
-    await _pushUnread(tester, channel, unread: 0);
-    expect(find.text('Inbox'), findsOneWidget);
-  });
-
-  // The whole point of the unsolicited push: several surfaces share one count
-  // without a request each behind them.
-  testWidgets('the badge moves on a pushed update with no new read', (
-    tester,
-  ) async {
-    final channel = await _pump(tester, const _BadgedTabBar());
-    await _answerRead(tester, channel, unread: 1);
-    expect(find.text('1'), findsOneWidget);
-    final readsBefore = channel.reads;
-
-    await _pushUnread(tester, channel, unread: 4);
-
-    expect(find.text('4'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
-    expect(channel.reads, readsBefore);
-  });
-
-  testWidgets('every surface that lists tabs agrees the Inbox is not there', (
-    tester,
-  ) async {
-    await _pump(tester, const _AllThreeSurfaces());
-
-    expect(find.text('Inbox'), findsNothing);
-    // The three surfaces are present and listing, so the absence above is
-    // three agreeing answers rather than three widgets that failed to build.
-    expect(find.byType(WorkspaceTabBar), findsOneWidget);
-    expect(find.byType(MobileBottomNav), findsOneWidget);
-    expect(find.byType(WorkspaceMenuPanel), findsOneWidget);
-    expect(find.text('Handler'), findsNWidgets(3));
-  });
-
-  testWidgets('every surface that lists tabs agrees the Inbox is there', (
-    tester,
-  ) async {
-    final channel = await _pump(tester, const _AllThreeSurfaces());
-
-    await _answerRead(tester, channel, unread: 3);
-
-    expect(find.text('Inbox'), findsNWidgets(3));
-  });
-
   group('the mailbox', () {
     testWidgets('lists an unread post with its sender', (tester) async {
-      final channel = await _pump(tester, const SessionInboxPanel());
+      final channel = await _pump(
+        tester,
+        const SessionInboxPanel(sessionId: _sessionId),
+      );
       await _answerRead(tester, channel, unread: 1);
 
       expect(find.text('same 401 on token refresh?'), findsOneWidget);
       expect(find.text('p-other · s-other'), findsOneWidget);
     });
 
-    // The marking read is the AGENT's: a human glancing at this tab must not
+    // The whole reason the badge can be the way in. A sheet that read focus
+    // would show the WRONG session's mail on every row but the open one, and
+    // look completely correct doing it.
+    testWidgets('reads the session it was given, not the one in focus', (
+      tester,
+    ) async {
+      final channel = await _pump(
+        tester,
+        const SessionInboxPanel(sessionId: _sessionId),
+        focused: 'some-other-session',
+      );
+
+      expect(
+        channel.reads.map((m) => m['sessionId']).toSet(),
+        {_sessionId},
+      );
+    });
+
+    // The marking read is the AGENT's: a human glancing at this sheet must not
     // spend a post the agent has not been handed, or it vanishes unseen. The
     // app has no marking verb at all, and this is what keeps it that way.
     testWidgets('reading the panel sends nothing but the peek', (tester) async {
-      final channel = await _pump(tester, const SessionInboxPanel());
+      final channel = await _pump(
+        tester,
+        const SessionInboxPanel(sessionId: _sessionId),
+      );
       await _answerRead(tester, channel, unread: 2);
 
       expect(
@@ -233,52 +165,27 @@ void main() {
     });
 
     // A LIFETIME total on the store, so it must not be worded as a delta —
-    // "since you last looked" would re-accuse the budget of the same posts on
-    // every visit.
-    testWidgets('the dropped tally is stated as a running total', (
+    // "since you last looked" would re-accuse the mailbox of the same posts on
+    // every visit. It must not name "the budget" either: the pair budget
+    // refuses a send where its sender can read the refusal, and discards
+    // nothing.
+    testWidgets('the dropped tally is a running total of the MAILBOX', (
       tester,
     ) async {
-      final channel = await _pump(tester, const SessionInboxPanel());
+      final channel = await _pump(
+        tester,
+        const SessionInboxPanel(sessionId: _sessionId),
+      );
       await _answerRead(tester, channel, unread: 1, dropped: 2);
 
       expect(
         find.text(
-          '2 posts have been discarded for this session against its budget.',
+          '2 posts aged out of this mailbox, or were pushed out of it when '
+          'it filled.',
         ),
         findsOneWidget,
       );
+      expect(find.textContaining('budget'), findsNothing);
     });
   });
-}
-
-/// The strip wired to the badge map the way `WorkspaceShell` wires it, so the
-/// count under test is the one the tab would really carry.
-class _BadgedTabBar extends ConsumerWidget {
-  const _BadgedTabBar();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) => WorkspaceTabBar(
-    selected: WorkspaceView.files,
-    onSelected: (_) {},
-    badges: ref.watch(workspaceBadgesProvider),
-  );
-}
-
-/// The desktop strip, the phone's nav and the agent bar's rail in one tree, so
-/// a disagreement between them is a single failing expectation.
-class _AllThreeSurfaces extends StatelessWidget {
-  const _AllThreeSurfaces();
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        WorkspaceTabBar(selected: WorkspaceView.files, onSelected: (_) {}),
-        MobileBottomNav(selected: WorkspaceView.files, onSelected: (_) {}),
-        const Expanded(
-          child: SingleChildScrollView(child: WorkspaceMenuPanel()),
-        ),
-      ],
-    );
-  }
 }

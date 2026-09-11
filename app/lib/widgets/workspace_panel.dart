@@ -5,7 +5,6 @@ import '../screens/file_explorer_screen.dart';
 import '../screens/preview_screen.dart';
 import 'git_panel.dart';
 import 'handler/handler_screen.dart';
-import 'session_inbox_panel.dart';
 import 'terminal_list_view.dart';
 import 'workspace_tab_bar.dart';
 
@@ -61,7 +60,6 @@ class WorkspacePanel extends StatelessWidget {
                 GitPanel(),
                 TerminalListView(),
                 HandlerScreen(),
-                SessionInboxPanel(),
               ],
             ),
           ),

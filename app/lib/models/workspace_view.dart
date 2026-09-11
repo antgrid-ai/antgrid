@@ -7,9 +7,11 @@
 ///
 /// APPEND ONLY. `ProjectPreferences.workspaceViewIndex` persists a raw ordinal
 /// (see `WorkspaceShellState._applyPrefs`), so inserting a value moves every
-/// saved workspace onto a different tab with nothing to notice it.
+/// saved workspace onto a different tab with nothing to notice it. Dropping the
+/// LAST one shifts none, which is what made removing `inbox` a deletion rather
+/// than a migration — an install that had it selected falls back on the bounds
+/// check `_applyPrefs` already does.
 ///
-/// Not every value is offered at every moment — [WorkspaceView.inbox] exists
-/// only for a session with a mailbox. The single rule for that is
-/// `visibleWorkspaceViewsProvider`; nothing may render `values` directly.
-enum WorkspaceView { preview, files, git, terminals, handler, inbox }
+/// Not every value need be offered at every moment; the single rule for that is
+/// `visibleWorkspaceViewsProvider`, and nothing may render `values` directly.
+enum WorkspaceView { preview, files, git, terminals, handler }
