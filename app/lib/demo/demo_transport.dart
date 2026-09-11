@@ -99,6 +99,15 @@ class DemoTransport extends BufferedAgentTransport {
           message['turnId'] as String?,
         );
         return;
+      // Answered without the round trip the rest of the script pretends to
+      // pay. This is not a beat of the demo's narrative but the refusal that
+      // tells the client which display protocol it is on, and the client
+      // holds a real timer open until it lands — so the delay that makes a
+      // reply feel local would instead make every terminal wait out that
+      // bound before it paints.
+      case 'terminal:subscribe':
+        _enqueueAll(Duration.zero, _repliesFor(message));
+        return;
     }
     _enqueueAll(_kReplyDelay, _repliesFor(message));
   }
@@ -295,6 +304,31 @@ class DemoTransport extends BufferedAgentTransport {
       case 'terminal:snapshot:request':
         return <Map<String, Object?>>[
           _terminalSnapshot(message['terminalId'] as String?),
+        ];
+
+      // The demo serves recorded scrollback, never a live serialized screen,
+      // so it genuinely cannot answer the frame protocol. Refusing the
+      // subscribe by its own requestId is what any agent that cannot serve
+      // frames owes the app, and it is the ONLY answer that keeps the demo
+      // whole: the tab stays on the legacy pull and the typed echo this
+      // transport does implement, with no failure badge (a refusal naming a
+      // still-legacy tab changes nothing the user can see) and without
+      // holding the client's subscribe bound open for its full duration.
+      case 'terminal:subscribe':
+        final terminalId = message['terminalId'] as String?;
+        final requestId = message['requestId'] as String?;
+        if (terminalId == null || requestId == null) {
+          return const <Map<String, Object?>>[];
+        }
+        return <Map<String, Object?>>[
+          <String, Object?>{
+            'type': 'terminal:display:status',
+            'checkoutId': 'main',
+            'terminalId': terminalId,
+            'requestId': requestId,
+            'code': 'UPGRADE_REQUIRED',
+            'message': 'The demo serves recorded terminals.',
+          },
         ];
 
       case 'terminal:start':

@@ -92,8 +92,7 @@ class TerminalService {
   /// pane that is visibly painting.
   final Map<String, int> _snapshotGeneration = {};
 
-  // --- Frame mode (live `terminal:frame` display, gated by
-  // kTerminalFrameModeEnabled) ---
+  // --- Frame mode (live `terminal:frame` display) ---
 
   /// terminalId -> the `requestId` of this client's most recently sent
   /// `terminal:subscribe`. A `terminal:subscribed` or `terminal:display:status`
@@ -898,8 +897,8 @@ class TerminalService {
   /// and nothing else -- D6/D8 mean it owns its pane outright, so the legacy
   /// pull is never requested again while it is being served. Every other tab
   /// keeps the pull that has always hydrated it; running both at once for a
-  /// fresh terminal IS the dual-protocol transition window while
-  /// [kTerminalFrameModeEnabled] is on and a subscribe has not yet resolved.
+  /// fresh terminal IS the dual-protocol transition window, open from the
+  /// subscribe until it resolves either way.
   ///
   /// A latch left standing over an attachment that is gone would be the one
   /// state nothing can recover: the D6/D8 guards keep refusing both legacy
@@ -909,9 +908,8 @@ class TerminalService {
   /// the fallback is a pull that bounds itself.
   void _attachTerminal(String terminalId) {
     final tab = _state.tabs[terminalId];
-    final canSubscribe =
-        kTerminalFrameModeEnabled && tab != null && _hasLivePty(tab);
-    final wasServing = _frameServing(terminalId);
+    final canSubscribe = tab != null && _hasLivePty(tab);
+    final wasServing = _frameOwnsPane(terminalId);
     // Frame identity is connection- and PTY-generation-scoped and does not
     // survive a re-establishment or a same-id respawn (see
     // [_frameAttachment]'s doc comment), so whatever the last connection or
@@ -924,14 +922,24 @@ class TerminalService {
     _requestTerminalSnapshot(terminalId);
   }
 
-  /// Whether the frame protocol is currently answering for [terminalId] --
-  /// an accepted attachment or an outstanding subscribe, neither of which has
-  /// since ended or failed.
-  bool _frameServing(String terminalId) {
+  /// Whether the frame protocol OWNS [terminalId]'s engine -- the same
+  /// question [_onHeavyJson]'s D6/D8 guards ask, and deliberately the same
+  /// answer: a committed `TerminalDisplayMode.frame` that has not since ended
+  /// or failed.
+  ///
+  /// An outstanding `terminal:subscribe` does NOT count. Until
+  /// `terminal:subscribed` lands, D6/D8 still admit `terminal:output` and
+  /// `terminal:snapshot`, so legacy is the only protocol that can paint the
+  /// pane -- and that is precisely the dual-protocol transition window. Were a
+  /// pending subscribe treated as ownership here, a re-attach inside that
+  /// window would drop the legacy pull while frame mode had nothing to paint
+  /// with, leaving the pane blank until the subscribe deadline demoted it; a
+  /// subscribe the bridge never answers at all (an old agent, a suppressed
+  /// connection, a deleting checkout) reopens that window on every re-attach.
+  bool _frameOwnsPane(String terminalId) {
     if (_frameEndedIds.contains(terminalId)) return false;
     if (_frameFailedIds.contains(terminalId)) return false;
-    return _frameAttachment.containsKey(terminalId) ||
-        _frameSubscribePending.contains(terminalId);
+    return _state.tabs[terminalId]?.mode == TerminalDisplayMode.frame;
   }
 
   /// Leaves the alternate screen a frame may have put the engine on.
@@ -1397,7 +1405,7 @@ class TerminalService {
       // anything, and the viewer that stops acking a still-live attachment is
       // the one the bridge then kills for real with ACK_TIMEOUT. Where the
       // notice really was terminal, nothing further arrives on it anyway, and
-      // the next attach drops it ([_frameServing]).
+      // the next attach drops it ([_frameOwnsPane]).
       _frameFailedIds.add(terminalId);
     }
     _publishHydration();

@@ -1,16 +1,13 @@
 // Opt-in coverage for the live frame-replace terminal protocol
 // (`terminal:subscribe`/`subscribed`/`frame`/`ack`/`unsubscribe`/
-// `display:status`), gated behind `kTerminalFrameModeEnabled`.
+// `display:status`).
 //
-// Every legacy terminal test in this directory asserts the snapshot-plus-diff
-// path with the latch at its OFF default and must keep passing unedited —
-// that is the whole point of D1. These cases flip the latch on for their own
-// duration and pin the state machine the spec's D1-D10 decisions describe:
-// what commits a terminal to frame mode, what an applied frame does to the
-// engine, what a superseded or stale-geometry frame does NOT do, and every
-// path that can retire an attachment (ended, failed, respawn, reconnect,
-// retry, delete, dispose).
-//
+// Frame mode is the default for any terminal with a live PTY, so the legacy
+// snapshot-plus-diff suites in this directory now exercise the DUAL-PROTOCOL
+// TRANSITION WINDOW: a subscribe goes out alongside the legacy pull and, until
+// `terminal:subscribed` lands, legacy is still the only protocol that may
+// paint. These cases pin the state machine the spec's D1-D10 decisions
+// describe:
 // The engine cases are gated on native availability, exactly like
 // terminal_reattach_test.dart: a host without the prebuilt libghostty-vt
 // reports them SKIPPED rather than failing.
@@ -78,14 +75,6 @@ void main() {
 
   setUp(() {
     useInMemoryPrefs();
-    kTerminalFrameModeEnabled = false;
-  });
-
-  // The latch is a process-global mutable, so every test that flips it on
-  // must flip it back regardless of how the test ends, or it leaks into
-  // whatever legacy-mode test runs next in the same process.
-  tearDown(() {
-    kTerminalFrameModeEnabled = false;
   });
 
   Future<ProjectSession> newSession(FakeAgentTransport t) async {
@@ -141,9 +130,8 @@ void main() {
   }
 
   test(
-    'discovering a running terminal sends terminal:subscribe when the latch is on',
+    'discovering a running terminal sends terminal:subscribe',
     () async {
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -164,16 +152,101 @@ void main() {
   );
 
   test(
-    'the latch off by default sends no subscribe and never leaves legacy mode',
+    'a re-attach inside the transition window keeps the legacy pull alive',
     () async {
-      // Deliberately NOT flipping the latch — this is the control case
-      // proving the gate actually gates, since every other case in this file
-      // would look identical if kTerminalFrameModeEnabled did nothing.
+      // The regression behind [_frameOwnsPane]. A subscribe the bridge never
+      // answers (an old agent, a suppressed connection, a deleting checkout)
+      // leaves the tab committed to nothing: D6/D8 still admit
+      // `terminal:output` and `terminal:snapshot`, so legacy is the only thing
+      // that can paint the pane. Treating that pending subscribe as though
+      // frame mode owned the pane dropped the pull on every re-attach and left
+      // it blank until the subscribe bound expired.
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
 
+      // `_rehydrateTerminals` reaches the transport only as a registered
+      // hydrator, and `activate()` is what registers it.
+      svc.activate();
+
       await seedRunningTab(t, 'a');
+      expect(t.sent.where((m) => m['type'] == 'terminal:subscribe'), isNotEmpty);
+      expect(t.requests.where((r) => r.method == 'terminal.snapshot'), isNotEmpty);
+      expect(svc.currentState.tabs['a']!.mode, TerminalDisplayMode.legacy);
+
+      final beforeRequests = t.requests.length;
+      final beforeSent = t.sent.length;
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        t.requests.skip(beforeRequests).where((r) => r.method == 'terminal.snapshot'),
+        hasLength(1),
+      );
+      expect(
+        t.sent.skip(beforeSent).where((m) => m['type'] == 'terminal:subscribe'),
+        hasLength(1),
+      );
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test(
+    'a re-attach over a COMMITTED frame tab re-subscribes and does not pull',
+    () async {
+      // The other half of the same decision: once `terminal:subscribed` has
+      // landed, D6/D8 refuse both legacy protocols outright, so a pull here
+      // would only race a frame it can never paint over.
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = TerminalService.fromSession(session);
+
+      // `_rehydrateTerminals` reaches the transport only as a registered
+      // hydrator, and `activate()` is what registers it.
+      svc.activate();
+
+      await seedRunningTab(t, 'a');
+      await acceptSubscribe(t, 'a');
+      expect(svc.currentState.tabs['a']!.mode, TerminalDisplayMode.frame);
+
+      final beforeRequests = t.requests.length;
+      final beforeSent = t.sent.length;
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        t.requests.skip(beforeRequests).where((r) => r.method == 'terminal.snapshot'),
+        isEmpty,
+      );
+      expect(
+        t.sent.skip(beforeSent).where((m) => m['type'] == 'terminal:subscribe'),
+        hasLength(1),
+      );
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test(
+    'a terminal with no live PTY sends no subscribe and stays on legacy',
+    () async {
+      // The control case proving the remaining gate actually gates: frame
+      // mode is scoped to a live PTY generation, so every other case in this
+      // file would look identical if `_hasLivePty` did nothing.
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = TerminalService.fromSession(session);
+
+      t.emit('agent:status', {
+        'projectId': 'p',
+        'terminals': [
+          {'id': 'a', 'terminalId': 'a', 'name': 'a', 'running': false},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
 
       expect(t.sent.where((m) => m['type'] == 'terminal:subscribe'), isEmpty);
       expect(svc.currentState.tabs['a']!.mode, TerminalDisplayMode.legacy);
@@ -186,7 +259,6 @@ void main() {
   test(
     'terminal:subscribed commits the tab to frame mode at TerminalAttachStage.cold',
     () async {
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -208,7 +280,6 @@ void main() {
   test(
     'a stale-requestId terminal:subscribed cannot resurrect a superseded attempt',
     () async {
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -234,7 +305,6 @@ void main() {
   test(
     'once frame mode commits, a fresh attach cycle no longer touches the legacy pull',
     () async {
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -266,7 +336,6 @@ void main() {
     's the sequence',
     () async {
       if (_skipWithoutNative()) return;
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -307,7 +376,6 @@ void main() {
     'a superseded (already-processed) sequence is dropped unparsed and never re-acked',
     () async {
       if (_skipWithoutNative()) return;
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -354,7 +422,6 @@ void main() {
     'a frame whose geometry predates the tab\'s own resize is dropped but still acked',
     () async {
       if (_skipWithoutNative()) return;
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -394,7 +461,6 @@ void main() {
 
   test('terminal:output is dropped once a terminal is in frame mode', () async {
     if (_skipWithoutNative()) return;
-    kTerminalFrameModeEnabled = true;
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
@@ -414,7 +480,6 @@ void main() {
 
   test('terminal:snapshot is dropped once a terminal is in frame mode', () async {
     if (_skipWithoutNative()) return;
-    kTerminalFrameModeEnabled = true;
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
@@ -441,7 +506,6 @@ void main() {
   test(
     'display:status ENDED is a lifecycle stage, never rendered as a failure',
     () async {
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -469,7 +533,6 @@ void main() {
   test(
     'display:status DISPLAY_FAILED surfaces as a failure carrying the message',
     () async {
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -497,7 +560,6 @@ void main() {
   test(
     'an unrecognized display:status code is a generic failure, never ignored',
     () async {
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -524,7 +586,6 @@ void main() {
   test(
     'a respawn resets the mode to legacy and renegotiates from scratch',
     () async {
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -558,7 +619,6 @@ void main() {
     'a stream re-attach re-subscribes a frame-mode terminal and reads as refreshing',
     () async {
       if (_skipWithoutNative()) return;
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -614,7 +674,6 @@ void main() {
     'pull instead of wedging on a stale screen',
     () async {
       if (_skipWithoutNative()) return;
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(
@@ -658,7 +717,6 @@ void main() {
     'screen that fits still paints and is still acked',
     () async {
       if (_skipWithoutNative()) return;
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -726,7 +784,6 @@ void main() {
     'paints once the geometry catches up',
     () async {
       if (_skipWithoutNative()) return;
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -777,7 +834,6 @@ void main() {
     'UPGRADE_REQUIRED refusing a re-subscribe reaches a tab already in frame '
     'mode and demotes it',
     () async {
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -816,7 +872,6 @@ void main() {
     'run that replaced it',
     () async {
       if (_skipWithoutNative()) return;
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -854,7 +909,6 @@ void main() {
   test(
     'retryAttach on a frame-mode tab with no live PTY still issues a pull',
     () async {
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -886,7 +940,6 @@ void main() {
     'engine on',
     () async {
       if (_skipWithoutNative()) return;
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -934,7 +987,6 @@ void main() {
     'deleteTerminal leaves replaceEpoch usable: a tab object outliving its '
     'deletion must not throw on a fresh listener',
     () async {
-      kTerminalFrameModeEnabled = true;
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -958,7 +1010,6 @@ void main() {
   );
 
   test('deleteTerminal sends terminal:unsubscribe for the live attachment', () async {
-    kTerminalFrameModeEnabled = true;
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
@@ -980,7 +1031,6 @@ void main() {
   });
 
   test('dispose sends terminal:unsubscribe for every live frame attachment', () async {
-    kTerminalFrameModeEnabled = true;
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);

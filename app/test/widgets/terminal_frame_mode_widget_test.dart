@@ -15,11 +15,9 @@
 //     output does — proven at the controller the wrapper drives, since
 //     neither is called from the wrapper itself.
 //
-// None of this touches or depends on legacy's default-off path:
-// TerminalAttachStage.ended is unreachable in legacy mode, and every tab
-// built here is passed `mode: TerminalDisplayMode.frame` explicitly rather
-// than relying on kTerminalFrameModeEnabled, so this file needs no latch and
-// leaks nothing into a test that runs after it.
+// None of this depends on how a tab REACHES frame mode: every tab built here
+// is passed `mode: TerminalDisplayMode.frame` explicitly, so the file tests
+// the display contract alone and stays valid whatever selects the mode.
 
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/terminal_models.dart';

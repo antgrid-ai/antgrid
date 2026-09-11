@@ -6,17 +6,6 @@ import 'ab_message.dart';
 
 enum TerminalSessionState { starting, running, exited }
 
-/// The ONE switch for the live frame-replace terminal protocol
-/// (`terminal:subscribe`/`frame`/`ack`/`unsubscribe`, wire version
-/// [kTerminalFrameProtocolVersion]). OFF by default: every terminal ships on
-/// the legacy snapshot-plus-diff path unconditionally until this flips.
-///
-/// Deliberately a plain mutable top-level, not a user-facing setting or a
-/// dart-define: a test flips it for the duration of one case (and must flip
-/// it back, since the value is process-global), and enabling it for real
-/// users is one line here.
-bool kTerminalFrameModeEnabled = false;
-
 /// Mirrors the bridge's `TERMINAL_PROTOCOL_VERSION`
 /// (`bridge/src/terminal-frames/protocol.ts`) -- the highest frame wire
 /// version this client can render, sent on every `terminal:subscribe`. Bump

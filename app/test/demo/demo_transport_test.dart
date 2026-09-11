@@ -321,6 +321,36 @@ void main() {
       );
       expect(output.json['data'], contains('sample project'));
     });
+
+    test('terminal:subscribe is refused at once, so the tab stays legacy', () async {
+      // Frame mode is the default for a live PTY, so every demo terminal now
+      // asks. The demo has only recorded scrollback to answer with, and the
+      // client holds a real bound open until something replies -- so the
+      // refusal must ride no scripted delay and must name the subscribe's own
+      // requestId, which is what demotes the tab silently instead of badging
+      // it as failed.
+      final transport = DemoTransport();
+      addTearDown(transport.dispose);
+      await transport.connect();
+
+      final seen = <InboundMessage>[];
+      _collect(transport, seen);
+      await transport.send({
+        'type': 'terminal:subscribe',
+        'terminalId': kDemoTerminalId,
+        'version': 1,
+        'requestId': 'req-1',
+      });
+      transport.drainScript();
+      await Future<void>.delayed(Duration.zero);
+
+      final status = seen.firstWhere(
+        (m) => m.json['type'] == 'terminal:display:status',
+      );
+      expect(status.json['requestId'], 'req-1');
+      expect(status.json['code'], 'UPGRADE_REQUIRED');
+      expect(status.json['terminalId'], kDemoTerminalId);
+    });
   });
 
   group('dispose', () {
