@@ -7,6 +7,7 @@ import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_avatar.dart';
 import '../../design/widgets/ab_button.dart';
+import '../../design/widgets/ab_diff_stat.dart';
 import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_icon_button.dart';
@@ -18,11 +19,20 @@ import '../../design/widgets/ab_select_sheet.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../design/widgets/ab_multiline_field.dart';
+import '../../models/ab_message.dart' show GitFileStatusEntry;
 import '../../models/task.dart';
+import '../../providers/agent_transport.dart'
+    show selectedRegistrationIdProvider;
+import '../../providers/providers.dart'
+    show checkoutFileTreeStateProvider, checkoutServiceOrNull;
 import '../../providers/tasks.dart';
 import '../../services/tasks_api.dart';
 import '../../util/detached.dart';
 import '../../util/external_url.dart';
+import '../diff_viewer.dart';
+import '../file_tree_view.dart';
+import '../file_viewer_router.dart';
+import '../send_capture_to_agent.dart';
 import '../transcript/markdown_body.dart';
 import 'task_launch_sheet.dart';
 import 'task_provenance_view.dart';
@@ -293,10 +303,9 @@ class _LoadedState extends ConsumerState<_Loaded> {
         targets: targets,
       );
       if (repoId == null) return;
-      await container.read(taskListProvider.notifier).publish(
-        number,
-        repoId: repoId,
-      );
+      await container
+          .read(taskListProvider.notifier)
+          .publish(number, repoId: repoId);
     } finally {
       if (mounted) setState(() => _publishing = false);
     }
@@ -331,6 +340,14 @@ class _LoadedState extends ConsumerState<_Loaded> {
   Widget build(BuildContext context) {
     final palette = context.antgrid;
     final run = ref.watch(taskRunPresenceProvider)[_task.number];
+    final session = ref.watch(taskSessionProvider(_task.number));
+    // Captured in the SAME tick as `session`: `taskSessionProvider` only ever
+    // resolves against the currently focused project's own sessions (see its
+    // own doc), so this is the project `session.checkoutId` actually lives
+    // in — never re-read live from inside `_TaskChangesSection`, or a focus
+    // change between this section mounting and unmounting misroutes its
+    // activate/deactivate at whichever project is focused BY THEN.
+    final registrationId = ref.watch(selectedRegistrationIdProvider);
     final failure = ref.watch(taskMutationErrorProvider);
     final conflict = _task.conflict;
     final pushBlock = _task.pushBlocked;
@@ -369,6 +386,16 @@ class _LoadedState extends ConsumerState<_Loaded> {
               if (run != null) ...[
                 const AbSectionHeader(label: 'Run'),
                 _runBlock(context, run),
+              ],
+              // Right after the run: a checkout is only resolvable while a
+              // session is actually attached to this task, so the two either
+              // show together or not at all.
+              if (run != null && session != null && registrationId != null) ...[
+                const AbSectionHeader(label: 'Changes'),
+                _TaskChangesSection(
+                  registrationId: registrationId,
+                  checkoutId: session.checkoutId,
+                ),
               ],
               // Above the description, never below it: it says whose words
               // the next block is.
@@ -451,8 +478,7 @@ class _LoadedState extends ConsumerState<_Loaded> {
                         label: _unlinking ? 'Unlinking…' : 'Unlink from GitHub',
                         onTap: _unlinking
                             ? null
-                            : () =>
-                                  detached('tasks', 'unlink task', _unlink),
+                            : () => detached('tasks', 'unlink task', _unlink),
                       ),
                     AbButton(
                       label: 'Delete task',
@@ -476,7 +502,8 @@ class _LoadedState extends ConsumerState<_Loaded> {
         launcher?.unavailableReason(_task) ??
         // No launcher at all is a build-time state, not a user error: say what
         // is missing rather than leaving a dead button with no explanation.
-        (launcher == null ? 'Starting a session from a task is not wired up yet.'
+        (launcher == null
+            ? 'Starting a session from a task is not wired up yet.'
             : null);
 
     return Padding(
@@ -845,7 +872,12 @@ class _LoadedState extends ConsumerState<_Loaded> {
             field.remoteValue,
           ),
           const SizedBox(height: AbTokens.space6),
-          _conflictSide(context, 'Yours · set aside', field.field, field.localValue),
+          _conflictSide(
+            context,
+            'Yours · set aside',
+            field.field,
+            field.localValue,
+          ),
           const SizedBox(height: AbTokens.space8),
           Row(
             children: [
@@ -1356,6 +1388,242 @@ class _LoadedState extends ConsumerState<_Loaded> {
     }
     return userId;
   }
+}
+
+/// The task's own changed-files list, scoped to a specific session checkout
+/// rather than whatever checkout the Git tab happens to have open.
+///
+/// Owns that checkout's activation for as long as it is mounted: a checkout's
+/// services bundle only pulls a live tree once `activate()` has been called
+/// on it — normally reserved for whichever checkout is on screen (see
+/// `FileService.activate`'s own doc) — so this section puts its own checkout
+/// on screen for its lifetime and hands it back on dispose, the same
+/// contract the workspace shell holds for the focused one.
+class _TaskChangesSection extends ConsumerStatefulWidget {
+  const _TaskChangesSection({
+    required this.registrationId,
+    required this.checkoutId,
+  });
+
+  /// The project this checkout actually lives in — captured by the caller
+  /// from the SAME read that resolved [checkoutId], never re-read live here.
+  /// See [checkoutServiceOrNull]'s own doc for why: this section can outlive
+  /// a focus change, and re-reading focus at dispose time would activate one
+  /// project's checkout and deactivate a different one's.
+  final String registrationId;
+
+  final String checkoutId;
+
+  @override
+  ConsumerState<_TaskChangesSection> createState() =>
+      _TaskChangesSectionState();
+}
+
+class _TaskChangesSectionState extends ConsumerState<_TaskChangesSection> {
+  @override
+  void initState() {
+    super.initState();
+    _activate(widget.registrationId, widget.checkoutId);
+  }
+
+  @override
+  void didUpdateWidget(covariant _TaskChangesSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.registrationId != widget.registrationId ||
+        oldWidget.checkoutId != widget.checkoutId) {
+      _deactivate(oldWidget.registrationId, oldWidget.checkoutId);
+      _activate(widget.registrationId, widget.checkoutId);
+    }
+  }
+
+  @override
+  void dispose() {
+    _deactivate(widget.registrationId, widget.checkoutId);
+    super.dispose();
+  }
+
+  void _activate(String registrationId, String checkoutId) =>
+      checkoutServiceOrNull(
+        ref.container,
+        registrationId,
+        checkoutId,
+        (s) => s,
+      )?.activate();
+
+  void _deactivate(String registrationId, String checkoutId) =>
+      checkoutServiceOrNull(
+        ref.container,
+        registrationId,
+        checkoutId,
+        (s) => s,
+      )?.deactivate();
+
+  /// Bounded height, not `shrinkWrap`: this list sits inside the detail
+  /// view's own outer `ListView`, and an unbounded list of a long-running
+  /// task's changes would grow to fill the whole scroll region, pushing
+  /// every other section (Description included) off screen.
+  static const double _kListHeight = 220;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.antgrid;
+    final registrationId = widget.registrationId;
+    final checkoutId = widget.checkoutId;
+    final state = ref.watch(checkoutFileTreeStateProvider(checkoutId)).value;
+    if (state == null) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: AbTokens.space12,
+          vertical: AbTokens.space8,
+        ),
+        child: AbLoading(message: 'loading changes...'),
+      );
+    }
+    final entries = state.gitFileEntries;
+    if (entries.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AbTokens.space12,
+          vertical: AbTokens.space6,
+        ),
+        child: Text(
+          'Nothing changed yet.',
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: palette.textMuted,
+          ),
+        ),
+      );
+    }
+    final (additions, deletions) = _changeTotals(entries);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AbTokens.space12,
+            vertical: AbTokens.space4,
+          ),
+          child: AbDiffStat(
+            additions: additions,
+            deletions: deletions,
+            fontSize: AbTokens.fontXs,
+          ),
+        ),
+        SizedBox(
+          height: _kListHeight,
+          child: FileTreeView(
+            root: state.root,
+            expandedPaths: state.expandedPaths,
+            selectedFilePath: state.git.diffPath,
+            filterQuery: null,
+            gitFileEntries: entries,
+            changesOnly: true,
+            collapsedPaths: state.git.collapsedPaths,
+            onToggleExpanded: (path) => checkoutServiceOrNull(
+              ref.container,
+              registrationId,
+              checkoutId,
+              (s) => s.fileService,
+            )?.toggleGitFolder(path),
+            onFileSelected: (path) => _openTaskFileDiff(
+              context,
+              ref,
+              registrationId,
+              checkoutId,
+              path,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Line totals across every changed path, deduped: a partially-staged file
+/// carries one entry per stage and both hold the same combined-vs-HEAD
+/// counts, so summing every entry would double it.
+(int, int) _changeTotals(List<GitFileStatusEntry> entries) {
+  final perPath = <String, GitFileStatusEntry>{};
+  for (final e in entries) {
+    perPath.putIfAbsent(e.path, () => e);
+  }
+  return (
+    perPath.values.fold(0, (sum, e) => sum + e.additions),
+    perPath.values.fold(0, (sum, e) => sum + e.deletions),
+  );
+}
+
+/// Pushes the same diff (and, from there, the same file viewer) the Git tab
+/// itself uses — see `GitPanel`'s own content area — scoped to [checkoutId]
+/// rather than whichever checkout is currently focused.
+Future<void> _openTaskFileDiff(
+  BuildContext context,
+  WidgetRef ref,
+  String registrationId,
+  String checkoutId,
+  String path,
+) {
+  final fileService = checkoutServiceOrNull(
+    ref.container,
+    registrationId,
+    checkoutId,
+    (s) => s.fileService,
+  );
+  if (fileService == null) return Future.value();
+  fileService.requestDiff(path);
+  return Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (routeContext) => ColoredBox(
+        color: routeContext.antgrid.bgDeepest,
+        child: SafeArea(
+          child: Consumer(
+            builder: (consumerContext, consumerRef, _) {
+              final state = consumerRef
+                  .watch(checkoutFileTreeStateProvider(checkoutId))
+                  .value;
+              final git = state?.git;
+              if (git?.viewingPath == path) {
+                return FileViewerRouter(
+                  fileContent: git!.viewingFile,
+                  isLoading: git.viewingLoading,
+                  selectedFilePath: path,
+                  fileWasModified: false,
+                  onRefreshContent: () => fileService.requestFileContent(path),
+                  onClose: () {
+                    fileService.clearGitViewing();
+                    Navigator.of(consumerContext).pop();
+                  },
+                );
+              }
+              if (git == null ||
+                  git.diffPath != path ||
+                  git.diffContent == null) {
+                return const AbLoading();
+              }
+              return DiffViewer(
+                path: path,
+                gitStatus: state!.gitFileStatuses[path],
+                diff: git.diffContent!,
+                additions: git.diffAdditions ?? 0,
+                deletions: git.diffDeletions ?? 0,
+                onViewFile: () => fileService.gitViewFile(path),
+                onClose: () {
+                  fileService.clearDiff();
+                  Navigator.of(consumerContext).pop();
+                },
+                onSendToAgent: (sendContext, message) => sendCaptureToAgent(
+                  context: sendContext,
+                  container: consumerRef.container,
+                  text: message,
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 /// A route-pushed detail, for the phone. Desktop puts the same widget in the

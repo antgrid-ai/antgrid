@@ -138,6 +138,46 @@ describe("GET /integrations/connect", () => {
     const second = installState(await connect(app, cookie));
     expect(first.state).not.toBe(second.state);
   });
+
+  describe("asEmail — the app's own signed-in user", () => {
+    test("matching the browser's session proceeds exactly as with no asEmail at all", async () => {
+      const app = build();
+      const { cookie } = await signIn("nia@example.com");
+      const res = await app.request("/integrations/connect?asEmail=nia@example.com", {
+        headers: { cookie },
+      });
+      expect(new URL(res.headers.get("location") ?? "").origin).toBe("https://github.com");
+      expect(res.headers.get("set-cookie") ?? "").toContain("antgrid.gh_install=");
+    });
+
+    test("matches case-insensitively", async () => {
+      const app = build();
+      const { cookie } = await signIn("nia@example.com");
+      const res = await app.request("/integrations/connect?asEmail=NIA@EXAMPLE.COM", {
+        headers: { cookie },
+      });
+      expect(new URL(res.headers.get("location") ?? "").origin).toBe("https://github.com");
+    });
+
+    test("a browser signed in as someone else is signed out and sent to sign in as the app's user, with no install state minted", async () => {
+      const app = build();
+      const { cookie } = await signIn("nia@example.com");
+      const res = await app.request(
+        "/integrations/connect?asEmail=someone-else@example.com",
+        { headers: { cookie } }
+      );
+      const location = res.headers.get("location") ?? "";
+      expect(location).toContain("/login");
+      expect(location).toContain(encodeURIComponent("someone-else@example.com"));
+      // Nothing bound to the wrong account: the install-state cookie is never
+      // set on this path.
+      expect(res.headers.get("set-cookie") ?? "").not.toContain("antgrid.gh_install=");
+
+      // The mismatched session is actually gone, not just redirected past.
+      const stillSignedIn = await app.request("/integrations", { headers: { cookie } });
+      expect(stillSignedIn.headers.get("location")).toContain("/login");
+    });
+  });
 });
 
 describe("GET /integrations/callback", () => {

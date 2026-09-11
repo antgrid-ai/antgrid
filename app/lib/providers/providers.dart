@@ -510,6 +510,27 @@ T? focusedCheckoutServiceOrNull<T>(
   return pick(session.servicesForCheckout(checkoutId));
 }
 
+/// [focusedCheckoutServiceOrNull], for an EXPLICIT project AND checkout
+/// rather than whichever is currently on screen — for a caller (an event
+/// handler, or the task detail view's Changes section) that needs a SPECIFIC
+/// session's checkout regardless of what is focused. [registrationId] must
+/// come from the SAME read/watch that resolved [checkoutId] (e.g. the
+/// project a task's session actually lives in), never from
+/// [selectedRegistrationIdProvider] at the call site — reading current focus
+/// there defeats the one thing this helper exists for, and does it silently:
+/// the widget still activates the checkout it meant to on mount, then
+/// deactivates a DIFFERENT project's entry if focus moved before it unmounts.
+T? checkoutServiceOrNull<T>(
+  ProviderContainer ref,
+  String registrationId,
+  String checkoutId,
+  T Function(CheckoutServices) pick,
+) {
+  final session = ref.read(projectSessionProvider(registrationId)).value;
+  if (session == null) return null;
+  return pick(session.servicesForCheckout(checkoutId));
+}
+
 final commandStateProvider = StreamProvider<CommandState>((ref) {
   final service = focusedCheckoutServicesOrNull(ref)?.commandService;
   if (service == null) return const Stream<CommandState>.empty();
@@ -654,6 +675,23 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
   // in Riverpod 3's default retry loop (which would leave the UI on "loading").
   // See provider_retry.dart.
 }, retry: noProviderRetry);
+
+/// [fileTreeStateProvider] for an EXPLICIT checkout of the focused project,
+/// rather than whichever checkout is currently on screen.
+///
+/// What the task detail view's Changes section watches: a task's own session
+/// is rarely the checkout the Git tab happens to have open (or the Git tab
+/// may not even be the visible workspace view), so it needs the tree for its
+/// OWN checkout id on demand. No prefs binding here — that binding is for the
+/// focused checkout's persisted UI state (expanded paths, selection), which
+/// this read-only summary has none of.
+final checkoutFileTreeStateProvider =
+    StreamProvider.family<FileTreeState, String>((ref, checkoutId) {
+      final session = focusedSessionOrNull(ref);
+      if (session == null) return const Stream<FileTreeState>.empty();
+      final service = session.servicesForCheckout(checkoutId).fileService;
+      return seededStream(() => service.currentState, service.stateStream);
+    }, retry: noProviderRetry);
 
 /// Per-project SearchService façade.
 final searchServiceProvider = _focusedCheckoutService<SearchService>(

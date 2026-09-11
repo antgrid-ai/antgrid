@@ -3,10 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_colors.dart';
 import '../design/ab_tokens.dart';
-import '../design/widgets/ab_disclosure_chevron.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../models/task.dart';
-import '../providers/drawer_expansion.dart';
 import '../providers/tasks.dart';
 import 'tasks/task_status_view.dart';
 import 'tasks/tasks_surface.dart';
@@ -23,21 +21,17 @@ import 'tasks/tasks_surface.dart';
 /// account-scoped store: no fetch of its own, and no dependency on any bridge
 /// being up. Tasks arrive over HTTPS, so this node is as live with every dev
 /// machine offline as it is with all of them running.
+///
+/// Always shows its rows once there are any — no collapse to click through.
+/// A task outlives any session opened against it and is exactly the kind of
+/// thing worth seeing without an extra tap; the header below is a label, not
+/// a control.
 class ProjectTasksNode extends ConsumerWidget {
-  const ProjectTasksNode({
-    super.key,
-    required this.repoKey,
-    required this.expansionId,
-  });
+  const ProjectTasksNode({super.key, required this.repoKey});
 
   /// The row's repository identity, as the host folded it from the origin
   /// remote. Null for a folder without one, or a host too old to send it.
   final String? repoKey;
-
-  /// This node's key in [expandedDrawerIdsProvider]. Callers pass a dotted id
-  /// so it can never be read as a bare machine uuid by the control-plane
-  /// keep-alive set, which counts only those.
-  final String expansionId;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -50,7 +44,6 @@ class ProjectTasksNode extends ConsumerWidget {
     final tasks = ref.watch(openTasksForProjectProvider(projectId));
     if (tasks.isEmpty) return const SizedBox.shrink();
 
-    final expanded = ref.watch(expandedDrawerIdsProvider).contains(expansionId);
     final t = context.antgrid;
 
     return Column(
@@ -63,8 +56,6 @@ class ProjectTasksNode extends ConsumerWidget {
           child: AbListRow(
             horizontalPadding: 0,
             density: AbRowDensity.sm,
-            hoverable: true,
-            leading: AbDisclosureChevron(expanded: expanded),
             title: Text(
               'Tasks',
               overflow: TextOverflow.ellipsis,
@@ -73,8 +64,6 @@ class ProjectTasksNode extends ConsumerWidget {
                 color: t.textSecondary,
               ),
             ),
-            // The count is the whole point of the collapsed state: it says
-            // whether opening the node is worth a click without opening it.
             trailing: Text(
               '${tasks.length}',
               style: AbTokens.monoStyle(
@@ -83,14 +72,10 @@ class ProjectTasksNode extends ConsumerWidget {
               ),
             ),
             margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
-            onTap: () => ref
-                .read(expandedDrawerIdsProvider.notifier)
-                .toggle(expansionId),
           ),
         ),
-        if (expanded)
-          for (final task in tasks)
-            _DrawerTaskRow(key: ValueKey(task.number), task: task),
+        for (final task in tasks)
+          _DrawerTaskRow(key: ValueKey(task.number), task: task),
       ],
     );
   }
@@ -112,10 +97,12 @@ class _DrawerTaskRow extends ConsumerWidget {
       child: AbListRow(
         density: AbRowDensity.sm,
         hoverable: true,
-        leading: SizedBox(
+        // Blank, not removed: the slot keeps this row's title flush with the
+        // sessions listed below it, which reserve the same width for their
+        // own leading mark.
+        leading: const SizedBox(
           width: AbTokens.drawerLeadingSlot,
           height: AbTokens.drawerLeadingSlot,
-          child: Center(child: TaskStatusDot(status: task.status)),
         ),
         title: Row(
           children: [
@@ -140,13 +127,9 @@ class _DrawerTaskRow extends ConsumerWidget {
             ),
           ],
         ),
+        trailing: TaskStatusPill(status: task.status, compact: true),
         margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
-        // Select before opening: the surface reads the selection on build, so
-        // setting it after would land on the list with nothing chosen.
-        onTap: () {
-          ref.read(selectedTaskNumberProvider.notifier).select(task.number);
-          showTasks(context);
-        },
+        onTap: () => openTasks(context, ref, select: task.number),
       ),
     );
   }

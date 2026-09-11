@@ -47,10 +47,12 @@ import 'drawer_entry_row.dart'
         LocalMachineBand,
         MachineDrawerHeaderRow,
         drawerProjectTitleStyle;
+import 'drawer_dismiss.dart';
 import 'first_run_checklist.dart';
 import 'open_folder_button.dart';
 import 'project_tasks_node.dart';
 import 'session_row.dart';
+import 'tasks_nav_row.dart';
 import 'update_row.dart';
 
 /// Always-visible (desktop) / slide-in (mobile) drawer listing local projects
@@ -219,16 +221,6 @@ class _SetupDock extends ConsumerWidget {
       primary: false,
       child: FirstRunSetupSection(),
     );
-  }
-}
-
-/// Mobile: the drawer is a slide-in overlay, so an action that navigates
-/// elsewhere must dismiss it or the destination stays hidden behind it. No-op on
-/// desktop, where the drawer is always-on chrome rather than a route.
-void closeDrawerIfOverlay(BuildContext context) {
-  final scaffold = Scaffold.maybeOf(context);
-  if (scaffold?.hasDrawer == true && scaffold!.isDrawerOpen) {
-    Navigator.of(context).pop();
   }
 }
 
@@ -546,7 +538,10 @@ class _EntryWithSessions extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (showLocalBand) LocalMachineBand(showRule: showRule),
+        if (showLocalBand) ...[
+          LocalMachineBand(showRule: showRule),
+          const TasksNavRow(),
+        ],
         entryRowWrapped,
         if (expanded)
           machineUuid != null
@@ -562,7 +557,6 @@ class _EntryWithSessions extends ConsumerWidget {
                       repoKey: entry is LocalProjectEntry
                           ? entry.project.repoKey
                           : null,
-                      expansionId: '${entry.id}.tasks',
                     ),
                     SessionsList(projectId: entry.id),
                   ],
@@ -772,10 +766,7 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
           },
         ),
         if (expanded) ...[
-          ProjectTasksNode(
-            repoKey: widget.project.repoKey,
-            expansionId: '$regId.tasks',
-          ),
+          ProjectTasksNode(repoKey: widget.project.repoKey),
           _ProjectSessions(regId: regId),
         ],
       ],

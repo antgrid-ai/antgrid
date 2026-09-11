@@ -13,6 +13,7 @@ import { ApprovedPage } from "../ui/approved.js";
 import {
   requireUser,
   requireUserOrRedirect,
+  requireMatchingAccount,
   type AuthVars,
 } from "../auth/middleware.js";
 import { listActiveDevices } from "../models/device.js";
@@ -1892,22 +1893,34 @@ export function uiRoutes(deps: {
    * GET that only sets a cookie and redirects is safe to be reached from
    * anywhere: nothing is bound to an account until the callback proves, through
    * GitHub, that the installation belongs to the person at the keyboard.
+   *
+   * The app links here directly (skipping the Integrations overview page,
+   * since Connect GitHub is the only reason it ever sends someone to this
+   * flow) carrying its signed-in user's email as `asEmail` —
+   * `requireMatchingAccount` is what makes that mean something: without it a
+   * browser signed in as a different Antgrid account would bind the
+   * installation to itself instead.
    */
-  r.get("/integrations/connect", requireUserOrRedirect({ auth: deps.auth }), (c) => {
-    const config = githubAppConfig(deps.env);
-    if (!config) return c.redirect("/integrations?github=not_configured");
-    const start = startGithubInstall({ userId: c.get("userId"), appSlug: config.slug });
-    setCookie(c, INSTALL_STATE_COOKIE, start.cookie, {
-      httpOnly: true,
-      // Lax, never Strict: GitHub returns the user by a cross-site top-level
-      // navigation, and Strict drops the cookie on exactly that request.
-      sameSite: "Lax",
-      secure: deps.env.BETTER_AUTH_URL.startsWith("https://"),
-      path: "/integrations",
-      maxAge: start.maxAgeSeconds,
-    });
-    return c.redirect(start.url);
-  });
+  r.get(
+    "/integrations/connect",
+    requireUserOrRedirect({ auth: deps.auth }),
+    requireMatchingAccount({ auth: deps.auth }),
+    (c) => {
+      const config = githubAppConfig(deps.env);
+      if (!config) return c.redirect("/integrations?github=not_configured");
+      const start = startGithubInstall({ userId: c.get("userId"), appSlug: config.slug });
+      setCookie(c, INSTALL_STATE_COOKIE, start.cookie, {
+        httpOnly: true,
+        // Lax, never Strict: GitHub returns the user by a cross-site top-level
+        // navigation, and Strict drops the cookie on exactly that request.
+        sameSite: "Lax",
+        secure: deps.env.BETTER_AUTH_URL.startsWith("https://"),
+        path: "/integrations",
+        maxAge: start.maxAgeSeconds,
+      });
+      return c.redirect(start.url);
+    }
+  );
 
   /**
    * GitHub's redirect back, carrying `installation_id`, `setup_action` and —

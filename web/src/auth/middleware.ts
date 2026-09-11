@@ -84,3 +84,43 @@ export function requireUserOrRedirect(deps: { auth: Auth }): MiddlewareHandler<{
     await next();
   };
 }
+
+/**
+ * Guards a browser hand-off from the app: the app passes the email of its own
+ * signed-in user as `?asEmail=`, and a browser whose Better-Auth session
+ * belongs to someone else must not be allowed to act as if it were that user
+ * — most importantly, must not bind a GitHub installation to the wrong
+ * account. Runs AFTER `requireUserOrRedirect`, which already sends a browser
+ * with no session at all to `/login`; this only has to catch the case where a
+ * session exists but names a different person.
+ *
+ * No-op (never reads or writes anything) when the route was reached without
+ * `asEmail` — a plain visit to the page in a browser carries no expectation
+ * to check against.
+ */
+export function requireMatchingAccount(deps: { auth: Auth }): MiddlewareHandler<{ Variables: AuthVars }> {
+  return async (c, next) => {
+    const asEmail = c.req.query("asEmail");
+    if (!asEmail) return next();
+    const actual = c.get("userEmail");
+    if (actual && actual.toLowerCase() === asEmail.toLowerCase()) return next();
+
+    // Mismatched account: sign this browser session out (mirrors /logout's
+    // own Set-Cookie forwarding — see there for why each header is forwarded
+    // individually) and send the user back to sign in, with the expected
+    // address pre-filled so they land on the right account instead of
+    // guessing which one the app meant.
+    const res = await deps.auth.api.signOut({ headers: c.req.raw.headers, asResponse: true });
+    for (const sc of res.headers.getSetCookie()) {
+      c.header("set-cookie", sc, { append: true });
+    }
+    // `error`, not `notice`: LoginPage renders `notice` in success (green)
+    // styling, which reads wrong for "you were signed out and need to try
+    // again" — `error` is the tone Login already uses for that.
+    const message =
+      "This browser was signed in to a different Antgrid account. Sign in again to continue.";
+    return c.redirect(
+      `/login?error=${encodeURIComponent(message)}&email=${encodeURIComponent(asEmail)}`
+    );
+  };
+}

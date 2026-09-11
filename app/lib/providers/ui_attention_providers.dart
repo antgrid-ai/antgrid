@@ -21,7 +21,13 @@ final appLifecycleStateProvider =
 final agentSurfaceVisibleProvider =
     NotifierProvider<ValueController<bool>, bool>(() => ValueController(true));
 
-enum WorkbenchSurface { workspace, newSession, appSettings, remoteDevices }
+enum WorkbenchSurface {
+  workspace,
+  newSession,
+  appSettings,
+  remoteDevices,
+  tasks,
+}
 
 /// The top-level workbench surface rendered beside the project drawer.
 final workbenchSurfaceProvider =

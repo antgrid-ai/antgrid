@@ -19,7 +19,6 @@ import '../screens/sign_in_screen.dart';
 import '../screens/upgrade_screen.dart';
 import 'auth_status_pill.dart';
 import 'sign_out_action.dart';
-import 'tasks/tasks_surface.dart';
 
 /// Drawer-footer account affordance.
 ///
@@ -177,12 +176,6 @@ class AccountFooter extends ConsumerWidget {
       width: menuWidth,
       bounds: bounds,
       entries: [
-        if (signedIn)
-          const AbMenuItem(
-            label: 'Tasks…',
-            value: _AccountMenu.tasks,
-            icon: AbIcons.tasks,
-          ),
         const AbMenuItem(
           label: 'App settings…',
           value: _AccountMenu.settings,
@@ -201,9 +194,6 @@ class AccountFooter extends ConsumerWidget {
       ],
     );
     switch (selected) {
-      case _AccountMenu.tasks:
-        if (context.mounted) await showTasks(context);
-        break;
       case _AccountMenu.settings:
         if (context.mounted) _openSettings(context, ref);
         break;
@@ -222,4 +212,4 @@ class AccountFooter extends ConsumerWidget {
   }
 }
 
-enum _AccountMenu { tasks, settings, upgrade, logout, signIn }
+enum _AccountMenu { settings, upgrade, logout, signIn }

@@ -12,15 +12,21 @@ import 'connection_identity.dart';
 import 'device_provisioning.dart';
 import 'providers.dart';
 import 'subscription.dart';
+import 'tasks.dart';
 
 /// Activates an idempotent provisioning hook tied to `currentUserProvider`:
 ///
 ///   - Signed out (`null`) → no-op.
 ///   - Signed in (`CurrentUser`) → call `DeviceProvisioning.ensureProvisioned`
 ///     (which short-circuits if a record for that user already exists in the
-///     keychain). After it succeeds, invalidate both `licenseTokenMinterProvider`
-///     and `localDeviceUuidProvider` so subsequent reads pick up the new keychain
-///     record.
+///     keychain). After it succeeds, invalidate `licenseTokenMinterProvider`,
+///     `connectionTokenMinterProvider` and `localDeviceUuidProvider` so
+///     subsequent reads pick up the new keychain record, and `taskListProvider`
+///     / `taskProjectsProvider` / `taskLabelsProvider` — none of the three
+///     watch anything that changes across a sign-in (same `licenseApiUrl`,
+///     same `authServiceProvider` instance, only the cookie it reads
+///     changed), so left uninvalidated a value fetched under the PREVIOUS
+///     account reads as "this account has none" for the rest of the session.
 ///
 /// The hook MUST be kept subscribed for the whole app lifetime — `main.dart`
 /// does `container.listen(postSignInProvisioningProvider, ...)`.
@@ -65,6 +71,14 @@ final postSignInProvisioningProvider = Provider<void>((ref) {
         ref.invalidate(licenseTokenMinterProvider);
         ref.invalidate(connectionTokenMinterProvider);
         ref.invalidate(localDeviceUuidProvider);
+        // Account-scoped and otherwise never re-fetched: none of the three
+        // watch anything that changes across a sign-in (same licenseApiUrl,
+        // same authServiceProvider instance — only the cookie it reads
+        // changed), so a value cached under the PREVIOUS account survives a
+        // switch and reads as "this account has none" forever.
+        ref.invalidate(taskListProvider);
+        ref.invalidate(taskProjectsProvider);
+        ref.invalidate(taskLabelsProvider);
         prefetchSubscriptionCache(ref);
       } on ProvisioningException catch (e) {
         // This closure is fire-and-forget: the user may have signed out (which
@@ -113,5 +127,8 @@ Future<void> retryDeviceProvisioning(WidgetRef ref) async {
   ref.invalidate(licenseTokenMinterProvider);
   ref.invalidate(connectionTokenMinterProvider);
   ref.invalidate(localDeviceUuidProvider);
+  ref.invalidate(taskListProvider);
+  ref.invalidate(taskProjectsProvider);
+  ref.invalidate(taskLabelsProvider);
   prefetchSubscriptionCache(ref);
 }

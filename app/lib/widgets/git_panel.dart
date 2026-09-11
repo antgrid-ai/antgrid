@@ -31,6 +31,7 @@ import '../models/file_tree_models.dart';
 import '../navigation/back_intent.dart';
 import '../providers/analytics.dart';
 import '../providers/providers.dart';
+import '../providers/tasks.dart' show focusedSessionTaskProvider;
 import '../providers/visible_surface.dart';
 import '../services/file_service.dart';
 import '../util/detached.dart';
@@ -43,6 +44,8 @@ import '../widgets/git_commit_sheet.dart';
 import '../widgets/git_status_color.dart';
 import '../widgets/git_sync_failure_handoff.dart';
 import '../widgets/send_capture_to_agent.dart';
+import '../widgets/tasks/task_status_view.dart';
+import '../widgets/tasks/tasks_surface.dart';
 
 /// Anchors the Changes header's title row (diff totals + conflict chip) for
 /// tests — it carries no text of its own (the header sits directly under the
@@ -145,7 +148,9 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     // sits on its "loading history..." placeholder forever — that is exactly
     // the state a service which never asked reports, and nothing asks again.
     // `loadHistory` touches no BuildContext; a disposed service drops it.
-    WidgetsBinding.instance.addPostFrameCallback((_) => fileService.loadHistory());
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => fileService.loadHistory(),
+    );
   }
 
   /// Same lazy, once-per-service-lifetime fetch as [_maybeLoadHistory], for
@@ -156,7 +161,9 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     // Unguarded for the same reason as [_maybeLoadHistory], and it matters
     // more here: nothing else in the app ever calls `loadStashes` again, so a
     // spent claim with no send hides the stash banner for good.
-    WidgetsBinding.instance.addPostFrameCallback((_) => fileService.loadStashes());
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => fileService.loadStashes(),
+    );
   }
 
   /// Steps out ONE level: the file opened from a diff, then the diff itself.
@@ -264,9 +271,7 @@ class _GitHeaderCounts {
   /// name before the slash is not a folder row and counting it as one leaves
   /// [changedFolders] holding a folder nothing can ever collapse.
   static Iterable<String> _ancestorsOf(String path) sync* {
-    var dir = path.endsWith('/')
-        ? path.substring(0, path.length - 1)
-        : path;
+    var dir = path.endsWith('/') ? path.substring(0, path.length - 1) : path;
     var slash = dir.lastIndexOf('/');
     while (slash >= 0) {
       dir = dir.substring(0, slash);
@@ -313,6 +318,54 @@ class _GitHeaderCounts {
 /// used for why an unbounded run of them is a layout failure, not just noise.
 const double _stashBannerMaxHeight = 132;
 
+/// Names the task the active session's changes belong to, when it was
+/// launched from one — the reverse of the task detail view's own Changes
+/// section, which shows a task's diff FROM the task side. Renders nothing for
+/// a session started outside a task, which is most of them.
+class _TaskContextStrip extends ConsumerWidget {
+  const _TaskContextStrip();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final task = ref.watch(focusedSessionTaskProvider);
+    if (task == null) return const SizedBox.shrink();
+    final t = context.antgrid;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space6),
+      child: AbListRow(
+        density: AbRowDensity.sm,
+        hoverable: true,
+        title: Row(
+          children: [
+            Text(
+              task.ref,
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXs,
+                color: t.textMuted,
+              ),
+            ),
+            const SizedBox(width: AbTokens.space6),
+            Expanded(
+              child: Text(
+                task.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontSm,
+                  color: t.textSecondary,
+                ),
+              ),
+            ),
+          ],
+        ),
+        trailing: TaskStatusPill(status: task.status, compact: true),
+        margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
+        onTap: () => openTasks(context, ref, select: task.number),
+      ),
+    );
+  }
+}
+
 /// The shared git-panel chrome: header + separator + expanded body, defined
 /// once so the loading/error/data branches can't drift in how they wrap the
 /// header. [onBack] is forwarded to the header (only the compact diff-viewing
@@ -341,6 +394,9 @@ class _GitPanelScaffold extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
+        // Above the header: it says whose changes the rest of the panel is
+        // about, so it has to be read before anything the header counts.
+        const _TaskContextStrip(),
         _GitChangesHeader(
           counts: counts,
           fileService: fileService,
@@ -530,13 +586,11 @@ class _GitChangesHeader extends StatelessWidget {
   /// END, so Commit sits flush against the panel's right edge exactly as it
   /// did when this was a fixed-width row, and only overflows into a scroll
   /// — starting scrolled to Commit's end, never to Refresh's — once the
-  /// buttons genuinely don't fit.
+  /// buttons genuinely don't fit. [_ScrollableActionsRow] fades whichever
+  /// edge is cut off, so a partly-hidden button reads as "scroll for more"
+  /// rather than a broken layout.
   Widget _actionsCluster(BuildContext context) {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      reverse: true,
-      child: Row(mainAxisSize: MainAxisSize.min, children: _actions(context)),
-    );
+    return _ScrollableActionsRow(children: _actions(context));
   }
 
   /// The title half of the header. Everything in it except the title text is
@@ -638,7 +692,11 @@ class _GitChangesHeader extends StatelessWidget {
     // tree, these two act on the branch's relationship to a remote. Sharing a
     // border would read as one control.
     if (git.sync.hasRemote) ...[
-      _SyncControl(sync: git.sync, syncing: git.syncing, fileService: fileService),
+      _SyncControl(
+        sync: git.sync,
+        syncing: git.syncing,
+        fileService: fileService,
+      ),
       const SizedBox(width: AbTokens.space6),
     ],
     if (counts.hasChanges) ...[
@@ -706,6 +764,99 @@ class _GitChangesHeader extends StatelessWidget {
   }
 }
 
+/// Wraps [_GitChangesHeader._actionsCluster]'s horizontal scroll with an edge
+/// fade on whichever side is currently cut off, tracked from the
+/// [ScrollController]'s own metrics rather than guessed from layout: a button
+/// clipped mid-glyph by the viewport boundary reads as a broken header, where
+/// a faded edge reads as "there's more, scroll for it".
+///
+/// `reverse: true` on the inner scroll view mirrors the metrics too —
+/// [ScrollMetrics.extentAfter] is what's hidden toward the row's leading
+/// (left) edge, where Refresh lives, and [ScrollMetrics.extentBefore] toward
+/// its trailing (Commit) edge.
+class _ScrollableActionsRow extends StatefulWidget {
+  const _ScrollableActionsRow({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  State<_ScrollableActionsRow> createState() => _ScrollableActionsRowState();
+}
+
+class _ScrollableActionsRowState extends State<_ScrollableActionsRow> {
+  final _controller = ScrollController();
+  bool _fadeStart = false;
+  bool _fadeEnd = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_updateFades);
+    // Metrics don't exist until the first layout, and that first layout is
+    // exactly the "starts scrolled to Commit's end" case this exists to fix.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateFades());
+  }
+
+  @override
+  void didUpdateWidget(covariant _ScrollableActionsRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The controller's own listener only fires on a scroll, so a rebuild that
+    // adds/removes an action (sync.hasRemote flipping, counts.hasChanges
+    // toggling Commit) needs its own nudge — same post-frame reasoning as
+    // initState's: this build's layout hasn't happened yet. Unconditional
+    // rather than diffing `children` (fresh, non-const widgets every build,
+    // so a diff would fire every time regardless) — `_updateFades` already
+    // no-ops via its own fadeStart/fadeEnd comparison when nothing changed.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateFades());
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _updateFades() {
+    if (!_controller.hasClients) return;
+    final metrics = _controller.position;
+    final fadeStart = metrics.extentAfter > 0;
+    final fadeEnd = metrics.extentBefore > 0;
+    if (fadeStart == _fadeStart && fadeEnd == _fadeEnd) return;
+    setState(() {
+      _fadeStart = fadeStart;
+      _fadeEnd = fadeEnd;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scrollable = SingleChildScrollView(
+      controller: _controller,
+      scrollDirection: Axis.horizontal,
+      reverse: true,
+      child: Row(mainAxisSize: MainAxisSize.min, children: widget.children),
+    );
+    if (!_fadeStart && !_fadeEnd) return scrollable;
+    // dstIn keeps the row's own pixels and colors — the fade is purely an
+    // alpha mask, so it needs no knowledge of the panel's background color.
+    return ShaderMask(
+      blendMode: BlendMode.dstIn,
+      shaderCallback: (bounds) => LinearGradient(
+        begin: Alignment.centerLeft,
+        end: Alignment.centerRight,
+        colors: [
+          _fadeStart ? Colors.transparent : Colors.black,
+          Colors.black,
+          Colors.black,
+          _fadeEnd ? Colors.transparent : Colors.black,
+        ],
+        stops: const [0.0, 0.3, 0.7, 1.0],
+      ).createShader(bounds),
+      child: scrollable,
+    );
+  }
+}
+
 /// The header's one fold control: Collapse All until every folder is shut,
 /// Expand All after that.
 ///
@@ -726,6 +877,53 @@ class _CollapseToggle extends StatelessWidget {
         icon: allCollapsed ? AbIcons.expandAll : AbIcons.collapseAll,
         onTap: onTap,
         tooltip: allCollapsed ? 'Expand All Folders' : 'Collapse All Folders',
+      ),
+    );
+  }
+}
+
+/// The small inline header the Changes section carries at the top of the
+/// left column (see [_GitPanelBody._buildLeftColumn]) — a label plus a fold
+/// toggle, mirroring [_GitHistorySectionHeader] below it. No back affordance
+/// or write actions, for the same reasons as that one.
+class _GitChangesSectionHeader extends StatelessWidget {
+  const _GitChangesSectionHeader({this.collapsed = false, this.onToggleCollapsed});
+
+  /// Whether the WHOLE section is folded shut — see
+  /// [GitPaneState.changesCollapsed]. Purely how this renders;
+  /// [onToggleCollapsed] is what actually flips it.
+  final bool collapsed;
+
+  /// Null when there is nothing changed to fold away — an empty tree has no
+  /// body for the toggle to hide, so offering one would fold a heading onto
+  /// itself with nothing underneath either way.
+  final VoidCallback? onToggleCollapsed;
+
+  @override
+  Widget build(BuildContext context) {
+    final toggle = onToggleCollapsed;
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space12,
+        vertical: AbTokens.space4,
+      ),
+      child: AbCompactTapTargets(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: toggle,
+          child: Row(
+            children: [
+              if (toggle != null) AbDisclosureChevron(expanded: !collapsed),
+              Expanded(
+                child: Text(
+                  'Changes',
+                  overflow: TextOverflow.ellipsis,
+                  style: AbTokens.sansStyle(color: context.antgrid.textMuted),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -785,7 +983,8 @@ class _GitHistorySectionHeader extends StatelessWidget {
                 onTap: toggle,
                 child: Row(
                   children: [
-                    if (toggle != null) AbDisclosureChevron(expanded: !collapsed),
+                    if (toggle != null)
+                      AbDisclosureChevron(expanded: !collapsed),
                     Expanded(
                       child: Text(
                         'History',
@@ -910,9 +1109,16 @@ class _SyncControl extends StatelessWidget {
 
     // A branch that has never been pushed has nothing to pull and no counts to
     // show — one action, named for what it does, matching VS Code.
+    //
+    // "Publish", not "Publish Branch": the push icon beside it already says
+    // what's being published, and the shorter label is what keeps this from
+    // being the widest thing in the row — the header's actions cluster
+    // anchors its scroll to the Commit end when everything doesn't fit
+    // (`_ScrollableActionsRow`), so the widest control here is the one most
+    // likely to end up scrolled mostly out of view.
     if (sync.canPublish) {
       return AbButton(
-        label: 'Publish Branch',
+        label: 'Publish',
         leading: AbIcon(
           AbIcons.gitPush,
           size: AbTokens.iconButtonGlyph,
@@ -974,12 +1180,20 @@ class _SyncCounts extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (sync.behind > 0) ...[
-            AbIcon(AbIcons.arrowDown, size: AbTokens.fontXs, color: colors.textMuted),
+            AbIcon(
+              AbIcons.arrowDown,
+              size: AbTokens.fontXs,
+              color: colors.textMuted,
+            ),
             Text('${sync.behind}', style: style),
           ],
           if (sync.ahead > 0) ...[
             if (sync.behind > 0) const SizedBox(width: AbTokens.space4),
-            AbIcon(AbIcons.arrowUp, size: AbTokens.fontXs, color: colors.textMuted),
+            AbIcon(
+              AbIcons.arrowUp,
+              size: AbTokens.fontXs,
+              color: colors.textMuted,
+            ),
             Text('${sync.ahead}', style: style),
           ],
         ],
@@ -1168,65 +1382,95 @@ class _GitPanelBody extends ConsumerWidget {
   /// underneath it, in one fixed 3:2 split rather than a tab switching
   /// between them — both stay on screen and each scrolls independently,
   /// so seeing what changed and seeing how it got there never cost a tap
-  /// to switch between. Tapping the History header (`historyCollapsed`)
-  /// always folds it down to just that header row, bottom-anchored — even
-  /// with no working-tree changes, when there is nothing else in the column
-  /// to give the freed space to; the rest of the column just sits blank
-  /// above it rather than the toggle being refused.
+  /// to switch between. Both sections carry the same fold control
+  /// (`changesCollapsed` / `historyCollapsed`); Changes stays the TOP section
+  /// regardless of which side is folded — folding History bottom-anchors its
+  /// header under an expanded Changes, and folding Changes instead leaves its
+  /// own header pinned at the top above an expanded History, never the other
+  /// way around.
   ///
-  /// With no working-tree changes AND History expanded, the Changes tree has
-  /// nothing to show but an empty state, so it is dropped entirely rather
-  /// than reserving 3/5 of the column for it — History takes the full column
-  /// instead.
+  /// With no working-tree changes, the Changes tree has nothing to show but
+  /// an empty state, so its body is dropped the same way a fold does — the
+  /// heading still shows (so "nothing changed" reads as answered, not
+  /// unloaded), it is just never given a toggle to collapse: there'd be
+  /// nothing left for the toggle to do.
   Widget _buildLeftColumn(BuildContext context) {
     final hasChanges = state.gitFileEntries.isNotEmpty;
-    final collapsed = state.git.historyCollapsed;
+    final changesCollapsed = state.git.changesCollapsed;
+    final historyCollapsed = state.git.historyCollapsed;
 
+    final changesHeader = _GitChangesSectionHeader(
+      collapsed: changesCollapsed,
+      onToggleCollapsed: hasChanges ? fileService.toggleChangesCollapsed : null,
+    );
     final historyHeader = _GitHistorySectionHeader(
       fileService: fileService,
       history: state.git.history,
-      collapsed: collapsed,
+      collapsed: historyCollapsed,
       onToggleCollapsed: fileService.toggleHistoryCollapsed,
     );
 
-    if (collapsed) {
-      // Folded to just its header, bottom-anchored, so Changes (or, with none,
-      // blank space) gets the rest of the column instead of sharing the fixed
-      // 3:2 split below.
+    final showChangesBody = hasChanges && !changesCollapsed;
+    final showHistoryBody = !historyCollapsed;
+
+    if (showChangesBody && showHistoryBody) {
+      // Both expanded: the panel's normal steady state.
       return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(
-            child: hasChanges
-                ? _buildFileList(context)
-                : const SizedBox.shrink(),
+            flex: 3,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                changesHeader,
+                const AbSeparator.horizontal(),
+                Expanded(child: _buildFileList(context)),
+              ],
+            ),
           ),
           const AbSeparator.horizontal(),
-          historyHeader,
+          Expanded(
+            flex: 2,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                historyHeader,
+                const AbSeparator.horizontal(),
+                Expanded(
+                  child: _HistoryList(git: state.git, fileService: fileService),
+                ),
+              ],
+            ),
+          ),
         ],
       );
     }
 
-    final historyColumn = Column(
+    // At most one section has a body left to show. Both headers always
+    // render, Changes above History; whichever section still has a body gets
+    // the rest of the column. When NEITHER does, the filler goes BETWEEN the
+    // two headers rather than after History's — that is what keeps History's
+    // header bottom-anchored (flush with the panel's bottom edge) exactly as
+    // it was before Changes had a heading of its own to sit under; putting
+    // the filler after it would instead leave it floating just under
+    // Changes, with blank space beneath it.
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        changesHeader,
+        if (showChangesBody) ...[
+          const AbSeparator.horizontal(),
+          Expanded(child: _buildFileList(context)),
+        ] else if (!showHistoryBody)
+          const Expanded(child: SizedBox.shrink()),
+        const AbSeparator.horizontal(),
         historyHeader,
-        const AbSeparator.horizontal(),
-        Expanded(
-          child: _HistoryList(git: state.git, fileService: fileService),
-        ),
-      ],
-    );
-
-    if (!hasChanges) {
-      return historyColumn;
-    }
-
-    return Column(
-      children: [
-        Expanded(flex: 3, child: _buildFileList(context)),
-        const AbSeparator.horizontal(),
-        Expanded(flex: 2, child: historyColumn),
+        if (showHistoryBody) ...[
+          const AbSeparator.horizontal(),
+          Expanded(
+            child: _HistoryList(git: state.git, fileService: fileService),
+          ),
+        ],
       ],
     );
   }
@@ -1967,16 +2211,11 @@ class _CommitFileRow extends StatelessWidget {
         message: file.path,
         child: Text(
           file.path,
-          style: AbTokens.monoStyle(
-            color: selected ? p.accent : p.textPrimary,
-          ),
+          style: AbTokens.monoStyle(color: selected ? p.accent : p.textPrimary),
         ),
       ),
       subtitle: file.oldPath != null
-          ? AbTooltip(
-              message: file.oldPath!,
-              child: Text(file.oldPath!),
-            )
+          ? AbTooltip(message: file.oldPath!, child: Text(file.oldPath!))
           : null,
       trailing: (file.additions > 0 || file.deletions > 0)
           ? AbDiffStat(

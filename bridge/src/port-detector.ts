@@ -1,6 +1,9 @@
 import type { PortInfo } from "./protocol";
 import type { OnDetect } from "./config";
-import { extractUrls, canonicalize, toUrlString } from "./url-parser";
+import { extractUrls, canonicalize, toUrlString, isLocalHost } from "./url-parser";
+import { NON_PREVIEW_PORTS } from "./detector/ports";
+
+const NON_PREVIEW_PORT_SET = new Set(NON_PREVIEW_PORTS);
 
 export interface PortDetectorInit {
   ports?: { port: number; name?: string; onDetect?: OnDetect }[];
@@ -79,6 +82,8 @@ export class PortDetector {
     if (!chunk.includes("://")) return;
     let schemeChanged = false;
     for (const raw of extractUrls(chunk)) {
+      if (!isLocalHost(raw.host) || toValidPort(String(raw.port)) === null) continue;
+      if (this.isSuppressed(raw.port)) continue;
       const hit = canonicalize(raw);
       const url = toUrlString(hit);
       const prev = this.lastDetections.get(hit.port);
@@ -136,7 +141,7 @@ export class PortDetector {
     let changed = false;
     for (const line of lines) {
       const port = extractPort(line);
-      if (port === null) continue;
+      if (port === null || this.isSuppressed(port)) continue;
 
       let termPorts = this.terminalPorts.get(terminalId);
       if (!termPorts) {
@@ -192,6 +197,16 @@ export class PortDetector {
       if (ports.has(port)) return true;
     }
     return false;
+  }
+
+  /** Ports like Postgres/Redis/Kafka listen on well-known ports too, and
+   *  dev-tool output (Prisma's datasource line, docker-compose logs) mentions
+   *  them constantly — they're never a browsable preview, so they're
+   *  suppressed by default. `antgrid.yaml` can still opt one in explicitly
+   *  (`configuredPorts` wins), which is how a genuinely user-declared port
+   *  stays listed. */
+  private isSuppressed(port: number): boolean {
+    return NON_PREVIEW_PORT_SET.has(port) && !this.configuredPorts.has(port);
   }
 
   /** Re-emits the current port list unconditionally — for app-reconnect

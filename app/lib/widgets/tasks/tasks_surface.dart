@@ -1,4 +1,3 @@
-import 'package:flutter/material.dart' show Dialog, Navigator, showDialog;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -9,8 +8,14 @@ import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_toolbar.dart';
+import '../../navigation/nav_controller.dart';
+import '../../navigation/nav_location.dart';
+import '../../providers/agent_transport.dart' show selectedTargetProvider;
+import '../../providers/sessions.dart' show activeSessionIdProvider;
 import '../../providers/tasks.dart';
+import '../../providers/ui_attention_providers.dart';
 import '../../util/detached.dart';
+import '../drawer_dismiss.dart';
 import 'task_detail_view.dart';
 import 'task_list_view.dart';
 
@@ -90,39 +95,76 @@ class _Split extends ConsumerWidget {
   }
 }
 
-class _Stacked extends ConsumerWidget {
+class _Stacked extends ConsumerStatefulWidget {
   const _Stacked();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_Stacked> createState() => _StackedState();
+}
+
+class _StackedState extends ConsumerState<_Stacked> {
+  @override
+  void initState() {
+    super.initState();
+    // A task pre-selected before this list existed (`openTasks`'s `select`,
+    // from the drawer, the Git panel's task strip, or the Tasks nav row)
+    // needs pushing explicitly here — unlike `_Split`, which just reads the
+    // selection straight into its own right pane, a phone has no pane to read
+    // it into, so nothing pushes the detail route unless this does.
+    final preselected = ref.read(selectedTaskNumberProvider);
+    if (preselected != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        detached(
+          'tasks',
+          'open pre-selected task',
+          () => showTaskDetail(context, preselected),
+        );
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Covers a LATER external selection made while this list stays mounted
+    // (e.g. the Git panel's task strip, tapped again without leaving Tasks) —
+    // [initState] only catches the selection that existed at first mount.
+    ref.listen<int?>(selectedTaskNumberProvider, (prev, next) {
+      if (next == null || next == prev) return;
+      detached('tasks', 'open task', () => showTaskDetail(context, next));
+    });
     return TaskListView(
       compact: true,
-      onOpen: (number) {
-        ref.read(selectedTaskNumberProvider.notifier).select(number);
-        detached('tasks', 'open task', () => showTaskDetail(context, number));
-      },
+      onOpen: (number) =>
+          ref.read(selectedTaskNumberProvider.notifier).select(number),
     );
   }
 }
 
-/// Opens the tasks surface full-screen.
-///
-/// A dialog route, following the mobile session search: the Android back button
-/// and the system back gesture close it for free, which an overlay would
-/// swallow neither of.
-Future<void> showTasks(BuildContext context) {
-  return showDialog<void>(
-    context: context,
-    // The surface draws its own safe area — the list must run to the bottom
-    // edge under the gesture bar rather than stopping short of it.
-    useSafeArea: false,
-    builder: (context) => Dialog.fullscreen(
-      backgroundColor: context.antgrid.bgDeepest,
-      child: SafeArea(
-        child: TasksSurface(onClose: () => Navigator.of(context).pop()),
-      ),
-    ),
-  );
+/// Switches the workbench to the tasks surface — the same mechanism
+/// [WorkbenchSurface.appSettings] uses (see `workspace_shell.dart`'s and
+/// `new_session_screen.dart`'s `_workbenchSurfaceChild`/`_surfaceChild`): it
+/// replaces the agent + context panel while the project drawer stays put,
+/// rather than a dialog route that would cover it too. [select], when given,
+/// is opened in the detail pane (or pushed on a phone) as soon as the surface
+/// is up.
+void openTasks(BuildContext context, WidgetRef ref, {int? select}) {
+  if (select != null) {
+    ref.read(selectedTaskNumberProvider.notifier).select(select);
+  }
+  ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.tasks);
+  ref
+      .read(navControllerProvider.notifier)
+      .commit(
+        NavLocation(
+          target: ref.read(selectedTargetProvider),
+          surface: WorkbenchSurface.tasks,
+          sessionId: ref.read(activeSessionIdProvider),
+        ),
+      );
+  // Mobile: the drawer this row lives in is a slide-in overlay over the
+  // surface switch above, so it must be dismissed for the switch to be seen.
+  closeDrawerIfOverlay(context);
 }
 
 const _listPaneWidth = 380.0;

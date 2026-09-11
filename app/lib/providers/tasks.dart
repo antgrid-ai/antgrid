@@ -1,9 +1,12 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/agent_work_status.dart';
+import '../models/session_entry.dart';
 import '../models/task.dart';
 import '../services/tasks_api.dart';
 import 'auth.dart';
+import 'sessions.dart'
+    show activeSessionOrCachedProvider, selectableSessionsProvider;
 
 /// Task state for the account-level list and the detail beside it.
 ///
@@ -720,16 +723,69 @@ class TaskRunPresence {
   final String? machineName;
 }
 
-/// Live runs keyed by task number.
+/// The task's live session in the CURRENTLY FOCUSED project, or null.
 ///
-/// The seam the launch work attaches to. It is empty today because the account
-/// service stores no run: `taskJson` in `web/src/routes/tasks.ts` carries no
-/// run field, and the app's own work-status maps are keyed by session and
-/// project with nothing tying either to a task number. Overriding this provider
-/// is all the row and the Running scope need.
-final taskRunPresenceProvider = Provider<Map<int, TaskRunPresence>>(
-  (ref) => const {},
-);
+/// A task's own `projectId` is an account uuid with no route to an app
+/// project id (see `task_launcher.dart`'s own doc), so a task's session can
+/// only ever have been created in whichever project was focused when Start
+/// was pressed (`AppTaskLauncher.start`) — there is nowhere else to look.
+/// A task run from a different Antgrid install, or in a project this one
+/// does not currently have open, is simply not visible here.
+final taskSessionProvider = Provider.family<SessionEntry?, int>((
+  ref,
+  taskNumber,
+) {
+  for (final session in ref.watch(selectableSessionsProvider)) {
+    if (session.running && session.taskRef?.number == taskNumber) {
+      return session;
+    }
+  }
+  return null;
+});
+
+/// Live runs keyed by task number, derived from [taskSessionProvider] for
+/// every session the focused project currently has running. A session's own
+/// `workStatus` is advisory and may still be null moments after it starts —
+/// [AgentWorkStatus.working] is the honest default for "running, nothing to
+/// report yet", never a state this map omits the session for.
+final taskRunPresenceProvider = Provider<Map<int, TaskRunPresence>>((ref) {
+  return {
+    for (final session in ref.watch(selectableSessionsProvider))
+      if (session.running && session.taskRef != null)
+        session.taskRef!.number: TaskRunPresence(
+          status: session.workStatus ?? AgentWorkStatus.working,
+          agentKey: session.tool,
+          sessionName: session.name,
+        ),
+  };
+});
+
+/// The task the currently ACTIVE session was launched for, or null.
+///
+/// `taskRef` is fixed for the life of a session (set once at creation), so
+/// [activeSessionOrCachedProvider] — which documents that same read-only-fixed
+/// contract — is enough here without needing the live stream. Read by the Git
+/// tab so a task's own session shows which task its changes belong to; a
+/// session created outside a task, or a `taskRef` naming a task this list has
+/// not fetched, both read as null (the "no run" case, never a broken link).
+final focusedSessionTaskProvider = Provider<Task?>((ref) {
+  final taskRef = ref.watch(activeSessionOrCachedProvider)?.taskRef;
+  if (taskRef == null) return null;
+  final tasks = ref.watch(taskListProvider).value ?? const <Task>[];
+  for (final task in tasks) {
+    if (task.number == taskRef.number) return task;
+  }
+  return null;
+});
+
+/// Every open task in the account, regardless of project — what the sidebar's
+/// permanent Tasks entry counts. `null` while the account-wide fetch has not
+/// landed yet, so the badge can stay absent instead of flashing a false zero.
+final openTaskCountProvider = Provider<int?>((ref) {
+  final tasks = ref.watch(taskListProvider).value;
+  if (tasks == null) return null;
+  return tasks.where((t) => !t.status.isClosed).length;
+});
 
 /// Starts an agent session from a task.
 ///

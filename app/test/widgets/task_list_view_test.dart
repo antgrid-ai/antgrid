@@ -100,9 +100,7 @@ void main() {
     tester,
   ) async {
     final gate = Completer<http.Response>();
-    final container = _container(
-      client: MockClient((_) => gate.future),
-    );
+    final container = _container(client: MockClient((_) => gate.future));
     await _pump(tester, container);
     await tester.pump();
 
@@ -430,6 +428,12 @@ void main() {
             }),
             200,
           );
+        }
+        // The filter bar's repo picker (`_RepoFilterChip`) watches this on
+        // every build too — excluded so `listCalls` still counts only the
+        // fetch this test is actually pinning the count of.
+        if (req.url.path == '/account/projects') {
+          return http.Response(jsonEncode({'projects': []}), 200);
         }
         listCalls++;
         return http.Response(

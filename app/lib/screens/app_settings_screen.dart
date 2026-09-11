@@ -393,7 +393,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                   _Section(
                     section: SettingsSection.account,
                     body: [
-                      if (ref.watch(currentUserProvider).value != null) ...[
+                      if (ref.watch(currentUserProvider).value case final user?) ...[
                         const SizedBox(height: AbTokens.space8),
                         Text(
                           'Set or change your password on the web, where a '
@@ -415,6 +415,30 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                               color: antgrid.textSecondary,
                             ),
                             onTap: () => openAccountInBrowser(ref.container),
+                          ),
+                        ),
+                        const SizedBox(height: AbTokens.space16),
+                        Text(
+                          'Connect GitHub to import issues as tasks.',
+                          style: AbTokens.sansStyle(
+                            fontSize: AbTokens.fontXxs,
+                            color: antgrid.textMuted,
+                          ),
+                        ),
+                        const SizedBox(height: AbTokens.space8),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: AbButton(
+                            label: 'CONNECT GITHUB',
+                            leading: AbIcon(
+                              AbIcons.link,
+                              size: 10,
+                              color: antgrid.textSecondary,
+                            ),
+                            onTap: () => openGitHubIntegrationsInBrowser(
+                              ref.container,
+                              appUserEmail: user.email,
+                            ),
                           ),
                         ),
                         const SizedBox(height: AbTokens.space16),

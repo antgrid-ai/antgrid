@@ -70,6 +70,7 @@ import '../widgets/session_search_modal.dart';
 import '../widgets/session_start_refusal.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../widgets/resizable_pane.dart';
+import '../widgets/tasks/tasks_surface.dart';
 import '../widgets/terminal_elapsed.dart';
 import '../widgets/workspace_tab_bar.dart';
 import '../widgets/ab_banner.dart';
@@ -2335,6 +2336,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
     return switch (surface) {
       WorkbenchSurface.appSettings => AppSettingsScreen(onClose: close),
+      WorkbenchSurface.tasks => TasksSurface(onClose: close),
       // No longer a surface of its own: the device roster lives in the title
       // bar's RemoteAccessPanel. Kept only so a lingering `devices` deep link
       // no-ops the same way here as on new_session_screen.dart.

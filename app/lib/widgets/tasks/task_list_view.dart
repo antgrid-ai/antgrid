@@ -13,6 +13,7 @@ import '../../design/widgets/ab_label_chip.dart';
 import '../../design/widgets/ab_loading.dart';
 import '../../design/widgets/ab_search_field.dart';
 import '../../design/widgets/ab_segmented.dart';
+import '../../design/widgets/ab_select_sheet.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../models/task.dart';
 import '../../providers/tasks.dart';
@@ -186,6 +187,15 @@ class _FilterBar extends ConsumerWidget {
             onChanged: controller.setQuery,
             onClear: () => controller.setQuery(''),
           ),
+          const SizedBox(height: AbTokens.space6),
+          // Repo scoping stays outside the compact-narrowing gate below: it is
+          // how this list becomes the per-project view the drawer node used to
+          // be the only way to reach, so it must be reachable with zero other
+          // filters active.
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: _RepoFilterChip(),
+          ),
           if (!compact || filter.hasNarrowingFilters) ...[
             const SizedBox(height: AbTokens.space6),
             SingleChildScrollView(
@@ -230,6 +240,54 @@ class _FilterBar extends ConsumerWidget {
   }
 }
 
+/// Narrows the list to one account project — the "repo" a drawer row's
+/// `repoKey` resolves to via [taskProjectIdByRepoKeyProvider]. Read/write
+/// [TaskFilter.projectId] directly rather than through [taskQueryProvider]'s
+/// server query: the fetch stays wide (see [TaskFilter.serverQuery]) so the
+/// drawer's per-project nodes are never emptied by a scope picked here, and
+/// this filter narrows the same client-side pass [visibleTasksProvider] does.
+class _RepoFilterChip extends ConsumerWidget {
+  const _RepoFilterChip();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final repoId = ref.watch(taskFilterProvider.select((f) => f.projectId));
+    final names = ref.watch(taskProjectNamesProvider);
+    final label = repoId == null
+        ? 'All repos'
+        : (names[repoId] ?? 'Unknown repo');
+    return AbChip.toggle(
+      label: label,
+      selected: repoId != null,
+      onTap: () => _pick(context, ref, names),
+    );
+  }
+
+  Future<void> _pick(
+    BuildContext context,
+    WidgetRef ref,
+    Map<String, String> names,
+  ) async {
+    final picked = await showAbSelect<String>(
+      context,
+      title: 'Repo',
+      single: true,
+      emptyMessage: 'No repos are bound to this account yet',
+      options: [
+        const AbSelectOption(value: '', label: 'All repos'),
+        for (final entry in names.entries)
+          AbSelectOption(value: entry.key, label: entry.value),
+      ],
+      selected: {ref.read(taskFilterProvider).projectId ?? ''},
+    );
+    final choice = picked?.firstOrNull;
+    if (choice == null) return;
+    ref
+        .read(taskFilterProvider.notifier)
+        .setProject(choice.isEmpty ? null : choice);
+  }
+}
+
 class _MutationBanner extends ConsumerWidget {
   const _MutationBanner({required this.failure});
 
@@ -256,8 +314,7 @@ class _MutationBanner extends ConsumerWidget {
           AbIconButton(
             icon: AbIcons.close,
             tooltip: 'Dismiss',
-            onTap: () =>
-                ref.read(taskMutationErrorProvider.notifier).set(null),
+            onTap: () => ref.read(taskMutationErrorProvider.notifier).set(null),
           ),
         ],
       ),
@@ -305,7 +362,10 @@ class _EmptyForScope extends ConsumerWidget {
       return AbEmptyState(
         icon: AbIcons.filter,
         title: 'No tasks match these filters',
-        action: AbButton(label: 'Clear filters', onTap: controller.clearFilters),
+        action: AbButton(
+          label: 'Clear filters',
+          onTap: controller.clearFilters,
+        ),
       );
     }
     return switch (filter.scope) {

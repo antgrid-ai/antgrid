@@ -77,7 +77,7 @@ Future<void> _pump(
       child: MaterialApp(
         theme: buildAbTheme(),
         home: Scaffold(
-          body: ProjectTasksNode(repoKey: repoKey, expansionId: 'p.tasks'),
+          body: ProjectTasksNode(repoKey: repoKey),
         ),
       ),
     ),
@@ -86,7 +86,7 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('collapsed, it says how many without being opened', (
+  testWidgets('shows every open task immediately, with no tap to expand', (
     tester,
   ) async {
     final container = _container(
@@ -96,12 +96,12 @@ void main() {
 
     expect(find.text('Tasks'), findsOneWidget);
     expect(find.text('3'), findsOneWidget);
-    // Collapsed by default: a tree that opens every node costs more than it
-    // shows.
-    expect(find.text('Fix the drawer'), findsNothing);
+    // Always open: a task outlives any session and is worth seeing without a
+    // click, so there is no collapsed state to expand out of.
+    expect(find.text('Fix the drawer'), findsNWidgets(3));
   });
 
-  testWidgets('expanding lists the project the tasks are filed against', (
+  testWidgets('lists only the project the tasks are filed against', (
     tester,
   ) async {
     final container = _container(
@@ -111,9 +111,6 @@ void main() {
       ],
     );
     await _pump(tester, container);
-
-    await tester.tap(find.text('Tasks'));
-    await tester.pumpAndSettle();
 
     expect(find.text('Drawer bug'), findsOneWidget);
     expect(find.text('ANT-1'), findsOneWidget);
