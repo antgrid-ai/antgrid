@@ -7,8 +7,6 @@
 // the one that is not, and the group at the bottom is what holds it to that.
 import 'dart:async';
 
-import 'package:antgrid/design/ab_status_tone.dart';
-import 'package:antgrid/design/widgets/ab_status_dot.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/account_agents.dart';
@@ -42,17 +40,57 @@ SessionEntry _session() => SessionEntry(
   mode: 'chat',
 );
 
-/// A bus channel that only pushes. The kebab reads a count and never asks for
-/// one, so a hydrator that stayed silent is the honest stand-in for a bridge
-/// that has answered nothing yet.
+/// Drive one arrival end to end: the push, the read it triggers, and the
+/// answer.
+///
+/// Called with the MENU OPEN, and that is not incidental. Nothing outside the
+/// menu reads a session's mailbox any more, so nothing is subscribed to push at
+/// until the kebab is opened — which is the whole shape of "no indication":
+/// mail moves a surface only while someone is looking at one.
+Future<void> _mailArrives(
+  WidgetTester tester,
+  _FakeBusChannel channel, {
+  required int posts,
+}) async {
+  channel.emit({'type': 'session-bus:arrived', 'sessionId': 'sess-lead'});
+  await tester.pump();
+  channel.emit({
+    'type': 'session-bus:inbox:result',
+    'requestId': channel.pendingRequestId,
+    'posts': [for (var i = 0; i < posts; i++) _inboxPost('m$i')],
+    'dropped': 0,
+  });
+  await tester.pump();
+}
+
+/// One parked post, as the bridge answers a peek.
+Map<String, dynamic> _inboxPost(String messageId) => {
+  'messageId': messageId,
+  'threadId': 't-1',
+  'contextId': 'ctx-1',
+  'at': 1700000000000,
+  'from': {
+    'machineId': 'm-other',
+    'projectId': 'p-other',
+    'sessionId': 's-other',
+  },
+  'summary': 'same 401 on token refresh?',
+  'text': const <String>['line one'],
+  'artifacts': const <Map<String, dynamic>>[],
+};
+
+/// A bus channel whose hydrator stays silent — the honest stand-in for a bridge
+/// that has answered nothing yet — and which records what was asked of it, so a
+/// test can answer the read an arrival push triggers.
 class _FakeBusChannel implements SessionBusChannel {
   final _frames = StreamController<Map<String, dynamic>>.broadcast();
+  final sent = <Map<String, dynamic>>[];
 
   @override
   Stream<Map<String, dynamic>> get frames => _frames.stream;
 
   @override
-  Future<void> send(Map<String, dynamic> message) async {}
+  Future<void> send(Map<String, dynamic> message) async => sent.add(message);
 
   @override
   Future<void> hydrate(String key, Future<void> Function() run) async {}
@@ -61,6 +99,11 @@ class _FakeBusChannel implements SessionBusChannel {
   void unhydrate(String key) {}
 
   void emit(Map<String, dynamic> frame) => _frames.add(frame);
+
+  /// The id of the read still waiting for an answer.
+  String get pendingRequestId =>
+      sent.lastWhere((m) => m['type'] == 'session-bus:inbox')['requestId']
+          as String;
 
   Future<void> dispose() => _frames.close();
 }
@@ -201,51 +244,24 @@ void main() {
       expect(find.byKey(const Key('session-attention-dot')), findsNothing);
     });
 
-    testWidgets('mail lights the one dot the kebab already has', (
+    testWidgets('mail lights nothing — the bus is agent-to-agent', (
       tester,
     ) async {
       final channel = await pumpWithBus(tester);
-      channel.emit({
-        'type': 'session-bus:unread',
-        'sessionId': 'sess-lead',
-        'unread': 2,
-        'dropped': 0,
-      });
-      await tester.pump();
+      await _openKebab(tester);
+      await _mailArrives(tester, channel, posts: 1);
 
-      // ONE dot, not a second beside it: the kebab reports that something
-      // behind it is waiting, and mail is one more thing that can be.
-      final dots = find.byKey(const Key('session-attention-dot'));
-      expect(dots, findsOneWidget);
-      // Mail blocks nobody, so it takes the dot in its own tone rather than
-      // borrowing the one an escalation uses.
-      expect(tester.widget<AbStatusDot>(dots).tone, AbStatusTone.unread);
-      // The dot cannot carry a number; the button says how many.
-      expect(
-        find.byTooltip(
-          'Session options — 2 unread messages from other sessions',
-        ),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('a count for another session moves nothing', (tester) async {
-      final channel = await pumpWithBus(tester);
-      channel.emit({
-        'type': 'session-bus:unread',
-        'sessionId': 'sess-elsewhere',
-        'unread': 5,
-        'dropped': 0,
-      });
-      await tester.pump();
-
+      // The mail is demonstrably there — the row that opens it is in the menu —
+      // and still nothing calls for the user. Nobody is blocked on them: the
+      // dot is an escalation's alone, and the button says only what it opens.
+      expect(find.text('Messages'), findsOneWidget);
       expect(find.byKey(const Key('session-attention-dot')), findsNothing);
       expect(find.byTooltip('Session options'), findsOneWidget);
     });
   });
 
-  // The kebab is the second door to the mailbox sheet, and the one that still
-  // works at zero unread — where the badge on the row has nothing to draw.
+  // The kebab is the ONLY door to the mailbox sheet: nothing announces a peer's
+  // mail, so this row is what a person opens when they want to look.
   group('the Messages row', () {
     Future<_FakeBusChannel> pumpWithBus(WidgetTester tester) async {
       final channel = _FakeBusChannel();
@@ -259,24 +275,6 @@ void main() {
         busChannel: channel,
       );
       return channel;
-    }
-
-    /// Opened BEFORE the push, so the row is proven to arrive on a live rebuild
-    /// rather than to have been resolved once when the popup opened — which is
-    /// the difference between [AbLiveMenuRow] and a static entry, and the
-    /// reason this row is the former.
-    Future<void> emitUnread(
-      WidgetTester tester,
-      _FakeBusChannel channel, {
-      required int unread,
-    }) async {
-      channel.emit({
-        'type': 'session-bus:unread',
-        'sessionId': 'sess-lead',
-        'unread': unread,
-        'dropped': 0,
-      });
-      await tester.pump();
     }
 
     testWidgets('is absent while the session has never been on the bus', (
@@ -297,7 +295,7 @@ void main() {
     testWidgets('appears once the session has bus traffic', (tester) async {
       final channel = await pumpWithBus(tester);
       await _openKebab(tester);
-      await emitUnread(tester, channel, unread: 2);
+      await _mailArrives(tester, channel, posts: 2);
 
       expect(find.text('Messages'), findsOneWidget);
     });
@@ -308,10 +306,10 @@ void main() {
     testWidgets('survives the agent emptying the mailbox', (tester) async {
       final channel = await pumpWithBus(tester);
       await _openKebab(tester);
-      await emitUnread(tester, channel, unread: 1);
+      await _mailArrives(tester, channel, posts: 1);
       expect(find.text('Messages'), findsOneWidget);
 
-      await emitUnread(tester, channel, unread: 0);
+      await _mailArrives(tester, channel, posts: 0);
 
       expect(find.text('Messages'), findsOneWidget);
     });
@@ -319,7 +317,7 @@ void main() {
     testWidgets('opens the sheet for this session', (tester) async {
       final channel = await pumpWithBus(tester);
       await _openKebab(tester);
-      await emitUnread(tester, channel, unread: 1);
+      await _mailArrives(tester, channel, posts: 1);
 
       await tester.tap(find.text('Messages'));
       await tester.pump();

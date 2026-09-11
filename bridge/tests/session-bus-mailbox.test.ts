@@ -9,7 +9,6 @@ import {
   loadMailbox,
   markRead,
   saveMailbox,
-  unreadCount,
   unreadPosts,
   type MailboxPost,
   type MailboxState,
@@ -85,12 +84,12 @@ test("expiry runs before the append, so live mail is not evicted for it", () => 
 
 test("reading marks exactly what was read", () => {
   let s = filled(3);
-  expect(unreadCount(s)).toBe(3);
+  expect(unreadPosts(s).length).toBe(3);
 
   s = markRead(s, ["m-1", "m-does-not-exist"]);
 
   expect(unreadPosts(s).map((p) => p.messageId)).toEqual(["m-0", "m-2"]);
-  expect(unreadCount(s)).toBe(2);
+  expect(unreadPosts(s).length).toBe(2);
   // A mark that changed nothing must not churn the state a save writes back.
   expect(markRead(s, ["m-1"])).toBe(s);
 });
@@ -108,7 +107,7 @@ test("a mailbox survives a restart, the drop count with it", () => {
     // The counter is what the bound was spent ON, so it has to outlive every
     // post it counts.
     expect(back.dropped).toBe(2);
-    expect(unreadCount(back)).toBe(MAX_MAILBOX_POSTS - 1);
+    expect(unreadPosts(back).length).toBe(MAX_MAILBOX_POSTS - 1);
   } finally {
     rmSync(abDir, { recursive: true, force: true });
   }

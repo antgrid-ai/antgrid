@@ -532,15 +532,21 @@ No new screen (D14's spirit, carried):
   view: a `notify` is written into the receiving PTY as a prompt (§5.2), and an
   outbound send is a tool call in the sender's transcript. What reaches neither
   is a `post` parked for an agent that has not looked, the mailbox's own
-  discards, and the receipt on an outbound entry — so the surface is a SHEET,
-  opened where the signal already is. Two doors, because they answer different
-  questions: the unread badge on a session row, which is the only thing that can
-  speak for a session the user is not looking at, and a **Messages** row in the
-  session kebab, which still opens at zero unread.
+  discards, and the receipt on an outbound entry — so the surface is a SHEET.
+  ONE door: a **Messages** row in the session kebab, shown for a session that
+  has been on the bus at all and opening at zero unread.
+- **No indication, anywhere.** Nothing announces that a peer wrote to a session —
+  no badge on a row, no count, no dot on the kebab. The bus is agent-to-agent and
+  §10.1 leaves no session a path to another session's human: nobody is blocked on
+  the user, so nothing may ask for their attention on the bus's behalf. The
+  kebab's dot stays an ESCALATION's alone, where a person really is what an agent
+  is stopped on. A `session-bus:arrived` push still crosses the wire — whose
+  mailbox grew, and no count — because a sheet already open on that mailbox has
+  to re-read and nothing else would tell it to.
 - **Thread view** — reuses the transcript's message rendering; a thread is a list
   of wrapped lines that already render.
 
-A session that has only ever SENT is still unreachable from either door: the
+A session that has only ever SENT is still unreachable from that door: the
 app's two reads are the mailbox and one thread by id, and a thread id comes only
 from an inbound post. A `session-bus:threads` read is what closes it.
 

@@ -98,10 +98,6 @@ export function unreadPosts(s: MailboxState): MailboxPost[] {
   return s.posts.filter((p) => !p.read);
 }
 
-export function unreadCount(s: MailboxState): number {
-  return unreadPosts(s).length;
-}
-
 /** Expiry runs on the way OUT of the database as well as on every append: a
  *  session nobody wrote to for a week would otherwise come back holding mail
  *  the TTL had already retired, and the constant would be decoration. */

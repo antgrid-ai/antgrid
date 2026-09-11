@@ -286,7 +286,7 @@ type BusFrame = SessionBusPost | SessionBusNotify | SessionBusFetch | SessionBus
 // The five frames a bridge actually carries between machines — the same set
 // `SessionBusCoordinator.handleInbound` (bridge/src/session-bus/coordinator.ts)
 // enumerates. NOT a `session-bus:` prefix match: that prefix also covers the
-// app's own reads of its bridge (inbox, directory, unread, …), which carry no
+// app's own reads of its bridge (inbox, directory, arrived, …), which carry no
 // `to.machineId` and so would land in `undeliverable` on every run — silent
 // today only because nothing asserts on that array yet.
 //

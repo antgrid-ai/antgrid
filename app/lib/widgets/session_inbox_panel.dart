@@ -13,7 +13,6 @@ import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_section_header.dart';
 import '../models/agent_event.dart';
 import '../providers/session_bus_inbox.dart';
-import '../util/detached.dart';
 import '../util/relative_time.dart';
 import 'transcript/rows/message_row.dart';
 import 'transcript/selection/transcript_selection_scope.dart';
@@ -40,19 +39,17 @@ Future<void> showSessionInbox(
 /// The posts other sessions have written to this one, and the thread behind any
 /// of them.
 ///
-/// A sheet, opened from the unread badge on a session row and from the session
-/// kebab — never a workspace tab. Almost everything a bus exchange does is
+/// A sheet, opened from the Messages row in the session kebab and nowhere else
+/// — never a workspace tab. Almost everything a bus exchange does is
 /// already in the terminal: a `notify` is written into the PTY as a prompt, and
 /// an outbound send is an MCP tool call in the transcript. What is ONLY here is
 /// what reaches neither — a `post` parked for an agent that has not looked, the
 /// mailbox's own discards, and the delivery receipt on an outbound entry. That
-/// is a surface to open at a row, not a permanent slot mostly saying "Nothing
-/// unread".
+/// is a surface to open on purpose, not a permanent slot mostly saying
+/// "Nothing unread".
 ///
-/// [sessionId] is given rather than read from focus, which is the whole reason
-/// the badge can be the entry point: the row carrying mail is routinely NOT the
-/// session the user is looking at, and a focus-scoped surface can never speak
-/// for it.
+/// [sessionId] is given rather than read from focus, so this renders the
+/// mailbox it was opened for even if focus moves out from under it.
 ///
 /// Every read it makes is a PEEK. The read that marks a post read belongs to
 /// the agent, and a human opening this must not spend it — the post would
@@ -74,21 +71,6 @@ class _SessionInboxPanelState extends ConsumerState<SessionInboxPanel> {
   @override
   Widget build(BuildContext context) {
     final sessionId = widget.sessionId;
-
-    // The arrival push moves the unread count and carries no posts, so a panel
-    // already on screen has to ask for the new one. `generation` is the only
-    // signal that what is rendered has gone short.
-    ref.listen(
-      sessionInboxProvider(sessionId).select((s) => s.generation),
-      (previous, next) {
-        if (previous == null || previous == next) return;
-        detached(
-          'SessionInboxPanel',
-          'mailbox re-read',
-          ref.read(sessionInboxProvider(sessionId).notifier).refresh,
-        );
-      },
-    );
 
     final threadId = _openThreadId;
     if (threadId != null) {

@@ -2091,7 +2091,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
       return json;
 
     // The app's own reads of its bridge's session bus, plus the unsolicited
-    // count that keeps their badges true between reads. Handed on raw like the
+    // note that one of those mailboxes grew. Handed on raw like the
     // carried frames above, but for the opposite reason: these ARE this app's
     // messages, and their one reader (`providers/session_bus_inbox.dart`)
     // decodes them into the view models its surfaces render. A second set of
@@ -2102,7 +2102,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     // case here; their type strings are authored where they are sent.
     case 'session-bus:inbox:result':
     case 'session-bus:thread:result':
-    case 'session-bus:unread':
+    case 'session-bus:arrived':
       return json;
 
     default:

@@ -37,7 +37,6 @@ import { removeSessionBusSession } from "./session-bus/store-fs";
 import { SessionBusCoordinator, type SessionBusEvent, type SessionBusSelf } from "./session-bus/coordinator";
 import { lineForEvent } from "./session-bus/deliver-event";
 import { isRefusal } from "./session-bus/errors";
-import { unreadCount } from "./session-bus/mailbox";
 import { neutralizeFenced } from "./session-bus/delivery";
 import type { QueuedLine } from "./session-bus/delivery-queue";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
@@ -495,10 +494,10 @@ export interface BuildAgentCoreOptions {
  *  makes the Git view move while the user is looking at it. */
 const GIT_POLL_BASE_MS = 10_000;
 
-/** How long a session's unread push waits for the rest of a burst. Wide enough
- *  that a fan-out of arrivals is one badge change, narrow enough that the badge
- *  still moves while the human who is waiting for it is looking. */
-const BUS_UNREAD_COALESCE_MS = 100;
+/** How long a session's arrival push waits for the rest of a burst. Wide enough
+ *  that a fan-out of arrivals is one push, narrow enough that a sheet open on
+ *  that mailbox still re-reads while its reader is looking at it. */
+const BUS_ARRIVED_COALESCE_MS = 100;
 
 export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<AgentCore> {
   // The interactive bootstrap (`consoleBootstrapIO` → @inquirer/prompts) reads
@@ -1094,7 +1093,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Declared ahead of the listener below, unlike the hoisted functions that use
   // it: a `const` in the temporal dead zone would throw on an event that arrived
   // during construction.
-  const unreadPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const arrivedPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   // The consumer that turns THIS project's bus events into lines its own
   // agents read (defined below; hoisted, so the forward reference is safe).
@@ -1139,30 +1138,26 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       return;
     }
     // A notify leaves no mailbox row — it is rendered into the session instead
-    // (coordinator's `onMessage`) — so only a post moves an unread count.
-    if (event.kind === "post") pushUnread(event.sessionId);
+    // (coordinator's `onMessage`) — so only a post changes what the sheet would
+    // show.
+    if (event.kind === "post") pushArrived(event.sessionId);
     if (!line) return;
     deliverLine(line);
   }
 
-  /** Tell the app one session's mailbox grew, so a badge moves without being
-   *  asked. A count only ever read on demand is a count frozen at whatever the
-   *  last request returned, which is the whole reason this push exists.
+  /** Tell the app one session's mailbox grew. Deliberately no count: nothing
+   *  in the app announces a peer's mail, and a number on the wire that no
+   *  surface renders is a badge waiting to be re-grown. The signal alone is
+   *  what an open sheet re-reads on.
    *
-   *  Coalesced per session: a task that lands five posts at once is one badge
-   *  change, not five. The count is read at FLUSH time rather than carried from
-   *  the event, so the single push says where the mailbox ENDED UP. */
-  function pushUnread(sessionId: string): void {
-    if (unreadPushTimers.has(sessionId)) return;
-    unreadPushTimers.set(sessionId, setTimeout(() => {
-      unreadPushTimers.delete(sessionId);
-      const mailbox = sessionBus.mailbox(sessionId);
-      sendAb(createMessage("session-bus:unread", {
-        sessionId,
-        unread: unreadCount(mailbox),
-        dropped: mailbox.dropped,
-      }));
-    }, BUS_UNREAD_COALESCE_MS));
+   *  Coalesced per session: a task that lands five posts at once is one push,
+   *  not five. */
+  function pushArrived(sessionId: string): void {
+    if (arrivedPushTimers.has(sessionId)) return;
+    arrivedPushTimers.set(sessionId, setTimeout(() => {
+      arrivedPushTimers.delete(sessionId);
+      sendAb(createMessage("session-bus:arrived", { sessionId }));
+    }, BUS_ARRIVED_COALESCE_MS));
   }
 
   /** Hand a rendered line to whoever owns delivery: the turn-boundary queue when
@@ -1359,10 +1354,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               requestId: msg.requestId,
               posts: view.posts,
               dropped: view.dropped,
-              // Every post a peek returns is unread by construction, so the
-              // count is this list's length rather than a second read of the
-              // mailbox that could answer about a later instant.
-              unread: view.posts.length,
             }),
         );
         break;
@@ -4734,8 +4725,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // A coalescing window that outlived the core would fire into a torn-down
       // transport, and on a host-injected coordinator it would also read a
       // mailbox for a project nothing is serving any more.
-      for (const timer of unreadPushTimers.values()) clearTimeout(timer);
-      unreadPushTimers.clear();
+      for (const timer of arrivedPushTimers.values()) clearTimeout(timer);
+      arrivedPushTimers.clear();
       if (!opts.sessionBus) sessionBus.stop();
       // Before teardownServices, which force-kills through `killAll()` and then
       // nulls `manager` — sequenced after it this could only ever see an empty

@@ -17,7 +17,7 @@ const _kInboxRequest = 'session-bus:inbox';
 const _kInboxResult = 'session-bus:inbox:result';
 const _kThreadRequest = 'session-bus:thread';
 const _kThreadResult = 'session-bus:thread:result';
-const _kUnreadPush = 'session-bus:unread';
+const _kArrivedPush = 'session-bus:arrived';
 
 const _uuid = Uuid();
 
@@ -437,7 +437,6 @@ List<T> _mapList<T>(Object? json, T? Function(Object?) decode) {
 @immutable
 class SessionInboxState {
   const SessionInboxState({
-    this.unread = 0,
     this.dropped = 0,
     this.posts = const <SessionBusInboxPost>[],
     this.loading = false,
@@ -445,26 +444,21 @@ class SessionInboxState {
     this.generation = 0,
   });
 
-  /// What a badge renders. Seeded by the read and moved in place by the
-  /// unsolicited push, which is the whole reason several surfaces can share one
-  /// count without a request each behind them.
-  final int unread;
-
   /// Posts this session will never see, zero included: a reader that cannot
   /// tell an empty mailbox from an emptied one has been told the wrong thing,
   /// not merely told less.
   final int dropped;
 
-  /// The last read's contents. [unread] can outrun this, because a push moves
-  /// the count without carrying posts — so a surface showing the list watches
-  /// [generation] and calls [SessionInboxController.refresh], and nothing
-  /// derives a count from `posts.length`.
+  /// The last read's contents. The arrival push carries none, so a surface
+  /// showing the list watches [generation] and calls
+  /// [SessionInboxController.refresh] rather than waiting to be handed them.
   final List<SessionBusInboxPost> posts;
 
   final bool loading;
 
-  /// Set when the bridge refused the read. The counts are left standing: a
-  /// transient refusal must not zero a badge that was right a moment ago.
+  /// Set when the bridge refused the read. What was already read is left
+  /// standing: a transient refusal must not empty a sheet that was right a
+  /// moment ago.
   final SessionBusRefusal? refusal;
 
   /// Bumped by every arrival push. A surface holding rendered content listens
@@ -472,7 +466,6 @@ class SessionInboxState {
   final int generation;
 
   SessionInboxState copyWith({
-    int? unread,
     int? dropped,
     List<SessionBusInboxPost>? posts,
     bool? loading,
@@ -485,7 +478,6 @@ class SessionInboxState {
       'clearRefusal with a refusal says two things at once.',
     );
     return SessionInboxState(
-      unread: unread ?? this.unread,
       dropped: dropped ?? this.dropped,
       posts: posts ?? this.posts,
       loading: loading ?? this.loading,
@@ -497,7 +489,6 @@ class SessionInboxState {
   @override
   bool operator ==(Object other) =>
       other is SessionInboxState &&
-      other.unread == unread &&
       other.dropped == dropped &&
       other.loading == loading &&
       other.refusal == refusal &&
@@ -506,7 +497,6 @@ class SessionInboxState {
 
   @override
   int get hashCode => Object.hash(
-    unread,
     dropped,
     loading,
     refusal,
@@ -538,7 +528,7 @@ class SessionInboxController extends Notifier<SessionInboxState> {
     _pendingRequestId = null;
     // A rebuild is not necessarily a new mailbox — `sessionBusChannelProvider`
     // can legitimately yield a fresh-but-equivalent channel (a reconnect that
-    // re-wrapped the same session). Carrying the counts forward keeps a badge
+    // re-wrapped the same session). Carrying `dropped` forward keeps a sheet
     // that was right a moment ago from blanking for the width of the re-read.
     final previous = stateOrNull;
     if (channel == null) return const SessionInboxState();
@@ -546,21 +536,16 @@ class SessionInboxController extends Notifier<SessionInboxState> {
     final sub = channel.frames.listen(_onFrame);
     ref.onDispose(sub.cancel);
     // Registered, not sent once: the mailbox is idempotent view-state, and the
-    // bridge does not re-announce the count on handshake. A reconnect that did
-    // not re-read would leave every badge stale at whatever the dropped socket
-    // last carried — and reading zero after an eviction is worse than reading
-    // nothing.
+    // bridge re-announces nothing on handshake. A reconnect that did not
+    // re-read would leave an open sheet stale at whatever the dropped socket
+    // last carried.
     ref.onDispose(() => channel.unhydrate(_hydratorKey));
     unawaited(channel.hydrate(_hydratorKey, _read));
-    return SessionInboxState(
-      unread: previous?.unread ?? 0,
-      dropped: previous?.dropped ?? 0,
-      loading: true,
-    );
+    return SessionInboxState(dropped: previous?.dropped ?? 0, loading: true);
   }
 
   /// Re-reads the mailbox. A peek: it never marks anything read, because the
-  /// marking read belongs to the agent and a human glancing at a badge must not
+  /// marking read belongs to the agent and a human opening the sheet must not
   /// spend a post the agent has not seen.
   Future<void> refresh() {
     state = state.copyWith(loading: true);
@@ -582,9 +567,9 @@ class SessionInboxController extends Notifier<SessionInboxState> {
 
   void _onFrame(Map<String, dynamic> json) {
     switch (json['type']) {
-      case _kUnreadPush:
+      case _kArrivedPush:
         if (json['sessionId'] != sessionId) return;
-        _applyPush(json);
+        _applyArrival();
       case _kInboxResult:
         if (json['requestId'] != _pendingRequestId) return;
         _pendingRequestId = null;
@@ -592,17 +577,19 @@ class SessionInboxController extends Notifier<SessionInboxState> {
     }
   }
 
-  void _applyPush(Map<String, dynamic> json) {
-    final unread = json['unread'];
-    final dropped = json['dropped'];
+  /// The push carries WHOSE mailbox grew and nothing else, so the contents are
+  /// re-read here rather than carried on the frame. This is the ONLY thing that
+  /// moves a mailbox between reads — nothing announces a peer's mail, so a
+  /// surface polling state alone would render whatever the connect-time read
+  /// returned for as long as the socket lived.
+  void _applyArrival() {
     state = state.copyWith(
-      unread: unread is num ? unread.toInt() : state.unread,
-      dropped: dropped is num ? dropped.toInt() : state.dropped,
       // A mailbox that just grew is a mailbox that exists, so whatever refused
       // the last read no longer holds.
       clearRefusal: true,
       generation: state.generation + 1,
     );
+    unawaited(_read());
   }
 
   void _applyResult(Map<String, dynamic> json) {
@@ -612,13 +599,8 @@ class SessionInboxController extends Notifier<SessionInboxState> {
       return;
     }
     final posts = _mapList(json['posts'], SessionBusInboxPost.fromJson);
-    final unread = json['unread'];
     final dropped = json['dropped'];
     state = SessionInboxState(
-      // Every post a peek returns is unread by construction, so the bridge
-      // sends the list's length; falling back to it keeps the two agreeing if
-      // an older bridge omits the field.
-      unread: unread is num ? unread.toInt() : posts.length,
       dropped: dropped is num ? dropped.toInt() : 0,
       posts: posts,
       generation: state.generation,

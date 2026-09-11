@@ -262,11 +262,11 @@ class _OtherSessionsMenuItem extends ConsumerWidget {
 /// What this session's peers have written to it, and the thread behind any of
 /// it.
 ///
-/// The second door to the same sheet the unread badge opens, and it exists for
-/// what the badge cannot offer: the badge renders on `unread > 0`, so at zero
-/// unread there would be no way to reach the mailbox's own discards or the
-/// delivery receipt on an outbound entry — the only two things on the bus that
-/// reach neither the terminal nor the transcript.
+/// The ONLY door to that sheet. Nothing announces a peer's mail — the bus is
+/// agent-to-agent and no dot, count or badge speaks for it — so this row is
+/// what a person opens when they want to look: at the mailbox's own discards,
+/// at a parked post, and at the delivery receipt on an outbound entry, the
+/// three things on the bus that reach neither the terminal nor the transcript.
 ///
 /// Live rather than a static [AbMenuItem] because the popup resolves its
 /// entries once at open time, and which session this row is about is settled by
@@ -331,15 +331,12 @@ class _SessionOverflowButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // The menu is closed by default, so a row inside it cannot call for
     // attention by itself. This dot is what the inline pill used to be: the
-    // always-visible sign that something behind the kebab is waiting — an
-    // escalation in a session that is not in focus, or mail another session
-    // sent this one. ONE dot for both: a second one beside it would make the
-    // kebab a status area, and the two facts share the same remedy, which is
-    // to open the menu.
+    // always-visible sign that something behind the kebab is waiting. ONLY an
+    // escalation earns it — a person is stopped until it is answered. Mail from
+    // another session deliberately does not: the bus is agent-to-agent, nobody
+    // is blocked on the human, and a dot for it would ask for attention that
+    // the exchange never needed.
     final waiting = ref.watch(_otherSessionEscalationsProvider).count;
-    final unread = ref.watch(
-      focusedSessionInboxProvider.select((s) => s.unread),
-    );
     final button = Builder(
       // AbCompactTapTargets: the toolbar row already owns its height, so the
       // button's mobile tap-target inflation (24px visual -> 44px hit box)
@@ -357,33 +354,20 @@ class _SessionOverflowButton extends ConsumerWidget {
           children: [
             AbIconButton(
               icon: AbIcons.more,
-              // The dot cannot carry a number, so the count it stands for is
-              // spelled here rather than left for the menu to reveal.
-              tooltip: switch (unread) {
-                0 => 'Session options',
-                1 => 'Session options — 1 unread message from another session',
-                _ =>
-                  'Session options — $unread unread messages from other '
-                      'sessions',
-              },
+              tooltip: 'Session options',
               onTap: () => detached(
                 'AgentPanel',
                 'session overflow menu failed',
                 () => _open(anchor),
               ),
             ),
-            if (waiting > 0 || unread > 0)
-              Positioned(
+            if (waiting > 0)
+              const Positioned(
                 right: -1,
                 top: -1,
                 child: AbStatusDot(
-                  key: const Key('session-attention-dot'),
-                  // An escalation has an agent stopped and waiting on a
-                  // person; mail blocks nothing and is read at leisure, so it
-                  // only takes the dot when nothing is blocked.
-                  tone: waiting > 0
-                      ? AbStatusTone.agentAttention
-                      : AbStatusTone.unread,
+                  key: Key('session-attention-dot'),
+                  tone: AbStatusTone.agentAttention,
                 ),
               ),
           ],

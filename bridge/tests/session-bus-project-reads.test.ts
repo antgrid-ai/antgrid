@@ -1,7 +1,7 @@
 // bridge/tests/session-bus-project-reads.test.ts
 //
 // The app's own reads of its bridge's session bus — directory, inbox, thread —
-// and the unread push that moves a badge nobody asked. All four ride the
+// and the push that says one of those mailboxes grew. All four ride the
 // PROJECT STREAM, because the object that answers them (`SessionBusApi`) is
 // built inside the project core with the machine-level directory injected into
 // it: machine-scoped state never implied machine-scoped transport
@@ -253,7 +253,6 @@ test(
     );
 
     expect(result.error).toBeUndefined();
-    expect(result.unread).toBe(1);
     expect(result.dropped).toBe(0);
     const posts = result.posts as { messageId: string; text: string[] }[];
     expect(posts).toHaveLength(1);
@@ -394,27 +393,26 @@ test(
 );
 
 test(
-  "a burst of posts is one unread push, not one per post",
+  "a burst of posts is one arrival push, not one per post",
   async () => {
     const fx = await setUp();
     for (let i = 0; i < 4; i += 1) {
       fx.bus.dispatchInbound(inboundPost(fx.sessionA, `msg-burst-${i}`, `burst ${i}`), "control", "loopback");
     }
 
-    await waitFor(() => fx.sent.some((m) => m.type === "session-bus:unread"), "the unread push");
+    await waitFor(() => fx.sent.some((m) => m.type === "session-bus:arrived"), "the arrival push");
     // Well past the coalescing window: a per-post implementation has published
     // all four by now, so this fails on count rather than on timing.
     await new Promise((r) => setTimeout(r, 500));
 
-    const pushes = fx.sent.filter((m) => m.type === "session-bus:unread") as unknown as {
-      sessionId: string; unread: number; dropped: number;
+    const pushes = fx.sent.filter((m) => m.type === "session-bus:arrived") as unknown as {
+      sessionId: string; unread?: number;
     }[];
     expect(pushes).toHaveLength(1);
     expect(pushes[0]!.sessionId).toBe(fx.sessionA);
-    // The count is read when the window flushes, so the one push says where the
-    // mailbox ended up rather than what the first arrival saw.
-    expect(pushes[0]!.unread).toBe(4);
-    expect(pushes[0]!.dropped).toBe(0);
+    // No count rides the frame: nothing in the app renders one, and a number
+    // here is what a badge would be re-grown from.
+    expect(pushes[0]!.unread).toBeUndefined();
   },
   30_000,
 );

@@ -1,7 +1,8 @@
-// The unread count is the only piece of session-bus state several surfaces read
-// at once, and the push is what lets them share one request. These pin the two
-// halves a widget test cannot: that a read seeds the count, and that the push
-// moves it with no second request behind it.
+// Nothing announces a peer's mail, so the arrival push is the ONLY thing that
+// moves a mailbox between reads — and it carries no contents, which makes the
+// re-read it triggers load-bearing rather than an optimisation. These pin what
+// a widget test cannot: that a read seeds the sheet, and that a push re-reads
+// for the session it names and for no other.
 import 'dart:async';
 
 import 'package:antgrid/providers/session_bus_inbox.dart';
@@ -67,7 +68,7 @@ ProviderContainer _containerWith(_FakeChannel channel) {
 }
 
 void main() {
-  test('the read seeds the count, the drop tally and the posts', () async {
+  test('the read seeds the drop tally and the posts', () async {
     final channel = _FakeChannel();
     final container = _containerWith(channel);
 
@@ -83,12 +84,10 @@ void main() {
       'requestId': channel.requestIdAt(0),
       'posts': [_post('m1'), _post('m2', threadId: 't-9')],
       'dropped': 3,
-      'unread': 2,
     });
     await pumpEventQueue();
 
     final state = sub.read();
-    expect(state.unread, 2);
     expect(state.dropped, 3);
     expect(state.posts.map((p) => p.messageId), ['m1', 'm2']);
     expect(state.posts.first.threadId, isNull);
@@ -98,7 +97,7 @@ void main() {
     expect(state.refusal, isNull);
   });
 
-  test('a push moves the count without a second read', () async {
+  test('a push re-reads, because it carries nothing to render', () async {
     final channel = _FakeChannel();
     final container = _containerWith(channel);
 
@@ -109,30 +108,30 @@ void main() {
       'requestId': channel.requestIdAt(0),
       'posts': [_post('m1')],
       'dropped': 0,
-      'unread': 1,
     });
     await pumpEventQueue();
     expect(channel.inboxReads, 1);
+
+    channel.emit({'type': 'session-bus:arrived', 'sessionId': 's1'});
+    await pumpEventQueue();
+
+    // The push is a signal, not an answer: without the read it triggers, the
+    // sheet would render the connect-time mailbox for the life of the socket.
+    expect(channel.inboxReads, 2);
+    expect(sub.read().generation, 1);
 
     channel.emit({
-      'type': 'session-bus:unread',
-      'sessionId': 's1',
-      'unread': 4,
-      'dropped': 2,
+      'type': 'session-bus:inbox:result',
+      'requestId': channel.requestIdAt(1),
+      'posts': [_post('m1'), _post('m2')],
+      'dropped': 0,
     });
     await pumpEventQueue();
 
-    expect(sub.read().unread, 4);
-    expect(sub.read().dropped, 2);
-    // The whole point: the badge is current and nothing was asked for it.
-    expect(channel.inboxReads, 1);
-    // The posts are the last read's, so a panel knows to re-read rather than
-    // deriving a count from a list that is now short.
-    expect(sub.read().posts, hasLength(1));
-    expect(sub.read().generation, 1);
+    expect(sub.read().posts.map((p) => p.messageId), ['m1', 'm2']);
   });
 
-  test("a push for another session leaves this one's count alone", () async {
+  test("a push for another session does not re-read this one", () async {
     final channel = _FakeChannel();
     final container = _containerWith(channel);
 
@@ -143,19 +142,13 @@ void main() {
       'requestId': channel.requestIdAt(0),
       'posts': const <Map<String, dynamic>>[],
       'dropped': 0,
-      'unread': 0,
     });
     await pumpEventQueue();
 
-    channel.emit({
-      'type': 'session-bus:unread',
-      'sessionId': 's2',
-      'unread': 7,
-      'dropped': 0,
-    });
+    channel.emit({'type': 'session-bus:arrived', 'sessionId': 's2'});
     await pumpEventQueue();
 
-    expect(sub.read().unread, 0);
+    expect(channel.inboxReads, 1);
     expect(sub.read().generation, 0);
   });
 
@@ -193,22 +186,19 @@ void main() {
       'requestId': channel.requestIdAt(1),
       'posts': [_post('fresh')],
       'dropped': 0,
-      'unread': 1,
     });
     channel.emit({
       'type': 'session-bus:inbox:result',
       'requestId': stale,
       'posts': const <Map<String, dynamic>>[],
       'dropped': 0,
-      'unread': 0,
     });
     await pumpEventQueue();
 
     expect(sub.read().posts.single.messageId, 'fresh');
-    expect(sub.read().unread, 1);
   });
 
-  test('a reconnect re-drives the read, so the badge is not left stale', () async {
+  test('a reconnect re-drives the read, so the sheet is not left stale', () async {
     final channel = _FakeChannel();
     final container = _containerWith(channel);
 

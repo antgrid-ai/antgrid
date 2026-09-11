@@ -189,15 +189,14 @@ const Set<String> _statusTypes = <String>{
   'git:commit-files-result',
   'git:commit-diff-content',
   'handler:status',
-  // Answers to the app's own bus reads, and the unsolicited unread count.
-  // Status tier, not heavy: they are low-frequency per-session state a badge
-  // renders, and a badge frozen at its last value while the app is unfocused
-  // is exactly the thing the push exists to prevent. Deliberately NOT in
-  // [kUnroutedInboundTypes] — that list is for frames nothing here reduces,
-  // and these reach `providers/session_bus_inbox.dart`.
+  // Answers to the app's own bus reads, and the unsolicited note that a
+  // mailbox grew. Status tier, not heavy: low-frequency per-session state, read
+  // by a sheet that is open on it. Deliberately NOT in [kUnroutedInboundTypes]
+  // — that list is for frames nothing here reduces, and these reach
+  // `providers/session_bus_inbox.dart`.
   'session-bus:inbox:result',
   'session-bus:thread:result',
-  'session-bus:unread',
+  'session-bus:arrived',
   'file:upload-ready',
   'file:upload-ack',
   'file:upload-result',
@@ -234,7 +233,7 @@ const Set<String> _statusTypes = <String>{
 ///     [kCheckoutDurableReplayTypes] (a message replayed to a new subscriber
 ///     would reach the agent a second time). The other `session-bus:*` types —
 ///     `session-bus:inbox:result`, `session-bus:thread:result` and
-///     `session-bus:unread` — are this app's own reads of its own bridge,
+///     `session-bus:arrived` — are this app's own reads of its own bridge,
 ///     not carried frames, and belong in [_statusTypes] instead.
 const Set<String> kUnroutedInboundTypes = <String>{
   'tunnel:http-start',

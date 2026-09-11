@@ -3,10 +3,9 @@
 // outbound send is a tool call in the transcript, so what is only here is a
 // parked post, the mailbox's own discards, and an outbound entry's receipt.
 //
-// It is opened AT A ROW (see session_inbox_badge_test.dart) and from the
-// session kebab (session_overflow_menu_test.dart), never as a tab — so the one
-// property this file guards above all is that it reads the session it was
-// GIVEN, not the session in focus.
+// It is opened from the session kebab (session_overflow_menu_test.dart) and
+// nowhere else, never as a tab — so the one property this file guards above all
+// is that it reads the session it was GIVEN, not the session in focus.
 import 'dart:async';
 
 import 'package:antgrid/design/theme_presets.dart';
@@ -112,7 +111,6 @@ Future<void> _answerRead(
     'requestId': channel.lastRequestId,
     'posts': [for (var i = 0; i < unread; i++) _post('m$i')],
     'dropped': dropped,
-    'unread': unread,
   });
   await tester.pumpAndSettle();
 }

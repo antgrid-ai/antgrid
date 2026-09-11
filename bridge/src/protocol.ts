@@ -2546,7 +2546,6 @@ const SessionBusInboxResultMessage = BaseMessage.extend({
    *  cannot tell an empty inbox from an emptied one has been told the wrong
    *  thing, not merely told less. */
   dropped: z.number().optional(),
-  unread: z.number().optional(),
   ...SessionBusRefusalWire,
 });
 
@@ -2569,16 +2568,15 @@ const SessionBusThreadResultMessage = BaseMessage.extend({
   ...SessionBusRefusalWire,
 });
 
-/** Unsolicited: a mailbox grew. The count is what a badge renders, and it
- *  exists because a badge that only ever moves when something asks is a badge
- *  frozen at whatever the last read returned. Coalesced per session on the
- *  bridge, so a burst of arrivals is one push carrying the final count rather
- *  than one push per post. */
-const SessionBusUnreadMessage = BaseMessage.extend({
-  type: z.literal("session-bus:unread"),
+/** Unsolicited: a mailbox grew. Carries WHOSE and nothing else — no count,
+ *  because nothing renders one: a session's peers are not the user's business
+ *  and no surface announces their mail. What still needs the signal is a sheet
+ *  ALREADY open on that mailbox, which re-reads on it, and the kebab row that
+ *  is the one door to it. Coalesced per session on the bridge, so a burst of
+ *  arrivals is one push rather than one per post. */
+const SessionBusArrivedMessage = BaseMessage.extend({
+  type: z.literal("session-bus:arrived"),
   sessionId: z.string(),
-  unread: z.number(),
-  dropped: z.number(),
 });
 
 // ── Netwatch: shipping a remote app's half of the frame capture ───────────────
@@ -2777,7 +2775,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   SessionBusInboxResultMessage,
   SessionBusThreadMessage,
   SessionBusThreadResultMessage,
-  SessionBusUnreadMessage,
+  SessionBusArrivedMessage,
   NetwatchConfigureMessage,
   NetwatchEventsMessage,
 ]);
@@ -2967,7 +2965,7 @@ export type SessionBusInboxRead = z.infer<typeof SessionBusInboxMessage>;
 export type SessionBusInboxResult = z.infer<typeof SessionBusInboxResultMessage>;
 export type SessionBusThreadRead = z.infer<typeof SessionBusThreadMessage>;
 export type SessionBusThreadResult = z.infer<typeof SessionBusThreadResultMessage>;
-export type SessionBusUnread = z.infer<typeof SessionBusUnreadMessage>;
+export type SessionBusArrived = z.infer<typeof SessionBusArrivedMessage>;
 
 /**
  * Types whose wire text must never be recorded verbatim, however loudly an
@@ -3133,7 +3131,7 @@ const KNOWN_TYPES = new Set<string>([
   "session-bus:directory", "session-bus:directory:result",
   "session-bus:inbox", "session-bus:inbox:result",
   "session-bus:thread", "session-bus:thread:result",
-  "session-bus:unread",
+  "session-bus:arrived",
   "netwatch:configure", "netwatch:events",
 ]);
 

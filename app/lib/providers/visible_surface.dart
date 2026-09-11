@@ -100,13 +100,8 @@ final focusedSessionInboxProvider = Provider<SessionInboxState>((ref) {
 }, name: 'focusedSessionInbox');
 
 /// Whether the focused session has bus traffic to show — the ONE rule behind
-/// the session kebab's Messages row.
-///
-/// The unread badge on a session row is the other way into the same sheet, and
-/// deliberately a different rule: it renders on `unread > 0` alone, for any
-/// session in the focused project. This one is wider and focus-scoped, because
-/// the kebab is the door for what a badge at zero unread cannot offer — the
-/// mailbox's discards, and the delivery receipt on something this session SENT.
+/// the session kebab's Messages row, which is the only door to the mailbox
+/// sheet. Nothing else announces a peer's mail.
 ///
 /// A session that has only ever sent still fails it. The app's two reads are
 /// the mailbox and one thread by id, and a thread id is reachable only from an
@@ -132,12 +127,13 @@ class SessionBusActivity extends Notifier<bool> {
       _seen = false;
     }
     if (sessionId == null) return false;
-    // `dropped` is a lifetime total on the store and posts outlive the count
-    // the agent spends, so all three together answer "has this session ever
-    // been on the bus" where `unread` alone answers only "right now".
+    // `dropped` is a lifetime total on the store, so the two together answer
+    // "has this session ever been on the bus" rather than "does it have mail
+    // right now" — which is the question the row is for, since a sheet is worth
+    // opening for a receipt on something already read.
     final active = ref.watch(
       focusedSessionInboxProvider.select(
-        (s) => s.unread > 0 || s.dropped > 0 || s.posts.isNotEmpty,
+        (s) => s.dropped > 0 || s.posts.isNotEmpty,
       ),
     );
     if (active) _seen = true;
