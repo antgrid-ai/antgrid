@@ -2097,10 +2097,9 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     // decodes them into the view models its surfaces render. A second set of
     // models here would be two shapes to keep true against one schema.
     //
-    // The three REQUESTS they answer (`session-bus:directory`, `:inbox`,
-    // `:thread`) are app→bridge and never arrive, so they have no case here;
-    // their type strings are authored where they are sent.
-    case 'session-bus:directory:result':
+    // The two REQUESTS they answer (`session-bus:inbox` and
+    // `session-bus:thread`) are app→bridge and never arrive, so they have no
+    // case here; their type strings are authored where they are sent.
     case 'session-bus:inbox:result':
     case 'session-bus:thread:result':
     case 'session-bus:unread':

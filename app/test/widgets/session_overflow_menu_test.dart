@@ -134,7 +134,6 @@ void main() {
 
       expect(find.text('Switch to Terminal'), findsOneWidget);
       expect(find.text('Arm Handler'), findsOneWidget);
-      expect(find.text('Sessions on this repository'), findsOneWidget);
     });
 
     testWidgets('a session on another machine still offers mode and Handler', (
@@ -159,10 +158,6 @@ void main() {
 
       expect(find.text('Switch to Terminal'), findsOneWidget);
       expect(find.text('Arm Handler'), findsOneWidget);
-      // The directory is about a REPOSITORY, not about where this session
-      // runs, so watching one from elsewhere reaches it exactly as a local
-      // session does.
-      expect(find.text('Sessions on this repository'), findsOneWidget);
     });
   });
 
@@ -181,7 +176,6 @@ void main() {
 
       expect(find.text('Switch to Terminal'), findsOneWidget);
       expect(find.text('Arm Handler'), findsOneWidget);
-      expect(find.text('Sessions on this repository'), findsOneWidget);
     });
   });
 

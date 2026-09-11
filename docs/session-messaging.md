@@ -523,9 +523,11 @@ machine-to-phone directly and unchanged.
 
 No new screen (D14's spirit, carried):
 
-- **Directory** — in the session kebab, where *Add machine* was: the addressable
-  sessions, grouped local first, each with its card, work status, and whether it
-  can reply (§9).
+- **Directory** — no human surface. The addressable set is the AGENT's read
+  (`antgrid_list_sessions`), and §10.1 leaves a human-facing version with no
+  action it is allowed to offer on any row: a modal spawning a branch read per
+  project, to render rows nobody may act on, is cost with no decision behind
+  it. `session-bus:directory` stays on the wire for a surface that earns one.
 - **Inbox** — unread `post` count on the session, opening the mailbox.
 - **Thread view** — reuses the transcript's message rendering; a thread is a list
   of wrapped lines that already render.

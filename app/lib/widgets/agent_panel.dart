@@ -54,7 +54,6 @@ import 'remote_access_control.dart';
 import 'remote_host_chip.dart';
 import 'session_agent_mark.dart';
 import 'session_approval_badge.dart';
-import 'session_directory_panel.dart';
 import 'session_mode_control.dart';
 import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
@@ -190,53 +189,6 @@ final _otherSessionEscalationsProvider = Provider<_OtherSessionEscalations>((
         ?.terminalId,
   );
 });
-
-/// The addressable set (`docs/session-messaging.md` §10.2): every other agent
-/// session working on this repository, on this machine and on any connected
-/// peer.
-///
-/// Reads, never recruits. Sessions are peers that already exist and are
-/// addressed rather than joined, so this row opens a list and offers no action
-/// on any row in it — and none of those rows may become a way to reach the
-/// person behind another session (§10.1).
-///
-/// Live rather than a static [AbMenuItem] because the popup resolves its
-/// entries once at open time, and which session this row is about is settled
-/// by focus that can move while the menu is up.
-class _SessionDirectoryMenuItem extends ConsumerWidget {
-  const _SessionDirectoryMenuItem();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final activeId = ref.watch(activeSessionIdProvider);
-    if (activeId == null) return const SizedBox.shrink();
-
-    void open() {
-      // The popup closes first, and the panel opens on a context that outlives
-      // the popped route — the same contract [_HandlerMenuItem.toggleArm] has,
-      // and the reason nothing past the pop reads this widget's ref.
-      final navigator = Navigator.of(context);
-      final host = navigator.context;
-      navigator.pop();
-      detached(
-        'AgentPanel',
-        'session directory failed to open',
-        () => showSessionDirectory(host, sessionId: activeId),
-      );
-    }
-
-    return AbLiveMenuRow(
-      label: 'Sessions on this repository',
-      // Deliberately not the live-share glyph: that one already means "another
-      // session is in THIS directory" on a session row, and lending it to a
-      // list spanning machines would give it two meanings one row apart.
-      icon: AbIcons.list,
-      tooltip: 'Which other agent sessions are working on this repository, '
-          'and which of them can answer.',
-      onTap: open,
-    );
-  }
-}
 
 /// The project-wide half of the Handler's attention, as an ACTION rather than
 /// the status pill it used to be.
@@ -443,7 +395,6 @@ class _SessionOverflowMenu extends ConsumerWidget {
         if (compact && branch != null) AbMenuHeaderLabel(branch),
         const SessionModeMenuItem(),
         const _HandlerMenuItem(),
-        const _SessionDirectoryMenuItem(),
         const _OtherSessionsMenuItem(),
       ],
     );

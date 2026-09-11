@@ -195,7 +195,6 @@ const Set<String> _statusTypes = <String>{
   // is exactly the thing the push exists to prevent. Deliberately NOT in
   // [kUnroutedInboundTypes] — that list is for frames nothing here reduces,
   // and these reach `providers/session_bus_inbox.dart`.
-  'session-bus:directory:result',
   'session-bus:inbox:result',
   'session-bus:thread:result',
   'session-bus:unread',
@@ -234,10 +233,9 @@ const Set<String> _statusTypes = <String>{
 ///     address one session by `to.sessionId`, not by the focused checkout) or
 ///     [kCheckoutDurableReplayTypes] (a message replayed to a new subscriber
 ///     would reach the agent a second time). The other `session-bus:*` types —
-///     `session-bus:directory:result`, `session-bus:inbox:result`,
-///     `session-bus:thread:result` and `session-bus:unread` — are this app's
-///     own reads of its own bridge, not carried frames, and belong in
-///     [_statusTypes] instead.
+///     `session-bus:inbox:result`, `session-bus:thread:result` and
+///     `session-bus:unread` — are this app's own reads of its own bridge,
+///     not carried frames, and belong in [_statusTypes] instead.
 const Set<String> kUnroutedInboundTypes = <String>{
   'tunnel:http-start',
   'tunnel:http-chunk',
