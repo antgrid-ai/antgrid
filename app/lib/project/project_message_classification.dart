@@ -189,6 +189,14 @@ const Set<String> _statusTypes = <String>{
   'git:commit-files-result',
   'git:commit-diff-content',
   'handler:status',
+  // Answers to the app's own bus reads, and the unsolicited note that a
+  // mailbox grew. Status tier, not heavy: low-frequency per-session state, read
+  // by a sheet that is open on it. Deliberately NOT in [kUnroutedInboundTypes]
+  // — that list is for frames nothing here reduces, and these reach
+  // `providers/session_bus_inbox.dart`.
+  'session-bus:inbox:result',
+  'session-bus:thread:result',
+  'session-bus:arrived',
   'file:upload-ready',
   'file:upload-ack',
   'file:upload-result',
@@ -216,6 +224,17 @@ const Set<String> _statusTypes = <String>{
 ///     agent / loopback side.
 ///   - the three `*:snapshot:request` types are snapshot REQUESTS serviced
 ///     outside the heavy/status reducers.
+///   - `session-bus:post`, `session-bus:notify`, `session-bus:fetch`,
+///     `session-bus:fetch:result` and `session-bus:ack` are CARRIED between two
+///     bridges by `SessionBusCarrier`, which reads them off the transport
+///     directly. They are not this app's messages: nothing here may reduce
+///     them, and they must never enter [kCheckoutVariableMessageTypes] (they
+///     address one session by `to.sessionId`, not by the focused checkout) or
+///     [kCheckoutDurableReplayTypes] (a message replayed to a new subscriber
+///     would reach the agent a second time). The other `session-bus:*` types —
+///     `session-bus:inbox:result`, `session-bus:thread:result` and
+///     `session-bus:arrived` — are this app's own reads of its own bridge,
+///     not carried frames, and belong in [_statusTypes] instead.
 const Set<String> kUnroutedInboundTypes = <String>{
   'tunnel:http-start',
   'tunnel:http-chunk',
@@ -226,6 +245,11 @@ const Set<String> kUnroutedInboundTypes = <String>{
   'terminal:snapshot:request',
   'file:tree:snapshot:request',
   'preview:snapshot:request',
+  'session-bus:post',
+  'session-bus:notify',
+  'session-bus:fetch',
+  'session-bus:fetch:result',
+  'session-bus:ack',
 };
 
 const Set<String> _heavyTypes = <String>{

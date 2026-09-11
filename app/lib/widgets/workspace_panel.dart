@@ -48,6 +48,11 @@ class WorkspacePanel extends StatelessWidget {
             ),
           Expanded(
             child: IndexedStack(
+              // Ordinal-indexed against `WorkspaceView`, which is append-only
+              // (see its own doc) — nothing ties an enum member to its slot
+              // here but this comment, so a new view must be appended AND
+              // given a child in the same position or `selectedView.index`
+              // walks past the last one.
               index: selectedView.index,
               children: const [
                 PreviewScreen(),

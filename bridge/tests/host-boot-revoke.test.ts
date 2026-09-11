@@ -31,7 +31,10 @@ function stubRelayFactory() {
   return (_opts: RelayClientOptions): RelayClient =>
     ({
       deviceId: "dev-1",
-      currentPeerPubkey: () => null,
+      hasEstablishedSession: () => false,
+      anySessionSupportsCheckoutRouting: () => false,
+      establishedPeers: () => [],
+      peerSession: () => null,
       setBus: () => {},
       connect: () => {},
       close: () => {},

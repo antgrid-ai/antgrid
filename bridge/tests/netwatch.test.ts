@@ -8,6 +8,7 @@ import { runNetwatchCli } from "../src/cli/netwatch";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { installFakeSession } from "./fake-session";
 
 describe("Netwatch ring", () => {
   it("keeps the newest events, oldest first, and reports what it evicted", () => {
@@ -82,15 +83,13 @@ function makeClient(
     },
     getLicenseToken: () => "token",
   });
-  (c as any)._peerId = "phone-1";
-  (c as any).established = {
-    attemptId: "a1",
+  installFakeSession(c, "phone-1", {
     transport: {
       seal: (plaintext: string) => Buffer.from(plaintext, "utf8"),
       open: overrides.open ?? (() => null),
+      zeroize: () => {},
     },
-    sessionKeys: { a2p: Buffer.alloc(32), p2a: Buffer.alloc(32), confirm: Buffer.alloc(32) },
-  };
+  });
   (c as any).ws = {
     readyState: overrides.readyState ?? WebSocket.OPEN,
     send: () => {},
@@ -136,7 +135,7 @@ describe("RelayClient netwatch taps", () => {
 
   it("records a send dropped for want of an E2E session", () => {
     client = makeClient();
-    (client as any).established = null;
+    (client as any).sessions.clear();
     client.sendOnChannel(createMessage("agent:turn-start", { sessionId: "s1", turnId: "t1" }), "control");
 
     const drops = events().filter((e) => e.kind === "drop");

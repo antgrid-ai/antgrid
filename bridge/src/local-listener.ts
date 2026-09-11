@@ -10,6 +10,7 @@ interface ConnState {
   state: "awaiting-hello" | "connected" | "rejected";
   appPid?: number;
   checkoutRouting?: boolean;
+  sessionBusCarrier?: boolean;
   pullsTree?: boolean;
 }
 
@@ -70,6 +71,14 @@ export class LocalListener implements TransportSubscriber {
    * authentication. */
   get ownerSupportsCheckoutRouting(): boolean {
     return this.ownerSocket?.data.checkoutRouting === true;
+  }
+
+  /** Whether this owner forwards session-bus frames on to the machine each one
+   * is addressed to. An app that does not is not broken, it is older: the
+   * coordinator holds the frame in its outbox instead of sending it into a
+   * client that would drop it. */
+  get ownerCarriesSessionBus(): boolean {
+    return this.ownerSocket?.data.sessionBusCarrier === true;
   }
 
   /** Whether the loopback owner pulls its own file tree (`file:tree:snapshot:request`),
@@ -205,6 +214,25 @@ export class LocalListener implements TransportSubscriber {
     });
   }
 
+  /**
+   * Send one frame to the desktop owner and to nobody else.
+   *
+   * Session-bus traffic never goes through the MessageBus even though
+   * {@link deliver} above ends at the same socket: a published frame fans out to
+   * every established app session, and the human's phone is one of them — it
+   * must never see another agent's bus traffic. This is the only
+   * other way a frame reaches the owner, and it takes the frame directly.
+   *
+   * False means the frame did not leave: no owner, or an owner that does not
+   * carry the bus. The caller holds it in its outbox and retries: an absent
+   * carrier is a machine that has not attached yet, never a refusal.
+   */
+  deliverToOwner(msg: AbMessage, channel: Channel = "control"): boolean {
+    if (!this.ownerSocket || !this.ownerCarriesSessionBus) return false;
+    this.ownerSocket.send(JSON.stringify({ channel, ...msg }));
+    return true;
+  }
+
   private handleHello(ws: ServerWebSocket<ConnState>, text: string, tokenBuf: Buffer): void {
     let envelope: any;
     try { envelope = JSON.parse(text); } catch {
@@ -227,6 +255,7 @@ export class LocalListener implements TransportSubscriber {
 
     const newPid = typeof envelope.appPid === "number" ? envelope.appPid : undefined;
     const checkoutRouting = envelope?.capabilities?.checkoutRouting === true;
+    const sessionBusCarrier = envelope?.capabilities?.sessionBusCarrier === true;
     const pullsTree = envelope?.capabilities?.pullsTree === true;
 
     // A second hello carrying the VALID token is the same trusted app
@@ -257,6 +286,7 @@ export class LocalListener implements TransportSubscriber {
     ws.data.state = "connected";
     ws.data.appPid = newPid;
     ws.data.checkoutRouting = checkoutRouting;
+    ws.data.sessionBusCarrier = sessionBusCarrier;
     ws.data.pullsTree = pullsTree;
     this.ownerSocket = ws;
     // The accepted hello and its answer, so a capture opens with the moment the

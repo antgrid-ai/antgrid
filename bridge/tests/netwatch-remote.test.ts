@@ -10,6 +10,7 @@ import { Netwatch, netwatch, armRemoteIngest, __resetNetwatchForTest } from "../
 import { RelayClient } from "../src/relay-client";
 import type { AbMessage } from "../src/protocol";
 import { runNetwatchCli } from "../src/cli/netwatch";
+import { installFakeSession } from "./fake-session";
 
 const appEvent = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   seq: 7,
@@ -99,19 +100,16 @@ function makeClient(open: () => string | null, onMessage?: (m: AbMessage) => voi
     getLicenseToken: () => "token",
     onMessage,
   });
-  (c as any)._peerId = "phone-1";
-  (c as any).established = {
-    attemptId: "a1",
-    transport: { seal: (p: string) => Buffer.from(p, "utf8"), open },
-    sessionKeys: { a2p: Buffer.alloc(32), p2a: Buffer.alloc(32), confirm: Buffer.alloc(32) },
-  };
+  installFakeSession(c, "phone-1", {
+    transport: { seal: (p: string) => Buffer.from(p, "utf8"), open, zeroize: () => {} },
+  });
   (c as any).ws = { readyState: WebSocket.OPEN, send: () => {}, close: () => {} };
   return c;
 }
 
 function deliverControlPlane(client: RelayClient, m: unknown): void {
   const payload = Buffer.concat([Buffer.alloc(12, 0x7f), Buffer.from("sealed")]);
-  (client as any).established.transport.open = () => JSON.stringify({ m });
+  (client as any).sessions.get("phone-1").transport.open = () => JSON.stringify({ m });
   const frame = encodeRouteFrame(
     { type: "message", from: "phone-1", channel: "control", ts: Date.now() },
     payload,

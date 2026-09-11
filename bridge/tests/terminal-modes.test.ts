@@ -1,10 +1,21 @@
 import { describe, test, expect } from "bun:test";
-import { TRACKED_MODES, TerminalModeTracker } from "../src/terminal-modes";
+import { BRACKETED_PASTE, TRACKED_MODES, TerminalModeTracker } from "../src/terminal-modes";
 import { TerminalScreen } from "../src/terminal-screen";
 
 const ESC = "\x1b";
 
 describe("TerminalModeTracker", () => {
+  test("isSet answers only for a mode the guest actually announced", () => {
+    const t = new TerminalModeTracker();
+    // Silence is not support: a caller framing a paste on a guess would type raw
+    // escape sequences into a composer that does not strip them.
+    expect(t.isSet(BRACKETED_PASTE)).toBe(false);
+    t.feed(`${ESC}[?2004h`);
+    expect(t.isSet(BRACKETED_PASTE)).toBe(true);
+    t.feed(`${ESC}[?2004l`);
+    expect(t.isSet(BRACKETED_PASTE)).toBe(false);
+  });
+
   test("latches the modes a TUI sets at startup", () => {
     const t = new TerminalModeTracker();
     t.feed(`${ESC}[?1049h${ESC}[?1000h${ESC}[?1006h${ESC}[?2004h`);

@@ -9,7 +9,13 @@ import { loadPairedPhones } from "../src/paired-phones";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { RelayClient } from "../src/relay-client";
 import { createRelayPromotion, type MachineRelaySession } from "../src/relay-promotion";
+import type { PeerSessionView } from "../src/stream-mux";
 import { generateEphemeralKeypair } from "../src/key-exchange";
+
+/** One established app session, as the relay transport would report it. */
+function session(peerPubkey: string, peerId = "app-dev#machine-dev"): PeerSessionView {
+  return { peerId, peerPubkey, checkoutRouting: true, reachable: true, pullsTree: true };
+}
 
 function tunnelResponses(frames: object[]): object[] {
   return frames.filter((f) => (f as { type?: string }).type === "tunnel:http-start");
@@ -134,8 +140,8 @@ test("drops project verbs from an account-trusted phone while mobile access is o
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
-  // Wire the connected-phone identity exactly as the remote transport does.
-  core.setPeerPubkeyProvider(() => "phone-pubkey-1-base64");
+  // Wire the attached-session lookup exactly as the remote transport does.
+  core.setPeerSessionProvider(() => session("phone-pubkey-1-base64"));
 
   // Spin up managers (the relay does this after the E2E handshake confirms).
   core.onHandshakeComplete();
@@ -178,7 +184,7 @@ test("a core with no host-supplied switch fails closed for a remote phone", asyn
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
-  core.setPeerPubkeyProvider(() => "phone-pubkey-unwired");
+  core.setPeerSessionProvider(() => session("phone-pubkey-unwired"));
 
   core.onHandshakeComplete();
   await waitForServices(sent);
@@ -193,7 +199,7 @@ test("a core with no host-supplied switch fails closed for a remote phone", asyn
   expect(statusListsTerminal(sent, t1)).toBe(false);
 });
 
-test("does NOT gate when no phone pubkey is present (local/loopback transport)", async () => {
+test("does NOT gate when no relay transport is wired (local/loopback transport)", async () => {
   const folder = tempFolder();
 
   core = await buildAgentCore({
@@ -208,7 +214,7 @@ test("does NOT gate when no phone pubkey is present (local/loopback transport)",
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
-  // Local transport never sets a provider → gate sees null → not gated.
+  // Local transport never sets a provider → no relay transport → not gated.
 
   core.onHandshakeComplete();
   await waitForServices(sent);
@@ -241,9 +247,9 @@ test("loopback frames bypass the gate even when mobile access is off", async () 
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
-  // Simulate promotion: a relay slot wired the gate's peer provider to the
-  // connected phone.
-  core.setPeerPubkeyProvider(() => "phone-pubkey-loopback-base64");
+  // Simulate promotion: a relay slot wired the gate's session provider to the
+  // attached app devices.
+  core.setPeerSessionProvider(() => session("phone-pubkey-loopback-base64"));
 
   core.onHandshakeComplete();
   await waitForServices(sent);
@@ -289,7 +295,7 @@ test("drops tunnel:http-request while mobile access is off, honors it once on", 
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
-  core.setPeerPubkeyProvider(() => "phone-pubkey-tunnel-base64");
+  core.setPeerSessionProvider(() => session("phone-pubkey-tunnel-base64"));
 
   // The tunnel response frames are emitted via the plaintext hook (they bypass
   // the bus); capture them to detect whether the proxy actually ran.
@@ -331,13 +337,13 @@ test("drops tunnel:http-request while mobile access is off, honors it once on", 
   expect((tunnelResponses(plain)[0] as { requestId?: string }).requestId).toBe("req-2");
 });
 
-// SOFT CONCERN (real bypass): on a trusted reconnect the relay sends peer-online
-// (NOT a fresh pair-request), so onApproved never repopulates the pubkey map.
-// After an agent RESTART the map starts empty, so currentPeerPubkey() would
-// return null — and a null peer reads as "local", which skips the gate. The
-// peer-online handler must backfill the pubkey from the persistent pairedPhones
-// store so a remote phone is still recognised as remote.
-test("currentPeerPubkey backfills from the phone store on trusted reconnect (empty map)", async () => {
+// SOFT CONCERN: on a trusted reconnect the relay sends peer-online (NOT a fresh
+// pair-request), so onApproved never repopulates the pubkey map. After an agent
+// RESTART the map starts empty, so nothing could name the device behind a route
+// address — and push, which seals to a phone's registry row, has no row to find.
+// The peer-online handler must backfill the pubkey from the persistent
+// pairedPhones store.
+test("peer-online backfills the peer pubkey from the phone store (empty map)", async () => {
   const store = loadPairedPhones(abDir);
   const pk1 = "phone-pubkey-reconnect-base64";
   const phoneDeviceId = "phone-dev-reconnect";
@@ -358,8 +364,8 @@ test("currentPeerPubkey backfills from the phone store on trusted reconnect (emp
     pairedPhones: store,
   });
 
-  // Before reconnect there is no peer → null.
-  expect(client.currentPeerPubkey()).toBe(null);
+  // Before reconnect the address resolves to nothing.
+  expect(client.peerPubkeyFor(phoneDeviceId)).toBe(null);
 
   // Drive the real peer-online server message (the reconnect-restore path).
   (client as unknown as { handleTextMessage(raw: string): void }).handleTextMessage(
@@ -368,7 +374,7 @@ test("currentPeerPubkey backfills from the phone store on trusted reconnect (emp
 
   // The gate can now identify the reconnected phone even though no fresh
   // pair-request (and thus no onApproved) ran this process.
-  expect(client.currentPeerPubkey()).toBe(pk1);
+  expect(client.peerPubkeyFor(phoneDeviceId)).toBe(pk1);
 
   client.close();
 });
@@ -376,28 +382,31 @@ test("currentPeerPubkey backfills from the phone store on trusted reconnect (emp
 // CRITICAL #2: a local→relay-promoted connection must be gated too. In v3
 // relay-promotion.ts no longer builds its own RelayClient — it asks the host
 // to bring the ONE machine socket up (ensureMachineRelay) and hands the result
-// to ProjectCore's `attach` (which owns the real setPeerPubkeyProvider wiring;
+// to ProjectCore's `attach` (which owns the real setPeerSessionProvider wiring;
 // see project-core.ts's attachRelayStream). This test stubs `attach` the same
 // way ProjectCore really implements it, so the load-bearing assertion —
-// enabling relay wires the gate to the promoted session's connected phone, and
+// enabling relay wires the gate to the promoted session's attached devices, and
 // disabling clears it — still holds under the new dependency split.
-test("promotion wires (and clears) the gate's peer provider", async () => {
+test("promotion wires (and clears) the gate's session provider", async () => {
   const bus = new MessageBus();
   bus.setInboundHandler(() => {});
 
-  let provider: (() => string | null) | null | undefined = undefined;
-  const setCalls: Array<(() => string | null) | null> = [];
+  type Provider = (peerId: string) => PeerSessionView | null;
+  let provider: Provider | null | undefined = undefined;
+  const setCalls: Array<Provider | null> = [];
 
-  const setPeerPubkeyProvider = (fn: (() => string | null) | null) => {
+  const setPeerSessionProvider = (fn: Provider | null) => {
     setCalls.push(fn);
     provider = fn;
   };
 
-  // Stub machine relay session whose currentPeerPubkey is observable through
-  // the wired provider — mirrors what HostServer.ensureMachineRelay() returns.
+  // Stub machine relay session whose attached device is observable through the
+  // wired provider — mirrors what HostServer.ensureMachineRelay() returns.
+  const promoted = session("promoted-phone-pk", "promoted-phone#machine-dev");
   const machineSession: MachineRelaySession = {
-    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const }),
-    currentPeerPubkey: () => "promoted-phone-pk",
+    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendTo: async () => "sent" as const }),
+    establishedPeers: () => [promoted],
+    peerSession: (peerId) => (peerId === promoted.peerId ? promoted : null),
     sendPushDeliver: () => {},
     agentDeviceId: "0bbd1111-2222-3333-4444-555566667777",
   };
@@ -408,10 +417,10 @@ test("promotion wires (and clears) the gate's peer provider", async () => {
     // Reproduces ProjectCore.attachLocalStreamForWizard's real wiring: wire
     // the gate's provider to the attached stream's peer, clear it on detach.
     attach: (remote) => {
-      setPeerPubkeyProvider(() => remote.currentPeerPubkey());
+      setPeerSessionProvider((peerId) => remote.peerSession(peerId));
       return {
-        handle: { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const },
-        detach: () => { setPeerPubkeyProvider(null); },
+        handle: { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendTo: async () => "sent" as const },
+        detach: () => { setPeerSessionProvider(null); },
       };
     },
   });
@@ -429,10 +438,13 @@ test("promotion wires (and clears) the gate's peer provider", async () => {
   );
   await new Promise((r) => setTimeout(r, 20));
 
-  // Provider was wired and reflects the promoted session's connected phone.
+  // Provider was wired and resolves the promoted session's attached device.
   expect(typeof provider).toBe("function");
-  const wired = provider as unknown as () => string | null;
-  expect(wired()).toBe("promoted-phone-pk");
+  const wired = provider as unknown as Provider;
+  expect(wired(promoted.peerId)?.peerPubkey).toBe("promoted-phone-pk");
+  // ...and only that device: an address it holds no session for resolves null,
+  // which is what makes every per-device answer fail closed.
+  expect(wired("someone-else#machine-dev")).toBe(null);
 
   // Teardown clears it (so the demoted local session is ungated again).
   ctrl.stop();
@@ -505,7 +517,7 @@ test("abortTunnelStreams aborts the core's in-flight tunnel streams", async () =
     const sent: AbMessage[] = [];
     bus.subscribe({ deliver: (m) => sent.push(m) });
     core.attachTransport(bus);
-    core.setPeerPubkeyProvider(() => "phone-pubkey-abort-base64");
+    core.setPeerSessionProvider(() => session("phone-pubkey-abort-base64"));
 
     const plain: object[] = [];
     const held: Array<(o: "sent") => void> = [];
@@ -572,7 +584,7 @@ test("abortTunnelStreams reaches a checkout runtime's manager, not only main", a
     const sent: AbMessage[] = [];
     bus.subscribe({ deliver: (m) => sent.push(m) });
     core.attachTransport(bus);
-    core.setPeerPubkeyProvider(() => "phone-pubkey-abort-checkout-base64");
+    core.setPeerSessionProvider(() => session("phone-pubkey-abort-checkout-base64"));
 
     const plain: object[] = [];
     const held = new Map<string, (o: "sent") => void>();
@@ -623,7 +635,7 @@ test("abortTunnelStreams reaches a checkout runtime's manager, not only main", a
       method: "GET",
       path: "/main",
       checkoutId: "main",
-    });
+    }, "app-dev#machine-dev");
     core.handleTunnelMessage({
       type: "tunnel:http-request",
       requestId: "abort-checkout",
@@ -631,7 +643,7 @@ test("abortTunnelStreams reaches a checkout runtime's manager, not only main", a
       method: "GET",
       path: "/checkout",
       checkoutId,
-    });
+    }, "app-dev#machine-dev");
 
     const heldBy = Date.now() + 15_000;
     while (held.size < 2 && Date.now() < heldBy) await new Promise((r) => setTimeout(r, 15));

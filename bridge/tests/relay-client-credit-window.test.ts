@@ -136,9 +136,24 @@ interface Harness {
   client: RelayClient;
   sent: Frame[];
   phone: E2eTransport;
-  s: SendScheduler;
+  /** The LIVE session's queue. A rekey builds a fresh one, so this is read
+   *  through on every access rather than captured at establish. */
+  readonly s: SendScheduler;
+  readonly session: { lastSealedRecvAt: number; rxFlow: { consumed: Record<string, number> } };
   agentEd: { seedB64: string; pubB64: string };
   phoneEd: { seedB64: string; pubB64: string };
+}
+
+function sessionOf(client: RelayClient, peerId = PHONE_ID): any {
+  return (client as any).sessions.get(peerId);
+}
+
+/** Re-applied on every read: a rekey installs a fresh scheduler at production
+ *  defaults, which would put the window far out of this file's reach. */
+function applyLimits(s: SendScheduler): SendScheduler {
+  s.limits.window = WINDOW;
+  s.limits.socketCap = SOCKET_CAP;
+  return s;
 }
 
 function establish(): Harness {
@@ -159,10 +174,12 @@ function establish(): Harness {
     attemptId: "a1", phoneEd, phoneId: PHONE_ID, nonce: Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]),
   });
   expect(client._handshakeComplete()).toBe(true);
-  const s = (client as any).scheduler as SendScheduler;
-  s.limits.window = WINDOW;
-  s.limits.socketCap = SOCKET_CAP;
-  return { client, sent, phone, s, agentEd, phoneEd };
+  applyLimits(sessionOf(client).scheduler as SendScheduler);
+  return {
+    client, sent, phone, agentEd, phoneEd,
+    get s(): SendScheduler { return applyLimits(sessionOf(client).scheduler as SendScheduler); },
+    get session() { return sessionOf(client); },
+  };
 }
 
 function tunnelChunk(requestId: string): object {
@@ -270,7 +287,7 @@ describe("RelayClient credit windows", () => {
 
     const ping = injectSealed(h.client, h.phone, JSON.stringify({ type: "ping" }), "control");
     expect(open(h.phone, h.sent[h.sent.length - 1]!)).toEqual({ type: "pong" });
-    expect((h.client as any).rxFlow.consumed.control).toBe(ping);
+    expect(h.session.rxFlow.consumed.control).toBe(ping);
   });
 
   it("re-sends both credits every liveness tick, and a credit refreshes liveness", () => {
@@ -283,21 +300,21 @@ describe("RelayClient credit windows", () => {
 
     // Healthy silence window: no ping is due, the credits go anyway.
     let at = h.sent.length;
-    (h.client as any).lastSealedRecvAt = Date.now();
+    h.session.lastSealedRecvAt = Date.now();
     (h.client as any).checkLiveness();
     expect((h.sent.slice(at) as Buffer[]).map((f) => open(h.phone, f))).toEqual(expected);
 
     at = h.sent.length;
-    (h.client as any).lastSealedRecvAt = Date.now();
+    h.session.lastSealedRecvAt = Date.now();
     (h.client as any).checkLiveness();
     expect((h.sent.slice(at) as Buffer[]).map((f) => open(h.phone, f))).toEqual(expected);
 
     (h.client as any).awaitingPong = true;
-    (h.client as any).lastSealedRecvAt = 0;
+    h.session.lastSealedRecvAt = 0;
     injectSealed(h.client, h.phone, JSON.stringify({ type: "credit", channel: "preview", consumed: 1 }));
 
     expect((h.client as any).awaitingPong).toBe(false);
-    expect(Date.now() - (h.client as any).lastSealedRecvAt).toBeLessThan(1000);
+    expect(Date.now() - h.session.lastSealedRecvAt).toBeLessThan(1000);
   });
 
   it("charges session frames without gating them", () => {
@@ -306,7 +323,7 @@ describe("RelayClient credit windows", () => {
     const at = h.sent.length;
     const before = h.s.unacked("control");
 
-    (h.client as any).lastSealedRecvAt = 0;
+    h.session.lastSealedRecvAt = 0;
     (h.client as any).checkLiveness();
 
     const written = h.sent.slice(at) as Buffer[];
@@ -402,9 +419,12 @@ describe("RelayClient credit windows", () => {
     expect(h.s.unacked("control")).toBe(established.length);
   });
 
-  it("drops everything when a different device takes the session over", () => {
+  it("leaves a busy device's window alone when a SECOND device starts a handshake", () => {
+    // The takeover this once asserted is gone: a different device is admitted
+    // alongside, with its own keys and its own queue. Clearing the first one's
+    // window here would drop frames the app still holding it is waiting for.
     const h = establish();
-    fillWindow(h);
+    const { written } = fillWindow(h);
     const phone2Ed = ed25519Pair();
     (h.client as any).phoneEd25519ByDeviceId.set(PHONE_2_ID, phone2Ed.pubB64);
 
@@ -428,8 +448,9 @@ describe("RelayClient credit windows", () => {
       PHONE_2_ID,
     );
 
-    expect((h.client as any).established).toBeNull();
-    expect(h.s.queued("preview").frames).toBe(0);
-    expect(h.s.unacked("preview")).toBe(0);
+    expect(h.client.peerSession(PHONE_ID)).not.toBeNull();
+    expect(h.client.peerSession(PHONE_2_ID)).toBeNull(); // still only a candidate
+    expect(h.s.queued("preview").frames).toBe(2);
+    expect(h.s.unacked("preview")).toBe(sum(written));
   });
 });

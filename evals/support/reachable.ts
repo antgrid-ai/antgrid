@@ -7,15 +7,13 @@ import { TestApp } from "../helpers/test-app";
  * early connect sees no peer. Under account trust a successful E2E handshake
  * IS the liveness proof — there is no ceremony left to probe with.
  *
- * Each probe attempt is NOT a harmless side effect on `env.app`. The relay
- * half is safe: `TestApp.connect`'s default slot keeps this probe's socket
- * distinct from `env.app`'s, so the relay never SUPERSEDED-closes it. But the
- * bridge's single-active-phone takeover (`bridge/src/relay-client.ts`) still
- * fires on every successful attempt here, since it
- * sees a second same-account slot regardless of relay routing — it sends
- * `env.app` a sealed `session-takeover` and tears its E2E session down. A
- * single successful attempt is therefore enough to end `env.app`'s session;
- * a caller that still needs `env.app` afterwards must re-handshake it.
+ * A probe attempt is additive on both layers: `TestApp.connect`'s default slot
+ * keeps this socket distinct from `env.app`'s, so the relay never
+ * SUPERSEDED-closes it, and the bridge admits the probe's session ALONGSIDE
+ * `env.app`'s rather than displacing it (`bridge/src/relay-client.ts` keeps one
+ * session per app device). `env.app` needs no re-handshake afterwards. The only
+ * residue is that each successful attempt leaves an unreachable session on the
+ * bridge until its TTL reap.
  */
 export async function waitAgentReachable(env: TestEnv, attempts = 80): Promise<void> {
   for (let i = 0; i < attempts; i++) {

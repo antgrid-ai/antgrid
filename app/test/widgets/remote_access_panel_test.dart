@@ -44,12 +44,37 @@ class _EmptyNotifier extends RemoteDevicesNotifier {
 }
 
 class _FakePolicyNotifier extends RemoteAccessPolicyNotifier {
-  _FakePolicyNotifier(this._enabled);
+  _FakePolicyNotifier(this._enabled, {this.unreadable = false});
   final bool _enabled;
+
+  /// The loopback host could not be reached at all — a third state the reach
+  /// row below must not speak as "remote access is off".
+  final bool unreadable;
   final List<bool> writes = [];
   @override
-  Future<RemoteAccessPolicy> build() async =>
-      RemoteAccessPolicy(enabled: _enabled);
+  Future<RemoteAccessPolicy> build() async {
+    if (unreadable) throw StateError('TRANSPORT');
+    return RemoteAccessPolicy(enabled: _enabled);
+  }
+
+  @override
+  Future<void> setEnabled(bool enabled) async => writes.add(enabled);
+}
+
+/// The subordinate bit. [unreadable] is the bridge that predates the verb —
+/// distinct from off, and the panel must not render it as a refusal the user
+/// chose.
+class _FakeReachNotifier extends AgentReachPolicyNotifier {
+  _FakeReachNotifier(this._enabled, {this.unreadable = false});
+  final bool _enabled;
+  final bool unreadable;
+  final List<bool> writes = [];
+  @override
+  Future<AgentReachPolicy> build() async {
+    if (unreadable) throw StateError('BAD_REQUEST');
+    return AgentReachPolicy(enabled: _enabled);
+  }
+
   @override
   Future<void> setEnabled(bool enabled) async => writes.add(enabled);
 }
@@ -75,6 +100,7 @@ Future<void> _pumpPanel(
   WidgetTester tester, {
   required RemoteDevicesNotifier Function() devices,
   RemoteAccessPolicyNotifier Function()? policy,
+  AgentReachPolicyNotifier Function()? reach,
   Map<String, DeviceSummary>? accounts,
 }) async {
   await tester.pumpWidget(
@@ -83,6 +109,9 @@ Future<void> _pumpPanel(
         remoteDevicesProvider.overrideWith(devices),
         remoteAccessPolicyProvider.overrideWith(
           policy ?? () => _FakePolicyNotifier(false),
+        ),
+        agentReachPolicyProvider.overrideWith(
+          reach ?? () => _FakeReachNotifier(true),
         ),
         accountDevicesByBridgeIdProvider.overrideWith(
           (ref) async => accounts ?? _accountDevices,
@@ -94,6 +123,9 @@ Future<void> _pumpPanel(
   await tester.pump();
   await tester.pump();
 }
+
+final _remoteSwitch = find.byKey(const Key('remote-access-switch'));
+final _reachSwitch = find.byKey(const Key('agent-reach-switch'));
 
 void main() {
   testWidgets('a device still on the account offers sign-out, not forget', (
@@ -136,9 +168,9 @@ void main() {
     await _pumpPanel(tester, devices: _FakeNotifier.new, policy: () => policy);
 
     expect(find.text('REMOTE ACCESS'), findsOneWidget);
-    expect(tester.widget<AbSwitch>(find.byType(AbSwitch)).value, isTrue);
+    expect(tester.widget<AbSwitch>(_remoteSwitch).value, isTrue);
 
-    await tester.tap(find.byType(AbSwitch));
+    await tester.tap(_remoteSwitch);
     await tester.pump();
     // Withdrawing access must never be slower than the fear that prompted it.
     expect(policy.writes, [false]);
@@ -150,7 +182,7 @@ void main() {
     final policy = _FakePolicyNotifier(false);
     await _pumpPanel(tester, devices: _FakeNotifier.new, policy: () => policy);
 
-    await tester.tap(find.byType(AbSwitch));
+    await tester.tap(_remoteSwitch);
     await tester.pumpAndSettle();
     expect(policy.writes, isEmpty, reason: 'the dialog must gate the write');
 
@@ -166,9 +198,97 @@ void main() {
     // being non-empty — otherwise a fresh machine has no way to turn it on.
     await _pumpPanel(tester, devices: _EmptyNotifier.new);
 
-    expect(find.byKey(const Key('remote-access-switch')), findsOneWidget);
+    expect(_remoteSwitch, findsOneWidget);
     // There is no pairing ceremony — an account device admits itself, so the
     // empty roster has no action to offer.
     expect(find.byType(AbButton), findsNothing);
+  });
+
+  testWidgets('agent reach turns off in one tap, with no confirm', (
+    tester,
+  ) async {
+    final reach = _FakeReachNotifier(true);
+    await _pumpPanel(
+      tester,
+      devices: _FakeNotifier.new,
+      policy: () => _FakePolicyNotifier(true),
+      reach: () => reach,
+    );
+
+    expect(tester.widget<AbSwitch>(_reachSwitch).value, isTrue);
+    await tester.tap(_reachSwitch);
+    await tester.pumpAndSettle();
+
+    // Narrowing what a machine discloses is the same shape as withdrawing
+    // remote access: never slower than the fear that prompted it.
+    expect(reach.writes, [false]);
+  });
+
+  testWidgets('agent reach stays tappable while remote access is off', (
+    tester,
+  ) async {
+    // The stored answer is independent of the switch above, so devices-yes /
+    // agents-no can be said before anything is granted.
+    final reach = _FakeReachNotifier(true);
+    await _pumpPanel(
+      tester,
+      devices: _FakeNotifier.new,
+      policy: () => _FakePolicyNotifier(false),
+      reach: () => reach,
+    );
+
+    expect(find.textContaining('Nothing until remote access is on'), findsOne);
+    await tester.tap(_reachSwitch);
+    await tester.pumpAndSettle();
+    expect(reach.writes, [false]);
+  });
+
+  testWidgets('a bridge that cannot answer is inert, not off', (tester) async {
+    await _pumpPanel(
+      tester,
+      devices: _FakeNotifier.new,
+      policy: () => _FakePolicyNotifier(true),
+      reach: () => _FakeReachNotifier(true, unreadable: true),
+    );
+
+    // Rendering "cannot say" as a refusal the user chose would invite a tap
+    // writing a value nothing on that machine reads.
+    expect(tester.widget<AbSwitch>(_reachSwitch).onChanged, isNull);
+    expect(find.textContaining("Couldn't read"), findsWidgets);
+  });
+
+  // Nothing in the app ever invalidates the remote-access read, so a host that
+  // was down when the panel first opened leaves it unknown for the rest of the
+  // run — and the machine default for agent reach is ON, which makes "nothing
+  // until remote access is on" a positive claim that the bit is inert while a
+  // peer agent may be reading this machine's session titles.
+  testWidgets('an unreadable remote access is not spoken as off', (
+    tester,
+  ) async {
+    await _pumpPanel(
+      tester,
+      devices: _FakeNotifier.new,
+      policy: () => _FakePolicyNotifier(false, unreadable: true),
+      reach: () => _FakeReachNotifier(true),
+    );
+
+    expect(find.textContaining('Nothing until remote access is on'), findsNothing);
+    expect(find.textContaining("Couldn't read remote access"), findsOne);
+  });
+
+  // The gate refuses a peer OPENING an exchange here; an answer inside one an
+  // agent here started is admitted by design. Copy that claims the machine is
+  // sealed is wrong in exactly the case the next sentence invites.
+  testWidgets('the off copy does not promise more than the gate does', (
+    tester,
+  ) async {
+    await _pumpPanel(
+      tester,
+      devices: _FakeNotifier.new,
+      policy: () => _FakePolicyNotifier(true),
+      reach: () => _FakeReachNotifier(false),
+    );
+
+    expect(find.textContaining('the answers they get still land'), findsOne);
   });
 }

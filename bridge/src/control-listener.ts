@@ -14,11 +14,17 @@ export interface ControlListenerOptions {
   handler: (req: ControlRequest) => Promise<ControlResponse>;
 }
 
-/** Control requests are tiny (a verb plus a couple of short strings). Cap the
- *  body so one oversized POST can't balloon the host RSS — the host is now a
- *  shared multi-project process, so a single bad client must not take down every
- *  warm core. Mirrors local-listener's payload bound. */
-const MAX_CONTROL_BODY_BYTES = 64 * 1024;
+/** Most control requests are tiny — a verb and a couple of short strings — and
+ *  the bound exists so one oversized POST cannot balloon the RSS of a process
+ *  that now holds every warm core. It is sized for the one route that is not
+ *  tiny: a full `session-bus:remote-directory` push carries
+ *  MAX_REMOTE_DIRECTORY_MACHINES machines of MAX_MACHINE_CARD_ROWS rows, and a
+ *  push rejected here 400s, which is the code the pump treats as "this bridge
+ *  is too old" and latches off on. The margin over that worst case is the
+ *  point rather than slack: session-bus-remote-directory.test.ts computes the
+ *  push from those constants and fails if it grows into the margin, so the
+ *  drift is caught while it is still theoretical. */
+export const MAX_CONTROL_BODY_BYTES = 1024 * 1024;
 
 function bearerToken(header: string | null): string | null {
   if (!header || !header.startsWith("Bearer ")) return null;

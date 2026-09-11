@@ -11,6 +11,7 @@ import { hostFilePath, writeHostFile, removeHostFile } from "./host-discovery";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { TrustedPeersProvider } from "./trusted-peers";
 import { loadRemoteAccessPolicy, type RemoteAccessPolicyStore } from "./remote-access-policy";
+import { loadAgentReachPolicy, type AgentReachPolicyStore } from "./agent-reach-policy";
 import { resolveAbDir } from "./antgrid-dir";
 import { VERSION } from "./version";
 import type { DeviceIdentity } from "./device";
@@ -36,9 +37,36 @@ import { buildAgentCatalog } from "./agent-catalog";
 import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";
 import { SessionManager } from "./session-manager";
+import { SessionBusSessionIndex } from "./session-bus/session-index";
+import { SessionBusRepoKeys } from "./session-bus/repo-key";
+import { SessionDirectory, directoryRowsFor, machineDirectoryRows } from "./session-bus/directory";
+import { RemoteDirectoryCache } from "./session-bus/remote-directory";
+import { SessionBusCoordinator } from "./session-bus/coordinator";
+import { removeSessionBusProject, removeSessionBusSession } from "./session-bus/store-fs";
+import {
+  MAX_BUS_ROUTES,
+  MAX_DIRECTORY_REPO_KEYS,
+  MAX_MACHINE_CARD_ROWS,
+  BUS_ROUTE_PERSIST_INTERVAL_MS,
+  LOCAL_MACHINE_ID,
+} from "./session-bus/constants";
+import {
+  loadPairBudgets,
+  savePairBudgets,
+  upsertPairBudget,
+  clearHalt as clearPairHalt,
+  pairEnds,
+  type PairBudgetState,
+} from "./session-bus/pair-budget";
 import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
 import type { BranchRemoteStatus } from "./git-branches";
+import {
+  MAX_CAPABILITY_CARD_PROJECTS,
+  readCapabilityCard,
+  filterByRepoKeys,
+  type CapabilityCardTarget,
+} from "./capability-card";
 import { resolveProject } from "./worktrees/project-resolver";
 import { WorktreeError, WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -76,6 +104,23 @@ function logRemoteStateDetail(projectPath: string, status: BranchRemoteStatus): 
   if (!status.detail) return;
   log.debug("git remote-state %s for %s#%s: %s", status.state, projectPath, status.branch, status.detail);
 }
+
+/** Omitted `projectIds` means the most recently active projects in this
+ *  machine's catalog — the add-machine dialog fills one dropdown from all of
+ *  them (§7.5), so asking per project would be N round trips for one card. Both
+ *  paths are held to the same bound: the catalog never shrinks, so "all of them"
+ *  has to cost the same as an explicit list. */
+const CapabilityCardParams = z.object({
+  projectIds: z.array(z.string()).max(MAX_CAPABILITY_CARD_PROJECTS).optional(),
+  /** Answer only about these repositories. Keys are `readRepoKey` output from
+   *  BOTH machines, so nothing here is re-derived by a caller; the cached
+   *  remote is what bounds the never-cached branch probe. A matching key and
+   *  never an authorization input. */
+  repoKeys: z.array(z.string().min(1).max(512)).max(MAX_DIRECTORY_REPO_KEYS).optional(),
+  /** Session rows beside the repo half. Also narrows the target set to
+   *  projects that hold an addressable session. */
+  includeSessions: z.boolean().optional(),
+});
 
 const GitCheckoutParams = z.object({
   projectId: z.string(),
@@ -225,6 +270,118 @@ function clampCaptureTtl(ttlMs: number): number {
   return Math.min(ttlMs, CAPTURE_MAX_TTL_MS);
 }
 
+/**
+ * Host-side, memory-first cache over `session-bus/pair-budget.ts`'s per-session
+ * store (§7.4): one row array per session, hydrated from disk on first touch
+ * and kept in memory after that, written back throttled like
+ * `SessionBusCoordinator`'s own route table beside it
+ * (`BUS_ROUTE_PERSIST_INTERVAL_MS`), because every send charges the budget and
+ * a disk write per send would put the ceiling in the path of typing. Held at
+ * the host level, beside `sessionIndex`/`repoKeys`/`sessionBus`, because the
+ * ceiling it backs is per (sender, target) PAIR, machine-wide, not per project
+ * core.
+ *
+ * A HALT is the one thing here that must not wait for a throttle window, in
+ * either direction: {@link write} forces the write that sets one and
+ * {@link clearHalt} the write that lifts one, so the state §7.4 says only a
+ * human may change is never the state a crash decides.
+ */
+export class PairBudgetStore {
+  private readonly bySession = new Map<string, PairBudgetState[]>();
+  private readonly savedAtMs = new Map<string, number>();
+
+  constructor(
+    private readonly abDir: string,
+    private readonly projectIdFor: (sessionId: string) => string | null,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  /** Nothing is cached for a session the index cannot place yet. A `[]` cached
+   *  on that path would answer "unbudgeted" for the life of the process, and
+   *  the direction it fails in is no ceiling at all. */
+  private load(sessionId: string): PairBudgetState[] {
+    const cached = this.bySession.get(sessionId);
+    if (cached) return cached;
+    const projectId = this.projectIdFor(sessionId);
+    if (!projectId) return [];
+    const records = loadPairBudgets(this.abDir, projectId, sessionId, this.now());
+    this.bySession.set(sessionId, records);
+    return records;
+  }
+
+  /** [sessionId]'s rows, already pruned of expired notify timestamps
+   *  (`loadPairBudgets`'s own contract). A copy: the caller is handed the
+   *  budget to READ, and the backing array is what every later check answers
+   *  from. */
+  recordsFor(sessionId: string): readonly PairBudgetState[] {
+    return [...this.load(sessionId)];
+  }
+
+  /** Record what one send spent. Forced to disk when it set a halt, throttled
+   *  otherwise — losing a few notify timestamps to a crash costs a pair part of
+   *  one hour's ceiling, where losing a halt costs the halt entirely. */
+  write(sessionId: string, next: PairBudgetState): void {
+    const records = upsertPairBudget(this.load(sessionId), next);
+    this.bySession.set(sessionId, records);
+    this.flush(sessionId, records, next.haltedAt !== null);
+  }
+
+  /**
+   * Lift every halt [sessionId] is a SENDER in (§7.4: "cleared only by a
+   * human"). Reads the memory-first cache, never disk: the budget belongs to
+   * the host, not to any one project's core, so a keystroke has to be able to
+   * lift a halt on a session whose project is not currently warm — a
+   * per-keystroke file read here would make the ceiling itself the thing that
+   * stalls typing. Only an actual change reaches disk, and it is FORCED rather
+   * than throttled — the same rule a route drop follows in
+   * `SessionBusCoordinator.saveRoutesIfDue`.
+   */
+  clearHalt(sessionId: string): void {
+    // The pair's other end holds its OWN mirror of the same record
+    // (`pair-budget.ts`'s header), so lifting only this session's copy leaves a
+    // peer still refusing every send on a pair a human has just cleared. Only a
+    // peer THIS machine holds is reachable from here — `load` answers nothing
+    // for a session it cannot place, which is what makes the remote end a
+    // no-op rather than a special case; there, the same act by that session's
+    // own human is what lifts it.
+    for (const key of this.lift(sessionId)) {
+      for (const end of pairEnds(key) ?? []) {
+        if (end.sessionId !== sessionId) this.lift(end.sessionId, key);
+      }
+    }
+  }
+
+  /** Lift [sessionId]'s halts, or just the one on [onlyPairKey], and answer
+   *  with the pairs actually lifted. */
+  private lift(sessionId: string, onlyPairKey?: string): string[] {
+    const records = this.load(sessionId);
+    const lifted: string[] = [];
+    const next = records.map((r) => {
+      if (r.haltedAt === null) return r;
+      if (onlyPairKey !== undefined && r.pairKey !== onlyPairKey) return r;
+      lifted.push(r.pairKey);
+      return clearPairHalt(r);
+    });
+    if (lifted.length === 0) return lifted;
+    this.bySession.set(sessionId, next);
+    this.flush(sessionId, next, true);
+    return lifted;
+  }
+
+  private flush(sessionId: string, records: PairBudgetState[], force: boolean): void {
+    const now = this.now();
+    if (!force && now - (this.savedAtMs.get(sessionId) ?? 0) < BUS_ROUTE_PERSIST_INTERVAL_MS) return;
+    const projectId = this.projectIdFor(sessionId);
+    if (!projectId) return;
+    this.savedAtMs.set(sessionId, now);
+    try {
+      savePairBudgets(this.abDir, projectId, sessionId, records);
+    } catch (err) {
+      log.warn("session bus: could not persist pair budget for %s: %s", sessionId, err);
+    }
+  }
+}
+
 export class HostServer {
   private readonly cores = new Map<string, CatalogEntry>();
   // In-flight open() promises keyed by projectId, so concurrent opens of the
@@ -255,6 +412,11 @@ export class HostServer {
   // The one authorization gate for remote phones: is this machine reachable
   // from mobile at all. Every project verb from a phone is checked against it.
   private readonly remoteAccessPolicy: RemoteAccessPolicyStore = loadRemoteAccessPolicy(resolveAbDir());
+  // The second half of that gate, subordinate to it: whether a peer machine's
+  // AGENT may see what runs here and reach into it. Read only after the switch
+  // above says yes — see `agent-reach-policy.ts` for why the two are separate
+  // questions.
+  private readonly agentReachPolicy: AgentReachPolicyStore = loadAgentReachPolicy(resolveAbDir());
   private stopPhonesWatch: (() => void) | null = null;
   // projectId → {path, label} for every project this machine has opened. Since
   // the per-phone allowlist went away this is the ONLY per-project bound on what
@@ -265,6 +427,204 @@ export class HostServer {
   // state of its own. Persisted to <abDir>/projects.json; if that file is lost,
   // worst case a stopped project isn't advertised until reopened.
   private readonly seenProjects: Map<string, SeenProject> = loadSeenProjects(seenProjectsPath());
+  // Machine-wide sessionId -> owning project (docs/session-messaging.md §5.4's
+  // directory). `liveSessions` defers to whichever core is warm right now, so
+  // an open project's own answer never lags its own sessions.json flush; see
+  // SessionBusSessionIndex's own doc for what that buys and what it costs.
+  private readonly sessionIndex = new SessionBusSessionIndex({
+    liveSessions: (projectId) => this.cores.get(projectId)?.core.listSessions(true) ?? null,
+  });
+  // The other half of §5.1's addressable set: the index says which project holds
+  // a session, this says which projects are the same repository. Refreshed on
+  // the same three edges as the index, for the reason its `note` doc gives.
+  private readonly repoKeys = new SessionBusRepoKeys();
+  // The asking half of the remote directory: an in-memory mirror of what the
+  // app's pump last learned peeking peer capability cards.
+  // Machine-level like `sessionIndex`/`repoKeys` above, filled by the
+  // `session-bus:remote-directory` loopback verb and read by `sessionDirectory`
+  // below — declared first so that construction can hand it over.
+  private readonly remoteDirectory = new RemoteDirectoryCache();
+  // §5.5's directory, assembled from the two machine-level halves above. The
+  // machine id is read live rather than captured: a core can be built before the
+  // relay has one, and a row's address is only ever read after it is.
+  private readonly sessionDirectory = new SessionDirectory({
+    repoKeys: this.repoKeys,
+    sessionIndex: this.sessionIndex,
+    projectPath: (projectId) => this.cores.get(projectId)?.path ?? this.seenProjects.get(projectId)?.path,
+    machineId: () => this.controlPlaneRegistrationId ?? null,
+    remoteDirectory: this.remoteDirectory,
+    remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
+    now: () => Date.now(),
+  });
+  // The same latches `agent-core.ts`'s per-core fallback keeps, moved here
+  // because the machine-level `send` below is this host's own copy of that
+  // fallback's dispatcher — see its doc for why the two absences (no route
+  // home for a peer, no desktop attached to this machine) get separate sets.
+  private readonly busRouteMissWarned = new Set<string>();
+  private readonly busOwnerMissWarned = new Set<string>();
+  // The host-side no-progress-halt store (§7.4), machine-wide like
+  // `sessionIndex`/`repoKeys` beside it — see PairBudgetStore's own doc.
+  // `sessionIndex.lookup` is what lets it answer for a session whose project
+  // is not currently warm.
+  private readonly pairBudgetStore = new PairBudgetStore(
+    resolveAbDir(),
+    (sessionId) => this.sessionIndex.lookup(sessionId)?.projectId ?? null,
+  );
+  // The ONE session bus for this machine (E9/§5.4): every project core built
+  // by `startCore` below is handed this exact instance rather than building
+  // its own, so a route learned while handling project A's inbound frame is
+  // visible to project B's outbound send for the same context, and a
+  // session created in project B is addressable the moment `self()` is asked
+  // about it from project A's stream. `projectIdFor`/`self` both resolve
+  // through `sessionIndex` rather than a captured project id, which is what
+  // makes this the single seam a bare `buildAgentCore` caller has no host to
+  // supply — see `BuildAgentCoreOptions.sessionBus`'s own doc.
+  private readonly sessionBus: SessionBusCoordinator = new SessionBusCoordinator({
+    abDir: resolveAbDir(),
+    projectIdFor: (sessionId) => this.sessionIndex.lookup(sessionId)?.projectId ?? null,
+    self: (sessionId) => {
+      // A relay registration is the NETWORK address; LOCAL_MACHINE_ID is this
+      // bridge's name for itself when it has none. The two sessions a purely
+      // local exchange (§6.1) involves never leave this machine, so a host
+      // launched local-only — or one whose control-plane mint threw — must
+      // still be able to name itself for that exchange rather than refuse it
+      // `AGENT_NOT_READY` over an address neither side needs. `addressable()`
+      // below is left reading the real registration on purpose: it is what a
+      // REMOTE caller's honesty depends on, and nothing here should make a
+      // peer think this machine is reachable when it is not.
+      const machineId = this.controlPlaneRegistrationId ?? LOCAL_MACHINE_ID;
+      const entry = this.sessionIndex.lookup(sessionId);
+      if (!entry) return null;
+      // The project's REAL name (antgrid.yaml's `name:` when set) is only known
+      // to its live core — `api.ts`'s per-project selfRef reads it the same
+      // way. The index's own label is a folder-basename snapshot kept for a
+      // project with no core warm right now (SessionIndexEntry's own doc), so
+      // it is the fallback here, never the first answer: preferring it
+      // unconditionally is the Wave 1 regression this resolves.
+      const projectLabel = this.cores.get(entry.projectId)?.core.projectName || entry.projectLabel;
+      return {
+        key: { machineId, projectId: entry.projectId, sessionId },
+        ref: {
+          machineId,
+          projectId: entry.projectId,
+          sessionId,
+          projectLabel,
+          sessionName: entry.sessionName,
+        },
+      };
+    },
+    addressable: () => this.controlPlaneRegistrationId !== null,
+    // §6.1: a target on THIS host is handed straight into the SAME fold the
+    // remote path folds through (`handleInbound`) — no relay, no carrier, no
+    // route table — so wrapping, queueing and turn-boundary injection are
+    // byte-identical for both paths. `dispatch()` (coordinator.ts) already
+    // confines this to a same-machine context (`ctx.to.machineId ===
+    // frame.from.machineId`); this only adds "and a core for it is actually
+    // loaded here right now" — a session this host merely KNOWS about (a cold
+    // project in the catalog) cannot be folded into in process, and falling
+    // through to `send` below holds the frame, which `flushHeld` then retries
+    // through this same decision — so a project that comes back warm delivers
+    // what was held for it, rather than offering it to a carrier forever.
+    //
+    // `handleInbound` can throw on a session-store write failure, and it is
+    // called RE-ENTRANTLY — the receipt `onMessage` dispatches back out
+    // through this very function, for a DIFFERENT session, from inside this
+    // call — so an uncaught throw here would unwind through a fold that
+    // already committed and report ITS delivery as failed too. Caught and
+    // turned into `false`, which is what makes the failure cost one retry
+    // rather than a wrongly-failed, already-applied send.
+    //
+    // `"applied"` is the whole answer for every verb `dispatch()` ever hands
+    // this (post, notify, ack): the store commit it implies (mailbox for a
+    // post, the log/thread row for a notify or ack) has already landed by the
+    // time `handleInbound` returns it, and what happens to a notify's
+    // rendered line downstream (`deliverBusEvent`/`lineForEvent`) is a
+    // separate, deliberately swallowed best-effort concern — `lineForEvent`
+    // returns null for every post ON PURPOSE, so answering "true iff a line
+    // was queued" here would read every local post as failed and retry it
+    // forever.
+    deliverLocal: (frame, to) => {
+      const projectId = this.sessionIndex.lookup(to.sessionId)?.projectId ?? null;
+      if (projectId === null || !this.cores.has(projectId)) return false;
+      try {
+        return this.sessionBus.handleInbound(frame) === "applied";
+      } catch (err) {
+        log.warn(
+          "session bus: local delivery to %s failed: %s",
+          to.sessionId,
+          err instanceof Error ? err.message : String(err),
+        );
+        return false;
+      }
+    },
+    // The one human signal that lifts a no-progress halt (§7.4) — delegated to
+    // the host-wide store so it can answer for a session this host is not
+    // currently holding warm; see PairBudgetStore.clearHalt.
+    clearHalt: (sessionId) => this.pairBudgetStore.clearHalt(sessionId),
+    // The one budget for the machine, for the same reason there is one
+    // coordinator: a pair is (sender, target) across every project, so a store
+    // per core would let the same two sessions spend a fresh ceiling by
+    // exchanging on a different project's stream.
+    pairBudget: this.pairBudgetStore,
+    send: (frame, ctx) => {
+      if (ctx.role === "peer") {
+        // There is exactly one way home and it is the carrier — on WHICHEVER
+        // project's stream — that brought the context in. `routeFor` names
+        // that project explicitly (`origin.projectId`), so this dispatch
+        // never assumes the sending core's own project is the right stream —
+        // the whole point of moving the route table off a single core.
+        const origin = this.sessionBus.routeFor(ctx.contextId);
+        if (!origin) {
+          if (this.latchBusWarn(this.busRouteMissWarned, ctx.contextId)) {
+            log.warn("session bus: no carrier route for context %s — frames held until one arrives", ctx.contextId);
+          }
+          return false;
+        }
+        // A route resolved, so the next context that loses one is worth saying
+        // again. Cleared here and not on a successful send: a route that exists
+        // but whose core is cold is a different silence, and latching this on it
+        // would mute the warning for the outage that follows.
+        this.busRouteMissWarned.delete(ctx.contextId);
+        const sent = this.cores.get(origin.projectId)?.core.sendToAppSession(origin.peerId, frame) ?? false;
+        if (sent) origin.at = Date.now();
+        return sent;
+      }
+      // Lead role: `ctx.to` names the REMOTE peer this frame is addressed
+      // to, not the local project sending it — so the project whose desktop
+      // owner should carry it out has to come from the SESSION that opened
+      // the exchange instead. `roleForContext` answers "lead" exactly when
+      // `contextId === sessionId` (coordinator.ts), which is what makes
+      // resolving the owning project off `ctx.contextId` through the same
+      // index the coordinator itself uses for `projectIdFor` correct here.
+      const projectId = this.sessionIndex.lookup(ctx.contextId)?.projectId ?? null;
+      const sentToOwner = projectId ? this.cores.get(projectId)?.core.sendToOwner(frame) ?? false : false;
+      if (sentToOwner) {
+        this.busOwnerMissWarned.delete(ctx.contextId);
+      } else if (this.latchBusWarn(this.busOwnerMissWarned, ctx.contextId)) {
+        log.warn(
+          "session bus: no carrier attached to project %s for context %s — frames held until a desktop app attaches",
+          projectId,
+          ctx.contextId,
+        );
+      }
+      return sentToOwner;
+    },
+  });
+
+  /** Latch [contextId] into a warn set, answering whether this is the first
+   *  time — so a frame retried once a second says its absence once, not once a
+   *  tick. Unlike the per-core sets this replaced, these live as long as the
+   *  MACHINE, so the size check is what keeps a de-duplicator from becoming a
+   *  leak: a latch bigger than the route table it shadows is tracking more
+   *  contexts than this host can route, and the whole cost of dropping it is
+   *  that some of those absences get said a second time. */
+  private latchBusWarn(latch: Set<string>, contextId: string): boolean {
+    if (latch.has(contextId)) return false;
+    if (latch.size >= MAX_BUS_ROUTES) latch.clear();
+    latch.add(contextId);
+    return true;
+  }
+
   // The always-on, coreless control-plane relay registered under the BARE
   // deviceUuid (no projectId), used to advertise the project catalog and accept
   // mobile-access-gated project verbs from a paired phone. Opened only when remote
@@ -305,6 +665,34 @@ export class HostServer {
       this.readvertiseToControlPlane();
     });
     this.pruneMissingSeenProjects();
+    // Fire-and-forget: nothing on this host blocks on the session index being
+    // ready, and a lookup that lands before this resolves gets its own
+    // distinguishable log line (SessionBusSessionIndex.lookup) rather than
+    // reading as a real addressing miss.
+    //
+    // The one machine-wide `resume()` waits for it: `resume()` resolves
+    // `projectIdFor` through this same index, and a `resume()` that ran first
+    // would read every cold project's on-disk session as unaddressable (a
+    // warned miss, per the index's own doc) instead of re-arming its held
+    // retries. Route-table hydration reads the one machine-level route table
+    // (E9/§5.4/C5) and needs no project list to do it, so it has nothing to
+    // wait for — it is only kept alongside `resume()` here so both land before
+    // the same first inbound frame this process folds. `.finally` rather than
+    // chaining off the resolved promise: a hydrate that fails for one project
+    // must not also cost every other project its resume, so route hydration
+    // and resume run once the attempt SETTLES, not only once it succeeds.
+    void this.sessionIndex
+      .hydrate(resolveAbDir(), [...this.seenProjects].map(([id, seen]) => ({ id, label: seen.label })))
+      .catch((err) => log.warn({ err }, "host: session index hydrate failed"))
+      .finally(() => {
+        this.sessionBus.hydrateRoutes();
+        this.sessionBus.resume();
+      });
+    // Separately, and deliberately not in that chain: this one spawns git per
+    // project, and nothing the bus resumes is waiting on a repo key.
+    void this.repoKeys
+      .hydrate([...this.seenProjects].map(([id, seen]) => ({ id, path: seen.path })))
+      .catch((err) => log.warn({ err }, "host: repo key hydrate failed"));
   }
 
   /** Self-heal the hint catalog at startup: drop any entry whose folder no
@@ -334,8 +722,8 @@ export class HostServer {
     const client = this.controlPlaneRelay;
     const bus = this.controlPlaneBus;
     if (!client || !bus) return;
-    // No authenticated peer → nothing to tell; the next handshake advertises.
-    if (!client.currentPeerPubkey()) return;
+    // No established session → nobody to tell; the next handshake advertises.
+    if (!client.hasEstablishedSession()) return;
     this.sendProjectsAdvertisement(bus);
     this.sendToolsAdvertisement(bus);
   }
@@ -344,10 +732,11 @@ export class HostServer {
    *  the exact re-advertise the file-watch callback runs. Lets the
    *  policy/catalog-change → re-advertise path be verified without standing up a
    *  live relay (the fake relay URL never connects, so no real peer exists). */
-  readvertiseForTest(bus: MessageBus, peerPubkey: string): void {
+  readvertiseForTest(bus: MessageBus): void {
     this.controlPlaneBus = bus;
     this.controlPlaneRelay = {
-      currentPeerPubkey: () => peerPubkey,
+      hasEstablishedSession: () => true,
+      anySessionSupportsCheckoutRouting: () => false,
       close: () => {},
     } as unknown as RelayClient;
     this.readvertiseToControlPlane();
@@ -453,16 +842,16 @@ export class HostServer {
         this.sendToolsAdvertisement(bus);
       },
       // A bridge-side reconnect to the RELAY (heartbeat lapse, network blip on
-      // this machine — NOT the phone dropping) clears `_peerId` for the gap and
-      // restores it here on `peer-online`, with NO fresh E2E handshake in
+      // this machine — NOT the phone dropping) marks the sessions unreachable
+      // for the gap; `peer-online` revives them with NO fresh E2E handshake in
       // between (the phone never saw a disconnect, so it never re-sends
       // client-hello — see relay-client.ts's post-establishment lockout). Any
       // `readvertiseToControlPlane()` call that raced that gap (e.g. a desktop
-      // mobile-access toggle) silently no-opped on the then-null peer id with no
-      // retry. Re-advertising here — right after `_peerId` is restored, before
-      // this callback runs — closes that window instead of leaving the phone
-      // stuck on a stale catalog until an unrelated project:start forces a
-      // full recompute.
+      // mobile-access toggle) silently no-opped on the then-empty session set
+      // with no retry. Re-advertising here — after the revival, before this
+      // callback runs — closes that window instead of leaving the phone stuck
+      // on a stale catalog until an unrelated project:start forces a full
+      // recompute.
       onPeerOnline: () => this.readvertiseToControlPlane(),
       // No peer-disconnect hook is wired on purpose. A transient disconnect is
       // NOT a revocation, and multiple phones share this one control-plane
@@ -473,12 +862,13 @@ export class HostServer {
       // idle outbound socket meanwhile; it reconnects with the core.
     });
 
-    bus.setInboundHandler((msg, channel) => {
-      // Admission is "an account-trusted phone completed the E2E handshake";
-      // WHICH phone no longer changes any answer, so the pubkey is only checked
-      // for presence here. Authorization is the machine switch, applied per verb.
-      if (!client.currentPeerPubkey()) return;
-      this.dispatchControlPlaneInbound(msg, channel, bus);
+    bus.setInboundHandler((msg, channel, _source, peerId) => {
+      // Admission is "an account-trusted app completed the E2E handshake", so
+      // only presence is checked here. Authorization is the machine switch,
+      // applied per verb — and the asking session names itself, which is what
+      // lets `project:start` answer from THAT device's capabilities.
+      if (!client.hasEstablishedSession()) return;
+      this.dispatchControlPlaneInbound(msg, channel, bus, peerId);
     });
     client.setBus(bus);
 
@@ -564,8 +954,8 @@ export class HostServer {
     const client = this.controlPlaneRelay!;
     return {
       attachStream: (bus, opts) => client.attachStream(bus, opts),
-      currentPeerPubkey: () => client.currentPeerPubkey(),
-      peerPullsTree: () => client.peerPullsTree,
+      establishedPeers: () => client.establishedPeers(),
+      peerSession: (peerId) => client.peerSession(peerId),
       sendPushDeliver: (m) => client.sendPushDeliver(m),
       // The LIVE socket's id, like every member beside it — not the inbound
       // auth's. The credential swap above is gated on nothing being live, so a
@@ -603,7 +993,15 @@ export class HostServer {
         const seen = this.seenProjects.get(id);
         const entry = this.cores.get(id);
         const needsCheckoutRouting = entry?.core.hasIsolatedSessions() ?? false;
-        const peerCanRoute = this.controlPlaneRelay?.peerSupportsCheckoutRouting === true;
+        // Optimistic across the fleet, because the advert is ONE broadcast frame
+        // (a replay-cached type sealed below any place that could vary it per
+        // receiver). Both refusals behind it are per-device, and BOTH are
+        // needed: project:start refuses the asking device by its own capability,
+        // and the stream's own `mayAcceptFrom` refuses it on the bind path below
+        // — which a reconnecting app takes WITHOUT a project:start, so the verb
+        // alone would leave a stale device on a mixed fleet bound to a stream
+        // that silently drops everything it sends.
+        const peerCanRoute = this.controlPlaneRelay?.anySessionSupportsCheckoutRouting() === true;
         const dialable = (entry?.core.isRelayRegistered() ?? false)
           && (!needsCheckoutRouting || peerCanRoute);
         // A reconnecting phone binds its ProjectSession to this streamId without a
@@ -676,6 +1074,34 @@ export class HostServer {
     );
   }
 
+  /** Answer one control-plane RPC to the app session that ASKED, rather than to
+   *  every established session on this machine.
+   *
+   *  `bus.publish` fans a response out to the desktop and the phone alike, and a
+   *  client tells its own answer from a sibling's only by `requestId` — fine for
+   *  a verb whose answer every session would have asked for anyway, wrong for
+   *  any answer assembled from ONE asker's params (E14,
+   *  `docs/session-messaging.md`). The session-bearing capability card is the
+   *  loudest case — this machine's session titles and work status — but the
+   *  quieter reason covers the rest: a client correlates a response by
+   *  `requestId` alone, and those are per-transport counters that two devices
+   *  attached to this bridge both start at zero, so a fanned answer can complete
+   *  a DIFFERENT device's pending request with a payload it never asked for.
+   *
+   *  Falls back to the bus ONLY when the asker cannot be named — a loopback
+   *  frame carries no peerId — so an answer is never lost to targeting. A named
+   *  asker whose session has gone resolves to no recipient and the frame is
+   *  dropped, which is correct: the asker it was assembled for left. Testing
+   *  liveness first and falling back to the bus would broadcast exactly the
+   *  answer that lost its reader. */
+  private answerAsker(res: AbMessage, channel: Channel, bus: MessageBus, peerId?: string): void {
+    if (peerId === undefined) {
+      bus.publish(res, channel);
+      return;
+    }
+    this.controlPlaneRelay?.sendOnChannel(res, channel, { kind: "peer", peerId });
+  }
+
   /** Route one inbound control-plane frame from the paired phone: either the
    *  welcome-replay `state.snapshot` RPC or a project verb. Extracted from the
    *  bus inbound handler so the request/verb split is unit-testable without a
@@ -685,6 +1111,7 @@ export class HostServer {
     msg: AbMessage,
     channel: Channel,
     bus: MessageBus,
+    peerId?: string,
   ): void {
     // The app's RelayTransport.connect() fires a `state.snapshot` request to
     // seed its replay cache with the durable frames (agent:projects /
@@ -711,33 +1138,39 @@ export class HostServer {
         // dispatchRpc) because authz needs the host's mobile-access policy and
         // seen-catalog, which dispatchRpc's (bus, params) signature can't see.
         // Async: the handler reads sessions.json off the event loop (see
-        // SessionManager.readPersisted), so publish on resolve.
+        // SessionManager.readPersisted), so answer on resolve.
         void this.handleSessionsListRpc(msg)
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("sessions.list handler threw: %s", err));
         return;
       }
       if (msg.method === "sessions.delete") {
         void this.handleSessionsDeleteRpc(msg)
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("sessions.delete handler threw: %s", err));
         return;
       }
       if (msg.method === "git.branches") {
         void this.handleGitBranchesRpc(msg)
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("git.branches handler threw: %s", err));
         return;
       }
       if (msg.method === "git.remote-state") {
         void this.handleGitRemoteStateRpc(msg)
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("git.remote-state handler threw: %s", err));
+        return;
+      }
+      if (msg.method === "machine.capability-card") {
+        void this.handleCapabilityCardRpc(msg)
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
+          .catch((err) => log.warn("machine.capability-card handler threw: %s", err));
         return;
       }
       if (msg.method === "git.checkout") {
         void this.handleGitCheckoutRpc(msg)
-          .then((res) => bus.publish(res, channel))
+          .then((res) => this.answerAsker(res, channel, bus, peerId))
           .catch((err) => log.warn("git.checkout handler threw: %s", err));
         return;
       }
@@ -748,7 +1181,7 @@ export class HostServer {
     // control:result so a rejected start (NOT_ALLOWED/UNKNOWN_PROJECT/OPEN_FAILED)
     // isn't silently dropped. Success re-advertises agent:projects inside the
     // handler, so we only publish on !ok. `.catch` guards an unexpected throw.
-    void this.handleControlPlaneVerb(msg, bus)
+    void this.handleControlPlaneVerb(msg, bus, peerId)
       .then((res) => {
         if (!res.ok) {
           // projectId lets the phone fail the exact pending bind (MachineSession
@@ -800,7 +1233,15 @@ export class HostServer {
         return { id: req.id, ok: true, type: "mobile-access:get", enabled: this.remoteAccessPolicy.isEnabled() };
       case "mobile-access:set": {
         const changed = this.remoteAccessPolicy.setEnabled(req.enabled);
-        if (changed && !req.enabled) this.demoteAllPromoted();
+        if (changed && !req.enabled) {
+          this.demoteAllPromoted();
+          // A second, independent clear: `handleRemoteDirectoryPush`'s own
+          // refusal path already clears on its next ingest attempt, but that
+          // is a reactive gate — it only fires when a push arrives. This one
+          // is what makes a flip to off empty the mirror immediately, with no
+          // push required, which is the property the test file pins.
+          this.remoteDirectory.clear("remote access turned off");
+        }
         if (changed) {
           // The advert derives from the switch, and `Device.mobileAccessEnabled`
           // in the account inventory must not lag until the next reconnect.
@@ -811,6 +1252,32 @@ export class HostServer {
       }
       default:
         return { id: req.id, ok: false, error: { code: "UNKNOWN_VERB", message: `not a mobile-access verb: ${(req as ControlRequest).type}` } };
+    }
+  }
+
+  /** The subordinate half of the gate (E12): whether an agent on another of this
+   *  account's machines may see what runs here and reach into it.
+   *
+   *  INBOUND ONLY, and deliberately not symmetric. Turning it off does not empty
+   *  this machine's mirror of its peers and does not stop an agent here opening
+   *  an exchange with one: what a peer discloses is that peer's user's decision,
+   *  answered by that machine's own copy of this bit. An answer arriving on a
+   *  context this machine LEADS is not an interruption — something here asked
+   *  for it — so it is not what this gate refuses.
+   *
+   *  Nothing is clawed back either. What peers already mirrored about this
+   *  machine expires on their own TTL; nothing here can reach in to clear it,
+   *  and nothing pretends to. */
+  async handleAgentReachVerb(req: ControlRequest): Promise<ControlResponse> {
+    switch (req.type) {
+      case "agent-reach:get":
+        return { id: req.id, ok: true, type: "agent-reach:get", enabled: this.agentReachPolicy.isEnabled() };
+      case "agent-reach:set": {
+        this.agentReachPolicy.setEnabled(req.enabled);
+        return { id: req.id, ok: true, type: "agent-reach:set", enabled: this.agentReachPolicy.isEnabled() };
+      }
+      default:
+        return { id: req.id, ok: false, error: { code: "UNKNOWN_VERB", message: `not an agent-reach verb: ${(req as ControlRequest).type}` } };
     }
   }
 
@@ -937,6 +1404,103 @@ export class HostServer {
       });
     }
     return createMessage("response", { requestId: req.requestId, ok: true, result: { deleted } });
+  }
+
+  /** The Capability Card (§3.3): OS plus one repo entry per project. It reads
+   *  the seen-projects catalog rather than a warm core, so it answers for COLD
+   *  projects — which is what "the card exists before any agent runs" means. An
+   *  id the catalog does not hold is OMITTED from `projects` rather than failing
+   *  the request: the dialog asks about a catalog it was advertised, and one
+   *  stale id must not blank the card for every other project.
+   *
+   *  `includeSessions` widens the answer with the session half of
+   *  `docs/session-messaging.md` §5.5's directory: `sessions` (possibly `[]`)
+   *  is present iff it was asked AND honoured — that presence is the only
+   *  signal a caller has that it is talking to a bridge old enough not to
+   *  know the flag, so an unasked card must never carry the key. */
+  async handleCapabilityCardRpc(req: RpcRequest): Promise<AbMessage> {
+    const parsed = CapabilityCardParams.safeParse(req.params ?? {});
+    if (!parsed.success) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "E_BAD_PARAMS", message: parsed.error.issues.map((i) => i.message).join("; ") },
+      });
+    }
+    const { projectIds, repoKeys, includeSessions } = parsed.data;
+    if (projectIds?.some((id) => !isSafeProjectId(id))) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "E_BAD_PARAMS", message: "invalid projectId" },
+      });
+    }
+    if (!this.remoteAccessPolicy.isEnabled()) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" },
+      });
+    }
+    // The disclosure half of E12. Only the SESSION-bearing card is gated: the
+    // repo/OS half answers a device the user is holding, where remote access is
+    // the whole question, while `sessions` is this machine's own titles and work
+    // status assembled for another machine's AGENT.
+    //
+    // Refused rather than answered without the key. Omitting `sessions` is
+    // already how a bridge too old to know the flag degrades, and reusing it
+    // here would tell the asker "that machine cannot say" when the truth is
+    // "that machine will not".
+    //
+    // Its OWN code, not the plain NOT_ALLOWED the remote-access gate above
+    // returns: both refusals travel to an agent as one line of prose naming a
+    // switch, and a machine whose remote access is on has nothing to fix where
+    // that line would send them. An app too old to know this code buckets it
+    // with the other refusals it cannot read, which is a weaker answer than
+    // this one and never a wrong one.
+    if (includeSessions && !this.agentReachPolicy.isEnabled()) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "NOT_ALLOWED_AGENT_REACH", message: "agent reach is disabled on this machine" },
+      });
+    }
+    const targets: CapabilityCardTarget[] = [];
+    for (const projectId of projectIds ?? this.recentSeenProjectIds()) {
+      const seen = this.seenProjects.get(projectId);
+      if (!seen?.path) continue;
+      targets.push({ projectId, path: seen.path, label: seen.label });
+    }
+    if (!includeSessions) {
+      const scoped = repoKeys === undefined ? targets : await filterByRepoKeys(targets, repoKeys);
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: true,
+        result: await readCapabilityCard(scoped),
+      });
+    }
+    // Session-bearing first: it is a synchronous read of memory already held,
+    // where the repo-key filter can spawn git — so the probe budget is only
+    // ever spent on a project this response could still carry a row for.
+    const bearing = targets.filter((t) => directoryRowsFor(this.sessionIndex, t.projectId).length > 0);
+    const keyed = repoKeys === undefined ? bearing : await filterByRepoKeys(bearing, repoKeys);
+    const card = await readCapabilityCard(keyed);
+    // `branch`/`repoKey` ride the same probe the card just paid for — a
+    // session row costs no git spawn of its own.
+    const { rows, truncated } = machineDirectoryRows(
+      this.sessionIndex,
+      keyed.map((t) => ({
+        projectId: t.projectId,
+        repoKey: card.projects[t.projectId]?.remote ?? null,
+        branch: card.projects[t.projectId]?.branch ?? null,
+      })),
+      MAX_MACHINE_CARD_ROWS,
+    );
+    return createMessage("response", {
+      requestId: req.requestId,
+      ok: true,
+      result: { ...card, sessions: rows, sessionsTruncated: truncated },
+    });
   }
 
   async handleGitBranchesRpc(req: RpcRequest): Promise<AbMessage> {
@@ -1129,6 +1693,7 @@ export class HostServer {
   async handleControlPlaneVerb(
     verb: AbMessage,
     bus: MessageBus,
+    peerId?: string,
   ): Promise<{ ok: true } | { ok: false; error: { code: string; message: string } }> {
     if (verb.type === "project:start") {
       // SECURITY: checked BEFORE open() — open() runs the project's `terminals:`
@@ -1142,8 +1707,14 @@ export class HostServer {
       // record is rejected, never opened with a guessed path.
       const seen = this.seenProjects.get(verb.projectId);
       if (!seen) return { ok: false, error: { code: "UNKNOWN_PROJECT", message: "no path on record; open from desktop first" } };
-      if (await this.projectRequiresCheckoutRouting(verb.projectId)
-        && this.controlPlaneRelay?.peerSupportsCheckoutRouting !== true) {
+      // The ASKING device's own capability, not the machine's best: the advert
+      // is deliberately optimistic (any attached app can route), so this is where
+      // a stale device on a mixed fleet gets a precise refusal instead of a
+      // silent dial into a project it would render as the main worktree.
+      const askerCanRoute = peerId
+        ? this.controlPlaneRelay?.peerSession(peerId)?.checkoutRouting === true
+        : false;
+      if (await this.projectRequiresCheckoutRouting(verb.projectId) && !askerCanRoute) {
         return {
           ok: false,
           error: { code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions" },
@@ -1387,6 +1958,25 @@ export class HostServer {
       case "mobile-access:get":
       case "mobile-access:set":
         return this.handleRemoteAccessVerb(req);
+      case "agent-reach:get":
+      case "agent-reach:set":
+        return this.handleAgentReachVerb(req);
+      case "machine:capability-card": {
+        try {
+          const card = await readCapabilityCard(
+            req.projects.map((p) => ({ projectId: p.projectId, path: p.projectPath, label: p.label })),
+          );
+          return { id: req.id, ok: true, type: "machine:capability-card", os: card.os, projects: card.projects };
+        } catch (err: any) {
+          return {
+            id: req.id,
+            ok: false,
+            error: { code: err.code || "UNKNOWN_ERROR", message: err.message || String(err) },
+          };
+        }
+      }
+      case "session-bus:remote-directory":
+        return this.handleRemoteDirectoryPush(req);
       case "git:branches": {
         try {
           const catalog = await listLocalBranches(req.projectPath);
@@ -1620,6 +2210,58 @@ export class HostServer {
     return { id: req.id, ok: true, type: "checkout:path", path };
   }
 
+  /** The asking half of the remote directory's fill path: the app's pump
+   *  hands over one cycle of what it learned peeking peer capability cards.
+   *  Gated on THIS machine's own remote-access switch even though the rest of
+   *  this plane is exempt from it — see the comment on this arm in
+   *  control-protocol.ts for why. `clear()` on both refusal branches is what
+   *  makes a switch flip take effect immediately rather than riding out the
+   *  mirror's TTL. */
+  private handleRemoteDirectoryPush(
+    req: Extract<ControlRequest, { type: "session-bus:remote-directory" }>,
+  ): ControlResponse {
+    if (!this.remoteAccessPolicy.isEnabled()) {
+      this.remoteDirectory.clear("remote access is off");
+      return {
+        id: req.id,
+        ok: false,
+        error: { code: "NOT_ALLOWED", message: "remote access is disabled on this machine, so it accepts no peer directory" },
+      };
+    }
+    const selfMachineId = this.controlPlaneRegistrationId;
+    if (selfMachineId === null) {
+      // A row offered while this machine has no relay identity is
+      // un-messageable (SessionBusCoordinator.message -> self() refuses
+      // AGENT_NOT_READY on a null machine id), so mirroring it would hand
+      // agents a directory that lies about what it can reach.
+      this.remoteDirectory.clear("no relay identity");
+      return {
+        id: req.id,
+        ok: false,
+        error: { code: "NOT_ADDRESSABLE", message: "this machine has no relay identity yet, so it cannot accept a peer directory" },
+      };
+    }
+    // unservedReads comes off replace()'s own return, not a follow-up
+    // `.unservedReads()` call — replace() drains that counter as part of this
+    // push, so a call made after it would always read back 0.
+    const { accepted, dropped, unservedReads } = this.remoteDirectory.replace(
+      req.machines,
+      req.notConnected,
+      selfMachineId,
+      Date.now(),
+    );
+    return {
+      id: req.id,
+      ok: true,
+      type: "session-bus:remote-directory",
+      accepted,
+      dropped,
+      wantedRepoKeys: this.remoteDirectory.wantedRepoKeys(),
+      unservedReads,
+      lastReadAt: this.remoteDirectory.lastReadAt(),
+    };
+  }
+
   private async refreshWarmGitState(projectId: string, projectPath: string): Promise<void> {
     const entry = this.cores.get(projectId);
     if (!entry) return;
@@ -1716,6 +2358,9 @@ export class HostServer {
       // Read live, not captured: a `mobile-access:set` must take effect on every
       // already-warm core's gate without restarting it.
       remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
+      // Same rule, one layer down: this bit is read only after the switch above
+      // says yes, so a core sees it live too.
+      agentReachEnabled: () => this.agentReachPolicy.isEnabled(),
       // Same rule, and for a second reason on top of it: the desktop wizard can
       // credential a host that launched local-only, and a core already warm at
       // that moment must move with it rather than stay permanently uncredentialed.
@@ -1723,12 +2368,31 @@ export class HostServer {
       // opening the same project locally would otherwise route around the gate,
       // and local is the desktop default.
       tierClaim: () => this.tierClaimNow(),
+      // Read live and given to every mode: the control plane can come up (or a
+      // wizard can credential this host) long after a local core warmed, and the
+      // session bus asks for this the moment a machine is added to one of its
+      // sessions — which is a local core's business as often as a remote one's.
+      machineDeviceId: () => this.controlPlaneRegistrationId,
       ensureMachineRelay: (msg) => this.ensureMachineRelay(msg),
+      // One coordinator for every project this host has open — see the field's
+      // own doc for why the route table and `self()` are keyed off the shared
+      // session index rather than this core's own id.
+      sessionBus: this.sessionBus,
+      sessionDirectory: this.sessionDirectory,
       ...(mode === "remote" ? { remote } : {}),
     });
     await core.start();
     const entry: CatalogEntry = { core, path: projectPath, mode, lastFocusedMs: this.tick() };
     this.cores.set(projectId, entry);
+    // Keyed by the core's OWN id, never the `projectId` parameter: the two
+    // agree here (the PROJECT_ID_MISMATCH check above already enforced it for
+    // this call), but the warm-core early return in open() grandfathers a
+    // legacy alias that skips that check, and this index must never learn a
+    // project under an id no route or store path will ever match. This is the
+    // start-time half only: what a session created LATER in this core needs is
+    // the cold-edge refresh in noteColdSnapshot().
+    this.sessionIndex.noteProject(core.projectId, basename(projectPath), core.listSessions(true));
+    void this.repoKeys.note(core.projectId, projectPath);
     // Re-advertise on a real work-status transition so the phone's Recent/sidebar
     // track activity (working/attention/error/done) without warming this core
     // themselves. Deduped inside the core, so this fires on transitions only.
@@ -1874,9 +2538,25 @@ export class HostServer {
     }));
   }
 
+  /** Take the session-index fallback snapshot for a core about to leave the
+   *  warm map. The index answers a warm project live and a cold one from this
+   *  snapshot, so a session created since the core started exists ONLY in the
+   *  live answer until this runs — skip it and every such session becomes
+   *  unaddressable the moment the project is stopped or evicted, which is the
+   *  unreachability keeping the rows across an eviction exists to prevent.
+   *  Must run BEFORE `core.shutdown()`, which is what takes the live answer
+   *  away. Keyed by the core's own id for the same reason startCore is. */
+  private noteColdSnapshot(entry: CatalogEntry): void {
+    const id = entry.core.projectId;
+    if (!id) return;
+    this.sessionIndex.noteProject(id, basename(entry.path), entry.core.listSessions(true));
+    void this.repoKeys.note(id, entry.path);
+  }
+
   async stop(projectId: string): Promise<void> {
     const entry = this.cores.get(projectId);
     if (!entry) return;
+    this.noteColdSnapshot(entry);
     this.cores.delete(projectId);
     // A promoted local core holds a relay slot separate from its loopback session
     // (core.shutdown only closes the core's own `this.relay`, which a local core
@@ -1893,10 +2573,17 @@ export class HostServer {
    *    1. stop a warm core (kills its PTYs + any relay slot),
    *    2. reclaim the project's managed worktrees,
    *    3. delete the on-disk store dir (`agents/<id>/`, holding sessions.json),
-   *    4. drop the seen-catalog hint (also clears the stale projects.json entry).
+   *    4. drop what the project owns that step 3's disk delete cannot reach:
+   *       its session index rows, any session-bus state the shared coordinator
+   *       still holds IN MEMORY — a session loaded before this call pins its
+   *       owning project at load time and does not notice the delete — and
+   *       every session-bus ROW it owns, which live in one MACHINE-level
+   *       database outside `agents/<id>/` and would otherwise outlive every
+   *       other trace of the project,
+   *    5. drop the seen-catalog hint (also clears the stale projects.json entry).
    *  Step 2's position is the invariant, not a preference: it reads
    *  `agents/<id>/checkouts.json`, which step 3 deletes, and it resolves the
-   *  repository from `seenProjects`, which step 4 drops — so anywhere later it
+   *  repository from `seenProjects`, which step 5 drops — so anywhere later it
    *  would leak the worktrees with nothing left able to name them.
    *  Deliberately does NOT touch the machine's mobile-access switch: that is
    *  machine-wide policy, and deleting one project must not turn the machine
@@ -1906,6 +2593,29 @@ export class HostServer {
     await this.stop(projectId);
     await this.reclaimManagedCheckouts(projectId);
     this.deleteProjectStores(projectId);
+    this.sessionIndex.forgetProject(projectId);
+    this.repoKeys.forgetProject(projectId);
+    // Step 3 removed `agents/<projectId>/` and the index above no longer
+    // resolves it, but the machine-level route table sits OUTSIDE that tree, so
+    // this is the only thing that reclaims the project's carrier rows. Without
+    // it the next process start hydrates every one of them back, leaving on
+    // disk exactly the kind of trace this method exists to erase.
+    this.sessionBus.forgetProjectRoutes(projectId);
+    // The coordinator's in-memory session states are the other half of the
+    // same leak: a session loaded before this forget() (a live exchange, or a
+    // boot-time resume()) is still cached with its `projectId` pinned to this
+    // project, and a held-message retry after step 3 deleted the directory
+    // would otherwise recreate it under that pinned id. Called after the index
+    // drop above on purpose — see forgetProjectStates's own doc on why it must
+    // not re-derive ownership through `projectIdFor`.
+    this.sessionBus.forgetProjectStates(projectId);
+    // Last of the bus reclaims, and after BOTH in-memory drops above on
+    // purpose: this is the durable one, and a session state or route still
+    // cached here could otherwise write its rows straight back behind it. What
+    // step 3 deleted was `agents/<projectId>/`, which holds only the artifact
+    // bytes now — every record the project owned is a row in the machine-level
+    // database, filed under an id nothing left on this machine could name.
+    removeSessionBusProject(resolveAbDir(), projectId);
     if (this.seenProjects.delete(projectId)) this.flushSeen();
     // Unconditional: the advert IS the seen catalog now, so a forgotten project
     // must vanish from a live phone's picker without waiting for a reconnect
@@ -1937,9 +2647,12 @@ export class HostServer {
   }
 
   /** Delete a project's on-disk per-project dirs (best-effort). Two locations,
-   *  both keyed by projectId under the `~/.antgrid` root:
+   *  both keyed by projectId under the `~/.antgrid` root. Directories only:
+   *  what the session bus keeps is rows, and `removeSessionBusProject` in
+   *  `forget()` is what reclaims those.
    *    - `agents/<id>/`   — SessionManager's `sessions.json` (the authoritative
-   *      session list); MUST mirror `join(storeDir, "agents", projectId)`.
+   *      session list) and the session bus's artifact BYTES; MUST mirror
+   *      `join(storeDir, "agents", projectId)`.
    *    - `projects/<id>/` — legacy ephemeral-pubkey dir. No longer written (the
    *      pubkey is in-memory only), but older bridges left these behind; clean
    *      them so a forgotten project leaves nothing on disk. */
@@ -1967,6 +2680,11 @@ export class HostServer {
     this.controlPlaneRelay = null;
     this.controlPlaneBus = null;
     this.remoteRuntime?.maint.stop();
+    // The one machine-wide coordinator's retry timer. Stopped here, once, at
+    // process exit — never inside a project core's own `shutdown()`, which
+    // runs on a routine LRU eviction too and must not silence retries for
+    // every OTHER project still warm on this machine.
+    this.sessionBus.stop();
     // Always close the paired-phones fs.watch handle, even if the control plane
     // was never started, so tests don't leak handles (Windows EBUSY).
     this.stopPhonesWatch?.();
@@ -2009,16 +2727,16 @@ export class HostServer {
         this.streamIds.set(projectId, handle.streamId);
         return {
           streamId: handle.streamId,
-          sendTunnel: (data) => handle.sendTunnel(data),
+          sendTunnel: (data, target) => handle.sendTunnel(data, target),
+          sendTo: (msg, channel, target) => handle.sendTo(msg, channel, target),
           detach: () => {
             if (this.streamIds.get(projectId) === handle.streamId) this.streamIds.delete(projectId);
             handle.detach();
           },
         };
       },
-      currentPeerPubkey: () => client.currentPeerPubkey(),
-      currentPeerSupportsCheckoutRouting: () => client.peerSupportsCheckoutRouting,
-      currentPeerPullsTree: () => client.peerPullsTree,
+      establishedPeers: () => client.establishedPeers(),
+      peerSession: (peerId) => client.peerSession(peerId),
       // client.deviceId, NOT the one from identityFor(): a local core is handed a fresh
       // randomUUID(), which addresses no machine the phone knows.
       machineDeviceId: () => client.deviceId,
@@ -2091,7 +2809,7 @@ export class HostServer {
     const session = persisted.find((entry) => entry.id === sessionId);
     if (!session) return false;
     if (!isManagedCheckoutKind(session.checkoutKind)) {
-      return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
+      return this.deleteColdSessionBusThenRow(projectId, sessionId);
     }
     // A forked "current workspace" session shares its checkout with siblings, so
     // removing the worktree here would delete THEIR working tree — with the
@@ -2102,7 +2820,7 @@ export class HostServer {
     // simply go.
     const members = persisted.filter((entry) => entry.checkoutId === session.checkoutId);
     if (members.length > 1) {
-      return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
+      return this.deleteColdSessionBusThenRow(projectId, sessionId);
     }
     if (options.removeCheckout === false) {
       throw new WorktreeError("WORKTREE_CONFLICT", "An isolated session must remove its managed worktree when deleted.");
@@ -2116,7 +2834,7 @@ export class HostServer {
     // refuse a session the warm path deletes — the drawer's delete reaches
     // whichever one is live.
     if (!await manager.recordFor(projectId, session.checkoutId)) {
-      return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
+      return this.deleteColdSessionBusThenRow(projectId, sessionId);
     }
     // The manager repeats the dirty/unpushed preflight and only removes metadata
     // after Git confirms removal. Persist the session row last.
@@ -2125,6 +2843,42 @@ export class HostServer {
       force: options.force === true,
       deleteBranch: options.deleteBranch === true,
     });
+    return this.deleteColdSessionBusThenRow(projectId, sessionId);
+  }
+
+  /** The bus half of a cold-deleted session — no core ever holds a handle on
+   *  this project, so nothing else ever sweeps it. Runs BEFORE
+   *  `SessionManager.deletePersisted`, which persists the row's removal LAST on
+   *  purpose (a failed removal leaves something to retry): sweeping first means
+   *  a crash between the two still leaves the row in place to retry against,
+   *  where sweeping after would let a persisted row-removal outlive the only
+   *  thing that would ever revisit these bytes. Mirrors `forget()`'s own
+   *  `reclaimManagedCheckouts` running before `deleteProjectStores`, "before the
+   *  metadata naming them dies". Idempotent: `removeSessionBusSession` is a
+   *  force-remove, so a retried delete sweeps a no-op.
+   *
+   *  The session index is dropped here and NOT left to `noteProject`: this
+   *  path runs only for a project with no warm core, so none of that method's
+   *  three edges is coming, and a stale row means `self()` still answers for
+   *  the deleted session — the peer's next retry then applies and writes the
+   *  message log back, re-creating the directory just removed, with no session
+   *  row left anywhere able to name it for a second reclaim.
+   *
+   *  One piece of bus state is knowingly left behind: this project's persisted
+   *  `deliveries.json` lines for the session. That file is owned by a warm
+   *  `ProjectCore` (`forgetBusLines`), which is exactly what this path does
+   *  not have, and writing it from here would put a second writer on it. The
+   *  lines are undeliverable and hold a slot against `MAX_QUEUED_LINES` until
+   *  the project next warms — a bounded, per-project residue, unlike the
+   *  machine-wide hydration the two sweeps above prevent. */
+  private deleteColdSessionBusThenRow(projectId: string, sessionId: string): Promise<boolean> {
+    this.sessionBus.forget(sessionId);
+    this.sessionIndex.forgetSession(projectId, sessionId);
+    try {
+      removeSessionBusSession(resolveAbDir(), projectId, sessionId);
+    } catch (err) {
+      log.warn("could not remove the session-bus store for %s: %s", sessionId, err);
+    }
     return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
   }
 
@@ -2135,6 +2889,7 @@ export class HostServer {
       const victim = this.selectEvictionVictim(justOpened);
       if (!victim) break;
       const entry = this.cores.get(victim);
+      if (entry) this.noteColdSnapshot(entry);
       this.cores.delete(victim);
       try { entry?.promotion?.stop(); } catch (e) { log.warn("Failed to stop promotion for evicted core %s: %s", victim, e instanceof Error ? e.message : String(e)); }
       log.info(`host: evicting LRU core ${victim} (cap ${cap})`);
@@ -2164,6 +2919,18 @@ export class HostServer {
   }
 
   private tick(): number { return ++this.nowCounter; }
+
+  /** The catalog ids one whole-machine card answers for: most recently active
+   *  first, capped. `seenProjects` is insertion-ordered and only ever grows (a
+   *  prune drops an id only once its path is gone), so taking it raw would spend
+   *  a bounded probe budget on the projects touched longest ago — and would
+   *  spend one probe per project the install has ever opened. */
+  private recentSeenProjectIds(): string[] {
+    return [...this.seenProjects.entries()]
+      .sort((a, b) => (b[1].lastActiveAt ?? "").localeCompare(a[1].lastActiveAt ?? ""))
+      .slice(0, MAX_CAPABILITY_CARD_PROJECTS)
+      .map(([id]) => id);
+  }
 
   /** Stamp `lastActiveAt` for an already-seen project and persist. Called by
    *  BOTH the warm-reopen branch of open() and (via the set+flush in) startCore,

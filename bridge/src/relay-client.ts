@@ -33,10 +33,16 @@ import {
 import type { MessageBus, Channel, TransportSubscriber } from "./message-bus";
 import type { PairedPhonesStore } from "./paired-phones";
 import type { TrustedPeersProvider } from "./trusted-peers";
-import { FragReassembler } from "./frag-reassembler";
+import { FragReassembler, type SharedByteBudget } from "./frag-reassembler";
 import { prunePushToken } from "./push/prune";
 import { nextEpoch } from "./relay-epoch";
-import { StreamMux, type AttachStreamOpts, type StreamHandle } from "./stream-mux";
+import {
+  StreamMux,
+  type AttachStreamOpts,
+  type PeerSessionView,
+  type SendTarget,
+  type StreamHandle,
+} from "./stream-mux";
 import { netwatch, frameIdFor, isRemoteIngestArmed } from "./netwatch";
 import { SendScheduler, type QueuedAppFrame, type SendOutcome } from "./send-scheduler";
 
@@ -57,10 +63,15 @@ export interface RelayClientOptions {
   onAuthRevoked?: () => void;
   onPeerOnline?: (peerId: string) => void;
   onPeerOffline?: (peerId: string) => void;
-  /** The E2E session established (phone's app:ready confirm verified). */
-  onHandshakeComplete?: (capabilities: { checkoutRouting: boolean; pullsTree: boolean }) => void;
+  /** One app device's E2E session established (its app:ready confirm verified).
+   *  Fires once per DEVICE, so a machine with two apps attached reports twice —
+   *  `peerId` says which, and a joining device needs its own state replay even
+   *  though its sibling is already up to date. */
+  onHandshakeComplete?: (
+    capabilities: { checkoutRouting: boolean; pullsTree: boolean; peerId: string },
+  ) => void;
   onMessage?: (msg: AbMessage) => void;
-  onTunnelMessage?: (msg: unknown) => void;
+  onTunnelMessage?: (msg: unknown, peerId: string) => void;
   onDisconnected?: () => void;
   onError?: (code: string, message: string) => void;
   autoReconnect?: boolean;
@@ -92,6 +103,16 @@ const HALF_OPEN_MS = 30_000;
 const PING_SILENCE_MS = 20_000;
 /** Consecutive unanswered pings before the E2E session is declared dead. */
 const MAX_MISSED_PONGS = 2;
+/** How many app devices may hold a session on one machine at once. A ceiling,
+ *  not a policy: real use is a desktop plus a phone or two, and each session
+ *  costs a receive context and its own copy of every broadcast frame. Past it
+ *  the least useful session is evicted so a device can always get in. */
+export const MAX_APP_SESSIONS = 4;
+/** How long a session whose device the relay reports offline is kept before its
+ *  keys are dropped. It is kept at all so a screen-lock or a tunnel flap comes
+ *  back without a rekey, and so push targeting can still name the device; past
+ *  this the app has plainly gone and the keys are dead weight. */
+export const UNREACHABLE_SESSION_TTL_MS = 300_000;
 // Relay rate limiting uses a one-second pair window. Keep a little extra local
 // history so the diagnostic still includes the earliest sends after the error
 // frame makes the round trip through a busy local event loop.
@@ -143,15 +164,52 @@ interface RateLimitBurst {
   code: string;
 }
 
-/** The current E2E session (confirmed keys) or a half-open candidate attempt. */
-interface E2eAttempt {
+/** A half-open handshake attempt: keys derived, the app's confirm not yet seen.
+ *  Receive-only until it is promoted (make-before-break). */
+interface PendingAttempt {
   attemptId: string;
   transport: E2eTransport;
   sessionKeys: SessionKeys;
-  // The phone deviceId this session's keys belong to. Anchors outgoing
-  // addressing to the session, so a sibling's bare presence can't repoint
-  // frames away from the live peer.
+  /** The app's relay SLOT — the route address this attempt is answered on. */
   peerId: string;
+  expiry: ReturnType<typeof setTimeout> | null;
+}
+
+/** One confirmed E2E session with one app device. Everything a session owns is
+ *  here rather than on the client, because the client now holds several. */
+interface PeerSession {
+  attemptId: string;
+  transport: E2eTransport;
+  sessionKeys: SessionKeys;
+  /** The app's relay SLOT — the route address every frame for this session is
+   *  addressed to. Anchoring outgoing addressing to the session is what keeps a
+   *  sibling's bare presence from repointing frames away from their owner. */
+  peerId: string;
+  /** Session-scoped: a rekey must not inherit the previous app's guarantee. */
+  checkoutRouting: boolean;
+  /** Relay presence. An unreachable session keeps its keys (see
+   *  {@link UNREACHABLE_SESSION_TTL_MS}) but is not counted as live. */
+  reachable: boolean;
+  unreachableSince: number;
+  lastSealedRecvAt: number;
+  missedPongs: number;
+  /** Fragments are per-session: two devices interleave transfers on one socket,
+   *  and a shared reassembler would splice their streams together. */
+  frag: FragReassembler;
+  /** Outbound queue + credit windows for THIS device. Per-session for the same
+   *  reason the keys are: a frame is sealed at dequeue under whichever session
+   *  is live then, and each app credits only what it consumed — one shared
+   *  window would let a busy device stall a quiet one. */
+  scheduler: SendScheduler;
+  /** Inbound half of the credit windows: cumulative sealed payload bytes read
+   *  from this device per channel, and how much of that has been credited back
+   *  to it. */
+  rxFlow: { consumed: Record<Channel, number>; credited: Record<Channel, number> };
+  /** One stall log per stalled channel, cleared when a credit advances. */
+  stallWarned: Partial<Record<Channel, true>>;
+  /** Whether THIS device pulls trees on demand. Per-session because the bridge
+   *  may only stop pushing `tree:full` when every attached device pulls. */
+  pullsTree: boolean;
 }
 
 function formatDiagnosticBytes(bytes: number): string {
@@ -221,8 +279,21 @@ function signEd25519(seedB64: string, data: Uint8Array): string {
 
 /**
  * The single machine↔relay connection. Authenticates with one signed
- * `hello`, then runs a reactive/acked E2E session and multiplexes project
- * streams inside it. There is exactly one live phone session per machine.
+ * `hello`, then runs reactive/acked E2E sessions and multiplexes project
+ * streams inside them.
+ *
+ * One session PER APP DEVICE, not one per machine: a phone and a desktop app
+ * drive the same machine at the same time, each with its own keys, liveness and
+ * fragment stream, all over this one socket. A verified client-hello from a
+ * device we have no session with is ADMITTED ALONGSIDE the others — it never
+ * displaces them. Only two things end a session: the same device rekeying
+ * (make-before-break, which replaces its own session and nobody else's), and
+ * capacity ({@link MAX_APP_SESSIONS}), which evicts the least useful session and
+ * tells it so.
+ *
+ * Consequently nothing here may ask "who is the peer". Outbound sends name a
+ * {@link SendTarget}; inbound frames carry the sending session's `peerId` all
+ * the way to the bus, so read state and replies belong to the device that asked.
  */
 export class RelayClient {
   private ws: WebSocket | null = null;
@@ -237,7 +308,6 @@ export class RelayClient {
   private awaitingPongSince = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private authenticated = false;
-  private _peerId: string | null = null;
   private readonly epoch: number;
   /** Learned wall-clock correction from a clock-skew AUTH_FAILED. */
   private clockOffsetMs = 0;
@@ -245,19 +315,19 @@ export class RelayClient {
   /** The last relay `error` frame; its `retryable` decides reconnect on close. */
   private lastError: { code: string; retryable: boolean } | null = null;
 
-  // E2E session state. `established` is the confirmed session;
-  // `pending` is an in-flight (half-open) attempt whose candidate keys stay live
-  // for receiving only, until its app:ready confirm verifies (make-before-break).
-  private established: E2eAttempt | null = null;
-  private pending: E2eAttempt | null = null;
-  /** Capability is session-scoped: a reconnect/rekey must not inherit the
-   * previous app's routing guarantee (also covers {@link peerAdvertisedPullsTree}). */
-  private peerCheckoutRouting = false;
-  private peerAdvertisedPullsTree = false;
-  private halfOpenTimer: ReturnType<typeof setTimeout> | null = null;
-  // Sealed-liveness bookkeeping.
-  private lastSealedRecvAt = 0;
-  private missedPongs = 0;
+  // E2E session state, keyed by the app's relay SLOT (the route address). A
+  // device appears in `pending` while its candidate keys are receive-only, and
+  // moves to `sessions` when its app:ready confirm verifies (make-before-break).
+  // Both are keyed by device so one device's rekey cannot disturb another's.
+  private readonly sessions = new Map<string, PeerSession>();
+  private readonly pending = new Map<string, PendingAttempt>();
+  /** One reassembly ceiling for the whole machine, shared by every session's
+   *  reassembler — N devices must not each be handed the full budget. */
+  private reassemblyBudget: SharedByteBudget = { used: 0, limit: GLOBAL_REASSEMBLY_BUDGET };
+  /** Consumed bytes between byte-triggered credits; a test seam shrinks it. */
+  private creditBatchBytes!: number;
+  /** One timer for every session: liveness is cheap per session and a timer
+   *  each would be N unrefed intervals to leak. */
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
 
   // Phone Ed25519 pubkeys (standard base64, raw 32 bytes) resolved from the
@@ -268,19 +338,6 @@ export class RelayClient {
   private bus: MessageBus | null = null;
   private busUnsub: (() => void) | null = null;
   private readonly mux: StreamMux;
-  private fragReassembler!: FragReassembler;
-  /** Declared without an initialiser on purpose: `forTest` builds the client
-   *  with `Object.create(prototype)`, where class-field initialisers never run.
-   *  Both constructors install it through {@link initSendScheduler}. */
-  private scheduler!: SendScheduler;
-  /** Inbound half of the credit windows: cumulative sealed payload bytes this
-   *  side has consumed per channel, and how much of that has been credited
-   *  back to the peer. Installed with the scheduler for the same reason. */
-  private rxFlow!: { consumed: Record<Channel, number>; credited: Record<Channel, number> };
-  /** Consumed bytes between byte-triggered credits; a test seam shrinks it. */
-  private creditBatchBytes!: number;
-  /** One stall log per stalled channel, cleared when a credit advances. */
-  private stallWarned!: Partial<Record<Channel, true>>;
   private fragSweep: ReturnType<typeof setInterval> | null = null;
   private outboundFrameDiagnostics: OutboundFrameDiagnostic[] = [];
   private rateLimitBurst: RateLimitBurst | null = null;
@@ -291,45 +348,99 @@ export class RelayClient {
   private droppedFrames = 0;
   private droppedFramesAt = 0;
 
-  get peerId(): string | null {
-    return this._peerId;
-  }
-
-  /** Whether an app has completed the E2E handshake on this socket. `peerId`
-   *  is NOT the same question — presence alone sets it, and `send()` drops
-   *  silently without a session, so a caller that needs to know its message
-   *  will actually go out has to ask this. */
-  get hasEstablishedSession(): boolean {
-    return this.established !== null;
-  }
-
-  /** Whether the currently established app can route checkout-scoped frames. */
-  get peerSupportsCheckoutRouting(): boolean {
-    return this.established !== null && this.peerCheckoutRouting;
-  }
-
-  /** Whether the established app pulls its own file tree. True with no session —
-   *  there is then no app the push could reach. Polarity is deliberately the
-   *  opposite of {@link peerSupportsCheckoutRouting}, which fail-closes because
-   *  it gates delivery; this only decides whether a duplicate push is worth it. */
-  get peerPullsTree(): boolean {
-    return this.established === null || this.peerAdvertisedPullsTree;
-  }
-
   /** The bare device id this client authenticates as (machine deviceUuid). */
   get deviceId(): string {
     return this.opts.identity.deviceId;
   }
 
-  /** The Ed25519 pubkey (standard base64) of the phone currently paired on this
-   *  connection, or null. Resolves `_peerId` → pubkey via `phoneEd25519ByDeviceId`
-   *  (populated at a client-hello's verified identity, or backfilled from the
-   *  paired-phones store on a trusted reconnect). Read by the core's
-   *  mobile-access gate as its "this peer is remote" signal, and by push
-   *  targeting to name the live device. */
+  /** Every established session, in the order the devices were admitted. The one
+   *  way to enumerate attached apps; no key material is exposed. */
+  establishedPeers(): PeerSessionView[] {
+    return [...this.sessions.values()].map((s) => this.viewOf(s));
+  }
+
+  /** One session by its route address, or null when that device holds none. */
+  peerSession(peerId: string): PeerSessionView | null {
+    const session = this.sessions.get(peerId);
+    return session ? this.viewOf(session) : null;
+  }
+
+  /** Whether ANY app device currently holds a session. */
+  hasEstablishedSession(): boolean {
+    return this.sessions.size > 0;
+  }
+
+  /** Whether at least one attached app can route checkout-scoped frames. The
+   *  honest per-device answer is {@link peerSession}; this is for the coarse
+   *  questions ("may this machine host an isolated session at all") that must
+   *  not be decided by whichever device happened to connect first. */
+  anySessionSupportsCheckoutRouting(): boolean {
+    for (const session of this.sessions.values()) {
+      if (session.checkoutRouting) return true;
+    }
+    return false;
+  }
+
+  /** The Ed25519 pubkey (standard base64) behind one route address, or null.
+   *  Resolved from `phoneEd25519ByDeviceId` — populated by a client-hello's
+   *  verified identity, or backfilled from the paired-phones store on a trusted
+   *  reconnect. */
+  peerPubkeyFor(peerId: string): string | null {
+    return this.phoneEd25519ByDeviceId.get(peerId) ?? null;
+  }
+
+  /** @deprecated One machine now has several attached apps, so "the" peer is not
+   *  a question with an answer. Reads the FIRST established session, which is
+   *  right only for callers asking "is anything remote attached at all"; every
+   *  caller that acts on WHICH device must take the peerId threaded to it and
+   *  use {@link peerPubkeyFor}. */
   currentPeerPubkey(): string | null {
-    if (!this._peerId) return null;
-    return this.phoneEd25519ByDeviceId.get(this._peerId) ?? null;
+    for (const session of this.sessions.values()) {
+      const pub = this.phoneEd25519ByDeviceId.get(session.peerId);
+      if (pub) return pub;
+    }
+    return null;
+  }
+
+  /** @deprecated Capability is per device — see
+   *  {@link anySessionSupportsCheckoutRouting}, which this forwards to. */
+  get peerSupportsCheckoutRouting(): boolean {
+    return this.anySessionSupportsCheckoutRouting();
+  }
+
+  /** Attached devices for a diagnostic line. A relay error or a rate limit is
+   *  now a question about several sessions, so naming only one would point the
+   *  operator at the wrong device as often as not. */
+  private describePeers(): string {
+    if (this.sessions.size === 0) return "none";
+    return [...this.sessions.values()]
+      .map((s) => (s.reachable ? s.peerId : `${s.peerId}(offline)`))
+      .join(",");
+  }
+
+  private viewOf(session: PeerSession): PeerSessionView {
+    return {
+      peerId: session.peerId,
+      peerPubkey: this.phoneEd25519ByDeviceId.get(session.peerId) ?? "",
+      checkoutRouting: session.checkoutRouting,
+      reachable: session.reachable,
+      pullsTree: session.pullsTree,
+    };
+  }
+
+  /** True while at least one session's device is reachable over the relay. The
+   *  coarse `peerOnline` the mux and the cores run on. */
+  private hasReachableSession(): boolean {
+    for (const session of this.sessions.values()) {
+      if (session.reachable) return true;
+    }
+    return false;
+  }
+
+  /** Fire the coarse peer-offline exactly when the LAST reachable session goes.
+   *  Idempotent in the mux, so every path that can lose a session calls it. */
+  private notifyOfflineIfLast(): void {
+    if (!this.hasReachableSession()) this.mux.notifyPeerOffline();
   }
 
   /** Ensure `phoneEd25519ByDeviceId` has an entry for `peerId` by recovering it
@@ -375,20 +486,40 @@ export class RelayClient {
       openStream: (id) => this.sendJson({ type: "stream-open", streamId: id }),
       closeStream: (id) => {
         // A detached stream's backlog must not sit in the send queue occupying
-        // room the streams that are still live need.
-        this.recordQueueDrop("stream-detached", this.scheduler.dropStream(id));
+        // room the streams that are still live need — in every device's queue,
+        // since the stream was fanned out to all of them.
+        for (const s of this.sessions.values()) {
+          this.recordQueueDrop("stream-detached", s.scheduler.dropStream(id));
+        }
         this.sendJson({ type: "stream-close", streamId: id });
       },
-      sendEnvelope: (id, msg, channel) => this.sendAppEnvelope(id, msg, channel),
+      sendEnvelope: (id, msg, channel, target) => this.sendAppEnvelope(id, msg, channel, target),
+      peerSession: (peerId) => this.peerSession(peerId),
     });
-    this.initSendScheduler();
-    this.initFragReassembler();
+    this.creditBatchBytes = CREDIT_BATCH_BYTES;
     this.startFragSweep();
   }
 
   /** Attach a project's bus as a multiplexed stream on this machine socket. */
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle {
     return this.mux.attach(bus, opts);
+  }
+
+  /** A reassembler owned by one session. Its completions are tagged with that
+   *  session's peerId, which is what keeps a reassembled transfer attributable
+   *  to the device that requested it. */
+  private newFragReassembler(peerId: string): FragReassembler {
+    return new FragReassembler({
+      timeoutMs: TRANSFER_TIMEOUT_MS,
+      budget: this.reassemblyBudget,
+      onComplete: (json) => this.routeReassembledEnvelope(json, peerId),
+      onAbort: (hint) => {
+        if (hint?.type === "file:content") {
+          log.warn("Fragmented file content transfer interrupted for %s", hint.key);
+          this.opts.onError?.("TRANSFER_INTERRUPTED", `Transfer interrupted for ${hint.key}`);
+        }
+      },
+    });
   }
 
   /** We just told the app which stream a project is on (`stream-ready`), so any
@@ -399,27 +530,26 @@ export class RelayClient {
   }
 
   /**
-   * Outbound app frames go through one queue per channel so that per-channel
-   * order is the queue's order and nothing else, and so a frame is sealed only
-   * once it is actually being written — under whatever session is live at that
-   * moment, not the one that was live when the caller handed it over.
+   * Outbound app frames go through one queue per channel PER DEVICE, so that
+   * per-channel order is the queue's order and nothing else, and so a frame is
+   * sealed only once it is actually being written — under whatever session is
+   * live at that moment, not the one that was live when the caller handed it
+   * over. The sink resolves the session by id rather than closing over it: a
+   * rekey replaces the struct, and a captured one would seal under retired keys.
    */
-  private initSendScheduler(): void {
-    this.stallWarned = {};
-    this.creditBatchBytes = CREDIT_BATCH_BYTES;
-    this.resetRxFlow();
-    this.scheduler = new SendScheduler({
+  private newSendScheduler(peerId: string): SendScheduler {
+    return new SendScheduler({
       send: (f) => {
-        const est = this.established;
-        if (!est) {
+        const session = this.sessions.get(peerId);
+        if (!session) {
           netwatch.record({
             dir: "tx", kind: "drop", transport: "relay", channel: f.channel,
             msgType: f.type, streamId: f.streamId, reason: "no-e2e-session",
           });
           return null;
         }
-        const sealed = est.transport.seal(f.plaintext);
-        return this.sendPayload(sealed, f.channel, FrameKind.sealed, f.type, f.streamId)
+        const sealed = session.transport.seal(f.plaintext);
+        return this.sendPayload(sealed, peerId, f.channel, FrameKind.sealed, f.type, f.streamId)
           ? sealed.length
           : null;
       },
@@ -427,26 +557,28 @@ export class RelayClient {
   }
 
   /** The single place a queued frame reaches the wire. */
-  private drain(): void {
-    if (this.scheduler.drain() === "blocked") this.noteWindowStall();
+  private drain(session?: PeerSession): void {
+    for (const s of session ? [session] : this.sessions.values()) {
+      if (s.scheduler.drain() === "blocked") this.noteWindowStall(s);
+    }
   }
 
   /** A peer that stops crediting is alive and silent, which every other
    *  observable reads as a healthy socket. Nothing was dropped, so this is a
    *  log and not a netwatch record; once per stall so a wedged channel does
    *  not bury the rest of the log. */
-  private noteWindowStall(): void {
+  private noteWindowStall(session: PeerSession): void {
     const now = Date.now();
     for (const ch of ["control", "preview"] as const) {
-      const since = this.scheduler.blockedSince[ch];
+      const since = session.scheduler.blockedSince[ch];
       if (since === undefined || now - since < WINDOW_STALL_WARN_MS) continue;
-      if (this.stallWarned[ch]) continue;
-      this.stallWarned[ch] = true;
-      const queued = this.scheduler.queued(ch);
+      if (session.stallWarned[ch]) continue;
+      session.stallWarned[ch] = true;
+      const queued = session.scheduler.queued(ch);
       log.warn(
-        "Send gate stalled on %s for %ds: unacked=%d totalUnacked=%d queued=%d frame(s)/%d bytes",
-        ch, Math.round((now - since) / 1000), this.scheduler.unacked(ch),
-        this.scheduler.totalUnacked(), queued.frames, queued.bytes,
+        "Send gate stalled on %s to %s for %ds: unacked=%d totalUnacked=%d queued=%d frame(s)/%d bytes",
+        ch, session.peerId, Math.round((now - since) / 1000), session.scheduler.unacked(ch),
+        session.scheduler.totalUnacked(), queued.frames, queued.bytes,
       );
     }
   }
@@ -454,9 +586,8 @@ export class RelayClient {
   /** A new session forgets both halves of the accounting, the stall flags
    *  included: a flag carried across would suppress the first real stall
    *  warning of the session that follows. */
-  private resetRxFlow(): void {
-    this.stallWarned = {};
-    this.rxFlow = {
+  private static freshRxFlow(): PeerSession["rxFlow"] {
+    return {
       consumed: { control: 0, preview: 0 },
       credited: { control: 0, preview: 0 },
     };
@@ -465,22 +596,20 @@ export class RelayClient {
   /** Count what the peer charged its window for. Credits go out in batches so
    *  a busy channel costs one small frame per {@link creditBatchBytes} rather
    *  than one per received frame. */
-  private noteConsumed(channel: Channel, bytes: number): void {
-    this.rxFlow.consumed[channel] += bytes;
-    if (this.rxFlow.consumed[channel] - this.rxFlow.credited[channel] >= this.creditBatchBytes) {
-      this.sendCredit(channel);
-    }
+  private noteConsumed(session: PeerSession, channel: Channel, bytes: number): void {
+    session.rxFlow.consumed[channel] += bytes;
+    const uncredited = session.rxFlow.consumed[channel] - session.rxFlow.credited[channel];
+    if (uncredited >= this.creditBatchBytes) this.sendCredit(session, channel);
   }
 
   /** Cumulative, so a credit lost in transit costs nothing: the next one
    *  carries the same ground truth and releases the whole backlog. */
-  private sendCredit(channel: Channel): void {
-    const est = this.established;
-    if (!est) return;
-    this.rxFlow.credited[channel] = this.rxFlow.consumed[channel];
+  private sendCredit(session: PeerSession, channel: Channel): void {
+    session.rxFlow.credited[channel] = session.rxFlow.consumed[channel];
     this.sendSessionFrame(
-      { type: "credit", channel, consumed: this.rxFlow.consumed[channel] },
-      est.transport,
+      { type: "credit", channel, consumed: session.rxFlow.consumed[channel] },
+      session.transport,
+      session.peerId,
     );
   }
 
@@ -496,23 +625,11 @@ export class RelayClient {
     log.info("Dropped %d queued frame(s): %s", frames.length, reason);
   }
 
-  private initFragReassembler(): void {
-    this.fragReassembler = new FragReassembler({
-      timeoutMs: TRANSFER_TIMEOUT_MS,
-      globalBudgetBytes: GLOBAL_REASSEMBLY_BUDGET,
-      onComplete: (json) => this.routeReassembledEnvelope(json),
-      onAbort: (hint) => {
-        if (hint?.type === "file:content") {
-          log.warn("Fragmented file content transfer interrupted for %s", hint.key);
-          this.opts.onError?.("TRANSFER_INTERRUPTED", `Transfer interrupted for ${hint.key}`);
-        }
-      },
-    });
-  }
-
   private startFragSweep(): void {
     if (this.fragSweep) return;
-    this.fragSweep = setInterval(() => this.fragReassembler.sweep(), 2000);
+    this.fragSweep = setInterval(() => {
+      for (const session of this.sessions.values()) session.frag.sweep();
+    }, 2000);
     this.fragSweep.unref?.();
   }
 
@@ -547,7 +664,6 @@ export class RelayClient {
 
   private doConnect(): void {
     this.authenticated = false;
-    this._peerId = null;
     this.lastError = null;
     this.resetE2eState();
 
@@ -721,12 +837,22 @@ export class RelayClient {
           log.debug("Ignoring peer-online for %s — scoped at another machine", msg.peerId);
           break;
         }
-        // Bare presence is not a handshake: a same-account sibling coming online
-        // must never repoint the address of a live session. Only a verified
-        // handshake moves it; adopt a
-        // presence peer as the default address solely when nothing is established.
-        if (!this.established) this._peerId = msg.peerId;
+        // Bare presence is not a handshake and creates no session: it only
+        // revives one this device already holds. Every reply address comes from
+        // a session, so a sibling coming online can no longer repoint anything.
         this.backfillPeerPubkey(msg.peerId);
+        {
+          const session = this.sessions.get(msg.peerId);
+          if (session) {
+            session.reachable = true;
+            session.unreachableSince = 0;
+            // Silence is expected across an absence; don't let the gap it left
+            // count as missed pongs the moment the device is back.
+            session.lastSealedRecvAt = Date.now();
+            session.missedPongs = 0;
+            this.mux.notifyPeerOnline();
+          }
+        }
         // Reactive: wait for the phone's fresh client-hello (its rekey). Stream
         // resume happens on handshake-complete, not here.
         this.opts.onPeerOnline?.(msg.peerId);
@@ -737,13 +863,27 @@ export class RelayClient {
           log.debug("Ignoring peer-offline for %s — scoped at another machine", msg.peerId);
           break;
         }
-        // A phone whose socket drops always tears its own session down, so its
-        // return is a fresh handshake — a retained backlog would only sit ahead
-        // of the adverts and snapshot the phone needs first.
-        this.recordQueueDrop("peer-offline", this.scheduler.clear());
-        // Keep _peerId + the established session for push fallback and a quick
-        // reconnect; suppress the heavy stream until the phone returns.
-        this.mux.notifyPeerOffline();
+        // Keep this device's session (keys included) for push fallback and a
+        // quick reconnect — only its reachability changes, and
+        // UNREACHABLE_SESSION_TTL_MS is what eventually reaps it. Its backlog
+        // does NOT survive: an app whose socket drops returns through a fresh
+        // handshake, and a retained queue would only sit ahead of the adverts
+        // and snapshot it needs first. A sibling's queue is untouched.
+        {
+          const session = this.sessions.get(msg.peerId);
+          if (session) {
+            this.recordQueueDrop("peer-offline", session.scheduler.clear());
+            if (session.reachable) {
+              session.reachable = false;
+              session.unreachableSince = Date.now();
+            }
+          }
+        }
+        // Per-session first — a sibling device still driving the machine must
+        // not have this one's focus and unread state left standing — then the
+        // coarse suppression only if nobody reachable is left.
+        this.mux.notifyPeerSessionOffline(msg.peerId);
+        this.notifyOfflineIfLast();
         this.opts.onPeerOffline?.(msg.peerId);
         break;
       case "push:result":
@@ -787,7 +927,13 @@ export class RelayClient {
     // Those bytes can never reach the peer's consumed total, so without the
     // un-charge every drop shrinks that channel for the rest of the session.
     if ((msg.channel === "control" || msg.channel === "preview") && typeof msg.bytes === "number") {
-      this.scheduler.uncharge(msg.channel, msg.bytes);
+      // The relay names the discarded frame's channel but not who it was for,
+      // so with two devices attached this un-charges both. Deliberately the
+      // loose direction: over-crediting costs a transient overshoot of one
+      // frame's bytes, while under-crediting shrinks a window for the rest of
+      // the session — the permanent stall this accounting exists to prevent.
+      // TODO(bharath): carry the destination on the drop report to make this exact.
+      for (const s of this.sessions.values()) s.scheduler.uncharge(msg.channel, msg.bytes);
       this.drain();
     }
 
@@ -801,7 +947,7 @@ export class RelayClient {
     if (msg.code === "AUTH_FAILED" && msg.serverTime) this.applyClockOffset(msg.serverTime);
 
     log.error(
-      `Relay error: device=${this.opts.identity.deviceId} peer=${this._peerId ?? "unpaired"} ` +
+      `Relay error: device=${this.opts.identity.deviceId} peers=${this.describePeers()} ` +
       `code=${msg.code} retryable=${msg.retryable} message="${msg.message}"`,
     );
     this.opts.onError?.(msg.code, msg.message);
@@ -875,7 +1021,7 @@ export class RelayClient {
       return;
     }
     // kind === sealed: decrypt-or-drop.
-    this.handleSealedFrame(Buffer.from(decoded.payload), channel, frameId, bytes);
+    this.handleSealedFrame(Buffer.from(decoded.payload), channel, header.from, frameId, bytes);
   }
 
   /** Kind-1 plaintext admits exactly the two handshake types; the agent only
@@ -908,44 +1054,97 @@ export class RelayClient {
     });
   }
 
-  private handleSealedFrame(payload: Buffer, channel: Channel, frameId?: string, bytes?: number): void {
-    // Make-before-break: at most two live receive contexts. Try the established
-    // session first; during a pending rekey also try the candidate keys so the
-    // new attempt's app:ready can be opened.
-    const est = this.established;
+  /**
+   * Decrypt-or-drop, and name the session that sent it. `from` is the relay's
+   * routing address and is only a HINT: it picks which keys to try first, and
+   * nothing is believed on its word — the frame's identity is whichever key
+   * actually opens it (AES-GCM's tag is the proof). The trial across the other
+   * sessions is what covers a frame whose `from` we do not recognise; it costs
+   * one failed open per attached device, and there are at most
+   * {@link MAX_APP_SESSIONS} of them.
+   *
+   * Each device keeps at most two receive contexts (make-before-break): its
+   * established session, and its own in-flight rekey candidate.
+   */
+  private handleSealedFrame(
+    payload: Buffer,
+    channel: Channel,
+    from: string,
+    frameId?: string,
+    bytes?: number,
+  ): void {
     const sealedBytes = bytes ?? payload.length;
-    if (est) {
-      const pt = est.transport.open(payload);
-      if (pt !== null) {
-        this.noteConsumed(channel, sealedBytes);
-        this.recordSealedRecv();
-        this.onSealedPlaintext(pt, channel, frameId, bytes);
-        return;
-      }
+    const hinted = this.sessions.get(from);
+    if (hinted && this.tryOpenSession(hinted, payload, channel, sealedBytes, frameId, bytes)) return;
+    const hintedPending = this.pending.get(from);
+    if (hintedPending && this.tryOpenPending(hintedPending, payload, channel, frameId, bytes)) return;
+
+    for (const session of this.sessions.values()) {
+      if (session === hinted) continue;
+      if (this.tryOpenSession(session, payload, channel, sealedBytes, frameId, bytes)) return;
     }
-    if (this.pending) {
-      const pt = this.pending.transport.open(payload);
-      if (pt !== null) {
-        // Candidate keys precede the peer's window reset by definition, so the
-        // sender never charged these bytes and crediting them would inflate it.
-        this.onSealedPlaintext(pt, channel, frameId, bytes);
-        return;
-      }
+    for (const attempt of this.pending.values()) {
+      if (attempt === hintedPending) continue;
+      if (this.tryOpenPending(attempt, payload, channel, frameId, bytes)) return;
     }
-    // Undecryptable, but the sender charged it: a frame this side cannot read
-    // must never be able to leak the peer's window.
-    if (est) this.noteConsumed(channel, sealedBytes);
-    log.warn("Failed to open sealed frame (len=%d), dropping", payload.length);
+    // Undecryptable, but the sender charged it. Credited to the ROUTING HINT:
+    // no key opened the frame, so nothing better names its sender, and crediting
+    // the wrong window is bounded while crediting none stalls the right one for
+    // the rest of the session. Accounting only — admission is still the tag.
+    if (hinted) this.noteConsumed(hinted, channel, sealedBytes);
+    log.warn("Failed to open sealed frame (len=%d) from %s, dropping", payload.length, from);
     netwatch.record({
       dir: "rx", kind: "drop", transport: "relay", channel,
       frameId, bytes, reason: "decrypt-failed",
-      detail: { established: this.established !== null, pending: this.pending !== null },
+      detail: { sessions: this.sessions.size, pending: this.pending.size },
     });
   }
 
-  private onSealedPlaintext(plaintext: string, channel: Channel, frameId?: string, bytes?: number): void {
+  private tryOpenSession(
+    session: PeerSession,
+    payload: Buffer,
+    channel: Channel,
+    sealedBytes: number,
+    frameId?: string,
+    bytes?: number,
+  ): boolean {
+    const pt = session.transport.open(payload);
+    if (pt === null) return false;
+    session.lastSealedRecvAt = Date.now();
+    session.missedPongs = 0;
+    this.noteConsumed(session, channel, sealedBytes);
+    this.onSealedPlaintext(pt, channel, session.peerId, session, frameId, bytes);
+    return true;
+  }
+
+  /** A candidate's keys are receive-only until its confirm verifies, so nothing
+   *  it opens counts as liveness and it owns no reassembler — the only thing it
+   *  can legitimately carry is the app:ready that promotes it. */
+  private tryOpenPending(
+    attempt: PendingAttempt,
+    payload: Buffer,
+    channel: Channel,
+    frameId?: string,
+    bytes?: number,
+  ): boolean {
+    const pt = attempt.transport.open(payload);
+    if (pt === null) return false;
+    // Candidate keys precede the peer's window reset by definition, so the
+    // sender never charged these bytes and crediting them would inflate it.
+    this.onSealedPlaintext(pt, channel, attempt.peerId, null, frameId, bytes);
+    return true;
+  }
+
+  private onSealedPlaintext(
+    plaintext: string,
+    channel: Channel,
+    peerId: string,
+    session: PeerSession | null,
+    frameId?: string,
+    bytes?: number,
+  ): void {
     // Fragmented app traffic → buffer; onComplete routes the reassembled envelope.
-    if (this.fragReassembler.accept(plaintext)) {
+    if (session?.frag.accept(plaintext)) {
       netwatch.record({
         dir: "rx", kind: "sealed", transport: "relay", channel,
         msgType: "__frag", frameId, bytes,
@@ -973,11 +1172,14 @@ export class RelayClient {
           dir: "rx", kind: "sealed", transport: "relay", channel,
           msgType: (obj as { type: string }).type, frameId, bytes,
         });
-        this.handleSessionFrame(obj as { type: string; attemptId?: string; confirm?: string; channel?: unknown; consumed?: unknown });
+        this.handleSessionFrame(
+          obj as { type: string; attemptId?: string; confirm?: string; channel?: unknown; consumed?: unknown },
+          peerId,
+        );
         return;
       }
       if ("m" in (obj as object)) {
-        this.routeAppEnvelope(obj as { s?: string; m: unknown }, channel, frameId, bytes);
+        this.routeAppEnvelope(obj as { s?: string; m: unknown }, channel, peerId, frameId, bytes);
         return;
       }
     }
@@ -988,7 +1190,7 @@ export class RelayClient {
     });
   }
 
-  private routeReassembledEnvelope(json: string): void {
+  private routeReassembledEnvelope(json: string, peerId: string): void {
     let env: { s?: string; m?: unknown };
     try {
       env = JSON.parse(json);
@@ -1012,12 +1214,20 @@ export class RelayClient {
     // only affects the AbMessage dispatch tag, which is control for these.
     // No frameId: a reassembled transfer spans N sealed frames, each with its
     // own nonce, so nothing here maps to a single frame on the peer's capture.
-    this.routeAppEnvelope(env as { s?: string; m: unknown }, "control", undefined, Buffer.byteLength(json, "utf8"), true);
+    this.routeAppEnvelope(
+      env as { s?: string; m: unknown },
+      "control",
+      peerId,
+      undefined,
+      Buffer.byteLength(json, "utf8"),
+      true,
+    );
   }
 
   private routeAppEnvelope(
     env: { s?: string; m: unknown },
     channel: Channel,
+    peerId: string,
     frameId?: string,
     bytes?: number,
     reassembled = false,
@@ -1032,10 +1242,10 @@ export class RelayClient {
       ...(reassembled ? { detail: { reassembled: true } } : {}),
     });
     if (streamId === null) {
-      this.dispatchControlPlane(mJson, channel);
+      this.dispatchControlPlane(mJson, channel, peerId);
       return;
     }
-    if (!this.mux.dispatchInbound(streamId, mJson, channel)) {
+    if (!this.mux.dispatchInbound(streamId, mJson, channel, peerId)) {
       this.logUnknownStreamDrop(streamId, msgType, frameId);
       netwatch.record({
         dir: "rx", kind: "drop", transport: "relay", channel,
@@ -1095,7 +1305,7 @@ export class RelayClient {
     );
   }
 
-  private dispatchControlPlane(mJson: string, channel: Channel): void {
+  private dispatchControlPlane(mJson: string, channel: Channel, peerId: string): void {
     const msg = parseMessageFast(mJson);
     if (msg) {
       // Consumed here like `netwatch:events` below: this is a statement about
@@ -1133,26 +1343,39 @@ export class RelayClient {
         return;
       }
       this.opts.onMessage?.(msg);
-      this.bus?.dispatchInbound(msg, channel, "relay");
+      this.bus?.dispatchInbound(msg, channel, "relay", peerId);
       return;
     }
     const tunnel = parseTunnelMessage(mJson);
-    if (tunnel) this.opts.onTunnelMessage?.(tunnel);
+    if (tunnel) this.opts.onTunnelMessage?.(tunnel, peerId);
   }
 
   // --- E2E session frames ---
 
-  private handleSessionFrame(obj: { type: string; attemptId?: string; confirm?: string; capabilities?: { checkoutRouting?: boolean; pullsTree?: boolean }; channel?: unknown; consumed?: unknown }): void {
+  private handleSessionFrame(
+    obj: {
+      type: string;
+      attemptId?: string;
+      confirm?: string;
+      capabilities?: { checkoutRouting?: boolean; pullsTree?: boolean };
+      channel?: unknown;
+      consumed?: unknown;
+    },
+    peerId: string,
+  ): void {
     switch (obj.type) {
       case "app:ready":
-        this.handleAppReady(obj);
+        this.handleAppReady(obj, peerId);
         return;
-      case "ping":
-        // Liveness reset already done for the established transport; answer sealed.
-        if (this.established) this.sendSessionFrame({ type: "pong" }, this.established.transport);
+      case "ping": {
+        // Answer under the ASKING session's keys — a pong sealed for anyone else
+        // is a frame the asker cannot open, so its liveness check fails anyway.
+        const session = this.sessions.get(peerId);
+        if (session) this.sendSessionFrame({ type: "pong" }, session.transport, peerId);
         return;
+      }
       case "pong":
-        // Liveness reset done in handleSealedFrame's recordSealedRecv.
+        // Liveness reset done when the frame opened, in tryOpenSession.
         return;
       case "credit": {
         // Hand-validated like every other session frame: these never carry a
@@ -1166,9 +1389,11 @@ export class RelayClient {
           log.warn("Dropping malformed credit frame");
           return;
         }
-        if (this.scheduler.credit(ch, consumed)) {
-          delete this.stallWarned[ch];
-          this.drain();
+        const session = this.sessions.get(peerId);
+        if (!session) return;
+        if (session.scheduler.credit(ch, consumed)) {
+          delete session.stallWarned[ch];
+          this.drain(session);
         }
         return;
       }
@@ -1269,40 +1494,16 @@ export class RelayClient {
       this.opts.pairedPhones?.touchLastSeen(phoneEd25519PubB64);
     }
 
-    // A different device's signature-verified client-hello supersedes the live
-    // session explicitly — the sig is proof of the new phone's identity, so
-    // don't wait for liveness to discover the old session is obsolete.
-    // Same-device rekey keeps make-before-break
-    // (the established session survives below until the new app:ready confirms).
-    if (this.established && this.established.peerId !== peerId) {
-      // Notify the displaced phone with its own (still-live) keys before
-      // zeroizing; without this it only learns via liveness timeout and would
-      // rekey right back (two-device ping-pong). Best-effort: it may already
-      // be gone.
-      // Both ids AND the address: the frame is sealed with the displaced
-      // phone's keys but routed by `_peerId`, and a mismatch there is the
-      // failure mode that has bitten this file before (a live session's
-      // address getting re-pointed). Silent otherwise — the notice leaves no
-      // other trace, so a displaced device that never banners is
-      // indistinguishable from one that was never notified.
-      log.info(
-        "Displacing phone %s in favour of %s — sending session-takeover (addressed to %s)",
-        this.established.peerId,
-        peerId,
-        this._peerId,
-      );
-      try {
-        this.sendSessionFrame({ type: "session-takeover" }, this.established.transport);
-      } catch {
-        // displaced peer unreachable — teardown proceeds regardless
-      }
-      this.tearDownEstablished();
-      this.stopLiveness();
-    }
-    this._peerId = peerId;
+    // A device we have no session with is ADMITTED ALONGSIDE the others: a
+    // phone and a desktop app drive the same machine at once, so a verified
+    // client-hello is never grounds to displace anyone. Same-device rekey still
+    // keeps make-before-break — the device's established session survives below
+    // until its own new app:ready confirms.
+    this.evictForCapacity(peerId);
 
-    // Fresh attempt: any prior half-open candidate is superseded.
-    this.tearDownPending();
+    // Fresh attempt: this device's own prior half-open candidate is superseded.
+    // Other devices' candidates are untouched.
+    this.tearDownPending(peerId);
 
     const kp = this.opts.generateKeypair();
     const agentPubkey = kp.publicKey;
@@ -1321,12 +1522,14 @@ export class RelayClient {
     kp.privateKey.fill(0);
     const sessionKeys = deriveSessionKeys(sharedSecret, agentTranscript);
     const transport = new E2eTransport({ sendKey: sessionKeys.a2p, recvKey: sessionKeys.p2a });
-    this.pending = { attemptId, transport, sessionKeys, peerId };
-    this.startHalfOpenTimer();
+    const attempt: PendingAttempt = { attemptId, transport, sessionKeys, peerId, expiry: null };
+    this.pending.set(peerId, attempt);
+    this.startHalfOpenTimer(attempt);
 
     const agentSig = signTranscript(agentTranscript, Buffer.from(seedB64, "base64"));
     this.sendPayload(
       Buffer.from(JSON.stringify({ type: "handshake:agent-hello", attemptId, pubkey: agentPubkey.toString("base64"), sig: agentSig }), "utf8"),
+      peerId,
       "control",
       FrameKind.handshake,
       "handshake:agent-hello",
@@ -1336,56 +1539,130 @@ export class RelayClient {
     this.sendSessionFrame(
       { type: "handshake:agent-ready", attemptId, confirm: agentConfirmTag(sessionKeys.confirm).toString("base64") },
       transport,
+      peerId,
     );
-    log.info("E2E handshake keys derived (attempt %s), waiting for app:ready", attemptId);
+    log.info("E2E handshake keys derived for %s (attempt %s), waiting for app:ready", peerId, attemptId);
   }
 
-  private handleAppReady(obj: { attemptId?: string; confirm?: string; capabilities?: { checkoutRouting?: boolean; pullsTree?: boolean } }): void {
+  /** Make room for a device that holds neither a session nor a candidate. The
+   *  unreachable go first (their device is already gone); otherwise the session
+   *  that has been silent longest. Only a REACHABLE evictee is told — a
+   *  session-takeover sealed for a device the relay says is offline reaches
+   *  nobody, and the frame is the one thing that keeps a displaced app from
+   *  rekeying straight back into the same eviction. */
+  private evictForCapacity(peerId: string): void {
+    if (this.sessions.has(peerId) || this.pending.has(peerId)) return;
+    while (this.sessions.size + this.pending.size >= MAX_APP_SESSIONS) {
+      // A half-open candidate has proved nothing yet, so it goes before any
+      // confirmed session — and silently, since there is no session to end.
+      const stale = [...this.pending.values()][0];
+      if (stale) {
+        log.info("Session capacity (%d) reached — discarding half-open attempt for %s", MAX_APP_SESSIONS, stale.peerId);
+        this.tearDownPending(stale.peerId);
+        continue;
+      }
+      const victim = this.pickEvictable();
+      if (!victim) return;
+      log.info(
+        "Session capacity (%d) reached — evicting %s to admit %s",
+        MAX_APP_SESSIONS,
+        victim.peerId,
+        peerId,
+      );
+      if (victim.reachable) {
+        try {
+          this.sendSessionFrame({ type: "session-takeover" }, victim.transport, victim.peerId);
+        } catch {
+          // evictee unreachable — teardown proceeds regardless
+        }
+      }
+      this.dropSession(victim.peerId);
+    }
+  }
+
+  /** Unreachable sessions first, then the least recently active. */
+  private pickEvictable(): PeerSession | null {
+    let worst: PeerSession | null = null;
+    for (const session of this.sessions.values()) {
+      if (!worst) { worst = session; continue; }
+      if (worst.reachable !== session.reachable) {
+        if (!session.reachable) worst = session;
+        continue;
+      }
+      if (session.lastSealedRecvAt < worst.lastSealedRecvAt) worst = session;
+    }
+    return worst;
+  }
+
+  private handleAppReady(
+    obj: {
+      attemptId?: string;
+      confirm?: string;
+      capabilities?: { checkoutRouting?: boolean; pullsTree?: boolean };
+    },
+    peerId: string,
+  ): void {
     const attemptId = obj.attemptId;
     if (!attemptId) return;
     const tag = Buffer.from(obj.confirm ?? "", "base64");
 
     // Idempotent: the phone retransmits app:ready every 2s until it sees
-    // `established`. A duplicate for the live session just re-acks — no
-    // state change.
-    if (this.established && this.established.attemptId === attemptId) {
-      this.sendSessionFrame({ type: "established", attemptId }, this.established.transport);
+    // `established`. A duplicate for this device's live session just re-acks —
+    // no state change.
+    const live = this.sessions.get(peerId);
+    if (live && live.attemptId === attemptId) {
+      this.sendSessionFrame({ type: "established", attemptId }, live.transport, peerId);
       return;
     }
 
-    if (this.pending && this.pending.attemptId === attemptId) {
-      const expected = phoneConfirmTag(this.pending.sessionKeys.confirm);
+    const attempt = this.pending.get(peerId);
+    if (attempt && attempt.attemptId === attemptId) {
+      const expected = phoneConfirmTag(attempt.sessionKeys.confirm);
       if (!verifyConfirmTag(expected, tag)) {
         log.warn("app:ready confirm tag invalid (attempt %s) — dropping", attemptId);
         return;
       }
-      // Make-before-break swap: promote the candidate, then zeroize the old set.
-      const old = this.established;
-      this.established = this.pending;
-      this.peerCheckoutRouting = obj.capabilities?.checkoutRouting === true;
-      this.peerAdvertisedPullsTree = obj.capabilities?.pullsTree === true;
-      // Self-correct the address to the promoted session's peer (already equal
-      // to it for same-device rekey; makes a presence flap during the pending
-      // window harmless).
-      this._peerId = this.established.peerId;
-      this.pending = null;
-      this.stopHalfOpenTimer();
-      if (old) {
-        zeroizeSessionKeys(old.sessionKeys);
-        old.transport.zeroize();
+      // Make-before-break swap, scoped to THIS device: promote its candidate,
+      // then zeroize the keys it replaces. Every other device is untouched.
+      const now = Date.now();
+      const session: PeerSession = {
+        attemptId,
+        transport: attempt.transport,
+        sessionKeys: attempt.sessionKeys,
+        peerId,
+        checkoutRouting: obj.capabilities?.checkoutRouting === true,
+        reachable: true,
+        unreachableSince: 0,
+        lastSealedRecvAt: now,
+        missedPongs: 0,
+        // Reuse the replaced session's reassembler: a rekey is the same device
+        // continuing, and its in-flight transfers survive the key swap.
+        frag: live?.frag ?? this.newFragReassembler(peerId),
+        // The queue and both windows start empty. Anything the replaced session
+        // still held is dropped rather than re-sealed under the promoted keys:
+        // the app captures its own key set several awaits after `established`
+        // reaches its socket, so a frame written behind the ack races that swap.
+        scheduler: this.newSendScheduler(peerId),
+        rxFlow: RelayClient.freshRxFlow(),
+        stallWarned: {},
+        pullsTree: obj.capabilities?.pullsTree === true,
+      };
+      this.pending.delete(peerId);
+      this.stopHalfOpenTimer(attempt);
+      this.sessions.set(peerId, session);
+      if (live) {
+        this.recordQueueDrop("rekey", live.scheduler.clear());
+        zeroizeSessionKeys(live.sessionKeys);
+        live.transport.zeroize();
       }
       this.startLiveness();
-      // Dropped rather than re-sealed under the promoted keys: the phone
-      // captures its own key set when a frame arrives and swaps several awaits
-      // after `established` reaches its socket, so anything written right
-      // behind the ack races that swap — and FIFO would put a stale backlog
-      // ahead of the adverts and snapshot the phone re-syncs from anyway.
-      this.recordQueueDrop("rekey", this.scheduler.clear());
-      this.scheduler.resetWindows();
-      this.resetRxFlow();
-      this.sendSessionFrame({ type: "established", attemptId }, this.established.transport);
-      log.info("E2E session established (attempt %s)", attemptId);
-      this.opts.onHandshakeComplete?.({ checkoutRouting: this.peerCheckoutRouting, pullsTree: this.peerAdvertisedPullsTree });
+      this.sendSessionFrame({ type: "established", attemptId }, session.transport, peerId);
+      log.info("E2E session established with %s (attempt %s)", peerId, attemptId);
+      this.opts.onHandshakeComplete?.({
+        checkoutRouting: session.checkoutRouting,
+        pullsTree: session.pullsTree,
+        peerId,
+      });
       this.mux.notifyPeerOnline();
       this.drain();
       return;
@@ -1427,22 +1704,23 @@ export class RelayClient {
 
   // --- Sending ---
 
-  /** Send a AbMessage on the control channel. Always sealed; dropped (never
-   *  plaintext) if the E2E session is not established. */
-  send(msg: AbMessage): void {
-    void this.sendAppEnvelope(CONTROL_STREAM_ID, msg, "control");
+  /** Send a AbMessage on the control channel to every established session (or
+   *  the one `target` names). Always sealed; dropped (never plaintext) if no
+   *  session is established. */
+  send(msg: AbMessage, target?: SendTarget): void {
+    void this.sendAppEnvelope(CONTROL_STREAM_ID, msg, "control", target);
   }
 
   /** Send a AbMessage on a specific channel (control plane). */
-  sendOnChannel(msg: AbMessage, channel: Channel): void {
-    void this.sendAppEnvelope(CONTROL_STREAM_ID, msg, channel);
+  sendOnChannel(msg: AbMessage, channel: Channel, target?: SendTarget): void {
+    void this.sendAppEnvelope(CONTROL_STREAM_ID, msg, channel, target);
   }
 
   /** Send a tunnel-protocol message on the preview channel (control plane).
-   *  The promise settles when the message left the send queue — see
-   *  {@link sendAppEnvelope}. */
-  sendTunnel(data: object): Promise<SendOutcome> {
-    return this.sendAppEnvelope(CONTROL_STREAM_ID, data, "preview");
+   *  `target` names the session whose request this answers. The promise settles
+   *  when the message left the send queue — see {@link sendAppEnvelope}. */
+  sendTunnel(data: object, target?: SendTarget): Promise<SendOutcome> {
+    return this.sendAppEnvelope(CONTROL_STREAM_ID, data, "preview", target);
   }
 
   /** Send a push:deliver control frame to the relay (blind FCM/APNs forward). A
@@ -1452,33 +1730,46 @@ export class RelayClient {
   }
 
   /**
-   * Wrap `msg` in the `{ s?, m }` stream envelope, fragment the
-   * ENVELOPE json (so `s` survives fragmentation), and hand every fragment to
-   * the send scheduler, which seals and writes them in order. Control-plane
-   * traffic uses `CONTROL_STREAM_ID` (`s` omitted). Dropped — never sent in
-   * cleartext — when the session is not established.
+   * Wrap `msg` in the `{ s?, m }` stream envelope, fragment the ENVELOPE json
+   * (so `s` survives fragmentation), then hand every fragment to the send
+   * scheduler OF EACH RECIPIENT SESSION, which seals and writes them in order —
+   * sealing is per-session by construction, since each device's keys are its
+   * own. Control-plane traffic uses `CONTROL_STREAM_ID` (`s` omitted).
+   * Dropped — never sent in cleartext — when no recipient has a session. A
+   * too-large `tunnel:http-response` degrades to a sealed 413 so the phone's
+   * preview request fails fast instead of hanging.
    *
-   * The returned promise settles when the message LEFT the queue: "sent" once
-   * every fragment was sealed and written, "dropped" the moment one is
-   * discarded. A caller that paces itself against this (the tunnel's chunk
-   * loop) is throttled by the credit window and nothing else; with an open
-   * window the frames are written inside the synchronous `drain()` below, so
-   * the promise is already resolved on return.
+   * Fragmenting once and queueing N times is deliberate: every device gets the
+   * SAME transfer id, which is what lets an abort be reported the same way to
+   * all of them, and the fragment ids stay unique process-wide either way.
+   *
+   * The returned promise settles when the message LEFT every recipient's queue:
+   * "sent" once every fragment of every copy was sealed and written, "dropped"
+   * the moment one is discarded. A caller that paces itself against this (the
+   * tunnel's chunk loop) is therefore throttled by the TIGHTEST of the
+   * recipients' credit windows, which is the one that would overflow first.
    */
-  private sendAppEnvelope(streamId: string, msg: unknown, channel: Channel): Promise<SendOutcome> {
+  private sendAppEnvelope(
+    streamId: string,
+    msg: unknown,
+    channel: Channel,
+    target: SendTarget = { kind: "broadcast" },
+  ): Promise<SendOutcome> {
     const type = (msg as { type?: string } | null)?.type;
-    if (!this.established) {
+    const recipients = this.resolveRecipients(target);
+    if (recipients.length === 0) {
       // NEVER send app traffic in cleartext (the relay is zero-knowledge). During
       // a rekey window services may still emit; dropping is correct — the phone
       // re-syncs control state after the next establishment.
-      log.debug("Dropping outbound %s — E2E session not established", type ?? "message");
+      log.debug("Dropping outbound %s — no established session to seal it for", type ?? "message");
       // Only visible at debug today, which is the level nobody is running when
       // the report is "my message never arrived".
       netwatch.record({
         dir: "tx", kind: "drop", transport: "relay", channel,
         msgType: type ?? "message", streamId, reason: "no-e2e-session",
       });
-      return Promise.resolve("dropped");
+      this.handleUndeliverableTunnel("dropped", channel, msg, target);
+      return Promise.resolve<SendOutcome>("dropped");
     }
 
     const envelope =
@@ -1489,47 +1780,114 @@ export class RelayClient {
     if (!fragmented.ok) {
       log.warn("%s", fragmented.error.message);
       this.opts.onError?.(fragmented.error.code, fragmented.error.message);
-      const outcome: SendOutcome = fragmented.error.code === "MESSAGE_TOO_LARGE" ? "too-large" : "dropped";
+      const outcome: SendOutcome =
+        fragmented.error.code === "MESSAGE_TOO_LARGE" ? "too-large" : "dropped";
       netwatch.record({
         dir: "tx", kind: "drop", transport: "relay", channel,
         msgType: type ?? "message", streamId, reason: fragmented.error.code,
         detail: { bytes: Buffer.byteLength(json, "utf8") },
       });
+      this.handleUndeliverableTunnel(outcome, channel, msg, target);
       return Promise.resolve(outcome);
     }
 
-    const frames: QueuedAppFrame[] = fragmented.frames.map((plaintext) => ({
-      channel,
-      streamId,
-      plaintext,
-      plaintextBytes: Buffer.byteLength(plaintext, "utf8"),
-      type: type ?? "app",
-    }));
-    // One settle per FRAGMENT, one resolution per message: the first drop wins
-    // and the rest are ignored, so a fragment set that half-lands still reports
-    // the message as undelivered.
-    let pending = frames.length;
+    // One settle per FRAGMENT PER RECIPIENT, one resolution per message: the
+    // first drop wins and the rest are ignored, so a fragment set that half
+    // lands — or one recipient of several that does not — still reports the
+    // message as undelivered.
+    let pending = 0;
     let failed = false;
-    const settled = new Promise<SendOutcome>((resolve) => {
-      for (const f of frames) {
-        f.settle = (o) => {
+    let resolveOutcome!: (o: SendOutcome) => void;
+    const settled = new Promise<SendOutcome>((resolve) => { resolveOutcome = resolve; });
+    const perRecipient: { session: PeerSession; frames: QueuedAppFrame[] }[] = [];
+    for (const session of recipients) {
+      const frames: QueuedAppFrame[] = fragmented.frames.map((plaintext) => ({
+        channel,
+        streamId,
+        plaintext,
+        plaintextBytes: Buffer.byteLength(plaintext, "utf8"),
+        type: type ?? "app",
+        settle: (o) => {
           if (failed) return;
-          if (o === "dropped") { failed = true; resolve("dropped"); return; }
-          if (--pending === 0) resolve("sent");
-        };
-      }
-    });
-    if (!this.scheduler.enqueue(frames)) {
-      log.warn("Send queue full on %s — dropping %s (%d frame(s))", channel, type ?? "message", frames.length);
+          if (o === "dropped") { failed = true; resolveOutcome("dropped"); return; }
+          if (--pending === 0) resolveOutcome("sent");
+        },
+      }));
+      pending += frames.length;
+      perRecipient.push({ session, frames });
+    }
+    for (const { session, frames } of perRecipient) {
+      if (session.scheduler.enqueue(frames)) continue;
+      log.warn(
+        "Send queue full on %s to %s — dropping %s (%d frame(s))",
+        channel, session.peerId, type ?? "message", frames.length,
+      );
       netwatch.record({
         dir: "tx", kind: "drop", transport: "relay", channel,
         msgType: type ?? "message", streamId, reason: "send-queue-full",
-        detail: { frames: frames.length, queued: this.scheduler.queued(channel).bytes },
+        detail: { frames: frames.length, queued: session.scheduler.queued(channel).bytes },
       });
-      return Promise.resolve("dropped");
+      // enqueue() refused the whole batch, so no settle of this recipient's
+      // frames will ever run — report the drop for the message here.
+      if (!failed) { failed = true; resolveOutcome("dropped"); }
     }
     this.drain();
     return settled;
+  }
+
+  /** Which sessions a {@link SendTarget} selects. An unreachable session is
+   *  still a recipient: the relay queues nothing, but a device coming back from
+   *  a brief flap opens what it missed, and dropping the send instead is how a
+   *  screen-lock used to lose an answer outright. */
+  private resolveRecipients(target: SendTarget): PeerSession[] {
+    if (target.kind === "peer") {
+      const session = this.sessions.get(target.peerId);
+      return session ? [session] : [];
+    }
+    const out: PeerSession[] = [];
+    for (const session of this.sessions.values()) {
+      if (target.where && !target.where(this.viewOf(session))) continue;
+      out.push(session);
+    }
+    return out;
+  }
+
+  /** A tunnel HTTP response has no re-sync path (unlike control), so an
+   *  undeliverable one must fail the phone's request fast: too-large → sealed
+   *  413; torn-down transport → loud warn (the request will time out). */
+  private handleUndeliverableTunnel(
+    outcome: "dropped" | "too-large",
+    channel: Channel,
+    msg: unknown,
+    target: SendTarget,
+  ): void {
+    if (channel !== "preview") return;
+    const type = (msg as { type?: string } | null)?.type;
+    const requestId = (msg as { requestId?: string } | null)?.requestId;
+    if (type !== "tunnel:http-response" || typeof requestId !== "string") return;
+    if (outcome === "too-large") {
+      // Guarded against recursion: the 413 body is tiny (never too-large).
+      this.sendAppEnvelope(
+        CONTROL_STREAM_ID,
+        {
+          type: "tunnel:http-response",
+          requestId,
+          status: 413,
+          headers: {},
+          body: "Preview response too large to tunnel",
+          bodyEncoding: "utf8",
+        },
+        "preview",
+        // Same addressing as the response it replaces: only the device that
+        // made the request is waiting on it.
+        target,
+      );
+    } else {
+      log.warn(
+        "Tunnel response %s dropped (E2E session not established) — preview request will time out",
+        requestId,
+      );
+    }
   }
 
   private messageFragKey(msg: unknown): string | undefined {
@@ -1538,17 +1896,22 @@ export class RelayClient {
   }
 
   /** Seal one bare session/liveness frame under `transport` (candidate keys for
-   *  agent-ready; established keys for established/ping/pong). */
-  private sendSessionFrame(obj: object, transport: E2eTransport | undefined): void {
+   *  agent-ready; established keys for established/ping/pong) and address it to
+   *  `to`. Keys and address are passed together on purpose: sealing for one
+   *  device and routing to another is the failure this file has hit before, and
+   *  it surfaces only as silence. */
+  private sendSessionFrame(obj: object, transport: E2eTransport | undefined, to: string): void {
     if (!transport) return;
     const type = (obj as { type?: string }).type ?? "session";
     const sealed = transport.seal(JSON.stringify(obj));
-    if (!this.sendPayload(sealed, "control", FrameKind.sealed, type)) return;
+    if (!this.sendPayload(sealed, to, "control", FrameKind.sealed, type)) return;
     // Exempt from the gate, not from the accounting: a relay drop report names
     // only a channel and a length, so bytes written outside the window would
-    // un-charge something that was never charged. Frames sealed under the
-    // candidate keys precede the peer's reset and stay uncounted on both ends.
-    if (transport === this.established?.transport) this.scheduler.charge("control", sealed.length);
+    // un-charge something that was never charged. Charge the session whose keys
+    // sealed it — a candidate's frames precede the peer's reset and stay
+    // uncounted on both ends, and so do a sibling device's.
+    const session = this.sessions.get(to);
+    if (session && transport === session.transport) session.scheduler.charge("control", sealed.length);
   }
 
   /** Attach a MessageBus as the CONTROL PLANE (s omitted). Streams attach via
@@ -1568,20 +1931,23 @@ export class RelayClient {
     this.bus = null;
   }
 
-  /** Returns whether the frame reached the socket; the scheduler charges only
-   *  what actually went out. */
+  /** `to` is the route address of the session whose keys sealed `data`. It is a
+   *  required argument rather than client state because there is no longer a
+   *  single peer to fall back on. Returns whether the frame reached the socket;
+   *  a scheduler charges only what actually went out. */
   private sendPayload(
     data: Buffer | string,
+    to: string,
     channel: Channel = "control",
     kind: FrameKind = FrameKind.sealed,
     diagnosticType = "transport",
     streamId?: string,
   ): boolean {
-    if (!this._peerId) {
-      log.warn("Cannot send payload — not paired");
+    if (!to) {
+      log.warn("Cannot send payload — no destination");
       netwatch.record({
         dir: "tx", kind: "drop", transport: "relay", channel,
-        msgType: diagnosticType, streamId, reason: "not-paired",
+        msgType: diagnosticType, streamId, reason: "no-destination",
       });
       return false;
     }
@@ -1598,7 +1964,7 @@ export class RelayClient {
     }
 
     const payloadBytes = typeof data === "string" ? Buffer.from(data, "utf8") : data;
-    const header: RouteHeader = { type: "message", to: this._peerId, channel };
+    const header: RouteHeader = { type: "message", to, channel };
     // `frame` is a fresh ArrayBuffer-backed Buffer (never shared); the cast
     // satisfies the WebSocket.send BufferSource type under TS 6's generic
     // Uint8Array.
@@ -1698,7 +2064,7 @@ export class RelayClient {
 
     const outboundAtOnset = this.formatOutboundRateDiagnostic(now);
     log.error(
-      `Relay dropped frames: device=${this.opts.identity.deviceId} peer=${this._peerId ?? "unpaired"} ` +
+      `Relay dropped frames: device=${this.opts.identity.deviceId} peers=${this.describePeers()} ` +
       `code=${code} message="${message}" recentOutbound(${RATE_DIAGNOSTIC_WINDOW_MS}ms)={${outboundAtOnset}}`,
     );
 
@@ -1764,62 +2130,67 @@ export class RelayClient {
 
   // --- E2E state teardown + timers ---
 
-  private tearDownEstablished(): void {
-    this.peerCheckoutRouting = false;
-    this.peerAdvertisedPullsTree = false;
-    if (!this.established) return;
+  /** End ONE device's session: zeroize its keys, release whatever it was
+   *  reassembling, and tell the cores that device is gone. The coarse
+   *  peer-offline follows only if it was the last reachable one. The socket and
+   *  every other session are untouched. */
+  private dropSession(peerId: string): void {
+    const session = this.sessions.get(peerId);
+    if (!session) return;
+    this.sessions.delete(peerId);
     // The choke point for every session end (reconnect, cross-device hello,
     // liveness death): queued frames would otherwise be sealed under a session
-    // the peer has already forgotten.
-    this.recordQueueDrop("session-torn-down", this.scheduler.clear());
-    this.scheduler.resetWindows();
-    this.resetRxFlow();
-    zeroizeSessionKeys(this.established.sessionKeys);
-    this.established.transport.zeroize();
-    this.established = null;
+    // the peer has already forgotten. The windows die with the struct.
+    this.recordQueueDrop("session-torn-down", session.scheduler.clear());
+    session.frag.dispose();
+    zeroizeSessionKeys(session.sessionKeys);
+    session.transport.zeroize();
+    if (this.sessions.size === 0) this.stopLiveness();
+    this.mux.notifyPeerSessionOffline(peerId);
+    this.notifyOfflineIfLast();
   }
 
-  private tearDownPending(): void {
-    if (!this.pending) return;
-    zeroizeSessionKeys(this.pending.sessionKeys);
-    this.pending.transport.zeroize();
-    this.pending = null;
+  private tearDownPending(peerId: string): void {
+    const attempt = this.pending.get(peerId);
+    if (!attempt) return;
+    this.pending.delete(peerId);
+    this.stopHalfOpenTimer(attempt);
+    zeroizeSessionKeys(attempt.sessionKeys);
+    attempt.transport.zeroize();
   }
 
+  /** Every session and candidate is gone (socket close / redial): the relay has
+   *  forgotten our routes, so nothing sealed for them could be delivered. */
   private resetE2eState(): void {
-    this.tearDownEstablished();
-    this.tearDownPending();
-    this.stopHalfOpenTimer();
+    for (const peerId of [...this.sessions.keys()]) this.dropSession(peerId);
+    for (const peerId of [...this.pending.keys()]) this.tearDownPending(peerId);
     this.stopLiveness();
   }
 
-  private startHalfOpenTimer(): void {
-    this.stopHalfOpenTimer();
-    this.halfOpenTimer = setTimeout(() => {
-      if (this.pending) {
-        log.warn("Half-open handshake attempt %s expired — discarding candidate keys", this.pending.attemptId);
-        this.tearDownPending();
-      }
+  private startHalfOpenTimer(attempt: PendingAttempt): void {
+    this.stopHalfOpenTimer(attempt);
+    attempt.expiry = setTimeout(() => {
+      // Per attempt, not per client: one device's candidate expiring must not
+      // discard another device's, which may have started at any time.
+      if (this.pending.get(attempt.peerId) !== attempt) return;
+      log.warn("Half-open handshake attempt %s expired — discarding candidate keys", attempt.attemptId);
+      this.tearDownPending(attempt.peerId);
     }, this.opts.halfOpenMs ?? HALF_OPEN_MS);
-    this.halfOpenTimer?.unref?.();
+    attempt.expiry?.unref?.();
   }
 
-  private stopHalfOpenTimer(): void {
-    if (this.halfOpenTimer) {
-      clearTimeout(this.halfOpenTimer);
-      this.halfOpenTimer = null;
+  private stopHalfOpenTimer(attempt: PendingAttempt): void {
+    if (attempt.expiry) {
+      clearTimeout(attempt.expiry);
+      attempt.expiry = null;
     }
   }
 
-  private recordSealedRecv(): void {
-    this.lastSealedRecvAt = Date.now();
-    this.missedPongs = 0;
-  }
-
+  /** Idempotent: the one interval covers every session, so a second device
+   *  establishing must not restart it (which would reset the whole sweep's
+   *  phase and delay every other session's next probe). */
   private startLiveness(): void {
-    this.stopLiveness();
-    this.lastSealedRecvAt = Date.now();
-    this.missedPongs = 0;
+    if (this.livenessTimer) return;
     this.livenessTimer = setInterval(() => this.checkLiveness(), PING_SILENCE_MS);
     this.livenessTimer?.unref?.();
   }
@@ -1832,29 +2203,34 @@ export class RelayClient {
   }
 
   private checkLiveness(): void {
-    if (!this.established) return;
-    // Unconditional, every tick: a credit the relay dropped is re-sent within
-    // one silence window carrying the same cumulative ground truth, and since
-    // it is a sealed frame under the established keys it also refreshes the
-    // peer's liveness while bulk drains on a slow uplink.
-    for (const ch of ["control", "preview"] as const) this.sendCredit(ch);
-    // Recent sealed traffic → healthy.
-    if (Date.now() - this.lastSealedRecvAt < PING_SILENCE_MS) return;
-    if (this.missedPongs >= MAX_MISSED_PONGS) {
-      this.declareSessionDead();
-      return;
+    const now = Date.now();
+    for (const session of [...this.sessions.values()]) {
+      if (!session.reachable) {
+        // Pinging a device the relay says is offline probes nothing. Keep its
+        // keys for the reconnect/push window, then let them go.
+        if (now - session.unreachableSince >= UNREACHABLE_SESSION_TTL_MS) {
+          log.info("Dropping keys for %s — offline past the session TTL", session.peerId);
+          this.dropSession(session.peerId);
+        }
+        continue;
+      }
+      // Unconditional, every tick: a credit the relay dropped is re-sent within
+      // one silence window carrying the same cumulative ground truth, and since
+      // it is a sealed frame under this session's keys it also refreshes the
+      // device's liveness while bulk drains on a slow uplink.
+      for (const ch of ["control", "preview"] as const) this.sendCredit(session, ch);
+      // Recent sealed traffic → healthy.
+      if (now - session.lastSealedRecvAt < PING_SILENCE_MS) continue;
+      if (session.missedPongs >= MAX_MISSED_PONGS) {
+        // Unresponsive: drop this device's keys and wait for its rekey (the app
+        // owns retry pacing). The socket and every sibling session stay up.
+        log.warn("E2E session with %s declared dead (%d missed pongs) — dropping keys, awaiting rekey", session.peerId, MAX_MISSED_PONGS);
+        this.dropSession(session.peerId);
+        continue;
+      }
+      session.missedPongs++;
+      this.sendSessionFrame({ type: "ping" }, session.transport, session.peerId);
     }
-    this.missedPongs++;
-    this.sendSessionFrame({ type: "ping" }, this.established.transport);
-  }
-
-  /** The E2E session is unresponsive: drop keys and wait for the phone's rekey
-   *  (it owns retry pacing). The socket is left intact. */
-  private declareSessionDead(): void {
-    log.warn(`E2E session declared dead (${MAX_MISSED_PONGS} missed pongs) — dropping keys, awaiting rekey`);
-    this.tearDownEstablished();
-    this.stopLiveness();
-    this.mux.notifyPeerOffline();
   }
 
   private heartbeatTick(): void {
@@ -1865,8 +2241,8 @@ export class RelayClient {
       // linger until OS TCP timeout; the close handler owns reconnection.
       log.warn(
         `relay socket unresponsive — ping unanswered for ${Date.now() - this.awaitingPongSince}ms ` +
-        `(probe interval ${HEARTBEAT_INTERVAL}ms), peer=${this._peerId ?? "unpaired"} ` +
-        `sealed=${this.established ? "established" : "none"}; closing to trigger reconnect`,
+        `(probe interval ${HEARTBEAT_INTERVAL}ms), peers=${[...this.sessions.keys()].join(",") || "none"} ` +
+        `sealed=${this.sessions.size}; closing to trigger reconnect`,
       );
       this.ws.close();
       return;
@@ -1909,10 +2285,12 @@ export class RelayClient {
     // replies are failed fast by the app's pending registry the moment the
     // session drops — so replaying it would only put stale bytes ahead of the
     // re-sync.
-    this.recordQueueDrop("socket-closed", this.scheduler.clear());
+    for (const session of this.sessions.values()) {
+      this.recordQueueDrop("socket-closed", session.scheduler.clear());
+    }
     this.stopHeartbeat();
     this.awaitingPong = false;
-    this.stopHalfOpenTimer();
+    for (const attempt of this.pending.values()) this.stopHalfOpenTimer(attempt);
     this.stopLiveness();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -1931,6 +2309,8 @@ export class RelayClient {
   static forTest(opts: {
     generateKeypair: () => EphemeralKeypair;
     sendPayload: (p: string | Buffer) => void;
+    /** The route address the test's default app device reaches us on. Seeds the
+     *  pubkey cache only — a session exists solely once a handshake completes. */
     peerId: string;
     /** Agent device id used as `agentDeviceId` in the handshake transcript. */
     deviceId?: string;
@@ -1953,9 +2333,12 @@ export class RelayClient {
       opts.sendPayload(p);
       return true;
     };
-    (c as unknown as { _peerId: string })._peerId = opts.peerId;
-    (c as unknown as { established: E2eAttempt | null }).established = null;
-    (c as unknown as { pending: E2eAttempt | null }).pending = null;
+    (c as unknown as { sessions: Map<string, PeerSession> }).sessions = new Map();
+    (c as unknown as { pending: Map<string, PendingAttempt> }).pending = new Map();
+    (c as unknown as { reassemblyBudget: SharedByteBudget }).reassemblyBudget = {
+      used: 0,
+      limit: GLOBAL_REASSEMBLY_BUDGET,
+    };
     (c as unknown as { phoneEd25519ByDeviceId: Map<string, string> }).phoneEd25519ByDeviceId = new Map();
     (c as unknown as { outboundFrameDiagnostics: OutboundFrameDiagnostic[] }).outboundFrameDiagnostics = [];
     (c as unknown as { rateLimitBurst: RateLimitBurst | null }).rateLimitBurst = null;
@@ -1963,20 +2346,26 @@ export class RelayClient {
     (c as unknown as { unknownStreamSuppressed: Map<string, number> }).unknownStreamSuppressed = new Map();
     (c as unknown as { droppedFrames: number }).droppedFrames = 0;
     (c as unknown as { droppedFramesAt: number }).droppedFramesAt = 0;
-    (c as unknown as { mux: StreamMux }).mux = new StreamMux({ openStream: () => {}, closeStream: () => {}, sendEnvelope: () => Promise.resolve("sent") });
-    (c as unknown as { initSendScheduler: () => void }).initSendScheduler();
+    (c as unknown as { mux: StreamMux }).mux = new StreamMux({
+      openStream: () => {},
+      closeStream: () => {},
+      sendEnvelope: () => Promise.resolve("sent"),
+      peerSession: () => null,
+    });
+    // The scheduler and the reassembler are per-session now, built by
+    // `newSendScheduler`/`newFragReassembler` as each device establishes, so
+    // there is nothing client-wide left for a test to initialize.
     if (opts.creditBatchBytes !== undefined) {
       (c as unknown as { creditBatchBytes: number }).creditBatchBytes = opts.creditBatchBytes;
     }
-    (c as unknown as { initFragReassembler: () => void }).initFragReassembler();
     if (opts.phoneEd25519PubB64) {
       (c as unknown as { phoneEd25519ByDeviceId: Map<string, string> }).phoneEd25519ByDeviceId.set(opts.peerId, opts.phoneEd25519PubB64);
     }
     return c;
   }
 
-  /** True once the E2E session is established (test seam). */
+  /** True once at least one E2E session is established (test seam). */
   _handshakeComplete(): boolean {
-    return this.established !== null;
+    return this.sessions.size > 0;
   }
 }

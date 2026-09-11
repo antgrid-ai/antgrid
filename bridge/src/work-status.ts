@@ -1,5 +1,5 @@
 import { needsKeystrokeTurnStart } from "./agents/registry";
-import type { InboundSource } from "./message-bus";
+import type { ClientKey } from "./message-bus";
 import type { AbMessage, NotificationType, WorkStatus } from "./protocol";
 
 /** Reduced work status for the control-plane advert, folded from a core's
@@ -39,9 +39,10 @@ export interface WorkStatusState {
    *  TUI menu — opened a turn no stop hook was ever going to close. */
   readonly typedSessions: ReadonlySet<string>;
   /** What each client has ON SCREEN — at most one session per client, since a
-   *  client shows one at a time. Keyed by {@link InboundSource} because that is
-   *  the honest granularity: the desktop reaches a core over loopback and the
-   *  phone over the relay, and they look at different sessions.
+   *  client shows one at a time. Keyed by {@link ClientKey} because that is the
+   *  honest granularity: the desktop owner reaches a core over loopback while
+   *  each attached app device holds its own relay session, and they look at
+   *  different sessions.
    *
    *  A SET of watchers, not one slot, and that is the whole point. With a single
    *  slot the last client to speak stole it, so a phone opening session B put a
@@ -52,7 +53,7 @@ export interface WorkStatusState {
    *  someone's pocket is looking at nothing) and by {@link clientGone} (the
    *  socket closed), so a client that walks away stops vouching for a session it
    *  can no longer see. */
-  readonly focusedSessions: ReadonlyMap<InboundSource, string>;
+  readonly focusedSessions: ReadonlyMap<ClientKey, string>;
   /** True once ANY client has declared its focus on this project. The gate on
    *  {@link WorkStatusState.unreadSessions}: before a client says what it is
    *  looking at, the bridge has no basis to call an answer unseen — a bare
@@ -83,12 +84,22 @@ export interface WorkStatusState {
  *  turn-end closes. Never collides with a real session id (a uuid). */
 export const UNATTRIBUTED_TURN = "";
 
+/** Is a turn open for [sessionId]? True for the session's own turn and for the
+ *  anonymous one, because a project mid-turn under {@link UNATTRIBUTED_TURN}
+ *  cannot say WHICH session is busy — so every session is, as far as anything
+ *  that must not interrupt one is concerned. Shared with the session-bus
+ *  delivery gate, which fails silently if it drifts from the status reduction:
+ *  a delivery submitted against an unattributed turn lands mid-turn. */
+export function turnOpenFor(activeTurns: ReadonlySet<string>, sessionId: string): boolean {
+  return activeTurns.has(sessionId) || activeTurns.has(UNATTRIBUTED_TURN);
+}
+
 /** Shared empty set for every session-id set on the state — turns, running
  *  sessions, keystroke/typed markers. */
 const EMPTY_IDS: ReadonlySet<string> = new Set();
 const EMPTY_NOTIFICATIONS: ReadonlyMap<string, NotificationType> = new Map();
 const EMPTY_REQUESTS: ReadonlyMap<string, ReadonlySet<string>> = new Map();
-const EMPTY_FOCUS: ReadonlyMap<InboundSource, string> = new Map();
+const EMPTY_FOCUS: ReadonlyMap<ClientKey, string> = new Map();
 
 /** The mutable inputs {@link build} folds into a state; everything else on
  *  WorkStatusState is derived from these. */
@@ -100,7 +111,7 @@ interface WorkInputs {
   pendingTurns: ReadonlySet<string>;
   keystrokeTurnSessions: ReadonlySet<string>;
   typedSessions: ReadonlySet<string>;
-  focusedSessions: ReadonlyMap<InboundSource, string>;
+  focusedSessions: ReadonlyMap<ClientKey, string>;
   readTracking: boolean;
   unreadSessions: ReadonlySet<string>;
   defaultTool: string | undefined;
@@ -166,9 +177,7 @@ function statusFor(sessionId: string, i: WorkInputs): WorkStatus {
     case "task_complete":
     case "idle": return "done";
     default:
-      return i.activeTurns.has(sessionId) || i.activeTurns.has(UNATTRIBUTED_TURN)
-        ? "working"
-        : "done";
+      return turnOpenFor(i.activeTurns, sessionId) ? "working" : "done";
   }
 }
 
@@ -201,6 +210,36 @@ function deriveUnread(i: WorkInputs, raw: ReadonlyMap<string, WorkStatus>, prev?
   }
   for (const seen of i.focusedSessions.values()) unread.delete(seen);
   return unread;
+}
+
+/**
+ * Sessions whose "blocked on a human" state flipped between two reductions.
+ *
+ * `attention` is this reduction's word for an unanswered permission request or
+ * question, which is the only thing on a bridge that says its own human is what
+ * the work waits on. Pure, so a caller can read the edge BEFORE it swaps the
+ * state it is comparing against, for the reason closedTurns (delivery-queue.ts)
+ * is.
+ *
+ * A session that left the map stopped waiting on anyone: only a running session
+ * carries a status, and a stopped agent is blocked on nothing.
+ */
+export function attentionEdges(
+  prev: { sessionStatuses: ReadonlyMap<string, WorkStatus> },
+  next: { sessionStatuses: ReadonlyMap<string, WorkStatus> },
+): { sessionId: string; blocked: boolean }[] {
+  const edges: { sessionId: string; blocked: boolean }[] = [];
+  for (const [id, status] of next.sessionStatuses) {
+    const was = prev.sessionStatuses.get(id) === "attention";
+    const is = status === "attention";
+    if (was !== is) edges.push({ sessionId: id, blocked: is });
+  }
+  for (const [id, status] of prev.sessionStatuses) {
+    if (status === "attention" && !next.sessionStatuses.has(id)) {
+      edges.push({ sessionId: id, blocked: false });
+    }
+  }
+  return edges;
 }
 
 /** Derive the per-session map and its rollup.
@@ -521,10 +560,10 @@ export function closeTurn(prev: WorkStatusState, sessionId: string): WorkStatusS
 /** Replace one client's focus entry, or drop it when [sessionId] is undefined.
  *  Returns the SAME map when it already said that. */
 function withFocus(
-  map: ReadonlyMap<InboundSource, string>,
-  client: InboundSource,
+  map: ReadonlyMap<ClientKey, string>,
+  client: ClientKey,
   sessionId: string | undefined,
-): ReadonlyMap<InboundSource, string> {
+): ReadonlyMap<ClientKey, string> {
   if (map.get(client) === sessionId) return map;
   const next = new Map(map);
   if (sessionId === undefined) next.delete(client); else next.set(client, sessionId);
@@ -552,7 +591,7 @@ function withFocus(
 export function sessionFocus(
   prev: WorkStatusState,
   sessionId: string,
-  client: InboundSource,
+  client: ClientKey,
 ): WorkStatusState {
   const focusedSessions = withFocus(prev.focusedSessions, client, sessionId);
   if (prev.readTracking
@@ -588,7 +627,7 @@ export function sessionFocus(
 export function clientFocusState(
   prev: WorkStatusState,
   paused: boolean,
-  client: InboundSource,
+  client: ClientKey,
 ): WorkStatusState {
   const focusedSessions = paused
     ? withFocus(prev.focusedSessions, client, undefined)
@@ -607,7 +646,7 @@ export function clientFocusState(
  *  back, and clearing it would replay every answer it missed as plain "done".
  *
  *  Pure; SAME object when that client had nothing on screen. */
-export function clientGone(prev: WorkStatusState, client: InboundSource): WorkStatusState {
+export function clientGone(prev: WorkStatusState, client: ClientKey): WorkStatusState {
   const focusedSessions = withFocus(prev.focusedSessions, client, undefined);
   if (focusedSessions === prev.focusedSessions) return prev;
   return build({ ...inputsOf(prev), focusedSessions }, prev);

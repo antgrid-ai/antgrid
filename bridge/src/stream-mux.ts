@@ -23,13 +23,63 @@ export interface StreamHandle {
   readonly streamId: string;
   detach(): void;
   /** Send a tunnel-protocol (preview channel) message tagged with this stream.
+   *  `target` names the app session that asked: a tunnel body answers exactly
+   *  one request, so fanning it out to every attached device both wastes the
+   *  link and hands one device another's response. Absent = every session.
+   *
    *  Resolves when the message left the send queue — "sent"/"dropped"/
    *  "too-large" from the send path, or "gated" when this stream's outbound
    *  authorization refused it. */
-  sendTunnel(data: object): Promise<SendOutcome>;
+  sendTunnel(data: object, target?: SendTarget): Promise<SendOutcome>;
+  /** Send one frame on a named channel to a single app session, bypassing the
+   *  bus. The bus has no addressing, so a published frame reaches every
+   *  established session — including the human's phone, which is attached here
+   *  too and must never see another agent's bus traffic. Resolves
+   *  the same outcomes as `sendTunnel`, so a caller with an outbox can hold the
+   *  frame rather than assume it left. */
+  sendTo(msg: unknown, channel: Channel, target: SendTarget): Promise<SendOutcome>;
+}
+
+/** What one app session looks like to everything outside the relay client. No
+ *  key material ever leaves that file. */
+export interface PeerSessionView {
+  readonly peerId: string;
+  readonly peerPubkey: string;
+  readonly checkoutRouting: boolean;
+  readonly reachable: boolean;
+  /** Whether this device pulls trees on demand rather than being pushed them.
+   *  Per-device: the bridge may only stop pushing when EVERY attached one does. */
+  readonly pullsTree: boolean;
+}
+
+/** Who an outbound frame is for. A bridge holds one E2E session per attached
+ *  app device, so every send either fans out (optionally filtered per receiver)
+ *  or names the single session that asked. */
+export type SendTarget =
+  | { kind: "broadcast"; where?: (peer: PeerSessionView) => boolean }
+  | { kind: "peer"; peerId: string };
+
+/** Conjunction of two optional receiver filters, so a stream's own per-receiver
+ *  mute layers under whatever filter the caller passed. */
+function bothOf(
+  a: ((peer: PeerSessionView) => boolean) | undefined,
+  b: ((peer: PeerSessionView) => boolean) | undefined,
+): ((peer: PeerSessionView) => boolean) | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return (peer) => a(peer) && b(peer);
+}
+
+/** Why one session may not drive this stream, as the app is told it. */
+export interface StreamRefusal {
+  readonly code: string;
+  readonly message: string;
 }
 
 export interface AttachStreamOpts {
+  /** The project this stream carries, named on a refusal so the app can fail the
+   *  exact bind it is waiting on instead of guessing. */
+  projectId?: string;
   /** Relay acked the stream-open (data-plane slot admitted). */
   onAdmitted?: (streamId: string) => void;
   /** Relay rejected the stream-open; the socket and every other stream stay
@@ -42,8 +92,15 @@ export interface AttachStreamOpts {
    *  so a drill-in stream resumes immediately. */
   onPeerOnline?: () => void;
   onPeerOffline?: () => void;
-  /** A preview-channel tunnel-protocol message routed to this stream. */
-  onTunnel?: (raw: unknown) => void;
+  /** One app session ended (liveness, presence, eviction, socket close) while
+   *  others may still be attached. Distinct from `onPeerOffline`, which fires
+   *  only when the LAST reachable session is gone: a device that quit must stop
+   *  vouching for the focus and unread state it had on screen even though a
+   *  sibling device is still driving the machine. */
+  onPeerSessionGone?: (peerId: string) => void;
+  /** A preview-channel tunnel-protocol message routed to this stream, tagged
+   *  with the session it came from so the answer can be addressed back. */
+  onTunnel?: (raw: unknown, peerId: string) => void;
   /** Outbound authorization: consulted on EVERY frame this stream would send.
    *  The mirror of the core's inbound gate — a stream carries project data off
    *  the machine, so it rides the same machine mobile-access switch that every
@@ -52,6 +109,21 @@ export interface AttachStreamOpts {
    *  answer to no switch); callers that HAVE a switch must fail closed in their
    *  own provider, not here. */
   mayDeliver?: () => boolean;
+  /** Per-RECEIVER half of the same gate, consulted once per attached session —
+   *  on a broadcast AND on a peer-addressed send, since a reply is exactly as
+   *  unreadable to a muted device as a push is. Absent = deliver to every
+   *  session. Lets a stale app that cannot route checkouts be muted without
+   *  also muting a modern one on the same machine. */
+  mayDeliverTo?: (peer: PeerSessionView) => boolean;
+  /** Per-SENDER mirror of {@link mayDeliverTo}, consulted on every inbound frame
+   *  — bus verbs AND tunnel frames, which bypass the bus and so are gated
+   *  nowhere else per device. Absent = accept from every session; a refusal is
+   *  returned rather than thrown so the mux can ANSWER the sender: an app binds
+   *  a `streamId` it read off the `agent:projects` advert without a fresh
+   *  `project:start`, so the refusal that verb would have given it is never
+   *  reached and silence leaves it rendering an empty project forever.
+   *  `null` peer = a frame whose session we cannot resolve. */
+  mayAcceptFrom?: (peer: PeerSessionView | null) => StreamRefusal | null;
 }
 
 /** The slice of the machine {@link RelayClient} the mux drives. Kept minimal so
@@ -59,9 +131,20 @@ export interface AttachStreamOpts {
 export interface StreamMuxTransport {
   openStream(streamId: string): void;
   closeStream(streamId: string): void;
-  /** Seal + fragment + send one stream-tagged app envelope on `channel`.
+  /** Seal + fragment + send one stream-tagged app envelope on `channel`, once
+   *  per session `target` selects (absent = every established session).
    *  Resolves when the message left the send queue. */
-  sendEnvelope(streamId: string, msg: unknown, channel: Channel): Promise<SendOutcome>;
+  sendEnvelope(
+    streamId: string,
+    msg: unknown,
+    channel: Channel,
+    target?: SendTarget,
+  ): Promise<SendOutcome>;
+  /** What the machine knows about one app session, or null for a route id that
+   *  holds none. The mux needs it to apply a stream's per-device filters to a
+   *  peer-addressed send and to an inbound frame, both of which name a session
+   *  rather than enumerate them. */
+  peerSession(peerId: string): PeerSessionView | null;
 }
 
 interface StreamEntry {
@@ -90,10 +173,12 @@ export class StreamMux {
   private readonly streams = new Map<string, StreamEntry>();
   /** Last broadcast peer state, so a stream attached mid-session inherits it. */
   private peerOnline = false;
-  /** Dead streamId → when we last told the phone about it, so a phone that keeps
-   *  replaying on it (or ignores the notice) can't turn every dropped frame into
-   *  a control-plane send. */
-  private readonly invalidNotifiedAt = new Map<string, number>();
+  /** `<kind> <peerId> <streamId>` → when we last sent that session that notice,
+   *  so a phone that keeps replaying on a stream (or ignores the notice) can't
+   *  turn every dropped frame into a control-plane send. Keyed per session
+   *  because each attached device has to be told separately: one device's
+   *  notice must not silence the other's for the cooldown. */
+  private readonly noticeSentAt = new Map<string, number>();
 
   constructor(
     private readonly transport: StreamMuxTransport,
@@ -109,6 +194,33 @@ export class StreamMux {
     // is awaiting — acceptable, since the same switch already refuses its next
     // request; the app times that out and resyncs from a snapshot.
     const mayDeliver = () => opts.mayDeliver?.() ?? true;
+    // The per-receiver mute applies to a peer-addressed send too. Being the
+    // session that asked is not an admission: tunnel frames bypass the bus, so
+    // the only producer of peer targets is the one path whose sender was never
+    // checked against this filter — and a device that cannot address a checkout
+    // would read an isolated session's preview as the main worktree's whether it
+    // asked for it or not. `null` = nothing to send to; the caller drops.
+    const gated = (target?: SendTarget): SendTarget | null => {
+      if (target?.kind !== "peer") {
+        return { kind: "broadcast", where: bothOf(target?.where, opts.mayDeliverTo) };
+      }
+      if (!opts.mayDeliverTo) return target;
+      const peer = this.transport.peerSession(target.peerId);
+      return peer && opts.mayDeliverTo(peer) ? target : null;
+    };
+    const sendTo = (
+      msg: unknown,
+      channel: Channel,
+      target?: SendTarget,
+    ): Promise<SendOutcome> => {
+      if (!mayDeliver()) return Promise.resolve<SendOutcome>("gated");
+      // A target the per-receiver mute filtered away is the same fact as the
+      // machine switch being off, not a drop: nothing was queued, so a caller
+      // holding an outbox must not retire the frame.
+      const to = gated(target);
+      if (!to) return Promise.resolve<SendOutcome>("gated");
+      return this.transport.sendEnvelope(streamId, msg, channel, to);
+    };
     const entry: StreamEntry = {
       bus,
       unsub: () => {},
@@ -122,7 +234,8 @@ export class StreamMux {
         // authorization question, and the switch is the more expensive read.
         if (entry.unboundAtPeer) return;
         if (!mayDeliver()) return;
-        void this.transport.sendEnvelope(streamId, msg, channel);
+        const target = gated();
+        if (target) void this.transport.sendEnvelope(streamId, msg, channel, target);
       },
     });
     this.streams.set(streamId, entry);
@@ -144,10 +257,8 @@ export class StreamMux {
       // so the muted case is a server-pushed frame on a tunnel that predates
       // the mute. Refusing it would need a third outcome — tunnel-manager.ts
       // branches on "sent", and "gated" is spoken for above.
-      sendTunnel: (data) =>
-        mayDeliver()
-          ? this.transport.sendEnvelope(streamId, data, "preview")
-          : Promise.resolve<SendOutcome>("gated"),
+      sendTunnel: (data, target) => sendTo(data, "preview", target),
+      sendTo: (msg, channel, target) => sendTo(msg, channel, target),
     };
   }
 
@@ -187,29 +298,70 @@ export class StreamMux {
    *  the control plane and every live stream are untouched. Rate-limited per id
    *  because the phone's retries arrive as a burst, and the map is swept so a
    *  long-lived host can't accumulate an entry per dead id. */
-  private notifyStreamInvalid(streamId: string): void {
-    const now = this.now();
-    const last = this.invalidNotifiedAt.get(streamId);
-    if (last !== undefined && now - last < INVALID_NOTICE_COOLDOWN_MS) return;
-    for (const [id, at] of this.invalidNotifiedAt) {
-      if (now - at >= INVALID_NOTICE_TTL_MS) this.invalidNotifiedAt.delete(id);
-    }
-    this.invalidNotifiedAt.set(streamId, now);
+  private notifyStreamInvalid(streamId: string, peerId: string): void {
+    if (!this.noticeDue(`invalid ${peerId} ${streamId}`)) return;
+    // Addressed at the sender: the notice answers one bad frame, and telling a
+    // healthy device its stream is dead makes it renegotiate for nothing.
     void this.transport.sendEnvelope(
       CONTROL_STREAM_ID,
       createMessage("stream-invalid", { streamId }),
       "control",
+      { kind: "peer", peerId },
     );
+  }
+
+  /** Tell one session why this stream refuses its frames. Same shape and channel
+   *  the `project:start` refusal takes, so the app surfaces it through the path
+   *  it already has — and addressed, because a healthy sibling banner-ing
+   *  someone else's UPDATE_REQUIRED is worse than the silence this replaces. */
+  private notifyRefused(
+    streamId: string,
+    peerId: string,
+    refusal: StreamRefusal,
+    projectId: string | undefined,
+  ): void {
+    if (!this.noticeDue(`refused ${peerId} ${streamId}`)) return;
+    void this.transport.sendEnvelope(
+      CONTROL_STREAM_ID,
+      createMessage("control:result", {
+        ok: false,
+        projectId,
+        error: { code: refusal.code, message: refusal.message },
+      }),
+      "control",
+      { kind: "peer", peerId },
+    );
+  }
+
+  /** Rate limit shared by both addressed notices, swept so a long-lived host
+   *  can't accumulate an entry per dead id. */
+  private noticeDue(key: string): boolean {
+    const now = this.now();
+    const last = this.noticeSentAt.get(key);
+    if (last !== undefined && now - last < INVALID_NOTICE_COOLDOWN_MS) return false;
+    for (const [id, at] of this.noticeSentAt) {
+      if (now - at >= INVALID_NOTICE_TTL_MS) this.noticeSentAt.delete(id);
+    }
+    this.noticeSentAt.set(key, now);
+    return true;
   }
 
   /** Route an inbound envelope's message (`m`, serialized) to its stream. Returns
    *  false for an unknown streamId so the caller drops + logs — and answers the
    *  phone with `stream-invalid` so a host restart self-heals. */
-  dispatchInbound(streamId: string, mJson: string, channel: Channel): boolean {
+  dispatchInbound(streamId: string, mJson: string, channel: Channel, peerId: string): boolean {
     const entry = this.streams.get(streamId);
     if (!entry) {
-      this.notifyStreamInvalid(streamId);
+      this.notifyStreamInvalid(streamId, peerId);
       return false;
+    }
+    // Per-sender gate ahead of BOTH routes below, because the tunnel route
+    // bypasses the bus and would otherwise proxy arbitrary HTTP out of a
+    // checkout for a device every other path on this stream refuses.
+    const refusal = entry.opts.mayAcceptFrom?.(this.transport.peerSession(peerId)) ?? null;
+    if (refusal) {
+      this.notifyRefused(streamId, peerId, refusal, entry.opts.projectId);
+      return true;
     }
     // The peer is transmitting on this stream, so it holds a transport for it —
     // the strongest possible retraction of an earlier `stream-unbound`, and the
@@ -217,11 +369,11 @@ export class StreamMux {
     if (entry.unboundAtPeer) this.markBound(streamId);
     const msg = parseMessageFast(mJson);
     if (msg) {
-      entry.bus.dispatchInbound(msg, channel, "relay");
+      entry.bus.dispatchInbound(msg, channel, "relay", peerId);
       return true;
     }
     const tunnel = parseTunnelMessage(mJson);
-    if (tunnel) entry.opts.onTunnel?.(tunnel);
+    if (tunnel) entry.opts.onTunnel?.(tunnel, peerId);
     return true;
   }
 
@@ -251,7 +403,11 @@ export class StreamMux {
     log.info("Stream %s rebound at the peer — resuming delivery", streamId);
   }
 
+  /** Coarse "some device is reachable". Guarded on the flag so a second device
+   *  attaching does not re-run every stream's resume for a machine that was
+   *  already online. */
   notifyPeerOnline(): void {
+    if (this.peerOnline) return;
     this.peerOnline = true;
     // A fresh E2E session re-adverts every project and the app rebinds from
     // that, so a mute earned by the PREVIOUS session must not silence this one.
@@ -262,9 +418,17 @@ export class StreamMux {
     }
   }
 
+  /** Coarse "no device is reachable" — the caller fires this only when the LAST
+   *  session is gone. */
   notifyPeerOffline(): void {
+    if (!this.peerOnline) return;
     this.peerOnline = false;
     for (const entry of this.streams.values()) entry.opts.onPeerOffline?.();
+  }
+
+  /** One session ended while others may remain. Never touches the coarse flag. */
+  notifyPeerSessionOffline(peerId: string): void {
+    for (const entry of this.streams.values()) entry.opts.onPeerSessionGone?.(peerId);
   }
 
   /** Re-send `stream-open` for every attached stream. Called on `welcome` after

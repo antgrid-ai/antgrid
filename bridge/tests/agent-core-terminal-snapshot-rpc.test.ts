@@ -312,7 +312,10 @@ test("dropped from a remote phone while mobile access is off — no response at 
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
-  core.setPeerPubkeyProvider(() => pk1);
+  core.setPeerSessionProvider(() => ({
+    peerId: "phone-dev-terminal-snap-rpc#agent-dev", peerPubkey: pk1, checkoutRouting: true,
+    reachable: true, pullsTree: false,
+  }));
   core.onHandshakeComplete();
   await waitFor(sent, (m) => m.type === "agent:status", "agent:status");
 

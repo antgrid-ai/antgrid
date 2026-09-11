@@ -1,6 +1,8 @@
 import { z } from "zod";
 import type { AgentDescriptor, SessionEntry } from "./protocol";
 import type { BranchRemoteStatus, StashEntry } from "./git-branches";
+import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capability-card";
+import { MAX_REMOTE_DIRECTORY_WIRE_MACHINES, MAX_REMOTE_DIRECTORY_WIRE_ROWS } from "./session-bus/constants";
 
 export const ControlRequestSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("project:list") }),
@@ -34,6 +36,32 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("phones:unpair"), phonePubkey: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("mobile-access:get") }),
   z.object({ id: z.string().min(1), type: z.literal("mobile-access:set"), enabled: z.boolean() }),
+  // Subordinate to `mobile-access` above, never a replacement for it: with
+  // remote access off this bit grants nothing. See `agent-reach-policy.ts`.
+  z.object({ id: z.string().min(1), type: z.literal("agent-reach:get") }),
+  z.object({ id: z.string().min(1), type: z.literal("agent-reach:set"), enabled: z.boolean() }),
+  // The machine half of the Capability Card over the LOOPBACK plane. The relay
+  // plane already answers `machine.capability-card`, so without this the app
+  // cannot read the NORMALISED remote of a project on its own machine — the key
+  // the add-machine dialog matches a peer machine's projects against.
+  //
+  // Paths come from the caller, exactly as `git:branches` below takes them: the
+  // desktop already holds its own projects' paths, so this needs neither the
+  // seen-project catalog nor the remote-access gate that bound the relay-side
+  // handler (loopback callers are exempt by design).
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("machine:capability-card"),
+    projects: z
+      .array(
+        z.object({
+          projectId: z.string().min(1),
+          projectPath: z.string().min(1),
+          label: z.string().optional(),
+        }),
+      )
+      .max(MAX_CAPABILITY_CARD_PROJECTS),
+  }),
   z.object({
     id: z.string().min(1),
     type: z.literal("git:branches"),
@@ -137,6 +165,41 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     projectId: z.string().min(1),
     checkoutId: z.string().min(1),
   }),
+  // The asking half of the remote session directory: the app's pump hands
+  // over what it learned peeking peer capability cards this cycle. Unlike
+  // every verb above, this ONE is gated behind the remote-access switch at
+  // the handler (host-server.ts) — the rest of this plane is exempt because a
+  // loopback caller is this machine's own desktop asking about its own data;
+  // this verb instead hands ANOTHER machine's session inventory into this
+  // machine's agents' reach, which is precisely what the switch authorizes.
+  // The gate is on the data's provenance, not on the caller.
+  //
+  // `rows` is deliberately `z.unknown()`, not `RemoteDirectoryRowSchema` — a
+  // strict per-row schema here would 400 the WHOLE push over one hostile or
+  // merely-too-long field (a renamed session title is enough), and the app
+  // reads a BAD_REQUEST from this verb as "the local bridge predates it" and
+  // latches the pump off. `RemoteDirectoryCache.replace()` is the real row
+  // gate: it validates and sanitises each row itself and drops only the rows
+  // that fail, never the push. The bounds below are a wire-layer DoS ceiling,
+  // looser than the product caps `replace()` enforces — see
+  // `MAX_REMOTE_DIRECTORY_WIRE_MACHINES`/`_ROWS` in session-bus/constants.ts.
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("session-bus:remote-directory"),
+    machines: z
+      .array(
+        z.object({
+          machineId: z.string().min(1).max(200),
+          machineLabel: z.string().max(120).optional(),
+          observedAt: z.number().int().nonnegative(),
+          outcome: z.enum(["rows", "no-card", "refused", "reach-refused", "unreachable"]),
+          rows: z.array(z.unknown()).max(MAX_REMOTE_DIRECTORY_WIRE_ROWS).default([]),
+          truncated: z.number().int().min(0).default(0),
+        }),
+      )
+      .max(MAX_REMOTE_DIRECTORY_WIRE_MACHINES),
+    notConnected: z.number().int().min(0).default(0),
+  }),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 
@@ -214,10 +277,18 @@ export type ControlResponse =
   | { id: string; ok: true; type: "phones:unpair" }
   | { id: string; ok: true; type: "mobile-access:get"; enabled: boolean }
   | { id: string; ok: true; type: "mobile-access:set"; enabled: boolean }
+  | { id: string; ok: true; type: "agent-reach:get"; enabled: boolean }
+  | { id: string; ok: true; type: "agent-reach:set"; enabled: boolean }
+  | { id: string; ok: true; type: "machine:capability-card"; os: OsCard; projects: Record<string, RepoCard> }
   | { id: string; ok: true; type: "git:branches"; isRepository: boolean; current: string | null; branches: string[]; worktreeSessionsSupported: boolean }
   | { id: string; ok: true; type: "git:remote-state"; status: BranchRemoteStatus }
   | { id: string; ok: true; type: "git:checkout"; current: string; stashed?: StashEntry }
   | { id: string; ok: true; type: "checkout:path"; path: string }
+  | {
+      id: string; ok: true; type: "session-bus:remote-directory";
+      accepted: number; dropped: number;
+      wantedRepoKeys: string[]; unservedReads: number; lastReadAt: number | null;
+    }
   /** `ttlMs` is the window actually armed, which is not always the one asked
    *  for (the host clamps), and `0`/absent while disarmed. A watcher heartbeats
    *  inside it, so echoing the request instead would let a clamped capture lapse

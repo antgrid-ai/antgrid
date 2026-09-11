@@ -83,6 +83,9 @@ void main() {
           // flutter_test runs as Android → the eager union would read the
           // recents store, which this harness deliberately doesn't provide.
           eagerControlPlanesEnabledProvider.overrideWithValue(false),
+          // Stated, not derived: these tests drive no drawer or session
+          // graph, and the union under test is over machine ids, not over
+          // how the links were computed.
         ],
       );
     }
@@ -148,7 +151,7 @@ void main() {
               () => ValueController(WorkbenchSurface.workspace),
             ),
             eagerControlPlanesEnabledProvider.overrideWithValue(false),
-          ],
+            ],
         );
         addTearDown(c.dispose);
 
@@ -208,6 +211,9 @@ void main() {
           ]),
           selectedSourceIdProvider.overrideWith(() => ValueController('local')),
           eagerControlPlanesEnabledProvider.overrideWithValue(false),
+          // Stated, not derived: these tests drive no drawer or session
+          // graph, and the union under test is over machine ids, not over
+          // how the links were computed.
         ],
       );
       addTearDown(c.dispose);
@@ -250,7 +256,7 @@ void main() {
               () => ValueController(WorkbenchSurface.workspace),
             ),
             eagerControlPlanesEnabledProvider.overrideWithValue(false),
-          ],
+            ],
         );
         addTearDown(c.dispose);
 

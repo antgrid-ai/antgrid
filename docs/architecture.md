@@ -15,6 +15,19 @@ proof-of-possession) but cannot decrypt payloads. Two WS channels: `control`
 (terminal, files, status) and `preview` (HTTP tunnel, streamed as start/chunk/end
 frames under the credit window).
 
+### The session bus
+
+Agent-to-agent frames (`session-bus:*`) never cross machines by themselves. The
+sending bridge hands every outbound bus frame to its loopback owner socket and
+nowhere else (`ProjectCore.sendToOwner`), and only to an owner that declared
+`capabilities.sessionBusCarrier` on its hello: the initiating machine's desktop
+app is the only carrier, and it forwards the frame verbatim onto the target
+machine's own relay connection. The receiving bridge answers on the one app
+session that carried the exchange in (`ProjectCore.sendToAppSession`), never by
+broadcast, so the traffic is invisible to the human's phone by design. The spec
+is `docs/session-messaging.md`; the host-side invariants are in
+`bridge/CLAUDE.md`.
+
 ## Checkout-scoped routing
 
 A session can run in a managed git worktree instead of the project root, so everything

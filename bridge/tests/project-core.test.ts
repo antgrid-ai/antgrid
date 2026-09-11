@@ -9,6 +9,7 @@ import { MessageBus } from "../src/message-bus";
 import type { AttachStreamOpts, StreamHandle } from "../src/stream-mux";
 import type { ConnState } from "../src/conn-state";
 import { createMessage, type AbMessage } from "../src/protocol";
+import { SessionDirectory } from "../src/session-bus/directory";
 
 let cleanup: Array<() => void | Promise<unknown>> = [];
 // LIFO + awaited: cores shut down (stopping their file watchers) before the
@@ -24,10 +25,16 @@ function fakeRemoteDeps(): { deps: ProjectCoreRemoteDeps; calls: Array<{ bus: Me
   const deps: ProjectCoreRemoteDeps = {
     attachStream: (bus, opts) => {
       calls.push({ bus, opts });
-      const handle: StreamHandle = { streamId: "stream-1", detach: () => {}, sendTunnel: async () => "sent" };
+      const handle: StreamHandle = {
+        streamId: "stream-1",
+        detach: () => {},
+        sendTunnel: async () => "sent" as const,
+        sendTo: async () => "sent" as const,
+      };
       return handle;
     },
-    currentPeerPubkey: () => null,
+    establishedPeers: () => [],
+    peerSession: () => null,
     machineDeviceId: () => "machine-uuid",
     sendPushDeliver: () => {},
   };
@@ -294,4 +301,90 @@ test("onSessionsChange fires on a rename but not on the create that established 
   );
 
   expect(sessionsChanges).toBeGreaterThan(changesAfterCreate);
+});
+
+test("a core built with sessionDirectory deps answers session-bus:directory instead of refusing AGENT_NOT_READY", async () => {
+  // api-server-session-bus.test.ts injects a SessionDirectory straight into
+  // createSessionBusApi, which skips the exact wiring this pins: ProjectCore
+  // must forward its sessionDirectory dep into buildAgentCore for the bus to
+  // ever see one. Going through a real ProjectCore is the only way to catch a
+  // dropped forward — a directory injected below the core would stay green
+  // even with the forward deleted.
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-bus-dir-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+  const { deps, calls } = fakeRemoteDeps();
+
+  const projectId = computeProjectId(folder);
+  const siblingId = randomUUID();
+  const directory = new SessionDirectory({
+    repoKeys: {
+      keyFor: (id) => (id === projectId ? "github.com/owner/repo" : null),
+      probed: () => true,
+      projectsSharing: (key) => (key === "github.com/owner/repo" ? [projectId] : []),
+    },
+    sessionIndex: {
+      *sessionsIn(id) {
+        if (id !== projectId) return;
+        yield {
+          entry: {
+            id: siblingId,
+            name: "Sibling session",
+            running: true,
+            archived: false,
+            deleting: false,
+            lastUsedAt: Date.now(),
+            tool: "claude-code",
+          } as any,
+        };
+      },
+    },
+    projectPath: () => undefined,
+    machineId: () => "machine-uuid",
+  });
+
+  const core = new ProjectCore({
+    folder,
+    mode: "remote",
+    identity: {
+      deviceId: randomUUID(), deviceName: "d", createdAt: new Date().toISOString(),
+      ed25519PublicKey: "AAAA", ed25519PrivateKey: "AAAA",
+    },
+    remote: deps,
+    sessionDirectory: directory,
+  });
+  cleanup.push(() => core.shutdown());
+  await core.start();
+
+  const bus = calls[0].bus;
+  const sent: AbMessage[] = [];
+  bus.subscribe({ deliver: (m) => sent.push(m) });
+
+  const createId = randomUUID();
+  bus.dispatchInbound(createMessage("session:create", {
+    requestId: createId, name: "Asking session", command: "node keepalive.js",
+  }) as any, "control", "loopback");
+  await waitFor(
+    () => sent.some((m) => m.type === "session:result" && (m as any).requestId === createId),
+    "the session:create result",
+  );
+  const created = sent.find((m) => m.type === "session:result" && (m as any).requestId === createId) as any;
+  expect(created.ok).toBe(true);
+  const sessionId = created.session.id as string;
+
+  const dirRequestId = randomUUID();
+  bus.dispatchInbound(createMessage("session-bus:directory", {
+    requestId: dirRequestId, sessionId,
+  }) as any, "control", "loopback");
+  await waitFor(
+    () => sent.some((m) => m.type === "session-bus:directory:result" && (m as any).requestId === dirRequestId),
+    "the session-bus:directory:result",
+  );
+  const result = sent.find((m) => m.type === "session-bus:directory:result" && (m as any).requestId === dirRequestId) as any;
+
+  // Not just "not AGENT_NOT_READY" — a directory that fails closed for an
+  // unrelated reason (e.g. a repo key that never probed) would pass that
+  // weaker check while still proving nothing about the forward under test.
+  expect(result.code).toBeUndefined();
+  expect(result.sessions).toEqual([expect.objectContaining({ sessionId: siblingId })]);
 });

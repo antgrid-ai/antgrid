@@ -18,7 +18,26 @@ export type InboundHandler = (
   msg: AbMessage,
   channel: Channel,
   source: InboundSource,
+  peerId?: string,
 ) => void;
+
+/** Which CLIENT a frame came from, for read-state that must not be shared:
+ *  focus, unread marks, the foreground/background pause. The loopback owner is
+ *  one client; each relay app session is another, named by its route peerId.
+ *
+ *  A peerId travels BESIDE {@link InboundSource} rather than widening it — the
+ *  source decides gating (loopback is never gated) and is compared against the
+ *  bare `"relay"` literal in a dozen places, so a discriminated union there
+ *  would churn every one of them for nothing. */
+export type ClientKey = string;
+
+/** `"relay"` is the fallback key for a caller that threads no peerId (the bare
+ *  agent, unit tests): one anonymous relay client, which is what the whole
+ *  bridge assumed before per-device sessions existed. */
+export function clientKeyOf(source: InboundSource, peerId?: string): ClientKey {
+  if (source === "loopback") return "loopback";
+  return peerId ?? "relay";
+}
 
 /**
  * Message types that carry durable snapshot state (vs. streaming events).
@@ -182,8 +201,13 @@ export class MessageBus {
   /** `source` defaults to `relay` so any caller that omits it is gated by
    *  default (fail-closed); only an explicit `loopback` frame bypasses the
    *  allowlist gate. */
-  dispatchInbound(msg: AbMessage, channel: Channel, source: InboundSource = "relay"): void {
-    this.handler?.(msg, channel, source);
+  dispatchInbound(
+    msg: AbMessage,
+    channel: Channel,
+    source: InboundSource = "relay",
+    peerId?: string,
+  ): void {
+    this.handler?.(msg, channel, source, peerId);
   }
 
   /** Drop a session's session-scoped replay entries. Called at session

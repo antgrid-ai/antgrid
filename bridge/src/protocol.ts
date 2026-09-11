@@ -1,6 +1,14 @@
 import { z } from "zod";
 import { AbConfigSchema } from "./config";
 import { KNOWN_TIERS } from "./entitlement";
+import {
+  ARTIFACT_CHUNK_B64_MAX,
+  ARTIFACT_CHUNK_BYTES,
+  MAX_PARTS,
+  MAX_PART_CHARS,
+  MAX_SUMMARY_CHARS,
+  MAX_UNEXPECTED_CHARS,
+} from "./session-bus/constants";
 
 const BaseMessage = z.object({
   id: z.string().uuid(),
@@ -1532,6 +1540,60 @@ const ConfigDetectToolsResultMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+// Identity of one session on one machine, and the address every bus frame
+// carries. `machineId` is the account device uuid — the value the app already
+// addresses a machine by. Opaque to both bridges: neither derives it, the app
+// supplies both halves, because neither bridge can dial the other.
+export const SessionMemberKeySchema = z.object({
+  machineId: z.string().min(1).max(200),
+  projectId: z.string().min(1).max(200),
+  sessionId: z.string().min(1).max(200),
+});
+
+// The Capability Card as it travels on an address (spec 5.3): the two MVP
+// fields, both observed by that machine's own bridge before any agent ran
+// there. Mirrors `OsCard`/`RepoCard` in capability-card.ts, which is where the
+// values are actually read — a second shape would be two things to keep true.
+//
+// Every field is optional and tolerates an explicit null, top to bottom,
+// because the reader that fills it already produces nulls (`readRepoCard`) and
+// because a machine that could not answer must still be able to appear in the
+// directory: withholding a row over a blank branch would cost the human the
+// machine rather than the field. Bounded like every other label here — the
+// values are rendered into an agent's prompt.
+export const SessionMemberCardSchema = z.object({
+  os: z.object({
+    name: z.string().max(60).nullish(),
+    version: z.string().max(200).nullish(),
+    arch: z.string().max(30).nullish(),
+  }).nullish(),
+  repo: z.object({
+    label: z.string().max(120).nullish(),
+    // The normalized `host[:port]/path` match key, never the raw remote URL: a
+    // raw one can carry a credential in its authority, and this value is
+    // rendered into a delivery and into a tool answer.
+    remote: z.string().max(300).nullish(),
+    branch: z.string().max(250).nullish(),
+  }).nullish(),
+});
+
+// Identity plus the labels a row renders from, so the other end of an exchange
+// resolves with no lookup on a machine that cannot reach the one it names.
+// Bounded because they ride every frame that names that end AND are
+// interpolated into a Handler instruction, where the delivery template
+// sanitizes them further.
+//
+// The card is the exception to that second half: hostnames and a repo path are
+// exactly what the Handler's authorizer reads as a grant, so no template may put
+// it in a WRAPPER. It travels as fenced data or as a tool answer, and never
+// through `HandlerEngine.instruct` (see session-bus/delivery.ts).
+export const SessionMemberRefSchema = SessionMemberKeySchema.extend({
+  machineLabel: z.string().max(120).optional(),
+  projectLabel: z.string().max(120).optional(),
+  sessionName: z.string().max(120).optional(),
+  card: SessionMemberCardSchema.optional(),
+});
+
 const SessionEntrySchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -2029,7 +2091,7 @@ const AgentUpdateAvailableMessage = BaseMessage.extend({
 // App -> agent: run the agent CLI's in-app self-update (codex/claude `update`,
 // opencode `upgrade` — see each agent's `update` in agents/registry.ts). A project verb
 // — gated by the same pairing + allowlist chokepoint as every other inbound
-// message (see currentPhoneAllowed() in agent-core). The update is machine-
+// message (see remoteFrameAllowed() in agent-core). The update is machine-
 // global, so the bridge quiesces every live chat session of that tool, updates
 // once, then restarts them. `sessionId` is the chat session that raised the
 // notice (routing context for the result). A `tool` with no known self-updater
@@ -2194,6 +2256,327 @@ const AgentQuestionResolveMessage = BaseMessage.extend({
   sessionId: z.string(),
   questionId: z.string(),
   answer: z.union([z.string(), z.array(z.string())]),
+});
+
+// ---------------------------------------------------------------------------
+// Session bus (`docs/session-messaging.md`) — the agent-to-agent frames.
+//
+// The envelope lives HERE rather than in bridge/src/session-bus/, which is
+// where the rest of the bus lives: it is a wire schema, the stores under
+// session-bus/ import `SessionMemberRefSchema` from this file, and a schema
+// module importing back would put this file's top-level `z.object` calls
+// behind a TDZ binding. Those modules re-export these names so a bus caller
+// still has one import site.
+// ---------------------------------------------------------------------------
+
+/** One unit of content. `artifact` carries the HANDLE only — spec 6.3's
+ *  reference-over-value: the bytes stay on the machine that made them and are
+ *  pulled with `session-bus:fetch` when the other side decides it wants them. */
+export const BusPartSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("text"), text: z.string().max(MAX_PART_CHARS) }),
+  z.object({ kind: z.literal("data"), data: z.record(z.string(), z.unknown()) }),
+  z.object({
+    kind: z.literal("artifact"),
+    artifactId: z.string().min(1).max(200),
+    name: z.string().min(1).max(200),
+    mediaType: z.string().min(1).max(120),
+    bytes: z.number().int().nonnegative(),
+    sha256: z.string().length(64),
+    summary: z.string().min(1).max(MAX_SUMMARY_CHARS),
+  }),
+]);
+export type BusPart = z.infer<typeof BusPartSchema>;
+
+export const BusEnvelopeSchema = z.object({
+  messageId: z.string().min(1).max(200),
+  /** The thread this belongs to, or null to open a new one. A correlation id
+   *  with no state machine (spec 4.2): it is carried and never validated, and
+   *  a thread is simply garbage once both sides stop writing to it. */
+  threadId: z.string().min(1).max(200).nullable(),
+  contextId: z.string().min(1).max(200),
+  parts: z.array(BusPartSchema).min(1).max(MAX_PARTS),
+  metadata: z.object({
+    /** Stamped from the connection by the receiving bridge, never a tool
+     *  parameter: an agent must not be able to author its own provenance. */
+    peer: SessionMemberRefSchema,
+    /** The one agent-authored envelope field (spec 3.4). MANDATORY, and never
+     *  defaulted — it is what the human and the other agent read first, so
+     *  inventing one would hide the omission instead of reporting it. */
+    summary: z.string().min(1).max(MAX_SUMMARY_CHARS),
+    timestamp: z.number().int().nonnegative(),
+    /** Spec 6.2's first-class channel for "here is what you asked for, and
+     *  separately, here is something you did not ask about". First-class so it
+     *  is not a smuggled instruction inside a text part. */
+    unexpected: z.string().max(MAX_UNEXPECTED_CHARS).optional(),
+  }),
+});
+export type BusEnvelope = z.infer<typeof BusEnvelopeSchema>;
+
+/** Both endpoints on every frame. Nothing shorter is an address: a machine holds
+ *  several projects and a project several sessions, and the carrier picks the
+ *  relay session to forward on out of `to`. */
+const SessionBusBaseWire = {
+  from: SessionMemberKeySchema,
+  to: SessionMemberKeySchema,
+  contextId: z.string().min(1).max(200),
+};
+
+/** The body both verbs carry, since spec 6.2 makes everything after the send
+ *  decision identical for the two. No `seq`: spec 6 makes messages lossy on
+ *  purpose, and reliable delivery behind text that changes no state would be
+ *  unbounded retry buying nothing. The E6 receipt witnesses arrival without
+ *  making it reliable — it is never retried either. */
+export const SessionBusMessageWire = z.object({
+  ...SessionBusBaseWire,
+  threadId: z.string().min(1).max(200).nullable(),
+  envelope: BusEnvelopeSchema,
+});
+
+export const SessionBusFetchWire = z.object({
+  ...SessionBusBaseWire,
+  requestId: z.string().min(1).max(200),
+  artifactId: z.string().min(1).max(200),
+  offset: z.number().int().nonnegative(),
+  length: z.number().int().positive().max(ARTIFACT_CHUNK_BYTES),
+});
+
+export const SessionBusFetchResultWire = z.object({
+  ...SessionBusBaseWire,
+  requestId: z.string().min(1).max(200),
+  ok: z.boolean(),
+  error: z.string().max(500).optional(),
+  errorCode: z.string().max(80).optional(),
+  artifactId: z.string().min(1).max(200),
+  offset: z.number().int().nonnegative(),
+  eof: z.boolean(),
+  dataBase64: z.string().max(ARTIFACT_CHUNK_B64_MAX),
+});
+
+/** The delivery receipt (E6), keyed by the id of the message it answers — the
+ *  only honest witness that a frame arrived, since everything this side of the
+ *  relay reports only that it left. It is fire-and-forget: an unacked ack is
+ *  never retried, and `ok: false` is still a receipt — "this reached me", not
+ *  "I liked it". No `seq`, because messages have none. */
+export const SessionBusAckWire = z.object({
+  ...SessionBusBaseWire,
+  messageId: z.string().min(1).max(200),
+  ok: z.boolean(),
+  error: z.string().max(500).optional(),
+});
+
+/** Two verbs rather than one verb and a flag (spec 7.1), and the shape is
+ *  identical because everything after the send decision is: a bridge that does
+ *  not know a verb REFUSES it, where a bridge that does not know a flag would
+ *  silently do the wrong thing — and a required Zod field is only fail-closed
+ *  in the old→new direction, which is the wrong one. */
+const SessionBusPostMessage = BaseMessage.extend({
+  type: z.literal("session-bus:post"),
+}).extend(SessionBusMessageWire.shape);
+
+const SessionBusNotifyMessage = BaseMessage.extend({
+  type: z.literal("session-bus:notify"),
+}).extend(SessionBusMessageWire.shape);
+
+const SessionBusFetchMessage = BaseMessage.extend({
+  type: z.literal("session-bus:fetch"),
+}).extend(SessionBusFetchWire.shape);
+
+const SessionBusFetchResultMessage = BaseMessage.extend({
+  type: z.literal("session-bus:fetch:result"),
+}).extend(SessionBusFetchResultWire.shape);
+
+const SessionBusAckMessage = BaseMessage.extend({
+  type: z.literal("session-bus:ack"),
+}).extend(SessionBusAckWire.shape);
+
+
+// ── Session bus: what the APP reads of its OWN bridge ────────────────────────
+// The five frames above are agent-to-agent traffic the app only CARRIES between
+// two bridges that cannot dial each other. These are the opposite: an app
+// asking the bridge it is attached to about its own sessions, and consuming the
+// answer. Same plane all the same — `SessionBusApi` is built inside the project
+// core with the machine-level directory injected into it, so machine-scoped
+// STATE never implied machine-scoped transport (`docs/session-messaging.md`
+// §5.4: "The transport did not move with it").
+//
+// Every one is answered from that single api rather than re-derived here. A
+// human surface and an agent tool that each computed who is reachable would
+// eventually disagree, and nothing would say which of the two was right.
+
+/** The bus's one refusal vocabulary (`session-bus/errors.ts`) as it rides a
+ *  result frame. `code` is a bare string rather than an enum over that map's
+ *  keys: a reader branches on the code and renders the `error` text authored at
+ *  the point of refusal, and one that dropped a whole frame over a code it had
+ *  not learned yet would turn a NEW refusal into silence.
+ *
+ *  Present exactly when the answer fields are absent. Collapsing a refusal into
+ *  an empty answer instead would render "this terminal names no session" as
+ *  "nobody has written to you", which is the one wrong thing an inbox can say. */
+const SessionBusRefusalWire = {
+  error: z.string().max(500).optional(),
+  code: z.string().max(80).optional(),
+};
+
+/** One directory row (§5.5). Mirrors `SessionDirectoryRow`
+ *  (`session-bus/directory.ts`) field for field rather than importing it, the
+ *  same one-way edge that module already keeps against the remote mirror's row:
+ *  the wire vocabulary lives here and the bus's internals must be free to gain
+ *  a field this does not carry. */
+const SessionBusDirectoryRowSchema = z.object({
+  /** Null in local mode, where no frame can leave the machine to need one. */
+  machineId: z.string().max(200).nullable(),
+  machineLabel: z.string().max(120).optional(),
+  projectId: z.string().max(200),
+  projectLabel: z.string().max(120).optional(),
+  sessionId: z.string().max(200),
+  title: z.string().max(200),
+  branch: z.string().max(250).nullable(),
+  activity: z.enum(["running", "idle", "stopped"]),
+  workStatus: WorkStatusSchema.optional(),
+  lastActiveAt: z.number(),
+  /** Whether that session's agent can be messaged back at all (§9). A
+   *  receive-only vendor is offered saying so, never as a peer that will
+   *  silently never answer. */
+  canReply: z.boolean(),
+});
+
+/** One machine in the reach report. It rides beside the rows and never in them:
+ *  a peer whose rows have all expired contributes nothing to the list and must
+ *  still be NAMED, or "that machine is not reachable from here" renders as
+ *  "that machine has nothing running". */
+const SessionBusReachMachineSchema = z.object({
+  machineId: z.string().max(200),
+  machineLabel: z.string().max(120).optional(),
+  status: z.enum(["answered", "no-card", "refused", "reach-refused", "unreachable"]),
+  rows: z.number(),
+  droppedRows: z.number(),
+  truncatedCard: z.number(),
+  ageMs: z.number(),
+});
+
+/** `DirectoryReach` (`session-bus/directory.ts`): either this answer never left
+ *  the machine, and why, or it spans the network and says what each peer
+ *  contributed. */
+const SessionBusDirectoryReachSchema = z.discriminatedUnion("scope", [
+  z.object({
+    scope: z.literal("machine"),
+    why: z.enum(["remote-access-off", "no-machine-id", "no-carrier"]),
+  }),
+  z.object({
+    scope: z.literal("network"),
+    lastPushAgoMs: z.number(),
+    machines: z.array(SessionBusReachMachineSchema),
+    staleMachines: z.number(),
+    notConnected: z.number(),
+  }),
+]);
+
+const SessionBusInboxArtifactSchema = z.object({
+  artifactId: z.string().max(200),
+  name: z.string().max(200),
+  mediaType: z.string().max(120),
+  bytes: z.number(),
+  sha256: z.string().max(64),
+  summary: z.string().max(MAX_SUMMARY_CHARS),
+});
+
+/** One unread post, rendered whole so a reader needs no second call per row. */
+const SessionBusInboxPostSchema = z.object({
+  messageId: z.string().max(200),
+  threadId: z.string().max(200).nullable(),
+  contextId: z.string().max(200),
+  at: z.number(),
+  from: SessionMemberKeySchema,
+  summary: z.string().max(MAX_SUMMARY_CHARS),
+  text: z.array(z.string()),
+  unexpected: z.string().max(MAX_UNEXPECTED_CHARS).optional(),
+  artifacts: z.array(SessionBusInboxArtifactSchema),
+});
+
+const SessionBusThreadEntrySchema = z.object({
+  direction: z.enum(["in", "out"]),
+  at: z.number(),
+  peer: SessionMemberKeySchema,
+  summary: z.string().max(MAX_SUMMARY_CHARS),
+  text: z.array(z.string()),
+  /** Outbound entries only, and its absence is "no receipt yet" rather than a
+   *  failure: a receipt is fire-and-forget and an unacked message is never
+   *  retried. This read is the only surface that stamp is visible on. */
+  deliveredAt: z.number().optional(),
+});
+
+const SessionBusDirectoryMessage = BaseMessage.extend({
+  type: z.literal("session-bus:directory"),
+  requestId: z.string(),
+  /** Whose directory this is. Every bus read is asked ON BEHALF of one session
+   *  — there is no machine-wide "who is out there" answer, because reachability
+   *  is computed from the asking session's own repo key and branch. */
+  sessionId: z.string(),
+});
+
+const SessionBusDirectoryResultMessage = BaseMessage.extend({
+  type: z.literal("session-bus:directory:result"),
+  requestId: z.string(),
+  sessions: z.array(SessionBusDirectoryRowSchema).optional(),
+  /** Rows the bound dropped. Never silent: a truncated list that claims to be
+   *  complete reads as "there is nobody else". */
+  truncated: z.number().optional(),
+  reach: SessionBusDirectoryReachSchema.optional(),
+  /** The asking machine's own id, so a renderer can tell a local row from a
+   *  peer's. Deriving it by elimination from `reach` would be wrong in exactly
+   *  the state that matters — a peer whose rows expired is named there while
+   *  contributing none. */
+  machineId: z.string().nullable().optional(),
+  ...SessionBusRefusalWire,
+});
+
+const SessionBusInboxMessage = BaseMessage.extend({
+  type: z.literal("session-bus:inbox"),
+  requestId: z.string(),
+  sessionId: z.string(),
+});
+
+const SessionBusInboxResultMessage = BaseMessage.extend({
+  type: z.literal("session-bus:inbox:result"),
+  requestId: z.string(),
+  /** A PEEK: answering this does not mark anything read. The agent's own read
+   *  is what spends the unread flag — see `SessionBusApi.inboxPeek`. */
+  posts: z.array(SessionBusInboxPostSchema).optional(),
+  /** Posts this session will never see, zero included (§7.4): a reader that
+   *  cannot tell an empty inbox from an emptied one has been told the wrong
+   *  thing, not merely told less. */
+  dropped: z.number().optional(),
+  ...SessionBusRefusalWire,
+});
+
+const SessionBusThreadMessage = BaseMessage.extend({
+  type: z.literal("session-bus:thread"),
+  requestId: z.string(),
+  sessionId: z.string(),
+  threadId: z.string(),
+});
+
+const SessionBusThreadResultMessage = BaseMessage.extend({
+  type: z.literal("session-bus:thread:result"),
+  requestId: z.string(),
+  /** Echoed even on a refusal: a surface holding several open threads has to
+   *  know which one was refused, and `requestId` alone says that only to the
+   *  caller that still remembers what it asked. */
+  threadId: z.string(),
+  contextId: z.string().optional(),
+  entries: z.array(SessionBusThreadEntrySchema).optional(),
+  ...SessionBusRefusalWire,
+});
+
+/** Unsolicited: a mailbox grew. Carries WHOSE and nothing else — no count,
+ *  because nothing renders one: a session's peers are not the user's business
+ *  and no surface announces their mail. What still needs the signal is a sheet
+ *  ALREADY open on that mailbox, which re-reads on it, and the kebab row that
+ *  is the one door to it. Coalesced per session on the bridge, so a burst of
+ *  arrivals is one push rather than one per post. */
+const SessionBusArrivedMessage = BaseMessage.extend({
+  type: z.literal("session-bus:arrived"),
+  sessionId: z.string(),
 });
 
 // ── Netwatch: shipping a remote app's half of the frame capture ───────────────
@@ -2381,6 +2764,18 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentPermissionResolveMessage,
   AgentQuestionResolveMessage,
   AgentTaskStopMessage,
+  SessionBusPostMessage,
+  SessionBusNotifyMessage,
+  SessionBusFetchMessage,
+  SessionBusFetchResultMessage,
+  SessionBusAckMessage,
+  SessionBusDirectoryMessage,
+  SessionBusDirectoryResultMessage,
+  SessionBusInboxMessage,
+  SessionBusInboxResultMessage,
+  SessionBusThreadMessage,
+  SessionBusThreadResultMessage,
+  SessionBusArrivedMessage,
   NetwatchConfigureMessage,
   NetwatchEventsMessage,
 ]);
@@ -2503,6 +2898,9 @@ export type SessionEntry = z.infer<typeof SessionEntrySchema>;
 export type SessionList = z.infer<typeof SessionListMessage>;
 export type SessionListResult = z.infer<typeof SessionListResultMessage>;
 export type SessionCreate = z.infer<typeof SessionCreateMessage>;
+export type SessionMemberRef = z.infer<typeof SessionMemberRefSchema>;
+export type SessionMemberCard = z.infer<typeof SessionMemberCardSchema>;
+export type SessionMemberKey = z.infer<typeof SessionMemberKeySchema>;
 export type SessionFork = z.infer<typeof SessionForkMessage>;
 export type SessionStart = z.infer<typeof SessionStartMessage>;
 export type SessionStop = z.infer<typeof SessionStopMessage>;
@@ -2556,6 +2954,18 @@ export type AgentSetConfig = z.infer<typeof AgentSetConfigMessage>;
 export type AgentSessionAction = z.infer<typeof AgentSessionActionMessage>;
 export type AgentPermissionResolve = z.infer<typeof AgentPermissionResolveMessage>;
 export type AgentQuestionResolve = z.infer<typeof AgentQuestionResolveMessage>;
+export type SessionBusPost = z.infer<typeof SessionBusPostMessage>;
+export type SessionBusNotify = z.infer<typeof SessionBusNotifyMessage>;
+export type SessionBusFetch = z.infer<typeof SessionBusFetchMessage>;
+export type SessionBusFetchResult = z.infer<typeof SessionBusFetchResultMessage>;
+export type SessionBusAck = z.infer<typeof SessionBusAckMessage>;
+export type SessionBusDirectoryRead = z.infer<typeof SessionBusDirectoryMessage>;
+export type SessionBusDirectoryResult = z.infer<typeof SessionBusDirectoryResultMessage>;
+export type SessionBusInboxRead = z.infer<typeof SessionBusInboxMessage>;
+export type SessionBusInboxResult = z.infer<typeof SessionBusInboxResultMessage>;
+export type SessionBusThreadRead = z.infer<typeof SessionBusThreadMessage>;
+export type SessionBusThreadResult = z.infer<typeof SessionBusThreadResultMessage>;
+export type SessionBusArrived = z.infer<typeof SessionBusArrivedMessage>;
 
 /**
  * Types whose wire text must never be recorded verbatim, however loudly an
@@ -2717,6 +3127,11 @@ const KNOWN_TYPES = new Set<string>([
   "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
+  "session-bus:post", "session-bus:notify", "session-bus:fetch", "session-bus:fetch:result", "session-bus:ack",
+  "session-bus:directory", "session-bus:directory:result",
+  "session-bus:inbox", "session-bus:inbox:result",
+  "session-bus:thread", "session-bus:thread:result",
+  "session-bus:arrived",
   "netwatch:configure", "netwatch:events",
 ]);
 

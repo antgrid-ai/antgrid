@@ -4,8 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { computeProjectId } from "../src/project-id";
-import type { AgentEnableRelay } from "../src/protocol";
+import { createMessage, type AgentEnableRelay } from "../src/protocol";
 import type { RelayClient } from "../src/relay-client";
+import type { SessionBusCoordinator } from "../src/session-bus/coordinator";
+import { loadHeld } from "../src/session-bus/held-store";
+import { LOCAL_MACHINE_ID } from "../src/session-bus/constants";
 
 // A remote config pointing at unreachable endpoints. The OAuth mint is never hit
 // because these tests inject `remoteRuntimeFactory`; RelayClient.connect() is
@@ -28,7 +31,10 @@ function fakeRuntime(): RemoteRuntime {
 function stubRelayClient(): RelayClient {
   return {
     deviceId: "control-plane-dev",
-    currentPeerPubkey: () => null,
+    hasEstablishedSession: () => false,
+    anySessionSupportsCheckoutRouting: () => false,
+    establishedPeers: () => [],
+    peerSession: () => null,
     setBus: () => {},
     connect: () => {},
     close: () => {},
@@ -495,3 +501,457 @@ test("prunes seen-catalog entries whose folder no longer exists, on load", () =>
   expect(after.projects.live).toBeDefined();
   expect(after.projects.dead).toBeUndefined();
 });
+
+async function waitFor(predicate: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+// R3: Wave 1's machine-wide sessionBus.self() started stamping the session
+// index's folder-basename label instead of the project's configured name,
+// silently regressing a value that goes out on the wire (session-index.ts's
+// own doc named the gap). This pins the fix at the one seam that actually
+// carries a name onto a frame: the loopback owner creates a real session in a
+// project whose antgrid.yaml names itself, and the envelope self() stamps for
+// it must carry that name, not the temp folder's random basename.
+test(
+  "a session-bus frame carries the project's configured antgrid.yaml name, not its folder name",
+  async () => {
+    host = new HostServer({
+      remote: fakeRemoteConfig(),
+      remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
+      relayClientFactory: () => stubRelayClient(),
+    });
+    const folder = tempFolder();
+    writeFileSync(join(folder, "antgrid.yaml"), "name: configured-project-name\nagent:\n  tool: claude-code\n");
+    const projectId = computeProjectId(folder);
+    const opened = await host.open(projectId, folder, "remote");
+    if (!opened.connect) throw new Error("expected a loopback connect info");
+
+    const ws = new WebSocket(`ws://127.0.0.1:${opened.connect.port}`);
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve();
+      ws.onerror = (e) => reject(e);
+    });
+    const inbox: any[] = [];
+    ws.onmessage = (ev) => inbox.push(JSON.parse(String(ev.data)));
+    ws.send(JSON.stringify({ type: "hello", token: opened.connect.token, appPid: 1, appVersion: "test" }));
+    await waitFor(() => inbox.some((m) => m.type === "ready"), "loopback ready");
+
+    const requestId = crypto.randomUUID();
+    ws.send(JSON.stringify(createMessage("session:create", { requestId, name: "s1" })));
+    await waitFor(
+      () => inbox.some((m) => m.type === "session:result" && m.requestId === requestId),
+      "session:create result",
+    );
+    const result = inbox.find((m) => m.type === "session:result" && m.requestId === requestId);
+    const sessionId = result.session.id as string;
+    ws.close();
+
+    const sessionBus = (host as unknown as { sessionBus: SessionBusCoordinator }).sessionBus;
+    const res = sessionBus.message({
+      sessionId,
+      verb: "post",
+      threadId: null,
+      to: { machineId: "m-remote", projectId: "p-remote", sessionId: "s-remote" },
+      summary: "hi",
+      parts: [{ kind: "text", text: "hi" }],
+    });
+    expect("ok" in res && res.ok).toBe(true);
+
+    const entries = sessionBus.messages(sessionId).entries;
+    expect(entries).toHaveLength(1);
+    const peer = entries[0]!.envelope.metadata.peer as { projectLabel?: string };
+    expect(peer.projectLabel).toBe("configured-project-name");
+  },
+  20_000,
+);
+
+// §6.1: a send between two sessions this HOST holds must not need a
+// relay, a carrier, or a route — `SessionBusCoordinator.dispatch` hands a
+// same-machine target straight to `deliverLocal` (host-server.ts), which
+// requires only that the target's project core is loaded here right now.
+// Every case below runs a `HostServer` with no remote config, no
+// `startControlPlane()` call, and a loopback owner it deliberately never
+// declares `capabilities.sessionBusCarrier` for (and then closes) — the
+// literal "desktop disconnected, remote access off" state the design has to
+// survive, since neither one is ever wired to anything that could carry a
+// frame off this machine.
+
+// Both sessions below are opened on the SAME bare `HostServer`, so both resolve
+// to this sentinel — which is what lets a send legitimately address "this
+// machine" without any relay ever having started.
+
+/** Give [host] a relay device id without standing a control plane up, so a test
+ *  can cross the one boundary `self()` changes answer at. Reaching past the
+ *  getter is the point: what matters is that the machine acquires a network
+ *  name mid-run, which is exactly what a late `startRemoteControlPlane()` does
+ *  to a bridge that had been answering locally all along. */
+function withRegistration(host: HostServer, deviceId: string): void {
+  (host as unknown as { controlPlaneRelay: { deviceId: string; close: () => void } | null }).controlPlaneRelay = {
+    deviceId,
+    close: () => {},
+  };
+  expect(host.controlPlaneRegistrationId).toBe(deviceId);
+}
+
+/** Opens [folder] as a local project and creates one shared session in it over
+ *  the loopback WS — the same dance the "configured antgrid.yaml name" test
+ *  above does — then closes the socket. `session:create` alone never starts a
+ *  PTY (machine-level suite's own comment), so the returned session is
+ *  registered but not "running", and the closed socket leaves no owner able
+ *  to carry a bus frame anywhere. */
+async function openLocalSession(
+  host: HostServer,
+  folder: string,
+  name: string,
+): Promise<{ projectId: string; sessionId: string }> {
+  const projectId = computeProjectId(folder);
+  const opened = await host.open(projectId, folder, "local");
+  if (!opened.connect) throw new Error("expected a loopback connect info");
+  const ws = new WebSocket(`ws://127.0.0.1:${opened.connect.port}`);
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve();
+    ws.onerror = (e) => reject(e);
+  });
+  const inbox: any[] = [];
+  ws.onmessage = (ev) => inbox.push(JSON.parse(String(ev.data)));
+  ws.send(JSON.stringify({ type: "hello", token: opened.connect.token, appPid: 1, appVersion: "test" }));
+  await waitFor(() => inbox.some((m) => m.type === "ready"), `${name} loopback ready`);
+  const requestId = crypto.randomUUID();
+  ws.send(JSON.stringify(createMessage("session:create", { requestId, name })));
+  await waitFor(
+    () => inbox.some((m) => m.type === "session:result" && m.requestId === requestId),
+    `${name} session:create result`,
+  );
+  const result = inbox.find((m) => m.type === "session:result" && m.requestId === requestId);
+  const sessionId = result.session.id as string;
+  ws.close();
+  return { projectId, sessionId };
+}
+
+function busCoordinatorOf(host: HostServer): SessionBusCoordinator {
+  return (host as unknown as { sessionBus: SessionBusCoordinator }).sessionBus;
+}
+
+test(
+  "a local post reaches the target's mailbox with the desktop disconnected and remote access off",
+  async () => {
+    host = new HostServer({}); // no remote config at all: no relay, no control plane
+    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
+    expect(host.controlPlaneRegistrationId).toBeNull();
+
+    const sessionBus = busCoordinatorOf(host);
+    const res = sessionBus.message({
+      sessionId: sessionA,
+      verb: "post",
+      threadId: null,
+      to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
+      summary: "hi from a",
+      parts: [{ kind: "text", text: "hi" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    // Delivered in process, never merely accepted: `sent: true` and `held:
+    // false` are deliverLocal's own outcome — deps.send would find no carrier
+    // here at all and hold it (case below proves that half).
+    expect(res.sent).toBe(true);
+    expect(res.held).toBe(false);
+
+    const mailbox = sessionBus.mailbox(sessionB);
+    expect(mailbox.posts).toHaveLength(1);
+    expect(mailbox.posts[0]!.from.sessionId).toBe(sessionA);
+    expect(mailbox.posts[0]!.summary).toBe("hi from a");
+  },
+  20_000,
+);
+
+test(
+  "a local notify reaches the target's delivery queue with the desktop disconnected and remote access off",
+  async () => {
+    host = new HostServer({});
+    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
+
+    const sessionBus = busCoordinatorOf(host);
+    const res = sessionBus.message({
+      sessionId: sessionA,
+      verb: "notify",
+      threadId: null,
+      to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
+      summary: "fyi from a",
+      parts: [{ kind: "text", text: "fyi" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    expect(res.sent).toBe(true);
+
+    // A notify never parks in the mailbox — that is a post's own path
+    // (deliver-event.ts's `lineForEvent`: "a post owes none").
+    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(0);
+
+    const cores = (host as unknown as {
+      cores: Map<string, { core: { deliveries: { lines: readonly { sessionId: string; kind: string }[] } } }>;
+    }).cores;
+    const queued = cores.get(projectIdB)!.core.deliveries.lines;
+    // session-b was created but never started (no PTY), so `injectBusLine`
+    // finds nothing running to submit into and the rendered line stays
+    // queued rather than being delivered and removed. That a notify to a
+    // stopped session is REFUSED (§7.3) is the verb layer's own decision and
+    // is taken above this one — what the transport owes here is a rendered
+    // line parked where the session will read it when it next reaches a turn
+    // boundary, which is also what a session stopped after the send gets.
+    expect(queued).toHaveLength(1);
+    expect(queued[0]!.sessionId).toBe(sessionB);
+    expect(queued[0]!.kind).toBe("notify");
+  },
+  20_000,
+);
+
+test(
+  "a local send never writes an entry into the carrier route table",
+  async () => {
+    host = new HostServer({});
+    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
+
+    const sessionBus = busCoordinatorOf(host);
+    expect(sessionBus.routeFor(sessionA)).toBeNull(); // nothing to untouch yet — the baseline
+    const res = sessionBus.message({
+      sessionId: sessionA,
+      verb: "post",
+      threadId: null,
+      to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
+      summary: "hi",
+      parts: [{ kind: "text", text: "hi" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    expect(res.sent).toBe(true);
+
+    // deliverLocal never calls noteRoute — the table exists for the carrier
+    // path alone (`send`'s peer/lead branches), so a local exchange leaves it
+    // exactly as empty as it started, not merely free of an error.
+    expect(sessionBus.routeFor(sessionA)).toBeNull();
+  },
+  20_000,
+);
+
+test(
+  "the E6 ack for a local post lands with no route in the table",
+  async () => {
+    host = new HostServer({});
+    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
+
+    const sessionBus = busCoordinatorOf(host);
+    const res = sessionBus.message({
+      sessionId: sessionA,
+      verb: "post",
+      threadId: null,
+      to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
+      summary: "hi",
+      parts: [{ kind: "text", text: "hi" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    expect(res.sent).toBe(true);
+
+    // onMessage dispatches the receipt back through the very same `dispatch`
+    // a message takes (coordinator.ts: a direct `send` would find no route
+    // for this pair — sessionA's context was never carried in by anyone —
+    // and drop it). The receipt's role is "peer" (roleForContext: its context
+    // is sessionA, not the receiving session sessionB), which is exactly the
+    // role a real carrier route lookup would have been keyed on had this gone
+    // through `send` instead. Proof it still landed is the sender's own log
+    // entry stamped delivered, with that same context never having earned a
+    // route entry at all.
+    const entries = sessionBus.messages(sessionA).entries;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.deliveredAt).toBeDefined();
+    expect(sessionBus.routeFor(sessionA)).toBeNull();
+  },
+  20_000,
+);
+
+test(
+  "a send naming a different machineId is refused outright without a relay identity, never folded locally",
+  async () => {
+    host = new HostServer({});
+    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
+
+    const sessionBus = busCoordinatorOf(host);
+    // session-b genuinely exists on this host under its real project id, so if
+    // `dispatch` placed a frame by its target's SESSION rather than by the
+    // machine named on it, deliverLocal would fold this straight into a
+    // mailbox the sender never addressed.
+    //
+    // What must happen instead is a refusal, not a hold: the sentinel this
+    // host names itself by buys the local path an address, not a network, and
+    // a frame held for a carrier that may attach later would reach the peer
+    // stamped `from: local` — an address no reply can be routed back to.
+    const res = sessionBus.message({
+      sessionId: sessionA,
+      verb: "post",
+      threadId: null,
+      to: { machineId: "some-other-machine", projectId: projectIdB, sessionId: sessionB },
+      summary: "should not land locally",
+      parts: [{ kind: "text", text: "should not land locally" }],
+    });
+    expect("ok" in res && res.ok).toBe(false);
+    expect((res as { code?: string }).code).toBe("AGENT_NOT_READY");
+    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(0);
+    // Refused before anything was stamped: no log entry, so nothing is held
+    // and nothing will be retried.
+    expect(sessionBus.messages(sessionA).entries).toHaveLength(0);
+  },
+  20_000,
+);
+
+test(
+  "a send naming a different machineId goes through deps.send once this machine has a relay identity",
+  async () => {
+    host = new HostServer({});
+    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
+    withRegistration(host, "machine-registered");
+
+    const sessionBus = busCoordinatorOf(host);
+    const res = sessionBus.message({
+      sessionId: sessionA,
+      verb: "post",
+      threadId: null,
+      to: { machineId: "some-other-machine", projectId: projectIdB, sessionId: sessionB },
+      summary: "should not land locally",
+      parts: [{ kind: "text", text: "should not land locally" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    // `send` here has no carrier at all — the loopback owner never declared
+    // itself a bus carrier and its socket is closed — so the frame is held,
+    // which is the outcome that proves it took the remote arm.
+    expect(res.sent).toBe(false);
+    expect(res.held).toBe(true);
+    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(0);
+  },
+  20_000,
+);
+
+test(
+  "a pair that exchanged before this machine registered still reaches itself afterwards",
+  async () => {
+    host = new HostServer({});
+    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
+
+    const sessionBus = busCoordinatorOf(host);
+    const first = sessionBus.message({
+      sessionId: sessionA,
+      verb: "post",
+      threadId: null,
+      to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
+      summary: "before",
+      parts: [{ kind: "text", text: "before" }],
+    });
+    if (!("ok" in first) || !first.ok) throw new Error(`message refused: ${JSON.stringify(first)}`);
+    // The sentinel is now on a DURABLE row: this is the address session-b's
+    // reply reads back, and the machine is about to rename itself.
+    const stored = sessionBus.mailbox(sessionB).posts[0]!.from;
+    expect(stored.machineId).toBe(LOCAL_MACHINE_ID);
+
+    withRegistration(host, "machine-registered");
+
+    const back = sessionBus.message({
+      sessionId: sessionB,
+      verb: "post",
+      threadId: null,
+      to: stored,
+      summary: "after",
+      parts: [{ kind: "text", text: "after" }],
+    });
+    if (!("ok" in back) || !back.ok) throw new Error(`reply refused: ${JSON.stringify(back)}`);
+    expect(back.sent).toBe(true);
+    expect(sessionBus.mailbox(sessionA).posts).toHaveLength(1);
+  },
+  20_000,
+);
+
+test(
+  "a send naming a local session whose project core is not loaded returns false and holds the frame",
+  async () => {
+    host = new HostServer({});
+    const { projectId: projectIdA, sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const folderB = tempFolder();
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, folderB, "session-b");
+
+    // Cold project B: `stop()` snapshots it into the session index before
+    // dropping it from `cores` (host-server.ts's `noteColdSnapshot`), so
+    // sessionIndex.lookup still resolves it — deliverLocal's SECOND
+    // condition, "and a core for it is actually loaded here right now", is
+    // the one this trips.
+    await host.stop(projectIdB);
+    expect(host.list().some((p) => p.projectId === projectIdB)).toBe(false);
+
+    const sessionBus = busCoordinatorOf(host);
+    const res = sessionBus.message({
+      sessionId: sessionA,
+      verb: "post",
+      threadId: null,
+      to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
+      summary: "hi",
+      parts: [{ kind: "text", text: "hi" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    expect(res.sent).toBe(false);
+    expect(res.held).toBe(true);
+
+    // Held to DISK under the sender's own project, not merely reported held —
+    // this is what a restart before the core comes back warm resumes from.
+    const held = loadHeld(abDir!, projectIdA, sessionA);
+    expect(held.held.some((h) => h.messageId === res.messageId && h.to.sessionId === sessionB)).toBe(true);
+
+    // And the hold is a DELAY, not a loss: the retry pump takes the same send
+    // decision the first attempt took, so the local arm delivers it the moment
+    // the target's project is warm again. A pump that went straight to `send`
+    // would keep offering a local frame to a carrier that has none until the
+    // hold aged out, which is a message lost with every log line green.
+    await host.open(projectIdB, folderB, "local");
+    sessionBus.pump();
+    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(1);
+    expect(loadHeld(abDir!, projectIdA, sessionA).held).toHaveLength(0);
+  },
+  20_000,
+);
+
+test(
+  "a coordinator with no control-plane registration id at all still delivers locally (relay connection down)",
+  async () => {
+    // A relay identity is CONFIGURED but startControlPlane() is never called:
+    // the exact "relay connection down" state 6.1 has to survive, since
+    // `self()`'s LOCAL_MACHINE_ID fallback is keyed on the registration id
+    // being absent, never on whether `opts.remote` itself is set.
+    host = new HostServer({
+      remote: fakeRemoteConfig(),
+      remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
+    });
+    expect(host.controlPlaneRegistrationId).toBeNull();
+
+    const { sessionId: sessionA } = await openLocalSession(host, tempFolder(), "session-a");
+    const { projectId: projectIdB, sessionId: sessionB } = await openLocalSession(host, tempFolder(), "session-b");
+
+    const sessionBus = busCoordinatorOf(host);
+    const res = sessionBus.message({
+      sessionId: sessionA,
+      verb: "post",
+      threadId: null,
+      to: { machineId: LOCAL_MACHINE_ID, projectId: projectIdB, sessionId: sessionB },
+      summary: "hi",
+      parts: [{ kind: "text", text: "hi" }],
+    });
+    if (!("ok" in res) || !res.ok) throw new Error(`message refused: ${JSON.stringify(res)}`);
+    expect(res.sent).toBe(true);
+    expect(sessionBus.mailbox(sessionB).posts).toHaveLength(1);
+  },
+  20_000,
+);

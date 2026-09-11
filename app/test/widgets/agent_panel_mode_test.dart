@@ -85,4 +85,48 @@ void main() {
 
     debugDefaultTargetPlatformOverride = null;
   });
+
+  // The mode switch and the Handler row moved off AgentBar and into its
+  // kebab (both breakpoints now reach them the same way), so desktop's own
+  // coverage lives here beside the mode fixtures that drive it.
+  testWidgets(
+    'at desktop width the session kebab offers the mode switch and Handler',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      tester.view.physicalSize = const Size(1000, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final stores = await buildTestStoreOverrides();
+      addTearDown(stores.close);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...stores.overrides,
+            activeSessionProvider.overrideWithValue(_session(mode: 'terminal')),
+            activeSessionIdProvider.overrideWith(
+              () => ValueController('session-1'),
+            ),
+          ],
+          child: const MaterialApp(home: Scaffold(body: AgentPanel())),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byType(AgentBar), findsOneWidget);
+      // Never pumpAndSettle: the agent panel keeps a pulsing status
+      // animation up for the whole test, so settling never arrives.
+      await tester.tap(find.byTooltip('Session options'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // A terminal session offers the switch TO chat; Handler's row renders
+      // whenever there's a focused session to arm, regardless of mode.
+      expect(find.text('Switch to Chat'), findsOneWidget);
+      expect(find.text('Arm Handler'), findsOneWidget);
+
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
 }

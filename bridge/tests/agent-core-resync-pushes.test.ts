@@ -137,7 +137,9 @@ test("a resync pushes the tree when the peer half of the guard is the one that d
   // over loopback while a legacy phone is still established on the relay slot.
   const { bus, sent } = await bootCore();
   core!.setOwnerPullsTreeProvider(() => true);
-  core!.setPeerPullsTreeProvider(() => false);
+  core!.setEstablishedPeersProvider(() => [
+    { peerId: "legacy#machine", peerPubkey: "pk-legacy", checkoutRouting: true, reachable: true, pullsTree: false },
+  ]);
   await waitFor(
     () => bus.getSnapshot(["tree:full"]).length > 0,
     "a tree:full in the replay cache",

@@ -32,7 +32,7 @@ class LocalTransportHandshakeException implements Exception {
 ///
 /// Wire protocol (mirror of `evals/helpers/local-client.ts`):
 ///   1. Open WS to ws://127.0.0.1:[port]
-///   2. Send `{type:'hello', token, appPid, appVersion}`
+///   2. Send `{type:'hello', token, appPid, appVersion, capabilities}`
 ///   3. Wait for `{type:'ready'}` (anything else = handshake failure)
 ///   4. Subsequent frames are `{channel, ...message}` JSON envelopes.
 class LocalTransport extends BufferedAgentTransport {
@@ -58,6 +58,15 @@ class LocalTransport extends BufferedAgentTransport {
   /// accepted the connection; 15s absorbs it, costing nothing on the warm path.
   final Duration connectTimeout;
 
+  /// What this client can do, sent verbatim as the hello's `capabilities`.
+  /// The agent gates behaviour on individual flags in it, so a caller that can
+  /// do more than the default says so here rather than growing a constructor
+  /// flag per capability. A caller that passes its own map REPLACES the
+  /// default, so it owes every key the default carries: dropping `pullsTree`
+  /// fails silently and puts the bridge back to pushing every checkout's
+  /// `tree:full` at each reconnect, the flood pull-first exists to prevent.
+  final Map<String, Object?> capabilities;
+
   IOWebSocketChannel? _ch;
   StreamSubscription? _sub;
 
@@ -75,6 +84,7 @@ class LocalTransport extends BufferedAgentTransport {
     this.appVersion = 'app',
     this.connectTimeout = const Duration(seconds: 15),
     this.netTap,
+    this.capabilities = const {'checkoutRouting': true, 'pullsTree': true},
   });
 
   /// Records a frame that never left, or never reached dispatch.
@@ -311,7 +321,7 @@ class LocalTransport extends BufferedAgentTransport {
         'token': token,
         'appPid': appPid,
         'appVersion': appVersion,
-        'capabilities': {'checkoutRouting': true, 'pullsTree': true},
+        'capabilities': capabilities,
       }),
     );
 

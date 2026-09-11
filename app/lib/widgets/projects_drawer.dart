@@ -20,6 +20,7 @@ import '../design/widgets/ab_tap_target.dart';
 import '../models/drawer_entry.dart';
 import '../project/project_session_registry.dart'
     show projectSessionRegistryProvider;
+import '../models/session_entry.dart';
 import '../models/session_target.dart';
 import '../providers/account_agents.dart';
 import '../providers/control_plane.dart';
@@ -465,8 +466,11 @@ class _Body extends ConsumerWidget {
 
 /// Pull-to-refresh / refresh-button handler for the drawer. Re-fetches the
 /// machine inventory (HTTPS) and re-pulls the live project advert for every
-/// machine whose control-plane socket is already open (the reaper's alive set —
-/// refreshing never force-opens sockets for machines the user isn't viewing).
+/// machine in the reaper's alive set. That is not the same as "already open":
+/// since E13 the set also carries machines a directory read missed, which this
+/// app has decided it wants a socket to and is dialling anyway — so the gesture
+/// can push one of those dials rather than only refreshing what is up. It still
+/// opens nothing for a machine the app has made no such decision about.
 /// Also re-lists the focused project's sessions (data plane).
 ///
 /// The session re-list is FIRE-AND-FORGET: its reply carries a 15s timeout
@@ -767,6 +771,11 @@ class _AdvertisedProjectRowState extends ConsumerState<_AdvertisedProjectRow> {
   }
 }
 
+extension _DrawerSessionVisibility on Iterable<SessionEntry> {
+  List<SessionEntry> whereVisibleInDrawer() =>
+      where((s) => !s.archived).toList(growable: false);
+}
+
 /// Triggers the drawer's per-project session-list peek
 /// ([drawerProjectSessionsProvider]) and renders whatever
 /// [sessionsForEntryProvider] holds (cached first, then the freshly-fetched list
@@ -781,8 +790,7 @@ class _ProjectSessions extends ConsumerWidget {
     final fetch = ref.watch(drawerProjectSessionsProvider(regId));
     final sessions = ref
         .watch(sessionsForEntryProvider(regId))
-        .where((s) => !s.archived)
-        .toList(growable: false);
+        .whereVisibleInDrawer();
     if (sessions.isNotEmpty) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -837,8 +845,7 @@ class SessionsList extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final sessions = ref
         .watch(sessionsForEntryProvider(projectId))
-        .where((s) => !s.archived)
-        .toList(growable: false);
+        .whereVisibleInDrawer();
     // No wrapper Padding — session rows own their own gutter.
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

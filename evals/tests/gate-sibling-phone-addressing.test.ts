@@ -19,11 +19,12 @@ import { createMessage } from "../../bridge/src/protocol";
 /**
  * Regression for the two-phone mis-addressing bug: with two phones signed
  * into ONE account, a bare
- * `peer-online` for the sibling used to overwrite the agent's `_peerId`, so the
- * agent sealed replies with the ACTIVE phone's keys but addressed them `to:` the
- * sibling. The active phone went deaf. Post-fix, only a verified handshake
- * repoints the address, so the active phone keeps receiving; a sibling's real
- * handshake then hands the session over.
+ * `peer-online` for the sibling used to overwrite the agent's single reply
+ * address, so the agent sealed replies with the ACTIVE phone's keys but
+ * addressed them `to:` the sibling. The active phone went deaf. Post-fix, bare
+ * presence repoints nothing: every outbound frame names its own session's peer,
+ * and a sibling's verified handshake is admitted ALONGSIDE the first (one
+ * established session per app device) instead of displacing it.
  */
 
 /** Generate a local Ed25519 identity for an app RelayClient (mirrors
@@ -65,7 +66,7 @@ async function assertSnapshot(app: RelayClient, label: string): Promise<void> {
   expect(res.ok).toBe(true);
 }
 
-test("a same-account sibling's presence does not steal addressing from the active phone; its handshake hands the session over", async () => {
+test("a same-account sibling's presence does not steal addressing from the active phone; its handshake joins alongside", async () => {
   const port = allocatePort();
   const abDir = mkdtempSync(join(tmpdir(), "antgrid-gate-sibling-"));
   const phone1 = await generateAppIdentity();
@@ -117,10 +118,11 @@ test("a same-account sibling's presence does not steal addressing from the activ
     // (the agent addressed the sealed reply to phone 2).
     await assertSnapshot(app1, "after-sibling-presence");
 
-    // Handoff: phone 2 now performs its own verified handshake and becomes the
-    // active, addressed phone.
+    // Phone 2 now performs its own verified handshake: it gets a session of
+    // its own, and phone 1 keeps the one it already had.
     await handshakeWithoutPairing(app2, agentDeviceId, auth.ed25519Pub);
-    await assertSnapshot(app2, "handoff");
+    await assertSnapshot(app2, "second-session");
+    await assertSnapshot(app1, "after-sibling-handshake");
   } finally {
     await app1?.disconnect();
     await app2?.disconnect();

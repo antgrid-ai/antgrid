@@ -20,7 +20,7 @@ function tomlBasicString(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-function toPosixPath(value: string): string {
+export function toPosixPath(value: string): string {
   return value.replace(/\\/g, "/");
 }
 

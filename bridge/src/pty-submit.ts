@@ -40,6 +40,51 @@ export function padBareVerb(line: string): string {
   return /^\/[^\s/\\]+$/.test(line) ? `${line} ` : line;
 }
 
+/**
+ * DECSET 2004's paste delimiters.
+ *
+ * A guest with the mode on takes everything between them as literal text,
+ * newlines included, and only the CR that follows submits. A guest WITHOUT it
+ * sees two escape sequences and reads every newline as Enter — which is why
+ * choosing this path is the caller's job and requires having watched the guest
+ * turn the mode on (`TerminalModeTracker`), never an assumption about it.
+ */
+export const PASTE_START = "\x1b[200~";
+export const PASTE_END = "\x1b[201~";
+
+/** Everything a paste body must not carry: every C0 control and DEL except the
+ *  newlines and tabs that are the block's shape. ESC above all — an embedded
+ *  {@link PASTE_END} would close the paste and put the remainder back on the
+ *  keystroke path, one line per newline. */
+const PASTE_UNSAFE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+
+/**
+ * Collapse a block onto the one line a keystroke channel can carry.
+ *
+ * The fallback for a guest that never announced bracketed paste. Losing the
+ * block's line breaks costs readability; keeping them costs a submit per line,
+ * so an agent handed a 20-line prompt would answer the first line and act on the
+ * rest as 19 separate turns.
+ */
+export function flattenForSubmit(text: string): string {
+  return text.replace(PASTE_UNSAFE, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * How one submit has to reach the guest.
+ *
+ * A PTY is a keystroke channel: a newline in the text is Enter, so a block
+ * handed over whole submits its first line and leaves the rest arriving as
+ * separate turns. Bracketed paste is the only framing that carries the newlines
+ * as text, and it needs the guest to have ANNOUNCED the mode — hence the
+ * caller-supplied answer rather than a guess. Pure, so the routing is pinnable
+ * without a live terminal.
+ */
+export function submitPlan(line: string, bracketedPaste: boolean): { paste: boolean; text: string } {
+  if (!/[\r\n]/.test(line)) return { paste: false, text: line };
+  return bracketedPaste ? { paste: true, text: line } : { paste: false, text: flattenForSubmit(line) };
+}
+
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -83,6 +128,29 @@ export class PtySubmitQueue {
       // tokenizes a read as a whole in both directions, so whatever is written
       // next — the user's own keystroke, a capability reply, a second submit —
       // would otherwise share this read and rob the CR of its own key event.
+      await sleep(SUBMIT_CR_GAP_MS);
+    });
+  }
+
+  /**
+   * Submit a multi-line block as ONE prompt, framed as a bracketed paste.
+   *
+   * Only for a terminal whose guest has DECSET 2004 latched — see
+   * {@link PASTE_START}. The body and its delimiters go in a single write so the
+   * guest cannot see an unterminated paste, and the CR keeps its own read for
+   * the same reason {@link submit}'s does.
+   */
+  submitPaste(text: string): void {
+    // Stripped here rather than trusted from the caller: this is the only place
+    // that knows the text is about to become a paste, and inside the brackets a
+    // control character is literal text to a guest that honours the mode and a
+    // live keystroke to one that half-does. Neither is content.
+    const body = text.replace(/\r\n?/g, "\n").replace(PASTE_UNSAFE, "");
+    this.chain(async () => {
+      const sleep = this.deps.sleep ?? defaultSleep;
+      this.deps.write(`${PASTE_START}${body}${PASTE_END}`);
+      await sleep(SUBMIT_CR_GAP_MS);
+      this.deps.write("\r");
       await sleep(SUBMIT_CR_GAP_MS);
     });
   }

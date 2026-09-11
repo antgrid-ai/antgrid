@@ -323,7 +323,7 @@ final handlerStateProvider = StreamProvider<HandlerState>((ref) {
 /// tab mixing two sessions' rows makes the reader do the routing.
 ///
 /// The unnarrowed [handlerStateProvider] stays the source for every surface
-/// that genuinely spans sessions — above all the agent bar's NEEDS YOU pill,
+/// that genuinely spans sessions — above all the session kebab's attention row,
 /// which is what says another session is waiting and so must never narrow.
 final focusedSessionHandlerStateProvider = Provider<HandlerState>((ref) {
   final state = ref.watch(handlerStateProvider).value;

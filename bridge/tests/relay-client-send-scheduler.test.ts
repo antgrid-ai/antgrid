@@ -7,6 +7,7 @@ import { RelayClient } from "../src/relay-client";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
 import type { SendScheduler } from "../src/send-scheduler";
+import { installFakeSession } from "./fake-session";
 
 const PHONE_ID = "phone-1";
 
@@ -37,19 +38,13 @@ function makeClient(): Harness {
     getLicenseToken: () => "token",
   });
   clients.push(client);
-  (client as any)._peerId = PHONE_ID;
-  (client as any).established = {
-    attemptId: "a1",
-    peerId: PHONE_ID,
-    transport: { seal: (plaintext: string) => Buffer.from(plaintext, "utf8") },
-    sessionKeys: { a2p: Buffer.alloc(32), p2a: Buffer.alloc(32), confirm: Buffer.alloc(32) },
-  };
+  const session = installFakeSession(client, PHONE_ID);
   (client as any).ws = {
     readyState: WebSocket.OPEN,
     send: (d: string | Uint8Array) => sent.push(d),
     close: () => {},
   };
-  return { client, sent, s: (client as any).scheduler as SendScheduler };
+  return { client, sent, s: session.scheduler as SendScheduler };
 }
 
 function decode(frame: string | Uint8Array): { channel: string; text: string } {
@@ -76,7 +71,7 @@ describe("RelayClient send scheduler", () => {
     for (const id of ["r1", "r2", "r3"]) void client.sendTunnel(tunnelChunk(id));
     expect(sent).toHaveLength(0);
 
-    (client as any).lastSealedRecvAt = 0;
+    (client as any).sessions.get(PHONE_ID).lastSealedRecvAt = 0;
     (client as any).checkLiveness();
 
     // A tick writes both channels' credits beside the ping; every one of them
@@ -145,7 +140,7 @@ describe("RelayClient send scheduler", () => {
     (client as any).handleTextMessage(JSON.stringify({ type: "peer-offline", peerId: PHONE_ID }));
 
     expect(s.queued("preview").frames).toBe(0);
-    expect(client.hasEstablishedSession).toBe(true);
+    expect(client.hasEstablishedSession()).toBe(true);
   });
 
   // The pacing contract the tunnel's chunk loop rides on: the promise says when

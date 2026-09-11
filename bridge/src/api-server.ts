@@ -10,12 +10,36 @@ import { AGENTS, BY_HOOK_NAME } from "./agents/registry";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
+import {
+  PublishArtifactBodySchema,
+  SendBodySchema,
+  ReplyBodySchema,
+  type SessionBusApi,
+} from "./session-bus/api";
+import { ARTIFACT_CHUNK_BYTES } from "./session-bus/constants";
+import { SESSION_BUS_ERRORS, isRefusal } from "./session-bus/errors";
+
+/** The tree one caller of this API works in: its own `antgrid.yaml`, and the
+ *  filesystem root a command it names must run against. */
+export interface CallerCheckout {
+  id: string;
+  path: string;
+  config: AbConfig;
+}
 
 export interface AgentContext {
   manager: () => TerminalManager | null;
   config: () => AbConfig;
   project: () => ProjectInfo;
   sendAb: (msg: AbMessage) => void;
+  /** Which checkout a caller's terminal actually runs in. This API is per CORE,
+   *  so an isolated session's agent reaches it on the same port main's does and
+   *  the slot it was spawned with (`ANTGRID_TERMINAL_ID`, forwarded into the MCP
+   *  server's environment) is the only thing that says which tree is its own —
+   *  checkout-scoped routing one level below the message plane. Wired in
+   *  buildAgentCore; absent, or an id no terminal claims, is the project's own
+   *  checkout, which is also what a terminal-less caller gets. */
+  checkoutFor?: (terminalId?: string) => CallerCheckout;
   /** Current session name for a slot id, for the notification title. Wired in
    *  buildAgentCore to SessionManager.get(); undefined for service PTYs. */
   sessionName?: (terminalId: string) => string | undefined;
@@ -44,6 +68,14 @@ export interface AgentContext {
    *  status. Bridge-internal: this never emits an app-facing frame — unlike
    *  /notify, a turn-start is not a user-facing notification. */
   onTurnStart?: (terminalId?: string) => void;
+  /** The session bus, when this core built one. Every decision the
+   *  `/session-bus/*` routes make is made in here, so the MCP tools above them
+   *  stay a transport and cannot answer differently from the routes. Absent
+   *  means the core has no bus at all (a test core, or one built before the
+   *  session manager was ready), and every route answers 503 rather than
+   *  refusing the caller — which would leave an agent unable to publish with
+   *  nothing saying why. */
+  sessionBus?: SessionBusApi;
 }
 
 const VERSION = "0.1.0";
@@ -121,6 +153,32 @@ function textResponse(data: string, status = 200) {
   return new Response(data, { status, headers: { "Content-Type": "text/plain" } });
 }
 
+/** One rendering for every session-bus answer: a refusal becomes its own status
+ *  and code, a result becomes 200. The status comes from `SESSION_BUS_ERRORS`, so
+ *  a route and the tool calling it can never disagree about what a code means. */
+function sessionBusJson(result: unknown): Response {
+  if (isRefusal(result)) {
+    return json({ error: result.error, code: result.code }, SESSION_BUS_ERRORS[result.code]);
+  }
+  return json(result);
+}
+
+function sessionBusPost<T>(schema: z.ZodType<T>, body: unknown, run: (b: T) => unknown): Response {
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) return json({ error: "Invalid body" }, 400);
+  return sessionBusJson(run(parsed.data));
+}
+
+/** A non-negative integer query param, or [fallback] for anything else. A caller
+ *  that spelled a range badly reads from the start rather than being refused:
+ *  the artifact read is clamped to one chunk on the bridge side anyway. */
+function intParam(url: URL, name: string, fallback: number): number {
+  const raw = url.searchParams.get(name);
+  if (raw === null) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 // Cursor merges hook tiers, so a machine with both the project-tier entries
 // (plugin installer) and the user-tier entries (spawn augmenter) runs two
 // identical hook processes per event, and both POST /notify. Collapse exact
@@ -129,6 +187,16 @@ const NOTIFY_DEDUP_WINDOW_MS = 5_000;
 
 export function startApiServer(ctx: AgentContext): ApiServerHandle {
   const recentNotifies = new Map<string, number>();
+
+  /** The checkout the caller of this request works in. A caller names itself
+   *  with `?terminalId=`; anything else is answered out of the project's own
+   *  checkout, which is what every pre-checkout caller already got. */
+  function callerCheckout(url: URL): CallerCheckout {
+    const terminalId = url.searchParams.get("terminalId") ?? undefined;
+    return ctx.checkoutFor?.(terminalId)
+      ?? { id: "main", path: ctx.project().path, config: ctx.config() };
+  }
+
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -141,7 +209,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
       }
 
       if (req.method === "GET" && path === "/config") {
-        const config = ctx.config();
+        const config = callerCheckout(url).config;
         return json({
           commands: config.commands ?? [],
           services: config.services ?? [],
@@ -154,9 +222,17 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (!mgr) return json({ error: "Agent not ready" }, 503);
 
         const all = url.searchParams.get("all") === "true";
+        const caller = callerCheckout(url);
         let terminals = mgr.getStatus();
         if (!all) {
           terminals = terminals.filter((t) => t.type !== "agent");
+        }
+        // A core runs the terminals of every checkout under it, so a caller
+        // inside an isolated session must see its own and no one else's — the
+        // scrollback of another session's agent is not context, it is someone
+        // else's conversation.
+        if (ctx.checkoutFor) {
+          terminals = terminals.filter((t) => ctx.checkoutFor!(t.terminalId).id === caller.id);
         }
         return json(terminals);
       }
@@ -168,6 +244,11 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         if (!mgr) return json({ error: "Agent not ready" }, 503);
 
         const terminalId = decodeURIComponent(scrollbackMatch[1]);
+        // Same answer as a terminal that does not exist, deliberately: a caller
+        // in another checkout must not learn this one is there.
+        if (ctx.checkoutFor && ctx.checkoutFor(terminalId).id !== callerCheckout(url).id) {
+          return json({ error: "Terminal not found" }, 404);
+        }
         const snap = mgr.getScrollback(terminalId);
         if (snap === null) {
           return json({ error: "Terminal not found" }, 404);
@@ -179,10 +260,14 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         const cmdMatch = path.match(/^\/commands\/([^/]+)\/run$/);
         if (!cmdMatch) return json({ error: "Not found" }, 404);
         const commandName = decodeURIComponent(cmdMatch[1]);
-        const config = ctx.config();
+        // Both the definition and the tree it runs in come from the CALLER's
+        // checkout: an isolated session's agent running `build` against main's
+        // working tree builds another session's uncommitted work and reads the
+        // result as its own.
+        const caller = callerCheckout(url);
         const project = ctx.project();
 
-        const cmdConfig = config.commands?.find((c) => c.name === commandName);
+        const cmdConfig = caller.config.commands?.find((c) => c.name === commandName);
         if (!cmdConfig) {
           return json({ error: `Unknown command: ${commandName}` }, 404);
         }
@@ -200,7 +285,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
 
         const args = cmdConfig.args ?? [];
-        const cwd = cmdConfig.workingDir ?? project.path;
+        const cwd = cmdConfig.workingDir ?? caller.path;
         const env = cmdConfig.env ? { ...process.env, ...cmdConfig.env } : undefined;
 
         try {
@@ -224,6 +309,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
               }
               ctx.sendAb(createMessage("command:output", {
                 projectId: project.id,
+                checkoutId: caller.id,
                 commandName,
                 data: text,
               }));
@@ -243,6 +329,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
 
           ctx.sendAb(createMessage("command:done", {
             projectId: project.id,
+            checkoutId: caller.id,
             commandName,
             exitCode,
           }));
@@ -367,6 +454,64 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
         ctx.onHandlerEvent?.(parsed.data);
         return json({ ok: true });
+      }
+
+      // The session bus. Every route resolves the CALLER from `?terminalId=` —
+      // the slot `ANTGRID_TERMINAL_ID` stamped into the agent's environment,
+      // which the MCP server puts on every request. The terminal id IS the
+      // session id for an agent session, which is what says whose artifacts are
+      // being asked for; a service PTY names none and resolves to no session.
+      if (path.startsWith("/session-bus/")) {
+        const bus = ctx.sessionBus;
+        if (!bus) return json({ error: "Session bus not available", code: "AGENT_NOT_READY" }, 503);
+        const terminalId = url.searchParams.get("terminalId") ?? undefined;
+        const rest = path.slice("/session-bus/".length);
+
+        if (req.method === "GET") {
+          if (rest === "artifacts") return sessionBusJson(bus.listArtifacts(terminalId));
+          if (rest === "sessions") return sessionBusJson(await bus.listSessions(terminalId));
+          if (rest === "inbox") return sessionBusJson(bus.inbox(terminalId));
+          if (rest === "self") return sessionBusJson(bus.self(terminalId));
+          if (rest === "thread") {
+            // An absent id is passed through as "" rather than answered here:
+            // the api's own thread lookup is what owns "unknown thread", so a
+            // caller that names no id gets that same refusal, not a route-level
+            // shortcut a client could learn to distinguish from a bad id.
+            return sessionBusJson(bus.thread(terminalId, url.searchParams.get("threadId") ?? ""));
+          }
+          const artifact = rest.match(/^artifacts\/([^/]+)$/);
+          if (artifact) {
+            return sessionBusJson(bus.getArtifact(
+              terminalId,
+              decodeURIComponent(artifact[1]),
+              intParam(url, "offset", 0),
+              intParam(url, "length", ARTIFACT_CHUNK_BYTES),
+            ));
+          }
+          return json({ error: "Not found" }, 404);
+        }
+
+        if (req.method !== "POST") return json({ error: "Not found" }, 404);
+
+        // An unreadable body is treated as an absent one rather than answered
+        // 400 here: the POST below validates with its own schema, so the refusal
+        // is identical.
+        let body: unknown;
+        try { body = await req.json(); } catch { body = undefined; }
+
+        if (rest === "artifacts") {
+          return sessionBusPost(PublishArtifactBodySchema, body, (b) => bus.publishArtifact(terminalId, b));
+        }
+        if (rest === "post") {
+          return sessionBusPost(SendBodySchema, body, (b) => bus.post(terminalId, b));
+        }
+        if (rest === "notify") {
+          return sessionBusPost(SendBodySchema, body, (b) => bus.notify(terminalId, b));
+        }
+        if (rest === "reply") {
+          return sessionBusPost(ReplyBodySchema, body, (b) => bus.reply(terminalId, b));
+        }
+        return json({ error: "Not found" }, 404);
       }
 
       return json({ error: "Not found" }, 404);
