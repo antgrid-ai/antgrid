@@ -197,8 +197,9 @@ Future<void> main() async {
     // batch is DROPPED, and the demo must not throw away the real events the
     // user queued before entering it.
     paused: () => container.read(demoModeProvider),
-    plausibleUrl: AppEnvironment.plausibleUrl,
-    plausibleDomain: AppEnvironment.plausibleDomain,
+    umamiUrl: AppEnvironment.umamiUrl,
+    umamiWebsiteId: AppEnvironment.umamiWebsiteId,
+    umamiHostname: AppEnvironment.umamiHostname,
     eventsApiUrl: AppEnvironment.eventsApiUrl,
   );
   container = ProviderContainer(
