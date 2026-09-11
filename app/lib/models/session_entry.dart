@@ -154,8 +154,8 @@ class SessionSetup {
   );
 }
 
-/// The Capability Card as it travels ON a membership, flattened: the OS the
-/// member machine runs and the repo of the one project the membership is for.
+/// The Capability Card as it travels beside one session's address, flattened:
+/// the OS that machine runs and the repo of the one project the address names.
 ///
 /// Hand-mirrors the bridge `SessionMemberCardSchema` (`bridge/src/protocol.ts`),
 /// which nests the six values as `{ os: {name, version, arch}, repo: {label,
@@ -164,8 +164,10 @@ class SessionSetup {
 ///
 /// Every field is nullable, top to bottom: the bridge that fills the card
 /// already produces nulls for a project that is not a repo, and a machine that
-/// could not answer must still be able to join. A card is what the lead's agent
-/// is TOLD about its new peer, never something either side acts on.
+/// could not answer must still appear in the directory — withholding a row over
+/// a blank branch costs the reader the machine rather than the field. A card is
+/// what a peer machine ANSWERED about itself, never something either side acts
+/// on.
 ///
 /// [repoRemote] is the bridge's normalised credential-free `host[:port]/path`
 /// match key, never a raw remote URL — the value is rendered into an agent's
@@ -187,9 +189,9 @@ class SessionMemberCard {
     this.repoBranch,
   });
 
-  /// Clamps every value to the length the lead bridge refuses above, because a
-  /// card is display metadata and a membership is not: an over-long branch name
-  /// must cost its own tail, never the machine the user was joining.
+  /// Clamps every value to the length the answering bridge refuses above,
+  /// because a card is display metadata and an address is not: an over-long
+  /// branch name must cost its own tail, never the session it describes.
   factory SessionMemberCard({
     String? osName,
     String? osVersion,
@@ -233,8 +235,8 @@ class SessionMemberCard {
 
   /// Null for anything that is not a card with a value in it — a missing key, a
   /// non-map, a group of the wrong shape, a leaf that is not a string. The card
-  /// is the least load-bearing thing on a membership, so a malformed one costs
-  /// itself and never the member it arrived on.
+  /// is the least load-bearing thing on a ref, so a malformed one costs itself
+  /// and never the session it arrived on.
   static SessionMemberCard? fromJson(Object? raw) {
     if (raw is! Map) return null;
     String? leaf(Object? group, String key) {
@@ -286,22 +288,26 @@ String? _bounded(String? value, int max) {
   return value.length <= max ? value : value.substring(0, max);
 }
 
-/// Address of one session in a multi-machine session — the machine, project and
-/// session that identify it, plus the labels a row renders with and the
-/// Capability Card of the machine it names.
+/// Address of one session on the bus — the machine, project and session that
+/// identify it — plus the labels a row renders with and the Capability Card of
+/// the machine it names.
 ///
 /// Hand-mirrors the bridge `SessionMemberRefSchema` (`bridge/src/protocol.ts`)
 /// per the package convention that the Dart side mirrors the TS Zod schemas by
-/// hand. The labels are carried rather than looked up because this rides every
-/// `session:updated` frame and is rendered by rows served from the persisted
-/// cache, which can resolve no other machine's names at all; the bridge bounds
-/// their length for the same reason.
+/// hand. The labels are CARRIED rather than looked up because no machine can
+/// resolve another machine's names at all; the bridge bounds their length for
+/// the same reason.
 ///
 /// [card] rides along for the harder version of that reason: no bridge can read
-/// another machine, so what the peer answered about itself at join time is the
-/// only description of it the lead will ever hold. It reaches one reader — the
-/// lead's agent, told what machine just joined it — and is fenced as data there,
-/// because a hostname or a repo path in a WRAPPER would read as a grant.
+/// another machine, so what the peer answered about itself when it was last
+/// peeked is the only description of it this side will ever hold. Wherever it
+/// is rendered into an agent's prompt it is fenced as data, because a hostname
+/// or a repo path in a WRAPPER would read as a grant.
+///
+/// Nothing in the app parses one yet — the bus inbox reads the bare key as
+/// `SessionBusAddress`, and the `session-bus:directory` read the bridge offers
+/// is unconsumed — so this is the mirror kept ready for the surface
+/// `docs/session-messaging.md` §5.3 describes, not an orphan to delete.
 class SessionMemberRef {
   /// The account device uuid, which is how the app addresses a machine — never
   /// a relay slot id or a hostname.
@@ -312,7 +318,7 @@ class SessionMemberRef {
   final String? projectLabel;
   final String? sessionName;
 
-  /// What the machine answered about itself when the membership was made. Null
+  /// What the machine answered about itself when it was last peeked. Null
   /// against a machine that could not answer and against a carrier predating
   /// the field; both are the same "no card" a reader must render.
   final SessionMemberCard? card;
@@ -327,7 +333,7 @@ class SessionMemberRef {
     this.card,
   });
 
-  /// Identity across the three ids that address a member — the same triple the
+  /// Identity across the three ids that address a session — the same triple the
   /// bridge keys its record and release on, so two refs for one session compare
   /// equal however their labels have drifted.
   String get key => '$machineId/$projectId/$sessionId';
@@ -343,8 +349,8 @@ class SessionMemberRef {
   };
 
   /// Null when any of the three ids is missing or empty. A ref that cannot be
-  /// addressed is not a member, and the caller drops that element rather than
-  /// the row containing it.
+  /// addressed names nobody, and the caller drops that element rather than the
+  /// row containing it.
   static SessionMemberRef? fromJson(Map<String, dynamic> j) {
     final machineId = j['machineId'];
     final projectId = j['projectId'];

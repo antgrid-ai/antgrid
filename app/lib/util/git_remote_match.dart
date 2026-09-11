@@ -8,27 +8,28 @@
 /// on the machine that owns the repo (`normalizeRemoteUrl` in
 /// `bridge/src/capability-card.ts`). Nothing here re-implements it — an app-side
 /// copy of a credential-stripping function is a second place for that strip to
-/// go wrong, and there is no caller holding a raw URL: the lead's key comes from
-/// the loopback Capability Card and the candidates' from the peer machine's.
+/// go wrong, and there is no caller holding a raw URL: the asking session's key
+/// comes from the loopback Capability Card and the candidates' from the peer
+/// machine's.
 ///
 /// A matching key and nothing else. It says two checkouts came from the same
 /// origin, never that either machine may act on the other.
 library;
 
-/// The project id in [candidateRemotes] whose repository is [leadRemote]'s, or
-/// null when there is no usable answer.
+/// The project id in [candidateRemotes] whose repository is the one
+/// [leadRemote] names — the asking session's own key — or null when there is no
+/// usable answer.
 ///
 /// [candidateRemotes] maps project id to that project's normalised remote, and
 /// its ITERATION ORDER is the answer's tiebreak — pass it in the order the
-/// dropdown renders, so two clones of one repo on the same machine pre-select
-/// the row the user would have reached first rather than an arbitrary one.
+/// caller would offer them, so two clones of one repo on one machine resolve to
+/// the one a reader would have reached first rather than an arbitrary one.
 ///
-/// Null whenever the lead has no remote (a repo with no `origin`, a filesystem
-/// remote, or a machine that could not answer), which is the same outcome as no
-/// match: the dialog leaves the project unselected and the user picks. A
-/// pre-selection is always overridable, so a wrong guess costs a click — but a
-/// guess made from a null key would match every other project with no remote,
-/// which is why the empty case is refused here rather than at the call site.
+/// Null whenever [leadRemote] is empty (a repo with no `origin`, a filesystem
+/// remote, or a machine that could not answer), and a caller must read that as
+/// no match rather than as a match on emptiness: a null key would otherwise
+/// pair with every project that also has none. The empty case is refused here
+/// rather than at each call site for exactly that reason.
 String? preselectProjectByRemote({
   required String? leadRemote,
   required Map<String, String?> candidateRemotes,
