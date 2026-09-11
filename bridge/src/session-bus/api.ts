@@ -201,6 +201,23 @@ export interface InboxPostView {
   artifacts: InboxArtifactView[];
 }
 
+/** Who the CALLER is, as the other end of the bus would have to spell it.
+ *
+ *  `machineId` is null in local mode and is otherwise always present, where a
+ *  {@link SessionDirectoryRow} omits it for a session on this machine. The two
+ *  are read in opposite directions and that is the whole difference: a row is
+ *  read HERE, so an absent machine correctly means this one, while this address
+ *  exists to be handed to a session somewhere else, where an absent machine
+ *  would mean THEIRS.
+ */
+export interface SessionSelfView {
+  machineId: string | null;
+  projectId: string;
+  sessionId: string;
+  projectLabel?: string;
+  sessionName?: string;
+}
+
 export interface ThreadEntryView {
   direction: "in" | "out";
   at: number;
@@ -250,6 +267,17 @@ export interface SessionBusApi {
     terminalId: string | undefined,
     threadId: string,
   ): { threadId: string; contextId: string; entries: ThreadEntryView[] } | SessionBusRefusal;
+  /** The caller's own address. Nothing else on the bus answers it: the
+   *  directory drops the asking session's row by design, a delivery names its
+   *  SENDER, and a send result names the thread it opened. So an agent asked to
+   *  hand its address to a third party — the shape every delegation through a
+   *  middle session takes — has nowhere to read it.
+   *
+   *  Separate from {@link listSessions} rather than a field on it, because that
+   *  read spawns git per row and is REFUSED outright with no directory, and
+   *  identity is neither expensive nor conditional: an agent must still be able
+   *  to say who it is on a bridge that cannot say who anyone else is. */
+  self(terminalId: string | undefined): SessionSelfView | SessionBusRefusal;
   publishArtifact(
     terminalId: string | undefined,
     body: PublishArtifactBody,
@@ -649,6 +677,22 @@ export function createSessionBusApi(deps: SessionBusApiDeps): SessionBusApi {
         threadId,
         contextId: row.contextId,
         entries: entriesForThread(deps.coordinator.messages(m.sessionId), threadId).map(threadEntryOf),
+      };
+    },
+
+    self(terminalId) {
+      const m = resolve(terminalId);
+      if (!m) return notMember();
+      // Not `selfRef`: that one answers null without a machine id, which is the
+      // right refusal for a frame that has to be routed and the wrong one for a
+      // question about who is asking. Local mode has an answer — it is just an
+      // answer nothing off this machine can use.
+      return {
+        machineId: deps.machineId(),
+        projectId: deps.projectId,
+        sessionId: m.sessionId,
+        ...(deps.projectName ? { projectLabel: deps.projectName } : {}),
+        ...(m.sessionName ? { sessionName: m.sessionName } : {}),
       };
     },
 

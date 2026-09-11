@@ -79,6 +79,11 @@ function machine(opts: {
   directory?: SessionDirectory;
   /** Off refuses every off-machine leg at the verb layer (§6.3). */
   remoteAccessEnabled?: boolean;
+  /** No relay identity on the API's side, which is what a core with no host
+   *  above it looks like: `machineId()` answers null there while the
+   *  coordinator still names itself, because a key needs a machine and an
+   *  unregistered one is still the machine it is. */
+  localMode?: boolean;
   /** The host's per-pair ceilings (§7.4). Absent is an unbudgeted bus, which is
    *  what a core with no host above it is. */
   pairBudget?: BudgetStore;
@@ -118,7 +123,7 @@ function machine(opts: {
     abDir: opts.abDir,
     projectId: opts.projectId,
     projectName: "proj",
-    machineId: () => opts.machineId,
+    machineId: () => (opts.localMode ? null : opts.machineId),
     membership: membershipOf,
     carrierPresent: () => opts.carrierPresent !== false,
     remoteAccessEnabled: () => opts.remoteAccessEnabled !== false,
@@ -564,6 +569,59 @@ describe("GET /session-bus/sessions", () => {
       const res = await get(m, "sessions", PEER_SESSION);
       expect(res.status).toBe(200);
       expect(res.body.reach).toEqual({ scope: "machine", why: "no-carrier" });
+    } finally { m.stop(); }
+  });
+});
+
+// The one read that answers about the CALLER. Everything else on the bus names
+// somebody else — the directory drops the asking row, a delivery names its
+// sender — so an agent asked to hand its own address to a third party has this
+// or nothing.
+describe("GET /session-bus/self", () => {
+  test("the caller is told the address a peer would have to send to", async () => {
+    const { lead, stop } = pair();
+    try {
+      const res = await get(lead, "self", LEAD_SESSION);
+      expect(res.status).toBe(200);
+      // Exactly `TO_LEAD`, which is what the peer spells on a send that reaches
+      // this session: an identity read that answered anything else would be
+      // handing out an address the send layer refuses.
+      expect({
+        machineId: res.body.machineId,
+        projectId: res.body.projectId,
+        sessionId: res.body.sessionId,
+      }).toEqual(TO_LEAD);
+      expect(res.body.sessionName).toBe("lead session");
+    } finally { stop(); }
+  });
+
+  test("a terminal that names no session is refused, not answered about nobody", async () => {
+    const { lead, stop } = pair();
+    try {
+      const res = await get(lead, "self", "service-pty");
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("NOT_MEMBER");
+    } finally { stop(); }
+  });
+
+  // The machine id is the only part that can be missing, and its absence is an
+  // answer rather than a refusal: a session with no relay identity still has a
+  // name on its own machine, and the caller is the one who has to be told the
+  // address stops at the machine edge.
+  test("a core with no relay identity answers with a null machine", async () => {
+    const m = machine({
+      abDir: tempDir("bus-local-"),
+      machineId: "m1",
+      projectId: "p1",
+      sessionIds: [LEAD_SESSION],
+      localMode: true,
+    });
+    try {
+      const res = await get(m, "self", LEAD_SESSION);
+      expect(res.status).toBe(200);
+      expect(res.body.machineId).toBeNull();
+      expect(res.body.projectId).toBe("p1");
+      expect(res.body.sessionId).toBe(LEAD_SESSION);
     } finally { m.stop(); }
   });
 });

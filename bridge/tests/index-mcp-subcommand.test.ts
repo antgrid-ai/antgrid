@@ -91,6 +91,7 @@ test("mcp subcommand serves the antgrid tools over stdio against the stamped cor
       "antgrid_list_terminals",
       "antgrid_read_terminal",
       "antgrid_list_sessions",
+      "antgrid_whoami",
       "antgrid_publish_artifact",
       "antgrid_list_artifacts",
       "antgrid_get_artifact",

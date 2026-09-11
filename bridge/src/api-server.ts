@@ -471,6 +471,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           if (rest === "artifacts") return sessionBusJson(bus.listArtifacts(terminalId));
           if (rest === "sessions") return sessionBusJson(await bus.listSessions(terminalId));
           if (rest === "inbox") return sessionBusJson(bus.inbox(terminalId));
+          if (rest === "self") return sessionBusJson(bus.self(terminalId));
           if (rest === "thread") {
             // An absent id is passed through as "" rather than answered here:
             // the api's own thread lookup is what owns "unknown thread", so a

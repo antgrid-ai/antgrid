@@ -118,6 +118,7 @@ describe("the session-bus tools", () => {
     expect(isSessionBusTool("antgrid_list_artifacts")).toBe(true);
     expect(isSessionBusTool("antgrid_get_artifact")).toBe(true);
     expect(isSessionBusTool("antgrid_list_sessions")).toBe(true);
+    expect(isSessionBusTool("antgrid_whoami")).toBe(true);
     expect(isSessionBusTool("antgrid_post")).toBe(true);
     expect(isSessionBusTool("antgrid_notify")).toBe(true);
     expect(isSessionBusTool("antgrid_reply")).toBe(true);
@@ -168,6 +169,30 @@ describe("the session-bus tools", () => {
     const text = result.content[0]!.text;
     expect(text).toContain('- [this machine] p1/4f2ac1 "Wire identity wave 6" — feat/wire-identity, running, can reply');
     expect(text).toContain('- [macbook-pro] peer/p2/9c11de "Relay flow control" — development, idle, receive-only');
+  });
+
+  // A local directory row prints no machine because it is read where it means
+  // "here". This address is asked for in order to be given away, so the same
+  // omission would name the READER's machine and address a session nobody meant.
+  test("the self address carries its machine, where a row for the same session would not", async () => {
+    stub(() => Response.json({
+      machineId: "self", projectId: "p1", sessionId: "4f2ac1",
+      projectLabel: "antgrid", sessionName: "Wire identity wave 6",
+    }));
+    const text = (await callSessionBusTool("antgrid_whoami", {})).content[0]!.text;
+    expect(text).toContain('You are "Wire identity wave 6" in project "antgrid"');
+    expect(text).toContain("self/p1/4f2ac1");
+    expect(text).toContain("one without a machine means the machine of whoever reads it");
+  });
+
+  // Two thirds of an address is worse than none: copied off this machine it
+  // resolves against the reader's own. The answer says so instead of printing
+  // it bare.
+  test("no relay identity is answered as an address that does not leave the machine", async () => {
+    stub(() => Response.json({ machineId: null, projectId: "p1", sessionId: "4f2ac1" }));
+    const text = (await callSessionBusTool("antgrid_whoami", {})).content[0]!.text;
+    expect(text).toContain("p1/4f2ac1");
+    expect(text).toContain("only a session on it can use that address");
   });
 
   // The seam a live two-session test walked off: the row is the ONLY place a

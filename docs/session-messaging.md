@@ -290,6 +290,36 @@ relevance. Antgrid starts ahead on both axes — the candidate set is bounded to
 repo and to connected machines (3–15 rows, not 149), and the name already names
 the task. Copy the architecture; do not copy the row.
 
+### 5.6 A session can name itself
+
+The directory answers "who can I address" and deliberately drops the asking
+session's own row. Nothing else on the bus names the caller either: a delivery
+names its SENDER, and a send result names the thread it opened. So an agent had
+no way to say where it could be reached.
+
+That is a hole in exactly one shape, and it is the shape delegation takes. A asks
+B to have C report back to A. B can address C, and C can answer B — but nothing
+can put A's address in front of C, because A cannot read it and B was only ever
+told A's labels. The chain has to be relayed by hand through the middle session.
+
+`antgrid_whoami` closes it: the caller's `machineId/projectId/sessionId` and the
+title it is listed under. Two properties are load-bearing.
+
+- **It is a separate read, not a field on the directory.** Listing sessions
+  spawns git per row and is refused outright where there is no directory. A
+  session must still be able to say who it is on a bridge that cannot say who
+  anyone else is — an identity that is unavailable exactly when the network is
+  broken is unavailable when it is needed.
+- **It always spells the machine**, where a directory row for a local session
+  omits it. A row is read on the machine it means, so the omission is correct
+  there. This address is asked for in order to be given away: handed over with
+  the machine dropped, it names the machine of whoever reads it, and the send
+  that follows lands on a session nobody meant.
+
+A machine with no relay identity has no first part to give. The answer says what
+that costs rather than printing the remaining two thirds bare, which would be
+copied off the machine and resolve against the reader's own.
+
 ---
 
 ## 6. Transport

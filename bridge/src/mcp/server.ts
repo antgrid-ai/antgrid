@@ -166,6 +166,11 @@ export const SESSION_BUS_TOOLS: McpTool[] = [
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
+    name: "antgrid_whoami",
+    description: "The address another session must use to reach you, and the title you are listed under. No other tool names you: antgrid_list_sessions lists everyone except you, a delivery names its sender, and a send names the thread it opened. Ask when your address has to travel — you are asking a session to have a third one report back to you, or you are writing down where you can be reached.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
     name: "antgrid_publish_artifact",
     description: "Store a file-sized piece of evidence — a diff, a log, a transcript — and get back an id to name in a message. The bytes stay on this machine. The other side is shown the id, name and summary and cannot read the content, so put anything it must actually READ in the message text.",
     inputSchema: {
@@ -399,6 +404,35 @@ function memberAddress(ref: any): string {
   return `${machine}${ref.projectId}/${ref.sessionId}`;
 }
 
+/**
+ * Who the caller is, written the way it has to travel.
+ *
+ * The machine is ALWAYS spelled, which is the one place this disagrees with
+ * `sessionLine` — a directory row for a local session prints no machine, and is
+ * right to, because it is read on the machine it means. This address is read
+ * somewhere else by definition: that is what asking for it is for. Handed over
+ * with the machine dropped it names the reader's own machine, and the send that
+ * follows lands on a session that was never meant, or on none.
+ *
+ * Local mode has no machine to spell, so the answer says what that costs rather
+ * than printing two thirds of an address and letting it be copied off this
+ * machine.
+ */
+function selfLines(data: any): string[] {
+  const where = data.projectLabel ? ` in project "${data.projectLabel}"` : "";
+  const title = data.sessionName ? `"${data.sessionName}"${where}` : `unnamed${where}`;
+  if (!data.machineId) {
+    return [
+      `You are ${title}, addressable as ${data.projectId}/${data.sessionId}.`,
+      "This machine has no bus identity, so only a session on it can use that address.",
+    ];
+  }
+  return [
+    `You are ${title}, addressable as ${data.machineId}/${data.projectId}/${data.sessionId}.`,
+    "Pass that address on exactly as written: one without a machine means the machine of whoever reads it.",
+  ];
+}
+
 /** What a send owes its caller. The thread id because §4.3 makes it
  *  bridge-owned — an agent never told it cannot answer on the exchange it just
  *  opened — and whether the frame LEFT this machine, which is never a claim
@@ -498,6 +532,12 @@ export async function callSessionBusTool(
         : `Sessions you can address (${rows.length}${hidden}):`;
       const body = rows.map((row) => sessionLine(row, self)).join("\n");
       return toolText([head, body, reachLine(r.data.reach)].filter(Boolean).join("\n"));
+    }
+
+    case "antgrid_whoami": {
+      const r = await api("GET", "/session-bus/self");
+      if (!r.ok) return toolError(busError(r));
+      return toolText(selfLines(r.data).join("\n"));
     }
 
     case "antgrid_publish_artifact": {
