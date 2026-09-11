@@ -25,8 +25,10 @@ export const TERMINAL_VIEWER_MAX_BYTES = 1024 * 1024;
 /** In-flight ceiling across every attachment on one connection, same unit.
  *
  *  Equal to the per-attachment budget, not a multiple of it, and that is the
- *  point: frames ride the PREVIEW channel (see agent-core's `sendPreviewAb`
- *  wiring), whose credit window is `CHANNEL_WINDOW_BYTES` — 2 MiB in
+ *  point: frames ride the PREVIEW channel (`PREVIEW_CHANNEL_MESSAGE_TYPES` in
+ *  protocol.ts is the set that puts them there, and agent-core routes every
+ *  targeted terminal reply off it), whose credit window is
+ *  `CHANNEL_WINDOW_BYTES` — 2 MiB in
  *  packages/antgrid-wire/src/flow.ts, which this file may not import (see the
  *  header). At 2 MiB a single terminal connection could hold the ENTIRE
  *  preview window un-acked for up to TERMINAL_ACK_TIMEOUT_MS, and the browser

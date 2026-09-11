@@ -190,9 +190,14 @@ class PreviewService {
   }
 
   /// Direct transport subscription — picks up tunnel HTTP responses on the
-  /// `preview` channel. The MessageRouter only forwards `control`-channel
-  /// frames into heavy/status streams, so preview-channel frames must be
-  /// caught here.
+  /// `preview` channel. [MessageRouter] forwards every `control`-channel frame
+  /// into heavy/status plus the preview-channel types named in
+  /// `kPreviewChannelInboundTypes`, and the tunnel's own types are deliberately
+  /// kept out of that set (they are in `kUnroutedInboundTypes`): they are
+  /// full-bandwidth bulk with exactly one consumer, so routing them would pay
+  /// for classification, durable retention and a debug parse on the hot path to
+  /// reach this same object. Anything ELSE that needs a preview-borne type
+  /// belongs in that set, not in another copy of this subscription.
   void _onTransportMessage(InboundMessage msg) {
     if (msg.channel != 'preview') return;
     if (checkoutIdForEnvelope(msg.json) != checkoutId) return;

@@ -33,7 +33,7 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, type InboundSource } from "./message-bus";
@@ -708,11 +708,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // client for a stream it never asked for. `runId`/`attachmentId` still
         // ride the message so the requester's own stale generation can ignore
         // one, exactly like `terminal:snapshot`'s `history` label.
-        // D4: only the bulk per-frame payload rides "preview" — `subscribed`/
+        // Only the bulk per-frame payload rides "preview" — `subscribed`/
         // `display:status` are small, latched, one-shot control replies the
         // requester is actively waiting on, and belong with the rest of the
         // control plane's priority instead of queued behind preview traffic.
-        (message.type === "terminal:frame" ? sendPreviewAbTo : sendAbTo)(message, source);
+        // The channel comes off PREVIEW_CHANNEL_MESSAGE_TYPES rather than a
+        // literal, because the app-side gate reads the same set.
+        sendAbToItsChannel(message, source);
       },
     };
   }
@@ -1840,8 +1842,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (manager.runId(internalId) !== msg.runId) break;
         const page = manager.historyPage(msg.runId, msg.epoch, msg.beforeRowId);
         if (!page) break;
-        // D4: bulk row data, same "preview" channel as `terminal:frame`.
-        sendPreviewAb(createMessage("terminal:history:page", {
+        // Bulk row data, targeted rather than broadcast: a history page answers
+        // one request's own `beforeRowId` cursor into scrollback the requester
+        // may already partly hold, so the wire it did not arrive on has no use
+        // for it and must not be charged for it. Targeting is per wire CLASS
+        // (`InboundSource`), so the guarantee is that the desktop's loopback
+        // socket never pays for a phone's paging, and vice versa.
+        sendAbToItsChannel(createMessage("terminal:history:page", {
           checkoutId,
           terminalId: msg.terminalId,
           runId: msg.runId,
@@ -1851,7 +1858,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           expired: page.expired,
           beforeRowId: page.beforeRowId,
           rows: page.rows,
-        }));
+        }), client);
         break;
       }
       case "file:tree:snapshot:request": {
@@ -2002,21 +2009,36 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  MessageBus.retain. */
   let retainAb: (msg: AbMessage) => void = (_m) => {};
   let sendPlain: (data: object) => Promise<SendOutcome> = async () => "dropped";
-  /** Same wire as [sendAb] but on the "preview" channel — D4's split so a
-   *  terminal's bulk display payloads (`terminal:frame`, `terminal:history:page`)
-   *  queue and get credited separately from the control plane, behind
-   *  `send-scheduler.ts`'s already-strict control>preview priority, instead of
-   *  competing with it for `CHANNEL_WINDOW_BYTES`: measured against
-   *  `packages/antgrid-wire/src/flow.ts`, `TERMINAL_CONNECTION_MAX_BYTES` (one
-   *  connection's whole terminal-viewer budget) is exactly `CHANNEL_WINDOW_BYTES`
-   *  — terminal traffic sharing "control" could alone occupy an entire credit
-   *  window and starve every other control-plane message behind it. */
-  let sendPreviewAb: (msg: AbMessage) => void = (_m) => {};
-  /** [sendAb]/[sendPreviewAb] narrowed to ONE wire — the terminal-viewer
-   *  replies, which answer the connection that subscribed rather than the
-   *  project. See MessageBus.publishOnly. */
+  /** [sendAb] narrowed to ONE wire — the terminal-viewer replies, which answer
+   *  the connection that subscribed rather than the project. `only` is an
+   *  `InboundSource`, a wire CLASS and not a client identity, so what this buys
+   *  is that the OTHER transport is never charged for a reply it did not ask
+   *  for. See MessageBus.publishOnly. */
   let sendAbTo: (msg: AbMessage, only: InboundSource) => void = (_m, _o) => {};
+  /** The same narrowing on the "preview" channel, so a terminal's bulk display
+   *  payloads queue and get credited separately from the control plane, behind
+   *  `send-scheduler.ts`'s control>preview priority, instead of competing with
+   *  it for `CHANNEL_WINDOW_BYTES`: measured against
+   *  `packages/antgrid-wire/src/flow.ts`, `TERMINAL_CONNECTION_MAX_BYTES` (one
+   *  connection's whole terminal-viewer budget) is half `CHANNEL_WINDOW_BYTES`
+   *  — the other half is what leaves the browser preview tunnel, which shares
+   *  this channel, room of its own — so terminal traffic on "control" could
+   *  alone occupy half a credit window and stall every other control-plane
+   *  message behind it. Priority is not isolation: `SOCKET_INFLIGHT_BYTES` is shared across
+   *  both channels and sits only one window above one channel's, so a saturated
+   *  preview channel still leaves control a bounded headroom before it too waits
+   *  on a credit. */
   let sendPreviewAbTo: (msg: AbMessage, only: InboundSource) => void = (_m, _o) => {};
+  /** Which channel a message rides is a property of its TYPE, not of the call
+   *  site. `PREVIEW_CHANNEL_MESSAGE_TYPES` is mirrored into the app, which drops
+   *  anything arriving on "preview" the set does not name; a site that hard-codes
+   *  the channel therefore keeps sending on "preview" after its type leaves the
+   *  set, and every frame is discarded with no error on either side. Deriving it
+   *  here makes that drift benign — the type falls back to "control", which the
+   *  app still accepts — so every targeted terminal reply goes out through this. */
+  function sendAbToItsChannel(msg: AbMessage, only: InboundSource): void {
+    (PREVIEW_CHANNEL_MESSAGE_TYPES.has(msg.type) ? sendPreviewAbTo : sendAbTo)(msg, only);
+  }
   /** [sendAb] withheld from the wires listed — D2's mode exclusivity, which is
    *  per CLIENT. See MessageBus.publishExcept. */
   let sendAbExcept: (msg: AbMessage, except: ReadonlySet<InboundSource>) => void = (_m, _e) => {};
@@ -4303,7 +4325,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb = (m) => bus.publish(m, "control");
     republishAb = (m) => bus.republish(m, "control");
     retainAb = (m) => bus.retain(m, "control");
-    sendPreviewAb = (m) => bus.publish(m, "preview");
     sendAbTo = (m, only) => bus.publishOnly(m, "control", only);
     sendPreviewAbTo = (m, only) => bus.publishOnly(m, "preview", only);
     sendAbExcept = (m, except) => bus.publishExcept(m, "control", except);

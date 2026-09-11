@@ -2758,6 +2758,35 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "session:result", "control:result",
 ]);
 
+/** The subset of CHECKOUT_VARIABLE_MESSAGE_TYPES carried on the "preview"
+ * channel rather than "control" (see MessageBus.publish's channel argument
+ * and send-scheduler.ts's control>preview priority): the two BULK per-frame
+ * terminal payloads, `terminal:frame` (a viewer's live screen) and
+ * `terminal:history:page` (a requested scrollback page). The frame
+ * protocol's other six wire types — `terminal:subscribe`/`subscribed`,
+ * `ack`, `unsubscribe`, `history:request`, `display:status` — are small,
+ * latched, one-shot exchanges the requester is actively waiting on, so they
+ * stay on "control" and are drained ahead of preview's bulk traffic rather
+ * than queuing behind it; see the comment on `TerminalViewerTransport.send`
+ * in agent-core.ts. Priority is not isolation: `SendScheduler.fits` also gates
+ * on `SOCKET_INFLIGHT_BYTES`, which is shared by both channels and sits only
+ * one channel-window above one, so a saturated preview channel leaves control
+ * a bounded headroom and then it too waits for a credit.
+ *
+ * Mirrored BY HAND as `kPreviewChannelInboundTypes` in
+ * app/lib/project/project_message_classification.dart, gated against this set
+ * in checkout-mirror-contract.test.ts. Drift here is silent on the wire in
+ * the worst way: a type added here with no Dart counterpart simply stops
+ * arriving at the app, with no error on either side. The bridge side is safe
+ * from the reverse drift only because every targeted terminal reply derives
+ * its channel from this set (`sendAbToItsChannel` in agent-core.ts) — a call
+ * site that hard-codes "preview" would keep sending a removed type onto a
+ * channel the app no longer admits it on. */
+export const PREVIEW_CHANNEL_MESSAGE_TYPES = new Set<string>([
+  "terminal:frame",
+  "terminal:history:page",
+]);
+
 type MessagePayload<T extends AbMessage["type"]> = Omit<
   Extract<AbMessage, { type: T }>,
   "id" | "timestamp" | "type" | "checkoutId"
