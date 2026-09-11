@@ -1,68 +1,155 @@
+import { randomUUID } from "node:crypto";
 import { relaySlotId } from "antgrid-wire";
 import type { HostFile } from "../../bridge/src/host-discovery";
-import type { AbMessage } from "../../bridge/src/protocol";
-import { firstProjectStream } from "../support/stream";
+import {
+  createMessage,
+  type AbMessage,
+  type SessionBusAck,
+  type SessionBusFetch,
+  type SessionBusFetchResult,
+  type SessionBusNotify,
+  type SessionBusPost,
+} from "../../bridge/src/protocol";
+import { postJson } from "../support/session-bus";
+import { firstProjectStream, resolveOnFreshAdvert } from "../support/stream";
 import { generateAppIdentity, handshakeWithoutPairing, setupTestEnv, waitForHostFile, type TestEnv } from "./harness";
 import { LocalTestClient, type LocalConnectInfo } from "./local-client";
 import { RelayClient, type PhoneIdentity } from "./relay-client";
 
 /**
- * Two real bridges, one relay, one desktop app between them.
+ * Two real bridges, one relay, and the desktop app each of them has attached.
  *
  * A SIBLING of `setupTestEnv`, never a change to it: `helpers/harness.ts` is a
  * frozen shared surface, and the multi-machine rows are the only callers that
  * need a second machine. Composition also keeps the fidelity claim honest —
  * each half is exactly the env every single-machine row already runs against.
  *
- * The carrier here is a TEST OBJECT with two legs, and never a third bridge: no
- * bridge can reach another (D7). Its lead leg is the loopback owner socket the
- * desktop app holds over an open project; its peer leg is an ordinary relay app
- * session on the peer's project stream. ONE account identity drives both, which
- * is what a real user has and what re-exercises the per-machine relay slot
- * (`relaySlotId`) end to end.
+ * The carrier here is a TEST OBJECT, never a third bridge: no bridge can dial
+ * another (D7). It holds FOUR legs, because that is what the desktop apps hold
+ * in production and because both directions have to work (§6.3 — a peer
+ * initiates too):
+ *
+ * - a LOOPBACK owner socket on each machine. It is what `carrierPresent()`
+ *   reads, so a machine without one refuses every off-machine send with
+ *   `PEER_UNREACHABLE`, and it is the socket a bridge hands its own outbound
+ *   frames to (lead-role dispatch, `sendToOwner`).
+ * - a RELAY app session on each machine's project stream. It is how a frame
+ *   OPENING an exchange enters the other bridge, and the only way in that
+ *   leaves a route home: `noteRoute` is fed the app session that carried the
+ *   frame, and a loopback delivery carries no such id.
+ *
+ * Routing follows that split exactly: a frame leaving a bridge over its
+ * loopback goes to the target's RELAY leg, and one leaving over a relay leg
+ * goes to the target's LOOPBACK leg. That is not a convention — it is the only
+ * pairing that works. A frame off a loopback is its machine acting as LEAD, so
+ * the far side is peer and needs the route only a relay arrival leaves; a frame
+ * off a relay leg is the far side ANSWERING, addressed to the machine that
+ * opened the context, which is lead there and needs no route at all. ONE
+ * account identity drives both relay legs, which is what a real user has and
+ * what re-exercises the per-machine relay slot (`relaySlotId`) end to end.
  */
+export type MachineName = "a" | "b";
+
+const MACHINE_NAMES: MachineName[] = ["a", "b"];
+
+/** One machine, and everything a row addresses it through. */
+export interface BridgeMachine {
+  readonly name: MachineName;
+  readonly env: TestEnv;
+  /**
+   * This bridge's bus address — its relay registration id, which is the bare
+   * `deviceUuid` the harness also handshakes against.
+   *
+   * A row that wants this proven rather than assumed reads `machineId` off
+   * `GET /session-bus/sessions` (or `session-bus:directory:result`) once a
+   * session exists: a frame addressed to anything else is dropped unacked, so
+   * a wrong id turns a routing bug into a silent timeout.
+   */
+  readonly machineId: string;
+  /** The loopback control plane: the port and token every switch flip and
+   *  directory push on this machine goes through. */
+  readonly host: HostFile;
+  /** The stream `env.app` drives this machine's project verbs on. Not one of
+   *  the carrier's legs on purpose: the carrier CONSUMES the bus frames its
+   *  legs receive, so a row waiting on one of those clients would race it. */
+  readonly streamId: string;
+}
+
+/** What one machine's card turned out to be this cycle, in the vocabulary
+ *  `session-bus:remote-directory` takes (`control-protocol.ts`). */
+export type DirectoryOutcome = "rows" | "no-card" | "refused" | "reach-refused" | "unreachable";
+
+/** One half of a directory pump: one machine's rows, offered to the other. */
+export interface DirectoryPush {
+  /** The machine whose mirror this filled. */
+  into: MachineName;
+  /** The machine whose card was read. */
+  about: MachineName;
+  outcome: DirectoryOutcome;
+  rows: unknown[];
+  truncated: number;
+  /** The receiving bridge's own answer, verbatim: `accepted`/`dropped` when it
+   *  took the push, `error.code` when it refused it. Never reduced to a
+   *  boolean — a push that was accepted and mirrored NOTHING is a different
+   *  failure from one the bridge would not take, and both end as
+   *  `UNKNOWN_PEER` at the next send. */
+  ack: any;
+  /** Why this card read as `unreachable`, when it did. Three unlike failures
+   *  share that outcome and only this separates them. */
+  why?: string;
+}
+
 export interface Carrier {
-  /** Every session-bus frame either leg observed, in arrival order. */
+  /** Every session-bus frame any leg observed, in arrival order. */
   readonly frames: AbMessage[];
   /** Frames the carrier could not hand to the machine they were addressed to —
-   *  an unreachable member, or a leg that is closed or stopped. Kept rather
-   *  than swallowed: a scenario staging an unreachable machine asserts on this,
-   *  and a routing bug surfaces here instead of as a silent timeout. */
-  readonly droppedToPeer: AbMessage[];
+   *  a stopped carrier, a machine whose app is detached, or an address on
+   *  neither machine. Kept rather than swallowed: a row staging an outage
+   *  asserts on this, and a routing bug surfaces here instead of as a silent
+   *  timeout. */
+  readonly undeliverable: AbMessage[];
   /** Resume forwarding. Already started by `setupTwoBridgeEnv`. */
   start(): void;
-  /** Stage an unreachable peer WITHOUT killing a bridge: both legs stay open
-   *  and both bridges stay live, but nothing crosses. */
+  /**
+   * Stage a LOSSY link: both bridges stay live and both believe every frame
+   * left, and nothing crosses.
+   *
+   * Not an unreachable machine. The sending bridge has already been told the
+   * frame was carried, so nothing retries it and `start()` does not flush what
+   * was staged — use `detachApp` for a machine that cannot send at all.
+   */
   stop(): void;
+  /** The desktop app on one machine quitting: its loopback socket closes, so
+   *  that machine's own off-machine sends refuse `PEER_UNREACHABLE` and frames
+   *  addressed INTO it have nowhere to land. */
+  detachApp(machine: MachineName): void;
+  /** The app coming back. The bridge's outbox retries on its own timer, so
+   *  what it held while the app was gone goes out shortly after this. */
+  attachApp(machine: MachineName): Promise<void>;
+  /**
+   * One cycle of the app's remote-directory pump, in both directions.
+   *
+   * Without it each machine's mirror is empty and EVERY cross-machine send
+   * answers `UNKNOWN_PEER`: a bridge cannot ask another bridge what sessions
+   * it holds, so the only thing that ever fills the mirror is this push. The
+   * push is also the carrier heartbeat the mirror ages out on, so a long row
+   * pumps again rather than once (`REMOTE_CARRIER_SILENCE_MS`).
+   *
+   * Both halves are read over the relay and pushed over loopback, exactly as
+   * the app does it — and both are gated on the ANSWERING machine's remote
+   * access and agent reach, and on the RECEIVING machine's remote access. A
+   * row that flips a switch pumps before it flips.
+   */
+  pumpDirectory(): Promise<DirectoryPush[]>;
 }
 
 export interface TwoBridgeEnv {
-  lead: TestEnv;
-  peer: TestEnv;
+  a: BridgeMachine;
+  b: BridgeMachine;
   carrier: Carrier;
-  /** The one account device id both legs connect under. */
+  /** The one account device id every relay leg connects under. */
   account: string;
   identity: PhoneIdentity;
-  leadMachineId: string;
-  peerMachineId: string;
-  /** The peer project's stream on the carrier's peer leg. */
-  peerStreamId: string;
-  /** The lead project's stream on `lead.app` — where the app drives A's own
-   *  session verbs, and the channel the leak invariants watch. */
-  leadStreamId: string;
-  /** The carrier's peer leg. Raw `RelayClient`, not `TestApp`: the forwarding
-   *  loop needs `waitFor`/`sendOnStream`, which the wrapper does not expose. */
-  peerApp: RelayClient;
-  /** The carrier's lead leg — the loopback owner socket. */
-  leadCarrier: LocalTestClient;
-  leadHost: HostFile;
-  peerHost: HostFile;
-  /**
-   * Re-establish the peer leg after `peer.restartAgent()`: the bridge came back
-   * with fresh session keys and a freshly registered project stream, so the
-   * handshake and the streamId both have to be resolved again.
-   */
-  rebindPeerLeg(): Promise<void>;
   teardown(): Promise<void>;
 }
 
@@ -110,7 +197,7 @@ async function connectSlotted(
 }
 
 /**
- * Drill into the peer's project stream on a freshly handshaked client.
+ * Drill into a project's stream on a freshly handshaked client.
  *
  * Two steps, both load-bearing. The advert says the project is dialable at all —
  * it is seeded only by a snapshot pull, and a project registers a beat after the
@@ -123,28 +210,90 @@ async function connectSlotted(
  * filter by stream at all, since the streamId travels inside the sealed payload.
  */
 async function resolveStream(app: RelayClient, projectId: string): Promise<string> {
-  let lastErr: unknown;
-  for (let i = 0; i < 15; i++) {
-    app.drainQueued("agent:projects");
-    await app.pullStateSnapshot();
-    try {
-      await firstProjectStream(app, projectId, 700);
-      return await app.openProjectStream(projectId, 10_000);
-    } catch (err) {
-      lastErr = err;
-      await Bun.sleep(100);
-    }
-  }
-  throw new Error(`no streamId advertised for project ${projectId}: ${String(lastErr)}`);
+  return resolveOnFreshAdvert(app, projectId, {
+    attempts: 15,
+    gapMs: 100,
+    resolve: async (client) => {
+      await firstProjectStream(client, projectId, 700);
+      return client.openProjectStream(projectId, 10_000);
+    },
+  });
 }
+
+/** The desktop app's own view of a peer machine's sessions, over the relay
+ *  control plane — the ONLY read that carries them, and the input the pump
+ *  pushes home. Classified into the five outcomes the wire verb names, because
+ *  a caller that cannot tell "that machine refused" from "nobody answered"
+ *  renders both as "nobody else is there".
+ *
+ *  `unreachable` is the outcome three unlike failures share — a timeout, a dead
+ *  leg, and an answer of a shape nothing here recognises — so it carries `why`
+ *  as well. Without it a row that fails on this read reports that a machine
+ *  said nothing, which is the one explanation that is never actionable. */
+async function readSessionCard(
+  app: RelayClient,
+  timeoutMs = 10_000,
+): Promise<{ outcome: DirectoryOutcome; rows: unknown[]; truncated: number; why?: string }> {
+  const requestId = randomUUID();
+  let failure: string | undefined;
+  // Armed before the send: the answer can arrive inside the same tick.
+  const answered = app
+    .waitFor((m: any) => m.type === "response" && m.requestId === requestId, timeoutMs)
+    .catch((err: unknown) => {
+      failure = err instanceof Error ? err.message : String(err);
+      return null;
+    });
+  app.sendEncrypted(
+    createMessage("request", {
+      requestId,
+      method: "machine.capability-card",
+      params: { includeSessions: true },
+    }),
+  );
+  const res = (await answered) as
+    | { ok?: boolean; result?: { sessions?: unknown[]; sessionsTruncated?: number }; error?: { code?: string } }
+    | null;
+  if (res === null) return { outcome: "unreachable", rows: [], truncated: 0, why: failure ?? "no answer" };
+  if (!res.ok) {
+    const code = res.error?.code;
+    if (code === "NOT_ALLOWED_AGENT_REACH") return { outcome: "reach-refused", rows: [], truncated: 0 };
+    if (code === "NOT_ALLOWED") return { outcome: "refused", rows: [], truncated: 0 };
+    return { outcome: "unreachable", rows: [], truncated: 0, why: `refused ${code ?? "with no code"}` };
+  }
+  const sessions = res.result?.sessions;
+  // An absent key is a bridge that does not know `includeSessions`, which is a
+  // different fact from a bridge that answered none.
+  if (!Array.isArray(sessions)) return { outcome: "no-card", rows: [], truncated: 0 };
+  return { outcome: "rows", rows: sessions, truncated: res.result?.sessionsTruncated ?? 0 };
+}
+
+/** `project:start` on a machine's loopback control plane, whose answer carries
+ *  the port and token the owner socket connects with. */
+async function startProject(machine: BridgeMachine): Promise<LocalConnectInfo> {
+  const started = await postJson(
+    `http://127.0.0.1:${machine.host.controlPort}/control`,
+    { id: `two-bridge-start-${randomUUID()}`, type: "project:start", projectId: machine.env.projectId },
+    machine.host.token,
+  ) as { ok?: boolean; connect?: LocalConnectInfo };
+  if (!started.ok || !started.connect) {
+    throw new Error(`project:start on machine ${machine.name} failed: ${JSON.stringify(started)}`);
+  }
+  return started.connect;
+}
+
+type BusFrame = SessionBusPost | SessionBusNotify | SessionBusFetch | SessionBusFetchResult | SessionBusAck;
 
 // The five frames a bridge actually carries between machines — the same set
 // `SessionBusCoordinator.handleInbound` (bridge/src/session-bus/coordinator.ts)
 // enumerates. NOT a `session-bus:` prefix match: that prefix also covers the
 // app's own reads of its bridge (inbox, directory, unread, …), which carry no
-// `to.machineId` and so would land in `droppedToPeer` on every run — silent
+// `to.machineId` and so would land in `undeliverable` on every run — silent
 // today only because nothing asserts on that array yet.
-const BUS_FRAME_TYPES = new Set([
+//
+// Filled through the frame types and read back as plain strings: the element
+// type makes a name the protocol renamed a compile error here, and the wider
+// read is what lets an arrival of any shape be tested.
+const BUS_FRAME_TYPES: ReadonlySet<string> = new Set<BusFrame["type"]>([
   "session-bus:post",
   "session-bus:notify",
   "session-bus:fetch",
@@ -152,30 +301,36 @@ const BUS_FRAME_TYPES = new Set([
   "session-bus:ack",
 ]);
 
-function isBusFrame(m: any): boolean {
-  return typeof m?.type === "string" && BUS_FRAME_TYPES.has(m.type);
+/** A predicate rather than a boolean so the routing below reads `to` off the
+ *  frame itself: every one of the five declares it, and a cast there would
+ *  survive the field being renamed and route nothing. */
+function isBusFrame(m: unknown): m is BusFrame {
+  if (typeof m !== "object" || m === null || !("type" in m)) return false;
+  return typeof m.type === "string" && BUS_FRAME_TYPES.has(m.type);
 }
+
+type LegKind = "loopback" | "relay";
 
 class TwoBridgeCarrier implements Carrier {
   readonly frames: AbMessage[] = [];
-  readonly droppedToPeer: AbMessage[] = [];
+  readonly undeliverable: AbMessage[] = [];
   private running = false;
   private disposed = false;
-  private pump: Promise<void> | null = null;
-  private unsubscribeLead: (() => void) | null = null;
+  private readonly pumps: Promise<void>[] = [];
+  private readonly loopbacks: Record<MachineName, LocalTestClient | null> = { a: null, b: null };
+  private readonly unsubscribe: Record<MachineName, (() => void) | null> = { a: null, b: null };
 
   constructor(
-    private readonly leadLeg: LocalTestClient,
-    private readonly peerLeg: RelayClient,
-    private peerStreamId: string,
-    private readonly leadMachineId: string,
-    private readonly peerMachineId: string,
+    private readonly machines: Record<MachineName, BridgeMachine>,
+    private readonly relays: Record<MachineName, RelayClient>,
+    private readonly relayStreams: Record<MachineName, string>,
   ) {}
 
-  attach(): void {
-    this.unsubscribeLead = this.leadLeg.on((m) => this.observe(m));
+  /** Begin forwarding. The relay legs are pumped from here; each machine's app
+   *  is attached separately, and a row may take one away again. */
+  open(): void {
     this.running = true;
-    this.pump = this.pumpPeerLeg();
+    for (const name of MACHINE_NAMES) this.pumps.push(this.pumpRelayLeg(name));
   }
 
   start(): void {
@@ -186,59 +341,110 @@ class TwoBridgeCarrier implements Carrier {
     this.running = false;
   }
 
-  /** After a peer bridge restart: the stream its project is reachable on is
-   *  reallocated, and forwarding to the old one would go nowhere. */
-  repointPeerStream(streamId: string): void {
-    this.peerStreamId = streamId;
+  detachApp(machine: MachineName): void {
+    this.unsubscribe[machine]?.();
+    this.unsubscribe[machine] = null;
+    this.loopbacks[machine]?.close();
+    this.loopbacks[machine] = null;
+  }
+
+  async attachApp(machine: MachineName): Promise<void> {
+    this.detachApp(machine);
+    const connect = await startProject(this.machines[machine]);
+    const client = new LocalTestClient();
+    // Subscribed BEFORE the hello resolves: a frame the bridge replays on
+    // connect must not land in the gap between `connect()` and the first
+    // listener.
+    this.unsubscribe[machine] = client.on((m) => this.observe(m, machine, "loopback"));
+    this.loopbacks[machine] = client;
+    await client.connect(connect, { capabilities: { sessionBusCarrier: true } });
+  }
+
+  async pumpDirectory(): Promise<DirectoryPush[]> {
+    // Each machine's rows into the OTHER machine's mirror: a mirror holds only
+    // peers, and a bridge reads its own sessions live.
+    return [await this.pushDirectory("b", "a"), await this.pushDirectory("a", "b")];
   }
 
   dispose(): void {
     this.disposed = true;
     this.running = false;
-    this.unsubscribeLead?.();
-    this.unsubscribeLead = null;
+    for (const name of MACHINE_NAMES) this.detachApp(name);
   }
 
   async settle(): Promise<void> {
-    await this.pump?.catch(() => {});
+    await Promise.all(this.pumps.map((p) => p.catch(() => {})));
+  }
+
+  private async pushDirectory(about: MachineName, into: MachineName): Promise<DirectoryPush> {
+    const answer = await readSessionCard(this.relays[about]);
+    const host = this.machines[into].host;
+    const ack = await postJson(
+      `http://127.0.0.1:${host.controlPort}/control`,
+      {
+        id: `two-bridge-directory-${randomUUID()}`,
+        type: "session-bus:remote-directory",
+        machines: [
+          {
+            machineId: this.machines[about].machineId,
+            observedAt: Date.now(),
+            outcome: answer.outcome,
+            rows: answer.rows,
+            truncated: answer.truncated,
+          },
+        ],
+        notConnected: 0,
+      },
+      host.token,
+    );
+    return { into, about, ...answer, ack };
   }
 
   // The carrier moves BYTES, not meaning: a frame is forwarded exactly as it
-  // arrived. Never re-`createMessage` it, never re-stamp `from`/`to`/`seq`/
-  // `taskId`, never fill in a field the sender left out. Each of those is a fact
-  // only a bridge may author — a carrier that repairs a frame turns a protocol
-  // bug on one machine into agreed state on both, and the ack/retry ladder stops
-  // meaning anything.
-  private observe(frame: AbMessage): void {
+  // arrived. Never re-`createMessage` it, never re-stamp `from`/`to`/
+  // `contextId`/`threadId`, never fill in a field the sender left out. Each of
+  // those is a fact only a bridge may author — a carrier that repairs a frame
+  // turns a protocol bug on one machine into agreed state on both, and the
+  // ack/retry ladder stops meaning anything.
+  private observe(frame: AbMessage, from: MachineName, leg: LegKind): void {
     if (!isBusFrame(frame)) return;
     this.frames.push(frame);
-    if (!this.running) { this.droppedToPeer.push(frame); return; }
+    if (!this.running) { this.undeliverable.push(frame); return; }
     // Routed by ADDRESS, never by the leg it arrived on: `to` is the only thing
     // that says which machine owes this frame, and a member on neither machine
     // has to be visibly undeliverable rather than quietly handed to whichever
-    // leg happened to be open.
-    const to = (frame as any).to?.machineId;
-    try {
-      if (to === this.peerMachineId) { this.peerLeg.sendOnStream(this.peerStreamId, frame); return; }
-      // Inbound to A goes back down the SAME loopback leg rather than over the
-      // phone's project stream: that socket is the only inbound bus route the
-      // desktop carrier has, and a frame arriving any other way would exercise a
-      // path production never takes.
-      if (to === this.leadMachineId) { this.leadLeg.send(frame, "control"); return; }
-    } catch {
-      // A closed leg is the same fact as an unreachable machine.
+    // leg happened to be open. The leg it arrived on decides only HOW it is
+    // handed over — see this class's own doc.
+    const to = frame.to?.machineId;
+    const target = MACHINE_NAMES.find((name) => this.machines[name].machineId === to);
+    // A frame addressed to the machine that just sent it is one no carrier
+    // should ever see: a same-machine send is handed straight to the target's
+    // delivery queue and never leaves the bridge.
+    if (target !== undefined && target !== from) {
+      try {
+        if (leg === "loopback") {
+          this.relays[target].sendOnStream(this.relayStreams[target], frame);
+          return;
+        }
+        const loopback = this.loopbacks[target];
+        if (loopback) { loopback.send(frame, "control"); return; }
+      } catch {
+        // A closed leg is the same fact as an unreachable machine.
+      }
     }
-    this.droppedToPeer.push(frame);
+    this.undeliverable.push(frame);
   }
 
-  /** The peer leg is a `RelayClient`, which has no listener hook — so it is
+  /** A relay leg is a `RelayClient`, which has no listener hook — so it is
    *  polled with a re-arming short `waitFor`. `waitForCancelable` scans what has
-   *  already arrived before it arms, so the gap between arms loses nothing. */
-  private async pumpPeerLeg(): Promise<void> {
+   *  already arrived before it arms, so the gap between arms loses nothing, and
+   *  it splices what it matches, so nothing is forwarded twice. */
+  private async pumpRelayLeg(machine: MachineName): Promise<void> {
+    const leg = this.relays[machine];
     while (!this.disposed) {
       let frame: any;
       try {
-        frame = await this.peerLeg.waitFor(isBusFrame, 200);
+        frame = await leg.waitFor(isBusFrame, 200);
       } catch {
         continue;
       }
@@ -247,7 +453,7 @@ class TwoBridgeCarrier implements Carrier {
       // of the frame — dropping it un-stamps the transport, it does not edit
       // what the bridge sent.
       const { _streamId, ...rest } = frame;
-      this.observe(rest as AbMessage);
+      this.observe(rest as AbMessage, machine, "relay");
     }
   }
 }
@@ -257,128 +463,83 @@ export async function setupTwoBridgeEnv(opts: {
   prepareProject?: (dir: string) => void | Promise<void>;
   /** Agent env for BOTH bridges. */
   env?: Record<string, string>;
-  /** Agent env for one side only — the PTY sink path has to differ per machine,
-   *  and the sink script reads one fixed variable name. */
-  leadEnv?: Record<string, string>;
-  peerEnv?: Record<string, string>;
+  /** Agent env for one machine only — the PTY sink path has to differ per
+   *  machine, and the sink script reads one fixed variable name. */
+  envA?: Record<string, string>;
+  envB?: Record<string, string>;
 } = {}): Promise<TwoBridgeEnv> {
   const fixtureName = opts.fixtureName ?? "basic";
 
-  // ONE relay, two bridges — the lead env owns it, so the peer must be torn
-  // down first (see `teardown`).
-  const lead = await setupTestEnv({
+  // ONE relay, two bridges — machine A's env owns it, so B must be torn down
+  // first (see `teardown`).
+  const envA = await setupTestEnv({
     fixtureName,
     prepareProject: opts.prepareProject,
-    env: { ...opts.env, ...opts.leadEnv },
+    env: { ...opts.env, ...opts.envA },
   });
   // Every handle below reaches the caller ONLY through the `TwoBridgeEnv` this
   // resolves with, so a throw partway leaves two bridges, their PTY trees, both
   // fake licence servers and the shared relay running with nothing left holding
   // them — and the rows that follow then fight those ports for the rest of the
   // process. The catch unwinds in `teardown`'s own order.
-  let builtPeer: TestEnv | undefined;
-  let builtPeerApp: RelayClient | undefined;
-  let builtLeadCarrier: LocalTestClient | undefined;
+  let builtEnvB: TestEnv | undefined;
+  const builtRelayLegs: RelayClient[] = [];
   let builtCarrier: TwoBridgeCarrier | undefined;
   try {
-    const peer = await setupTestEnv({
+    const envB = await setupTestEnv({
       fixtureName,
-      relay: lead.relay,
+      relay: envA.relay,
       prepareProject: opts.prepareProject,
-      env: { ...opts.env, ...opts.peerEnv },
+      env: { ...opts.env, ...opts.envB },
     });
-    builtPeer = peer;
+    builtEnvB = envB;
 
-    const { account, identity } = await seedSharedAccountDevice(lead, peer);
+    const { account, identity } = await seedSharedAccountDevice(envA, envB);
 
-    // The phone joins A's project stream so the scenarios can address A's own
-    // session verbs on it. The leak invariants do NOT rest on that join: a bridge
-    // broadcast reaches every established app session whether or not it joined a
-    // stream (see `resolveStream`), which is exactly what makes "no bus frame ever
-    // arrived here" a fact about the bridge on either client.
-    const leadStreamId = await resolveStream(lead.app, lead.projectId);
-
-    // --- lead leg: the desktop app's loopback owner socket ---
-    // D7 again: the lead bridge addresses every outbound frame to this socket and
-    // nowhere else, and only once the owner declares itself the carrier.
-    const leadHost = await waitForHostFile(lead.abDir, 15_000);
-    const started = await fetch(`http://127.0.0.1:${leadHost.controlPort}/control`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", authorization: `Bearer ${leadHost.token}` },
-      body: JSON.stringify({ id: "two-bridge-carrier", type: "project:start", projectId: lead.projectId }),
-    }).then((r) => r.json() as Promise<{ ok?: boolean; connect?: LocalConnectInfo }>);
-    if (!started.ok || !started.connect) {
-      throw new Error(`project:start on the lead failed: ${JSON.stringify(started)}`);
+    const machines = {} as Record<MachineName, BridgeMachine>;
+    const relays = {} as Record<MachineName, RelayClient>;
+    const relayStreams = {} as Record<MachineName, string>;
+    for (const [name, env] of [["a", envA], ["b", envB]] as Array<[MachineName, TestEnv]>) {
+      machines[name] = {
+        name,
+        env,
+        machineId: env.agentDeviceId,
+        host: await waitForHostFile(env.abDir, 15_000),
+        // The row's own client joins the project stream so it can drive that
+        // machine's session verbs. The leak invariants do NOT rest on that
+        // join: a bridge broadcast reaches every established app session
+        // whether or not it joined a stream (see `resolveStream`), which is
+        // what makes "no carried frame ever arrived here" a fact about the
+        // bridge rather than about this client's subscriptions.
+        streamId: await resolveStream(env.app, env.projectId),
+      };
+      const leg = await connectSlotted(env, identity, account, env.agentDeviceId);
+      builtRelayLegs.push(leg);
+      relays[name] = leg;
+      relayStreams[name] = await resolveStream(leg, env.projectId);
     }
-    const leadCarrier = new LocalTestClient();
-    builtLeadCarrier = leadCarrier;
 
-    // --- peer leg: an ordinary relay app session on the peer's project stream ---
-    const peerApp = await connectSlotted(peer, identity, account, peer.agentDeviceId);
-    builtPeerApp = peerApp;
-    const peerStreamId = await resolveStream(peerApp, peer.projectId);
-    const peerHost = await waitForHostFile(peer.abDir, 15_000);
-
-    const carrier = new TwoBridgeCarrier(
-      leadCarrier,
-      peerApp,
-      peerStreamId,
-      lead.agentDeviceId,
-      peer.agentDeviceId,
-    );
+    const carrier = new TwoBridgeCarrier(machines, relays, relayStreams);
     builtCarrier = carrier;
-    // Subscribed BEFORE the hello resolves: a frame the bridge replays on connect
-    // must not land in the gap between `connect()` and the first listener.
-    carrier.attach();
-    await leadCarrier.connect(started.connect, { capabilities: { sessionBusCarrier: true } });
+    carrier.open();
+    for (const name of MACHINE_NAMES) await carrier.attachApp(name);
 
-    const env: TwoBridgeEnv = {
-      lead,
-      peer,
+    return {
+      a: machines.a,
+      b: machines.b,
       carrier,
       account,
       identity,
-      // The bridge's own half of every bus address. Taken from the harness here
-      // and PROVEN against `GET /session-bus/role` in each scenario — a frame
-      // addressed to anything else is dropped unacked, so an assumed id would
-      // turn a routing bug into a silent timeout.
-      leadMachineId: lead.agentDeviceId,
-      peerMachineId: peer.agentDeviceId,
-      peerStreamId,
-      leadStreamId,
-      peerApp,
-      leadCarrier,
-      leadHost,
-      peerHost,
-      async rebindPeerLeg() {
-        // The relay closes an agent's streams when it disconnects, and
-        // `RelayClient` never invalidates its own project->stream cache on a
-        // peer-offline — so the stale entry has to go before the re-drill, or the
-        // carrier keeps forwarding onto a stream id the relay no longer routes.
-        (peerApp as unknown as { streamByProject: Map<string, string> }).streamByProject.delete(peer.projectId);
-        // Generous: the fresh process has to spawn, register with the relay and
-        // become routable before a client-hello can be answered at all.
-        await handshakeWithoutPairing(peerApp, peer.agentDeviceId, peer.agent.ed25519Pubkey, {
-          attempts: 30,
-          perAttemptTimeoutMs: 2_000,
-          gapMs: 300,
-        });
-        const next = await resolveStream(peerApp, peer.projectId);
-        env.peerStreamId = next;
-        carrier.repointPeerStream(next);
-      },
       async teardown() {
         carrier.stop();
         carrier.dispose();
         await carrier.settle();
-        leadCarrier.close();
-        await peerApp.disconnect().catch(() => {});
-        // Peer first: `lead` owns the shared relay and stops it on teardown.
-        await peer.teardown();
-        await lead.teardown();
+        for (const leg of builtRelayLegs) await leg.disconnect().catch(() => {});
+        // B first: A owns the shared relay and stops it on teardown.
+        await envB.teardown();
+        await envA.teardown();
       },
     };
-    return env;
   } catch (err) {
     // Each step guarded on its own: a cleanup that throws must not replace the
     // failure the caller needs to read.
@@ -387,10 +548,9 @@ export async function setupTwoBridgeEnv(opts: {
       builtCarrier?.dispose();
       await builtCarrier?.settle();
     } catch { /* nothing left to salvage */ }
-    try { builtLeadCarrier?.close(); } catch { /* already closed */ }
-    await builtPeerApp?.disconnect().catch(() => {});
-    await builtPeer?.teardown().catch(() => {});
-    await lead.teardown().catch(() => {});
+    for (const leg of builtRelayLegs) await leg.disconnect().catch(() => {});
+    await builtEnvB?.teardown().catch(() => {});
+    await envA.teardown().catch(() => {});
     throw err;
   }
 }

@@ -419,6 +419,12 @@ export class ProjectCore {
       // (evals, most of this file's own test callers), which falls back to a
       // coordinator scoped to itself.
       sessionBus: this.deps.sessionBus,
+      // Host-injected like the coordinator above, and forwarded by name because
+      // this list is explicit rather than a spread: a field the host supplies
+      // and this list omits reaches the core as undefined, and the bus then
+      // refuses AGENT_NOT_READY ahead of every other gate on a real bridge
+      // while every in-process test that injects a directory stays green.
+      ...(this.deps.sessionDirectory ? { sessionDirectory: this.deps.sessionDirectory } : {}),
       queueBusLine: (line: Omit<QueuedLine, "queuedAt">) => this.deliveries?.queue(line),
       forgetBusLines: (sessionId: string) => this.deliveries?.forget(sessionId),
       relayUrl: this.deps.relayUrl,

@@ -105,9 +105,9 @@ export interface SessionBusSelf {
  * What {@link SessionBusCoordinator.handleInbound} did with a frame.
  *
  * `false` means it was not a bus frame at all. The other two carry the
- * difference a carrier-routing caller depends on: only an applied frame has been
- * proven to name a session this bridge holds, so only an applied frame may be
- * trusted to say anything about where its sender is.
+ * difference a local deliverer depends on: only an applied frame reached a
+ * session this bridge holds, so only an applied frame may be reported as
+ * delivered rather than held and retried.
  */
 export type InboundOutcome = false | "applied" | "dropped";
 
@@ -320,12 +320,13 @@ export class SessionBusCoordinator {
   /**
    * Record which app session — and which project's stream — carried
    * [contextId] in, so a later peer-role send on this context knows where home
-   * is. Called only for a frame `handleInbound` already reported `"applied"`:
-   * that address check is what proves the sender is talking about a session
-   * this bridge actually holds, and this table is the other end's only route
-   * back — noting on an unapplied frame would let any app session rebind it
-   * with one syntactically valid frame carrying someone else's contextId, and
-   * take the next answer for itself.
+   * is. Called only for a frame that cleared `handleInbound`'s address check —
+   * from its `onAccepted` hook, which fires at exactly that point: the check is
+   * what proves the sender is talking about a session this bridge actually
+   * holds, and this table is the other end's only route back, so noting ahead
+   * of it would let any app session rebind the context with one syntactically
+   * valid frame carrying someone else's contextId, and take the next answer for
+   * itself.
    *
    * The project named here is the one whose stream the frame ARRIVED on, and
    * it is deliberately not compared against whichever project owns
@@ -826,7 +827,18 @@ export class SessionBusCoordinator {
     );
   }
 
-  handleInbound(msg: AbMessage): InboundOutcome {
+  /**
+   * [onAccepted] runs the instant the address check below passes and before any
+   * verb is folded, because folding a message DISPATCHES its receipt — and that
+   * receipt is itself a peer-role send, which reaches nobody until the caller
+   * has recorded the route this very frame arrived on. Running it on the
+   * outcome instead loses the receipt for the first frame of every context,
+   * permanently: an ack is fire-and-forget and nothing retries it.
+   *
+   * Optional because a caller with no carrier to record — local delivery on
+   * this machine (host-server.ts's `deliverLocal`) — has no route to bind.
+   */
+  handleInbound(msg: AbMessage, onAccepted?: () => void): InboundOutcome {
     switch (msg.type) {
       case "session-bus:post":
       case "session-bus:notify":
@@ -846,6 +858,7 @@ export class SessionBusCoordinator {
       return "dropped";
     }
     const sessionId = msg.to.sessionId;
+    onAccepted?.();
     this.warnIfProjectDrifted(self, msg.to);
     switch (msg.type) {
       case "session-bus:post":

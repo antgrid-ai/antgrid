@@ -523,3 +523,87 @@ describe("session-bus coordinator across a carrier", () => {
     expect(carried.filter((f) => f.type === "session-bus:post")).toEqual([]);
   });
 });
+
+// The harness above sends every peer-role frame unconditionally, so it cannot
+// see what agent-core's own carrier does: there is exactly one way home for a
+// peer-role frame and it is the route the inbound frame taught. The receipt a
+// fold dispatches is such a frame, and it is fire-and-forget — so the moment the
+// route is bound, relative to the fold, is the whole of whether the first
+// message of a cross-machine exchange is ever reported delivered.
+describe("session-bus route binding around the fold", () => {
+  let dir: string;
+  let peer: SessionBusCoordinator;
+  let carried: AbMessage[];
+  let now: number;
+
+  const CONTEXT = "ctx-opened-by-lead";
+
+  const selfFor = (ref: SessionMemberRef) => (sessionId: string): SessionBusSelf | null =>
+    sessionId === ref.sessionId
+      ? { key: { machineId: ref.machineId, projectId: ref.projectId, sessionId }, ref }
+      : null;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "sb-route-"));
+    carried = [];
+    now = 2_000_000;
+    peer = new SessionBusCoordinator({
+      abDir: join(dir, "peer"),
+      projectIdFor: () => "p-peer",
+      self: selfFor(PEER_REF),
+      // agent-core.ts's `send` closure, reduced to the decision under test.
+      send: (frame, ctx) => {
+        if (ctx.role === "peer" && !peer.routeFor(ctx.contextId)) return false;
+        carried.push(frame);
+        return true;
+      },
+      now: () => now,
+      newId: () => "id-route",
+    });
+  });
+
+  afterEach(() => {
+    peer.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const inbound = (to: SessionMemberKey, contextId: string) =>
+    createMessage("session-bus:post", {
+      from: LEAD_KEY,
+      to,
+      contextId,
+      threadId: null,
+      envelope: {
+        messageId: "msg-opening",
+        threadId: null,
+        contextId,
+        parts: [{ kind: "text" as const, text: "run the suite" }],
+        metadata: { peer: LEAD_REF, summary: "run the suite", timestamp: now },
+      },
+    });
+
+  test("the receipt for the frame that OPENS a context reaches its carrier", () => {
+    // Nothing has ever routed this context: this is the first frame of the
+    // exchange, which is exactly where the sender looks for its receipt.
+    expect(peer.routeFor(CONTEXT)).toBeNull();
+
+    expect(peer.handleInbound(inbound(PEER_KEY, CONTEXT), () => peer.noteRoute(CONTEXT, "app-1", "p-peer")))
+      .toBe("applied");
+
+    // Observed at the carrier, not in the log: an ack that was never handed to
+    // a transport is not a receipt, and nothing retries one.
+    expect(carried.map((f) => f.type)).toEqual(["session-bus:ack"]);
+    expect((carried[0] as unknown as { messageId: string }).messageId).toBe("msg-opening");
+  });
+
+  test("a frame whose address check fails binds no route", () => {
+    // The rebind hole: this map is the far end's only way home, so a frame
+    // naming a session this bridge does not hold must not be able to claim a
+    // context and take the next answer for itself.
+    expect(peer.handleInbound(inbound({ machineId: "m-peer", projectId: "p-peer", sessionId: "s-nobody" }, CONTEXT), () =>
+      peer.noteRoute(CONTEXT, "app-impostor", "p-peer"),
+    )).toBe("dropped");
+    expect(peer.routeFor(CONTEXT)).toBeNull();
+    expect(carried).toEqual([]);
+  });
+});

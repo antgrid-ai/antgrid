@@ -1297,12 +1297,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "session-bus:fetch":
       case "session-bus:fetch:result":
       case "session-bus:ack":
-        // Noted only for a frame the coordinator ACCEPTED. Its address check is
-        // what proves the sender is talking about a session this bridge actually
-        // holds, and this map is the other end's only route home — noting first
-        // would let any app session rebind it with one syntactically valid frame
-        // carrying someone else's contextId, and take the next answer for itself.
-        if (sessionBus.handleInbound(msg) === "applied") sessionBus.noteRoute(msg.contextId, peerId, project.id);
+        // Noted only for a frame the coordinator's address check ACCEPTED —
+        // that check is what proves the sender is talking about a session this
+        // bridge actually holds, and this map is the other end's only route
+        // home, so noting ahead of it would let any app session rebind the
+        // context with one syntactically valid frame carrying someone else's
+        // contextId, and take the next answer for itself. Hence the hook rather
+        // than the outcome: folding the frame dispatches its receipt, which is a
+        // peer-role send with nowhere to go until this route exists, and an ack
+        // is never retried.
+        sessionBus.handleInbound(msg, () => sessionBus.noteRoute(msg.contextId, peerId, project.id));
         break;
       // The app reading THIS machine's bus, as against carrying another
       // machine's frames above. All three are answered from `sessionBusApi` —
