@@ -166,8 +166,34 @@ describe("the session-bus tools", () => {
     }));
     const result = await callSessionBusTool("antgrid_list_sessions", {});
     const text = result.content[0]!.text;
-    expect(text).toContain('- [this machine] 4f2ac1 "Wire identity wave 6" — feat/wire-identity, running, can reply');
-    expect(text).toContain('- [macbook-pro] 9c11de "Relay flow control" — development, idle, receive-only');
+    expect(text).toContain('- [this machine] p1/4f2ac1 "Wire identity wave 6" — feat/wire-identity, running, can reply');
+    expect(text).toContain('- [macbook-pro] peer/p2/9c11de "Relay flow control" — development, idle, receive-only');
+  });
+
+  // The seam a live two-session test walked off: the row is the ONLY place a
+  // caller is offered an address, and `to` is validated somewhere else, so a
+  // field the schema demands and the row omits leaves an initiator guessing —
+  // which is a hard block, because a reply resolves through its threadId and
+  // never exercises this. Driven off `to.required` rather than spelled, so a
+  // new required field that nothing prints fails here.
+  test("a directory row prints every field a send's address requires", async () => {
+    const row = {
+      machineId: "self", projectId: "9f12d0f481b4a8a6", sessionId: "5f069fe3", title: "Bus B",
+      branch: "master", activity: "running", lastActiveAt: 1, canReply: true,
+    };
+    stub(() => Response.json({
+      sessions: [row],
+      truncated: 0,
+      machineId: "self",
+      reach: { scope: "machine", lastPushAgoMs: 0, machines: [], staleMachines: 0, notConnected: 0 },
+    }));
+    const result = await callSessionBusTool("antgrid_list_sessions", {});
+    const line = result.content[0]!.text.split("\n").find((l) => l.startsWith("- ["));
+    expect(line).toBeDefined();
+    const to = SESSION_BUS_TOOLS.find((t) => t.name === "antgrid_post")!.inputSchema.properties.to as any;
+    for (const key of to.required as string[]) {
+      expect(line).toContain(String(row[key as keyof typeof row]));
+    }
   });
 
   // The one wrong answer a directory can give is "there is nobody else" when the

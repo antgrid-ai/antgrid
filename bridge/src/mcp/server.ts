@@ -323,12 +323,22 @@ function machineName(m: { machineLabel?: string; machineId: string }): string {
   return m.machineLabel || m.machineId;
 }
 
-/** One directory row. Machine and session id lead because together they ARE the
- *  address — the title is what makes the row judgeable, not what names it. */
+/** One directory row. The address leads, spelled by `memberAddress` so it reads
+ *  the same here as on a thread — and it carries the project id because
+ *  `sendTargetSchema` REQUIRES one and no other surface prints it: a row a
+ *  caller cannot copy into `to` leaves them deriving the id by hand, and a
+ *  wrong guess answers UNKNOWN_PEER, which reads as "that peer is gone" rather
+ *  than "your address is malformed". The bracketed machine is the human's name
+ *  for where, which is not what addresses it; the title makes the row
+ *  judgeable, not addressable. */
 function sessionLine(row: any, selfMachineId: string | null): string {
-  const where = row.machineId === null || row.machineId === selfMachineId ? "this machine" : machineName(row);
+  const local = row.machineId === null || row.machineId === selfMachineId;
+  const where = local ? "this machine" : machineName(row);
   const facts = [row.branch, row.activity, row.canReply ? "can reply" : "receive-only"].filter(Boolean);
-  return `- [${where}] ${row.sessionId} "${row.title}" — ${facts.join(", ")}`;
+  // An omitted machine means THIS machine on the way back in, so a local row is
+  // spelled without one rather than echoing an id the caller never needs.
+  const address = memberAddress({ ...row, machineId: local ? null : row.machineId });
+  return `- [${where}] ${address} "${row.title}" — ${facts.join(", ")}`;
 }
 
 /** What one peer contributed, or why it contributed nothing. A machine that
