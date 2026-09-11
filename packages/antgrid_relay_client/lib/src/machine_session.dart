@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'agent_transport.dart';
@@ -20,6 +21,31 @@ import 'send_scheduler.dart';
 const int kPingSilenceSeconds = 20;
 const int kMaxMissedPongs = 2;
 const int _kConsecutiveTimeoutsToRekey = 3;
+
+/// One `stream-unbound` per dead id per this window. The agent mutes on the
+/// first, so this paces the RETRY that covers a lost notice — long enough that
+/// a stream flooding thousands of frames still costs one control frame.
+const Duration _unboundNoticeInterval = Duration(seconds: 30);
+
+/// How many ids [MachineSession._unboundNotifiedAt] tracks at once. Past it the
+/// notice is skipped rather than the map widened or emptied — see the sweep in
+/// `_notifyStreamUnbound`.
+const int _kMaxTrackedUnboundStreams = 64;
+
+/// A random UUIDv4. The wire's `id` is `z.string().uuid()`
+/// (`bridge/src/protocol.ts`), and this package deliberately carries no uuid
+/// dependency — it stays Flutter-free and near-dependency-free, and the app's
+/// `createAbMessage` lives across the licence boundary where it cannot be
+/// imported from.
+String _uuidV4() {
+  final r = Random.secure();
+  final b = List<int>.generate(16, (_) => r.nextInt(256));
+  b[6] = (b[6] & 0x0f) | 0x40; // version 4
+  b[8] = (b[8] & 0x3f) | 0x80; // variant 10xx
+  final h = b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+  return '${h.substring(0, 8)}-${h.substring(8, 12)}-${h.substring(12, 16)}'
+      '-${h.substring(16, 20)}-${h.substring(20)}';
+}
 
 /// Drives ONE E2E handshake attempt-cycle over a [MachineSession]'s socket,
 /// completing only after the agent's sealed `established`.
@@ -225,6 +251,13 @@ class MachineSession {
   /// in particular cannot be left to log per frame.
   final Map<String, DateTime> _unknownStreamLoggedAt = {};
   final Map<String, int> _unknownStreamSuppressed = {};
+
+  /// Rate-limit state for [_notifyStreamUnbound]. Separate from the log's,
+  /// because the two answer different questions: the log records that we are
+  /// still losing frames, the notice asks the agent to stop sending them. They
+  /// share a window today, but tying them together would mean a quieter log
+  /// silently stops asking.
+  final Map<String, DateTime> _unboundNotifiedAt = {};
 
   late final FragReassembler _reassembler = FragReassembler(
     timeoutMs: kTransferTimeoutMs,
@@ -796,6 +829,14 @@ class MachineSession {
     _scheduler.resetWindows();
     _resetRxFlow();
     _scheduler.kick();
+    // The agent un-mutes EVERY stream on a fresh session (`notifyPeerOnline` in
+    // bridge/src/stream-mux.ts), so a throttle carried across the boundary
+    // would leave a stream it just resumed flooding with nothing asking it to
+    // stop again. Matters most for the rekey a flooded control channel causes:
+    // three timed-out RPCs re-handshake, and the loop would re-open its own
+    // cause. The bound streams below re-announce themselves by transmitting;
+    // the unbound ones have nothing that can.
+    _unboundNotifiedAt.clear();
     // Re-pull durable state on every (re)establish so late subscribers
     // (a ControlPlaneClient, a just-bound project stream) replay it.
     for (final s in _streams.values) {
@@ -1112,6 +1153,7 @@ class MachineSession {
     // mid-flight), not the routine restart case. "0" legitimately has no
     // transport (adverts are snooped above), so it's never a drop.
     if (st == null && sid != kControlStreamId) {
+      _notifyStreamUnbound(sid);
       _logUnknownStreamDrop(sid, mType, frameId, epoch);
       _dropped(
         'rx',
@@ -1122,6 +1164,48 @@ class MachineSession {
         frameId: frameId,
       );
     }
+  }
+
+  /// Tell the agent it is pushing onto a stream we hold no transport for, so it
+  /// stops. The mirror of the agent's `stream-invalid` (`bridge/src/stream-mux.ts`),
+  /// which covers only the opposite direction — us sending onto an id IT retired.
+  ///
+  /// Without a notice this way the loss is unbounded and entirely one-sided.
+  /// Stream ids outlive the app process that bound them: the agent keeps a
+  /// project's stream for the life of its core, and a re-open reuses the same
+  /// id. So a fresh process inherits every id the agent still holds, binds none
+  /// of them until the user opens that project — which may be never — and a
+  /// live PTY on one drops a frame per frame for as long as it runs. Measured
+  /// at 11.6/s for 24 minutes against a desktop peer, ending only when the
+  /// agent went away.
+  ///
+  /// Rate-limited per id: the agent mutes on the FIRST notice, so the repeats
+  /// only cover a lost one, and frames arrive far faster than any notice could
+  /// take effect. Fire-and-forget — this is a hint about a frame already
+  /// dropped, and there is no caller to fail.
+  void _notifyStreamUnbound(String sid) {
+    final now = DateTime.now();
+    final last = _unboundNotifiedAt[sid];
+    if (last != null && now.difference(last) < _unboundNoticeInterval) return;
+    // Bounded like the log's map, but SWEPT rather than emptied: this map gates
+    // a control-plane SEND, not a log line. Clearing it wholesale would let a
+    // peer rotating more ids than the cap draw one notice per inbound frame,
+    // onto the channel liveness and credits share. Expired entries suppress
+    // nothing, so dropping them is free; past the cap, skip the notice rather
+    // than widen the map.
+    _unboundNotifiedAt.removeWhere(
+      (_, at) => now.difference(at) >= _unboundNoticeInterval,
+    );
+    if (_unboundNotifiedAt.length >= _kMaxTrackedUnboundStreams) return;
+    _unboundNotifiedAt[sid] = now;
+    unawaited(
+      sendOnStream(kControlStreamId, {
+        'type': 'stream-unbound',
+        'id': _uuidV4(),
+        'timestamp': now.millisecondsSinceEpoch,
+        'streamId': sid,
+      }, 'control').catchError((Object _) {}),
+    );
   }
 
   /// One warn per stream per [unknownStreamLogInterval], carrying how many

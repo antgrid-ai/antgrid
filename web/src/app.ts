@@ -17,6 +17,7 @@ import { eventsRoutes } from "./routes/events.js";
 import { waitlistRoutes } from "./routes/waitlist.js";
 import { uiRoutes } from "./routes/ui.js";
 import { setPublicOrigin } from "./ui/origin.js";
+import { setSalesIqWidgetUrl } from "./ui/salesiq.js";
 import type { DB } from "./db/index.js";
 import type { Auth } from "./auth/better-auth.js";
 import type { Env } from "./env.js";
@@ -42,6 +43,7 @@ export function buildApp(deps: AppDeps) {
   // Layout renders og:image, which a scraper fetches with no page to resolve a
   // relative URL against. This is the one place that knows the public origin.
   setPublicOrigin(deps.env.BETTER_AUTH_URL);
+  setSalesIqWidgetUrl(deps.env.SALESIQ_WIDGET_URL);
 
   // The ZeptoMail webhook authenticates via a secret in its URL path
   // (/webhooks/zeptomail/:key). Hono's logger prints the full path, so redact
