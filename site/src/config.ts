@@ -6,6 +6,9 @@ export const APP_URL = import.meta.env.PUBLIC_APP_URL ?? "https://app.antgrid.ai
 // checkout off production. The site is a static build on another origin, so
 // anything under here is a cross-origin request the web service must allow.
 export const WEB_URL = import.meta.env.PUBLIC_WEB_URL ?? "https://app.antgrid.ai";
+export const SALESIQ_WIDGET_URL =
+  import.meta.env.PUBLIC_SALESIQ_WIDGET_URL?.trim() ||
+  "https://salesiq.zohopublic.com/widget?wc=siq1b947f921d212e33194fb74467bb4e1d9243576c0c0fc99198af56f9bc127661";
 
 // Self-hosted Umami, on our own infrastructure. Cookieless and first-party, so
 // nothing here needs a consent banner — see /privacy §4, which has to keep

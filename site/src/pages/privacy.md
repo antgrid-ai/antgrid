@@ -21,7 +21,7 @@ Radha AI Products is the legal entity behind Antgrid. **Questions or concerns?**
 
 - **End-to-end encrypted.** Communication between your coding agents and your devices is end-to-end encrypted (X25519 key exchange + AES-256-GCM). Our relay server forwards encrypted data it **cannot decrypt** — it never sees your source code, terminal output, prompts, or files in readable form. The relay does authenticate and route by your device identity (see Section 3).
 - **What we process.** Account details (name, email), device identifiers and public keys used for pairing, session information including IP address and browser/device type, and billing status. Payment card data is handled by our payment processors and app stores — not by us.
-- **Privacy-respecting analytics & crash reporting.** Anonymous, cookieless usage analytics — self-hosted Umami on our websites and in the app, plus our own first-party backend for the app — and crash/error reports via our self-hosted error tracker. No third-party analytics, advertising, or tracking SDKs, and no third party ever receives your data to use for its own purposes — the only third-party SDK in the app (Sentry) is used purely as transport to our own self-hosted error tracking, and the infrastructure providers listed in Section 7 only carry it on our behalf. No personal information is included; the app's telemetry can be turned off anytime in app settings, and the website's analytics identifies no one to begin with.
+- **Privacy-respecting analytics, crash reporting & support.** Anonymous, cookieless usage analytics — self-hosted Umami on our websites and in the app, plus our own first-party backend for the app — and crash/error reports via our self-hosted error tracker. No third-party analytics, advertising, or tracking SDKs, and no third party ever receives your data to use for its own purposes — the only third-party SDK in the app (Sentry) is used purely as transport to our own self-hosted error tracking, and the infrastructure providers listed in Section 7 only carry it on our behalf. No personal information is included; the app's telemetry can be turned off anytime in app settings, and the website's analytics identifies no one to begin with. Zoho SalesIQ is used only when you explicitly open support chat; tracking is disabled, and the widget is not loaded before that action.
 - **AI providers.** Antgrid does not send your code or prompts to AI providers. Your local coding agents (e.g., Claude Code, Codex) do that directly, under your own accounts and API keys.
 - **We do not sell your personal information**, and we do not process sensitive personal information.
 - **Your rights.** You may review, change, or delete your information. See Sections 10 and 11.
@@ -33,6 +33,7 @@ Radha AI Products is the legal entity behind Antgrid. **Questions or concerns?**
 - **Account information** — name and email address (provided directly or via a third-party sign-in provider).
 - **Billing status** — your plan, subscription state, trial status, and transaction identifiers returned by our payment processors or app stores. **We do not collect or store full payment card numbers; these are handled entirely by our payment processors and the app stores.**
 - **Waitlist email address** — if you join the founding-pricing waitlist from our website or pricing page, we store the email address you submit and the page you submitted it from, so we can tell you when pricing opens. This does not create an account, and the submitting IP address is used only for rate limiting and is never stored on the record.
+- **Support conversations** — if you choose to open support chat, we process the messages and attachments you submit. When you are signed in, your name or account identifier and email address are supplied so we can recognize you and retain conversation history across devices. The app passes name and email to the support page in a URL fragment, which is removed after the page reads it and is not sent to our web host.
 
 ### Information collected automatically
 
@@ -66,7 +67,7 @@ For full transparency about what the relay *can* see: the relay authenticates de
 
 ## 4. Analytics, Crash Reporting, and Tracking
 
-**We do not use any third-party analytics, advertising, or behavioral-tracking technologies, and no third party ever receives your analytics or crash data to use for its own purposes.** The analytics and error-tracking services are our own, running on infrastructure we control; the providers listed in Section 7 carry that traffic on our behalf and nothing more. We do not use tracking cookies. Our website and app use only the functional cookies and storage necessary to keep you signed in and to operate the Services.
+**We do not use any third-party analytics, advertising, or behavioral-tracking technologies, and no third party ever receives your analytics or crash data to use for its own purposes.** The analytics and error-tracking services are our own, running on infrastructure we control; the providers listed in Section 7 carry that traffic on our behalf and nothing more. We do not use tracking cookies. Our website and app use only the functional cookies and storage necessary to keep you signed in and to operate the Services. Zoho SalesIQ's website tracking is disabled. Its support widget connects only after you choose Chat with support and may then use functional storage needed to maintain the conversation.
 
 Our website and the Antgrid app both collect anonymous, first-party usage analytics, and the app additionally reports crashes and errors when telemetry is enabled:
 
@@ -98,6 +99,7 @@ We share information only with service providers that help us operate the Servic
 | **Google** | In-app purchases (Android) | Purchase/subscription data |
 | **ipinfo.io** | Geolocation for correct pricing and tax | Your IP address (to return a country code) |
 | **ZeptoMail (Zoho)** | Transactional and sign-in emails | Your email address and message content |
+| **Zoho SalesIQ** | User-initiated customer support chat | Name or account identifier and email when signed in, technical connection data, and the support messages or attachments you submit |
 | **Cloudflare** | CDN and security filtering in front of our analytics endpoint | Connection data for requests it proxies (IP address, user-agent) |
 | **Microsoft Azure** | Hosting and infrastructure (website, app backend, and relay) | Technical/connection data as needed to operate |
 
@@ -112,6 +114,7 @@ We keep personal information only for as long as necessary for the purposes set 
 - **Cross-device sign-in records** — automatically expire within approximately 10 minutes.
 - **Operational logs** (which may contain IP addresses) — retained for up to 30 days, then deleted.
 - **Waitlist email address** — until founding pricing opens and we have contacted you, or until you ask us to remove it, whichever comes first.
+- **Support conversations** — while needed to resolve and follow up on your request, and then according to our support retention settings or until you ask us to delete them where applicable.
 
 When we no longer have a legitimate need to process your information, we delete or anonymize it, or securely isolate it where deletion is not immediately possible (for example, in backups).
 

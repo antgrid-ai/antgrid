@@ -66,11 +66,13 @@ class CurrentUser {
   CurrentUser({
     required this.userId,
     required this.email,
+    this.name,
     this.tier,
     this.promotional = false,
   });
   final String userId;
   final String email;
+  final String? name;
   final String? tier;
 
   /// True when [tier] is a temporary, unpurchased promo grant rather than a
@@ -782,6 +784,7 @@ class AuthService {
     return CurrentUser(
       userId: userId,
       email: email,
+      name: body['name'] as String?,
       tier: body['tier'] as String?,
       promotional: body['promotional'] as bool? ?? false,
     );

@@ -54,4 +54,9 @@ abstract final class AppEnvironment {
   /// Empty by default — crash reporting is inert until a DSN is supplied at
   /// build time via `--dart-define=SENTRY_DSN=https://...`.
   static const String sentryDsn = String.fromEnvironment('SENTRY_DSN');
+
+  static const String salesIqSupportUrl = String.fromEnvironment(
+    'SALESIQ_SUPPORT_URL',
+    defaultValue: 'https://antgrid.ai/support?chat=1&source=app',
+  );
 }
