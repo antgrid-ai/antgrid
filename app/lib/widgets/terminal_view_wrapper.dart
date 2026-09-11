@@ -127,6 +127,31 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// overlay button only when the user has a non-empty selection.
   String? _selectedText;
 
+  /// The row/col anchors [_selectedText] was resolved from, kept so a frame
+  /// that replaces the screen can name exactly what it invalidated.
+  GhosttyTerminalSelection? _selectedAnchors;
+
+  /// The anchors a frame replaced the glyphs under, refused until the user
+  /// makes a genuinely different selection.
+  ///
+  /// `GhosttyTerminalView` re-resolves its selection's text and re-fires
+  /// `onSelectionContentChanged` on EVERY controller notify while it holds a
+  /// selection, and nothing in it drops anchors a frame invalidated — a
+  /// resize, a `setSessionRunning`, or a focus assertion is enough to
+  /// repopulate [_selectedText] with whatever the frame put at those cells.
+  /// Clearing the mirror alone is therefore undone by the very next notify,
+  /// which is the harm D10 exists to prevent.
+  ///
+  /// KNOWN GAP, because the engine exposes no way to drop a selection: this
+  /// covers everything that reads [_selectedText] (Ctrl+C, the send-to-agent
+  /// overlay) but not the view's OWN copy paths — its selection context menu
+  /// and, on macOS, ⌘C — which resolve text from the surviving anchors at copy
+  /// time, nor the highlight itself, which stays painted over glyphs the user
+  /// did not choose. Closing those needs a selection-clear hook on
+  /// `GhosttyTerminalController`/`GhosttyTerminalView` in the `dart_terminal`
+  /// fork.
+  GhosttyTerminalSelection? _invalidatedAnchors;
+
   /// The OSC 8 link under the pointer and where to park its readout, or null
   /// when the pointer is over no link.
   ///
@@ -423,6 +448,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     );
     FocusManager.instance.addEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.addListener(_onFocusChange);
+    widget.tab.replaceEpoch.addListener(_onFrameReplaced);
     // Pinned: dispose can run after the ProviderScope is gone, and reading
     // through `ref` then throws.
     _container = ref.container;
@@ -440,6 +466,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   @override
   void didUpdateWidget(TerminalViewWrapper oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // Keyed on the notifier's own identity, not on terminalId: an ad-hoc
+    // terminal id is reused for a brand-new TerminalTab (a fresh engine, a
+    // fresh replaceEpoch) while this unkeyed State can stay mounted at the
+    // same slot, so the terminalId comparison below is not sufficient here.
+    if (!identical(oldWidget.tab.replaceEpoch, widget.tab.replaceEpoch)) {
+      oldWidget.tab.replaceEpoch.removeListener(_onFrameReplaced);
+      widget.tab.replaceEpoch.addListener(_onFrameReplaced);
+    }
     // The booking below is per-PTY, but this State is not: only
     // `terminal_screen` keys the wrapper by terminalId — the pinned pane
     // (`terminal_list_view`), `terminal_detail_view` and the setup banner all
@@ -480,6 +514,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   void dispose() {
     FocusManager.instance.removeEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.removeListener(_onFocusChange);
+    widget.tab.replaceEpoch.removeListener(_onFrameReplaced);
     // Identity alone, no isAgentSurface check: a copy that never published
     // simply never matches. try/catch for the app-teardown case the pinned
     // container exists for.
@@ -509,6 +544,31 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       _locallyActive = active;
       if (active && !_hasPhysicalKeyboard) _claimed = false;
       if (!active) _claimRequestedByUser = false;
+    });
+  }
+
+  /// D10: fires whenever [TerminalTab.replaceEpoch] bumps -- an applied frame
+  /// just replaced the whole screen this selection's row/col anchors point
+  /// into. Ctrl+C and [SendToAgentButton] both read [_selectedText], so a
+  /// stale mirror hands the user a copy of glyphs the screen no longer shows;
+  /// dropping it is strictly better than a selection that silently retargets
+  /// itself.
+  ///
+  /// The anchors are remembered as well as cleared, because the engine will
+  /// re-offer them -- see [_invalidatedAnchors].
+  ///
+  /// Guarded on an existing selection so a live frame stream (up to 20/s)
+  /// costs a rebuild only on the one frame that actually invalidates a
+  /// selection, never on every frame -- see `_TerminalGridFreeze`'s own doc
+  /// comment for why a rebuild storm here would matter.
+  void _onFrameReplaced() {
+    if (!mounted) return;
+    final anchors = _selectedAnchors;
+    if (anchors == null && _selectedText == null) return;
+    setState(() {
+      _selectedText = null;
+      _selectedAnchors = null;
+      _invalidatedAnchors = anchors;
     });
   }
 
@@ -822,7 +882,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       text: message,
     );
     if (!sent || !mounted) return;
-    setState(() => _selectedText = null);
+    setState(() {
+      _selectedText = null;
+      _selectedAnchors = null;
+    });
   }
 
   @override
@@ -878,8 +941,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// mobile focus resume — training the user to ignore it.
   ({String? label, AbStatusTone tone, int? startedAtMs, bool retry, bool dim})
   _chromeFor(TerminalHydration hydration) => switch (hydration.stage) {
+    // The frame protocol's own text, when it sent one, beats the generic
+    // label -- legacy's `hydration.message` is always null (see its own doc
+    // comment), so this is inert there and the pre-existing generic copy is
+    // unchanged for every legacy failure.
     TerminalAttachStage.failed => (
-      label: "couldn't load this terminal",
+      label: hydration.message ?? "couldn't load this terminal",
       tone: AbStatusTone.danger,
       startedAtMs: null,
       retry: true,
@@ -897,6 +964,16 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     TerminalAttachStage.painted => (
       label: null,
       tone: AbStatusTone.warning,
+      startedAtMs: null,
+      retry: false,
+      dim: false,
+    ),
+    // D7: lifecycle, not failure -- the pane's last painted frame IS its true
+    // final state, so this never dims the screen and offers no Retry (there
+    // is nothing left to retry: the run is over, not stuck).
+    TerminalAttachStage.ended => (
+      label: hydration.message ?? 'this session has ended',
+      tone: AbStatusTone.neutral,
       startedAtMs: null,
       retry: false,
       dim: false,
@@ -1101,10 +1178,17 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         setState(() => _reportedCell = next);
       },
       onSelectionContentChanged: (content) {
+        final anchors = content?.selection;
+        // A re-offer of the anchors a frame invalidated, resolved against
+        // glyphs the user never selected — see [_invalidatedAnchors].
+        if (anchors != null && anchors == _invalidatedAnchors) return;
         final text = content?.text;
-        if (text != _selectedText) {
-          setState(() => _selectedText = text);
-        }
+        if (text == _selectedText && anchors == _selectedAnchors) return;
+        setState(() {
+          _selectedText = text;
+          _selectedAnchors = anchors;
+          _invalidatedAnchors = null;
+        });
       },
       onZoomUpdate: _onZoomUpdate,
       onZoomEnd: _onZoomEnd,

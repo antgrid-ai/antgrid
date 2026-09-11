@@ -1,9 +1,38 @@
+import 'package:flutter/foundation.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
 import 'layout_models.dart';
 import 'ab_message.dart';
 
 enum TerminalSessionState { starting, running, exited }
+
+/// The ONE switch for the live frame-replace terminal protocol
+/// (`terminal:subscribe`/`frame`/`ack`/`unsubscribe`, wire version
+/// [kTerminalFrameProtocolVersion]). OFF by default: every terminal ships on
+/// the legacy snapshot-plus-diff path unconditionally until this flips.
+///
+/// Deliberately a plain mutable top-level, not a user-facing setting or a
+/// dart-define: a test flips it for the duration of one case (and must flip
+/// it back, since the value is process-global), and enabling it for real
+/// users is one line here.
+bool kTerminalFrameModeEnabled = false;
+
+/// Mirrors the bridge's `TERMINAL_PROTOCOL_VERSION`
+/// (`bridge/src/terminal-frames/protocol.ts`) -- the highest frame wire
+/// version this client can render, sent on every `terminal:subscribe`. Bump
+/// only in lockstep with that constant; a mismatch answers
+/// `terminal:display:status` `UPGRADE_REQUIRED` rather than a screen.
+const int kTerminalFrameProtocolVersion = 1;
+
+/// Which wire protocol governs one terminal's screen.
+///
+/// Selected once, by a successful `terminal:subscribe`, and never mixed
+/// within one PTY generation: the legacy snapshot-plus-diff model and the
+/// frame-replace model paint the same engine in incompatible ways (a
+/// composed legacy blob and a bare frame both assume they own erasing the
+/// screen), so a terminal is one or the other for its life. A respawn -- a
+/// fresh PTY under the same id -- starts the choice over at [legacy].
+enum TerminalDisplayMode { legacy, frame }
 
 class TerminalTab {
   final String terminalId;
@@ -16,6 +45,29 @@ class TerminalTab {
   final int? exitCode;
   final String? type; // "agent" | "service"
   final bool unread;
+
+  /// Which wire protocol currently owns this terminal's screen. See
+  /// [TerminalDisplayMode].
+  final TerminalDisplayMode mode;
+
+  /// Bumped every time this tab's engine content was REPLACED wholesale
+  /// rather than appended to -- currently only an applied frame-mode
+  /// `terminal:frame` (one `appendOutputBytes` call, self-contained). A
+  /// `ValueNotifier`, not a `TerminalState`/`copyWith` field: a live frame
+  /// replaces the screen up to 20x/s (`TERMINAL_FRAME_INTERVAL_MS`), and
+  /// running that through `TerminalService._setState` would reintroduce the
+  /// exact per-byte provider-rebuild cost this branch exists to remove.
+  /// Threaded through [copyWith] as the SAME instance, exactly like
+  /// [ghostty].
+  ///
+  /// The view layer owns terminal selection (there is no selection state on
+  /// the engine controller itself), and must treat any change here as "the
+  /// screen underneath a live selection is now different content" and CLEAR
+  /// the selection rather than re-resolve it from row/col anchors that now
+  /// point at the wrong glyphs -- Ctrl+C and `SendToAgentButton` read that
+  /// selection, and handing the user the wrong text on copy is worse than
+  /// losing the selection.
+  final ValueNotifier<int> replaceEpoch;
 
   /// Bumped whenever what the app knew about this PTY's geometry stops being
   /// trustworthy — a reconnect, a same-id respawn, or a resize the service
@@ -52,7 +104,9 @@ class TerminalTab {
     this.type,
     this.unread = false,
     this.sizeEpoch = 0,
+    this.mode = TerminalDisplayMode.legacy,
     GhosttyTerminalController? ghostty,
+    ValueNotifier<int>? replaceEpoch,
   }) : ghostty =
            ghostty ??
            GhosttyTerminalController(
@@ -66,7 +120,8 @@ class TerminalTab {
              // than a narrow one.
              maxScrollback: 64 << 20,
              maxScrollbackLines: 10000,
-           );
+           ),
+       replaceEpoch = replaceEpoch ?? ValueNotifier<int>(0);
 
   bool get isAgent => type == 'agent';
 
@@ -83,6 +138,7 @@ class TerminalTab {
     String? type,
     bool? unread,
     int? sizeEpoch,
+    TerminalDisplayMode? mode,
   }) {
     return TerminalTab(
       terminalId: terminalId,
@@ -98,7 +154,9 @@ class TerminalTab {
       type: type ?? this.type,
       unread: unread ?? this.unread,
       sizeEpoch: sizeEpoch ?? this.sizeEpoch,
+      mode: mode ?? this.mode,
       ghostty: ghostty,
+      replaceEpoch: replaceEpoch,
     );
   }
 }
@@ -127,6 +185,13 @@ enum TerminalAttachStage {
   /// A pull over an empty engine went unanswered past its bound. Only ever
   /// reachable for a terminal that has never painted.
   failed,
+
+  /// A frame-mode attachment's run completed (`terminal:display:status`
+  /// code `ENDED`) rather than failed. Lifecycle, not failure: the pane's
+  /// last painted frame IS its true final state, and unlike [failed] it must
+  /// never be dimmed or offered a retry. Unreachable in legacy mode, which
+  /// has no equivalent notice.
+  ended,
 }
 
 /// Whether the checkout has enough to show anything at all.
@@ -142,7 +207,11 @@ enum CheckoutAttachStatus {
 }
 
 class TerminalHydration {
-  const TerminalHydration({required this.stage, this.requestedAtMs});
+  const TerminalHydration({
+    required this.stage,
+    this.requestedAtMs,
+    this.message,
+  });
 
   final TerminalAttachStage stage;
 
@@ -151,15 +220,22 @@ class TerminalHydration {
   /// widget ticker so a 1 Hz rebuild never reaches the terminal beside it.
   final int? requestedAtMs;
 
+  /// The frame protocol's own text for [TerminalAttachStage.failed] /
+  /// [TerminalAttachStage.ended] (`terminal:display:status.message`), so the
+  /// view layer can show the agent's own reason instead of (or beside) a
+  /// generic label. Always null in legacy mode, which has no equivalent.
+  final String? message;
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is TerminalHydration &&
           other.stage == stage &&
-          other.requestedAtMs == requestedAtMs);
+          other.requestedAtMs == requestedAtMs &&
+          other.message == message);
 
   @override
-  int get hashCode => Object.hash(stage, requestedAtMs);
+  int get hashCode => Object.hash(stage, requestedAtMs, message);
 }
 
 class TerminalState {

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:uuid/uuid.dart';
 
 import '../analytics/events.dart';
 import '../models/terminal_models.dart';
@@ -90,6 +91,96 @@ class TerminalService {
   /// ([_handleTerminalOutput]) can never stamp `_snapshotFailedIds` over a
   /// pane that is visibly painting.
   final Map<String, int> _snapshotGeneration = {};
+
+  // --- Frame mode (live `terminal:frame` display, gated by
+  // kTerminalFrameModeEnabled) ---
+
+  /// terminalId -> the `requestId` of this client's most recently sent
+  /// `terminal:subscribe`. A `terminal:subscribed` or `terminal:display:status`
+  /// whose own `requestId` does not match is the answer to an attempt this
+  /// terminal has since superseded (a fresh reconnect, respawn or retry) and
+  /// must never resurrect it.
+  final Map<String, String> _frameSubscribeRequestId = {};
+
+  /// terminalId -> true while a `terminal:subscribe` is outstanding for it.
+  /// Consumed by whichever answers first: `terminal:subscribed`, or a
+  /// `terminal:display:status` naming the same request (UPGRADE_REQUIRED is
+  /// the only code reachable before an attachment exists).
+  final Set<String> _frameSubscribePending = {};
+
+  /// Epoch ms the outstanding `terminal:subscribe` in [_frameSubscribePending]
+  /// went out, for the same elapsed readout the legacy path gives
+  /// [_snapshotRequestedAtMs].
+  final Map<String, int> _frameSubscribeRequestedAtMs = {};
+
+  /// The bound on an outstanding `terminal:subscribe`, mirroring
+  /// [_snapshotDeadlines].
+  ///
+  /// A subscribe going unanswered is a routine bridge outcome, not a race:
+  /// `agent-core` breaks with no reply for a deleting checkout, a disposed
+  /// owner or a stale client generation, and `TerminalFrameDelivery` returns
+  /// silently while the connection is suppressed — which is exactly the state
+  /// a reconnect passes through, and a reconnect is where every tab
+  /// re-subscribes. Unbounded, a terminal already committed to frame mode
+  /// then sits on its last frame with both legacy protocols refused
+  /// ([_onHeavyJson]'s D6/D8 guards) and nothing left that can repaint it.
+  final Map<String, Timer> _frameSubscribeDeadlines = {};
+
+  /// terminalId -> a frame accepted for the live attachment whose own
+  /// `cols`/`rows` did not match the tab's geometry yet.
+  ///
+  /// Held rather than discarded because the bridge will not send it again:
+  /// `TerminalFrameDelivery` stamps `attachment.revision` at SEND time and
+  /// refuses any revision at or below it, and the source only mints a new one
+  /// on a guest write or a resize — so an idle guest produces nothing further
+  /// and there is no NACK in the protocol. `terminal:size` rides the status
+  /// channel while the frame rides the preview channel, each with its own
+  /// credit window, so the frame overtaking its own resize is ordinary
+  /// skew; the body is self-contained, which is what makes a deferred apply
+  /// still correct.
+  final Map<String, TerminalFrameMessage> _frameDeferred = {};
+
+  /// terminalId -> the live attachment once `terminal:subscribed` has been
+  /// accepted for it. Absent means no live frame-mode attachment: subscribe
+  /// has never succeeded, is outstanding, or the attachment was retired
+  /// (ended, failed, unsubscribed, or dropped locally by a fresh attach
+  /// attempt that has not yet been answered).
+  ///
+  /// Scoped to THIS connection: an attachment id is minted by one
+  /// `TerminalViewerConnection` and does not survive a reconnect, so every
+  /// re-attach drops it before asking again rather than trusting it to still
+  /// name anything on the other end.
+  final Map<String, ({String runId, String attachmentId})> _frameAttachment =
+      {};
+
+  /// terminalId -> the highest `terminal:frame` `sequence` this client has
+  /// processed (applied or dropped as stale) for its live attachment. Acks
+  /// are cumulative on this value, so it doubles as "what to ack next".
+  final Map<String, int> _frameHighestSequence = {};
+
+  /// Terminals whose live frame attachment has painted at least one frame.
+  /// The frame-mode analogue of [_paintedTerminalIds]: NOT cleared on a
+  /// reconnect or a resubscribe attempt (the engine's last frame is still
+  /// current-looking on screen right up until a fresh one replaces it), only
+  /// on a genuinely fresh engine ([_createTab]) or a deletion.
+  final Set<String> _framePaintedIds = {};
+
+  /// Terminals whose live frame attachment ended for a reason OTHER than
+  /// `ENDED` -- DISPLAY_FAILED, ACK_TIMEOUT, HISTORY_DISABLED, or any code
+  /// this client does not recognize (a newer agent's failure must surface,
+  /// never be silently ignored). See [TerminalAttachStage.failed].
+  final Set<String> _frameFailedIds = {};
+
+  /// Terminals whose live frame attachment ended with `ENDED` -- the run
+  /// completed. Lifecycle, not failure; kept distinct from [_frameFailedIds]
+  /// so [TerminalAttachStage.ended] never renders as a failure. See
+  /// [TerminalAttachStage.ended].
+  final Set<String> _frameEndedIds = {};
+
+  /// terminalId -> the last `terminal:display:status.message` for it, shown
+  /// alongside [_frameFailedIds] / [_frameEndedIds].
+  final Map<String, String> _frameStatusMessage = {};
+
   Timer? _checkoutAttachDeadline;
   bool _sawAgentStatus = false;
   bool _checkoutAttachFailed = false;
@@ -267,7 +358,7 @@ class TerminalService {
       // keep off screen.
       if (!_hasLivePty(entry.value)) continue;
       if (_stageFor(entry.key) != TerminalAttachStage.cold) continue;
-      _requestTerminalSnapshot(entry.key);
+      _attachTerminal(entry.key);
     }
   }
 
@@ -342,7 +433,7 @@ class TerminalService {
       // unknown terminal" and send nothing. Its own terminal:started carries
       // the pull.
       if (_pendingTerminalIds.contains(tab.terminalId)) continue;
-      _requestTerminalSnapshot(tab.terminalId);
+      _attachTerminal(tab.terminalId);
     }
   }
 
@@ -404,10 +495,13 @@ class TerminalService {
     Map<String, TerminalTab> tabs,
   ) {
     return {
-      for (final id in tabs.keys)
-        id: TerminalHydration(
-          stage: _stageFor(id),
-          requestedAtMs: _snapshotRequestedAtMs[id],
+      for (final entry in tabs.entries)
+        entry.key: TerminalHydration(
+          stage: _stageFor(entry.key),
+          requestedAtMs: entry.value.mode == TerminalDisplayMode.frame
+              ? _frameSubscribeRequestedAtMs[entry.key]
+              : _snapshotRequestedAtMs[entry.key],
+          message: _frameStatusMessage[entry.key],
         ),
     };
   }
@@ -417,9 +511,29 @@ class TerminalService {
   // every focus resume issues one for every live tab — and must never present
   // as a wait or escalate to a failure.
   TerminalAttachStage _stageFor(String id) {
+    if (_state.tabs[id]?.mode == TerminalDisplayMode.frame) {
+      return _frameStageFor(id);
+    }
     final painted = _paintedTerminalIds.contains(id);
     if (_snapshotFailedIds.contains(id)) return TerminalAttachStage.failed;
     if (_snapshotRequestedAtMs.containsKey(id)) {
+      return painted
+          ? TerminalAttachStage.refreshing
+          : TerminalAttachStage.awaitingScreen;
+    }
+    return painted ? TerminalAttachStage.painted : TerminalAttachStage.cold;
+  }
+
+  /// [_stageFor]'s frame-mode counterpart. The frame protocol's own
+  /// subscribed/frame/display:status sequence answers the same question the
+  /// legacy branch answers from snapshot-pull bookkeeping (D7: hydration
+  /// comes from the PROTOCOL, not from output arriving) -- attach progress
+  /// and the eventual chrome both still come from one function.
+  TerminalAttachStage _frameStageFor(String id) {
+    if (_frameEndedIds.contains(id)) return TerminalAttachStage.ended;
+    if (_frameFailedIds.contains(id)) return TerminalAttachStage.failed;
+    final painted = _framePaintedIds.contains(id);
+    if (_frameSubscribePending.contains(id)) {
       return painted
           ? TerminalAttachStage.refreshing
           : TerminalAttachStage.awaitingScreen;
@@ -511,7 +625,18 @@ class TerminalService {
     if (_disposed) return;
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
+    if (parsed is TerminalFrameMessage) {
+      _handleTerminalFrame(parsed);
+      return;
+    }
     if (parsed is TerminalSnapshotMessage) {
+      // D8/(a): a frame-mode terminal owns its engine outright. This reply
+      // can be the fan-out of another client's still-legacy request, or our
+      // own dual-protocol-window pull racing a subscribe that has since
+      // succeeded -- either way it must never paint over a frame.
+      if (_state.tabs[parsed.terminalId]?.mode == TerminalDisplayMode.frame) {
+        return;
+      }
       // Arming is _applySnapshot's job, not this one's: it bails on a tab that
       // vanished between request and reply, and a cutoff armed for scrollback
       // nothing rendered filters the live output of the tab that replaces it.
@@ -519,6 +644,13 @@ class TerminalService {
       return;
     }
     if (parsed is TerminalOutputMessage) {
+      // D6: the bridge withholds raw output per SUBSCRIPTION, but a
+      // transition window exists on both edges of a resubscribe -- this is
+      // this client's own backstop against interleaving the two protocols
+      // into one engine.
+      if (_state.tabs[parsed.terminalId]?.mode == TerminalDisplayMode.frame) {
+        return;
+      }
       final seq = parsed.seq;
       final cutoff = _snapshotSeq[parsed.terminalId];
       if (seq != null && cutoff != null && seq <= cutoff) {
@@ -526,6 +658,123 @@ class TerminalService {
       }
       _handleTerminalOutput(parsed);
     }
+  }
+
+  /// Applies (or drops) one `terminal:frame` and acks it. Ack is delivery,
+  /// not proof of rendering (D5): sent whenever a frame is accepted as
+  /// belonging to the live attachment, whether or not its geometry let it
+  /// actually paint.
+  void _handleTerminalFrame(TerminalFrameMessage msg) {
+    final tab = _state.tabs[msg.terminalId];
+    if (tab == null || tab.mode != TerminalDisplayMode.frame) return;
+    final attachment = _frameAttachment[msg.terminalId];
+    // D5: never apply or ack a frame for a superseded attachment -- a
+    // resubscribe (reconnect, respawn, retry) can still have one of the old
+    // attachment's frames in flight, addressed by a runId/attachmentId this
+    // client no longer considers live.
+    if (attachment == null ||
+        attachment.runId != msg.runId ||
+        attachment.attachmentId != msg.attachmentId) {
+      return;
+    }
+    final highest = _frameHighestSequence[msg.terminalId] ?? 0;
+    // Cumulative, and cheap to be defensive about: a sequence already
+    // processed (applied or dropped) needs neither a second apply nor a
+    // second ack -- "ack the highest and drop the superseded ones unparsed".
+    if (msg.sequence <= highest) return;
+    _frameHighestSequence[msg.terminalId] = msg.sequence;
+    // D4: the frame's own geometry only ever DETECTS a frame that predates a
+    // resize the driver already believes it sent -- never adopted as the
+    // tab's own geometry, which stays authoritative from terminal:size.
+    if (msg.cols != tab.cols || msg.rows != tab.rows) {
+      // Held for the `terminal:size` that is still in flight behind it, not
+      // discarded -- see [_frameDeferred]. Only the newest is worth keeping:
+      // an older mismatched screen is superseded by construction.
+      _frameDeferred[msg.terminalId] = msg;
+    } else {
+      _frameDeferred.remove(msg.terminalId);
+      _paintFrame(tab, msg);
+    }
+    _ackFrame(
+      msg.terminalId,
+      runId: msg.runId,
+      attachmentId: msg.attachmentId,
+      sequence: msg.sequence,
+    );
+  }
+
+  /// Writes one frame into [tab]'s engine and moves this terminal's frame-mode
+  /// hydration on.
+  void _paintFrame(TerminalTab tab, TerminalFrameMessage msg) {
+    // A frame is this mode's live output: it is the screen that answers what
+    // the user typed, so it closes the echo timer for the same reason the raw
+    // byte path does. Without this the perf harness reads zero echo latency in
+    // frame mode and leaves every sample pending forever.
+    perfRecorder.noteTerminalOutput(
+      projectId: session.projectId,
+      checkoutId: checkoutId,
+      terminalId: msg.terminalId,
+    );
+    // D3: one frame, one appendOutputBytes call, nothing prepended -- the
+    // frame wraps its own preamble (alt-screen exit, 3J, cursor home, SGR
+    // reset) and is fully self-contained. _legacyAttachErase must NEVER
+    // reach this path (see its own doc comment for why).
+    tab.ghostty.appendOutputBytes(utf8.encode(msg.ansi));
+    // D10: every cell a live selection's row/col anchors pointed at was
+    // just replaced wholesale. See TerminalTab.replaceEpoch's doc comment.
+    tab.replaceEpoch.value++;
+    final firstPaint = _framePaintedIds.add(msg.terminalId);
+    // The legacy-side claim means exactly what a painted frame makes true:
+    // bytes have been written into this engine since the tab was built. It is
+    // what keeps an erase-first history blob off a screen that already holds
+    // one, and what lets a terminal that later falls back to legacy read as a
+    // refresh rather than a cold wait.
+    _paintedTerminalIds.add(msg.terminalId);
+    // A screen the bridge skipped as oversize does not retire the attachment,
+    // so the notice it sent is spent the moment one fits again.
+    final recovered = _frameFailedIds.remove(msg.terminalId);
+    if (recovered) _frameStatusMessage.remove(msg.terminalId);
+    // Gated, not unconditional: a live stream applies up to
+    // `TERMINAL_FRAME_INTERVAL_MS` frames a second, and _publishHydration
+    // re-emits the whole TerminalState — one full workspace rebuild per frame.
+    if (firstPaint || recovered) _publishHydration();
+  }
+
+  /// Re-evaluates the frame [_frameDeferred] held for [terminalId] now that
+  /// its geometry may have caught up.
+  void _applyDeferredFrame(String terminalId) {
+    final msg = _frameDeferred.remove(terminalId);
+    if (msg == null) return;
+    final tab = _state.tabs[terminalId];
+    if (tab == null || tab.mode != TerminalDisplayMode.frame) return;
+    final attachment = _frameAttachment[terminalId];
+    if (attachment == null ||
+        attachment.runId != msg.runId ||
+        attachment.attachmentId != msg.attachmentId) {
+      return;
+    }
+    // Still mismatched means a further resize is outstanding, and this screen
+    // describes neither geometry — dropped, since the one that follows it
+    // will.
+    if (msg.cols != tab.cols || msg.rows != tab.rows) return;
+    _paintFrame(tab, msg);
+  }
+
+  void _ackFrame(
+    String terminalId, {
+    required String runId,
+    required String attachmentId,
+    required int sequence,
+  }) {
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('terminal:ack', {
+        'terminalId': terminalId,
+        'runId': runId,
+        'attachmentId': attachmentId,
+        'sequence': sequence,
+      }),
+    );
   }
 
   /// Erase for the LEGACY payload only — an older agent's raw byte tail, up to
@@ -640,6 +889,161 @@ class TerminalService {
     final retired = _retireSnapshotPull(terminalId);
     final firstPaint = _paintedTerminalIds.add(terminalId);
     if (retired || firstPaint) _publishHydration();
+  }
+
+  /// Resumes whatever protocol [terminalId] is on after a stream re-attach, a
+  /// fresh discovery, or an explicit retry.
+  ///
+  /// A terminal frame mode is actually SERVING (D1: never mixed) re-subscribes
+  /// and nothing else -- D6/D8 mean it owns its pane outright, so the legacy
+  /// pull is never requested again while it is being served. Every other tab
+  /// keeps the pull that has always hydrated it; running both at once for a
+  /// fresh terminal IS the dual-protocol transition window while
+  /// [kTerminalFrameModeEnabled] is on and a subscribe has not yet resolved.
+  ///
+  /// A latch left standing over an attachment that is gone would be the one
+  /// state nothing can recover: the D6/D8 guards keep refusing both legacy
+  /// protocols while frame mode has nothing left to paint with. So a tab whose
+  /// frame mode is no longer serving -- retired, refused, or facing a PTY that
+  /// frame mode cannot attach to at all -- is put back on legacy here, where
+  /// the fallback is a pull that bounds itself.
+  void _attachTerminal(String terminalId) {
+    final tab = _state.tabs[terminalId];
+    final canSubscribe =
+        kTerminalFrameModeEnabled && tab != null && _hasLivePty(tab);
+    final wasServing = _frameServing(terminalId);
+    // Frame identity is connection- and PTY-generation-scoped and does not
+    // survive a re-establishment or a same-id respawn (see
+    // [_frameAttachment]'s doc comment), so whatever the last connection or
+    // run told us is dropped before asking again rather than trusted.
+    _resetFrameTracking(terminalId);
+    final stillFrame = canSubscribe && wasServing;
+    if (!stillFrame) _demoteToLegacy(terminalId);
+    if (canSubscribe) _subscribeFrame(terminalId);
+    if (stillFrame) return;
+    _requestTerminalSnapshot(terminalId);
+  }
+
+  /// Whether the frame protocol is currently answering for [terminalId] --
+  /// an accepted attachment or an outstanding subscribe, neither of which has
+  /// since ended or failed.
+  bool _frameServing(String terminalId) {
+    if (_frameEndedIds.contains(terminalId)) return false;
+    if (_frameFailedIds.contains(terminalId)) return false;
+    return _frameAttachment.containsKey(terminalId) ||
+        _frameSubscribePending.contains(terminalId);
+  }
+
+  /// Leaves the alternate screen a frame may have put the engine on.
+  ///
+  /// A frame serialized from a guest running a full-screen TUI carries
+  /// `?1049h` in its own body, and the only thing that normally undoes it is
+  /// the NEXT frame's preamble. At a frame-to-legacy boundary there is no next
+  /// frame: the raw byte tail a legacy attach writes would paint into the
+  /// alternate screen and be thrown away the moment anything emits `?1049l`.
+  static final Uint8List _frameExitAltScreen = Uint8List.fromList(
+    utf8.encode('\x1b[?1049l'),
+  );
+
+  /// Writes [_frameExitAltScreen] for a tab that is leaving frame mode.
+  /// Deliberately NOT prepended to a frame: D3's rule stands.
+  void _leaveFrameScreen(TerminalTab tab) {
+    tab.ghostty.appendOutputBytes(_frameExitAltScreen);
+  }
+
+  /// Puts [terminalId] back on the legacy protocol, reporting whether it was
+  /// on the frame protocol to begin with.
+  bool _demoteToLegacy(String terminalId) {
+    final tab = _state.tabs[terminalId];
+    if (tab == null || tab.mode != TerminalDisplayMode.frame) return false;
+    _leaveFrameScreen(tab);
+    final tabs = Map<String, TerminalTab>.from(_state.tabs);
+    tabs[terminalId] = tab.copyWith(mode: TerminalDisplayMode.legacy);
+    _setState(_state.copyWith(tabs: tabs));
+    return true;
+  }
+
+  /// Drops everything this client believes about [terminalId]'s frame-mode
+  /// attachment, short of whether it has ever painted (see
+  /// [_framePaintedIds]'s own doc comment for why that survives this).
+  void _resetFrameTracking(String terminalId) {
+    _frameAttachment.remove(terminalId);
+    _clearPendingSubscribe(terminalId);
+    _frameHighestSequence.remove(terminalId);
+    _frameDeferred.remove(terminalId);
+    _frameFailedIds.remove(terminalId);
+    _frameEndedIds.remove(terminalId);
+    _frameStatusMessage.remove(terminalId);
+  }
+
+  /// Retires the bookkeeping for an outstanding `terminal:subscribe`, its
+  /// bound included.
+  void _clearPendingSubscribe(String terminalId) {
+    _frameSubscribeDeadlines.remove(terminalId)?.cancel();
+    _frameSubscribePending.remove(terminalId);
+    _frameSubscribeRequestId.remove(terminalId);
+    _frameSubscribeRequestedAtMs.remove(terminalId);
+  }
+
+  /// Sends `terminal:subscribe` for [terminalId] at the highest frame
+  /// protocol version this client can render, and bounds the wait.
+  void _subscribeFrame(String terminalId) {
+    final requestId = const Uuid().v4();
+    _clearPendingSubscribe(terminalId);
+    _frameSubscribeRequestId[terminalId] = requestId;
+    _frameSubscribePending.add(terminalId);
+    _frameSubscribeRequestedAtMs[terminalId] =
+        DateTime.now().millisecondsSinceEpoch;
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('terminal:subscribe', {
+        'terminalId': terminalId,
+        'version': kTerminalFrameProtocolVersion,
+        'requestId': requestId,
+      }),
+    );
+    _frameSubscribeDeadlines[terminalId] = Timer(snapshotAttachTimeout, () {
+      if (_disposed) return;
+      _frameSubscribeDeadlines.remove(terminalId);
+      _failFrameSubscribe(terminalId);
+    });
+    // The subscribe IS this terminal's attach from here on, so the stage it
+    // moves to has to reach the pane — without this a re-subscribe over an
+    // already-painted frame tab never republishes, and the UI keeps rendering
+    // the stage from before it (see [_frameSubscribeDeadlines]).
+    _publishHydration();
+  }
+
+  /// The bound in [_frameSubscribeDeadlines] expiring: the bridge is not
+  /// answering this subscribe, so the terminal goes back to the protocol that
+  /// can still hydrate it rather than waiting on a reply that is not coming.
+  void _failFrameSubscribe(String terminalId) {
+    _clearPendingSubscribe(terminalId);
+    // Still legacy means the dual-protocol window's own pull already owns the
+    // pane and is bounded in its own right; there is nothing to recover.
+    if (!_demoteToLegacy(terminalId)) {
+      _publishHydration();
+      return;
+    }
+    _requestTerminalSnapshot(terminalId);
+  }
+
+  /// Best-effort `terminal:unsubscribe` for whatever live frame attachment
+  /// [terminalId] holds. Fire-and-forget like every other outbound verb here
+  /// -- the bridge's own ACK_TIMEOUT and run-exit paths already retire an
+  /// attachment nobody explicitly released, so a dropped send here costs
+  /// nothing but a slightly later bridge-side cleanup.
+  void _unsubscribeFrame(String terminalId) {
+    final attachment = _frameAttachment.remove(terminalId);
+    if (attachment == null) return;
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('terminal:unsubscribe', {
+        'terminalId': terminalId,
+        'runId': attachment.runId,
+        'attachmentId': attachment.attachmentId,
+      }),
+    );
   }
 
   /// Issues one terminal's screen pull: `terminal.snapshot` RPC unless this
@@ -829,7 +1233,11 @@ class TerminalService {
     // first and unconditionally, for the same reason.
     _snapshotSeq.remove(terminalId);
     _snapshotFailedIds.remove(terminalId);
-    _requestTerminalSnapshot(terminalId);
+    // Which protocol a retry re-drives is _attachTerminal's judgement: a
+    // terminal frame mode is still serving re-subscribes alone (D1's
+    // no-mixed-mode rule holds for a retry too), and one it is not falls back
+    // to the pull, which is the whole point of offering a Retry.
+    _attachTerminal(terminalId);
   }
 
   /// Re-drives the whole checkout's attach after its checkout-wide verdict
@@ -898,7 +1306,101 @@ class TerminalService {
       _pushController.add(message);
     } else if (message is TerminalSizeMessage) {
       _handleTerminalSize(message);
+    } else if (message is TerminalSubscribedMessage) {
+      _handleFrameSubscribed(message);
+    } else if (message is TerminalDisplayStatusMessage) {
+      _handleFrameDisplayStatus(message);
     }
+  }
+
+  /// Accepts a `terminal:subscribe` this client sent, promoting the terminal
+  /// to frame mode.
+  void _handleFrameSubscribed(TerminalSubscribedMessage msg) {
+    final terminalId = msg.terminalId;
+    // A late reply to a subscribe this terminal has since superseded (a
+    // fresh reconnect, respawn, or retry already sent another one) must
+    // never resurrect the attempt it answers.
+    if (_frameSubscribeRequestId[terminalId] != msg.requestId) return;
+    _clearPendingSubscribe(terminalId);
+    final tab = _state.tabs[terminalId];
+    if (tab == null) return; // Tab gone since we asked; nothing to attach.
+    _frameAttachment[terminalId] = (
+      runId: msg.runId,
+      attachmentId: msg.attachmentId,
+    );
+    _frameHighestSequence[terminalId] = 0;
+    _frameFailedIds.remove(terminalId);
+    _frameEndedIds.remove(terminalId);
+    _frameStatusMessage.remove(terminalId);
+    // D8(i): the frame carries its own preamble and will erase the screen
+    // outright, so an outstanding legacy history pull for this terminal must
+    // never be left free to paint into the engine the frame protocol now
+    // owns. Disowning (not deleting) matches _abandonSnapshotPull's own
+    // contract, in case a reply for it is already on the wire.
+    _abandonSnapshotPull(terminalId);
+    final tabs = Map<String, TerminalTab>.from(_state.tabs);
+    tabs[terminalId] = tab.copyWith(mode: TerminalDisplayMode.frame);
+    _setState(_state.copyWith(tabs: tabs));
+  }
+
+  /// Handles `terminal:display:status` for either a still-outstanding
+  /// subscribe (only `UPGRADE_REQUIRED` is reachable there) or a live
+  /// attachment's own ending.
+  void _handleFrameDisplayStatus(TerminalDisplayStatusMessage msg) {
+    final terminalId = msg.terminalId;
+    final tab = _state.tabs[terminalId];
+    if (tab == null) return;
+    final requestId = msg.requestId;
+    // A notice naming a request this client still has outstanding is answering
+    // the SUBSCRIBE, and by construction carries no attachment to key on --
+    // `UPGRADE_REQUIRED` is sent with only the terminal and the requestId.
+    // Resolved FIRST and regardless of mode, or a tab already committed to
+    // frame mode drops the only word it will ever get that its re-subscribe
+    // was refused, and then waits out the bound instead.
+    if (requestId != null && _frameSubscribeRequestId[terminalId] == requestId) {
+      _clearPendingSubscribe(terminalId);
+      // Still legacy: the dual-protocol window's pull already owns the pane,
+      // so the refusal changes nothing the user can see.
+      if (!_demoteToLegacy(terminalId)) {
+        _publishHydration();
+        return;
+      }
+      // Already committed, so the refusal leaves nothing serving this pane.
+      _requestTerminalSnapshot(terminalId);
+      return;
+    }
+    if (tab.mode != TerminalDisplayMode.frame) return;
+    final attachment = _frameAttachment[terminalId];
+    // Only the LIVE attachment's own notice may act on it -- a superseded
+    // attachment's late ENDED/failure racing a fresh resubscribe must never
+    // touch the one that replaced it. A notice carrying no attachmentId
+    // addresses the terminal itself and is taken at face value (D7: an
+    // unrecognized notice must surface, never be dropped).
+    if (attachment == null) return;
+    if (msg.attachmentId != null &&
+        msg.attachmentId != attachment.attachmentId) {
+      return;
+    }
+    _frameStatusMessage[terminalId] = msg.message;
+    if (msg.code == 'ENDED') {
+      // D7: lifecycle, not failure. The only notice that definitionally ends
+      // the attachment, so the only one that drops it here.
+      _frameAttachment.remove(terminalId);
+      _frameEndedIds.add(terminalId);
+    } else {
+      // DISPLAY_FAILED, ACK_TIMEOUT, HISTORY_DISABLED, and any code this
+      // client does not recognize (a newer agent) -- D7: must surface as a
+      // generic failure, never be silently ignored.
+      //
+      // The attachment deliberately SURVIVES: `reportOversize` reuses
+      // DISPLAY_FAILED to say one screen was skipped without retiring
+      // anything, and the viewer that stops acking a still-live attachment is
+      // the one the bridge then kills for real with ACK_TIMEOUT. Where the
+      // notice really was terminal, nothing further arrives on it anyway, and
+      // the next attach drops it ([_frameServing]).
+      _frameFailedIds.add(terminalId);
+    }
+    _publishHydration();
   }
 
   Future<void> _send(Map<String, dynamic> message) async {
@@ -943,6 +1445,9 @@ class TerminalService {
 
     if (existing != null) {
       existing.ghostty.setSessionRunning(true);
+      if (existing.mode == TerminalDisplayMode.frame) {
+        _leaveFrameScreen(existing);
+      }
       // A start on an id the app already holds is a RESPAWN, and the new PTY
       // carries whatever `TerminalManager.lastDriverGeometry` held — the size
       // of whichever terminal resized last in that bridge process, or 80x24 on
@@ -958,6 +1463,10 @@ class TerminalService {
         clearExitCode: true,
         type: msg.terminalType,
         sizeEpoch: existing.sizeEpoch + 1,
+        // D1: a respawn is a fresh PTY generation, so the legacy-or-frame
+        // choice starts over -- whatever the dead run negotiated does not
+        // carry forward to the one replacing it.
+        mode: TerminalDisplayMode.legacy,
       );
     } else {
       final tab = _createTab(
@@ -985,9 +1494,10 @@ class TerminalService {
     // never delivered, which is every window where outbound frames were dropped
     // (a remote-access flip drops status frames too).
     _snapshotSeq.remove(msg.terminalId);
-    // Newly-discovered terminal — fetch its scrollback so we can drop stale
-    // terminal:output frames via the per-terminal seq cutoff.
-    _requestTerminalSnapshot(msg.terminalId);
+    // Newly-discovered (or respawned) terminal — negotiate a protocol for it.
+    // Legacy fetches its scrollback so stale terminal:output can be dropped
+    // via the per-terminal seq cutoff; frame mode subscribes instead.
+    _attachTerminal(msg.terminalId);
   }
 
   void _handleTerminalSize(TerminalSizeMessage msg) {
@@ -1017,6 +1527,9 @@ class TerminalService {
       sizeEpoch: dropped ? tab.sizeEpoch + 1 : null,
     );
     _setState(_state.copyWith(tabs: tabs));
+    // The geometry a frame was waiting on may have just landed — see
+    // [_frameDeferred].
+    _applyDeferredFrame(msg.terminalId);
   }
 
   void _handleTerminalExited(TerminalExitedMessage msg) {
@@ -1091,6 +1604,18 @@ class TerminalService {
         final respawned =
             info.running &&
             existing.sessionState == TerminalSessionState.exited;
+        // A respawn detected only through this replay (no terminal:started
+        // reached this client) is still a fresh PTY generation: a stale
+        // frame attachment left pointing at the dead run's runId would
+        // silently swallow every frame the new one sends (D5's own-runId
+        // guard), which is worse than legacy's equivalent gap here (an
+        // uncleared seq cutoff, at most a few duplicated lines).
+        if (respawned) {
+          _resetFrameTracking(info.terminalId);
+          if (existing.mode == TerminalDisplayMode.frame) {
+            _leaveFrameScreen(existing);
+          }
+        }
         final updated = existing.copyWith(
           name: info.name,
           sessionState: info.running
@@ -1101,6 +1626,7 @@ class TerminalService {
           rows: info.rows,
           type: info.type,
           sizeEpoch: respawned ? existing.sizeEpoch + 1 : null,
+          mode: respawned ? TerminalDisplayMode.legacy : null,
         );
         newTabs[info.terminalId] = info.driverClientId == null
             ? updated.copyWith(clearDriverClientId: true)
@@ -1185,7 +1711,7 @@ class TerminalService {
     for (final terminalId in discovered) {
       // Only the tabs that survived the rebuild: one dropped along the way has
       // nowhere for the reply to land.
-      if (newTabs.containsKey(terminalId)) _requestTerminalSnapshot(terminalId);
+      if (newTabs.containsKey(terminalId)) _attachTerminal(terminalId);
     }
   }
 
@@ -1207,6 +1733,11 @@ class TerminalService {
     _paintedTerminalIds.remove(terminalId);
     _awaitingHistoryIds.remove(terminalId);
     _abandonSnapshotPull(terminalId);
+    // Same reasoning, frame-mode side: a fresh engine has painted nothing, so
+    // this id's next frame attachment starts at TerminalAttachStage.cold, not
+    // whatever a same-id tab before it left behind.
+    _framePaintedIds.remove(terminalId);
+    _resetFrameTracking(terminalId);
     final tab = TerminalTab(
       terminalId: terminalId,
       name: name,
@@ -1250,6 +1781,12 @@ class TerminalService {
     // keeps `isFocused` current (false for background projects, blurred agents,
     // and while the app is backgrounded), so a background bell doesn't sound /
     // buzz the device. `ringTerminalBell` throttles bursts.
+    //
+    // This fires only on legacy bytes: a `terminal:frame` is a SERIALIZED
+    // SCREEN, the engine's state at one instant, and BEL is a transient event
+    // with no state of its own -- appendOutputBytes-ing a frame's `ansi` can
+    // never contain one. Frame mode has no bell (a known gap, not a bug to
+    // silently work around).
     final ghostty = tab.ghostty;
     ghostty.onBellData = () {
       if (!ghostty.isFocused) return;
@@ -1468,6 +2005,18 @@ class TerminalService {
     // generation a recreated same-id tab issues — painting the deleted
     // terminal's screen into the new one. One int per id is not worth that.
     _abandonSnapshotPull(terminalId);
+    // Tell the bridge the viewer is gone so it retires the attachment instead
+    // of ticking an unread frame budget against a subscriber that will never
+    // ack again (mirrors the snapshot pull's own disowning, one line up).
+    _unsubscribeFrame(terminalId);
+    _framePaintedIds.remove(terminalId);
+    _resetFrameTracking(terminalId);
+    // `replaceEpoch` is deliberately NOT disposed, while the engine below must
+    // be: a `ValueNotifier` holds no native resource, and `addListener` on a
+    // disposed one THROWS where `removeListener` is allowed. Disposing it only
+    // here would make this the single path that can fault a widget remounting
+    // on a stale tab object — the service's own dispose and a same-id respawn
+    // both leave theirs alive.
     tab.ghostty.dispose();
     final tabs = Map<String, TerminalTab>.from(_state.tabs)..remove(terminalId);
     final isActive = _state.activeTerminalId == terminalId;
@@ -1616,6 +2165,12 @@ class TerminalService {
     _heavySub = null;
     await _statusSub?.cancel();
     _statusSub = null;
+    // Disown every live frame attachment on the way out — otherwise the
+    // bridge keeps ticking an ack budget against a viewer that has stopped
+    // listening, and only discovers that the hard way via ACK_TIMEOUT.
+    for (final id in _frameAttachment.keys.toList()) {
+      _unsubscribeFrame(id);
+    }
     for (final timer in _resizeTimers.values) {
       timer.cancel();
     }
@@ -1623,6 +2178,9 @@ class TerminalService {
       timer.cancel();
     }
     for (final timer in _snapshotDeadlines.values) {
+      timer.cancel();
+    }
+    for (final timer in _frameSubscribeDeadlines.values) {
       timer.cancel();
     }
     _checkoutAttachDeadline?.cancel();
