@@ -49,6 +49,8 @@ jobs:
           restore-keys: bun-${{ runner.os }}-site-
       - name: Install and build
         working-directory: site
+        env:
+          PUBLIC_SALESIQ_WIDGET_URL: ${{ secrets.SALESIQ_WIDGET_URL }}
         run: |
           bun install --frozen-lockfile
           bun run check

@@ -4,14 +4,20 @@ import { BETA } from "../billing/plans.js";
 import { Wordmark } from "./wordmark.js";
 import { Mark } from "./mark.js";
 import { absoluteUrl } from "./origin.js";
+import { SALESIQ_CONTROLLER_SCRIPT, salesIqSupportControl } from "./salesiq.js";
 
 /** Which nav entry the current page IS, so it can be marked. Pages without an
  *  entry of their own (account, sign-in, checkout) pass nothing. */
 export type NavSection = "dashboard" | "devices" | "team" | "pricing";
 
+export type LayoutUser = {
+  id: string;
+  email?: string | null;
+};
+
 export type LayoutProps = {
   title: string;
-  user?: { email?: string | null } | null;
+  user?: LayoutUser | null;
   section?: NavSection;
   children: Child;
 };
@@ -123,7 +129,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
             )}
             <div class="flex-1" />
             {user ? (
-              <AccountMenu email={user.email} />
+              <AccountMenu user={user} />
             ) : user === null ? (
               // `null` = a product page being read signed out, where this is the
               // way in. `undefined` = an auth page, which IS the way in — there
@@ -137,7 +143,10 @@ export function Layout({ title, user, section, children }: LayoutProps) {
         </header>
         <main class="max-w-5xl mx-auto p-6">{children}</main>
         {user && (
-          <script dangerouslySetInnerHTML={{ __html: ACCOUNT_MENU_SCRIPT }} />
+          <>
+            <script dangerouslySetInnerHTML={{ __html: ACCOUNT_MENU_SCRIPT }} />
+            <script dangerouslySetInnerHTML={{ __html: SALESIQ_CONTROLLER_SCRIPT }} />
+          </>
         )}
       </body>
     </html>
@@ -159,7 +168,8 @@ export function Layout({ title, user, section, children }: LayoutProps) {
  * twice. Here it is also on phones, where the trigger has always been the
  * avatar alone.
  */
-function AccountMenu({ email }: { email?: string | null }) {
+function AccountMenu({ user }: { user: LayoutUser }) {
+  const email = user.email;
   return (
     <details class="group relative shrink-0" data-account-menu>
       <summary
@@ -191,8 +201,9 @@ function AccountMenu({ email }: { email?: string | null }) {
             <PersonIcon />
             Account
           </a>
+          {salesIqSupportControl(user)}
         </div>
-        <form method="post" action="/logout" class="border-t border-edge-inner p-1">
+        <form method="post" action="/logout" class="border-t border-edge-inner p-1" data-salesiq-logout="true">
           {/* Not permanently red. Signing out is routine and reversible; danger
               on hover marks it as the row that ends the session without the
               menu shouting one of its two items at every open. */}

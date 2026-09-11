@@ -5,9 +5,15 @@ export type AuthVars = {
   userId: string;
   sessionId: string;
   userEmail: string | null;
+  userName: string | null;
 };
 
-type Session = { sessionId: string; userId: string; email: string | null };
+type Session = {
+  sessionId: string;
+  userId: string;
+  email: string | null;
+  name: string | null;
+};
 
 async function loadSession(auth: Auth, c: Context): Promise<Session | null> {
   const res = await auth.api.getSession({ headers: c.req.raw.headers });
@@ -16,6 +22,7 @@ async function loadSession(auth: Auth, c: Context): Promise<Session | null> {
     sessionId: res.session.id,
     userId: res.user.id,
     email: res.user.email ?? null,
+    name: res.user.name ?? null,
   };
 }
 
@@ -23,6 +30,7 @@ function setAuthVars(c: Context<{ Variables: AuthVars }>, s: Session): void {
   c.set("userId", s.userId);
   c.set("sessionId", s.sessionId);
   c.set("userEmail", s.email);
+  c.set("userName", s.name);
 }
 
 /** Gate a JSON route. Returns 401 when unauthenticated. */

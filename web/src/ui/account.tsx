@@ -1,8 +1,8 @@
-import { Layout, PageHead } from "./layout.js";
+import { Layout, PageHead, type LayoutUser } from "./layout.js";
 import { AUTH_MEMORY_SCRIPT } from "./auth-memory.js";
 
 export type AccountPageProps = {
-  user: { email?: string | null };
+  user: LayoutUser;
   blockedBySubscription: boolean;
   /** Owner of a team that still has members. Unlike the subscription block, the
    *  user cannot clear this one themselves — v1 has no ownership transfer. */

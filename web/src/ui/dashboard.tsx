@@ -1,4 +1,4 @@
-import { Layout, PageHead } from "./layout.js";
+import { Layout, PageHead, type LayoutUser } from "./layout.js";
 import { asset } from "./asset.js";
 import { CellMeter } from "./cell-meter.js";
 import { ActiveSessionsCard } from "./active-sessions.js";
@@ -10,7 +10,7 @@ import { FREE_TIER } from "../billing/plans.js";
 import { isPendingCancellation } from "../models/subscription.js";
 
 export type DashboardPageProps = {
-  user: { email?: string | null };
+  user: LayoutUser;
   subscription: SubscriptionRow;
   plan: PlanRow;
   tier: string;

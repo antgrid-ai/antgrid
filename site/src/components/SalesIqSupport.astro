@@ -1,0 +1,102 @@
+---
+import { SALESIQ_WIDGET_URL } from "../config";
+
+const parsed = URL.canParse(SALESIQ_WIDGET_URL) ? new URL(SALESIQ_WIDGET_URL) : null;
+const widgetUrl = parsed?.protocol === "https:" ? parsed.toString() : "";
+---
+
+<aside class="support-chat" data-salesiq-support data-widget-url={widgetUrl}>
+  <p>Need a hand from a person?</p>
+  <button type="button" data-salesiq-open>Chat with support</button>
+  <span data-salesiq-status role="status" aria-live="polite"></span>
+</aside>
+
+<script is:inline>
+  (() => {
+    const root = document.querySelector("[data-salesiq-support]");
+    const button = root?.querySelector("[data-salesiq-open]");
+    const status = root?.querySelector("[data-salesiq-status]");
+    if (!(root instanceof HTMLElement) || !(button instanceof HTMLButtonElement)) return;
+
+    const widgetUrl = root.dataset.widgetUrl || "";
+    const appHandoff = new URLSearchParams(window.location.hash.slice(1));
+    const fromApp = new URLSearchParams(window.location.search).get("source") === "app";
+    const visitorName = fromApp ? appHandoff.get("name")?.trim().slice(0, 200) : "";
+    const visitorEmail = fromApp ? appHandoff.get("email")?.trim().slice(0, 320) : "";
+    if (fromApp && window.location.hash) {
+      history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    }
+    const identify = () => {
+      if (visitorName) window.$zoho?.salesiq?.visitor?.name(visitorName);
+      if (visitorEmail) window.$zoho?.salesiq?.visitor?.email(visitorEmail);
+    };
+    let loading;
+    const open = () => {
+      if (!widgetUrl) {
+        window.location.href = "mailto:contact@radhaai.com?subject=Antgrid%20support";
+        return;
+      }
+      if (window.$zoho?.salesiq?.chatwindow) {
+        identify();
+        window.$zoho.salesiq.chatwindow.visible("show");
+        return;
+      }
+      if (loading) return;
+      button.disabled = true;
+      if (status) status.textContent = "Opening support chat…";
+      window.$zoho = window.$zoho || {};
+      window.$zoho.salesiq = window.$zoho.salesiq || {
+        widgetcode: "siqwidget",
+        values: {},
+        ready: function () {},
+      };
+      window.$zoho.salesiq.ready = function () {
+        window.$zoho.salesiq.tracking?.off();
+        window.$zoho.salesiq.floatbutton?.visible("hide");
+        identify();
+        window.$zoho.salesiq.chatwindow?.visible("show");
+        button.disabled = false;
+        if (status) status.textContent = "";
+      };
+      const script = document.createElement("script");
+      script.id = "zsiqscript";
+      script.src = widgetUrl;
+      script.defer = true;
+      loading = new Promise((resolve, reject) => {
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      }).catch(() => {
+        script.remove();
+        loading = undefined;
+        button.disabled = false;
+        if (status) status.textContent = "Chat could not load. Email contact@radhaai.com.";
+      });
+    };
+    button.addEventListener("click", open);
+    if (new URLSearchParams(window.location.search).get("chat") === "1" && widgetUrl) open();
+  })();
+</script>
+
+<style>
+  .support-chat {
+    margin-top: 2rem;
+    padding: 1rem;
+    border: 1px solid var(--color-edge);
+    border-radius: 8px;
+    background: var(--color-group);
+  }
+  p { margin: 0 0 0.75rem; color: var(--color-ink2); }
+  button {
+    border: 1px solid var(--color-signal);
+    border-radius: 5px;
+    padding: 0.55rem 0.85rem;
+    background: var(--color-signal);
+    color: var(--color-page);
+    cursor: pointer;
+    font: inherit;
+    font-weight: 600;
+  }
+  button:disabled { cursor: wait; opacity: 0.65; }
+  span { display: block; min-height: 1.25rem; margin-top: 0.5rem; color: var(--color-muted); font-size: 12px; }
+</style>

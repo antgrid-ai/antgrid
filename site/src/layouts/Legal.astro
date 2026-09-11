@@ -1,5 +1,6 @@
 ---
 import Base from "./Base.astro";
+import SalesIqSupport from "../components/SalesIqSupport.astro";
 
 interface Props {
   frontmatter: { title: string; description: string; path: string };
@@ -11,6 +12,7 @@ const { frontmatter } = Astro.props;
     <article class="legal-prose">
       <slot />
     </article>
+    {frontmatter.path === "/support" && <SalesIqSupport />}
   </main>
 </Base>
 
