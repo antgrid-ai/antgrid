@@ -1,11 +1,11 @@
 // bridge/src/handler/authorization.ts
 
-// Instruction-scoped authorization. A lift is derived ONLY from the text a
-// human typed into `handler:instruct` — the PA bar and the preset chips both funnel
-// through `HandlerEngine.instruct`, and that method is the single feed point. Never
-// the transcript, never judge/Assistant output: those are attacker-influenced, and an
-// agent that could authorize itself by writing "the user approved this" into its own
-// output would turn the advisory floor into decoration.
+// Instruction-scoped authorization. A lift is derived ONLY from the text a human
+// typed into `handler:instruct` — the arm sheet's composer and the backlog drawer's
+// both funnel through `HandlerEngine.instruct`, and that method is the single feed
+// point. Never the transcript, never judge/Assistant output: those are attacker-
+// influenced, and an agent that could authorize itself by writing "the user approved
+// this" into its own output would turn the advisory floor into decoration.
 //
 // Two grades, because "the user named this operation" and "the user named this
 // target" are different claims:

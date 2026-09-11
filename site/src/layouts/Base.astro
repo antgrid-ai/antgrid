@@ -4,14 +4,17 @@ import { Font } from "astro:assets";
 import Seo from "../components/Seo.astro";
 import Nav from "../components/Nav.astro";
 import Footer from "../components/Footer.astro";
+import SalesIqSupport from "../components/SalesIqSupport.astro";
+import { ANALYTICS } from "../config";
 interface Props {
   title: string;
   description: string;
   ogImage?: string;
   ogImageAlt?: string;
   path?: string;
+  robots?: string;
 }
-const { title, description, ogImage, ogImageAlt, path } = Astro.props;
+const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
 ---
 <html lang="en">
   <head>
@@ -25,12 +28,68 @@ const { title, description, ogImage, ogImageAlt, path } = Astro.props;
     <Font cssVariable="--font-archivo" preload />
     <Font cssVariable="--font-inter" preload />
     <Font cssVariable="--font-jetbrains" preload />
-    <Seo title={title} description={description} ogImage={ogImage} ogImageAlt={ogImageAlt} path={path} />
+    <Seo title={title} description={description} ogImage={ogImage} ogImageAlt={ogImageAlt} path={path} robots={robots} />
+    {/* Two things follow the reader's own OS off this one attribute: the
+        mockup's window chrome, because the app's does (Windows paints its own
+        caption buttons, macOS keeps the real NSWindow traffic lights —
+        app/lib/window/window_capabilities.dart), and the hero's download
+        button, which offers the build the reader can actually install.
+        `is:inline` is load-bearing — Astro would otherwise bundle this as a
+        deferred module and both swaps would land a frame after paint, as a
+        visible flicker in the hero. Windows is the no-JS default, so a bot, an
+        OG screenshot or a blocked script still gets a coherent window and a
+        working CTA rather than a bare one and none. */}
+    <script is:inline>
+      (function () {
+        var d = document.documentElement;
+        // High-entropy client hints need an async request, so the low-entropy
+        // `platform` plus the UA string is the whole budget here. Order matters,
+        // not breadth: an iPad asking for the desktop site carries "Macintosh",
+        // and every Android UA carries "Linux". So Apple is matched first, and
+        // Android is ruled out before the Linux test — which leaves phones on
+        // the Windows default they already had, and is the right answer for a
+        // desktop-only download anyway.
+        var p = (navigator.userAgentData && navigator.userAgentData.platform) || "";
+        var s = p + " " + navigator.userAgent;
+        var apple = /mac|iphone|ipad|ipod/i.test(s);
+        d.dataset.os = apple
+          ? "mac"
+          : /linux/i.test(s) && !/android/i.test(s)
+            ? "linux"
+            : "win";
+        // A SECOND axis, and the reason it cannot be folded into data-os: the
+        // mapping above deliberately answers "which build would this reader
+        // want", so it files Android under win and iPhone under mac. That is
+        // right for OFFERING a build — a phone reader is usually fetching one
+        // for a machine they will sit at later — and catastrophic for FIRING
+        // one, because it makes every phone look like a desktop that matched.
+        // Nothing may auto-download while this is set.
+        //
+        // maxTouchPoints, not another UA token, is what catches an iPad: since
+        // iPadOS 13 "Request Desktop Website" is the DEFAULT, and in it Safari
+        // sends a UA byte-identical to a real Mac's — no "iPad", no "Mobile" —
+        // while userAgentData is unimplemented in WebKit, so the string budget
+        // above is exhausted. A Mac reports 0 touch points and an iPad reports
+        // several, which is the only signal that separates them. Gated on the
+        // apple branch so a Windows touchscreen laptop, which reports plenty,
+        // stays the desktop it is.
+        if (/iphone|ipad|ipod|android|mobile/i.test(s) || (apple && navigator.maxTouchPoints > 1)) {
+          d.dataset.form = "mobile";
+        }
+      })();
+    </script>
+    {/* For a page that needs its own pre-paint work, on the same terms as the
+        OS script above — anything that decides what the first frame LOOKS like
+        has to run before there is one. In the head rather than at the top of
+        the page body because a body script only wins that race by luck: the
+        browser is free to paint the markup it has already parsed above it. */}
+    <slot name="head" />
   </head>
   <body class="bg-page text-ink font-sans">
     <Nav />
     <slot />
     <Footer />
+    <SalesIqSupport />
     <script>
       // Scroll reveal: the hidden state only applies under html.js, so a failed
       // script leaves the page fully visible rather than permanently blank.
@@ -57,5 +116,20 @@ const { title, description, ogImage, ogImageAlt, path } = Astro.props;
       );
       reveals.forEach((el) => { if (!el.classList.contains("in")) io.observe(el); });
     </script>
+    {/* Last thing in the document, and the head would be the wrong place for it:
+        everything up there is chosen for what it does to the first frame, and
+        this does nothing to it. `defer` is what keeps that true — Chrome fetches
+        a deferred script at Low priority, under the font preloads and the CSS
+        that DO paint, then runs it once parsing is done.
+
+        `is:inline` is load-bearing for a different reason than the OS script's:
+        here the data-* attributes ARE the configuration, so the tag has to reach
+        the browser as written rather than as something a bundler rewrote. */}
+    <script
+      is:inline
+      defer
+      src={ANALYTICS.src}
+      data-website-id={ANALYTICS.websiteId}
+      data-domains={ANALYTICS.domains}></script>
   </body>
 </html>

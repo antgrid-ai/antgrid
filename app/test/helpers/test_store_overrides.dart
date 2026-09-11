@@ -16,7 +16,6 @@ import 'package:antgrid/providers/drawer_order.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/projects.dart';
 import 'package:antgrid/providers/recent_agents.dart';
-import 'package:antgrid/providers/recent_ports.dart';
 import 'package:antgrid/providers/update_available.dart';
 import 'package:antgrid/project/project_session_registry.dart'
     show projectStatusCacheProvider;
@@ -26,9 +25,9 @@ import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/drawer_collapsed_store.dart';
 import 'package:antgrid/storage/drawer_order_store.dart';
 import 'package:antgrid/storage/first_run_store.dart';
+import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
-import 'package:antgrid/storage/recent_ports_store.dart';
 import 'package:antgrid/storage/update_handoff_store.dart';
 
 class TestStoreOverrides {
@@ -37,7 +36,6 @@ class TestStoreOverrides {
   final RecentAgentsStore recentAgentsStore;
   final DrawerOrderStore drawerOrderStore;
   final CachedSessionsStore cachedSessionsStore;
-  final RecentPortsStore recentPortsStore;
 
   TestStoreOverrides._({
     required this.overrides,
@@ -45,7 +43,6 @@ class TestStoreOverrides {
     required this.recentAgentsStore,
     required this.drawerOrderStore,
     required this.cachedSessionsStore,
-    required this.recentPortsStore,
   });
 
   /// Releases the stores, but deliberately does not AWAIT them.
@@ -66,7 +63,6 @@ class TestStoreOverrides {
   Future<void> close() async {
     unawaited(recentAgentsStore.close());
     unawaited(cachedSessionsStore.close());
-    unawaited(recentPortsStore.close());
   }
 }
 
@@ -77,7 +73,6 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
     drawerOrderStore,
     drawerCollapsedStore,
     cachedSessionsStore,
-    recentPortsStore,
     firstRunStore,
     updateHandoffStore,
     prefs,
@@ -87,11 +82,11 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
     DrawerOrderStore.open(),
     DrawerCollapsedStore.open(),
     CachedSessionsStore.open(),
-    RecentPortsStore.open(),
     FirstRunStore.open(),
     UpdateHandoffStore.open(),
     openAppSettingsPrefs(),
   ).wait;
+  final pendingForgetsStore = await PendingForgetsStore.open();
   // Deterministic, NOT eagerly created: ProjectStatusCache.testInstance only
   // stores the path; the dir is created lazily on first write() and the file is
   // statted only when clear()/read() run. Crucially this performs NO real I/O at
@@ -106,11 +101,11 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
   return TestStoreOverrides._(
     overrides: [
       projectStoreProvider.overrideWithValue(projectStore),
+      pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
       recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
       drawerOrderStoreProvider.overrideWithValue(drawerOrderStore),
       drawerCollapsedStoreProvider.overrideWithValue(drawerCollapsedStore),
       cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),
-      recentPortsStoreProvider.overrideWithValue(recentPortsStore),
       firstRunStoreProvider.overrideWithValue(firstRunStore),
       updateHandoffStoreProvider.overrideWithValue(updateHandoffStore),
       projectStatusCacheProvider.overrideWithValue(
@@ -124,6 +119,5 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
     recentAgentsStore: recentAgentsStore,
     drawerOrderStore: drawerOrderStore,
     cachedSessionsStore: cachedSessionsStore,
-    recentPortsStore: recentPortsStore,
   );
 }

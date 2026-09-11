@@ -17,6 +17,6 @@ await page.evaluate(() => document.fonts.ready);
 // shipping: the card should show the run resolved, not caught mid-populate.
 await page
   .locator("#og")
-  .screenshot({ path: "public/og/one-screen.png", animations: "disabled" });
+  .screenshot({ path: "public/og/control-plane.png", animations: "disabled" });
 await browser.close();
-console.log("wrote public/og/one-screen.png");
+console.log("wrote public/og/control-plane.png");

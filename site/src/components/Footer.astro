@@ -1,17 +1,25 @@
 ---
 import { Icon } from "astro-icon/components";
 import { links } from "../config";
+import Mark from "./ui/Mark.astro";
 import Wordmark from "./ui/Wordmark.astro";
 ---
 <footer class="border-t border-edge-inner">
   <div class="mx-auto max-w-shell px-6 pb-8 pt-12">
     <div class="grid grid-cols-2 gap-8 md:grid-cols-[1.7fr_1fr_1fr_1fr]">
       <div>
-        <div class="mb-2.5">
+        {/* The full lockup, as in the nav — the wordmark alone was the only
+            place on the site the mark was dropped, so the page opened and closed
+            on two different marques. h-8 against the wordmark's h-6 holds the
+            kit's proportion (the mark box runs 4/3 of the type size); scaled
+            down from the nav's 9/7 because the footer is a sign-off, not a
+            header. Keep the pair in step. */}
+        <div class="mb-2.5 flex items-center gap-2">
+          <Mark class="h-8 w-auto" />
           <Wordmark class="h-6 w-auto" />
         </div>
         <p class="mb-3.5 max-w-[230px] text-meta leading-relaxed text-muted">
-          Run your coding agents on your machine, steer them from your phone — and nothing counts as done without evidence.
+          Every agent you run, on every machine you own, in one control plane — and a gate on every phase when you arm Handler.
         </p>
         <span class="inline-flex items-center gap-1.5 rounded border border-edge px-2.5 py-1 font-mono text-marker text-muted2">
           <Icon name="tabler:lock" class="text-signal" width="12" height="12" />end-to-end encrypted · zero-knowledge relay
@@ -25,6 +33,8 @@ import Wordmark from "./ui/Wordmark.astro";
           <a href={links.download} class="hover:text-ink">Download</a>
           <a href={links.getStarted} class="hover:text-ink">Get started</a>
           <a href={links.support} class="hover:text-ink">Support</a>
+          <a href={links.security} class="hover:text-ink">Security</a>
+          <a href={links.changelog} class="hover:text-ink">Changelog</a>
         </div>
       </div>
       <div>
@@ -44,6 +54,16 @@ import Wordmark from "./ui/Wordmark.astro";
     </div>
     <div class="mt-7 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-edge-inner pt-4.5 font-mono text-marker text-faint">
       <span>© 2026 antgrid</span>
+      <span aria-hidden="true">·</span>
+      {/* The repo, with no ask attached. /security already sends readers here to
+          check the handshake spec against the client that implements it, so the
+          link exists on the site either way — it just had nowhere a reader could
+          find it without being sold something first. The star ask lives on
+          /download, the one page where a reader already has what they came
+          for. */}
+      <a href={links.repo} class="inline-flex items-center gap-1.5 text-muted hover:text-ink">
+        <Icon name="tabler:brand-github" width="13" height="13" />GitHub
+      </a>
       <span aria-hidden="true">·</span>
       <a href={links.company} class="group inline-flex items-center gap-1.5 text-muted hover:text-ink">
         <span>a product of</span>

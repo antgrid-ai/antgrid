@@ -75,11 +75,38 @@ const fonts = [
 // PUBLIC_SITE_URL kept in lockstep with Seo's PUBLIC_SITE_URL so canonical and sitemap never diverge.
 export default defineConfig({
   site: process.env.PUBLIC_SITE_URL ?? "https://antgrid.ai",
-  // Still behind the experimental flag as of Astro 5.18 — the docs describe it
-  // unflagged, but `fonts` at the top level throws ExperimentalFontsNotEnabled.
-  // Move it up a level when it stabilises; the shape of `fonts` itself is what
-  // the docs document, so only the nesting should need to change.
-  experimental: { fonts },
+  // There is no ClientRouter here, so every navigation is a full document load.
+  // `hover` buys the one that matters back: the download CTAs are deliberate,
+  // aimed clicks, and the page is fetched while the pointer is still travelling.
+  // prefetchAll rather than per-link opt-in because the site is nine pages —
+  // tagging them individually is a list that goes stale, not a saving.
+  prefetch: { prefetchAll: true, defaultStrategy: "hover" },
+  fonts,
   vite: { plugins: [tailwindcss()] },
-  integrations: [icon(), sitemap({ filter: (page) => !page.includes("/og-card") })],
+  integrations: [
+    // simple-icons is named explicitly because astro-icon otherwise assigns an
+    // installed collection `["*"]` and inlines the whole pack into the build's
+    // virtual module — 3,700 icons and ~4.7MB of source, to draw five brand
+    // marks in Compat.astro. (Claude Code and Mistral AI moved to src/icons/
+    // with a tightened viewBox — the simple-icons originals letterbox short of
+    // the full 24x24, so they render smaller than their siblings.) Collections
+    // left unnamed (tabler) keep `*`.
+    icon({
+      include: {
+        "simple-icons": [
+          "openai",
+          "opencode",
+          "cursor",
+          "githubcopilot",
+          "kimi",
+        ],
+      },
+    }),
+    // og-card carries robots=noindex — it is the screenshot source for the
+    // social card — and a sitemap that submits a noindex URL is a conflict
+    // Search Console reports rather than ignores. /download is deliberately NOT
+    // excluded: it is the site's only addressable download URL and the one page
+    // a "antgrid download" search should be able to land on.
+    sitemap({ filter: (page) => !page.includes("/og-card") }),
+  ],
 });

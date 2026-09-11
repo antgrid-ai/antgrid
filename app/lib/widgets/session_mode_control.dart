@@ -1,7 +1,9 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../design/ab_icons.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
+import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../models/agent_work_status.dart';
@@ -14,6 +16,7 @@ import '../providers/new_session_picker.dart';
 import '../providers/session_mode.dart';
 import '../providers/sessions.dart';
 import '../services/sessions_service.dart';
+import '../util/detached.dart';
 import 'mode_segmented.dart';
 import 'session_agent_mark.dart';
 
@@ -81,11 +84,81 @@ class SessionModeControl extends ConsumerWidget {
       // Both cells inert while a flip is in flight, so a second tap can't queue
       // a second one. No reason attached: the user just tapped.
       enabled: !inFlight,
-      onChanged: (target) => _switchMode(context, ref, active, target),
+      onChanged: (target) => detached(
+        'SessionModeControl',
+        'switch session mode',
+        () => _switchMode(context, ref.container, active, target),
+      ),
     );
     // Dimming a control whose whole job is to look chooseable reads as broken,
     // so the pending state pulses instead.
     return inFlight ? PulsingOpacity(child: control) : control;
+  }
+}
+
+/// [SessionModeControl]'s state, redone as a single [AbLiveMenuRow] for a
+/// text-menu host (the mobile overflow popup) instead of a segmented
+/// control. A menu row has no room to show the option NOT being picked, so
+/// the label names the action ("Switch to Terminal"/"Switch to Chat")
+/// instead of the two-state choice. Same visibility/capability rules as
+/// [SessionModeControl] — keep the two in lockstep by hand; neither is a
+/// special case of the other's build method.
+class SessionModeMenuItem extends ConsumerWidget {
+  const SessionModeMenuItem({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final active = ref.watch(activeSessionProvider);
+    if (active == null || !active.agentSessionResumable) {
+      return const SizedBox.shrink();
+    }
+    final pending = ref.watch(pendingSessionModeProvider);
+    final inFlight = pending?.sessionId == active.id;
+    final mode = (ref.watch(activeSessionModeProvider) ?? active.mode) == 'chat'
+        ? 'chat'
+        : 'terminal';
+    final target = mode == 'chat' ? 'terminal' : 'chat';
+    final chatCapable = ref.watch(focusedToolChatCapableProvider(active.tool));
+    final agent =
+        ref.watch(focusedMachineToolsProvider).value?.labels[active.tool] ??
+        sessionAgentDisplayLabel(active, ref.watch(agentCatalogProvider));
+    final chatEnabled = mode == 'chat' || chatCapable == true;
+    // Switching TO terminal is always reachable; switching to chat carries
+    // the same capability gate as the segmented control's Chat cell.
+    final targetEnabled = target == 'terminal' || chatEnabled;
+
+    final row = AbLiveMenuRow(
+      label: target == 'chat' ? 'Switch to Chat' : 'Switch to Terminal',
+      icon: target == 'chat' ? AbIcons.comment : AbIcons.terminal,
+      enabled: targetEnabled,
+      disabledReason: chatCapable == null
+          ? "This machine hasn't said whether $agent supports chat sessions — "
+                'it may still be connecting, or its bridge may be too old to '
+                'answer.'
+          : "$agent doesn't support chat sessions.",
+      onTap: () {
+        // Inert while a flip is in flight, so a second tap can't queue a
+        // second one — same contract as SessionModeControl.
+        if (inFlight) return;
+        // The popup route closes BEFORE the confirm dialog opens. This row is
+        // the content of a `showAbPanel` PopupRoute, which its own doc says
+        // pops itself; leaving it up stacks the dialog over a live modal
+        // barrier and then leaves the menu covering the session it just
+        // changed. The dialog anchors on the NAVIGATOR's context, which
+        // outlives the route being popped, and the container is read before
+        // the pop for the same reason.
+        final navigator = Navigator.of(context);
+        final host = navigator.context;
+        final container = ref.container;
+        navigator.pop();
+        detached(
+          'SessionModeMenuItem',
+          'switch session mode',
+          () => _switchMode(host, container, active, target),
+        );
+      },
+    );
+    return inFlight ? PulsingOpacity(child: row) : row;
   }
 }
 
@@ -136,14 +209,15 @@ String? _modeSwitchWarning(AgentWorkStatus? status, String agent) =>
 
 Future<void> _switchMode(
   BuildContext context,
-  WidgetRef ref,
+  ProviderContainer container,
   SessionEntry session,
   String target,
 ) async {
-  // Captured before the dialog: the focused project can re-resolve while it is
-  // open, and a WidgetRef read past that point throws. Everything downstream
-  // goes through the container so an unmount mid-flip still clears `pending`.
-  final container = ref.container;
+  // Takes the container, never a `WidgetRef`: the focused project can
+  // re-resolve while the dialog is open, and one caller pops its own popup
+  // route before getting here — a ref read past either point throws.
+  // Everything downstream goes through it so an unmount mid-flip still clears
+  // `pending`.
   final agent =
       container.read(focusedMachineToolsProvider).value?.labels[session.tool] ??
       sessionAgentDisplayLabel(session, container.read(agentCatalogProvider));

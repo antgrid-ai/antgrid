@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Database } from "bun:sqlite";
 
-import { resumeArgv, sessionResumable } from "../src/agent-resume";
+import { agentSessionGone, resumeArgv, sessionResumable } from "../src/agent-resume";
 import { initialPromptArgv } from "../src/initial-prompt";
 import { updateSpecFor } from "../src/update/specs";
 import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
@@ -135,6 +135,46 @@ function livePath(): string {
 }
 
 describe("resume pre-flight", () => {
+  // Which agents let a store MISS refuse a resume. Strictly narrower than the
+  // table below: copilot can say "gone" and is still asked, because the index
+  // it answers from is not the one `--resume` consults. Adding an agent here
+  // means its CLI exits rather than starting fresh on an id its store lacks —
+  // measure that before flipping one.
+  const storeMissRefusesResume: PerAgent<boolean> = {
+    "claude-code": false,
+    codex: true,
+    opencode: false,
+    "cursor-agent": false,
+    "github-copilot": false,
+    kilo: false,
+    kimi: false,
+    "mistral-vibe": false,
+  };
+
+  for (const key of AGENT_KEYS) {
+    test(`${key}: a store that lacks the id refuses the resume only if authoritative`, () => {
+      expect(
+        agentSessionGone({
+          tool: key,
+          agentSessionId: RESUME_ID,
+          codexHome: codexStore(["other"]),
+          copilotHome: copilotStore(["other"]),
+        }),
+      ).toBe(storeMissRefusesResume[key]);
+    });
+
+    test(`${key}: an undeterminable store never refuses the resume`, () => {
+      expect(
+        agentSessionGone({
+          tool: key,
+          agentSessionId: RESUME_ID,
+          codexHome: join(tmp("ab-spec-nohome-"), "missing"),
+          copilotHome: join(tmp("ab-spec-nohome-"), "missing"),
+        }),
+      ).toBe(false);
+    });
+  }
+
   // The one discriminating table: both stores exist and neither holds the id,
   // so codex and copilot can say "gone" and nobody else can.
   const storesLackTheId: PerAgent<boolean> = {
@@ -284,39 +324,40 @@ describe("initial prompt argv", () => {
 
 const CODEX_INJECTION_WIN32: string[] = [
   "-c",
-  'hooks.PermissionRequest=[{hooks=[{type="command",command="& \\"/opt/antgrid/antgrid-bridge\\" \\"hook\\" \\"codex\\" \\"permission-request\\""}]}]',
-  "-c",
   'hooks.Stop=[{hooks=[{type="command",command="& \\"/opt/antgrid/antgrid-bridge\\" \\"hook\\" \\"codex\\" \\"stop\\""}]}]',
   "-c",
   'hooks.SessionStart=[{hooks=[{type="command",command="& \\"/opt/antgrid/antgrid-bridge\\" \\"hook\\" \\"codex\\" \\"session-start\\""}]}]',
   "-c",
-  "hooks.state={'C:\\<session-flags>\\config.toml:permission_request:0:0'={trusted_hash=\"sha256:3e82f5650402783d2e3994646de6aa57c6a53e6d99de8fb9717643c32adde22d\"},'C:\\<session-flags>\\config.toml:stop:0:0'={trusted_hash=\"sha256:1d7caa27559a541b2c55656844ac9e3586b9d87f70873f623bb3b93bde490e94\"},'C:\\<session-flags>\\config.toml:session_start:0:0'={trusted_hash=\"sha256:61c27f2f55cc14d58631afd9d17d783e02066f5a4251859af01ff1779b5d21b3\"}}",
+  "hooks.state={'C:\\<session-flags>\\config.toml:stop:0:0'={trusted_hash=\"sha256:1d7caa27559a541b2c55656844ac9e3586b9d87f70873f623bb3b93bde490e94\"},'C:\\<session-flags>\\config.toml:session_start:0:0'={trusted_hash=\"sha256:61c27f2f55cc14d58631afd9d17d783e02066f5a4251859af01ff1779b5d21b3\"}}",
 ];
 
 const CODEX_INJECTION_POSIX: string[] = [
-  "-c",
-  `hooks.PermissionRequest=[{hooks=[{type="command",command="'/opt/antgrid/antgrid-bridge' 'hook' 'codex' 'permission-request'"}]}]`,
   "-c",
   `hooks.Stop=[{hooks=[{type="command",command="'/opt/antgrid/antgrid-bridge' 'hook' 'codex' 'stop'"}]}]`,
   "-c",
   `hooks.SessionStart=[{hooks=[{type="command",command="'/opt/antgrid/antgrid-bridge' 'hook' 'codex' 'session-start'"}]}]`,
   "-c",
-  `hooks.state={'/<session-flags>/config.toml:permission_request:0:0'={trusted_hash="sha256:46febd81962cdfcb8a0f1c7522cfd059863eb92dbd158f0d3ce2dc44baa44a95"},'/<session-flags>/config.toml:stop:0:0'={trusted_hash="sha256:d14f3ab0bb0201bcccdc987a0cbbf4418627d4f2bd725ed8be61ec81c8c65e9e"},'/<session-flags>/config.toml:session_start:0:0'={trusted_hash="sha256:ec29560fd4a6819f16dd77fe0e7a9d0507e66d8188c269e9fe6b70a64a070f3f"}}`,
+  `hooks.state={'/<session-flags>/config.toml:stop:0:0'={trusted_hash="sha256:d14f3ab0bb0201bcccdc987a0cbbf4418627d4f2bd725ed8be61ec81c8c65e9e"},'/<session-flags>/config.toml:session_start:0:0'={trusted_hash="sha256:ec29560fd4a6819f16dd77fe0e7a9d0507e66d8188c269e9fe6b70a64a070f3f"}}`,
 ];
 
 const CODEX_INJECTION = WIN ? CODEX_INJECTION_WIN32 : CODEX_INJECTION_POSIX;
+const CODEX_TUI_ARGS = [
+  "-c", 'tui.notifications=["approval-requested"]',
+  "-c", 'tui.notification_method="osc9"',
+  "-c", 'tui.notification_condition="always"',
+];
 const CODEX_NOTIFY_ARG = `notify=["${BIN}","hook","codex","after-agent"]`;
 
 describe("codex hook trust", () => {
   test("the -c hooks.state string is byte-for-byte stable", () => {
     const args = augmentAgentLaunch("codex", tmp("ab-spec-"), tmp("ab-cursor-"), HOOK_COMMAND).args;
     const state = args.find((a) => a.startsWith("hooks.state="));
-    expect(state).toBe(CODEX_INJECTION[7]);
+    expect(state).toBe(CODEX_INJECTION[5]);
   });
 
-  test("the three hook defs and their order are byte-for-byte stable", () => {
+  test("the hook defs and their order are byte-for-byte stable", () => {
     const args = augmentAgentLaunch("codex", tmp("ab-spec-"), tmp("ab-cursor-"), HOOK_COMMAND).args;
-    expect(args.slice(2)).toEqual(CODEX_INJECTION);
+    expect(args.slice(8)).toEqual(CODEX_INJECTION);
   });
 });
 
@@ -347,7 +388,7 @@ describe("launch augmentation", () => {
 
   test("codex", () => {
     const a = augment("codex", tmp("ab-spec-"), tmp("ab-cursor-"));
-    expect(a.args).toEqual(["-c", CODEX_NOTIFY_ARG, ...CODEX_INJECTION]);
+    expect(a.args).toEqual(["-c", CODEX_NOTIFY_ARG, ...CODEX_TUI_ARGS, ...CODEX_INJECTION]);
     expect(a.env).toEqual({});
     // Codex reports no outcome; session-manager reads undefined as success.
     expect(a.notificationsInjected).toBeUndefined();
@@ -784,10 +825,8 @@ describe("hook posts", () => {
       expect(posts[0]?.body).toEqual({ terminalId: TERM, sessionId: "thread-2", agent: "codex" });
     });
 
-    test("permission-request posts a bare notify", async () => {
-      expect(await hookPosts({ agent: name, event: "permission-request", stdin: "{}" })).toEqual([
-        { port: PORT, path: "/notify", body: { type: "permission_request", terminalId: TERM } },
-      ]);
+    test("legacy permission-request does not notify before automatic review", async () => {
+      expect(await hookPosts({ agent: name, event: "permission-request", stdin: "{}" })).toEqual([]);
     });
 
     test("stop forwards last_assistant_message", async () => {

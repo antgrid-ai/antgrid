@@ -65,3 +65,19 @@ test("rejects a non-positive ownerPid", () => {
     expect(r.success).toBe(false);
   }
 });
+
+// Consent is optional on the wire (an older app, the CLI, a test sends none)
+// and index.ts resolves its ABSENCE to off — so the schema's job is only to
+// keep a present value honest, never to supply one.
+test("telemetryEnabled is optional and must be a boolean when present", () => {
+  const base = { firstProject: { projectId: "p", projectPath: "/tmp/p", mode: "local" } };
+  // `.success` asserted separately: `.data?.x` is undefined both for a payload
+  // that parsed WITHOUT the field and for one the schema rejected outright, so
+  // on its own it cannot tell "optional" from "no longer accepted".
+  const absent = BootstrapPayloadSchema.safeParse(base);
+  expect(absent.success).toBe(true);
+  expect(absent.data?.telemetryEnabled).toBeUndefined();
+  expect(BootstrapPayloadSchema.safeParse({ ...base, telemetryEnabled: true }).data?.telemetryEnabled).toBe(true);
+  expect(BootstrapPayloadSchema.safeParse({ ...base, telemetryEnabled: false }).data?.telemetryEnabled).toBe(false);
+  expect(BootstrapPayloadSchema.safeParse({ ...base, telemetryEnabled: "yes" }).success).toBe(false);
+});

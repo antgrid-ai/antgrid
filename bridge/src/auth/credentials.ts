@@ -45,6 +45,14 @@ export const BootstrapPayloadSchema = z
     // replaced the app out from under. Opaque here — the host never interprets
     // it. Optional: a host started outside the app (CLI/tests) has no owner.
     ownerBuild: z.string().min(1).optional(),
+    // The user's crash/telemetry consent, read by the app from its own settings
+    // at the moment it spawned us — the SAME read that decides the app's own
+    // Sentry init, so the two halves of one install can never disagree. Consent
+    // is therefore fixed for the host's lifetime, exactly as it is for the app
+    // process (`initCrashReporting` wraps `runApp` and is never re-run); a
+    // toggle takes effect on the next spawn. Optional, and absence must resolve
+    // to OFF: a host started outside the app has nobody to have consented.
+    telemetryEnabled: z.boolean().optional(),
   })
   .refine((p) => p.firstProject === undefined || p.firstProject.mode !== "remote" || p.machine !== undefined, {
     message: "firstProject.mode 'remote' requires a machine block",

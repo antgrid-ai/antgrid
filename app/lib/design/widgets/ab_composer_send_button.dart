@@ -71,7 +71,9 @@ class _ComposerSendButtonState extends State<ComposerSendButton> {
 
     if (!enabled) {
       // Busy keeps full opacity — the fill + dot read as "working", not off.
-      return widget.busy ? visual : Opacity(opacity: 0.4, child: visual);
+      return widget.busy
+          ? visual
+          : Opacity(opacity: AbTokens.opacityDisabled, child: visual);
     }
 
     return FocusableActionDetector(

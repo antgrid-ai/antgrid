@@ -4,11 +4,12 @@ import 'package:antgrid/design/ab_colors.dart';
 import 'package:antgrid/design/ab_icons.dart';
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
 import 'package:antgrid/design/widgets/ab_icon.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
+import 'package:antgrid/design/widgets/ab_composer_send_button.dart';
 import 'package:antgrid/design/widgets/ab_menu.dart';
+import 'package:antgrid/design/widgets/ab_prompt_field.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -20,6 +21,7 @@ import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/handler/handler_backlog_drawer.dart';
+import 'package:antgrid/widgets/handler/handler_instruction_composer.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -232,6 +234,37 @@ Future<void> _drainSnackBar(WidgetTester tester) async {
   await tester.pump(const Duration(seconds: 4));
   await tester.pumpAndSettle();
 }
+
+/// The composer's field and its send key. Both hosts of
+/// [HandlerInstructionComposer] carry the same two keys, so the finders written
+/// here are the ones the arm sheet's tests use as well.
+final _field = find.byKey(const Key('handler-instruction-field'));
+final _sendKey = find.byKey(const Key('handler-instruction-send'));
+
+/// Every `handler:instruct` the drawer sent. File-scope because the edit-hold
+/// and grant-echo groups assert on the same frames the instructing group does.
+List<Map<String, dynamic>> _instructs(ProjectSession session) => _transportOf(
+  session,
+).sent.where((m) => m['type'] == 'handler:instruct').toList();
+
+/// The one `handler:instruct` the drawer sent.
+Map<String, dynamic> _sentInstruct(ProjectSession session) =>
+    _instructs(session).single;
+
+/// Types [text] and taps the send key — the one route a sentence takes to
+/// Handler now that the composer is the whole footer.
+Future<void> _sendInstruction(WidgetTester tester, String text) async {
+  await tester.enterText(_field, text);
+  // enterText schedules the composer's rebuild without pumping one, and the
+  // send key is inert until that frame lands — tapping it first is a no-op
+  // that reads exactly like a send the widget refused.
+  await tester.pump();
+  await tester.tap(_sendKey);
+  await tester.pump();
+}
+
+String _fieldText(WidgetTester tester) =>
+    tester.widget<AbPromptField>(_field).controller.text;
 
 Future<void> _pick(WidgetTester tester, String label) async {
   await tester.tap(find.text(label));
@@ -581,8 +614,8 @@ void main() {
       ),
       findsOneWidget,
     );
-    // No second route to the one action: the presets and the field below are
-    // it, and a button here would give that action a second name.
+    // No second route to the one action: the composer below is it, and a
+    // button here would give that action a second name.
     expect(find.byTooltip('Send to Handler'), findsOneWidget);
   });
 
@@ -683,90 +716,27 @@ void main() {
     });
   });
 
-  // The instruction field and the presets live here rather than pinned above
-  // the composer, so this is where the load-bearing assertion now sits: the
-  // message TYPE a preset chip produces. A chip that grew its own verb would
-  // route around every rule that applies to instructions.
+  // The instruction box lives here rather than pinned above the session
+  // composer, so this is where the load-bearing assertions sit: what a typed
+  // sentence puts on the wire, and what becomes of the user's words when a send
+  // is refused.
   group('instructing', () {
-    List<Map<String, dynamic>> instructs(ProjectSession session) =>
-        _transportOf(
-          session,
-        ).sent.where((m) => m['type'] == 'handler:instruct').toList();
-
-    /// The one `handler:instruct` the drawer sent.
-    Map<String, dynamic> sentInstruct(ProjectSession session) =>
-        instructs(session).single;
-
-    testWidgets('a preset chip sends handler:instruct with its own sentence', (
-      tester,
-    ) async {
-      final session = await _armedSession([_tests]);
-      await _pumpDrawer(tester, session);
-
-      await tester.tap(find.text('Clean Build'));
-      await tester.pump();
-
-      final sent = sentInstruct(session);
-      // Not a chip-specific verb: the chip is indistinguishable on the wire
-      // from the user typing the same words.
-      expect(sent['terminalId'], 't1');
-      expect(sent['text'], 'Clean Build');
-    });
-
-    testWidgets('every preset chip is offered', (tester) async {
-      final session = await _armedSession([_tests]);
-      await _pumpDrawer(tester, session);
-
-      for (final preset in handlerPresetInstructions) {
-        expect(find.text(preset), findsOneWidget);
-      }
-    });
-
-    testWidgets('and every one of them stays on a narrow phone', (
-      tester,
-    ) async {
-      // `find.text` above passes on a preset parked off the right edge — a
-      // horizontal strip builds all its children whether or not any is
-      // reachable. Geometry is the only thing that can tell the two apart, and
-      // this width is where the fourth chip used to fall off.
-      tester.view.physicalSize = const Size(320, 900);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.reset);
-
-      final session = await _armedSession([_tests]);
-      await _pumpDrawer(tester, session);
-
-      for (final preset in handlerPresetInstructions) {
-        expect(
-          tester.getRect(find.text(preset)).right,
-          lessThanOrEqualTo(320.0),
-          reason: preset,
-        );
-      }
-
-      // Reachable, not merely laid out: the last one still sends.
-      await tester.tap(find.text(handlerPresetInstructions.last));
-      await tester.pump();
-      expect(sentInstruct(session)['text'], handlerPresetInstructions.last);
-    });
-
     testWidgets('typed text sends handler:instruct and clears the field', (
       tester,
     ) async {
       final session = await _armedSession([_tests]);
       await _pumpDrawer(tester, session);
 
-      await tester.enterText(find.byType(AbTextField), 'also update the docs');
-      await tester.tap(find.byTooltip('Send to Handler'));
-      await tester.pump();
+      await _sendInstruction(tester, 'also update the docs');
 
-      expect(sentInstruct(session)['text'], 'also update the docs');
+      final sent = _sentInstruct(session);
+      // Nothing composer-specific on the wire: this is the same frame a phone
+      // typing the same words produces.
+      expect(sent['terminalId'], 't1');
+      expect(sent['text'], 'also update the docs');
       // The field is emptied; the sentence itself is not gone — it moves to
       // the list, which is the other half of this same submit.
-      expect(
-        tester.widget<AbTextField>(find.byType(AbTextField)).controller!.text,
-        isEmpty,
-      );
+      expect(_fieldText(tester), isEmpty);
     });
 
     testWidgets('a sent instruction sits in the list until a status lands', (
@@ -775,9 +745,7 @@ void main() {
       final session = await _armedSession([_tests]);
       await _pumpDrawer(tester, session);
 
-      await tester.enterText(find.byType(AbTextField), 'also update the docs');
-      await tester.tap(find.byTooltip('Send to Handler'));
-      await tester.pump();
+      await _sendInstruction(tester, 'also update the docs');
 
       // In the user's own words, at the tail — the slot appendItems will fill
       // with whatever the extractor makes of them.
@@ -810,12 +778,12 @@ void main() {
       final session = await _armedSession(const []);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Run Tests'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Run Tests');
 
       expect(find.textContaining('lands here'), findsNothing);
-      // Twice: the chip that sent it, and the row it is now waiting in.
-      expect(find.text('Run Tests'), findsNWidgets(2));
+      // Once: the field cleared itself on the send, so the only copy on screen
+      // is the row the sentence is now waiting in.
+      expect(find.text('Run Tests'), findsOneWidget);
     });
 
     testWidgets('a repeated send is refused until the snapshot lands', (
@@ -824,31 +792,25 @@ void main() {
       final session = await _armedSession([_tests]);
       await _pumpDrawer(tester, session);
 
-      // The chip, never the bare text: once the send lands, the sentence is on
-      // screen twice — on the chip and in the row waiting for its items.
-      final chip = find.widgetWithText(AbChip, 'Run Tests');
-      await tester.tap(chip);
-      await tester.pump();
-      await tester.tap(chip);
-      await tester.pump();
+      await _sendInstruction(tester, 'Run Tests');
+      await _sendInstruction(tester, 'Run Tests');
 
       // The bridge appends and absorbs no duplicate, so a second identical
       // send is a second copy of the work in the backlog.
-      expect(instructs(session), hasLength(1));
+      expect(_instructs(session), hasLength(1));
 
-      // The second tap moves something on screen. Without it the chip is
+      // The second send moves something on screen. Without it the key is
       // indistinguishable from a broken button — the list is unchanged, and the
       // row waiting at the tail may be scrolled well out of sight.
       expect(find.text('Already sending "Run Tests".'), findsOneWidget);
 
       _emitStatus(session, [_tests, _extracted]);
       await tester.pump();
-      await tester.tap(chip);
-      await tester.pump();
+      await _sendInstruction(tester, 'Run Tests');
 
       // The debounce lasts exactly as long as the ambiguity: once the bridge
       // has spoken, asking for the same thing again is a real second ask.
-      expect(instructs(session), hasLength(2));
+      expect(_instructs(session), hasLength(2));
       expect(find.text('Already sending "Run Tests".'), findsNothing);
     });
 
@@ -858,19 +820,13 @@ void main() {
       final session = await _armedSession([_tests]);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.widgetWithText(AbChip, 'Run Tests'));
-      await tester.pump();
-      await tester.enterText(find.byType(AbTextField), 'Run Tests');
-      await tester.tap(find.byTooltip('Send to Handler'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Run Tests');
+      await _sendInstruction(tester, 'Run Tests');
 
-      expect(instructs(session), hasLength(1));
+      expect(_instructs(session), hasLength(1));
       // The field keeps what was typed: a clear on a send that did not happen
       // takes the user's words away and leaves an unchanged list behind.
-      expect(
-        tester.widget<AbTextField>(find.byType(AbTextField)).controller!.text,
-        'Run Tests',
-      );
+      expect(_fieldText(tester), 'Run Tests');
       expect(find.text('Already sending "Run Tests".'), findsOneWidget);
     });
 
@@ -880,12 +836,15 @@ void main() {
       final session = await _armedSession([_tests]);
       await _pumpDrawer(tester, session);
 
-      await tester.enterText(find.byType(AbTextField), 'also update the docs');
-      await tester.tap(find.byTooltip('Send to Handler'));
-      await tester.tap(find.byTooltip('Send to Handler'));
+      await tester.enterText(_field, 'also update the docs');
+      await tester.pump();
+      // Twice with no pump between, which is the shape of a double tap: the
+      // first send clears the controller under a key that has not rebuilt yet.
+      await tester.tap(_sendKey);
+      await tester.tap(_sendKey);
       await tester.pump();
 
-      expect(instructs(session), hasLength(1));
+      expect(_instructs(session), hasLength(1));
     });
 
     testWidgets('a whitespace-only submit sends nothing', (tester) async {
@@ -893,24 +852,27 @@ void main() {
       await _pumpDrawer(tester, session);
       final before = _transportOf(session).sent.length;
 
-      await tester.enterText(find.byType(AbTextField), '   ');
-      await tester.tap(find.byTooltip('Send to Handler'));
+      await tester.enterText(_field, '   ');
+      await tester.pump();
+
+      // Refused before the tap: whitespace leaves the key dead, so there is
+      // nothing to press rather than a press that quietly does nothing.
+      expect(tester.widget<ComposerSendButton>(_sendKey).onTap, isNull);
+
+      await tester.tap(_sendKey);
       await tester.pump();
 
       expect(_transportOf(session).sent.length, before);
     });
 
-    testWidgets('a parked session keeps the chips and input live', (
-      tester,
-    ) async {
+    testWidgets('a parked session keeps the composer live', (tester) async {
       // Stacking while parked is the point — the bridge queues it.
       final session = await _armedSession([_tests], state: 'parked');
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Run Tests'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Run Tests');
 
-      expect(sentInstruct(session)['text'], 'Run Tests');
+      expect(_sentInstruct(session)['text'], 'Run Tests');
     });
 
     testWidgets('an unarmed terminal is offered no field to instruct through', (
@@ -932,7 +894,7 @@ void main() {
 
       // Nothing is supervising that terminal, so an instruction would be sent
       // into a session that cannot run it.
-      expect(find.byType(AbTextField), findsNothing);
+      expect(find.byType(HandlerInstructionComposer), findsNothing);
       expect(find.text(handlerDisclaimerText), findsNothing);
     });
 
@@ -997,8 +959,7 @@ void main() {
       expect(find.text(handlerDisclaimerText), findsNothing);
       // Everything the sheet is FOR is untouched — the retirement is of one
       // standing notice, not of the footer it stood in.
-      expect(find.byType(AbTextField), findsOneWidget);
-      expect(find.text(handlerPresetInstructions.first), findsOneWidget);
+      expect(find.byType(HandlerInstructionComposer), findsOneWidget);
     });
   });
 
@@ -1023,8 +984,7 @@ void main() {
       final session = await _armedSession([_tests, _commit, _pr]);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Run Tests'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Run Tests');
 
       // On a phone this drawer is a modal sheet, which paints over the snack
       // bar its own ScaffoldMessenger renders, and a tooltip is long-press
@@ -1044,8 +1004,7 @@ void main() {
       final session = await _armedSession([_tests, _commit, _pr]);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Run Tests'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Run Tests');
 
       await _openMenuFor(tester, 2);
       // Still listed — the action applies, it is the moment that doesn't, and
@@ -1068,8 +1027,7 @@ void main() {
       final session = await _armedSession([_tests, _commit, _pr]);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Run Tests'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Run Tests');
       _emitStatus(session, [_tests, _commit, _pr, _extracted]);
       await tester.pump();
 
@@ -1088,8 +1046,7 @@ void main() {
       final session = await _armedSession([_tests, _commit, _pr]);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Run Tests'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Run Tests');
 
       // Disabled outright rather than tinted disabled over a live control: the
       // reason is standing above the list, so this button has nothing left to
@@ -1112,10 +1069,8 @@ void main() {
       final session = await _armedSession([_tests, _commit]);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Run Tests'));
-      await tester.pump();
-      await tester.tap(find.text('Commit'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Run Tests');
+      await _sendInstruction(tester, 'Commit');
 
       const twoOutstanding =
           'Still sending 2 instructions — editing is paused until they land.';
@@ -1131,21 +1086,13 @@ void main() {
       final session = await _armedSession([_tests]);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Run Tests'));
-      await tester.pump();
-      await tester.enterText(find.byType(AbTextField), 'also update the docs');
-      await tester.tap(find.byTooltip('Send to Handler'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Run Tests');
+      await _sendInstruction(tester, 'also update the docs');
 
       // Two appends cannot erase each other, and the extraction chain is
       // per-terminal and serial — so stacking work is exactly what this
       // surface is for, lock or no lock.
-      expect(
-        _transportOf(
-          session,
-        ).sent.where((m) => m['type'] == 'handler:instruct'),
-        hasLength(2),
-      );
+      expect(_instructs(session), hasLength(2));
     });
   });
 
@@ -1703,8 +1650,7 @@ void main() {
       final session = await _armedSession(const [_tests]);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Clean Build'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Clean Build');
       _emitGrant(session);
       await tester.pump();
 
@@ -1713,13 +1659,14 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('rm -rf · logs.example.com'), findsOneWidget);
-      // On the field's own left edge. The column around this centres anything
-      // that sizes to its child, and both lines are narrower than the sheet.
+      // On the composer's own left edge. The column around this centres
+      // anything that sizes to its child, and both lines are narrower than the
+      // sheet.
       expect(
         tester
             .getTopLeft(find.text('Also allowed for the rest of this session:'))
             .dx,
-        tester.getTopLeft(find.byType(AbTextField)).dx,
+        tester.getTopLeft(find.byType(HandlerInstructionComposer)).dx,
       );
     });
 
@@ -1731,8 +1678,7 @@ void main() {
       final session = await _armedSession(const [_tests]);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Clean Build'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Clean Build');
       _emitGrant(session, reason: 'rm -rf', detail: null);
       await tester.pump();
 
@@ -1745,8 +1691,7 @@ void main() {
       final session = await _armedSession(const [_tests]);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Clean Build'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Clean Build');
       _emitGrant(
         session,
         reason: '20 hosts',
@@ -1766,8 +1711,7 @@ void main() {
       final session = await _armedSession(const [_tests]);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Clean Build'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Clean Build');
 
       expect(find.textContaining('Also allowed'), findsNothing);
     });
@@ -1797,8 +1741,7 @@ void main() {
 
       _emitGrant(session);
       await tester.pump();
-      await tester.tap(find.text('Clean Build'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Clean Build');
 
       expect(find.textContaining('Also allowed'), findsNothing);
     });
@@ -1811,8 +1754,7 @@ void main() {
 
       _emitGrant(session, recordId: 'old', detail: 'git clean -fd');
       await tester.pump();
-      await tester.tap(find.text('Clean Build'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Clean Build');
       _emitGrant(session, recordId: 'new', detail: 'rm -rf');
       await tester.pump();
 
@@ -1828,8 +1770,7 @@ void main() {
       final session = await _armedSession(const [_tests]);
       await _pumpDrawer(tester, session);
 
-      await tester.tap(find.text('Clean Build'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Clean Build');
       _emitStatus(session, const [_tests, _extracted]);
       await tester.pump();
       _emitGrant(session, recordId: 'phone', detail: 'git push --force');
@@ -1850,8 +1791,7 @@ void main() {
       );
       await _pumpDrawer(tester, session, firstRun: firstRun);
 
-      await tester.tap(find.text('Clean Build'));
-      await tester.pump();
+      await _sendInstruction(tester, 'Clean Build');
       _emitGrant(session);
       await tester.pump();
 

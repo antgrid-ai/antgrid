@@ -1,13 +1,16 @@
 import 'dart:async';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:uuid/uuid.dart';
 
 import '../analytics/events.dart';
 import '../models/file_tree_models.dart';
 import '../models/preferences_models.dart';
 import '../models/ab_message.dart';
+import '../models/git_sync_state.dart';
 import '../project/project_session.dart';
 import '../util/detached.dart';
+import 'pending_reply.dart';
 import 'reply_latch.dart';
 
 /// Per-project file tree + git status + viewing-file service.
@@ -27,6 +30,8 @@ class FileService {
   StreamSubscription<Map<String, dynamic>>? _statusSub;
   StreamSubscription<void>? _resumeSub;
   int _snapshotSeq = -1;
+  /// The establishment [_snapshotSeq] was issued under — see [_claimableSeq].
+  int _snapshotEpoch = -1;
   int _gitOpSeq = 0;
   bool _disposed = false;
 
@@ -50,20 +55,89 @@ class FileService {
   final Duration gitActionTimeout;
   ReplyLatch? _diffLatch;
 
+  /// Bounds a `git:log` page fetch the same way [_diffLatch] bounds
+  /// `git:diff` — one slot, superseded on the next fetch (a scroll-triggered
+  /// load is guarded against firing while one is already in flight, so there
+  /// is never more than one page request to bound at a time).
+  ReplyLatch? _historyLatch;
+
+  /// The offset [_historyLatch] is waiting on. `git:log-result` carries no
+  /// request id, and the offset is the only thing that distinguishes one page
+  /// from another — see [_handleGitLogResult] for what a mismatched page costs.
+  int? _pendingLogSkip;
+
+  /// Bounds `git:commit-files`, keyed by sha rather than a single slot like
+  /// [_historyLatch]: the History tab lets more than one commit's file list
+  /// stay expanded and loading at once (see [GitHistoryState]), so a dropped
+  /// send for one commit must not settle another's in-flight fetch.
+  final Map<String, ReplyLatch> _commitFilesLatches = {};
+
+  /// Wall-clock bound for push/pull. Longer than [gitActionTimeout] because
+  /// these reach the network — and load-bearing beyond the usual dropped-send
+  /// case: a bridge predating `git:sync` DROPS the verb silently, and there is
+  /// no bridge-to-app feature negotiation to check instead, so this timeout is
+  /// the only thing that clears the spinner against an older host.
+  final Duration gitSyncTimeout;
+  ReplyLatch? _syncLatch;
+
+  /// In-flight `file:resolve-path` round trips, keyed by requestId — plural
+  /// unlike [_diffLatch]/[_syncLatch] because more than one terminal link can
+  /// be clicked (or hovered-then-clicked from two terminals) before either
+  /// answer lands.
+  final Map<String, PendingReply<FileResolvePathResultMessage>>
+  _pendingResolves = {};
+
   FileService.fromSession(
     this.session, {
     this.checkoutId = 'main',
     this.gitActionTimeout = const Duration(seconds: 15),
+    this.gitSyncTimeout = const Duration(seconds: 150),
   }) : _state = FileTreeState(projectId: session.projectId) {
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
-    // Pull the tree rather than wait for the bridge's push. A managed
-    // checkout's `tree:full` goes out while its runtime is being prepared —
-    // which is BEFORE the session list that makes the app build this bundle —
-    // so a bundle created for an isolated session would never see one and its
-    // file tree stayed empty for the life of the session. As a hydrator it also
-    // re-pulls on every reconnect.
-    session.hydrateCheckout(checkoutId, _treeHydratorKey, _hydrateTree);
+    // The bridge caches `git:sync-state` for replay, but only a checkout whose
+    // bundle existed at connect time receives that replay — an isolated
+    // session's does not. Asking also re-fires on every reconnect, which is
+    // what keeps the indicator from sitting on counts from before a drop. Kept
+    // eager (not gated behind [activate]) because it feeds drawer/status
+    // chrome for every checkout, not just the one on screen — see
+    // [ProjectSession.setActiveCheckouts].
+    session.hydrateCheckout(checkoutId, _syncHydratorKey, _hydrateSyncState);
+    // History is deliberately NOT hydrated here the way sync state is: it has
+    // no consumer besides the Git panel (every FileService exists whether or
+    // not that panel is ever opened), so eager-on-construct hydration would
+    // cost every project session a `git:log` round trip for a view most never
+    // visit. `GitPanel` triggers the first load itself once it is actually
+    // built with an empty history — see its `_maybeLoadHistory`.
+  }
+
+  static const _treeHydratorKey = 'file:tree';
+  static const _syncHydratorKey = 'git:sync-state';
+
+  /// Pulls the tree rather than waiting for the bridge's push. A managed
+  /// checkout's `tree:full` goes out while its runtime is being prepared —
+  /// BEFORE the session list that makes the app build this bundle — so a
+  /// bundle that never activates would never see one and its file tree would
+  /// stay empty for the life of the session. As a hydrator it also re-pulls on
+  /// every reconnect. Also re-registers the selected-file / preview pulls if
+  /// this checkout had one open before it was last deactivated. Only the
+  /// checkout on screen carries these — see [ProjectSession.setActiveCheckouts].
+  void activate() {
+    if (_disposed) return;
+    session.hydrateCheckout(checkoutId, _treeHydratorKey, _pullTree);
+    if (_stashesRequested) {
+      session.hydrateCheckout(checkoutId, _stashHydratorKey, _hydrateStashes);
+    }
+    if (_state.files.selectedFilePath != null) {
+      session.hydrateCheckout(
+        checkoutId,
+        'file:selected',
+        _hydrateSelectedFile,
+      );
+    }
+    if (_state.preview.isOpen) {
+      session.hydrateCheckout(checkoutId, 'file:preview', _hydratePreview);
+    }
     // A hydrator covers re-ESTABLISHMENT; this covers the other window the
     // agent suppresses in, which re-establishes nothing. While the app is
     // backgrounded the agent DROPS every `tree:update` and keeps bumping its
@@ -72,24 +146,66 @@ class FileService {
     // and a directory it deleted stays listed, for the life of the connection.
     // Nothing self-corrects it — `_snapshotSeq` only ever advances on a full
     // snapshot, which only this pull asks for.
-    _resumeSub = session.focusResumed.listen(
-      (_) =>
-          detached('FileService', 'tree re-pull on focus resume', _hydrateTree),
+    _resumeSub ??= session.focusResumed.listen(
+      (_) => detached(
+        'FileService',
+        'tree re-pull on focus resume',
+        _pullTree,
+      ),
     );
   }
 
-  static const _treeHydratorKey = 'file:tree';
+  /// Leaves [_state] intact — a re-[activate] renders the last tree while its
+  /// pull refreshes it.
+  void deactivate() {
+    if (_disposed) return;
+    session.unhydrateCheckout(checkoutId, _treeHydratorKey);
+    session.unhydrateCheckout(checkoutId, _stashHydratorKey);
+    session.unhydrateCheckout(checkoutId, 'file:selected');
+    session.unhydrateCheckout(checkoutId, 'file:preview');
+    unawaited(_resumeSub?.cancel());
+    _resumeSub = null;
+  }
 
-  /// Pull the tree. Names the seq already held so an unchanged tree comes back
-  /// as a few bytes rather than the whole thing — every open checkout sends
-  /// this on every reconnect and resume, ahead of whatever the user is waiting
-  /// on. [force] asks for the tree regardless: the user's own refresh doubts
-  /// what is held, and that doubt is the request.
-  Future<void> _hydrateTree({bool force = false}) => session.sendForCheckout(
+  /// The tree pull behind both the hydrator and the focus-resume re-drive.
+  /// Names the revision this checkout holds where that revision can still be
+  /// believed, so an unchanged tree is answered `file:tree:unchanged` rather
+  /// than in full.
+  ///
+  /// Claiming is worth the care because the unchanged answer is the common one:
+  /// every open project's every active checkout re-pulls on the same resume
+  /// edge, and activation is per-focused-checkout, so switching away from a
+  /// checkout and back re-runs this too — on an idle tree each of those answers
+  /// was a byte-identical few hundred KB.
+  Future<void> _pullTree() => _requestTree(sinceSeq: _claimableSeq());
+
+  /// The held revision, or null when it cannot be believed.
+  ///
+  /// A seq is only comparable against the establishment that issued it. A
+  /// hydrator run means the transport re-established, and the agent behind it
+  /// may be a NEW PROCESS whose revision counter restarted at zero — a claim
+  /// carried across could then match by coincidence and have a stale tree
+  /// confirmed. The epoch is what separates that from the cases where the agent
+  /// is demonstrably the same one that issued the seq: a focus resume, which
+  /// re-establishes nothing (see [MessageRouter.focusResumed]), and a checkout
+  /// returning to screen on a transport that never dropped.
+  int? _claimableSeq() {
+    if (_snapshotSeq < 0) return null;
+    if (_snapshotEpoch != session.establishmentEpoch) return null;
+    return _snapshotSeq;
+  }
+
+  /// Records [seq] together with the establishment that issued it. Every write
+  /// to [_snapshotSeq] goes through here — a seq stored without its epoch would
+  /// be claimed against the wrong agent.
+  void _rememberSeq(int seq) {
+    _snapshotSeq = seq;
+    _snapshotEpoch = session.establishmentEpoch;
+  }
+
+  Future<void> _requestTree({int? sinceSeq}) => session.sendForCheckout(
     checkoutId,
-    createAbMessage('file:tree:snapshot:request', {
-      if (!force && _snapshotSeq >= 0) 'sinceSeq': _snapshotSeq,
-    }),
+    createAbMessage('file:tree:snapshot:request', {'sinceSeq': ?sinceSeq}),
   );
 
   void _setState(FileTreeState state) {
@@ -102,16 +218,15 @@ class FileService {
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
     if (parsed is FileTreeSnapshotMessage) {
-      final tree = parsed.tree;
-      // Tree-less means the bridge confirmed the one held is current; a
-      // tree-less reply that arrives holding nothing is a bridge answering a
-      // seq this service never sent, and there is nothing to apply either way.
-      if (tree == null) {
-        if (_state.root != null) _snapshotSeq = parsed.seq;
-        return;
-      }
-      _snapshotSeq = parsed.seq;
-      _setState(_state.copyWith(root: tree));
+      _rememberSeq(parsed.seq);
+      _setState(_state.copyWith(root: parsed.tree));
+      return;
+    }
+    if (parsed is FileTreeUnchangedMessage) {
+      // Nothing to apply — the agent is confirming the revision we claimed.
+      // Guarded anyway so a confirmation that raced an applied delta cannot
+      // walk the base backwards and re-admit an update already merged.
+      if (parsed.seq > _snapshotSeq) _rememberSeq(parsed.seq);
       return;
     }
     if (parsed is TreeUpdateMessage) {
@@ -120,6 +235,15 @@ class FileService {
         return; // stale — drop
       }
       _mergeTreeUpdate(parsed);
+      // Only a CONTIGUOUS delta may advance the base. A gap means the agent
+      // suppressed updates while this app was backgrounded and dropped them
+      // (it keeps counting through a suppression window), so the tree here is
+      // missing whatever those carried. Leaving the base behind is exactly what
+      // makes the next resume ask for a full tree rather than have a stale one
+      // confirmed.
+      if (seq != null && _snapshotSeq >= 0 && seq == _snapshotSeq + 1) {
+        _rememberSeq(seq);
+      }
       return;
     }
     if (parsed is TreeFullMessage) {
@@ -132,6 +256,10 @@ class FileService {
     }
     if (parsed is FileContentMessage) {
       _handleFileContent(parsed);
+      return;
+    }
+    if (parsed is FileResolvePathResultMessage) {
+      _pendingResolves.remove(parsed.requestId)?.complete(parsed);
       return;
     }
   }
@@ -174,6 +302,82 @@ class FileService {
       if (!parsed.success) _emitOpFeedback(parsed.error ?? 'Unstage failed');
       return;
     }
+    if (parsed is GitStashListResultMessage) {
+      if (parsed.error == null) {
+        _setState(
+          _state.copyWith(
+            git: _state.git.copyWith(stashes: parsed.stashes),
+          ),
+        );
+      }
+      return;
+    }
+    // Neither result asks for the list back: the agent already follows every
+    // pop and drop with a fresh `git:stash-list-result` on both outcomes, so a
+    // request here is a second round trip for a list already on its way.
+    if (parsed is GitStashPopResultMessage) {
+      if (!parsed.success) {
+        _emitOpFeedback(parsed.error ?? 'Could not restore the stash');
+      }
+      return;
+    }
+    if (parsed is GitStashDropResultMessage) {
+      if (!parsed.success) {
+        _emitOpFeedback(parsed.error ?? 'Could not discard the stash');
+      }
+      return;
+    }
+    if (parsed is GitSyncResultMessage) {
+      _handleGitSyncResult(parsed);
+      return;
+    }
+    if (parsed is GitSyncStateMessage) {
+      _setState(_state.copyWith(git: _state.git.copyWith(sync: parsed.state)));
+      return;
+    }
+    if (parsed is GitLogResultMessage) {
+      _handleGitLogResult(parsed);
+      return;
+    }
+    if (parsed is GitCommitFilesResultMessage) {
+      _handleCommitFilesResult(parsed);
+      return;
+    }
+    if (parsed is GitCommitDiffContentMessage) {
+      _handleGitCommitDiffContent(parsed);
+      return;
+    }
+  }
+
+  void _handleGitSyncResult(GitSyncResultMessage msg) {
+    // A result for an op we are not waiting on is stale — a push whose latch
+    // already timed out, landing after the user started a pull. Settling the
+    // pull's latch on it would clear `syncing`, toast "Push complete" and
+    // re-enable both buttons while the pull is still running, and the pull's
+    // own reply would then arrive with nothing left to settle. A result with
+    // NO op in flight still lands: that is the other device having synced, and
+    // its outcome is the honest state for this one too.
+    final syncing = _state.git.syncing;
+    if (syncing != null && msg.op != syncing) return;
+    _syncLatch?.settle();
+    _syncLatch = null;
+    final failure = msg.failure;
+    // Two branches rather than one call passing both a value and its clear
+    // flag: that combination is ambiguous by house rule, and here it would
+    // also be wrong — `lastSyncFailure: null` reads as "unchanged", so a
+    // success would leave the previous failure's offer standing.
+    final git = failure == null
+        ? _state.git.copyWith(clearSyncing: true, clearSyncFailure: true)
+        : _state.git.copyWith(clearSyncing: true, lastSyncFailure: failure);
+    _setState(_state.copyWith(git: git));
+    // Toasted even when the panel will also offer the agent handoff: the
+    // handoff is an affordance the user may never look at, and a failure that
+    // said nothing at all would read as a button that did nothing.
+    _emitOpFeedback(
+      failure == null
+          ? (msg.summary ?? '${msg.op.label} complete')
+          : failure.message,
+    );
   }
 
   /// Surface a one-shot git op result. Bumping the seq makes each result a
@@ -187,6 +391,11 @@ class FileService {
 
   void _handleTreeFull(TreeFullMessage msg) {
     final preserveExpanded = msg.projectId == _state.projectId;
+    // A re-sync push carries the revision it was built at, so the base moves
+    // with the tree it replaces. An agent too old to stamp one leaves the base
+    // where it was, which costs a full pull on the next resume and nothing else.
+    final seq = msg.seq;
+    if (seq != null && seq > _snapshotSeq) _rememberSeq(seq);
     _setState(
       _state.copyWith(
         root: msg.root,
@@ -284,7 +493,113 @@ class FileService {
 
   void _handleGitDiffContent(GitDiffContentMessage msg) {
     onFragmentSuccess?.call(FragHint('git:diff-content', msg.path));
-    if (msg.path != _state.git.diffPath) return;
+    // Also guards on diffCommitSha being unset: a working-tree diff reply
+    // landing after the user has already switched to a commit's diff for the
+    // SAME path must not overwrite it.
+    if (msg.path != _state.git.diffPath || _state.git.diffCommitSha != null) {
+      return;
+    }
+    _diffLatch?.settle();
+    _diffLatch = null;
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          diffContent: msg.diff,
+          diffAdditions: msg.additions,
+          diffDeletions: msg.deletions,
+          diffLoading: false,
+        ),
+      ),
+    );
+  }
+
+  void _handleGitLogResult(GitLogResultMessage msg) {
+    // Correlated on the offset, because the append below is unconditional and
+    // a page that is not the one in flight appends the WRONG commits: a
+    // timed-out `skip: 50` arriving after the user scrolled and asked for
+    // `skip: 50` again lands twice, duplicating commits 51-100 in the list and
+    // pushing every later page's offset past real history. The same reply also
+    // settles whichever latch is current, so the page actually in flight then
+    // has nothing to time out on.
+    if (_pendingLogSkip != null && msg.skip != _pendingLogSkip) return;
+    _pendingLogSkip = null;
+    _historyLatch?.settle();
+    _historyLatch = null;
+    if (msg.error != null) {
+      _setState(
+        _state.copyWith(
+          git: _state.git.copyWith(
+            history: _state.git.history.copyWith(
+              loadingMore: false,
+              initialLoad: false,
+              error: msg.error,
+            ),
+          ),
+        ),
+      );
+      return;
+    }
+    // A page fetched with `skip: 0` REPLACES the list (a fresh open of the
+    // History tab, or a refresh); any other skip is assumed to continue the
+    // list this service itself has been paginating — callers never fetch an
+    // arbitrary skip, so there is nothing else it could be appending to.
+    final commits = msg.skip == 0
+        ? msg.commits
+        : [..._state.git.history.commits, ...msg.commits];
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          history: _state.git.history.copyWith(
+            commits: commits,
+            loadingMore: false,
+            initialLoad: false,
+            hasMore: msg.hasMore,
+            clearError: true,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _handleCommitFilesResult(GitCommitFilesResultMessage msg) {
+    _commitFilesLatches.remove(msg.sha)?.settle();
+    final loading = Set<String>.from(_state.git.history.filesLoadingShas)
+      ..remove(msg.sha);
+    if (msg.error != null) {
+      final errors = Map<String, String>.from(_state.git.history.filesErrorBySha)
+        ..[msg.sha] = msg.error!;
+      _setState(
+        _state.copyWith(
+          git: _state.git.copyWith(
+            history: _state.git.history.copyWith(
+              filesLoadingShas: loading,
+              filesErrorBySha: errors,
+            ),
+          ),
+        ),
+      );
+      return;
+    }
+    final files = Map<String, List<GitCommitFileEntry>>.from(
+      _state.git.history.filesBySha,
+    )..[msg.sha] = msg.files;
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          history: _state.git.history.copyWith(
+            filesBySha: files,
+            filesLoadingShas: loading,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _handleGitCommitDiffContent(GitCommitDiffContentMessage msg) {
+    onFragmentSuccess?.call(FragHint('git:commit-diff-content', msg.path));
+    if (msg.path != _state.git.diffPath || msg.sha != _state.git.diffCommitSha) {
+      return;
+    }
     _diffLatch?.settle();
     _diffLatch = null;
     _setState(
@@ -306,6 +621,7 @@ class FileService {
       case 'file:content':
         _failFileContent(hint.key);
       case 'git:diff-content':
+      case 'git:commit-diff-content':
         _failDiff(hint.key);
     }
   }
@@ -352,6 +668,7 @@ class FileService {
       size: node.size,
       extension: node.extension,
       children: node.children.map(_cloneNode).toList(),
+      truncated: node.truncated,
     );
   }
 
@@ -369,6 +686,7 @@ class FileService {
       size: root.size,
       extension: root.extension,
       children: newChildren,
+      truncated: root.truncated,
     );
   }
 
@@ -396,6 +714,7 @@ class FileService {
       size: current.size,
       extension: current.extension,
       children: newChildren,
+      truncated: current.truncated,
     );
   }
 
@@ -431,6 +750,7 @@ class FileService {
       size: parent.size,
       extension: parent.extension,
       children: newChildren,
+      truncated: parent.truncated,
     );
   }
 
@@ -466,6 +786,44 @@ class FileService {
     _setState(_state.copyWith(expandedPaths: expanded));
   }
 
+  /// Expands [path] and every ancestor directory so it is visible in the
+  /// tree. Used to reveal a folder a terminal link pointed at, which — unlike
+  /// a file — has no `selectedFilePath` of its own to make it visible.
+  void revealDirectory(String path) {
+    final segments = path.split('/').where((s) => s.isNotEmpty);
+    final expanded = Set<String>.from(_state.expandedPaths);
+    var acc = '';
+    for (final segment in segments) {
+      acc = acc.isEmpty ? segment : '$acc/$segment';
+      expanded.add(acc);
+    }
+    _setState(_state.copyWith(expandedPaths: expanded));
+  }
+
+  /// Resolves a path a terminal program printed (an OSC 8 `file://` hyperlink
+  /// target, absolute or relative) against this checkout, returning its
+  /// checkout-relative form — or a null [FileResolvePathResultMessage.relPath]
+  /// when it doesn't resolve inside this checkout. Only the bridge can answer
+  /// this: the app never learns the checkout's absolute root (see
+  /// `docs/architecture.md`), so it cannot relativize the path itself.
+  Future<FileResolvePathResultMessage> resolveTerminalPath(String rawPath) {
+    final requestId = const Uuid().v4();
+    final pending = session.newPending<FileResolvePathResultMessage>(
+      timeout: const Duration(seconds: 8),
+      onAbandon: () => _pendingResolves.remove(requestId),
+    );
+    _pendingResolves[requestId] = pending;
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('file:resolve-path', {
+        'projectId': projectId,
+        'requestId': requestId,
+        'path': rawPath,
+      }),
+    );
+    return pending.future;
+  }
+
   void selectFile(String path, {int? searchLine, String? searchQuery}) {
     // Fire here, not in requestFileContent — the latter is a shared chokepoint
     // also hit by session-restore, fragment recovery, git "view file", and
@@ -482,12 +840,31 @@ class FileService {
           clearSearchLine: searchLine == null,
           clearSearchQuery: searchQuery == null,
         ),
+        expandedPaths: _expandedWithAncestorsOf(path),
       ),
     );
     // Register (fires now if established) rather than sending inline — see
     // [_hydrateSelectedFile]. Re-registering under the same key supersedes, so
     // opening a new file replaces the prior file's hydrator.
     session.hydrateCheckout(checkoutId, 'file:selected', _hydrateSelectedFile);
+  }
+
+  /// Ancestor directories of [path], folded into the current expanded set —
+  /// mirrors [revealDirectory] but for a FILE selection (a terminal link, a
+  /// search result, git's "view file", …), none of which otherwise touches
+  /// [FileTreeState.expandedPaths]. Without this the tree can select a file
+  /// deep inside collapsed folders and show nothing, since [FileTreeView]
+  /// only walks into a directory that is in the expanded set.
+  Set<String> _expandedWithAncestorsOf(String path) {
+    final segments = path.split('/').where((s) => s.isNotEmpty).toList();
+    if (segments.length <= 1) return _state.expandedPaths;
+    final expanded = Set<String>.from(_state.expandedPaths);
+    var acc = '';
+    for (final segment in segments.sublist(0, segments.length - 1)) {
+      acc = acc.isEmpty ? segment : '$acc/$segment';
+      expanded.add(acc);
+    }
+    return expanded;
   }
 
   void requestFileContent(String path) {
@@ -539,7 +916,7 @@ class FileService {
 
   /// Tier-3 hydrator for the preview overlay. Reads the path from `_state` so a
   /// re-register always pulls whatever is CURRENTLY open, and no-ops once the
-  /// overlay is closed — which is what retires it without an unregister.
+  /// overlay is closed — unregistered on [deactivate] and [dispose].
   Future<void> _hydratePreview() async {
     if (_disposed) return;
     final path = _state.preview.path;
@@ -549,7 +926,10 @@ class FileService {
 
   void requestFullTree() {
     _setState(_state.copyWith(expandedPaths: {}));
-    unawaited(_hydrateTree(force: true));
+    // Deliberately claims nothing, unlike [_pullTree]: this is the user asking
+    // for the tree to be rebuilt from disk, and `file:tree:unchanged` would
+    // answer that refresh by doing visibly nothing.
+    unawaited(_requestTree());
   }
 
   void setFilterQuery(String? query) {
@@ -626,6 +1006,62 @@ class FileService {
     );
   }
 
+  /// Push the current branch, or publish it when it has no upstream. Never a
+  /// force push — a rejected push comes back as a [GitSyncFailure] for the
+  /// agent to reconcile rather than being forced through.
+  void push() => _sync(GitSyncOp.push);
+
+  /// Fast-forward the current branch onto its upstream. A diverged branch
+  /// changes nothing and reports [GitSyncFailureKind.diverged].
+  void pull() => _sync(GitSyncOp.pull);
+
+  void _sync(GitSyncOp op) {
+    if (_state.git.syncing != null) return;
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(syncing: op, clearSyncFailure: true),
+      ),
+    );
+    // Tier-2 one-shot, the same shape as [requestDiff]: a send dropped in a
+    // keyless relay window, or a bridge too old to know the verb, replies
+    // never — and without this the two buttons stay disabled for the life of
+    // the session.
+    _syncLatch?.settle();
+    final latch = _syncLatch = ReplyLatch();
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:sync', {'projectId': projectId, 'op': op.name}),
+    );
+    unawaited(
+      session.action(() => latch.done, timeout: gitSyncTimeout).catchError((_) {
+        if (_disposed || _syncLatch != latch) return;
+        _syncLatch = null;
+        _setState(_state.copyWith(git: _state.git.copyWith(clearSyncing: true)));
+        _emitOpFeedback('${op.label} timed out');
+      }),
+    );
+  }
+
+  /// Re-read how the branch stands against its upstream.
+  ///
+  /// [probeRemote] additionally asks the REMOTE, which costs a network round
+  /// trip — so it is reserved for an explicit user action, never for the
+  /// hydrator, which would turn every reconnect into one.
+  void refreshSyncState({bool probeRemote = false}) {
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:sync-status', {
+        'projectId': projectId,
+        if (probeRemote) 'probeRemote': true,
+      }),
+    );
+  }
+
+  Future<void> _hydrateSyncState() async {
+    if (_disposed) return;
+    refreshSyncState();
+  }
+
   void requestDiff(String path) {
     _setState(
       _state.copyWith(
@@ -633,6 +1069,9 @@ class FileService {
           diffPath: path,
           diffLoading: true,
           clearViewing: true,
+          // A prior commit diff for the same path must not linger: the reply
+          // handler keys on diffCommitSha being unset to accept this one.
+          clearDiffCommitSha: true,
         ),
       ),
     );
@@ -651,6 +1090,305 @@ class FileService {
         _,
       ) {
         if (_disposed || _diffLatch != latch || _state.git.diffPath != path) {
+          return;
+        }
+        _diffLatch = null;
+        _setState(
+          _state.copyWith(git: _state.git.copyWith(diffLoading: false)),
+        );
+      }),
+    );
+  }
+
+  /// Commits fetched per `git:log` page — the History tab's scroll-triggered
+  /// [loadMoreHistory] asks for another page of this size once the list is
+  /// within reach of its end.
+  static const historyPageSize = 50;
+
+  bool _historyRequested = false;
+
+  /// Claims the FIRST-ever history load for this service's lifetime,
+  /// returning true only on that one call. `GitPanel` calls this on every
+  /// build once its data is ready — cheaply and safely, since it is a plain
+  /// bool flip, not a state notification — and defers the actual
+  /// [loadHistory] send to outside build() only when it wins the claim. That
+  /// split is what makes the trigger immune to a build() that fires more than
+  /// once before the resulting `loadingMore` state change is reflected back:
+  /// without it, each such build would kick off its own `git:log` send and
+  /// its own 15s reply timeout, and only the LAST would ever be tracked (or
+  /// answered), leaving the earlier ones as orphaned pending timers.
+  bool claimHistoryLoad() {
+    if (_historyRequested) return false;
+    _historyRequested = true;
+    return true;
+  }
+
+  bool _stashesRequested = false;
+
+  /// Claims the first-ever stash load for this service's lifetime — same
+  /// contract as [claimHistoryLoad], and for the same reason: `GitPanel`
+  /// calls this on every build, and only the winning call may fire the
+  /// `git:stash-list` send.
+  bool claimStashLoad() {
+    if (_stashesRequested) return false;
+    _stashesRequested = true;
+    return true;
+  }
+
+  /// Fetch every stash in the repository. Called once when the Git tab first
+  /// mounts (via [claimStashLoad]); the agent pushes a fresh list itself after
+  /// every pop and drop, since the list is the only honest record of what is
+  /// left — see [GitPaneState.stashes].
+  void loadStashes() {
+    // Registered on the first ask rather than in the constructor, for the same
+    // reason history is not hydrated at all: a FileService exists whether or
+    // not the Git panel is ever opened. Once the panel HAS asked, the list has
+    // to survive a reconnect — [claimStashLoad] is one-shot for the service's
+    // lifetime and nothing else ever re-reads it, so the banner would go on
+    // offering a stash the agent popped while the socket was down.
+    // Registering IS the first ask — a hydrator fires immediately when the
+    // session is already established and on the next establishment otherwise,
+    // so a separate send here would only double it. Re-registering under the
+    // same key supersedes, so repeat calls are free.
+    session.hydrateCheckout(checkoutId, _stashHydratorKey, _hydrateStashes);
+  }
+
+  static const _stashHydratorKey = 'git:stash-list';
+
+  Future<void> _hydrateStashes() => session.sendForCheckout(
+    checkoutId,
+    createAbMessage('git:stash-list', {'projectId': projectId}),
+  );
+
+  /// Reapplies [ref] and drops it on success — the Git panel banner's
+  /// "Restore". Callers on a branch OTHER than the one the stash was made on
+  /// should switch first: a pop is a 3-way merge against the stash's own
+  /// base, and popping onto an unrelated branch invites a conflict that has
+  /// nothing to do with what the user asked for.
+  void restoreStash(String ref) {
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:stash-pop', {'projectId': projectId, 'ref': ref}),
+    );
+  }
+
+  /// Discards [ref] permanently — the Git panel banner's "Discard". Callers
+  /// must confirm first.
+  void dropStash(String ref) {
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:stash-drop', {'projectId': projectId, 'ref': ref}),
+    );
+  }
+
+  /// History tab: fetch the first page of commits, replacing whatever was
+  /// loaded before. Called once when the tab is first shown.
+  void loadHistory() {
+    _historyLatch?.settle();
+    final latch = _historyLatch = ReplyLatch();
+    // Keeps whatever is already loaded on screen. `_handleGitLogResult`
+    // replaces the list wholesale for a `skip == 0` page, so clearing it here
+    // buys nothing and costs the caller its view: `_HistoryList` renders its
+    // full-pane spinner for exactly "initialLoad with no commits", which on a
+    // pull-to-refresh tore the RefreshIndicator out from under the gesture
+    // that started it and dropped the scroll position with it. Only a list
+    // that is genuinely empty is an initial load.
+    final history = _state.git.history;
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          history: history.copyWith(
+            loadingMore: true,
+            initialLoad: history.commits.isEmpty,
+            hasMore: true,
+            clearError: true,
+          ),
+        ),
+      ),
+    );
+    _requestLogPage(skip: 0, latch: latch);
+  }
+
+  /// History tab: fetch the next page, appending to what is already loaded.
+  /// No-op while a page is already loading or none remain — the scroll
+  /// listener that drives this has no other way to avoid firing repeatedly
+  /// near the bottom of the list.
+  void loadMoreHistory() {
+    final history = _state.git.history;
+    if (history.loadingMore || !history.hasMore) return;
+    _historyLatch?.settle();
+    final latch = _historyLatch = ReplyLatch();
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(history: history.copyWith(loadingMore: true)),
+      ),
+    );
+    _requestLogPage(skip: history.commits.length, latch: latch);
+  }
+
+  void _requestLogPage({required int skip, required ReplyLatch latch}) {
+    _pendingLogSkip = skip;
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:log', {
+        'projectId': projectId,
+        'skip': skip,
+        'limit': historyPageSize,
+      }),
+    );
+    unawaited(
+      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+        _,
+      ) {
+        if (_disposed || _historyLatch != latch) return;
+        _historyLatch = null;
+        _pendingLogSkip = null;
+        _setState(
+          _state.copyWith(
+            git: _state.git.copyWith(
+              history: _state.git.history.copyWith(
+                loadingMore: false,
+                initialLoad: false,
+                error: 'Loading history timed out — no response from the agent',
+              ),
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
+  /// History tab: expand a commit's file list, fetching it on first expand —
+  /// [GitHistoryState.filesBySha] is a cache the toggle never re-fetches once
+  /// populated — or collapse it back up. More than one commit can stay
+  /// expanded at once; see [collapseAllHistory] for the bulk fold.
+  void toggleCommitExpanded(String sha) {
+    final history = _state.git.history;
+    final expanded = Set<String>.from(history.expandedShas);
+    final expanding = !expanded.remove(sha);
+    if (expanding) expanded.add(sha);
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(history: history.copyWith(expandedShas: expanded)),
+      ),
+    );
+    if (expanding &&
+        !history.filesBySha.containsKey(sha) &&
+        !history.filesLoadingShas.contains(sha)) {
+      _requestCommitFiles(sha);
+    }
+  }
+
+  /// History tab: re-fetch a commit's file list after [_requestCommitFiles]
+  /// failed — the commit is already expanded (that's why an error row is on
+  /// screen), so retrying is a plain re-fetch rather than another toggle.
+  void retryCommitFiles(String sha) => _requestCommitFiles(sha);
+
+  void _requestCommitFiles(String sha) {
+    final history = _state.git.history;
+    final loading = Set<String>.from(history.filesLoadingShas)..add(sha);
+    final errors = Map<String, String>.from(history.filesErrorBySha)
+      ..remove(sha);
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          history: history.copyWith(
+            filesLoadingShas: loading,
+            filesErrorBySha: errors,
+          ),
+        ),
+      ),
+    );
+    _commitFilesLatches.remove(sha)?.settle();
+    final latch = ReplyLatch();
+    _commitFilesLatches[sha] = latch;
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:commit-files', {'projectId': projectId, 'sha': sha}),
+    );
+    unawaited(
+      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+        _,
+      ) {
+        if (_disposed || _commitFilesLatches[sha] != latch) return;
+        _commitFilesLatches.remove(sha);
+        final stillLoading = Set<String>.from(
+          _state.git.history.filesLoadingShas,
+        )..remove(sha);
+        final withError = Map<String, String>.from(
+          _state.git.history.filesErrorBySha,
+        )..[sha] = 'Loading files timed out — no response from the agent';
+        _setState(
+          _state.copyWith(
+            git: _state.git.copyWith(
+              history: _state.git.history.copyWith(
+                filesLoadingShas: stillLoading,
+                filesErrorBySha: withError,
+              ),
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
+  /// History tab: fold every expanded commit's file list shut without
+  /// dropping the cached files — the same "Collapse All" the Changes tab's
+  /// folder toggle offers, applied to expanded commits instead of folders.
+  void collapseAllHistory() {
+    final history = _state.git.history;
+    if (history.expandedShas.isEmpty) return;
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(history: history.copyWith(expandedShas: const {})),
+      ),
+    );
+  }
+
+  /// Fold the whole History section shut in the side-by-side layout, or
+  /// reopen it — see [GitPaneState.historyCollapsed].
+  void toggleHistoryCollapsed() {
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          historyCollapsed: !_state.git.historyCollapsed,
+        ),
+      ),
+    );
+  }
+
+  /// History tab: open one file's diff within [sha] — the same viewer
+  /// [requestDiff] opens for the working tree, distinguished on screen by
+  /// [GitPaneState.diffCommitSha].
+  void requestCommitDiff(String sha, String path) {
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          diffPath: path,
+          diffCommitSha: sha,
+          diffLoading: true,
+          clearViewing: true,
+        ),
+      ),
+    );
+    _diffLatch?.settle();
+    final latch = _diffLatch = ReplyLatch();
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:commit-diff', {
+        'projectId': projectId,
+        'sha': sha,
+        'path': path,
+      }),
+    );
+    unawaited(
+      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+        _,
+      ) {
+        if (_disposed ||
+            _diffLatch != latch ||
+            _state.git.diffPath != path ||
+            _state.git.diffCommitSha != sha) {
           return;
         }
         _diffLatch = null;
@@ -719,8 +1457,25 @@ class FileService {
     // Resolve any in-flight git:diff action so its timeout timer is cancelled.
     _diffLatch?.settle();
     _diffLatch = null;
+    _syncLatch?.settle();
+    _syncLatch = null;
+    _historyLatch?.settle();
+    _historyLatch = null;
+    _pendingLogSkip = null;
+    for (final latch in _commitFilesLatches.values) {
+      latch.settle();
+    }
+    _commitFilesLatches.clear();
+    final resolves = _pendingResolves.values.toList();
+    _pendingResolves.clear();
+    for (final pending in resolves) {
+      pending.fail(StateError('FileService disposed'));
+    }
     session.unhydrateCheckout(checkoutId, 'file:selected');
+    session.unhydrateCheckout(checkoutId, 'file:preview');
     session.unhydrateCheckout(checkoutId, _treeHydratorKey);
+    session.unhydrateCheckout(checkoutId, _syncHydratorKey);
+    session.unhydrateCheckout(checkoutId, _stashHydratorKey);
     await _heavySub?.cancel();
     _heavySub = null;
     await _statusSub?.cancel();

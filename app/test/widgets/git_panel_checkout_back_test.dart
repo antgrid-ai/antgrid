@@ -79,6 +79,27 @@ void main() {
       ),
     );
     await tester.pump();
+    // The mounted panel is bound to the FOCUSED checkout (wt-1, per
+    // activeSessionProvider above) and eagerly claims its first `git:log` —
+    // see GitPanel._maybeLoadHistory. `main`'s FileService is constructed too
+    // (ProjectSession builds it eagerly) but never backs an on-screen panel in
+    // this test, so it never claims one; only wt-1's needs answering here.
+    final transport = session.transport as FakeAgentTransport;
+    for (
+      var i = 0;
+      i < 5 && transport.sent.every((m) => m['type'] != 'git:log');
+      i++
+    ) {
+      await tester.pump();
+    }
+    transport.emit('git:log-result', {
+      'projectId': 'test',
+      'checkoutId': 'wt-1',
+      'commits': const <Object?>[],
+      'skip': 0,
+      'hasMore': false,
+    });
+    await tester.pump();
   }
 
   // Both checkouts are left viewing a file, so the assertion distinguishes

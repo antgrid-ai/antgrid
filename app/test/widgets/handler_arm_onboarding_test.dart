@@ -2,7 +2,10 @@ import 'dart:async';
 
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
+import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/handler_state.dart';
+import 'package:antgrid/navigation/root_navigator.dart';
+import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -19,12 +22,34 @@ import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/handler/handler_arm_explainer.dart';
 import 'package:antgrid/widgets/handler/handler_away_hint.dart';
 import 'package:antgrid/widgets/handler/handler_item_status.dart';
+import 'package:antgrid/widgets/handler/handler_judge_chip.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
+
+/// The bridge is authoritative for what an agent is called and what it can do,
+/// so a judge picker has nothing to list until an advert has landed.
+class _SeededCatalog extends AgentCatalogNotifier {
+  _SeededCatalog(this.seed);
+
+  final Map<String, AgentDescriptor> seed;
+
+  @override
+  Map<String, AgentDescriptor> build() => seed;
+}
+
+AgentDescriptor _descriptor(String tool) => AgentDescriptor(
+  tool: tool,
+  label: tool[0].toUpperCase() + tool.substring(1),
+  chatCapable: true,
+  judgeCapable: true,
+  handlerTerminal: true,
+  handlerChat: true,
+);
 
 Widget _wrap(Widget child, {required List<Override> overrides}) {
   return ProviderScope(
@@ -72,8 +97,8 @@ void main() {
 
     test('a seeded goal is named, and only when one exists', () {
       const seeded =
-          'It starts from what you asked for when you opened this session, '
-          'and queues that as your backlog.';
+          'Handler starts from what you asked for when you opened this '
+          'session, and queues that as your backlog.';
       expect(
         handlerArmExplainerBody(agentObservable: true),
         isNot(contains(seeded)),
@@ -140,6 +165,204 @@ void main() {
         hasOpeningPrompt: true,
       );
       expect(body, endsWith(unwatchableNotice('Claude Code')));
+    });
+
+    group('past the first arm', () {
+      test('a covered agent with nothing to add says nothing at all', () {
+        // The sheet opens on every arm, so the standing explanation would
+        // otherwise be re-read by a user who has armed a hundred sessions.
+        expect(
+          handlerArmExplainerBody(agentObservable: true, explain: false),
+          isNull,
+        );
+      });
+
+      test('the standing explanation is the only thing dropped', () {
+        // Coverage is per-agent and the goal is per-session: neither is retired
+        // by having read the explanation once.
+        expect(
+          handlerArmExplainerBody(
+            agentObservable: false,
+            agentLabel: 'Claude Code',
+            explain: false,
+          ),
+          unwatchableNotice('Claude Code'),
+        );
+        expect(
+          handlerArmExplainerBody(
+            agentObservable: true,
+            judgeCapable: false,
+            explain: false,
+          ),
+          escalateOnlyNotice,
+        );
+        expect(
+          handlerArmExplainerBody(agentObservable: null, explain: false),
+          "This agent hasn't reported what Handler can see here, so it may "
+          'stay silent.',
+        );
+      });
+
+      test('a seeded goal names Handler, having lost its antecedent', () {
+        expect(
+          handlerArmExplainerBody(
+            agentObservable: true,
+            hasOpeningPrompt: true,
+            explain: false,
+          ),
+          'Handler starts from what you asked for when you opened this '
+          'session, and queues that as your backlog.',
+        );
+      });
+
+      test('an unwatchable agent still withholds the goal', () {
+        expect(
+          handlerArmExplainerBody(
+            agentObservable: false,
+            agentLabel: 'Claude Code',
+            hasOpeningPrompt: true,
+            explain: false,
+          ),
+          unwatchableNotice('Claude Code'),
+        );
+      });
+    });
+  });
+
+  group('handlerShieldTooltip', () {
+    // The explainer's copy matrix has its own group above. This is the surface
+    // that answers every time, and the two must agree about precedence.
+    test('an armed session offers only the way out', () {
+      expect(
+        handlerShieldTooltip(armed: true, observable: false, judgeCapable: false),
+        'Disarm Handler',
+      );
+    });
+
+    test('an escalate-only agent is named before the arm, not after', () {
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: true,
+          judgeCapable: false,
+        ),
+        escalateOnlyNotice,
+      );
+    });
+
+    test('unwatchable outranks escalate-only', () {
+      // Both true of the same agent says one thing: it reports nothing. What
+      // its judge could have done never comes up.
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: false,
+          judgeCapable: false,
+          agentLabel: 'Claude Code',
+        ),
+        unwatchableNotice('Claude Code'),
+      );
+    });
+
+    test('a fully covered agent gets the plain label', () {
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: true,
+          judgeCapable: true,
+        ),
+        'Arm Handler',
+      );
+    });
+
+    test('an undescribed agent claims neither fault', () {
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: null,
+          judgeCapable: null,
+        ),
+        'Arm Handler',
+      );
+    });
+
+    test('a refused machine outranks every coverage answer', () {
+      // Coverage describes what an arm WOULD get, and there is no arm to get
+      // it — so a fully covered agent on a refused machine still says why.
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: true,
+          judgeCapable: true,
+          entitlement: const HandlerEntitlement(
+            reason: HandlerEntitlementReason.notEntitled,
+            tier: 'free',
+          ),
+        ),
+        contains('Free plan'),
+      );
+      expect(
+        handlerShieldTooltip(
+          armed: false,
+          observable: false,
+          judgeCapable: false,
+          agentLabel: 'Claude Code',
+          entitlement: const HandlerEntitlement(
+            reason: HandlerEntitlementReason.unreadable,
+          ),
+        ),
+        handlerEntitlementNotice(
+          const HandlerEntitlement(reason: HandlerEntitlementReason.unreadable),
+        ),
+      );
+    });
+
+    test("a session armed before the refusal is still the user's to disarm", () {
+      expect(
+        handlerShieldTooltip(
+          armed: true,
+          observable: true,
+          judgeCapable: true,
+          entitlement: const HandlerEntitlement(
+            reason: HandlerEntitlementReason.notEntitled,
+            tier: 'free',
+          ),
+        ),
+        'Disarm Handler',
+      );
+    });
+  });
+
+  group('handlerEntitlementNotice', () {
+    test('names the plan the machine is on when the bridge could read one', () {
+      // "You need Pro" alone leaves a paying user unable to tell whether they
+      // already have it.
+      expect(
+        handlerEntitlementNotice(
+          const HandlerEntitlement(
+            reason: HandlerEntitlementReason.notEntitled,
+            tier: 'free',
+          ),
+        ),
+        contains('Free plan'),
+      );
+    });
+
+    test('an unreadable claim is sent to sign-in, never to checkout', () {
+      final notice = handlerEntitlementNotice(
+        const HandlerEntitlement(reason: HandlerEntitlementReason.unreadable),
+      );
+      expect(notice, contains('Sign out and back in'));
+      expect(notice, isNot(contains('Pro')));
+    });
+
+    test('a reason this app cannot name still says arming will not work', () {
+      // Silence is the failure being fixed, so an unknown reason falls back to
+      // unavailability rather than to nothing.
+      expect(
+        handlerEntitlementNotice(const HandlerEntitlement()),
+        contains("isn't available"),
+      );
     });
   });
 
@@ -244,14 +467,15 @@ void main() {
     expect(store.read().handlerAwayHintDismissed, isTrue);
   });
 
-  group('armWithFirstRunExplainer carries the opening prompt', () {
+  group('armWithSheet carries the opening prompt', () {
     /// A REAL [ProjectSession] over a fake transport, focused: the goal is only
     /// proven seeded if the arm the flow sends carries it on the wire, and the
     /// flow resolves its service off the focused project rather than off
     /// anything the caller hands it.
     Future<(FakeAgentTransport, ProviderContainer, BuildContext)> pumpArm(
       WidgetTester tester, {
-      required bool armedOnce,
+      bool armedOnce = false,
+      List<Override> extraOverrides = const [],
     }) async {
       useInMemoryPrefs();
       final store = await FirstRunStore.open();
@@ -273,6 +497,7 @@ void main() {
           firstRunStoreProvider.overrideWithValue(store),
           selectedRegistrationIdProvider.overrideWithValue('p'),
           projectSessionProvider('p').overrideWith((ref) => projectSession),
+          ...extraOverrides,
         ],
       );
       addTearDown(container.dispose);
@@ -281,6 +506,10 @@ void main() {
         UncontrolledProviderScope(
           container: container,
           child: MaterialApp(
+            // The flow's own failure reports go to the ROOT navigator's
+            // overlay, since every widget that could have shown one is gone by
+            // then — so the key has to be the one the provider hands out.
+            navigatorKey: container.read(rootNavigatorKeyProvider),
             theme: ThemeData.dark().copyWith(
               extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
             ),
@@ -298,8 +527,35 @@ void main() {
       );
     }
 
+    /// A toast dismisses itself on a timer, and a timer outliving the tree
+    /// fails the test — so every assertion on one has to let it finish.
+    Future<void> settleToast(WidgetTester tester) async {
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+    }
+
     Map<String, dynamic> armFrame(FakeAgentTransport transport) =>
         transport.sent.firstWhere((m) => m['type'] == 'handler:configure');
+
+    /// The whole flow as a user performs it: the sheet is not skippable, so
+    /// every arm here goes through it and commits on its own button.
+    Future<void> armThroughSheet(
+      WidgetTester tester,
+      ProviderContainer container,
+      BuildContext context,
+    ) async {
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.pumpAndSettle();
+    }
 
     /// The bridge answering that the terminal is armed, which is what the flow
     /// waits on before retiring anything. Without it the confirmation window
@@ -325,20 +581,12 @@ void main() {
     }
 
     testWidgets('a remembered prompt arms as the session goal', (tester) async {
-      final (transport, container, context) = await pumpArm(
-        tester,
-        armedOnce: true,
-      );
+      final (transport, container, context) = await pumpArm(tester);
       container
           .read(sessionOpeningPromptsProvider.notifier)
           .remember('t1', 'fix the flaky login test');
 
-      await armWithFirstRunExplainer(
-        context: context,
-        container: container,
-        terminalId: 't1',
-        agentObservable: true,
-      );
+      await armThroughSheet(tester, container, context);
 
       final sent = armFrame(transport);
       expect(sent['armed'], true);
@@ -351,70 +599,271 @@ void main() {
     testWidgets('a session nothing remembers still arms with no payload', (
       tester,
     ) async {
-      final (transport, container, context) = await pumpArm(
-        tester,
-        armedOnce: true,
-      );
+      final (transport, container, context) = await pumpArm(tester);
 
-      await armWithFirstRunExplainer(
-        context: context,
-        container: container,
-        terminalId: 't1',
-        agentObservable: true,
-      );
+      await armThroughSheet(tester, container, context);
 
       final sent = armFrame(transport);
       expect(sent['armed'], true);
       expect(sent.containsKey('goal'), isFalse);
       expect(sent.containsKey('backlog'), isFalse);
+      // The posture the sheet SHOWS is a seed, not something the bridge
+      // reported: a cold cache over a session the bridge holds a posture for
+      // is the ordinary case after a restart, so an untouched control must
+      // send nothing rather than reset that pick to the default.
+      expect(sent.containsKey('personality'), isFalse);
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('the prompt is dropped once the bridge confirms the arm, so a '
-        're-arm queues nothing twice', (tester) async {
+    testWidgets('the sheet opens on every arm, not just the first', (
+      tester,
+    ) async {
       final (transport, container, context) = await pumpArm(
         tester,
         armedOnce: true,
       );
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Arm Handler'), findsWidgets);
+      // …but without re-teaching what Handler is. The composer and the posture
+      // control are the whole sheet from here on.
+      expect(
+        find.textContaining('Handler watches this session while'),
+        findsNothing,
+      );
+      // Nothing is armed until the sheet's own commit — the tap that opened it
+      // is not the arm.
+      expect(
+        transport.sent.where((m) => m['type'] == 'handler:configure'),
+        isEmpty,
+      );
+
+      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.pumpAndSettle();
+      expect(armFrame(transport)['armed'], true);
+      await confirmArmed(tester, transport);
+    });
+
+    testWidgets('a posture picked on the sheet rides the arm', (tester) async {
+      final (transport, container, context) = await pumpArm(tester);
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('AUTOPILOT'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.pumpAndSettle();
+
+      expect(armFrame(transport)['personality'], 'autopilot');
+      await confirmArmed(tester, transport);
+    });
+
+    testWidgets('a posture moved away from and back still rides the arm', (
+      tester,
+    ) async {
+      // The seed is a display value: the bridge may hold a posture this app has
+      // never been told about, so landing back on what the sheet opened showing
+      // is a choice about it, not the absence of one.
+      final (transport, container, context) = await pumpArm(tester);
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('CLOSER'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('WATCHDOG'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+      await tester.pumpAndSettle();
+
+      expect(armFrame(transport)['personality'], 'watchdog');
+      await confirmArmed(tester, transport);
+    });
+
+    /// The bridge saying this machine will not run Handler at all. Emitted with
+    /// no armed sessions, which is the state a refusal always leaves behind.
+    Future<void> refuse(
+      WidgetTester tester,
+      FakeAgentTransport transport,
+      Map<String, dynamic> entitlement,
+    ) async {
+      transport.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': <dynamic>[],
+        'entitlement': entitlement,
+      });
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a paywalled machine explains itself instead of arming', (
+      tester,
+    ) async {
+      final (transport, container, context) = await pumpArm(tester);
+      await refuse(tester, transport, {'reason': 'not_entitled', 'tier': 'free'});
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The arm sheet is a form that could not have committed, so it never
+      // opens: the refusal takes its place and offers the one fix it has.
+      expect(find.text('Handler needs Pro'), findsOneWidget);
+      expect(find.textContaining('Free plan'), findsOneWidget);
+      expect(find.widgetWithText(AbButton, 'See plans'), findsOneWidget);
+      expect(find.widgetWithText(AbButton, 'Arm Handler'), findsNothing);
+
+      await tester.tap(find.widgetWithText(AbButton, 'Not now'));
+      await tester.pumpAndSettle();
+      expect(
+        transport.sent.where((m) => m['type'] == 'handler:configure'),
+        isEmpty,
+      );
+    });
+
+    testWidgets('an unreadable claim is never sold an upgrade', (tester) async {
+      final (transport, container, context) = await pumpArm(tester);
+      await refuse(tester, transport, {'reason': 'unreadable'});
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // A purchase buys nothing here, and a button offering one would teach the
+      // user the wrong thing about what went wrong.
+      expect(find.text('Handler is unavailable'), findsOneWidget);
+      expect(find.widgetWithText(AbButton, 'See plans'), findsNothing);
+      expect(find.widgetWithText(AbButton, 'Close'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(AbButton, 'Close'));
+      await tester.pumpAndSettle();
+      expect(
+        transport.sent.where((m) => m['type'] == 'handler:configure'),
+        isEmpty,
+      );
+    });
+
+    testWidgets('a refusal the bridge stops sending stops gating the arm', (
+      tester,
+    ) async {
+      // The gate is derived per frame on both ends: an app told once that
+      // Handler is paywalled has no other way to learn that it no longer is.
+      final (transport, container, context) = await pumpArm(tester);
+      await refuse(tester, transport, {'reason': 'not_entitled', 'tier': 'free'});
+      transport.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': <dynamic>[],
+      });
+      await tester.pumpAndSettle();
+
+      await armThroughSheet(tester, container, context);
+
+      expect(armFrame(transport)['armed'], true);
+      await confirmArmed(tester, transport);
+    });
+
+    testWidgets('a refusal arriving on the answer to an arm is spoken', (
+      tester,
+    ) async {
+      // The stale-cache path: the app believed it was entitled, sent the arm,
+      // and the bridge answered no. Without this the send is indistinguishable
+      // from a tap that never registered until the confirmation window runs out
+      // — and, with no instruction riding on it, not even then.
+      final (transport, container, context) = await pumpArm(tester);
+
+      await armThroughSheet(tester, container, context);
+      expect(armFrame(transport)['armed'], true);
+
+      await refuse(tester, transport, {'reason': 'not_entitled', 'tier': 'free'});
+
+      expect(find.text('Handler not armed'), findsOneWidget);
+      expect(find.textContaining('Free plan'), findsOneWidget);
+      await settleToast(tester);
+    });
+
+    testWidgets('backing out of the sheet arms nothing', (tester) async {
+      final (transport, container, context) = await pumpArm(tester);
+
+      unawaited(
+        armWithSheet(
+          context: context,
+          container: container,
+          terminalId: 't1',
+          agentObservable: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(AbButton, 'Not now'));
+      await tester.pumpAndSettle();
+
+      expect(
+        transport.sent.where((m) => m['type'] == 'handler:configure'),
+        isEmpty,
+      );
+    });
+
+    testWidgets('the prompt is dropped once the bridge confirms the arm, so a '
+        're-arm queues nothing twice', (tester) async {
+      final (transport, container, context) = await pumpArm(tester);
       container
           .read(sessionOpeningPromptsProvider.notifier)
           .remember('t1', 'revert the last migration');
 
-      await armWithFirstRunExplainer(
-        context: context,
-        container: container,
-        terminalId: 't1',
-        agentObservable: true,
-      );
+      await armThroughSheet(tester, container, context);
       await confirmArmed(tester, transport);
       expect(container.read(sessionOpeningPromptsProvider)['t1'], isNull);
 
       // A plain disarm leaves the bridge nothing to rehydrate, so a goal sent
       // again here is extracted into an empty backlog and done a second time.
       transport.clearSent();
-      await armWithFirstRunExplainer(
-        context: context,
-        container: container,
-        terminalId: 't1',
-        agentObservable: true,
-      );
+      await armThroughSheet(tester, container, context);
       expect(armFrame(transport).containsKey('goal'), isFalse);
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('the first arm tells the user the goal is being seeded', (
+    testWidgets('an arm over a remembered prompt says the goal is seeded', (
       tester,
     ) async {
-      final (transport, container, context) = await pumpArm(
-        tester,
-        armedOnce: false,
-      );
+      final (transport, container, context) = await pumpArm(tester);
       container
           .read(sessionOpeningPromptsProvider.notifier)
           .remember('t1', 'fix the flaky login test');
 
       unawaited(
-        armWithFirstRunExplainer(
+        armWithSheet(
           context: context,
           container: container,
           terminalId: 't1',
@@ -425,7 +874,7 @@ void main() {
 
       expect(
         find.textContaining(
-          'It starts from what you asked for when you opened this session',
+          'Handler starts from what you asked for when you opened this session',
         ),
         findsOneWidget,
       );
@@ -435,16 +884,13 @@ void main() {
       await confirmArmed(tester, transport);
     });
 
-    testWidgets('with nothing remembered the first arm promises no backlog', (
+    testWidgets('with nothing remembered the sheet promises no backlog', (
       tester,
     ) async {
-      final (transport, container, context) = await pumpArm(
-        tester,
-        armedOnce: false,
-      );
+      final (transport, container, context) = await pumpArm(tester);
 
       unawaited(
-        armWithFirstRunExplainer(
+        armWithSheet(
           context: context,
           container: container,
           terminalId: 't1',
@@ -454,13 +900,156 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.textContaining('It starts from what you asked for'),
+        find.textContaining('Handler starts from what you asked for'),
         findsNothing,
+      );
+      // A first arm still gets the standing explanation — the other half of
+      // what handlerArmedOnce gates on this sheet.
+      expect(
+        find.textContaining('Handler watches this session while'),
+        findsOneWidget,
       );
       await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
       await tester.pumpAndSettle();
       expect(armFrame(transport).containsKey('goal'), isFalse);
       await confirmArmed(tester, transport);
+    });
+
+    // The sharp edge of the whole feature: `handler:instruct` is DROPPED by the
+    // bridge when no armed session exists, and the drop is a log line no phone
+    // reads. So the sentence typed on this sheet cannot ride the arm, and
+    // cannot be smuggled in as the goal either — a goal grants nothing, and
+    // `instruct` is the one feed point for instruction-scoped authorization.
+    group('the arm sheet composer', () {
+      final field = find.byKey(const Key('handler-instruction-field'));
+
+      List<Map<String, dynamic>> instructs(FakeAgentTransport transport) =>
+          transport.sent
+              .where((m) => m['type'] == 'handler:instruct')
+              .toList();
+
+      /// Opens the arm sheet and leaves it on screen.
+      Future<void> openSheet(
+        WidgetTester tester,
+        ProviderContainer container,
+        BuildContext context,
+      ) async {
+        unawaited(
+          armWithSheet(
+            context: context,
+            container: container,
+            terminalId: 't1',
+            agentObservable: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('typed text is not on the wire before the arm is confirmed', (
+        tester,
+      ) async {
+        final (transport, container, context) = await pumpArm(tester);
+        await openSheet(tester, container, context);
+
+        await tester.enterText(field, 'also update the changelog');
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+
+        // The arm went; the instruction did not go with it.
+        expect(armFrame(transport)['armed'], true);
+        expect(instructs(transport), isEmpty);
+
+        await confirmArmed(tester, transport);
+      });
+
+      testWidgets('and lands exactly once when the bridge confirms', (
+        tester,
+      ) async {
+        final (transport, container, context) = await pumpArm(tester);
+        await openSheet(tester, container, context);
+
+        await tester.enterText(field, 'also update the changelog');
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+        await confirmArmed(tester, transport);
+
+        expect(instructs(transport), hasLength(1));
+        expect(instructs(transport).single['terminalId'], 't1');
+        expect(instructs(transport).single['text'], 'also update the changelog');
+      });
+
+      testWidgets('an untouched composer sends no instruction at all', (
+        tester,
+      ) async {
+        final (transport, container, context) = await pumpArm(tester);
+        await openSheet(tester, container, context);
+
+        // Arming with nothing typed is the ordinary case, and an empty
+        // `handler:instruct` would spend an extraction pass on nothing.
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+        await confirmArmed(tester, transport);
+
+        expect(instructs(transport), isEmpty);
+      });
+
+      testWidgets('an arm the bridge never confirms sends nothing', (
+        tester,
+      ) async {
+        // A send that vanished with nothing coming back to explain it: the
+        // window closing is the end of it, not a late retry. The user is told,
+        // because the sentence they typed exists nowhere else once it shuts.
+        final (transport, container, context) = await pumpArm(tester);
+        await openSheet(tester, container, context);
+
+        await tester.enterText(field, 'also update the changelog');
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+        await tester.pump(kHandlerArmConfirmWindow + const Duration(seconds: 1));
+        await tester.pumpAndSettle();
+
+        expect(instructs(transport), isEmpty);
+        expect(find.text('Nothing was queued'), findsOneWidget);
+        await settleToast(tester);
+      });
+
+      testWidgets('a judge picked here rides the arm, not a frame of its own', (
+        tester,
+      ) async {
+        final (transport, container, context) = await pumpArm(
+          tester,
+          extraOverrides: [
+            agentCatalogProvider.overrideWith(
+              () => _SeededCatalog({
+                'claude': _descriptor('claude'),
+                'codex': _descriptor('codex'),
+              }),
+            ),
+          ],
+        );
+        await openSheet(tester, container, context);
+
+        await tester.tap(find.byType(HandlerJudgeChip));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Codex'));
+        await tester.pumpAndSettle();
+        // The panel stays open on a judge pick — the model is the next thing
+        // the user may want — so it has to be dismissed before the sheet's own
+        // commit is reachable.
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.widgetWithText(AbButton, 'Arm Handler'));
+        await tester.pumpAndSettle();
+
+        final configures = transport.sent
+            .where((m) => m['type'] == 'handler:configure')
+            .toList();
+        expect(configures, hasLength(1));
+        expect(configures.single['judgeTool'], 'codex');
+
+        await confirmArmed(tester, transport);
+      });
     });
   });
 

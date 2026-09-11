@@ -1,13 +1,18 @@
 import '../connection/supervisor_state.dart';
 import '../design/ab_status_tone.dart';
 import '../models/terminal_models.dart';
+import '../project/checkout_readiness.dart';
 
 /// Maps [SupervisorStatus] to a (tone, label) pair for status surfaces —
 /// the ladder itself, not the raw socket phase, since only the ladder knows
 /// whether the agent is actually on the other end.
 (AbStatusTone, String) connectionDisplayInfo(SupervisorStatus status) {
   return switch (status) {
-    Connected() => (AbStatusTone.success, 'Connected'),
+    // Reports the MACHINE socket, not the workspace — see readinessDisplayInfo
+    // for "is the checkout usable". Reaches only a screen-reader label today
+    // (_MachineOnlineDot); a visible "Connected" here would misstate a machine
+    // that is up but whose checkout has not painted anything yet.
+    Connected() => (AbStatusTone.success, 'Machine linked'),
     Climbing(:final rung) => (AbStatusTone.warning, _rungLabel(rung)),
     Blocked(:final reason) => (AbStatusTone.danger, _blockReasonLabel(reason)),
     Released() => (AbStatusTone.disabled, 'Disconnected'),
@@ -145,3 +150,26 @@ AbStatusTone sessionStateTone(TerminalSessionState state) {
     TerminalSessionState.starting => AbStatusTone.disabled,
   };
 }
+
+/// Reports whether the FOCUSED CHECKOUT is usable. Its counterpart
+/// connectionDisplayInfo reports whether a MACHINE is reachable; the two answer
+/// different questions and must not be substituted for one another.
+///
+/// Every tone here is rendered as readable text, so `disabled` is deliberately
+/// absent: it resolves to iconMuted, whose 3:1 floor is a glyph bar, not a body
+/// text bar.
+(AbStatusTone, String) readinessDisplayInfo(CheckoutReadiness r) => switch (r) {
+  CheckoutReadiness.cold => (AbStatusTone.muted, 'Not connected'),
+  // Callers with a SupervisorStatus in hand should prefer
+  // connectionDisplayInfo's block reason, which names the specific block.
+  CheckoutReadiness.blocked => (AbStatusTone.danger, 'Blocked'),
+  CheckoutReadiness.reachingMachine => (AbStatusTone.warning, 'Reaching machine'),
+  CheckoutReadiness.openingSession => (AbStatusTone.warning, 'Opening session'),
+  CheckoutReadiness.loadingScreen => (AbStatusTone.warning, 'Loading terminal'),
+  // Names the AGENT, not a terminal: this is "no agent:status ever arrived",
+  // so the checkout has no terminals to have failed. The per-terminal strip's
+  // "couldn't load this terminal" is a different condition and the two can be
+  // on screen together.
+  CheckoutReadiness.stalled => (AbStatusTone.danger, "Couldn't reach agent"),
+  CheckoutReadiness.ready => (AbStatusTone.success, 'Ready'),
+};

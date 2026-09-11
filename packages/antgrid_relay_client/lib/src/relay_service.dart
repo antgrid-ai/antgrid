@@ -41,6 +41,21 @@ typedef RelayLogger =
       Map<String, Object?>? fields,
     });
 
+/// Frame-level capture hook, for debugging relay connection and delivery.
+///
+/// Deliberately UNTYPED. The capture's event schema, its buffer and its file
+/// live in the app (`app/lib/util/netwatch.dart`), which is ELv2; this package
+/// is Apache-2.0 and the licence boundary is one-way, so nothing but the hook
+/// itself belongs here. Two shapes, by the `op` key: `'frame'` records a frame
+/// (`dir`, `kind`, `channel`, `bytes`, `frameId`, `reason`, `detail`), and
+/// `'annotate'` fills in the `msgType`/`streamId` of an already-recorded
+/// `frameId` — the transport edge is the only place that can see a frame's id,
+/// and the layers above and below it are the only places that know its type.
+///
+/// Null in every build nobody is debugging, which is the whole gate: an
+/// instrumented path then costs one null check.
+typedef RelayNetTap = void Function(Map<String, Object?> event);
+
 /// One machine↔relay WebSocket for one phone identity. v3: authenticates with a
 /// single signed `hello` frame (proof-of-possession over `buildHelloSigBody`),
 /// the relay answers `welcome` (→ authenticated) or a typed `error`. There is
@@ -53,6 +68,18 @@ typedef RelayLogger =
 class RelayService {
   final CryptoService _crypto;
   final RelayLogger? _logger;
+  RelayNetTap? _netTap;
+
+  /// The capture hook, for the layers above this one ([MachineSession]) to
+  /// annotate frames they can name but not identify. Null when unarmed.
+  ///
+  /// Settable, and null is the load-bearing default: nothing may pay for a
+  /// capture nobody asked for, and every tap site is guarded on this being
+  /// non-null — including the id computation, which is the only per-frame cost.
+  /// A capture can be armed long after the socket opened (a remote request
+  /// arrives over the socket itself), so it cannot be fixed at construction.
+  RelayNetTap? get netTap => _netTap;
+  set netTap(RelayNetTap? tap) => _netTap = tap;
 
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
@@ -65,6 +92,12 @@ class RelayService {
   Duration _heartbeatInterval = const Duration(seconds: 25);
   Timer? _heartbeatTimer;
   DateTime? _socketOpenedAt;
+
+  /// Stamped at `welcome`, where [_socketOpenedAt] is stamped at dial. A connect
+  /// that gives up after [_connectTimeoutDuration] without ever authenticating
+  /// otherwise logs an age indistinguishable from a socket that really lived
+  /// that long — null here is the only thing separating the two.
+  DateTime? _socketAuthenticatedAt;
   DateTime? _lastInboundAt;
   DateTime? _probeSentAt;
   String? _relaySlotId;
@@ -111,9 +144,13 @@ class RelayService {
 
   AppState get currentState => _currentState;
 
-  RelayService({required CryptoService crypto, RelayLogger? logger})
-    : _crypto = crypto,
-      _logger = logger;
+  RelayService({
+    required CryptoService crypto,
+    RelayLogger? logger,
+    RelayNetTap? netTap,
+  }) : _crypto = crypto,
+       _logger = logger,
+       _netTap = netTap;
 
   /// A dial outlives this object: `connect()` deliberately does not await
   /// `_doConnect`, so a socket that fails (or a `channel.ready` that rejects
@@ -380,20 +417,88 @@ class RelayService {
   /// completes. Not part of the supported API.
   void debugSetChannel(WebSocketChannel channel) => _channel = channel;
 
+  /// The relay control fields worth carrying into a capture — the same set the
+  /// agent's half records, so a joined view reads as one conversation.
+  static Map<String, Object?>? _controlDetail(Map<String, dynamic> json) {
+    final detail = <String, Object?>{};
+    for (final k in const [
+      'code',
+      'retryable',
+      'ref',
+      'peerId',
+      'streamId',
+      'epoch',
+      'ok',
+      'reason',
+    ]) {
+      final v = json[k];
+      if (v != null) detail[k] = v;
+    }
+    return detail.isEmpty ? null : detail;
+  }
+
   void _handleText(String data) {
+    final tap = _netTap;
     Map<String, dynamic> json;
     try {
       json = jsonDecode(data) as Map<String, dynamic>;
     } catch (_) {
+      tap?.call({
+        'op': 'frame',
+        'dir': 'rx',
+        'kind': 'drop',
+        'bytes': utf8.encode(data).length,
+        'reason': 'unparseable',
+      });
+      _log(
+        RelayLogLevel.warn,
+        'dropping unparseable relay control text',
+        fields: {'bytes': utf8.encode(data).length},
+      );
       return;
     }
 
     final msg = parseRelayMessage(json);
-    if (msg == null) return;
+    if (msg == null) {
+      tap?.call({
+        'op': 'frame',
+        'dir': 'rx',
+        'kind': 'drop',
+        'msgType': json['type'] as String?,
+        'bytes': utf8.encode(data).length,
+        'reason': 'unknown-control',
+      });
+      // Includes the type the relay used: a forward-compat message from a newer
+      // relay and a genuinely malformed one are indistinguishable without it,
+      // and this is the path an `error` (MESSAGE_RATE_LIMITED — the relay saying
+      // it threw our frame away) would vanish down.
+      _log(
+        RelayLogLevel.warn,
+        'dropping unrecognised relay control message',
+        fields: {'msgType': json['type'] as String?},
+      );
+      return;
+    }
+
+    // Relay CONTROL json, not a sealed frame — the agent's half records the
+    // same class, and without this one the app is blind to everything the relay
+    // says to it. `error` with MESSAGE_RATE_LIMITED is the relay telling this
+    // sender it threw a frame away, which is the exact question a capture is
+    // opened to answer, and it would otherwise show as an idle app beside an
+    // agent that saw the socket stall.
+    tap?.call({
+      'op': 'frame',
+      'dir': 'rx',
+      'kind': 'control',
+      'msgType': json['type'] as String?,
+      'bytes': utf8.encode(data).length,
+      'detail': _controlDetail(json),
+    });
 
     _markInboundHealthy();
 
     if (msg is WelcomeMessage) {
+      _socketAuthenticatedAt = DateTime.now().toUtc();
       // State first, then the completer: whoever awaits connect() re-reads the
       // connection state the instant it resolves.
       _setState(
@@ -510,20 +615,100 @@ class RelayService {
   }
 
   void _handleBinary(Uint8List data) {
+    final tap = _netTap;
     ({Map<String, dynamic> header, Uint8List payload, FrameKind kind}) decoded;
     try {
       decoded = decodeRouteFrame(data);
-    } on FrameException catch (_) {
+    } on FrameException catch (e) {
+      tap?.call({
+        'op': 'frame',
+        'dir': 'rx',
+        'kind': 'drop',
+        'bytes': data.length,
+        'reason': 'bad-frame',
+        'detail': {'why': e.reason.name},
+      });
+      // Returns BEFORE _markInboundHealthy, so a sustained failure here is bytes
+      // arriving while liveness is never marked — the heartbeat then reaps a
+      // socket that is still delivering. Tap-only, that was observable solely
+      // while a netwatch capture happened to be armed, which over a fault
+      // arriving a few times a day means never.
+      _log(
+        RelayLogLevel.warn,
+        'dropping undecodable inbound frame',
+        fields: {
+          'reason': 'bad-frame',
+          'why': e.reason.name,
+          'bytes': data.length,
+        },
+      );
       return;
     }
+    // Computed here and nowhere else: this is the last point at which the
+    // payload is still sealed, and the nonce that identifies it is readable.
+    // The plaintext type arrives four layers later, past a real await — so the
+    // layers name the same frame by this id rather than threading it.
+    final frameId = tap == null
+        ? null
+        : frameIdOf(decoded.payload, decoded.kind);
+    final channel = decoded.header['channel'];
     final msg = IncomingRouteMessage.fromFrameHeader(
       decoded.header,
       decoded.payload,
       decoded.kind,
     );
-    if (msg == null) return;
+    if (msg == null) {
+      tap?.call({
+        'op': 'frame',
+        'dir': 'rx',
+        'kind': 'drop',
+        'channel': channel is String ? channel : null,
+        'bytes': decoded.payload.length,
+        'frameId': frameId,
+        'reason': 'bad-route-header',
+      });
+      // The other half of the same blind spot as the bad-frame return above.
+      _log(
+        RelayLogLevel.warn,
+        'dropping inbound frame with an unusable route header',
+        fields: {
+          'reason': 'bad-route-header',
+          'channel': channel is String ? channel : null,
+          'bytes': decoded.payload.length,
+        },
+      );
+      return;
+    }
+    tap?.call({
+      'op': 'frame',
+      'dir': 'rx',
+      'kind': decoded.kind == FrameKind.handshake ? 'handshake' : 'sealed',
+      'channel': msg.channel,
+      'bytes': decoded.payload.length,
+      'frameId': frameId,
+    });
     _markInboundHealthy();
-    if (_messageController.isClosed) return;
+    if (_messageController.isClosed) {
+      tap?.call({
+        'op': 'frame',
+        'dir': 'rx',
+        'kind': 'drop',
+        'channel': msg.channel,
+        'bytes': decoded.payload.length,
+        'frameId': frameId,
+        'reason': 'message-stream-closed',
+      });
+      // debug, not warn: this is the routine teardown race — frames still in
+      // flight when the controller closes. It earns a line only because a
+      // SUSTAINED run of it means inbound is being discarded by a service
+      // nobody noticed had shut down.
+      _log(
+        RelayLogLevel.debug,
+        'dropping inbound frame after the message stream closed',
+        fields: {'channel': msg.channel, 'bytes': decoded.payload.length},
+      );
+      return;
+    }
     _messageController.add(msg);
   }
 
@@ -541,6 +726,7 @@ class RelayService {
       fields: {
         'machineSlot': _relaySlotId,
         'socketAgeMs': _ageMs(_socketOpenedAt),
+        'authenticatedAgeMs': _ageMs(_socketAuthenticatedAt),
         if (error != null) 'error': '$error',
       },
     );
@@ -604,7 +790,34 @@ class RelayService {
     Uint8List payload, {
     FrameKind kind = FrameKind.sealed,
   }) {
-    if (_channel?.sink == null) return;
+    // Every outbound frame passes here, the E2E handshake's included
+    // (connection_handshake.dart sends both its kind-1 client-hello and its
+    // sealed reply through this method) — which is why the capture sits at the
+    // wire and not at the callers: a connection that never establishes is the
+    // case you most need it for, and it produces no stream traffic at all.
+    final tap = _netTap;
+    final frameId = tap == null ? null : frameIdOf(payload, kind);
+    if (_channel?.sink == null) {
+      tap?.call({
+        'op': 'frame',
+        'dir': 'tx',
+        'kind': 'drop',
+        'channel': channel,
+        'bytes': payload.length,
+        'frameId': frameId,
+        'reason': 'socket-not-open',
+      });
+      // sendMessage returns void, so the caller believes this frame went out.
+      // It is the same contract the send-queue drop got a line for one layer
+      // up, and it is the drop a connection that never establishes produces
+      // most of — the case with no stream traffic to diagnose from.
+      _log(
+        RelayLogLevel.warn,
+        'dropping outbound frame — socket not open',
+        fields: {'channel': channel, 'bytes': payload.length},
+      );
+      return;
+    }
     try {
       final frame = encodeRouteFrame(
         {'type': 'message', 'to': to, 'channel': channel},
@@ -612,8 +825,35 @@ class RelayService {
         kind,
       );
       _channel!.sink.add(frame);
-    } on FrameException catch (_) {
+      tap?.call({
+        'op': 'frame',
+        'dir': 'tx',
+        'kind': kind == FrameKind.handshake ? 'handshake' : 'sealed',
+        'channel': channel,
+        'bytes': payload.length,
+        'frameId': frameId,
+      });
+    } on FrameException catch (e) {
       // Dropped — caller can retry with a smaller payload.
+      tap?.call({
+        'op': 'frame',
+        'dir': 'tx',
+        'kind': 'drop',
+        'channel': channel,
+        'bytes': payload.length,
+        'frameId': frameId,
+        'reason': 'frame-encode-failed',
+        'detail': {'why': e.reason.name},
+      });
+      _log(
+        RelayLogLevel.warn,
+        'dropping outbound frame — encode failed',
+        fields: {
+          'channel': channel,
+          'bytes': payload.length,
+          'why': e.reason.name,
+        },
+      );
     }
   }
 
@@ -629,7 +869,16 @@ class RelayService {
   }
 
   void _send(Map<String, dynamic> data) {
-    _channel?.sink.add(jsonEncode(data));
+    final json = jsonEncode(data);
+    _netTap?.call({
+      'op': 'frame',
+      'dir': 'tx',
+      'kind': 'control',
+      'msgType': data['type'] as String?,
+      'streamId': data['streamId'] as String?,
+      'bytes': utf8.encode(json).length,
+    });
+    _channel?.sink.add(json);
   }
 
   void _cleanup() {
@@ -707,6 +956,7 @@ class RelayService {
       fields: {
         'machineSlot': _relaySlotId,
         'socketAgeMs': _ageMs(_socketOpenedAt, now),
+        'authenticatedAgeMs': _ageMs(_socketAuthenticatedAt, now),
         'lastInboundAgeMs': _ageMs(_lastInboundAt, now),
         'outstandingProbeAgeMs': _ageMs(_probeSentAt, now),
       },
@@ -726,6 +976,7 @@ class RelayService {
     _lastInboundAt = null;
     _probeSentAt = null;
     _socketOpenedAt = null;
+    _socketAuthenticatedAt = null;
   }
 
   int? _ageMs(DateTime? at, [DateTime? now]) => at == null

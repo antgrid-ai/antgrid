@@ -1,4 +1,4 @@
-import { Layout, PageHead } from "./layout.js";
+import { Layout, PageHead, type LayoutUser } from "./layout.js";
 import { CellMeter } from "./cell-meter.js";
 import type { AccountMemberRole } from "../models/account-member.js";
 import type { TeamNotice } from "./team-notice.js";
@@ -55,7 +55,7 @@ export type TeamView =
     };
 
 export type TeamPageProps = {
-  user: { email?: string | null };
+  user: LayoutUser;
   notice: TeamNotice | null;
   view: TeamView;
 };

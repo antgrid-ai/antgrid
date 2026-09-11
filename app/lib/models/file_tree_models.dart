@@ -1,4 +1,6 @@
-import 'ab_message.dart' show GitFileStatusEntry;
+import 'ab_message.dart'
+    show GitFileStatusEntry, GitLogEntry, GitCommitFileEntry, GitStashEntry;
+import 'git_sync_state.dart';
 
 enum FileNodeType { file, directory }
 
@@ -10,6 +12,12 @@ class FileNode {
   final String? extension;
   final List<FileNode> children;
 
+  /// The bridge stopped listing this directory early — [children] is a
+  /// complete, ordered prefix of it, not the whole of it. Set by the node
+  /// budget and the depth cap in the bridge's file-tree walk; it must survive
+  /// every rebuild below, or a tree:update silently repairs a partial tree.
+  final bool truncated;
+
   const FileNode({
     required this.name,
     required this.path,
@@ -17,6 +25,7 @@ class FileNode {
     this.size,
     this.extension,
     this.children = const [],
+    this.truncated = false,
   });
 
   static FileNode? fromJson(Map<String, dynamic> json) {
@@ -67,6 +76,7 @@ class FileNode {
       size: json['size'] as int?,
       extension: json['extension'] as String?,
       children: children,
+      truncated: json['truncated'] == true,
     );
   }
 }
@@ -138,12 +148,83 @@ class FilesPaneState {
   }
 }
 
+/// The History tab's commit list plus whatever per-commit file lists the user
+/// has expanded. A `Set`, not a single "open commit" — the History tab lets
+/// more than one commit's file list stay expanded at once (unlike an
+/// accordion), and [collapseAll] (an empty [expandedShas]) is the explicit
+/// action that folds all of them back up.
+class GitHistoryState {
+  final List<GitLogEntry> commits;
+
+  /// True only while fetching the NEXT page (scroll-triggered); the first
+  /// page's own fetch is [initialLoad], since the list is empty either way and
+  /// the two need different placeholders (a full-pane spinner vs. a trailing
+  /// row).
+  final bool loadingMore;
+  final bool initialLoad;
+  final bool hasMore;
+  final String? error;
+
+  /// Commits whose file list is expanded and showing.
+  final Set<String> expandedShas;
+
+  /// Per-commit file lists, once fetched — absent means "never requested",
+  /// distinct from an empty list (a commit with a message but no diff, e.g. an
+  /// empty merge commit).
+  final Map<String, List<GitCommitFileEntry>> filesBySha;
+  final Set<String> filesLoadingShas;
+  final Map<String, String> filesErrorBySha;
+
+  const GitHistoryState({
+    this.commits = const [],
+    this.loadingMore = false,
+    this.initialLoad = true,
+    this.hasMore = true,
+    this.error,
+    this.expandedShas = const {},
+    this.filesBySha = const {},
+    this.filesLoadingShas = const {},
+    this.filesErrorBySha = const {},
+  });
+
+  static const empty = GitHistoryState();
+
+  GitHistoryState copyWith({
+    List<GitLogEntry>? commits,
+    bool? loadingMore,
+    bool? initialLoad,
+    bool? hasMore,
+    String? error,
+    bool clearError = false,
+    Set<String>? expandedShas,
+    Map<String, List<GitCommitFileEntry>>? filesBySha,
+    Set<String>? filesLoadingShas,
+    Map<String, String>? filesErrorBySha,
+  }) {
+    return GitHistoryState(
+      commits: commits ?? this.commits,
+      loadingMore: loadingMore ?? this.loadingMore,
+      initialLoad: initialLoad ?? this.initialLoad,
+      hasMore: hasMore ?? this.hasMore,
+      error: clearError ? null : (error ?? this.error),
+      expandedShas: expandedShas ?? this.expandedShas,
+      filesBySha: filesBySha ?? this.filesBySha,
+      filesLoadingShas: filesLoadingShas ?? this.filesLoadingShas,
+      filesErrorBySha: filesErrorBySha ?? this.filesErrorBySha,
+    );
+  }
+}
+
 /// Per-tab right-pane state for the Git tab.
 ///
 /// Mutated only by Git-tab actions (requestDiff, clearDiff, gitViewFile,
 /// gitClearViewing). Reading these fields from the Files tab is a leak.
 ///
-/// [diffPath]/[diffContent]/[diffLoading] back the DiffViewer.
+/// [diffPath]/[diffContent]/[diffLoading] back the DiffViewer — for a working
+/// -tree diff when [diffCommitSha] is null, or for that commit's diff of
+/// [diffPath] when it is set. One shared slot rather than a second copy under
+/// [GitHistoryState]: only one diff is ever open regardless of which tab it
+/// was opened from, and the viewer itself renders the same either way.
 /// [viewingPath]/[viewingFile]/[viewingLoading] back the "View File from diff"
 /// mode that renders a FileContentViewer inside the Git pane.
 class GitPaneState {
@@ -152,9 +233,19 @@ class GitPaneState {
   final int? diffAdditions;
   final int? diffDeletions;
   final bool diffLoading;
+
+  /// Set when [diffPath] names a file WITHIN this commit rather than the
+  /// working tree — the History tab's file list opens a diff the same way the
+  /// Changes tab does, just scoped to a commit instead of HEAD.
+  final String? diffCommitSha;
+
   final String? viewingPath;
   final FileContent? viewingFile;
   final bool viewingLoading;
+
+  /// The History tab's own state — commit list, pagination, and expanded
+  /// per-commit file lists. See [GitHistoryState].
+  final GitHistoryState history;
 
   /// Folders the user has collapsed in the changed-files tree.
   ///
@@ -167,16 +258,55 @@ class GitPaneState {
   /// sitting on.
   final Set<String> collapsedPaths;
 
+  /// Whether the History section itself is folded shut in the side-by-side
+  /// layout's fixed Changes/History split (`_GitPanelBody._buildLeftColumn`).
+  /// Distinct from [GitHistoryState.expandedShas], which folds individual
+  /// COMMITS within an already-visible list. Ignored (treated as expanded)
+  /// whenever there are no changed files to give the freed space to — see
+  /// that method for why collapsing would otherwise leave blank space with
+  /// nothing to show for it.
+  final bool historyCollapsed;
+
+  /// How the branch stands against its upstream. Replayed on reconnect (it is
+  /// in `kCheckoutDurableReplayTypes`), so this is durable state rather than a
+  /// one-shot — an app that reconnects must not show a synced branch until the
+  /// next op.
+  final GitSyncState sync;
+
+  /// The op currently in flight, if any. Null is idle; the two buttons are
+  /// disabled together while either runs, since both mutate the same branch.
+  final GitSyncOp? syncing;
+
+  /// The last push/pull that failed, kept until the next sync attempt so the
+  /// panel can offer the agent handoff after the toast has gone.
+  final GitSyncFailure? lastSyncFailure;
+
+  /// Every stash in the repository, most recent first — fetched lazily the
+  /// same way [history] is (see [FileService.claimStashLoad]), and re-fetched
+  /// after every checkout, pop, or drop rather than mutated locally: a stash
+  /// list is repo-wide (shared across every worktree), so anything else
+  /// risks drifting from a stash the user or agent created outside this
+  /// panel. Drives the Git panel's Restore/Discard banner — see
+  /// `git_panel.dart`'s `_StashBanner`.
+  final List<GitStashEntry> stashes;
+
   const GitPaneState({
     this.diffPath,
     this.diffContent,
     this.diffAdditions,
     this.diffDeletions,
     this.diffLoading = false,
+    this.diffCommitSha,
     this.viewingPath,
     this.viewingFile,
     this.viewingLoading = false,
     this.collapsedPaths = const {},
+    this.historyCollapsed = false,
+    this.sync = GitSyncState.empty,
+    this.syncing,
+    this.lastSyncFailure,
+    this.history = GitHistoryState.empty,
+    this.stashes = const [],
   });
 
   static const empty = GitPaneState();
@@ -187,12 +317,22 @@ class GitPaneState {
     int? diffAdditions,
     int? diffDeletions,
     bool? diffLoading,
+    String? diffCommitSha,
+    bool clearDiffCommitSha = false,
     bool clearDiff = false,
     String? viewingPath,
     FileContent? viewingFile,
     bool? viewingLoading,
     bool clearViewing = false,
     Set<String>? collapsedPaths,
+    bool? historyCollapsed,
+    GitSyncState? sync,
+    GitSyncOp? syncing,
+    bool clearSyncing = false,
+    GitSyncFailure? lastSyncFailure,
+    bool clearSyncFailure = false,
+    GitHistoryState? history,
+    List<GitStashEntry>? stashes,
   }) {
     return GitPaneState(
       diffPath: clearDiff ? null : (diffPath ?? this.diffPath),
@@ -200,6 +340,9 @@ class GitPaneState {
       diffAdditions: clearDiff ? null : (diffAdditions ?? this.diffAdditions),
       diffDeletions: clearDiff ? null : (diffDeletions ?? this.diffDeletions),
       diffLoading: clearDiff ? false : (diffLoading ?? this.diffLoading),
+      diffCommitSha: (clearDiff || clearDiffCommitSha)
+          ? null
+          : (diffCommitSha ?? this.diffCommitSha),
       viewingPath: clearViewing ? null : (viewingPath ?? this.viewingPath),
       viewingFile: clearViewing ? null : (viewingFile ?? this.viewingFile),
       viewingLoading: clearViewing
@@ -208,6 +351,14 @@ class GitPaneState {
       // Survives clearDiff/clearViewing: closing a diff is not a reason to
       // reopen every folder the user shut to find it.
       collapsedPaths: collapsedPaths ?? this.collapsedPaths,
+      historyCollapsed: historyCollapsed ?? this.historyCollapsed,
+      sync: sync ?? this.sync,
+      syncing: clearSyncing ? null : (syncing ?? this.syncing),
+      lastSyncFailure: clearSyncFailure
+          ? null
+          : (lastSyncFailure ?? this.lastSyncFailure),
+      history: history ?? this.history,
+      stashes: stashes ?? this.stashes,
     );
   }
 }
@@ -388,5 +539,39 @@ class FileContentMessage {
     this.error,
     this.encoding = 'utf8',
     this.mimeType,
+  });
+}
+
+/// Reply to a `file:resolve-path` request — a path a terminal program printed
+/// (an OSC 8 `file://` hyperlink target), resolved against the checkout the
+/// request named. [relPath] is null when the path does not resolve inside
+/// that checkout; the app never learns the checkout's absolute root, so only
+/// the bridge can make this call.
+///
+/// [externalImagePath] is set only when [relPath] is null AND the bridge
+/// recognized the path as a safe image type outside the checkout (an
+/// image-generation tool's own output directory, typically) — see
+/// `EXTERNAL_SAFE_IMAGE_MIME` in the bridge's `file-tree.ts`. It carries the
+/// ABSOLUTE path, unlike [relPath]; `file:read` accepts it as-is (the
+/// bridge's traversal guard has the matching narrow exception), so the app
+/// can preview it read-only via [FileService.openPreview] instead of
+/// refusing the link outright.
+class FileResolvePathResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final String requestId;
+  final String? relPath;
+  final bool isDirectory;
+  final String? externalImagePath;
+
+  const FileResolvePathResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.requestId,
+    this.relPath,
+    this.isDirectory = false,
+    this.externalImagePath,
   });
 }

@@ -2,11 +2,22 @@
 import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Button from "../ui/Button.astro";
-import ProofCard from "./ProofCard.astro";
-import { links } from "../../config";
+import WorkspaceScene from "../shell/WorkspaceScene.astro";
+import { links, PLATFORMS, downloadUrlFor } from "../../config";
 import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../../data/pricing";
 
-const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
+// One button per desktop build. All three ship and `data-os` (Base.astro)
+// reveals the one the reader can actually install — the same attribute the
+// window chrome follows, and revealed the same way in global.css rather than by
+// rewriting a label after load, which would flicker on the primary CTA. Windows
+// leads because it is also what the reveal rules fall through to.
+//
+// Each aims at /download rather than at the artifact, and that page starts the
+// download itself (downloadUrlFor) — and re-checks the machine before it does,
+// which is the only reason a link that has travelled cannot land a build on a
+// device that cannot run it. Straight at the artifact, the click leaves the page
+// looking like nothing happened and answers none of "it downloaded, now what".
+// The raw artifacts stay one layer down, in the setup guide.
 ---
 {/* The proof loop is the argument, so it gets the stage rather than a column:
     full shell width under the headline, which also puts it just below the fold
@@ -19,7 +30,11 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
       stop around 1568px because past the shell the mask has faded the field out
       anyway, and the life belongs where the content is. */}
   <svg class="live-cells pointer-events-none absolute inset-0 h-full w-full" aria-hidden="true">
-    <rect x="96" y="128" width="64" height="32" style="animation-delay:0s" />
+    {/* Right gutter, not the left one. The shell is 72rem, so at 1440 a cell at
+        x=96 lands in the margin and reads as intended — but the margin shrinks
+        with the viewport, and by 1280 that same cell is a warm block sitting on
+        the kicker. Past the right edge it is simply clipped away instead. */}
+    <rect x="1216" y="128" width="64" height="32" style="animation-delay:0s" />
     <rect x="352" y="96" width="32" height="32" style="animation-delay:12.8s" />
     <rect x="640" y="160" width="32" height="32" style="animation-delay:4.8s" />
     <rect x="960" y="128" width="64" height="32" style="animation-delay:19.2s" />
@@ -35,7 +50,9 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
     <rect x="1024" y="448" width="32" height="32" style="animation-delay:11.2s" />
     <rect x="1376" y="512" width="64" height="32" style="animation-delay:17.6s" />
   </svg>
-  <div class="pointer-events-none absolute -top-56 left-1/2 h-[620px] w-[980px] -translate-x-1/2 glow-signal" aria-hidden="true"></div>
+  {/* Geometry lives with the paint in .glow-hero, not in utilities here: the
+      two change together across the md breakpoint and are meaningless apart. */}
+  <div class="glow-hero pointer-events-none" aria-hidden="true"></div>
 
   <div class="relative mx-auto max-w-shell px-6 pt-12 md:pt-18">
     <div class="mb-7 flex flex-wrap items-center gap-x-5 gap-y-3">
@@ -57,60 +74,283 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
           href={links.pricing}
           class="inline-flex items-center gap-2 rounded-full border border-signaldeep2 bg-signaldeep/40 px-3 py-1 font-mono text-marker text-signal2 transition-colors hover:border-signalbtn hover:text-signal3"
         >
-          <span class="rounded-full bg-signalbtn px-1.5 py-px text-pip font-medium text-page">{offerPct}% off</span>
-          Launch offer — Pro ${YEARLY_OFFER_USD} per seat / year
+          {/* Forwards, never as a discount off a struck price — same rule
+              PlanCard.astro states and for the same reason: $99 has never been
+              charged, so "% off" would invent a reference price. */}
+          <span class="rounded-full bg-signalbtn px-1.5 py-px text-pip font-medium text-page">Founding</span>
+          Pro ${YEARLY_OFFER_USD} per seat / year — ${YEARLY_LIST_USD} at launch
           <Icon name="tabler:arrow-right" width="12" height="12" />
         </a>
       )}
     </div>
 
-    <h1 class="mb-8">
-      {/* inline-block per sentence, here and in the headline below, so a line can
-          only ever break BETWEEN sentences. Both are short-sentence copy at large
-          type, where the default wrap strands a two-word tail ("stuck since 2am.",
-          "machine.") on its own line at some widths and not others. A hard <br />
-          fixes the one width you tested and makes narrow viewports worse. */}
-      <span class="mb-3 block max-w-2xl text-kicker text-muted">
-        <span class="inline-block">Agents on your laptop, your workstation, a cloud box.</span>{" "}
-        <span class="inline-block">One's been stuck since 2am.</span>
-      </span>
-      {/* The headline claims the overview, so the tension has to sit in the kicker
-          above it — on its own "One screen." is a watching claim, and the product
-          acts. The stuck agent is what the lede's proof loop then answers. */}
-      <span class="block font-display text-display font-semibold text-ink">
-        <span class="inline-block">Every agent.</span>{" "}
-        <span class="inline-block">Every machine.</span>{" "}
-        <span class="inline-block">One screen.</span>
-      </span>
+    {/* inline-block per sentence so a line can only ever break BETWEEN
+        sentences. This is short-sentence copy at display size, where the default
+        wrap strands a two-word tail ("machine.") on its own line at some widths
+        and not others. A hard <br /> fixes the one width you tested and makes
+        narrow viewports worse. */}
+    {/* This deliberately takes the overview claim BACK from Fleet.astro, which
+        was handed it while the headline carried the evidence gate. The gate is
+        not entitled to a headline: Handler is opt-in and it is on Pro, so "make
+        it prove it" was false on every free machine until someone armed it —
+        the one promise a stranger is asked to believe has to be true on a bare
+        install. This one is. Fleet.astro keeps the PROOF; the hero takes back
+        the CLAIM, and the ProofCard below still shows the gate doing its job. */}
+    <h1 class="mb-8 font-display text-display font-semibold text-ink">
+      <span class="inline-block">Your machines.</span>{" "}
+      <span class="inline-block">Your agents.</span>{" "}
+      <span class="inline-block">One control plane.</span>
     </h1>
 
-    {/* Argument left, action right. The two columns are sized to sit adjacent
-        rather than pinned to the shell's edges — pushed apart, the buttons read
-        as stranded rather than as a deliberate second column. */}
-    <div class="grid gap-x-12 gap-y-7 md:grid-cols-[minmax(0,35rem)_minmax(0,21rem)]">
-      {/* Carries the proof loop, because the headline no longer does — it claims
-          the overview instead. Does not re-open on "your agents run on your own
-          machines": the kicker and headline directly above have just said that,
-          and the paragraph runs long on a phone as it is. */}
+    {/* One column, not two. Argument-left/action-right asked the eye to leave
+        the lede mid-argument and come back for the terms, and it only balanced
+        because the CTA stack was vertically centred against a two-paragraph
+        column — a crutch that goes out of true the moment the copy changes
+        length. Stacked, the hero reads in the order it argues: claim, evidence,
+        action, terms. The 45rem cap stays: it is the measure the lede was
+        written against, and the rows below it are short enough not to need one
+        of their own. */}
+    <div class="max-w-[45rem]">
+      {/* Two beats, and their order is the argument. The first opens on the
+          reader's own week before it claims anything, which is what lets a
+          stranger agree before being sold to, and lands on the product in
+          different words than the headline — "control everything from one app"
+          there would be the h1 restated in a weaker voice. The second names the
+          paid feature with a VERB — you arm it — because a reader who takes the
+          gate for a default will find it missing and conclude we lied. It links
+          rather than explains: Phases.astro is two sections down and makes the
+          whole case there.
+
+          Ownership used to close this paragraph AND fill the terms row under
+          the button, which put the same claim twice in one viewport and, with
+          the headline, ran "your/yours" to eleven above the fold — at that
+          density the word stops carrying the argument it exists to carry. The
+          claim now lives once, in the row, where a reader who skips the prose
+          still meets it at the moment of decision. */}
+      {/* No inline-block on the sentences here, unlike the headline: at lede
+          size in a 45rem column they still wrap mid-sentence, and forbidding
+          a mid-sentence break only strands a short second line. */}
       <p class="text-lede text-muted">
-        They run on your own machines — your repos, your branches, your existing subscriptions. Hand antgrid the sequence in plain text: it reads every result, refuses a "done" that arrives with no test output, exit code or diff, and moves to the next phase.
+        Claude Code on your laptop, Codex on your workstation, another on a cloud box. One's been stuck since 2am. All of them in one app.
       </p>
-      <div>
-        <div class="flex flex-wrap items-center gap-3">
-          <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
-          <Button href={links.getStarted} variant="outline">Setup guide</Button>
+      <p class="mt-4 text-lede text-muted">
+        Arm <a href={links.features} class="text-signal2 hover:text-signal">Handler</a> to hand off a session on your instructions — it wakes you only when the call is truly yours.
+      </p>
+
+      <div class="mt-8 flex flex-wrap items-center gap-x-6 gap-y-3">
+        {PLATFORMS.map((p) => (
+          <Button href={downloadUrlFor(p.id)} variant="primary" class={`dl-os dl-${p.os}`}>
+            <Icon name={p.icon} width="16" height="16" />Download for {p.name}
+          </Button>
+        ))}
+        {/* The escape hatch for the button, and deliberately not a peer-weight
+            outline button beside it: the OS match is right for nearly everyone,
+            so a second button would spend the hero's one strong action on the
+            minority case. A text link sits at the moment of decision without
+            competing for it.
+
+            It ships as a plain anchor to /download and is UPGRADED to a
+            disclosure by the script below — so a reader with no JS still gets
+            the whole build list, one page away, instead of a dead control.
+            That is also why the chevron is in the markup rather than swapped in
+            on upgrade: pointing down is true of both states, the menu that
+            opens under it and the page it otherwise goes to. A disclosure and
+            not `aria-haspopup="menu"` — the panel is three links and a guide,
+            and claiming menu semantics would owe arrow-key roving that a list
+            this size gains nothing from.
+
+            Opted out of prefetch: hover-prefetching is aimed at links a reader
+            is travelling towards, and once the script has run — which is a
+            precondition for prefetch existing at all — this one never navigates.
+            Prefetching it spends a document fetch on the one anchor in the hero
+            whose click is guaranteed to be swallowed.
+
+            aria-controls is set by the script, not shipped: paired with the
+            aria-expanded the script also sets, it describes a disclosure — on
+            its own, in the window before the module runs and forever for a
+            reader with no JS, it announces a relationship to a panel that will
+            never open, over a link that in fact navigates. The two belong to the
+            upgraded state, so both are applied by the thing that upgrades. */}
+        <div class="relative">
+          <a
+            id="buildsBtn"
+            href={links.download}
+            data-astro-prefetch="false"
+            class="group inline-flex items-center gap-2 text-note font-medium text-signal2 underline decoration-signaldeep2 underline-offset-4 transition-colors hover:text-signal hover:decoration-signal"
+          >
+            See all builds
+            <Icon
+              name="tabler:chevron-down"
+              width="14"
+              height="14"
+              class="transition-transform duration-200 group-aria-expanded:rotate-180 motion-reduce:transition-none"
+            />
+          </a>
+          {/* Every platform, including the one already on the button — a reader
+              who opens this wants the list, and hiding their own build from it
+              only raises the question of whether it is there at all. Each entry
+              routes through /download like every other download on the site
+              (downloadUrlFor), never straight at the artifact — which is what
+              stops a reader picking a build their machine cannot run from being
+              handed it.
+
+              No `dl-os` class on these: that class is the OS reveal, and
+              contracts.spec.ts counts exactly three of them in the hero with one
+              visible. Borrowing it here would hide two entries of a list whose
+              entire job is to show all three.
+
+              It anchors under the trigger and is then nudged back into the
+              viewport by the script: a static anchor cannot be right for both
+              cases, because the trigger sits at the END of the CTA row on a
+              wide screen and at its START once that row wraps on a narrow one.
+              Measured — left-anchored it runs off the right edge at 430px, and
+              right-anchored it runs off the LEFT edge at 360px. */}
+          <div
+            id="buildsMenu"
+            class="absolute left-0 top-full z-20 mt-3 hidden w-60 rounded-lg border border-edge-emph bg-panel p-1.5 shadow-[0_16px_40px_rgba(0,0,0,0.55)]"
+          >
+            {PLATFORMS.map((p) => (
+              <a
+                href={downloadUrlFor(p.id)}
+                class="flex items-center gap-2.5 rounded-md px-3 py-2 text-note text-ink2 transition-colors hover:bg-page hover:text-ink"
+              >
+                <Icon name={p.icon} width="16" height="16" class="text-muted" />{p.name}
+              </a>
+            ))}
+            <div class="my-1.5 h-px bg-edge-inner" aria-hidden="true"></div>
+            <a
+              href={links.getStarted}
+              class="flex items-center gap-2.5 rounded-md px-3 py-2 text-meta text-muted2 transition-colors hover:bg-page hover:text-ink2"
+            >
+              <Icon name="tabler:book" width="16" height="16" />Setup guide
+            </a>
+          </div>
         </div>
-        <p class="mt-4.5 text-meta leading-relaxed text-muted2">
-          No VPN or port forwarding · End-to-end encrypted · Desktop out now, iOS &amp; Android coming to the App Store &amp; Play.
-        </p>
+      </div>
+
+      {/* The two things a stranger has to believe before installing anything,
+          promoted out of the footnote they used to share with the builds link.
+          Terms, not features — so they read at meta weight under the action
+          rather than competing with the lede. The rule hides below sm, where
+          the pair has already wrapped to two lines and a divider between them
+          points across nothing.
+
+          The ownership half keeps the LEDE's old wording rather than the
+          abstract pair it replaced: "your repos, your subscriptions" names
+          things a reader can check against their own machine, where
+          "infrastructure"/"data" name categories, and "nothing rented from us"
+          is the business-model claim no competitor makes. It is the sharpest
+          sentence on the page — worth the extra few words at meta weight. */}
+      <div class="mt-6 flex flex-wrap items-center gap-x-4 gap-y-2 text-meta text-muted2">
+        <span class="inline-flex items-center gap-2">
+          <Icon name="tabler:lock" width="14" height="14" class="text-muted" />End-to-end encrypted
+        </span>
+        <span class="hidden h-3 w-px bg-edge-inner sm:block" aria-hidden="true"></span>
+        <span class="inline-flex items-center gap-2">
+          <Icon name="tabler:database" width="14" height="14" class="text-muted" />Your repos, your subscriptions. Nothing rented from us.
+        </span>
       </div>
     </div>
   </div>
 
-  <div class="relative mx-auto max-w-shell px-6 pb-16 pt-10 md:pt-12">
-    {/* min-w-0 for the same reason as the Worktrees card — see the comment there. */}
-    <div class="pc-animate min-w-0">
-      <ProofCard />
+  {/* The window runs off the bottom of the hero rather than ending inside it:
+      the reader should feel the app continue past the fold. The fade is a
+      SIBLING of the window, never a child — as a child it sits under the
+      window's own border and leaves a bright hairline across the exact point
+      the page is trying to dissolve. */}
+  <div class="relative mx-auto max-w-shell px-6 pt-10 md:pt-12">
+    <div class="appwin-bleed -mb-16 min-w-0 md:-mb-20">
+      <WorkspaceScene />
     </div>
+    <div class="relative z-10 h-16 bg-gradient-to-b from-transparent to-page md:h-20" aria-hidden="true"></div>
   </div>
 </section>
+<script>
+  const btn = document.getElementById("buildsBtn");
+  const menu = document.getElementById("buildsMenu");
+
+  // Setting aria-controls + aria-expanded is what UPGRADES the link into a
+  // disclosure: until this runs the anchor is a plain jump to /download, which
+  // is the scriptless reader's whole experience and has to stay honest — so
+  // neither attribute ships in the markup. aria-expanded is also the hook the
+  // chevron's rotation reads (group-aria-expanded), so state lives in exactly
+  // one place.
+  if (btn && menu) {
+    btn.setAttribute("aria-controls", "buildsMenu");
+    // Keeps the panel on screen wherever the trigger ended up. Measured after
+    // unhiding rather than derived from a breakpoint: what moves the trigger is
+    // the CTA row WRAPPING, which depends on the button's rendered label, so a
+    // media query would be guessing at the very thing being measured.
+    const GUTTER = 12;
+    const place = () => {
+      menu.style.transform = "";
+      const box = menu.getBoundingClientRect();
+      // clientWidth, not innerWidth: innerWidth counts a classic scrollbar as
+      // usable width, and this page always has one on a desktop browser — so
+      // clamping against it leaves the panel up to a scrollbar's width past the
+      // edge it is being pulled back from.
+      const edge = document.documentElement.clientWidth;
+      let dx = 0;
+      if (box.right > edge - GUTTER) dx = edge - GUTTER - box.right;
+      if (box.left + dx < GUTTER) dx = GUTTER - box.left;
+      if (dx) menu.style.transform = `translateX(${Math.round(dx)}px)`;
+    };
+
+    const setOpen = (open: boolean) => {
+      menu.classList.toggle("hidden", !open);
+      btn.setAttribute("aria-expanded", String(open));
+      if (open) place();
+    };
+    setOpen(false);
+
+    // Coalesced to one frame: place() clears the transform, measures, then
+    // writes it back, which forces a synchronous layout each call — and a
+    // drag-resize fires this event faster than the page can paint.
+    let queued = 0;
+    addEventListener("resize", () => {
+      if (menu.classList.contains("hidden") || queued) return;
+      queued = requestAnimationFrame(() => {
+        queued = 0;
+        if (!menu.classList.contains("hidden")) place();
+      });
+    });
+
+    btn.addEventListener("click", (e) => {
+      // A modified click is a request for a new tab or window, and this control
+      // is a real link to /download — swallowing it would make the one gesture
+      // that opens the full list in a new tab do nothing but toggle a panel.
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+      e.preventDefault();
+      const open = menu.classList.contains("hidden");
+      setOpen(open);
+      // Safari does not focus an anchor on click, so without this a mouse user
+      // pressing Tab next moves on from wherever focus happened to be rather
+      // than into the panel — and Tab is the only keyboard way in, since this
+      // is a disclosure rather than a role="menu" with arrow-key roving.
+      if (open) btn.focus();
+    });
+
+    // pointerdown, not click: a reader dismissing the panel to reach the primary
+    // download button underneath should have that press land on the button.
+    document.addEventListener("pointerdown", (e) => {
+      if (menu.classList.contains("hidden")) return;
+      const t = e.target as Node;
+      if (!menu.contains(t) && !btn.contains(t)) setOpen(false);
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || menu.classList.contains("hidden")) return;
+      setOpen(false);
+      btn.focus();
+    });
+
+    // Tabbing past the last entry has to close it too, or the panel is left
+    // hanging open over the page with the focus ring somewhere below it.
+    menu.addEventListener("focusout", (e) => {
+      const next = e.relatedTarget as Node | null;
+      if (next && (menu.contains(next) || btn.contains(next))) return;
+      setOpen(false);
+    });
+  }
+</script>
+

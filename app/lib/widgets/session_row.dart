@@ -32,6 +32,7 @@ import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
+import '../services/pending_reply.dart' show SessionDownException;
 import '../services/sessions_service.dart';
 import '../util/detached.dart';
 import '../util/external_open_target.dart';
@@ -39,6 +40,7 @@ import 'agent_work_status_dot.dart';
 import 'drawer_entry_row.dart' show activateDrawerEntryById, ensureRemoteOnline;
 import 'session_delete_flow.dart';
 import 'session_deleting_badge.dart';
+import 'session_handler_badge.dart';
 import 'session_fork_dialog.dart';
 import 'session_isolation_badge.dart';
 import 'session_approval_badge.dart';
@@ -159,10 +161,29 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       detached('SessionRow', 'session rename failed', _commitEdit);
 
   void _exitEdit() {
-    _editController?.dispose();
-    _editFocus?.dispose();
+    // Disposing a FocusNode detaches it, and `FocusManager._markDetached`
+    // removes it from `_dirtyNodes` — the very Set that
+    // `applyFocusChangesIfNeeded` is ITERATING when it notifies listeners. One
+    // caller is the field's own `onFocusChange`, and `detached` runs its action
+    // through `Future.sync`, so the whole path down to here executes inside
+    // that notification: disposing synchronously throws
+    // ConcurrentModificationError and kills the app. Defer the disposal so the
+    // notification unwinds first. The fields are cleared BEFORE it runs, so
+    // nothing reaches a disposed node in between and `dispose()` above cannot
+    // double-dispose.
+    //
+    // Post-frame rather than a microtask: a microtask still lands inside the
+    // frame that is showing the field, so the TextField would outlive the
+    // controller and focus node it is built against. The setState below is what
+    // takes it down, and the callback runs after that rebuild.
+    final controller = _editController;
+    final focus = _editFocus;
     _editController = null;
     _editFocus = null;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      controller?.dispose();
+      focus?.dispose();
+    });
     if (mounted) {
       setState(() => _editing = false);
     } else {
@@ -323,6 +344,10 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                     ),
                     SessionApprovalBadge(session: session),
                     SessionSharedWorkspaceBadge(session: session),
+                    SessionHandlerBadge(
+                      entryId: widget.entryId,
+                      sessionId: session.id,
+                    ),
                     SessionDeletingBadge(deleting: deleting),
                   ],
                 ),
@@ -454,6 +479,12 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // spawned the PTY anyway (`session:updated` then reconciles the row).
           // Leaving the activeSessionId set while the surface never switches is
           // the worst of both — a tap that visibly did nothing.
+          if (refusalHost.mounted) {
+            showAbSnackBar(refusalHost, _startNoAnswerMessage);
+          }
+        } on SessionDownException {
+          // Same "may still be coming up" shape as the timeout above — the
+          // machine went away, not the bridge refusing.
           if (refusalHost.mounted) {
             showAbSnackBar(refusalHost, _startNoAnswerMessage);
           }
@@ -831,6 +862,10 @@ class _SessionMenu extends ConsumerWidget {
               if (anchor.mounted) {
                 reportSessionNotice(anchor, _startNoAnswerMessage);
               }
+            } on SessionDownException {
+              if (anchor.mounted) {
+                reportSessionNotice(anchor, _startNoAnswerMessage);
+              }
             }
             if (anchor.mounted) await _focusSession(anchor, ref, svc, fork.id);
           } on SessionOperationException catch (error) {
@@ -863,6 +898,8 @@ class _SessionMenu extends ConsumerWidget {
           "The agent didn't answer. Check the connection and try again.",
         );
       }
+    } on SessionDownException catch (e) {
+      if (anchor.mounted) showAbSnackBar(anchor, e.toString());
     }
   }
 

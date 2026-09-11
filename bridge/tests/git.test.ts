@@ -51,6 +51,28 @@ describe("git helpers", () => {
     });
   });
 
+  it("reports each file in a wholly-untracked directory individually, not the collapsed dir entry", async () => {
+    mkdirSync(join(dir, "newdir"));
+    writeFileSync(join(dir, "newdir", "a.txt"), "a\n");
+    writeFileSync(join(dir, "newdir", "b.txt"), "b\n");
+    const status = await getGitStatus(dir);
+    expect(status.map((e) => e.path)).not.toContain("newdir/");
+    expect(status).toContainEqual({
+      path: "newdir/a.txt",
+      status: "U",
+      staged: false,
+      additions: 1,
+      deletions: 0,
+    });
+    expect(status).toContainEqual({
+      path: "newdir/b.txt",
+      status: "U",
+      staged: false,
+      additions: 1,
+      deletions: 0,
+    });
+  });
+
   it("gitStage moves a modified file into the staged bucket", async () => {
     writeFileSync(join(dir, "tracked.txt"), "v2\n");
     const res = await gitStage(dir, ["tracked.txt"]);
@@ -587,6 +609,79 @@ describe("git helpers", () => {
       deletions: 0,
     });
     expect(status).toHaveLength(2);
+  });
+
+  // `getGitStatus` skips `git diff HEAD` when conflicts/renames/staged/unstaged
+  // are all empty. The skip is keyed on all four because `statsFor` is read for
+  // three of them and a missing map renders every file 0/0 with no error — the
+  // two cases below are the ones that would fail silently if the key narrowed.
+  it("an untracked-only tree still reports its entries with the diff-stats call skipped", async () => {
+    mkdirSync(join(dir, "fresh"));
+    writeFileSync(join(dir, "fresh", "a.txt"), "a\nb\n");
+    writeFileSync(join(dir, "solo.txt"), "x\n");
+    const status = await getGitStatus(dir);
+    expect(status).toContainEqual({
+      path: "fresh/a.txt", status: "U", staged: false, additions: 2, deletions: 0,
+    });
+    expect(status).toContainEqual({
+      path: "solo.txt", status: "U", staged: false, additions: 1, deletions: 0,
+    });
+    expect(status).toHaveLength(2);
+  });
+
+  it("a staged rename with no worktree change still reports real +/- counts", async () => {
+    writeFileSync(join(dir, "big.txt"), "a\nb\nc\nd\n");
+    await run(dir, ["add", "big.txt"]);
+    await run(dir, ["commit", "-m", "big"]);
+    await run(dir, ["mv", "big.txt", "moved.txt"]);
+    // Content edited and staged too, so the rename carries counts that only
+    // `git diff HEAD --numstat` can produce.
+    writeFileSync(join(dir, "moved.txt"), "a\nb\nc\nd\ne\n");
+    await run(dir, ["add", "moved.txt"]);
+
+    const rename = (await getGitStatus(dir)).find((e) => e.path === "moved.txt");
+    expect(rename).toMatchObject({ status: "R", staged: true, oldPath: "big.txt" });
+    expect(rename!.additions).toBe(1);
+  });
+
+  // The three on-demand readers below pass `--untracked-files=no`, which is
+  // safe only because none of them looks at the untracked bucket.
+  it("gitUnstage still pulls a rename's old path in beside untracked noise", async () => {
+    await run(dir, ["mv", "tracked.txt", "renamed.txt"]);
+    writeFileSync(join(dir, "noise.txt"), "n\n");
+    expect((await gitUnstage(dir, ["renamed.txt"])).success).toBe(true);
+    const status = await getGitStatus(dir);
+    expect(status).toContainEqual({
+      path: "tracked.txt", status: "D", staged: false, additions: 0, deletions: 1,
+    });
+    expect(status.some((e) => e.path === "renamed.txt" && e.status === "U")).toBe(true);
+  });
+
+  it("gitCommit still refuses on an unresolved conflict beside untracked noise", async () => {
+    await conflictOnTracked();
+    writeFileSync(join(dir, "noise.txt"), "n\n");
+    const res = await gitCommit(dir, "merge");
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("tracked.txt");
+  });
+
+  it("gitDiscard still handles a rename beside untracked noise", async () => {
+    await run(dir, ["mv", "tracked.txt", "renamed.txt"]);
+    writeFileSync(join(dir, "noise.txt"), "n\n");
+    expect((await gitDiscard(dir, ["renamed.txt"])).success).toBe(true);
+    expect(readText(dir, "tracked.txt")).toBe("v1\n");
+    expect(existsSync(join(dir, "renamed.txt"))).toBe(false);
+    // Untracked files it was never asked about are untouched.
+    expect(existsSync(join(dir, "noise.txt"))).toBe(true);
+  });
+
+  it("gitDiscard still fails loudly when includeStaged meets an unreadable status", async () => {
+    writeFileSync(join(dir, "tracked.txt"), "v2\n");
+    await run(dir, ["add", "tracked.txt"]);
+    rmSync(join(dir, ".git"), { recursive: true, force: true });
+    const res = await gitDiscard(dir, ["tracked.txt"], { includeStaged: true });
+    expect(res.success).toBe(false);
+    expect(res.error).toBe("Could not read git status");
   });
 });
 

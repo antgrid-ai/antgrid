@@ -24,10 +24,11 @@ function fakeRemoteDeps(): { deps: ProjectCoreRemoteDeps; calls: Array<{ bus: Me
   const deps: ProjectCoreRemoteDeps = {
     attachStream: (bus, opts) => {
       calls.push({ bus, opts });
-      const handle: StreamHandle = { streamId: "stream-1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} };
+      const handle: StreamHandle = { streamId: "stream-1", detach: () => {}, sendTunnel: async () => "sent", sendFrame: () => {} };
       return handle;
     },
     currentPeerPubkey: () => null,
+    machineDeviceId: () => "machine-uuid",
     sendPushDeliver: () => {},
   };
   return { deps, calls };

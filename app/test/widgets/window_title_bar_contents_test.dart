@@ -273,6 +273,37 @@ void main() {
     }
   });
 
+  // Regression test: the trailing cluster (project-action chips like
+  // RemoteAccessControl, the context-panel toggle, the window controls) used
+  // to be reserved for ONLY by its fixed, analytically-known members — the
+  // window controls — never by the chips, whose width is text-dependent
+  // ("Remote on"/"Remote off"/a host name) and so wasn't predictable the way
+  // the leading cluster's icon slots are. On a narrow window the centred
+  // search box could reach far enough right to paint under the "Remote"
+  // chip. `_measuredTrailingWidth` reserves the trailing cluster's REAL
+  // rendered width instead — this pins that the search box's right edge
+  // clears it. A second `pump()` lets the post-frame measurement's rebuild
+  // settle before asserting the reserve it drives.
+  testWidgets(
+    'the search box clears the trailing chip cluster at the narrowest width',
+    (tester) async {
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        await pumpAt(tester, kMediumBreakpoint);
+        await tester.pump();
+        final chip = tester.getRect(
+          find.byKey(const Key('remote-access-chip')),
+        );
+        final field = tester.getRect(
+          find.byKey(WindowTitleBarContents.searchSlotKey),
+        );
+        expect(field.right, lessThanOrEqualTo(chip.left));
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
   // Separate test, not a second pump — Riverpod forbids changing a live
   // scope's override COUNT.
   testWidgets('the session search survives a hidden drawer', (tester) async {
@@ -424,4 +455,41 @@ void main() {
       }
     },
   );
+
+  testWidgets('a visible context panel keeps an icon toggle that hides it', (
+    tester,
+  ) async {
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      var toggled = 0;
+      await pumpAt(
+        tester,
+        1400,
+        extraOverrides: [
+          contextPanelControlProvider.overrideWith(
+            () => ValueController((hidden: false, toggle: () => toggled++)),
+          ),
+        ],
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(WindowTitleBarContents.contextPanelSlotKey),
+          matching: find.byType(AbIconButton),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(WindowTitleBarContents.contextPanelSlotKey),
+          matching: find.byTooltip('Hide context panel'),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.byTooltip('Hide context panel'));
+      await tester.pump();
+      expect(toggled, 1);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 }

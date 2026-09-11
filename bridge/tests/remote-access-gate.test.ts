@@ -12,7 +12,7 @@ import { createRelayPromotion, type MachineRelaySession } from "../src/relay-pro
 import { generateEphemeralKeypair } from "../src/key-exchange";
 
 function tunnelResponses(frames: object[]): object[] {
-  return frames.filter((f) => (f as { type?: string }).type === "tunnel:http-response");
+  return frames.filter((f) => (f as { type?: string }).type === "tunnel:http-start");
 }
 
 // Isolate ANTGRID_DIR so the core writes its session/catalog state into a temp
@@ -66,7 +66,11 @@ afterEach(async () => {
   // unhandled error. The OS reclaims the OS temp dir; leaking a couple of empty
   // temp folders per run is the lesser evil. They are tracked in `folders` and
   // cleaned once at the end of the suite (afterAll), after all watchers are gone.
-});
+  // 30s, not the 5s Bun gives a hook by default: a core holding a managed
+  // worktree drains git children that still have the checkout as their cwd
+  // before shutdown() returns, and an overrun hook is not cancelled — its body
+  // would resume inside the NEXT test, against the already-reassigned abDir.
+}, 30_000);
 
 afterAll(async () => {
   while (folders.length) await rmWithRetry(folders.pop()!);
@@ -287,15 +291,15 @@ test("drops tunnel:http-request while mobile access is off, honors it once on", 
   core.attachTransport(bus);
   core.setPeerPubkeyProvider(() => "phone-pubkey-tunnel-base64");
 
-  // The tunnel HTTP-response is emitted via the plaintext hook (it bypasses the
-  // bus); capture it to detect whether the proxy actually ran.
+  // The tunnel response frames are emitted via the plaintext hook (they bypass
+  // the bus); capture them to detect whether the proxy actually ran.
   const plain: object[] = [];
-  core.setPlainHook((d) => plain.push(d));
+  core.setPlainHook(async (d) => { plain.push(d); return "sent"; });
 
   core.onHandshakeComplete();
   await waitForServices(sent);
 
-  // --- Off: the proxy must NOT run → no tunnel:http-response. ---
+  // --- Off: the proxy must NOT run → no tunnel:http-start. ---
   plain.length = 0;
   core.handleTunnelMessage({
     type: "tunnel:http-request",
@@ -392,7 +396,7 @@ test("promotion wires (and clears) the gate's peer provider", async () => {
   // Stub machine relay session whose currentPeerPubkey is observable through
   // the wired provider — mirrors what HostServer.ensureMachineRelay() returns.
   const machineSession: MachineRelaySession = {
-    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} }),
+    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendFrame: () => {} }),
     currentPeerPubkey: () => "promoted-phone-pk",
     sendPushDeliver: () => {},
     agentDeviceId: "0bbd1111-2222-3333-4444-555566667777",
@@ -406,7 +410,7 @@ test("promotion wires (and clears) the gate's peer provider", async () => {
     attach: (remote) => {
       setPeerPubkeyProvider(() => remote.currentPeerPubkey());
       return {
-        handle: { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} },
+        handle: { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendFrame: () => {} },
         detach: () => { setPeerPubkeyProvider(null); },
       };
     },
@@ -434,3 +438,218 @@ test("promotion wires (and clears) the gate's peer provider", async () => {
   ctrl.stop();
   expect(setCalls[setCalls.length - 1]).toBe(null);
 });
+
+// The core-level half of the abort: `project-core`'s peer hooks reach every
+// checkout runtime's TunnelManager only through this one call, and a body left
+// streaming past a peer loss burns the whole credit window on frames nobody
+// will read. (It lives here because this file is the only place that builds a
+// real core with a plaintext hook.)
+/** A dev server whose body trickles, so the flush window turns a response into
+ *  a start plus chunks rather than one whole-body frame. `onCancel` is handed
+ *  the request path, which is how a caller with two concurrent runs tells which
+ *  upstream the bridge let go of. */
+function trickleServer(onCancel: (path: string) => void) {
+  return Bun.serve({
+    port: 0,
+    fetch(req) {
+      const path = new URL(req.url).pathname;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            let n = 0;
+            const timer = setInterval(() => {
+              try {
+                if (n++ >= 200) { clearInterval(timer); c.close(); return; }
+                c.enqueue(new Uint8Array(4096).fill(0x61));
+              } catch { clearInterval(timer); }
+            }, 20);
+          },
+          cancel() { onCancel(path); },
+        }),
+        { headers: { "content-type": "application/octet-stream" } },
+      );
+    },
+  });
+}
+
+async function gitIn(folder: string, args: string[]): Promise<void> {
+  const proc = Bun.spawn(["git", ...args], { cwd: folder, stdout: "ignore", stderr: "pipe" });
+  const code = await proc.exited;
+  if (code !== 0) throw new Error(await new Response(proc.stderr).text());
+}
+
+/** A managed-worktree session can only be created inside a repository, so the
+ *  checkout half of the fan-out needs a real one to branch from. */
+async function initRepo(folder: string): Promise<void> {
+  await gitIn(folder, ["init"]);
+  await gitIn(folder, ["config", "user.email", "test@antgrid.local"]);
+  await gitIn(folder, ["config", "user.name", "Antgrid Test"]);
+  await gitIn(folder, ["add", "."]);
+  await gitIn(folder, ["commit", "-m", "initial"]);
+}
+
+test("abortTunnelStreams aborts the core's in-flight tunnel streams", async () => {
+  const folder = tempFolder();
+  const upstream = { cancelled: false };
+  const route = trickleServer(() => { upstream.cancelled = true; });
+
+  try {
+    core = await buildAgentCore({
+      folder,
+      mode: "remote",
+      identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
+      remoteAccessEnabled: () => true,
+    });
+
+    const bus = new MessageBus();
+    const sent: AbMessage[] = [];
+    bus.subscribe({ deliver: (m) => sent.push(m) });
+    core.attachTransport(bus);
+    core.setPeerPubkeyProvider(() => "phone-pubkey-abort-base64");
+
+    const plain: object[] = [];
+    const held: Array<(o: "sent") => void> = [];
+    core.setPlainHook(async (d) => {
+      plain.push(d);
+      // Park on the first chunk so the run is mid-body when the abort lands.
+      if ((d as { type?: string }).type === "tunnel:http-chunk" && held.length === 0) {
+        return new Promise<"sent">((resolve) => held.push(resolve));
+      }
+      return "sent";
+    });
+
+    core.onHandshakeComplete();
+    await waitForServices(sent);
+
+    core.handleTunnelMessage({
+      type: "tunnel:http-request",
+      requestId: "abort-me",
+      port: route.port!,
+      method: "GET",
+      path: "/big",
+    });
+
+    const heldBy = Date.now() + 5000;
+    while (held.length === 0 && Date.now() < heldBy) await new Promise((r) => setTimeout(r, 15));
+    expect(held.length).toBe(1);
+
+    core.abortTunnelStreams();
+    for (const resolve of held.splice(0)) resolve("sent");
+
+    const cancelledBy = Date.now() + 2000;
+    while (!upstream.cancelled && Date.now() < cancelledBy) await new Promise((r) => setTimeout(r, 15));
+    expect(upstream.cancelled).toBe(true);
+
+    const before = plain.length;
+    await new Promise((r) => setTimeout(r, 200));
+    expect(plain.length).toBe(before);
+    expect(plain.some((f) => (f as { type?: string }).type === "tunnel:http-end")).toBe(false);
+  } finally {
+    route.stop(true);
+  }
+});
+
+// The other half of the same call: an isolated session runs its own
+// TunnelManager, so a core that aborted only the main one would leave a managed
+// checkout streaming a dead body past the peer loss. Nothing but this fan-out
+// reaches those managers.
+test("abortTunnelStreams reaches a checkout runtime's manager, not only main", async () => {
+  const folder = tempFolder();
+  await initRepo(folder);
+  const cancelled = new Set<string>();
+  const route = trickleServer((path) => cancelled.add(path));
+
+  try {
+    core = await buildAgentCore({
+      folder,
+      mode: "remote",
+      worktreeSessionsSupported: true,
+      identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
+      remoteAccessEnabled: () => true,
+    });
+
+    const bus = new MessageBus();
+    const sent: AbMessage[] = [];
+    bus.subscribe({ deliver: (m) => sent.push(m) });
+    core.attachTransport(bus);
+    core.setPeerPubkeyProvider(() => "phone-pubkey-abort-checkout-base64");
+
+    const plain: object[] = [];
+    const held = new Map<string, (o: "sent") => void>();
+    const parked = new Set<string>();
+    core.setPlainHook(async (d) => {
+      plain.push(d);
+      const frame = d as { type?: string; requestId?: string };
+      // Park each run on ITS first chunk, so both are mid-body when the abort
+      // lands and neither can finish while the other is still climbing.
+      if (frame.type === "tunnel:http-chunk" && frame.requestId && !parked.has(frame.requestId)) {
+        parked.add(frame.requestId);
+        const requestId = frame.requestId;
+        return new Promise<"sent">((resolve) => held.set(requestId, resolve));
+      }
+      return "sent";
+    });
+
+    core.onHandshakeComplete();
+    await waitForServices(sent);
+
+    // Loopback, so the isolated session is created before anything depends on a
+    // remote app advertising checkout routing.
+    const requestId = randomUUID();
+    bus.dispatchInbound(
+      createMessage("session:create", { requestId, name: "Isolated", isolation: "worktree" }),
+      "control",
+      "loopback",
+    );
+    const createdBy = Date.now() + 30_000;
+    let checkoutId: string | undefined;
+    while (Date.now() < createdBy && checkoutId === undefined) {
+      const result = sent.find(
+        (m) => m.type === "session:result" && (m as { requestId?: string }).requestId === requestId,
+      );
+      if (result) {
+        checkoutId = (result as { session?: { checkoutId?: string } }).session?.checkoutId;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(typeof checkoutId).toBe("string");
+    expect(checkoutId).not.toBe("main");
+
+    core.handleTunnelMessage({
+      type: "tunnel:http-request",
+      requestId: "abort-main",
+      port: route.port!,
+      method: "GET",
+      path: "/main",
+      checkoutId: "main",
+    });
+    core.handleTunnelMessage({
+      type: "tunnel:http-request",
+      requestId: "abort-checkout",
+      port: route.port!,
+      method: "GET",
+      path: "/checkout",
+      checkoutId,
+    });
+
+    const heldBy = Date.now() + 15_000;
+    while (held.size < 2 && Date.now() < heldBy) await new Promise((r) => setTimeout(r, 15));
+    expect(held.size).toBe(2);
+
+    core.abortTunnelStreams();
+    for (const resolve of held.values()) resolve("sent");
+    held.clear();
+
+    const cancelledBy = Date.now() + 5000;
+    while (cancelled.size < 2 && Date.now() < cancelledBy) await new Promise((r) => setTimeout(r, 15));
+    expect([...cancelled].sort()).toEqual(["/checkout", "/main"]);
+
+    const before = plain.length;
+    await new Promise((r) => setTimeout(r, 300));
+    expect(plain.length).toBe(before);
+    expect(plain.some((f) => (f as { type?: string }).type === "tunnel:http-end")).toBe(false);
+  } finally {
+    route.stop(true);
+  }
+}, 60_000);

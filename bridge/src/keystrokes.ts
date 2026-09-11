@@ -23,15 +23,21 @@ export function isSubmitKeystroke(data: string): boolean {
 }
 
 /**
- * Reports the terminal EMITS rather than input a human gave it: mouse tracking
- * (SGR `\x1b[<b;x;yM|m`, X10 `\x1b[M` + 3 bytes, urxvt `\x1b[b;x;yM`) and focus
- * in/out (`\x1b[I`, `\x1b[O`).
+ * Whether a `terminal:input` payload is the terminal ANSWERING the guest
+ * rather than the user driving it: mouse tracking (SGR `\x1b[<b;x;yM|m`, X10
+ * `\x1b[M` + 3 bytes, urxvt `\x1b[b;x;yM`) and focus in/out (`\x1b[I`, `\x1b[O`).
  *
- * A coding agent turns mouse reporting on as it starts, so once the pointer is
- * over the terminal these arrive continuously, one frame each, from a user who
- * has touched no key.
+ * A viewer's VT engine writes back on the same channel a keystroke uses, so an
+ * agent that turned on focus reporting (DEC 1004) or mouse tracking gets a
+ * stream of `terminal:input` frames nobody typed: one per window focus change,
+ * and one per click/drag/scroll over the grid once the pointer is over the
+ * terminal. They must still reach the PTY — the guest asked for them — but
+ * they are not a reply, and counting one as "the user acted" is what put out a
+ * blocked agent's "needs you" dot the instant the user clicked back into the
+ * window to answer it (see `sessions.touch`/`onUserReply` in agent-core.ts,
+ * and `userReply` in work-status.ts).
  */
-function isPointerOrFocusReport(data: string): boolean {
+export function isTerminalReport(data: string): boolean {
   return /^\x1b\[(?:<\d+;\d+;\d+[Mm]|M[\s\S]{3}|\d+;\d+;\d+M|[IO])$/.test(data);
 }
 
@@ -53,7 +59,7 @@ function isPointerOrFocusReport(data: string): boolean {
  * close, and the session holds a "working" dot for the rest of its life.
  */
 export function hasTypedContent(data: string): boolean {
-  if (isPointerOrFocusReport(data)) return false;
+  if (isTerminalReport(data)) return false;
   return data.replace(/\r$/, "").length > 0;
 }
 

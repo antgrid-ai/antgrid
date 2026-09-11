@@ -1,44 +1,118 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
-// Prices and the tier axis. KEEP IN LOCKSTEP with src/data/pricing.ts, which is itself
-// pinned to the shipped catalog by web/tests/billing/site-pricing-lockstep.test.ts —
-// this file only proves the page renders what that file says, so a number that is wrong
-// in both is caught over there, not here. CTA wiring and the closed paid path are
-// asserted in contracts.spec.ts — a wrong number here is a pricing bug, a wrong link
-// there is a revenue bug, and they should not be able to mask each other.
+// The founding-price capture, which is the only thing on this page that DOES
+// anything. The figures it sits beside are not asserted here: they come from
+// src/data/pricing.ts, which is pinned to the shipped catalog by
+// web/tests/billing/site-pricing-lockstep.test.ts — a number that is wrong is
+// caught against the catalog, not against a copy of itself. CTA wiring and the
+// closed paid path are in contracts.spec.ts.
 
-test("pricing is sold on the seat axis", async ({ page }) => {
+const capture = (page: Page) =>
+  page.locator("span.font-mono", { hasText: /^Pro$/ }).locator("..").locator("..").locator("form[data-waitlist]");
+
+test("the capture is a usable email control before anything is typed", async ({ page }) => {
   await page.goto("/pricing");
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText(/priced per person/i);
+  const form = capture(page);
+
+  // The accessibility floor, all of it behaviour: a real label to find the field
+  // by, the type that gets a keyboard an @ key, a live region for the reply, and
+  // a control that is not already inert. It ships disabled for a scriptless
+  // reader, so a still-disabled button here means the page's script never ran.
+  const field = form.getByLabel(/email address/i);
+  await expect(field).toHaveAttribute("type", "email");
+  await expect(form.locator("[aria-live]")).toHaveCount(1);
+  await expect(form.getByRole("button", { name: /^Join the list$/ })).toBeEnabled();
 });
 
-test("plan cards carry the real prices, machine allowances and seat ceiling", async ({ page }) => {
+test("joining posts the address with the surface it came from", async ({ page }) => {
+  const posted: unknown[] = [];
+  await page.route("**/api/waitlist", async (route) => {
+    posted.push(route.request().postDataJSON());
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+      body: JSON.stringify({ ok: true }),
+    });
+  });
+
   await page.goto("/pricing");
+  const form = capture(page);
+  await form.getByLabel(/email address/i).fill("founder@example.com");
+  await form.getByRole("button", { name: /^Join the list$/ }).click();
 
-  // Locate each plan card by its heading span (font-mono text-ink inside the card).
-  // Using .locator("..") to go up to the card root so price assertions stay within one card.
-  const freeCard = page.locator("span.font-mono", { hasText: /^Free$/ }).locator("..").locator("..");
-  const yearlyCard = page.locator("span.font-mono", { hasText: /^Pro$/ }).locator("..").locator("..");
-
-  await expect(freeCard.locator("[data-price]", { hasText: "$0" })).toBeVisible();
-  await expect(freeCard.getByText("1 worker machine")).toBeVisible();
-
-  // Yearly card: $49 offer price (the headline figure) + $99 struck list price, both
-  // per seat — the unit is the claim, so it is asserted beside the number.
-  await expect(yearlyCard.locator("[data-price]", { hasText: "$49" })).toBeVisible();
-  await expect(yearlyCard.locator("span.line-through", { hasText: "$99" })).toBeVisible();
-  await expect(yearlyCard.getByText("/ seat / year")).toBeVisible();
-  await expect(yearlyCard.getByText("Up to 10 worker machines per person")).toBeVisible();
-  await expect(yearlyCard.getByText(/Up to 25 seats/)).toBeVisible();
+  // The payload is the contract with the web service — `source` is what tells
+  // pricing leads apart from every other capture surface.
+  await expect(form.getByRole("button", { name: /^Joined$/ })).toBeVisible();
+  expect(posted).toEqual([{ email: "founder@example.com", source: "pricing" }]);
 });
 
-test("the FAQ answers the seat and machine questions in place", async ({ page }) => {
-  await page.goto("/pricing");
-  await expect(page.getByRole("heading", { name: /what counts as a seat\?/i })).toBeVisible();
-  await expect(page.getByRole("heading", { name: /what counts as a worker machine\?/i })).toBeVisible();
+test("the control is inert while the address is in flight", async ({ page }) => {
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route("**/api/waitlist", async (route) => {
+    await held;
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+      body: JSON.stringify({ ok: true }),
+    });
+  });
 
-  // The FAQPage schema ships with the questions so the two cannot answer differently;
-  // a malformed blob is invisible on the page and costs the rich result.
+  await page.goto("/pricing");
+  const form = capture(page);
+  await form.getByLabel(/email address/i).fill("founder@example.com");
+  await form.getByRole("button", { name: /^Join the list$/ }).click();
+
+  // Disabled mid-flight or an impatient second click posts the address twice.
+  await expect(form.getByRole("button", { name: /^Joining/ })).toBeDisabled();
+  release();
+  await expect(form.getByRole("button", { name: /^Joined$/ })).toBeVisible();
+});
+
+test("a malformed address is refused at the field, before anything is sent", async ({ page }) => {
+  let requests = 0;
+  await page.route("**/api/waitlist", async (route) => {
+    requests += 1;
+    await route.fulfill({ status: 200, headers: { "access-control-allow-origin": "*" }, body: "{}" });
+  });
+
+  await page.goto("/pricing");
+  const form = capture(page);
+  await form.getByLabel(/email address/i).fill("founder@");
+  await form.getByRole("button", { name: /^Join the list$/ }).click();
+
+  expect(requests, "a malformed address reached the network").toBe(0);
+  // And the reader is left able to fix it, rather than dead-ended the way the
+  // button this replaced was.
+  await expect(form.getByRole("button", { name: /^Join the list$/ })).toBeEnabled();
+});
+
+test("a rejected address leaves the reader able to retry", async ({ page }) => {
+  // The API answers a rejection with a machine code. Leaking it verbatim is a
+  // behaviour, not a wording preference: "BAD_REQUEST" tells the reader nothing
+  // they can act on, so the page owes them its own sentence.
+  await page.route("**/api/waitlist", async (route) => {
+    await route.fulfill({
+      status: 400,
+      headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+      body: JSON.stringify({ ok: false, error: "BAD_REQUEST" }),
+    });
+  });
+
+  await page.goto("/pricing");
+  const form = capture(page);
+  await form.getByLabel(/email address/i).fill("founder@example.com");
+  await form.getByRole("button", { name: /^Join the list$/ }).click();
+
+  await expect(form.locator("[aria-live]")).not.toContainText("BAD_REQUEST");
+  await expect(form.getByRole("button", { name: /^Join the list$/ })).toBeEnabled();
+  await expect(form.getByLabel(/email address/i)).toBeEditable();
+});
+
+// Machine-read, so it is a contract rather than content: a malformed blob is
+// invisible on the page and silently costs the FAQ rich result.
+test("the FAQ ships structured data a crawler can parse", async ({ page }) => {
+  await page.goto("/pricing");
   const raw = await page.locator('script[type="application/ld+json"]').last().textContent();
   const schema = JSON.parse(raw ?? "");
   expect(schema["@type"]).toBe("FAQPage");

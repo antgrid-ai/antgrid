@@ -1,6 +1,7 @@
 ---
 import Base from "../layouts/Base.astro";
 import Hero from "../components/sections/Hero.astro";
+import Compat from "../components/sections/Compat.astro";
 import Phases from "../components/sections/Phases.astro";
 import Fleet from "../components/sections/Fleet.astro";
 import Reach from "../components/sections/Reach.astro";
@@ -9,19 +10,37 @@ import Privacy from "../components/sections/Privacy.astro";
 import CrossAgent from "../components/sections/CrossAgent.astro";
 import ClosingCta from "../components/sections/ClosingCta.astro";
 
+// "Control plane", after two rejected shelves. NOT "remote dev" — that is the
+// cloud-workspace category (Codespaces, Gitpod, devcontainers), it is judged on
+// workspace provisioning and browser IDEs, and it centres a human at a keyboard.
+// NOT "remote control" either: that is 1:1, one phone to one laptop, it is a
+// feature every agent vendor is shipping, and nobody buys it for a team. A
+// control plane is 1:many — N machines by M agents on one screen — which is the
+// only one of the three a company recognises as its own problem. Under 60
+// characters so a result page shows it whole rather than cutting the agents off.
+const TITLE = "antgrid — control plane for Claude Code, Codex and Cursor";
+
 // Under ~125 characters so a mobile link preview shows it whole — Google's
 // ~155 is the looser bound, and this is the page people actually share. It has
 // to keep the end-to-end claim through any rewrite: that is the positioning the
 // product is sold on, and home.spec.ts asserts it for exactly that reason.
+//
+// It names the agents, because "Claude Code" is what a person types into a
+// search box and "coding agent" is not, and it leads with WHERE they run: the
+// thing a reader is likeliest to get wrong here is assuming the work happens in
+// our cloud. It promises only what an unarmed, unpaid install actually does —
+// the evidence gate is the reason to pay, but it is opt-in and it lives on Pro,
+// so a headline built on it would be false for every free machine on day one.
 const DESCRIPTION =
-  "Claude Code, Codex and Cursor on your own machines. antgrid sequences the work and proves it's done. End-to-end encrypted.";
+  "Claude Code, Codex and Cursor on every machine you own, in one control plane. Nothing rented from us. End-to-end encrypted.";
 ---
 <Base
-  title="antgrid — remote dev for concurrent coding agents"
+  title={TITLE}
   description={DESCRIPTION}
   path="/"
 >
   <Hero />
+  <Compat />
   <Phases />
   <Fleet />
   <Reach />

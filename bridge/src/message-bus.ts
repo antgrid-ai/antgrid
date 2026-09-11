@@ -36,6 +36,9 @@ const REPLAY_TYPES: ReadonlySet<string> = new Set([
   "agent:projects",
   "agent:tools",
   "git:status",
+  // Latest-wins ahead/behind. Without the replay a reconnecting app shows a
+  // synced branch until the next op, which is the exact wrong answer.
+  "git:sync-state",
   "tree:full",
   // Latest per-project handler snapshot (armed sessions + open escalations).
   // Must be cached: the app rebuilds its escalation list from the status
@@ -87,7 +90,20 @@ export class MessageBus {
   }
 
   publish(msg: AbMessage, channel: Channel): void {
-    this.emit(msg, channel, false);
+    this.emit(msg, channel, {});
+  }
+
+  /** Cache for replay WITHOUT delivering to subscribers.
+   *
+   *  For a durable frame that every client pulls for itself: the cache still
+   *  has to hold it (`state.snapshot` is how a client that asks for it by name
+   *  gets one), but pushing it costs the wire a copy nobody reads. The one
+   *  frame this is for today is the open-time file tree, which is also the
+   *  largest the bridge ever produces — it went out before any app had a
+   *  stream bound to receive it, so it was discarded on arrival AND held half
+   *  the control channel's credit window while the bind waited behind it. */
+  retain(msg: AbMessage, channel: Channel): void {
+    this.emit(msg, channel, { deliver: false });
   }
 
   /** Publish, bypassing the payload-equality dedup below.
@@ -98,10 +114,14 @@ export class MessageBus {
    *  dedup is what silently swallowed them — a reconnecting app's `agent:status`
    *  is byte-identical to the cached one, so no subscriber ever saw it. */
   republish(msg: AbMessage, channel: Channel): void {
-    this.emit(msg, channel, true);
+    this.emit(msg, channel, { force: true });
   }
 
-  private emit(msg: AbMessage, channel: Channel, force: boolean): void {
+  private emit(
+    msg: AbMessage,
+    channel: Channel,
+    { force = false, deliver = true }: { force?: boolean; deliver?: boolean },
+  ): void {
     const key = this.replayKey(msg);
     if (key !== null) {
       const prev = this.replayCache.get(key);
@@ -118,6 +138,7 @@ export class MessageBus {
     // a log. The one subscriber that must NOT abort the emit — the best-effort
     // push dispatcher — wraps its own deliver at the subscribe site (see
     // project-core.ts attachRelayStream).
+    if (!deliver) return;
     for (const s of this.subs) {
       s.deliver(msg, channel);
     }

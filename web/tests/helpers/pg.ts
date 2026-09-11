@@ -33,6 +33,7 @@ const APP_TABLES = [
   "product_accounts",
   "pending_sign_in",
   "analytic_event",
+  "waitlist_signup",
   "session",
   "account",
   "verification",

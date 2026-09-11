@@ -1,0 +1,145 @@
+---
+import { Icon } from "astro-icon/components";
+import AppWindow from "./AppWindow.astro";
+import Rail from "./Rail.astro";
+
+// The "one screen" claim, rendered as the screen it actually is.
+//
+// There is no fleet page in the app. Sessions across machines is the HOME list
+// with its grouping switched to MACHINE — the same rows, re-banded. That is a
+// better argument than a bespoke dashboard would be, so the scene shows the
+// chip row that does the switching rather than hiding it: the reader can see
+// that the fleet view is one control away, not a separate product surface.
+//
+// Group bands are the app's hairline label (`STUDIO-WORKSTATION · 2`), not
+// bordered cards, and `Needs you` is the app's own label for the `attention`
+// work status (models/agent_work_status.dart, recent_sessions_summary.dart).
+//
+// home.spec.ts pins "studio-workstation" and the needs-you task string, so
+// those travel with the picture rather than being restated underneath it.
+type Row = { title: string; project: string; time: string; needs?: boolean; done?: boolean };
+type Machine = { host: string; rows: Row[] };
+
+interface Props {
+  class?: string;
+}
+const { class: cls = "" } = Astro.props;
+
+const machines: Machine[] = [
+  { host: "macbook-pro", rows: [
+    { title: "Refactor auth middleware", project: "api", time: "2m" },
+    { title: "Write checkout tests", project: "web", time: "5m" },
+  ]},
+  { host: "studio-workstation", rows: [
+    { title: "Needs you — which migration strategy?", project: "relay", time: "just now", needs: true },
+    { title: "Built release bundle", project: "app", time: "12m", done: true },
+  ]},
+  { host: "prod-box", rows: [
+    { title: "Run the E2E suite", project: "evals", time: "1m" },
+    { title: "Tail deploy logs", project: "infra", time: "3m" },
+  ]},
+];
+
+const total = machines.reduce((n, m) => n + m.rows.length, 0);
+const hot = (m: Machine) => m.rows.some((r) => r.needs);
+
+// The header says one session needs you, so the list has to put it first: a
+// machine holding a blocked row floats above the rest, and the blocked row
+// floats inside its band. The fixture above stays in its natural order so it
+// reads as a machine list rather than as an answer — sort here, not there.
+const ordered = [...machines].sort((a, b) => Number(hot(b)) - Number(hot(a)));
+const rowsOf = (m: Machine) => [...m.rows].sort((a, b) => Number(!!b.needs) - Number(!!a.needs));
+---
+<AppWindow class={cls}>
+  <Rail
+    slot="rail"
+    footer={false}
+    entries={[
+      { kind: "machine", label: "studio-workstation" },
+      { kind: "project", label: "relay" },
+      { kind: "session", label: "Needs you — which migr…", active: true },
+      { kind: "project", label: "app" },
+      { kind: "machine", label: "macbook-pro" },
+      { kind: "project", label: "api" },
+      { kind: "project", label: "web" },
+      { kind: "machine", label: "prod-box" },
+      { kind: "project", label: "evals" },
+      { kind: "project", label: "infra" },
+    ]}
+  />
+
+  <div class="min-w-0">
+    <div class="flex flex-wrap items-center gap-2 px-3.5 py-2.5">
+      <span class="text-row text-ab-text">Sessions · {total} total</span>
+      <span class="flex-1"></span>
+      <span class="flex shrink-0 gap-1" aria-hidden="true">
+        {["Machine", "Project", "Status"].map((g) => (
+          <span
+            class={`rounded border px-1.5 font-mono text-pip uppercase tracking-[0.1em] ${
+              g === "Machine"
+                ? "border-ab-line-strong bg-ab-elevated text-ab-text"
+                : "border-ab-line text-ab-dim"
+            }`}
+          >{g}</span>
+        ))}
+      </span>
+      <span class="shrink-0 font-mono text-pip text-ab-attn">1 needs you</span>
+    </div>
+
+    <div class="flex flex-col gap-1.5 pb-3">
+      {ordered.map((m) => (
+        <div>
+          <div class="flex items-center gap-2 px-3.5 pb-1 pt-2">
+            <span class="font-mono text-pip uppercase tracking-[0.14em] text-ab-dim">{m.host} · {m.rows.length}</span>
+            <span class="h-px flex-1 bg-ab-line"></span>
+          </div>
+          {rowsOf(m).map((r) => (
+            <div class="flex items-center gap-2.5 px-3.5 py-1.5">
+              <Icon
+                name={r.done ? "tabler:circle-check" : "tabler:sparkles"}
+                class={`shrink-0 ${r.done ? "text-ab-ok" : r.needs ? "text-ab-attn" : "text-ab-dim"}`}
+                width="13"
+                height="13"
+                aria-hidden="true"
+              />
+              <span class={`min-w-0 flex-1 truncate text-row ${r.needs ? "text-ab-attn" : "text-ab-text"}`}>{r.title}</span>
+              {r.needs && (
+                <span class="hidden shrink-0 rounded border border-ab-attn/35 bg-ab-attn/10 px-1.5 font-mono text-pip text-ab-attn sm:inline">Needs you</span>
+              )}
+              <span class="hidden w-20 shrink-0 truncate font-mono text-pip text-ab-mute md:inline">{r.project}</span>
+              <span class="w-14 shrink-0 text-right font-mono text-pip text-ab-dim">{r.time}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+
+    {/* The composer is always on this surface in the app — the new-session flow
+        is this chip row, not a wizard. */}
+    <div class="mx-3.5 mb-3.5 rounded-md border border-ab-line bg-ab-surface p-2.5">
+      {/* The machine chip names a machine rather than saying "Local": the
+          project beside it lives on that machine, and the whole point of this
+          surface is that a new session can start on any of them. */}
+      <div class="flex flex-wrap items-center gap-1.5" aria-hidden="true">
+        {[
+          { icon: "tabler:device-desktop", label: "studio-workstation" },
+          { icon: "tabler:folder", label: "relay" },
+          { icon: "tabler:git-branch", label: "development" },
+        ].map((c) => (
+          <span class="flex items-center gap-1 rounded border border-ab-line px-1.5 py-0.5 text-pip text-ab-text2">
+            <Icon name={c.icon} width="10" height="10" />
+            {c.label}
+            <Icon name="tabler:chevron-down" class="text-ab-dim" width="10" height="10" />
+          </span>
+        ))}
+        <span class="flex items-center gap-1 rounded border border-ab-line px-1.5 py-0.5 text-pip text-ab-dim">
+          <Icon name="tabler:circle" width="10" height="10" />
+          isolated
+        </span>
+      </div>
+      <div class="mt-2 flex items-center gap-1.5 text-row text-ab-dim">
+        <span class="font-mono text-ab-mute">&rsaquo;</span> Describe a task or ask a question
+      </div>
+    </div>
+  </div>
+</AppWindow>

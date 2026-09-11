@@ -12,6 +12,7 @@ import '../models/session_target.dart';
 import '../project/project_session.dart';
 import '../project/project_session_registry.dart';
 import '../services/control_plane_client.dart';
+import '../services/pending_reply.dart' show SessionDownException;
 import '../util/device_id.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/new_session/picker_sources.dart';
@@ -86,6 +87,23 @@ class ActiveSessionsBranchSwitchException implements Exception {
       'ActiveSessionsBranchSwitchException($targetId, $branch)';
 }
 
+/// Thrown when the pre-start branch switch refuses because the folder's
+/// working tree is dirty (`DIRTY_WORKTREE`) and the caller hasn't already
+/// opted into stashing. The composer catches this, offers to stash, and
+/// retries with `stashIfDirty: true` — see [startNewSession].
+class DirtyWorktreeBranchSwitchException implements Exception {
+  final String targetId;
+  final String branch;
+  const DirtyWorktreeBranchSwitchException({
+    required this.targetId,
+    required this.branch,
+  });
+
+  @override
+  String toString() =>
+      'DirtyWorktreeBranchSwitchException($targetId, $branch)';
+}
+
 /// Start action for the New Session page.
 ///
 /// Activates the picker-selected target project so `selectedRegistrationIdProvider`
@@ -112,6 +130,7 @@ class ActiveSessionsBranchSwitchException implements Exception {
 Future<void> startNewSession(
   ProviderContainer ref, {
   bool allowActiveSessions = false,
+  bool stashIfDirty = false,
 }) async {
   final target = ref.read(selectedTargetProjectProvider);
   if (target == null) return;
@@ -207,6 +226,7 @@ Future<void> startNewSession(
               projectPath: target.detail,
               branch: explicitBranch,
               allowActiveSessions: allowActiveSessions,
+              stashIfDirty: stashIfDirty,
             );
           } finally {
             client.close();
@@ -225,6 +245,7 @@ Future<void> startNewSession(
             projectId: target.projectId ?? target.id,
             branch: explicitBranch,
             allowActiveSessions: allowActiveSessions,
+            stashIfDirty: stashIfDirty,
           );
         }
       } on HostControlException catch (e) {
@@ -234,10 +255,22 @@ Future<void> startNewSession(
             branch: explicitBranch,
           );
         }
+        if (e.code == 'DIRTY_WORKTREE' && !stashIfDirty) {
+          throw DirtyWorktreeBranchSwitchException(
+            targetId: target.id,
+            branch: explicitBranch,
+          );
+        }
         rethrow;
       } on RpcException catch (e) {
         if (e.code == 'ACTIVE_SESSIONS') {
           throw ActiveSessionsBranchSwitchException(
+            targetId: target.id,
+            branch: explicitBranch,
+          );
+        }
+        if (e.code == 'DIRTY_WORKTREE' && !stashIfDirty) {
+          throw DirtyWorktreeBranchSwitchException(
             targetId: target.id,
             branch: explicitBranch,
           );
@@ -410,6 +443,11 @@ Future<void> startNewSession(
       // An accepted start consumes the draft. Navigation itself preserves
       // drafts, so failures and a later return to this canvas remain editable.
       resetNewSessionForm(ref);
+    } on SessionDownException {
+      // The registry failed create/start immediately rather than the bridge
+      // ever refusing them — nothing was left in flight to time out, so this
+      // gets its own reason instead of collapsing into replyTimedOut below.
+      abort(NewSessionStartAbortReason.sessionDown);
     } on TimeoutException {
       // A dropped/late reply is retryable. Typed bridge failures intentionally
       // reach the composer so it can show their safe display message — though

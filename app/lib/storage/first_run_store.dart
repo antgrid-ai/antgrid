@@ -44,8 +44,12 @@ class FirstRunState {
 
   /// True once the user has ever armed Handler — any session, any platform.
   /// Cross-project app-install discovery state (shield label collapse,
-  /// explainer/away-hint suppression, checklist step), NOT handler config —
-  /// which is why it lives here and not in the bridge's HandlerState.
+  /// away-hint suppression, checklist step), NOT handler config — which is why
+  /// it lives here and not in the bridge's HandlerState. On the arm sheet it
+  /// gates the explanatory paragraph ALONE: the sheet is where an arm is
+  /// composed, so it opens every time, and what it says about coverage or a
+  /// seeded goal is a fact about that arm rather than something reading it once
+  /// retires.
   final bool handlerArmedOnce;
 
   /// Global kill for the away-moment hint once the user closes it — it must

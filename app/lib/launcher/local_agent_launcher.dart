@@ -7,9 +7,10 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import 'host_control_client.dart';
 import 'host_controller.dart';
-import 'project_id.dart';
+import 'project_resolve.dart';
 import '../config/build_info.dart';
 import '../util/ab_log.dart';
+import '../util/netwatch.dart';
 
 // ---------------------------------------------------------------------------
 // BootstrapPayload
@@ -33,6 +34,7 @@ class BootstrapPayload {
     this.licenseApiUrl,
     this.relayUrl,
     this.ownerPid,
+    this.telemetryEnabled = false,
     String? ownerBuild,
   }) : ownerBuild = ownerBuild ?? BuildInfo.summary;
 
@@ -45,6 +47,7 @@ class BootstrapPayload {
     this.licenseApiUrl,
     this.relayUrl,
     this.ownerPid,
+    this.telemetryEnabled = false,
     String? ownerBuild,
   }) : ownerBuild = ownerBuild ?? BuildInfo.summary,
        projectId = null,
@@ -68,6 +71,18 @@ class BootstrapPayload {
   /// literal nobody bumps, so it is identical across every release.
   final String ownerBuild;
 
+  /// The user's telemetry consent, carried so the host can decide whether to
+  /// bring up its own crash reporting (`bridge/src/crash-reporting.ts`). Read
+  /// from the same `telemetryEnabled` setting that gates the app's own Sentry,
+  /// so one install never reports from one half and not the other.
+  ///
+  /// Defaults to FALSE, and every caller passes it explicitly: the host reads
+  /// its bootstrap once, so a call site that forgets this should fall silent,
+  /// never report without being asked to. The host's consent is likewise fixed
+  /// for its lifetime — the same restart-scoped gate the app applies to itself,
+  /// since `initCrashReporting` wraps `runApp` and is never re-run.
+  final bool telemetryEnabled;
+
   /// First-core mode. The app only ever spawns `local`; the field stays a
   /// parameter because the bridge's `BootstrapPayloadSchema` also accepts
   /// `remote`, which additionally requires a `machine` block.
@@ -86,6 +101,7 @@ class BootstrapPayload {
         },
       if (ownerPid != null) 'ownerPid': ownerPid,
       'ownerBuild': ownerBuild,
+      'telemetryEnabled': telemetryEnabled,
     };
     final d = device;
     if (d != null && licenseApiUrl != null && relayUrl != null) {
@@ -160,6 +176,7 @@ class LocalAgentLauncher {
     DeviceRecord? device,
     String? licenseApiUrl,
     String? relayUrl,
+    bool telemetryEnabled = false,
   }) async {
     // A host computes repository identity because only it can correctly fold a
     // linked worktree into its primary checkout. Older hosts predate this
@@ -169,25 +186,21 @@ class LocalAgentLauncher {
       licenseApiUrl: licenseApiUrl,
       relayUrl: relayUrl,
       ownerPid: pid,
+      telemetryEnabled: telemetryEnabled,
     );
     final host = await _host.ensureHost();
     final resolveClient = HostControlClient(
       port: host.controlPort,
       token: host.token,
     );
-    String projectId;
-    String repoPath;
+    final ResolvedLocalProject resolved;
     try {
-      final resolved = await resolveClient.projectResolve(folder);
-      projectId = resolved.projectId;
-      repoPath = resolved.repoPath;
-    } on HostControlException catch (e) {
-      if (e.code != 'BAD_REQUEST' && e.code != 'UNKNOWN_VERB') rethrow;
-      projectId = await computeProjectId(folder);
-      repoPath = folder;
+      resolved = await resolveLocalProject(resolveClient, folder);
     } finally {
       resolveClient.close();
     }
+    final projectId = resolved.projectId;
+    final repoPath = resolved.repoPath;
     final existing = _inFlight[projectId];
     if (existing != null) {
       _log('openProject: projectId=$projectId — coalescing with in-flight');
@@ -199,6 +212,7 @@ class LocalAgentLauncher {
       device,
       licenseApiUrl,
       relayUrl,
+      telemetryEnabled,
     );
     _inFlight[projectId] = fut;
     try {
@@ -231,12 +245,14 @@ class LocalAgentLauncher {
     String? licenseApiUrl,
     String? relayUrl,
     bool forceRespawn = false,
+    bool telemetryEnabled = false,
   }) async {
     _host.bootstrapBuilder = () => BootstrapPayload.machineOnly(
       device: device,
       licenseApiUrl: licenseApiUrl,
       relayUrl: relayUrl,
       ownerPid: pid,
+      telemetryEnabled: telemetryEnabled,
     );
     if (forceRespawn) {
       // Let any concurrent spawn settle first so the teardown+respawn below
@@ -256,6 +272,7 @@ class LocalAgentLauncher {
     DeviceRecord? device,
     String? licenseApiUrl,
     String? relayUrl,
+    bool telemetryEnabled,
   ) async {
     // The host's stdin bootstrap, consumed only if ensureHost must spawn fresh.
     // `??=`: the FIRST project to open wins, so whichever device record was
@@ -272,6 +289,7 @@ class LocalAgentLauncher {
       // dart:io `pid` — this app process; the host watches it and self-exits
       // when we die, so it can't outlive the app on any exit path.
       ownerPid: pid,
+      telemetryEnabled: telemetryEnabled,
     );
 
     final host = await _host.ensureHost();
@@ -291,6 +309,7 @@ class LocalAgentLauncher {
         port: connect.port,
         token: connect.token,
         appPid: pid,
+        netTap: localNetTapFor(projectId),
       );
       await t.connect();
       _log('opened project $projectId (port ${connect.port})');

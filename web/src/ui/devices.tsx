@@ -1,10 +1,10 @@
-import { Layout, PageHead } from "./layout.js";
+import { Layout, PageHead, type LayoutUser } from "./layout.js";
 import { asset } from "./asset.js";
 import { DownloadCard } from "./download-card.js";
 import type { DeviceRow } from "../models/device.js";
 
 export function DevicesPage(props: {
-  user: { email?: string | null };
+  user: LayoutUser;
   devices: DeviceRow[];
 }) {
   return (

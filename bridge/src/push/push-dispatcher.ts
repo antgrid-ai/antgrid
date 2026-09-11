@@ -4,6 +4,11 @@ const log = logger.child({ component: "push-dispatcher" });
 import { composePush } from "./compose";
 
 const MAX_BODY_LEN = 480; // keep the sealed payload well under FCM's ~4 KB data cap
+// The title is a session name (protocol.ts SessionEntry), which nothing upstream
+// bounds. Oversizing it is silent data loss, not a truncated toast: the relay Zod-
+// rejects a `box` over 8192 base64 chars before forwarding, and a rejected deliver
+// produces no push:result, so the notification simply never exists.
+const MAX_TITLE_LEN = 120;
 
 export interface PushTarget {
   pushToken: string;
@@ -21,6 +26,11 @@ export interface PushDispatcherDeps {
    *  send. Plural because with no live peer the agent can't know which allowed
    *  device the user holds — see resolveTargets in project-core.ts. */
   resolveTargets: () => PushTarget[];
+  /** The bare machine deviceUuid this host registers under. A getter because the
+   *  two suppliers differ in how well they can answer: host-server reads the live
+   *  machine socket's identity, while the wizard-promotion path can only report
+   *  the uuid the enabling `agent:enableRelay` carried (see relay-promotion.ts). */
+  machineUuid: () => string;
   seal: (json: string, recipientPushPubkeyB64: string) => { epk: string; box: string };
   deliver: (token: string, provider: "fcm" | "apns", blob: { epk: string; box: string }) => void;
 }
@@ -56,13 +66,16 @@ export function createPushDispatcher(deps: PushDispatcherDeps) {
         log.warn("push: %s DROPPED — no push target for project %s", composed.kind, deps.projectId);
         return;
       }
-      const sourceMessageId = msg.type === "handler:escalation" ? msg.escalationId : msg.id;
       const payload = JSON.stringify({
-        title: composed.title,
+        title: composed.title.slice(0, MAX_TITLE_LEN),
         body: composed.body.slice(0, MAX_BODY_LEN),
         kind: composed.kind,
         projectId: deps.projectId,
-        sourceMessageId,
+        // projectId is sha256(realpath(folder)) with no machine input, so two
+        // machines holding the same repo at the same path mint the identical id.
+        machineUuid: deps.machineUuid(),
+        ...(composed.terminalId ? { terminalId: composed.terminalId } : {}),
+        sourceMessageId: composed.sourceMessageId,
       });
       // Seal per target: each phone has its own push key, so the ciphertext can't
       // be shared even though the plaintext is identical.

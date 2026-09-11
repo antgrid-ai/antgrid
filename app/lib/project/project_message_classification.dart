@@ -39,6 +39,7 @@ enum MessageTier {
 const Set<String> kCheckoutDurableReplayTypes = <String>{
   'agent:status',
   'git:status',
+  'git:sync-state',
   'tree:full',
 };
 
@@ -62,6 +63,8 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'tree:update',
   'file:read',
   'file:content',
+  'file:resolve-path',
+  'file:resolve-path-result',
   'file:search',
   'file:search-cancel',
   'file:search-result',
@@ -87,6 +90,22 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'git:stage-result',
   'git:unstage',
   'git:unstage-result',
+  'git:stash-list',
+  'git:stash-list-result',
+  'git:stash-pop',
+  'git:stash-pop-result',
+  'git:stash-drop',
+  'git:stash-drop-result',
+  'git:log',
+  'git:log-result',
+  'git:commit-files',
+  'git:commit-files-result',
+  'git:commit-diff',
+  'git:commit-diff-content',
+  'git:sync',
+  'git:sync-result',
+  'git:sync-status',
+  'git:sync-state',
   'command:run',
   'command:output',
   'command:done',
@@ -102,6 +121,7 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'preview:url',
   'file:tree:snapshot:request',
   'file:tree:snapshot',
+  'file:tree:unchanged',
   'preview:snapshot:request',
   'preview:snapshot',
   'session:result',
@@ -158,8 +178,16 @@ const Set<String> _statusTypes = <String>{
   'git:discard-result',
   'git:stage-result',
   'git:unstage-result',
+  'git:stash-list-result',
+  'git:stash-pop-result',
+  'git:stash-drop-result',
+  'git:sync-result',
+  'git:sync-state',
   'git:status',
   'git:diff-content',
+  'git:log-result',
+  'git:commit-files-result',
+  'git:commit-diff-content',
   'handler:status',
   'file:upload-ready',
   'file:upload-ack',
@@ -178,17 +206,20 @@ const Set<String> _statusTypes = <String>{
 /// what makes "add an inbound type without classifying it" fail CI instead of
 /// silently dropping the frame.
 ///
-///   - `tunnel:http-response`, `tunnel:ws-data` and `tunnel:ws-close` all
-///     arrive on the `preview` channel and are consumed by PreviewService's
-///     direct transport subscription, bypassing the control classification
-///     path entirely — same as the WS tunnel's own `tunnel:ws-open`, which is
-///     app→bridge (outbound) only and so never reaches this parser at all.
+///   - `tunnel:http-start`/`http-chunk`/`http-end`, `tunnel:ws-data` and
+///     `tunnel:ws-close` all arrive on the `preview` channel and are consumed
+///     by PreviewService's direct transport subscription, bypassing the
+///     control classification path entirely — same as the WS tunnel's own
+///     `tunnel:ws-open` and `tunnel:http-cancel`, which are app→bridge
+///     (outbound) only and so never reach this parser at all.
 ///   - `client:focus-state` is app→agent (outbound); it parses only for the
 ///     agent / loopback side.
 ///   - the three `*:snapshot:request` types are snapshot REQUESTS serviced
 ///     outside the heavy/status reducers.
 const Set<String> kUnroutedInboundTypes = <String>{
-  'tunnel:http-response',
+  'tunnel:http-start',
+  'tunnel:http-chunk',
+  'tunnel:http-end',
   'tunnel:ws-data',
   'tunnel:ws-close',
   'client:focus-state',
@@ -203,7 +234,9 @@ const Set<String> _heavyTypes = <String>{
   'tree:full',
   'tree:update',
   'file:tree:snapshot',
+  'file:tree:unchanged',
   'file:content',
+  'file:resolve-path-result',
   'preview:url',
   'preview:snapshot',
   'command:output',

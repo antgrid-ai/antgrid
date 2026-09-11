@@ -11,6 +11,7 @@ import {
   hasTypedContent,
   isInterruptKeystroke,
   isSubmitKeystroke,
+  isTerminalReport,
   submittedLine,
 } from "./keystrokes";
 import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
@@ -20,6 +21,7 @@ import { FileUploadManager } from "./file-upload";
 import { FileSearcher } from "./file-search";
 import { PortDetector } from "./port-detector";
 import { TunnelManager } from "./tunnel-manager";
+import type { SendOutcome } from "./send-scheduler";
 import { type DeviceIdentity } from "./device";
 import { displayStartupBanner } from "./banner";
 import { generateEphemeralKeypair, type EphemeralKeypair } from "./key-exchange";
@@ -36,6 +38,7 @@ import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
 import { detectInstalledTools } from "./tool-detector";
+import { modelwatch } from "./modelwatch";
 import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
@@ -48,7 +51,7 @@ import { SessionNamer } from "./session-namer";
 import { antigravityCliHome } from "./agents/antigravity/title";
 import { AntigravityTitleWatcher } from "./agents/antigravity/title-watcher";
 import { resolveStructuredTitle } from "./agents/title-dispatch";
-import { buildTitleContext, generateTitleFromContext } from "./agents/title-generate";
+import { buildTitleContext, generateTitleFromContext, type TitleGeneration } from "./agents/title-generate";
 import { TitleAttempts, type TitleOutcome } from "./agents/title-attempts";
 import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
@@ -60,8 +63,19 @@ import { dispatchRpc } from "./rpc/methods";
 import { snapshotAsksFor } from "./rpc/state-snapshot";
 import { StructuredAgentManager } from "./structured/structured-manager";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
-import { getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
-import { listLocalBranches, checkoutLocalBranch } from "./git-branches";
+import { forgetGitScanMemos, getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
+import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote, listStashes, stashPop, stashDrop } from "./git-branches";
+import { getGitLog, getCommitFiles, getCommitFileDiff } from "./git-log";
+import { gitPull, gitPush, readSyncState, fetchRemote, EMPTY_SYNC_STATE, type GitSyncState } from "./git-sync";
+import {
+  CHECKOUT_MAX_TIER_INDEX,
+  MAIN_MAX_TIER_INDEX,
+  createGitPollCadence,
+  noteGitPollResult,
+  resetGitPollCadence,
+  shouldRunPollTick,
+  type GitPollCadence,
+} from "./git-poll-cadence";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 
 /** Hand the event loop one full turn. `setImmediate` fires in libuv's check
@@ -95,7 +109,29 @@ interface CheckoutRuntime {
   runningCommands: Map<string, ChildProcess>;
   cachedGitBranch: string | null;
   cachedGitFiles: GitFileEntry[];
+  /** Ahead/behind against the upstream REF. Refreshed alongside the git status
+   * it rides with, which is only affordable because [readSyncState] reaches no
+   * remote — a probe here would be one network round trip per checkout every
+   * 10s on the backstop poll alone. */
+  cachedGitSync: GitSyncState;
+  /** Full serializations of the two caches above, recomputed once wherever
+   *  [refreshGitStatus] applies a winning ticket. Every "did this move" test
+   *  compares these rather than re-serializing the arrays per tick — a
+   *  worktree with thousands of untracked entries was paying two full
+   *  stringifies of the same unchanged list every poll, per runtime. Still a
+   *  structural compare, not a hash, so the semantics are unchanged. */
+  gitFilesFingerprint: string;
+  gitSyncFingerprint: string;
   gitBranchInterval: ReturnType<typeof setInterval> | null;
+  /** Backoff state for [gitBranchInterval]'s backstop poll — see
+   *  git-poll-cadence.ts. A skipped tick spawns nothing, so slowing the poll
+   *  adds no teardown surface: the timer set [stopCheckoutServices] clears is
+   *  unchanged. */
+  gitPoll: GitPollCadence;
+  /** Periodic background `git fetch` — see [fetchRemote]. Its own timer, on a
+   * much longer period than [gitBranchInterval]: that one is a cheap LOCAL
+   * read, this one reaches the network. */
+  gitAutofetchInterval: ReturnType<typeof setInterval> | null;
   gitRefreshTimer: ReturnType<typeof setTimeout> | null;
   /** Fire-and-forget `git status` reads still running against this checkout —
    * see [trackGitRefresh] for why teardown has to wait them out. */
@@ -193,7 +229,13 @@ export interface AgentCore {
    *  and are sent through this hook directly. Pass `null` to clear it (the
    *  promotion controller does this on teardown so a dead relay closure
    *  isn't retained). */
-  setPlainHook(fn: ((data: object) => void) | null): void;
+  setPlainHook(fn: ((data: object) => Promise<SendOutcome>) | null): void;
+  /** Abort every in-flight tunneled HTTP response, on every checkout runtime
+   *  and on main. Driven from the transport's peer-online/peer-offline hooks:
+   *  a body in flight across a peer loss or a (re)establishment is dead by
+   *  construction, and the relay client's queue clear only reaches a run that
+   *  happens to be parked on a send at that instant. WS tunnels are untouched. */
+  abortTunnelStreams(): void;
   /** Wire a provider that returns the Ed25519 pubkey (standard base64) of the
    *  phone currently paired on the transport, or null when there is no relay
    *  peer (e.g. local/loopback transport, or pre-handshake). The mobile-access
@@ -204,6 +246,11 @@ export interface AgentCore {
   setPeerPubkeyProvider(fn: (() => string | null) | null): void;
   /** Current remote app capability; cleared when that transport detaches. */
   setPeerCheckoutRoutingProvider(fn: (() => boolean) | null): void;
+  /** Current remote app's tree-pull capability; cleared when that transport detaches. */
+  setPeerPullsTreeProvider(fn: (() => boolean) | null): void;
+  /** Same question for the loopback owner. Wired once at listener bind — the
+   *  listener outlives any single owner. */
+  setOwnerPullsTreeProvider(fn: (() => boolean) | null): void;
   /** Stream-gating state. The transport's peer-online/offline callbacks flip
    *  `peerOnline` to suppress the heavy stream while the paired phone is gone. */
   readonly connState: ConnState;
@@ -333,7 +380,17 @@ export interface BuildAgentCoreOptions {
   /** Test-only release-gate override. Production callers omit this and use the
    * central capability constant. */
   worktreeSessionsSupported?: boolean;
+  /** Base period of the per-runtime git backstop poll, in ms. The seam a test
+   *  needs: the backoff ladder is expressed in MULTIPLES of this (see
+   *  git-poll-cadence.ts), so at the production default a single tier costs
+   *  tens of seconds of wall clock to observe. Production callers omit it. */
+  gitPollBaseMs?: number;
 }
+
+/** Period of the git backstop poll — the interval the cadence tiers multiply.
+ *  Not the watcher path: that is [GIT_REFRESH_DEBOUNCE_MS], and it is what
+ *  makes the Git view move while the user is looking at it. */
+const GIT_POLL_BASE_MS = 10_000;
 
 export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<AgentCore> {
   // The interactive bootstrap (`consoleBootstrapIO` → @inquirer/prompts) reads
@@ -344,6 +401,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // core.start() never returns, so the app's project:start times out at 30s
   // ("Could not start project"). Headless → defaults, exactly like local mode.
   const interactive = !!process.stdin.isTTY;
+
+  const gitPollBaseMs = opts.gitPollBaseMs ?? GIT_POLL_BASE_MS;
 
   // Load config (or run interactive bootstrap if none found)
   let config: AbConfig;
@@ -549,12 +608,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   const terminalOwners = new Map<string, { checkoutId: string; externalId: string }>();
   // What each client last said is on screen (`session:focus`), dropped when it
   // declares it can render nothing here (`client:focus-state`) or when its
-  // socket goes away (`noteClientGone`) — the app restates its focus on
-  // resume. Read only by the setup push: a run whose
-  // banner the user is watching must not also buzz their phone. The work-status
-  // read state keeps its own copy in ProjectCore; this one exists because a
-  // core has no way back into that reduction.
+  // socket goes away (`noteClientGone`). A dropped socket is the app's to
+  // restate (`resyncFocus`); a pause is NOT — the app sends no `session:focus`
+  // on the resume edge, so this file restores it from [pausedFocusByClient].
+  // Read by the setup push (a run whose banner the user is watching must not
+  // also buzz their phone) and by [isCheckoutAttended]. The work-status read
+  // state keeps its own copy in ProjectCore; this one exists because a core has
+  // no way back into that reduction.
   const focusedSessionByClient = new Map<InboundSource, string>();
+
+  // What each paused client was looking at when it declared it could render
+  // nothing, so the reverse edge can put it back. Separate from the map above
+  // rather than a flag on it: everything that reads focus means "on screen
+  // NOW", and a paused client's session is not.
+  const pausedFocusByClient = new Map<InboundSource, string>();
 
   function createCheckoutRuntime(
     checkout: CheckoutRecord,
@@ -576,7 +643,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       runningCommands: new Map(),
       cachedGitBranch: null,
       cachedGitFiles: [],
+      cachedGitSync: EMPTY_SYNC_STATE,
+      gitFilesFingerprint: JSON.stringify([]),
+      gitSyncFingerprint: JSON.stringify(EMPTY_SYNC_STATE),
       gitBranchInterval: null,
+      gitPoll: createGitPollCadence(),
+      gitAutofetchInterval: null,
       gitRefreshTimer: null,
       pendingGitRefreshes: new Set(),
       gitStatusSeq: 0,
@@ -605,6 +677,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function sendFromRuntime(runtime: CheckoutRuntime, msg: AbMessage, force = false): void {
     const stamped = { ...msg, checkoutId: runtime.checkout.id } as AbMessage;
     if (force) republishAb(stamped); else sendAb(stamped);
+  }
+
+  /** Stamps the checkout like [sendFromRuntime] but only seeds the replay
+   *  cache — see MessageBus.retain. */
+  function retainFromRuntime(runtime: CheckoutRuntime, msg: AbMessage): void {
+    retainAb({ ...msg, checkoutId: runtime.checkout.id } as AbMessage);
   }
 
   function internalTerminalId(runtime: CheckoutRuntime, terminalId: string): string {
@@ -653,6 +731,27 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   }
 
   function sendTerminalFrame(msg: AbMessage): void {
+    const terminalId = "terminalId" in msg && typeof msg.terminalId === "string"
+      ? msg.terminalId
+      : null;
+    if (terminalId && msg.type === "terminal:notification") {
+      const { runtime } = terminalOwner(terminalId);
+      const session = sessions?.get(terminalId);
+      const tool = session?.tool ?? (session?.command ? undefined : runtime.config.agent?.tool);
+      if (session && tool === "codex") {
+        // Codex's TUI is configured to emit approvals only. Use the hook's wire
+        // channel so mobile push and the work-status reducer also see the prompt,
+        // without a second terminal notification producing a duplicate toast.
+        sendFromRuntime(runtime, createMessage("notification:push", {
+          notificationType: "permission_request",
+          message: msg.body ?? msg.title ?? "Codex needs approval",
+          sessionId: session.id,
+          sessionTitle: session.name,
+          projectId: project.id,
+        }));
+        return;
+      }
+    }
     sendAb(stampTerminalFrame(msg));
   }
 
@@ -676,11 +775,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // in local mode, where there is no relay peer.
   let peerPubkeyProvider: (() => string | null) | null = null;
   let peerCheckoutRoutingProvider: (() => boolean) | null = null;
+  let peerPullsTreeProvider: (() => boolean) | null = null;
+  let ownerPullsTreeProvider: (() => boolean) | null = null;
   function setPeerPubkeyProvider(fn: (() => string | null) | null) {
     peerPubkeyProvider = fn;
   }
   function setPeerCheckoutRoutingProvider(fn: (() => boolean) | null) {
     peerCheckoutRoutingProvider = fn;
+  }
+  function setPeerPullsTreeProvider(fn: (() => boolean) | null) {
+    peerPullsTreeProvider = fn;
+  }
+  function setOwnerPullsTreeProvider(fn: (() => boolean) | null) {
+    ownerPullsTreeProvider = fn;
   }
 
   // Mobile-access gate, shared by every inbound path (bus verbs AND the
@@ -698,6 +805,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   function currentPeerCanRouteCheckouts(): boolean {
     return peerCheckoutRoutingProvider?.() === true;
+  }
+
+  /** A re-sync push reaches EVERY bus subscriber, so it may only be skipped when
+   *  every attached client pulls the tree for itself. No provider wired at all
+   *  means the core is driven by something that named no capability (a bare bus,
+   *  as in the unit tests) — that client gets the push. */
+  function everyClientPullsTrees(): boolean {
+    const wired = [ownerPullsTreeProvider, peerPullsTreeProvider]
+      .filter((p): p is () => boolean => p !== null);
+    return wired.length > 0 && wired.every((p) => p());
   }
 
   function handleTunnelMessage(raw: unknown) {
@@ -721,6 +838,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
           log.error("tunnel:http-request handler failed: %s", err)
         );
+        break;
+      case "tunnel:http-cancel":
+        runtime.tunnelManager.onHttpCancel(msg);
         break;
       case "tunnel:ws-open":
         runtime.tunnelManager.onWsOpen(msg);
@@ -804,6 +924,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const line = submittedLine(msg.data);
         if (line === null) manager.write(id, msg.data);
         else manager.submit(id, line);
+        // Everything below reads the frame as "the user did something". A focus
+        // or mouse report is the viewer's VT engine answering a mode the guest
+        // turned on, so it goes to the PTY and stops there.
+        if (isTerminalReport(msg.data)) break;
         // Typing into a session counts as activity — float it up the drawer.
         // No-ops for non-session terminals (service PTYs).
         sessions?.touch(msg.terminalId);
@@ -833,8 +957,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // never wrap up.
         const parsed = HandlerConfigureWire.safeParse(msg);
         if (parsed.success && parsed.data.armed) {
-          const { terminalId, goal, backlog, judgeTool, judgeModel } = parsed.data;
-          handlerEngine.arm({ terminalId, goal, backlog, judgeTool, judgeModel });
+          const { terminalId, goal, backlog, judgeTool, judgeModel, personality } = parsed.data;
+          handlerEngine.arm({ terminalId, goal, backlog, judgeTool, judgeModel, personality });
         } else if (parsed.success) {
           handlerEngine.disarm(parsed.data.terminalId);
         } else {
@@ -960,6 +1084,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         break;
       }
+      case "file:resolve-path": {
+        const fw = runtime.fileWatcher;
+        if (fw) {
+          fw.handleResolvePathRequest(msg.requestId, msg.path);
+        } else {
+          log.warn("file:resolve-path for unknown projectId: %s", msg.projectId);
+        }
+        break;
+      }
       case "file:upload-start":
         runtime.uploadManager?.handleStart(msg);
         break;
@@ -1004,6 +1137,24 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         break;
       }
+      case "git:log": {
+        handleGitLog(runtime, msg.projectId, msg.skip, msg.limit).catch((err) =>
+          log.error("git:log handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:commit-files": {
+        handleGitCommitFiles(runtime, msg.projectId, msg.sha).catch((err) =>
+          log.error("git:commit-files handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:commit-diff": {
+        handleGitCommitDiff(runtime, msg.projectId, msg.sha, msg.path).catch((err) =>
+          log.error("git:commit-diff handler failed: %s", err)
+        );
+        break;
+      }
       case "git:checkout": {
         handleGitCheckout(runtime, msg.projectId, msg.branch).catch((err) =>
           log.error("git:checkout handler failed: %s", err)
@@ -1031,6 +1182,53 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "git:unstage": {
         handleGitUnstage(runtime, msg.projectId, msg.files).catch((err) =>
           log.error("git:unstage handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:stash-list": {
+        handleGitStashList(runtime, msg.projectId).catch((err) =>
+          log.error("git:stash-list handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:stash-pop": {
+        // Tracked for the same reason `git:sync` below is, and more urgently:
+        // a pop rewrites the whole working tree, so it holds the checkout as
+        // its child's cwd for longer than a push does.
+        trackGitRefresh(
+          runtime,
+          handleGitStashPop(runtime, msg.projectId, msg.ref).catch((err) =>
+            log.error("git:stash-pop handler failed: %s", err)
+          ),
+        );
+        break;
+      }
+      case "git:stash-drop": {
+        trackGitRefresh(
+          runtime,
+          handleGitStashDrop(runtime, msg.projectId, msg.ref).catch((err) =>
+            log.error("git:stash-drop handler failed: %s", err)
+          ),
+        );
+        break;
+      }
+      case "git:sync": {
+        // Tracked, not merely fired: a push/pull holds the checkout as its
+        // child's cwd for up to the transfer timeout, and `awaitGitRefreshes`
+        // is what teardown waits on before `git worktree remove`. Untracked,
+        // a session deleted mid-push takes a Windows sharing violation and is
+        // then undeletable forever.
+        trackGitRefresh(
+          runtime,
+          handleGitSync(runtime, msg.projectId, msg.op).catch((err) =>
+            log.error("git:sync handler failed: %s", err)
+          ),
+        );
+        break;
+      }
+      case "git:sync-status": {
+        handleGitSyncStatus(runtime, msg.projectId, msg.probeRemote === true).catch((err) =>
+          log.error("git:sync-status handler failed: %s", err)
         );
         break;
       }
@@ -1320,11 +1518,30 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         focusedSessionByClient.set(client, msg.sessionId);
         if (!sessions) break;
         sessions.focus(msg.sessionId);
+        refreshFocusedCheckout(msg.sessionId);
         break;
       }
       case "client:focus-state": {
         connState.appFocusPaused = msg.paused;
-        if (msg.paused) focusedSessionByClient.delete(client);
+        // Both edges, because the app restates its focus only on a STREAM
+        // re-establish (`resyncFocus`, driven by `streamReadyEvents`) — a
+        // background/foreground inside one live connection sends this frame
+        // and nothing else. Dropping the entry without putting it back left
+        // the checkout the user is sitting on reading as unattended, which is
+        // what [isCheckoutAttended] hands the backstop poll as permission to
+        // fall to its slowest tier while they watch it.
+        if (msg.paused) {
+          const focused = focusedSessionByClient.get(client);
+          if (focused !== undefined) pausedFocusByClient.set(client, focused);
+          focusedSessionByClient.delete(client);
+        } else {
+          const resumed = pausedFocusByClient.get(client);
+          pausedFocusByClient.delete(client);
+          if (resumed !== undefined && !focusedSessionByClient.has(client)) {
+            focusedSessionByClient.set(client, resumed);
+            refreshFocusedCheckout(resumed);
+          }
+        }
         opts.onClientFocusState?.(msg.paused, client);
         log.info("focus-state: paused=%s", msg.paused);
         break;
@@ -1391,18 +1608,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (runtime.checkout.id !== checkoutIdOf(msg)) break;
         const fw = runtime.fileWatcher;
         if (!fw) break;
-        const { tree, seq } = fw.getTreeSnapshot();
-        // The seq moves on every change the watcher sees, suppressed or not, so
-        // a requester holding the current one holds the current tree — and the
-        // tree is the bulk of this reply, sent on every reconnect and resume
-        // by every open checkout, ahead of whatever the app is waiting on.
-        // `sinceSeq` is the app's own last snapshot seq, so an app predating
-        // it never sends one and always gets the tree.
-        if (msg.sinceSeq !== undefined && msg.sinceSeq === seq) {
-          sendFromRuntime(runtime, createMessage("file:tree:snapshot", { seq, unchanged: true }));
+        // A caller that names the revision it holds, and is still right about
+        // it, is told so instead of being sent the tree again. A phone
+        // foregrounding re-asks EVERY bound checkout at once and nothing else
+        // gates that, so on an idle project every one of those answers was a
+        // byte-identical megabyte. `currentSeq` reads the counter without
+        // walking the tree, so the confirmation costs no disk either.
+        if (msg.sinceSeq !== undefined && msg.sinceSeq === fw.currentSeq()) {
+          sendFromRuntime(runtime, createMessage("file:tree:unchanged", { seq: msg.sinceSeq }));
         } else {
+          const { tree, seq } = fw.getTreeSnapshot();
           sendFromRuntime(runtime, createMessage("file:tree:snapshot", { tree, seq }));
         }
+        // Outside the branch above on purpose: staging, a branch move and a
+        // commit all change the decorations without touching a watched path,
+        // so an unchanged tree says nothing about the status drawn on it.
         // The app asks for this on every (re)connect and on a pull-to-refresh,
         // and the git decorations belong to the same picture as the tree —
         // answering with a tree alone left the changes list showing whatever
@@ -1413,7 +1633,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // and no way to ever get one.
         trackGitRefresh(
           runtime,
-          refreshGitStatus(runtime)
+          refreshGitStatusAttended(runtime)
             .then(() => sendGitStatus(runtime, true))
             .catch(() => {}),
         );
@@ -1479,6 +1699,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       runtime.tunnelManager?.stop();
       if (runtime.gitBranchInterval) clearInterval(runtime.gitBranchInterval);
       runtime.gitBranchInterval = null;
+      if (runtime.gitAutofetchInterval) clearInterval(runtime.gitAutofetchInterval);
+      runtime.gitAutofetchInterval = null;
       if (runtime.gitRefreshTimer) clearTimeout(runtime.gitRefreshTimer);
       runtime.gitRefreshTimer = null;
       runtime.started = false;
@@ -1520,7 +1742,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   /** Same wire as [sendAb] but bypasses the bus's payload-equality dedup. Only
    *  the explicit re-sync paths use it — see MessageBus.republish. */
   let republishAb: (msg: AbMessage) => void = (_m) => {};
-  let sendPlain: (data: object) => void = (_d) => {};
+  /** Same bus as [sendAb] but caches for replay WITHOUT delivering — see
+   *  MessageBus.retain. */
+  let retainAb: (msg: AbMessage) => void = (_m) => {};
+  let sendPlain: (data: object) => Promise<SendOutcome> = async () => "dropped";
   // Replay-cache eviction for torn-down chat sessions; bound with the bus in
   // attachTransport, like sendAb.
   let dropSessionReplay: (sessionId: string) => void = (_s) => {};
@@ -1686,8 +1911,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   async function refreshGitStatus(runtime: CheckoutRuntime = mainRuntime): Promise<void> {
     const ticket = ++runtime.gitStatusSeq;
     let files: GitFileEntry[];
+    let sync: GitSyncState;
     try {
-      files = await getGitStatus(runtime.checkout.path);
+      // Read together and applied together under ONE ticket: they are two
+      // halves of the same snapshot, and a separate sequence for each lets a
+      // reader see this refresh's file list beside the previous one's counts.
+      [files, sync] = await Promise.all([
+        getGitStatus(runtime.checkout.path),
+        readSyncState(runtime.checkout.path),
+      ]);
     } catch {
       // `Bun.spawn` throws SYNCHRONOUSLY when cwd is gone, which is the normal
       // state once the checkout has been removed under an in-flight refresh.
@@ -1699,6 +1931,59 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (ticket < runtime.gitStatusApplied) return;
     runtime.gitStatusApplied = ticket;
     runtime.cachedGitFiles = files;
+    runtime.cachedGitSync = sync;
+    runtime.gitFilesFingerprint = JSON.stringify(files);
+    runtime.gitSyncFingerprint = JSON.stringify(sync);
+  }
+
+  /** [refreshGitStatus] for a trigger that is NOT the backstop poll. Every such
+   *  read means this checkout moved, or that someone asked about it, so it also
+   *  puts the poll back on its base period: a checkout that just took a commit
+   *  is the likeliest to move again, and is exactly where a slow backstop would
+   *  be felt. */
+  function refreshGitStatusAttended(runtime: CheckoutRuntime): Promise<void> {
+    resetGitPollCadence(runtime.gitPoll);
+    return refreshGitStatus(runtime);
+  }
+
+  /** Whether any client says it is looking at a session bound to [checkoutId].
+   *  An ANY test rather than a lookup, because several sessions can share one
+   *  checkout. A focused session the manager cannot resolve pins `main` — an
+   *  unknown or not-yet-built session must keep the project's own header on the
+   *  fast cadence rather than silence it. */
+  function isCheckoutAttended(checkoutId: string): boolean {
+    for (const focused of focusedSessionByClient.values()) {
+      if ((sessions?.get(focused)?.checkoutId ?? "main") === checkoutId) return true;
+    }
+    return false;
+  }
+
+  /** One forced read for the checkout a client has just put on screen. The
+   *  backstop may be several tiers slow for a checkout nobody was watching, and
+   *  a resume-from-background inside ONE connection re-establishes nothing — so
+   *  without this the user reads a snapshot up to the slowest tier old. */
+  function refreshFocusedCheckout(sessionId: string): void {
+    const runtime = checkoutRuntimes.runtime(sessions?.get(sessionId)?.checkoutId ?? "main");
+    if (!runtime) return;
+    resetGitPollCadence(runtime.gitPoll);
+    // Synchronous, and immediately before the spawn: [awaitGitRefreshes]
+    // snapshots the pending set, so a refresh added after a sweep has taken its
+    // snapshot is never waited on — and a `git` child cwd'd inside the checkout
+    // is exactly what aborts the `git worktree remove` that follows.
+    if (runtime.disposed) return;
+    const branch = runtime.cachedGitBranch;
+    const files = runtime.gitFilesFingerprint;
+    const sync = runtime.gitSyncFingerprint;
+    trackGitRefresh(
+      runtime,
+      Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)])
+        .then(() => {
+          if (runtime.cachedGitBranch !== branch) sendStatus(runtime);
+          if (runtime.gitFilesFingerprint !== files) sendGitStatus(runtime);
+          if (runtime.gitSyncFingerprint !== sync) sendGitSyncState(runtime);
+        })
+        .catch(() => {}),
+    );
   }
 
   // Coalescing window for a watcher-driven git refresh. Long enough that a
@@ -1762,26 +2047,30 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Re-reads git status after the file watcher saw the tree move, and pushes
   // it only if it actually changed.
   ///
-  // The 10s poll below is a BACKSTOP, not the mechanism: it exists for the
+  // The backstop poll below is not the mechanism: it exists for the
   // changes no watcher sees (a `git add` or `git stash` run in another
   // terminal touches only `.git/`, which the ignore rules exclude). Leaving
   // the poll as the only trigger is what made a diff take up to ten seconds
   // to appear after the agent finished writing — worst on a phone or tablet,
   // where the Git view is opened deliberately, right after the agent stops.
   function scheduleGitRefresh(runtime: CheckoutRuntime) {
+    // Reset on the SIGNAL, not on the coalesced run: a checkout the watcher is
+    // still firing on is a checkout under active work, and it must never drift
+    // into a slow tier while a build is writing into it.
+    resetGitPollCadence(runtime.gitPoll);
     if (runtime.gitRefreshTimer) return;
     runtime.gitRefreshTimer = setTimeout(() => {
       runtime.gitRefreshTimer = null;
       trackGitRefresh(
         runtime,
         (async () => {
-          const before = JSON.stringify(runtime.cachedGitFiles);
+          const before = runtime.gitFilesFingerprint;
           try {
-            await refreshGitStatus(runtime);
+            await refreshGitStatusAttended(runtime);
           } catch {
             return;
           }
-          if (JSON.stringify(runtime.cachedGitFiles) !== before) sendGitStatus(runtime);
+          if (runtime.gitFilesFingerprint !== before) sendGitStatus(runtime);
         })(),
       );
     }, GIT_REFRESH_DEBOUNCE_MS);
@@ -1795,6 +2084,77 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }),
       force,
     );
+  }
+
+  function sendGitSyncState(
+    runtime: CheckoutRuntime = mainRuntime,
+    state: GitSyncState = runtime.cachedGitSync,
+    probed?: Awaited<ReturnType<typeof checkBranchAgainstRemote>>,
+    force = false,
+  ) {
+    sendFromRuntime(runtime, createMessage("git:sync-state", {
+      projectId: project.id,
+      branch: state.branch,
+      remote: state.remote,
+      remoteBranch: state.remoteBranch,
+      // A probe ASKED the remote, so its counts supersede the local ones for
+      // the frame that reports its verdict — sending `state: "behind"` beside
+      // a pre-fetch `behind: 0` describes two different moments as one.
+      // `checkBranchAgainstRemote` omits both whenever it could not count
+      // (`differs`, `unreachable`, `gone`), which is when the local pair is
+      // still the best answer there is.
+      ahead: probed?.ahead ?? state.ahead,
+      behind: probed?.behind ?? state.behind,
+      hasUpstream: state.hasUpstream,
+      hasRemote: state.hasRemote,
+      ...(probed ? { state: probed.state } : {}),
+    }), force);
+  }
+
+  /** One background-fetch pass — see [fetchRemote]. Pushes `git:sync-state`
+   *  only when the counts it produces actually moved. */
+  function runGitAutofetchTick(runtime: CheckoutRuntime): void {
+    // An untracked branch — every `antgrid/*` isolated one — can never fetch:
+    // [fetchRemote] would spend `currentBranch` + `resolvePushTarget` only to
+    // bail before it reaches the network. Gated on a sync state that has
+    // actually been READ, because [startGitAutofetch] ticks once immediately
+    // and `setupServices` arms it behind a refresh it does not await — the
+    // empty state's `tracked: false` would otherwise skip the connect-time
+    // fetch this exists for.
+    if (runtime.gitStatusApplied > 0 && !runtime.cachedGitSync.tracked) return;
+    const prevSync = runtime.gitSyncFingerprint;
+    trackGitRefresh(
+      runtime,
+      fetchRemote(runtime.checkout.path)
+        .then((fetched) => {
+          if (!fetched || runtime.disposed) return;
+          // Plain [refreshGitStatus], NOT the attended variant: this is a
+          // 3-minute TIMER, not a signal that anyone is watching, and
+          // `fetchRemote` answers true on any exit-0 fetch — including the
+          // usual one that brought nothing down. Resetting on the fetch itself
+          // would put every tracked checkout back on the base period every
+          // 180s, which is shorter than the time it takes to climb the ladder
+          // and so would cancel the backoff outright. The counts MOVING is the
+          // real "this checkout is live" signal, so the reset rides that.
+          return refreshGitStatus(runtime).then(() => {
+            if (runtime.gitSyncFingerprint === prevSync) return;
+            resetGitPollCadence(runtime.gitPoll);
+            sendGitSyncState(runtime);
+          });
+        })
+        .catch(() => {}),
+    );
+  }
+
+  /** Starts this checkout's background-fetch backstop — the periodic
+   *  counterpart to [readSyncState]'s "as fresh as the last fetch" contract,
+   *  matching every SCM client with a sync indicator (VS Code defaults to 3
+   *  minutes; kept the same here). Ticks once immediately: without that, a
+   *  checkout that just connected would wait up to the full period before it
+   *  could show a commit someone else pushed while this bridge was offline. */
+  function startGitAutofetch(runtime: CheckoutRuntime): void {
+    runGitAutofetchTick(runtime);
+    runtime.gitAutofetchInterval = setInterval(() => runGitAutofetchTick(runtime), 180_000);
   }
 
   async function handleGitListBranches(runtime: CheckoutRuntime, projectId: string) {
@@ -1812,6 +2172,67 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
+  async function handleGitLog(runtime: CheckoutRuntime, projectId: string, skip: number, limit: number) {
+    try {
+      const { commits, hasMore } = await getGitLog(runtime.checkout.path, skip, limit);
+      sendFromRuntime(runtime, createMessage("git:log-result", {
+        projectId,
+        commits,
+        skip,
+        hasMore,
+      }));
+    } catch (err: any) {
+      sendFromRuntime(runtime, createMessage("git:log-result", {
+        projectId,
+        commits: [],
+        skip,
+        hasMore: false,
+        error: err?.message || String(err),
+      }));
+    }
+  }
+
+  async function handleGitCommitFiles(runtime: CheckoutRuntime, projectId: string, sha: string) {
+    try {
+      const files = await getCommitFiles(runtime.checkout.path, sha);
+      sendFromRuntime(runtime, createMessage("git:commit-files-result", {
+        projectId,
+        sha,
+        files,
+      }));
+    } catch (err: any) {
+      sendFromRuntime(runtime, createMessage("git:commit-files-result", {
+        projectId,
+        sha,
+        files: [],
+        error: err?.message || String(err),
+      }));
+    }
+  }
+
+  async function handleGitCommitDiff(runtime: CheckoutRuntime, projectId: string, sha: string, path: string) {
+    try {
+      const { diff, additions, deletions } = await getCommitFileDiff(runtime.checkout.path, sha, path);
+      sendFromRuntime(runtime, createMessage("git:commit-diff-content", {
+        projectId,
+        sha,
+        path,
+        diff,
+        additions,
+        deletions,
+      }));
+    } catch {
+      sendFromRuntime(runtime, createMessage("git:commit-diff-content", {
+        projectId,
+        sha,
+        path,
+        diff: null,
+        additions: 0,
+        deletions: 0,
+      }));
+    }
+  }
+
   async function handleGitCheckout(runtime: CheckoutRuntime, projectId: string, branch: string) {
     try {
       const res = await checkoutLocalBranch(runtime.checkout.path, branch);
@@ -1824,8 +2245,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // Refresh cached state and notify app
       runtime.cachedGitBranch = res.current;
       sendStatus(runtime);
-      await refreshGitStatus(runtime);
+      await refreshGitStatusAttended(runtime);
       sendGitStatus(runtime);
+      // A branch switch changes ahead/behind outright (new branch, new — or no
+      // — upstream); without this the sync control shows the PREVIOUS branch's
+      // counts until the next backstop tick, which for an unattended
+      // checkout can be a full slow tier away.
+      sendGitSyncState(runtime);
     } catch (err: any) {
       sendFromRuntime(runtime, createMessage("git:checkout-result", {
         projectId,
@@ -1845,9 +2271,102 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       ...(result.error ? { error: result.error } : {}),
     }));
     if (result.success) {
-      await refreshGitStatus(runtime);
+      await refreshGitStatusAttended(runtime);
       sendGitStatus(runtime);
+      // A commit moves `ahead` immediately; without this push the sync
+      // control's count (and the enabled Push button) waits on the next
+      // backstop tick instead of appearing the moment the commit lands.
+      sendGitSyncState(runtime);
       sendStatus(runtime);
+    }
+  }
+
+  // Serialized per checkout. The app disables its own buttons while one runs,
+  // but that guards ONE client — a desktop and a phone driving the same
+  // project is the ordinary case here, and a pull rewriting HEAD underneath a
+  // push is a state neither result can describe. A lock rather than a flag for
+  // the reason keyed-lock.ts gives: the hazard is a suspension window, and
+  // every await added later would be a fresh hole in a flag.
+  const withGitSyncLock = createKeyedLock();
+
+  async function handleGitSync(
+    runtime: CheckoutRuntime,
+    projectId: string,
+    op: "push" | "pull",
+  ) {
+    // A throw here owes a result frame just as much as a git failure does. The
+    // app's only other way out is a 150s wall-clock latch, and `Bun.spawn`
+    // throws SYNCHRONOUSLY when the cwd is gone — the normal state once a
+    // managed checkout is removed under an in-flight push (see
+    // [refreshGitStatus]) — so the common case would be a dead Push button for
+    // two and a half minutes reporting a timeout for a failure that was
+    // instant.
+    let result: Awaited<ReturnType<typeof gitPush>>;
+    try {
+      result = await withGitSyncLock(runtime.checkout.id, () =>
+        op === "push" ? gitPush(runtime.checkout.path) : gitPull(runtime.checkout.path),
+      );
+    } catch (err: any) {
+      sendFromRuntime(runtime, createMessage("git:sync-result", {
+        projectId,
+        op,
+        success: false,
+        branch: runtime.cachedGitSync.branch,
+        failureKind: "unknown" as const,
+        error: err?.message || String(err),
+      }));
+      return;
+    }
+
+    sendFromRuntime(runtime, createMessage("git:sync-result", {
+      projectId,
+      op,
+      success: result.success,
+      branch: result.branch,
+      ...(result.remote ? { remote: result.remote } : {}),
+      ...(result.remoteBranch ? { remoteBranch: result.remoteBranch } : {}),
+      ...(result.summary ? { summary: result.summary } : {}),
+      ...(result.error ? { error: result.error } : {}),
+      ...(result.failureKind ? { failureKind: result.failureKind } : {}),
+      ...(result.command ? { command: result.command } : {}),
+      ...(result.stderr ? { stderr: result.stderr } : {}),
+    }));
+
+    // Refreshed on BOTH outcomes, for the reason [handleGitDiscard] gives: a
+    // pull is several git invocations and a fetch that succeeded before the
+    // ff-only refusal has already moved `refs/remotes`, so even a failure
+    // changes the counts. A successful push moves nothing but `.git/`, which
+    // the watcher ignores — nothing else would ever correct the indicator.
+    await Promise.all([refreshGitBranch(runtime), refreshGitStatusAttended(runtime)]);
+    sendGitStatus(runtime);
+    sendGitSyncState(runtime);
+    sendStatus(runtime);
+  }
+
+  async function handleGitSyncStatus(
+    runtime: CheckoutRuntime,
+    projectId: string,
+    probeRemote: boolean,
+  ) {
+    await refreshGitStatusAttended(runtime);
+    const state = runtime.cachedGitSync;
+    // Forced on every arm: this verb IS the app's hydrator, re-fired on every
+    // (re)establish, and `git:sync-state` is a replay type — so for an idle
+    // checkout the answer is byte-identical to the cached frame and the bus's
+    // dedup drops it before the asker sees it. Same reason [resyncState]
+    // forces its pair.
+    if (!probeRemote || !state.branch) {
+      sendGitSyncState(runtime, state, undefined, true);
+      return;
+    }
+    try {
+      // Bounded and non-prompting inside itself; a branch the remote cannot be
+      // asked about reports `unreachable`, which the app renders as nothing
+      // rather than as an error — the local counts beside it are still true.
+      const probed = await checkBranchAgainstRemote(runtime.checkout.path, state.branch);
+      sendGitSyncState(runtime, state, probed, true);
+    } catch {
+      sendGitSyncState(runtime, state, undefined, true);
     }
   }
 
@@ -1872,7 +2391,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // moves the tree. Nothing else would correct the view — an index-only
     // mutation touches `.git/`, which the watcher ignores, leaving the 10s
     // backstop poll to show the user files that are no longer staged.
-    await refreshGitStatus(runtime);
+    await refreshGitStatusAttended(runtime);
     sendGitStatus(runtime);
     sendStatus(runtime);
   }
@@ -1886,7 +2405,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       ...(result.error ? { error: result.error } : {}),
     }));
     if (result.success) {
-      await refreshGitStatus(runtime);
+      await refreshGitStatusAttended(runtime);
       sendGitStatus(runtime);
       sendStatus(runtime);
     }
@@ -1901,10 +2420,59 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       ...(result.error ? { error: result.error } : {}),
     }));
     if (result.success) {
-      await refreshGitStatus(runtime);
+      await refreshGitStatusAttended(runtime);
       sendGitStatus(runtime);
       sendStatus(runtime);
     }
+  }
+
+  async function handleGitStashList(runtime: CheckoutRuntime, projectId: string) {
+    try {
+      const stashes = await listStashes(runtime.checkout.path);
+      sendFromRuntime(runtime, createMessage("git:stash-list-result", { projectId, stashes }));
+    } catch (err: any) {
+      sendFromRuntime(runtime, createMessage("git:stash-list-result", {
+        projectId,
+        stashes: [],
+        error: err?.message || String(err),
+      }));
+    }
+  }
+
+  async function handleGitStashPop(runtime: CheckoutRuntime, projectId: string, ref: string) {
+    try {
+      await stashPop(runtime.checkout.path, ref);
+      sendFromRuntime(runtime, createMessage("git:stash-pop-result", { projectId, ref, success: true }));
+      await refreshGitStatusAttended(runtime);
+      sendGitStatus(runtime);
+      sendStatus(runtime);
+    } catch (err: any) {
+      sendFromRuntime(runtime, createMessage("git:stash-pop-result", {
+        projectId,
+        ref,
+        success: false,
+        error: err?.message || String(err),
+      }));
+    }
+    // Either outcome moves the stash LIST (removed on success, unchanged on
+    // failure) — the panel's banner needs the fresh read either way to know
+    // whether to keep showing this entry.
+    await handleGitStashList(runtime, projectId);
+  }
+
+  async function handleGitStashDrop(runtime: CheckoutRuntime, projectId: string, ref: string) {
+    try {
+      await stashDrop(runtime.checkout.path, ref);
+      sendFromRuntime(runtime, createMessage("git:stash-drop-result", { projectId, ref, success: true }));
+    } catch (err: any) {
+      sendFromRuntime(runtime, createMessage("git:stash-drop-result", {
+        projectId,
+        ref,
+        success: false,
+        error: err?.message || String(err),
+      }));
+    }
+    await handleGitStashList(runtime, projectId);
   }
 
   async function handleGitDiffRequest(runtime: CheckoutRuntime, projectId: string, path: string) {
@@ -2024,7 +2592,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           icon: c.icon,
         })),
         ports: portStatus,
-        git: runtime.cachedGitBranch ? { branch: runtime.cachedGitBranch } : undefined,
+        git: runtime.cachedGitBranch
+          ? {
+              branch: runtime.cachedGitBranch,
+              ahead: runtime.cachedGitSync.ahead,
+              behind: runtime.cachedGitSync.behind,
+              hasUpstream: runtime.cachedGitSync.hasUpstream,
+            }
+          : undefined,
         agent: {
           tool: runtime.config.agent?.tool,
           name: agentName,
@@ -2052,9 +2627,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // exactly what the bus's dedup drops before any subscriber sees it.
       sendStatus(runtime, true);
       sendGitStatus(runtime, true);
+      sendGitSyncState(runtime, runtime.cachedGitSync, undefined, true);
       trackGitRefresh(
         runtime,
-        Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)])
+        Promise.all([refreshGitBranch(runtime), refreshGitStatusAttended(runtime)])
           .then(() => {
             sendStatus(runtime);
             sendGitStatus(runtime);
@@ -2065,17 +2641,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       );
     }
 
-    // Re-send the file tree. Forced for the same reason as the status/git pair
-    // above: an idle project's tree is byte-identical to the cached one, so the
-    // ordinary dedup would drop the very re-push this resync exists to perform.
-    for (const runtime of checkoutRuntimes.values()) {
-      await yieldToEventLoop();
-      // Re-tested after the yield, not just on entry: `sendFullTree` walks the
-      // whole tree synchronously and `stop()` does not disable it, so a
-      // teardown that started during the yield would be walking a directory
-      // Git is removing.
-      if (runtime.disposed) continue;
-      runtime.fileWatcher?.sendFullTree({ force: true });
+    // Re-send the file tree, but only for a client that cannot pull it. An app
+    // advertising `pullsTree` asks per checkout with `file:tree:snapshot:request`
+    // on every establishment, so the push is the largest frame the bridge
+    // produces spent on bytes already in flight the other way — ahead of that
+    // app's replies in the same FIFO.
+    //
+    // Forced, for the same reason as the status/git pair above: an idle
+    // project's tree is byte-identical to the cached one, so the ordinary dedup
+    // would drop the very re-push this branch exists to perform.
+    if (!everyClientPullsTrees()) {
+      for (const runtime of checkoutRuntimes.values()) {
+        await yieldToEventLoop();
+        // Re-tested after the yield, not just on entry: `sendFullTree` walks the
+        // whole tree synchronously and `stop()` does not disable it, so a
+        // teardown that started during the yield would be walking a directory
+        // Git is removing.
+        if (runtime.disposed) continue;
+        runtime.fileWatcher?.sendFullTree({ force: true });
+      }
     }
 
     // Re-emit the detected-port list. ports:update is only pushed on change,
@@ -2192,7 +2776,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
     const fw = new FileWatcher(
       { id: project.id, path: runtime.checkout.path, name: project.name },
-      (msg, opts) => sendFromRuntime(runtime, msg, opts?.force),
+      (msg, opts) => {
+        if (opts?.replayOnly) retainFromRuntime(runtime, msg);
+        else sendFromRuntime(runtime, msg, opts?.force);
+      },
       connState,
       () => scheduleGitRefresh(runtime),
     );
@@ -2209,7 +2796,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // by this point it has already nulled `manager`. The delete path cannot:
     // [withCheckoutRuntimeLock] holds teardown behind this whole function.
     if (runtime.disposed || !manager) return;
-    fw.sendFullTree();
+    // Cached, not pushed. Nothing reads an open-time tree: every client pulls
+    // its own with `file:tree:snapshot:request`, and this one is built before
+    // any app has a stream bound to receive it — so the push was discarded on
+    // arrival while holding half the control channel's window (see
+    // MessageBus.retain).
+    fw.sendFullTree({ replayOnly: true });
     fw.startWatching();
 
     runtime.configController.watch((result, diff) => {
@@ -2268,19 +2860,43 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (runtime.disposed) return;
     sendStatus(runtime);
     sendGitStatus(runtime);
+    // Sent once here so the bus CACHES it for replay: the app asks on every
+    // (re)establish, but a welcome-replay that already carries the counts is
+    // what keeps a reconnect from showing a synced branch for one round trip.
+    sendGitSyncState(runtime);
     runtime.gitBranchInterval = setInterval(() => {
+      // A skipped tick spawns nothing at all — which is the whole point, since
+      // the poll's cost is O(worktrees) and most warm checkouts have nobody
+      // looking at them. The timer itself keeps its shape so the set
+      // [stopCheckoutServices] clears before the teardown wait is unchanged.
+      if (!shouldRunPollTick(runtime.gitPoll)) return;
+      if (runtime.disposed) return;
       const branch = runtime.cachedGitBranch;
-      const files = JSON.stringify(runtime.cachedGitFiles);
+      const files = runtime.gitFilesFingerprint;
+      const sync = runtime.gitSyncFingerprint;
       trackGitRefresh(
         runtime,
         Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)])
           .then(() => {
-            if (runtime.cachedGitBranch !== branch) sendStatus(runtime);
-            if (JSON.stringify(runtime.cachedGitFiles) !== files) sendGitStatus(runtime);
+            const branchMoved = runtime.cachedGitBranch !== branch;
+            const filesMoved = runtime.gitFilesFingerprint !== files;
+            const syncMoved = runtime.gitSyncFingerprint !== sync;
+            if (branchMoved) sendStatus(runtime);
+            if (filesMoved) sendGitStatus(runtime);
+            // The backstop that catches a commit, fetch or push made OUTSIDE
+            // the app — those touch only `.git/`, which the watcher ignores.
+            if (syncMoved) sendGitSyncState(runtime);
+            noteGitPollResult(runtime.gitPoll, {
+              changed: branchMoved || filesMoved || syncMoved,
+              attended: isCheckoutAttended(runtime.checkout.id),
+              maxTierIndex: CHECKOUT_MAX_TIER_INDEX,
+            });
           })
           .catch(() => {}),
       );
-    }, 10_000);
+    }, gitPollBaseMs);
+
+    startGitAutofetch(runtime);
   }
 
   /** Spawn the checkout's `services` block. Manual-start slots stay listed in
@@ -2357,6 +2973,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     runtime.tunnelManager?.stop();
     if (runtime.gitBranchInterval) clearInterval(runtime.gitBranchInterval);
     runtime.gitBranchInterval = null;
+    if (runtime.gitAutofetchInterval) clearInterval(runtime.gitAutofetchInterval);
+    runtime.gitAutofetchInterval = null;
     if (runtime.gitRefreshTimer) clearTimeout(runtime.gitRefreshTimer);
     runtime.gitRefreshTimer = null;
     return watcherClosed;
@@ -2404,6 +3022,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // `onTerminalForgotten`, so this loop names only what the manager holds.
     for (const internalId of ownedTerminalIds) manager?.forget(internalId);
     dropCheckoutReplay(checkoutId);
+    // Keyed by path, and this path is about to stop existing: nothing will
+    // ever scan it again to prune the memos the way a live checkout does.
+    forgetGitScanMemos(runtime.checkout.path);
     await checkoutRuntimes.remove(checkoutId);
   }
 
@@ -2679,6 +3300,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // identical to what the replay cache holds.
         sendStatus(runtime, true);
         sendGitStatus(runtime, true);
+        sendGitSyncState(runtime, runtime.cachedGitSync, undefined, true);
       },
       teardownCheckoutRuntime,
       resolveCheckout: async (checkoutId) => {
@@ -2933,30 +3555,54 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         .then(() => {
           sendStatus();
           sendGitStatus();
+          // Sent once here so the bus CACHES it for replay — see the matching
+          // comment on the checkout-runtime path above.
+          sendGitSyncState(mainRuntime);
         })
         .catch(() => {}),
     );
 
-    // Refresh git branch every 10s and re-send status if it changed
+    // Main's own backstop poll. Covered here as well as in
+    // [startCheckoutRuntime] deliberately: this timer is armed once per PROJECT
+    // core, so leaving it alone would keep a per-warm-core cost the checkout
+    // fix cannot reach.
     mainRuntime.gitBranchInterval = setInterval(() => {
+      if (!shouldRunPollTick(mainRuntime.gitPoll)) return;
+      if (mainRuntime.disposed) return;
       const prevBranch = mainRuntime.cachedGitBranch;
-      const prevFiles = JSON.stringify(mainRuntime.cachedGitFiles);
+      const prevFiles = mainRuntime.gitFilesFingerprint;
+      const prevSync = mainRuntime.gitSyncFingerprint;
       trackGitRefresh(
         mainRuntime,
         Promise.all([refreshGitBranch(mainRuntime), refreshGitStatus(mainRuntime)])
           .then(() => {
-            if (mainRuntime.cachedGitBranch !== prevBranch) sendStatus(mainRuntime);
-            if (JSON.stringify(mainRuntime.cachedGitFiles) !== prevFiles) {
-              sendGitStatus(mainRuntime);
-            }
+            const branchMoved = mainRuntime.cachedGitBranch !== prevBranch;
+            const filesMoved = mainRuntime.gitFilesFingerprint !== prevFiles;
+            const syncMoved = mainRuntime.gitSyncFingerprint !== prevSync;
+            if (branchMoved) sendStatus(mainRuntime);
+            if (filesMoved) sendGitStatus(mainRuntime);
+            // The backstop that catches a commit, fetch or push made OUTSIDE
+            // the app — those touch only `.git/`, which the watcher ignores.
+            if (syncMoved) sendGitSyncState(mainRuntime);
+            noteGitPollResult(mainRuntime.gitPoll, {
+              changed: branchMoved || filesMoved || syncMoved,
+              attended: isCheckoutAttended("main"),
+              maxTierIndex: MAIN_MAX_TIER_INDEX,
+            });
           })
           .catch(() => {}),
       );
-    }, 10_000);
+    }, gitPollBaseMs);
+
+    startGitAutofetch(mainRuntime);
 
     const fw = new FileWatcher(
       project,
-      (msg: AbMessage, opts) => (opts?.force ? republishAb(msg) : sendAb(msg)),
+      (msg: AbMessage, opts) => {
+        if (opts?.replayOnly) retainAb(msg);
+        else if (opts?.force) republishAb(msg);
+        else sendAb(msg);
+      },
       connState,
       () => scheduleGitRefresh(mainRuntime),
     );
@@ -2970,7 +3616,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     uploadManager.startSweeper();
     mainRuntime.uploadManager = uploadManager;
     await yieldToEventLoop();
-    fw.sendFullTree();
+    // Cached, not pushed. Nothing reads an open-time tree: every client pulls
+    // its own with `file:tree:snapshot:request`, and this one is built before
+    // any app has a stream bound to receive it — so the push was discarded on
+    // arrival while holding half the control channel's window (see
+    // MessageBus.retain).
+    fw.sendFullTree({ replayOnly: true });
     fw.startWatching();
 
     const mainSearcher = new FileSearcher(
@@ -3095,10 +3746,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // title thrown away for reasons unrelated to generating it, which releases
     // the claim without spending the budget.
     let outcome: TitleOutcome = "abandoned";
+    // Held out here so the record below can name the call the verdict belongs
+    // to: the two exits after a successful spawn settle as `abandoned`, and
+    // those are the calls that were paid for and their answer thrown away.
+    let result: TitleGeneration | undefined;
     try {
       // No cwd: a naming spawn runs in a throwaway directory of its own
       // (headlessScratchCwd), never this session's checkout.
-      const result = await generateTitleFromContext(context, { tool });
+      result = await generateTitleFromContext(context, { tool, terminalId: target.terminalId });
       if (!result.ok) {
         outcome = result.reason;
         return;
@@ -3118,6 +3773,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       namer?.onStructuredTitle(target.terminalId, result.title, "self");
     } finally {
       titleAttempts.settle(target.terminalId, key, outcome);
+      // After the settle and inside a catch of its own: that call decides
+      // whether this session may ever be named again, and an observer must
+      // never be what breaks it. `abandoned` is recorded like any other verdict
+      // — it is the one outcome nothing else counts, and the only place the
+      // spawn's own records can be told a paid-for answer was discarded.
+      try {
+        if (result) modelwatch.record({
+          callId: result.callId, phase: "outcome", purpose: "title", attempt: 1,
+          requestedTool: tool, actualTool: result.actualTool, reach: result.reach,
+          terminalId: target.terminalId, outcome,
+        });
+      } catch { /* an observer must never fail a naming run */ }
     }
   }
 
@@ -3143,14 +3810,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // Persist the agent's native resume id for this slot every turn
       // (overwrite-latest), independent of title resolution. terminalId is the
       // slot id (stamped as ANTGRID_TERMINAL_ID at spawn).
-      if (!body.titleOnly) {
-        const prevAgentSession = sessions?.get(body.terminalId)?.agentSessionId;
-        sessions?.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
+      // True only when the manager REFUSED this id — an ephemeral thread the
+      // agent's own store disowns. The slot still holds a different
+      // conversation, so nothing below may name it after the id in this post.
+      // An UNKNOWN slot is not a refusal: a service PTY never had an identity.
+      let idRefused = false;
+      if (!body.titleOnly && sessions) {
+        const slot = sessions.get(body.terminalId);
+        const prevAgentSession = slot?.agentSessionId;
+        idRefused = slot !== undefined
+          && !sessions.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
         // A new conversation under a STILL-LIVE PTY (`/clear`, `/new`) reaches
         // no exit path, so this is the only place the previous conversation's
         // title rank can be released. Left latched, it vetoes every
         // first-message title the new conversation resolves.
-        if (prevAgentSession && prevAgentSession !== body.sessionId) {
+        if (!idRefused && prevAgentSession && prevAgentSession !== body.sessionId) {
           namer?.forgetStructuredTitle(body.terminalId);
         }
       }
@@ -3163,7 +3837,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       const hookTool = body.agent ? BY_HOOK_NAME[body.agent] : undefined;
       const chatSlot = sessions?.get(body.terminalId)?.mode === "chat";
       const nameFromHook = (fallback?: string) => {
-        if (!hookTool || !body.sessionId || chatSlot) return;
+        if (!hookTool || !body.sessionId || chatSlot || idRefused) return;
         maybeGenerateTitle(hookTool, {
           terminalId: body.terminalId,
           agentSessionId: body.sessionId,
@@ -3212,6 +3886,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });
 
+  // `params` is z.unknown() on RequestMessage, so `...CheckoutScoped`'s default
+  // never runs on this path -- the "main" default has to live here instead.
+  const TerminalSnapshotRpcParams = z.object({
+    terminalId: z.string().min(1),
+    checkoutId: z.string().default("main"),
+    history: z.boolean().default(false),
+  });
+
   // Intercepted before the generic dispatchRpc registry — like sessions.list/
   // sessions.delete's own special-casing — because it needs `structured`
   // (StructuredAgentManager) in closure scope, which rpc/methods.ts's registry
@@ -3234,13 +3916,95 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return createMessage("response", { requestId: msg.requestId, ok: true, result: { frames } });
   }
 
+  // Correlated RPC twin of `terminal:snapshot:request` (see that case below,
+  // which stays untouched -- old apps and `resyncState`'s unsolicited push
+  // still need it). This is intercepted here rather than registered in
+  // rpc/methods.ts for the same reason session.transcriptSnapshot is: a
+  // MethodDef handler cannot see `manager`, `checkoutRuntimes`, `mainRuntime`,
+  // `internalTerminalId`, `prepareCheckoutRuntime` or `sessions`, all of which
+  // are closure-scoped here.
+  async function handleTerminalSnapshotRpc(msg: RpcRequest): Promise<AbMessage> {
+    const parsed = TerminalSnapshotRpcParams.safeParse(msg.params ?? {});
+    if (!parsed.success) {
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: {
+          code: "E_BAD_PARAMS",
+          message: parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; "),
+        },
+      });
+    }
+    const { terminalId, checkoutId, history } = parsed.data;
+    if (!manager) {
+      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
+    }
+    if (sessions?.isCheckoutDeleting(checkoutId) === true) {
+      log.warn("Refusing terminal.snapshot for checkout %s: its delete is in flight (project %s)", checkoutId, project.id);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "CHECKOUT_DELETING", message: "This session's workspace is being deleted." },
+      });
+    }
+    const checkout = await checkoutRuntimes.resolve(checkoutId);
+    if (!checkout) {
+      log.warn("Rejecting terminal.snapshot for unknown checkout %s (project %s)", checkoutId, project.id);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "UNKNOWN_CHECKOUT", message: "The requested checkout is not available." },
+      });
+    }
+    // Re-checked after the store lookup: a delete that started during that
+    // await would otherwise have this checkout re-prepared right here.
+    if (sessions?.isCheckoutDeleting(checkoutId) === true) {
+      log.warn("Refusing terminal.snapshot for checkout %s: its delete is in flight (project %s)", checkoutId, project.id);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "CHECKOUT_DELETING", message: "This session's workspace is being deleted." },
+      });
+    }
+    // Never `runtimeFor`/`terminalOwner`/`?? mainRuntime` -- see the guard this
+    // mirrors at the `terminal:snapshot:request` case below. `internalTerminalId`
+    // WRITES `runtime.configuredTerminalIds` and the module-level
+    // `terminalOwners`, so resolving the wrong runtime here would permanently
+    // corrupt `sendTerminalFrame`'s id rewrite for this terminal.
+    const runtime = checkoutId === "main" ? mainRuntime : await prepareCheckoutRuntime(checkout);
+    if (runtime.disposed) {
+      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
+    }
+    let snap: { text: string; seq: number } | null;
+    try {
+      snap = await manager.getAttachSnapshot(internalTerminalId(runtime, terminalId), { history });
+    } catch (err) {
+      log.warn("terminal.snapshot for terminal %s failed: %s", terminalId, err);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "E_HANDLER", message: "terminal snapshot failed" },
+      });
+    }
+    if (!snap) {
+      log.warn("terminal.snapshot requested for unknown terminal %s", terminalId);
+      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
+    }
+    return createMessage("response", {
+      requestId: msg.requestId,
+      ok: true,
+      result: { snapshot: { terminalId, scrollback: snap.text, seq: snap.seq, composed: true } },
+    });
+  }
+
   function attachTransport(bus: MessageBus) {
     sendAb = (m) => bus.publish(m, "control");
     republishAb = (m) => bus.republish(m, "control");
+    retainAb = (m) => bus.retain(m, "control");
     dropSessionReplay = (sessionId) => bus.dropSessionReplay(sessionId);
     dropCheckoutReplay = (checkoutId) => bus.dropCheckoutReplay(checkoutId);
     // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.
-    sendPlain = (data) => busPlainHook?.(data);
+    sendPlain = (data) => busPlainHook?.(data) ?? Promise.resolve("dropped");
     bus.setInboundHandler((msg, channel, source) => {
       // Mobile-access gate: the single chokepoint through which both RPC
       // requests and plain Ab messages enter the core dispatch. Drops EVERY
@@ -3282,8 +4046,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // Same failure, same fix, as the machine control plane's own
           // `state.snapshot` intercept (`host-server.ts`); an unchanged
           // payload is a cheap no-op, since the bus dedups on it. Skipped for
-          // a pull that could not carry the status anyway (the app's separate
-          // tree pull) — nothing there to keep fresh.
+          // a pull that could not carry the status anyway — nothing there to
+          // keep fresh.
           for (const runtime of checkoutRuntimes.values()) {
             if (runtime.disposed) continue;
             sendStatus(runtime);
@@ -3291,6 +4055,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         if (msg.method === "session.transcriptSnapshot") {
           void handleTranscriptSnapshotRequest(msg).then((res) => bus.publish(res, channel));
+          return;
+        }
+        if (msg.method === "terminal.snapshot") {
+          // `.catch` before the publish, not after: the handler awaits
+          // `checkoutRuntimes.resolve` (a store read) and
+          // `prepareCheckoutRuntime` (config load + runtime start), neither of
+          // which is guarded inside it. An unhandled rejection here reaches
+          // `index.ts`'s `unhandledRejection` hook, which shuts the whole host
+          // down over one failed screen pull.
+          void handleTerminalSnapshotRpc(msg)
+            .catch((err) => {
+              log.warn("terminal.snapshot failed for project %s: %s", project.id, err);
+              return createMessage("response", {
+                requestId: msg.requestId,
+                ok: false,
+                error: { code: "E_HANDLER", message: "terminal snapshot failed" },
+              });
+            })
+            .then((res) => bus.publish(res, channel));
           return;
         }
         void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));
@@ -3344,9 +4127,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   }
 
   // Plaintext (tunnel) sender wired by the caller after transport construction.
-  let busPlainHook: ((data: object) => void) | null = null;
-  function setPlainHook(fn: ((data: object) => void) | null) {
+  let busPlainHook: ((data: object) => Promise<SendOutcome>) | null = null;
+  function setPlainHook(fn: ((data: object) => Promise<SendOutcome>) | null) {
     busPlainHook = fn;
+  }
+
+  function abortTunnelStreams(): void {
+    for (const runtime of checkoutRuntimes.values()) runtime.tunnelManager?.abortHttpStreams();
+    tunnelManager?.abortHttpStreams();
   }
 
   return {
@@ -3387,15 +4175,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       sessions?.refreshWorkStatus();
     },
     async refreshGitState(): Promise<void> {
-      await Promise.all([refreshGitBranch(), refreshGitStatus()]);
+      await Promise.all([refreshGitBranch(mainRuntime), refreshGitStatusAttended(mainRuntime)]);
       sendStatus();
       sendGitStatus();
     },
     handleTunnelMessage,
     onHandshakeComplete,
     setPlainHook,
+    abortTunnelStreams,
     setPeerPubkeyProvider,
     setPeerCheckoutRoutingProvider,
+    setPeerPullsTreeProvider,
+    setOwnerPullsTreeProvider,
     connState,
     deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean> {
       if (!sessions) return false;
@@ -3426,6 +4217,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     noteClientGone(client: InboundSource): void {
       focusedSessionByClient.delete(client);
+      // A socket that went away takes the pause with it: a reconnecting app
+      // re-declares both halves itself, and holding the id here would leak one
+      // entry per client for the life of the core.
+      pausedFocusByClient.delete(client);
     },
   };
 }

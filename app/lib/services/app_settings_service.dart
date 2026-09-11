@@ -273,6 +273,17 @@ final appSettingsServiceProvider =
       ),
     );
 
+/// The user's crash/telemetry consent, as a single boolean.
+///
+/// Carried into the bridge host's stdin bootstrap on every spawn — the host has
+/// no settings store of its own, so this read is the whole of its consent (see
+/// `bridge/src/crash-reporting.ts`). Split out from the settings notifier so a
+/// spawn path depends on the ANSWER rather than on the prefs-seeded service,
+/// which is also what lets a test container override it with a plain value.
+final telemetryEnabledProvider = Provider<bool>(
+  (ref) => ref.watch(appSettingsServiceProvider).telemetryEnabled,
+);
+
 /// Compile-time relay URL baked in via `--dart-define=RELAY_URL=...`. Lets a
 /// build point at a specific relay (e.g. staging) without anyone touching App
 /// Settings. Empty (the default) means "no compile-time default".

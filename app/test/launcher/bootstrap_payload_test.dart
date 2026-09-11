@@ -97,5 +97,29 @@ void main() {
         expect(j['ownerBuild'], BuildInfo.summary);
       }
     });
+
+    // The host reads its bootstrap once and treats a missing flag as OFF, so a
+    // construction site that forgets to pass consent must fall SILENT — never
+    // report on a user who was never asked. Both constructors, both directions.
+    test('telemetry consent defaults to false and is carried when granted', () {
+      for (final p in [
+        BootstrapPayload(projectId: 'p1', projectPath: '/tmp/p1'),
+        BootstrapPayload.machineOnly(),
+      ]) {
+        final j = jsonDecode(p.toJsonLine().trim()) as Map<String, dynamic>;
+        expect(j['telemetryEnabled'], isFalse);
+      }
+      for (final p in [
+        BootstrapPayload(
+          projectId: 'p1',
+          projectPath: '/tmp/p1',
+          telemetryEnabled: true,
+        ),
+        BootstrapPayload.machineOnly(telemetryEnabled: true),
+      ]) {
+        final j = jsonDecode(p.toJsonLine().trim()) as Map<String, dynamic>;
+        expect(j['telemetryEnabled'], isTrue);
+      }
+    });
   });
 }

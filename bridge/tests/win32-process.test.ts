@@ -11,13 +11,15 @@
 // teardown path calls into it unconditionally, so an exception on Linux or
 // macOS would break a delete that has no such problem to begin with.
 import { afterEach, describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createKillOnCloseJob,
   listProcessesWithCwdUnder,
+  selfAndAncestors,
+  terminateProcesses,
   win32ProcessApiAvailable,
   type Win32Job,
 } from "../src/win32-process";
@@ -163,6 +165,15 @@ describe.skipIf(onWindows)("off Windows", () => {
   test("an unavailable enumeration survives a path that does not exist", () => {
     expect(listProcessesWithCwdUnder(join(tmpdir(), "antgrid-nonexistent"))).toEqual([]);
   });
+
+  test("a termination it cannot verify reports null rather than zero", () => {
+    // Null, not 0: the delete path reads a 0 as "every holder had already
+    // gone" and retries the remove on the strength of it. Off Windows nothing
+    // was looked at, and saying so is the difference between a retry that is
+    // pointless and one that is wrong.
+    expect(terminateProcesses([{ pid: 1, parentPid: 0, name: "init" }])).toBeNull();
+    expect(terminateProcesses([])).toBeNull();
+  });
 });
 
 describe.skipIf(!onWindows)("createKillOnCloseJob", () => {
@@ -271,5 +282,78 @@ describe.skipIf(!onWindows)("listProcessesWithCwdUnder", () => {
 
   test("a root nothing runs under reports no holders", () => {
     expect(listProcessesWithCwdUnder(join(tempDir(), "empty"))).toEqual([]);
+  });
+});
+
+describe.skipIf(!onWindows)("terminateProcesses", () => {
+  /** A detached sleeper whose current directory is `dir`, i.e. the exact thing
+   *  Windows refuses to delete a directory for. */
+  function holderIn(dir: string): number {
+    const child = spawn(process.execPath, ["-e", SLEEPER], {
+      cwd: dir, stdio: "ignore", detached: true, windowsHide: true,
+    });
+    child.unref();
+    return track(child.pid);
+  }
+
+  test("terminates a real holder, and reports how many it took", async () => {
+    const dir = tempDir();
+    const pid = holderIn(dir);
+    expect(await waitUntil(() => holds(dir, pid), 10_000)).toBe(true);
+
+    const holders = listProcessesWithCwdUnder(dir).filter((h) => h.pid === pid);
+    expect(holders).toHaveLength(1);
+    // The parent field is new, and this is the one place it can be checked
+    // against a known answer: the test spawned this child itself, so the
+    // creator Toolhelp records is this process. Read it from the wrong offset
+    // and every identity check downstream silently refuses every kill.
+    expect(holders[0]!.parentPid).toBe(process.pid);
+
+    expect(terminateProcesses(holders)).toBe(1);
+    expect(await waitUntil(() => !holds(dir, pid), 10_000)).toBe(true);
+  }, 30_000);
+
+  test("refuses an entry whose identity no longer matches, and leaves it running", async () => {
+    // A pid Windows has reissued looks exactly like this: the same number
+    // naming a different process. This is the whole reason a holder carries its
+    // parent and its image name at all — without the refusal, a delete that
+    // came back to a stale enumeration would kill a stranger's process.
+    const dir = tempDir();
+    const pid = holderIn(dir);
+    expect(await waitUntil(() => holds(dir, pid), 10_000)).toBe(true);
+    const holder = listProcessesWithCwdUnder(dir).find((h) => h.pid === pid)!;
+
+    expect(terminateProcesses([{ ...holder, parentPid: holder.parentPid + 1 }])).toBe(0);
+    expect(holds(dir, pid)).toBe(true);
+    expect(terminateProcesses([{ ...holder, name: "something-else.exe" }])).toBe(0);
+    expect(holds(dir, pid)).toBe(true);
+
+    // And the unmodified entry still works, so the refusals above are the
+    // identity check doing its job rather than the kill being broken.
+    expect(terminateProcesses([holder])).toBe(1);
+    expect(await waitUntil(() => !holds(dir, pid), 10_000)).toBe(true);
+  }, 30_000);
+
+  test("nothing to terminate is zero, and a pid that never existed is not a throw", () => {
+    expect(terminateProcesses([])).toBe(0);
+    expect(terminateProcesses([{ pid: 0x7ffffff0, parentPid: 4, name: "nothing.exe" }])).toBe(0);
+  });
+
+  test("refuses to terminate this process, however it is named", () => {
+    // Measured on a real machine, a managed checkout with a dev stack running
+    // in it is held as a current directory by dozens of processes, and the
+    // bridge's own ancestry can be among them — so a caller killing by cwd
+    // match WILL eventually hand this function the pid it is running as.
+    // Surviving to run the assertion is most of the assertion.
+    const self = listProcessesWithCwdUnder(process.cwd()).find((h) => h.pid === process.pid);
+    expect(self).toBeDefined();
+    expect(terminateProcesses([self!])).toBe(0);
+
+    const protectedPids = selfAndAncestors();
+    expect(protectedPids.has(process.pid)).toBe(true);
+    // The chain, not just the process: killing the app that launched the bridge
+    // is the failure this guards, and that is an ancestor rather than self.
+    expect(protectedPids.has(self!.parentPid)).toBe(true);
+    expect(protectedPids.size).toBeGreaterThan(1);
   });
 });

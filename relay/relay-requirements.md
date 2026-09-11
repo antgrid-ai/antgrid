@@ -9,7 +9,10 @@
 > `pair-connected` pairing ceremony below. Both are gone: the relay now
 > authenticates a single signed `hello` and routing is account-derived
 > (`mayRoute`), with no pairing step at all. See `relay/CLAUDE.md` for the
-> current protocol.
+> current protocol. The offline message queue in section 4 never shipped either:
+> a frame for a disconnected peer is answered `PEER_OFFLINE` and dropped, and
+> nothing is buffered or written to disk — which is what `/privacy` on the site
+> states, so do not implement section 4 without changing that page first.
 
 ---
 

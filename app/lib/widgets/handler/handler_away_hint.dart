@@ -46,11 +46,11 @@ class HandlerAwayHint extends ConsumerWidget {
             onTap: service == null || activeId == null
                 ? null
                 : () {
-                    // Fire-and-forget: past the explainer await everything runs
+                    // Fire-and-forget: past the sheet await everything runs
                     // on the container, never this widget's ref, and none of it
                     // can throw (the arm send is a plain fire-and-forget too).
                     unawaited(
-                      armWithFirstRunExplainer(
+                      armWithSheet(
                         context: context,
                         container: ref.container,
                         terminalId: activeId,

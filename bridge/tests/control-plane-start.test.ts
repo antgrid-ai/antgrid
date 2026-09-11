@@ -40,6 +40,7 @@ function makeAuthenticatingRelayFactory() {
         streamOpts.onAdmitted?.("s1");
         return { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} };
       },
+      noteStreamBound: () => {},
       sendPushDeliver: () => {},
     }) as unknown as RelayClient;
 }

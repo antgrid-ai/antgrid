@@ -7,7 +7,6 @@ import 'agent_catalog.dart';
 import 'cached_sessions.dart';
 import 'projects.dart' show projectsProvider;
 import 'providers.dart' show preferencesServiceProvider, storageServiceProvider;
-import 'recent_ports.dart';
 
 /// One purge step: a store name (for error reporting) plus the async clear
 /// itself.
@@ -76,10 +75,6 @@ Future<void> purgeEntryState(
       },
     ),
     (
-      store: 'recentPorts',
-      clear: () => ref.read(recentPortsStoreProvider).removeProject(id),
-    ),
-    (
       store: 'projectStatusCache',
       clear: () => ref.read(projectStatusCacheProvider).clear(id),
     ),
@@ -101,8 +96,8 @@ void _logPurgeFailure(String store, Object error) {
 /// silent leak with no compile-time signal.
 ///
 /// Everything below describes machines the account made reachable — their
-/// session lists, project labels and work status, the ports and file-tree state
-/// of the projects on them, the agents they advertised. Left at rest, it all
+/// session lists, project labels and work status, the file-tree state of the
+/// projects on them, the agents they advertised. Left at rest, it all
 /// renders on the very next launch, before (or without) any sign-in: the drawer
 /// and the Recent list read straight from these stores. So the next person to
 /// use the install sees the previous account's work.
@@ -134,10 +129,6 @@ Future<void> purgeAccountCaches(
     (
       store: 'cachedSessions',
       clear: () => ref.read(cachedSessionsStoreProvider).clear(),
-    ),
-    (
-      store: 'recentPorts',
-      clear: () => ref.read(recentPortsStoreProvider).clear(),
     ),
     (
       store: 'projectStatusCache',

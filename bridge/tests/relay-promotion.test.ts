@@ -11,6 +11,7 @@ import { expect, test } from "bun:test";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { createRelayPromotion, type MachineRelaySession, type LocalStreamAttachment } from "../src/relay-promotion";
+import type { ProjectCoreRemoteDeps } from "../src/project-core";
 import type { StreamHandle } from "../src/stream-mux";
 
 const ENABLE = createMessage("agent:enableRelay", {
@@ -25,7 +26,7 @@ const ENABLE = createMessage("agent:enableRelay", {
 
 function makeMachineSession(overrides: Partial<MachineRelaySession> = {}): MachineRelaySession {
   return {
-    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} }),
+    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendFrame: () => {} }),
     currentPeerPubkey: () => null,
     sendPushDeliver: () => {},
     agentDeviceId: "0bbd1111-2222-3333-4444-555566667777",
@@ -38,17 +39,20 @@ function makeMachineSession(overrides: Partial<MachineRelaySession> = {}): Machi
  *  bring-up, exactly one attach per promotion) did not. */
 function makeDeps(session: MachineRelaySession) {
   const calls = { ensureMachineRelay: 0, attach: 0, detach: 0 };
-  const handle: StreamHandle = { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} };
+  let attached: ProjectCoreRemoteDeps | null = null;
+  const handle: StreamHandle = { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendFrame: () => {} };
   return {
     calls,
     ensureMachineRelay: async (_msg: Extract<AbMessage, { type: "agent:enableRelay" }>) => {
       calls.ensureMachineRelay++;
       return session;
     },
-    attach: (): LocalStreamAttachment => {
+    attach: (remote: ProjectCoreRemoteDeps): LocalStreamAttachment => {
       calls.attach++;
+      attached = remote;
       return { handle, detach: () => { calls.detach++; } };
     },
+    get attached() { return attached; },
   };
 }
 
@@ -70,6 +74,9 @@ test("enableRelay attaches the core as a stream and emits relayReady from the ma
   expect(ready).toBeDefined();
   // @ts-expect-error narrowed at runtime
   expect(ready.agentDeviceId).toBe(session.agentDeviceId);
+  // The promoted core seals pushes addressed to the machine the wizard just
+  // brought up; tsc alone would accept any string here.
+  expect(deps.attached?.machineDeviceId()).toBe(session.agentDeviceId);
 
   ctrl.stop();
   expect(deps.calls.detach).toBe(1);
@@ -130,7 +137,7 @@ test("a disableRelay landing mid-start cancels the in-flight attach", async () =
   const ctrl = createRelayPromotion({
     bus,
     ensureMachineRelay: async () => { ensureCalls++; return gate; },
-    attach: () => { attachCalls++; return { handle: { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} }, detach: () => {} }; },
+    attach: () => { attachCalls++; return { handle: { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendFrame: () => {} }, detach: () => {} }; },
   });
 
   expect(ctrl.handleInbound(ENABLE)).toBe(true); // start() begins, awaiting ensureMachineRelay
@@ -159,7 +166,7 @@ test("ensureMachineRelay rejecting surfaces relayError(ENABLE_FAILED) and allows
       if (fail) throw new Error("boom: machine socket failed to start");
       return makeMachineSession();
     },
-    attach: () => { attachCalls++; return { handle: { streamId: "s1", detach: () => {}, sendTunnel: () => {}, sendFrame: () => {} }, detach: () => {} }; },
+    attach: () => { attachCalls++; return { handle: { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const, sendFrame: () => {} }, detach: () => {} }; },
   });
 
   ctrl.handleInbound(ENABLE);

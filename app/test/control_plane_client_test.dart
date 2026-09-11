@@ -537,6 +537,7 @@ void main() {
           'projectId': 'p1',
           'branch': 'dev',
           'allowActiveSessions': true,
+          'stashIfDirty': false,
         });
       },
     );

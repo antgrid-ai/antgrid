@@ -2,11 +2,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 
 import '../connection/supervisor_state.dart';
+import '../launcher/host_control_client.dart';
 import '../launcher/host_controller.dart';
 import '../launcher/local_agent_launcher.dart';
+import '../launcher/project_resolve.dart';
 import '../project/project_session_registry.dart';
 import '../services/control_plane_client.dart';
 import '../util/device_id.dart';
+import '../util/netwatch.dart';
 import 'account_agents.dart';
 import 'agent_transport.dart';
 import 'drawer_expansion.dart';
@@ -20,6 +23,28 @@ import 'ui_attention_providers.dart';
 /// host daemon and hands out a verified port+token via `ensureHost`).
 final hostControllerProvider = Provider<HostController>(
   (_) => LocalAgentLauncher.sharedHost,
+);
+
+/// Resolves a folder's host-owned repository identity, given only the folder
+/// path — the seam widgets call through so tests can substitute a fake
+/// without spawning a real bridge host.
+typedef LocalProjectResolver = Future<ResolvedLocalProject> Function(
+  String folder,
+);
+
+/// Default implementation: ensures the singleton host (spawning if needed —
+/// this is the widget-facing seam, unlike the poll-driven closure in
+/// `app_shell.dart`, which must never respawn) and resolves through it.
+final localProjectResolverProvider = Provider<LocalProjectResolver>(
+  (ref) => (folder) async {
+    final host = await ref.read(hostControllerProvider).ensureHost();
+    final client = HostControlClient(port: host.controlPort, token: host.token);
+    try {
+      return await resolveLocalProject(client, folder);
+    } finally {
+      client.close();
+    }
+  },
 );
 
 /// A [ControlPlaneClient] bound to the relay control plane of the remote machine
@@ -51,9 +76,22 @@ final controlPlaneClientForProvider = FutureProvider.family<ControlPlaneClient?,
   // connection; a null peek just means no live socket → no presence to feed.
   final conn = ref.read(relayConnectionManagerProvider).peek(bareDeviceUuid);
   final presence = conn?.relay.peerPresenceStream;
+  // The capture tap goes on the SAME RelayService the presence above came from
+  // — the socket this control plane rides. Absent when there is no live one, in
+  // which case the client simply is not a capture surface: the machine's request
+  // to arm has nothing to arm.
+  final relay = conn?.relay;
   final client = ControlPlaneClient(
     transport: transport,
     peerPresence: presence,
+    // `|| netwatchEnabled`: a desktop may already be capturing to its own
+    // netwatch.log, and a remote DISARM must not take that with it — the two
+    // arming routes share one recorder and neither owns the tap.
+    netwatchArm: relay == null
+        ? null
+        : (armed) => relay.netTap = (armed || netwatchEnabled)
+              ? ensureNetwatch().tap
+              : null,
   );
   ref.onDispose(client.dispose);
   return client;

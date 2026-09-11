@@ -180,15 +180,16 @@ describe("a generated title survives a restart", () => {
     expect(sm.get(s.id)!.name).toBe("Fix S3 retry backoff");
   });
 
-  test("a launch that resumes nothing starts a conversation the name is not about", () => {
+  test("a missing transcript does not discard the resumed conversation's title", () => {
     const store = newStore();
     const sm = mk(store);
     const s = sm.create(undefined, { tool: "claude-code" });
     sm.setAgentSession(s.id, "sess-dead", "/no/such/file.jsonl");
     sm.applyAutoName(s.id, "Fix S3 retry backoff", "self");
 
-    sm.start(s.id); // transcript gone → no resume argv → fresh conversation
-    expect(sm.hasFinalAutoTitle(s.id)).toBe(false);
+    sm.start(s.id);
+    expect(sm.hasFinalAutoTitle(s.id)).toBe(true);
+    expect(sm.get(s.id)?.agentSessionId).toBe("sess-dead");
   });
 
   test("a new conversation under the running agent releases it", () => {

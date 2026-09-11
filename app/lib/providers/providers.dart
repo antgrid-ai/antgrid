@@ -94,7 +94,9 @@ final relayEpochProvider = FutureProvider<int>((ref) async {
   // SharedPreferencesAsync, not the legacy getInstance() — this repo's prefs
   // convention (see device_provisioning.dart) and the only API the in-memory
   // test platform backs.
-  final prefs = SharedPreferencesAsync();
+  final prefs = SharedPreferencesAsync(
+    options: desktopSharedPreferencesOptions,
+  );
   var stored = 0;
   try {
     stored = await prefs.getInt(key) ?? 0;
@@ -140,28 +142,42 @@ final terminalStateProvider = StreamProvider<TerminalState>((ref) {
   return seededStream(() => service.currentState, service.stateStream);
 });
 
+/// A message paired with the drawer entryId of the project it came from.
+///
+/// The entryId is the only project attribution these fan-in streams can carry:
+/// `HandlerEscalation` and `TerminalNotificationMessage` name no project at all,
+/// and a consumer that falls back to the FOCUSED project is wrong for exactly
+/// the case this fan-out exists to serve — a background project's agent. The id
+/// is the registry key, i.e. already in its correct local-or-remote shape.
+typedef ProjectScoped<T extends Object> = ({String entryId, T message});
+
 /// Agent desktop-notification signals (OSC 9 / OSC 777) merged across
 /// ALL warm projects — not just the focused one — so a background project's
 /// agent can still raise a toast / OS notification. Rebuilds (and re-subscribes)
 /// when the warm set changes or a session resolves; the warm-set is small
 /// (kWarmCap), so the per-rebuild resubscribe is cheap.
 final terminalNotificationsProvider =
-    StreamProvider<TerminalNotificationMessage>((ref) {
+    StreamProvider<ProjectScoped<TerminalNotificationMessage>>((ref) {
       final openProjects = ref.watch(projectSessionRegistryProvider);
-      final controller = StreamController<TerminalNotificationMessage>();
+      final controller =
+          StreamController<ProjectScoped<TerminalNotificationMessage>>();
       final subs = <StreamSubscription<dynamic>>[];
       for (final id in openProjects) {
         final session = ref.watch(projectSessionProvider(id)).value;
         if (session == null) continue;
         for (final bundle in session.checkoutServiceBundles) {
           subs.add(
-            bundle.terminalService.notificationStream.listen(controller.add),
+            bundle.terminalService.notificationStream.listen(
+              (m) => controller.add((entryId: id, message: m)),
+            ),
           );
         }
         subs.add(
           session.checkoutServiceBundleStream.listen((bundle) {
             subs.add(
-              bundle.terminalService.notificationStream.listen(controller.add),
+              bundle.terminalService.notificationStream.listen(
+                (m) => controller.add((entryId: id, message: m)),
+              ),
             );
           }),
         );
@@ -178,36 +194,40 @@ final terminalNotificationsProvider =
 /// Plugin/hook-sourced agent notifications (notification:push) merged across all
 /// warm projects — same fan-out as terminalNotificationsProvider but for the
 /// intent-aware plugin path. Rebuilds when the warm set changes.
-final agentPushNotificationsProvider = StreamProvider<NotificationPushMessage>((
-  ref,
-) {
-  final openProjects = ref.watch(projectSessionRegistryProvider);
-  final controller = StreamController<NotificationPushMessage>();
-  final subs = <StreamSubscription<dynamic>>[];
-  for (final id in openProjects) {
-    final session = ref.watch(projectSessionProvider(id)).value;
-    if (session == null) continue;
-    for (final bundle in session.checkoutServiceBundles) {
-      subs.add(
-        bundle.terminalService.pushNotificationStream.listen(controller.add),
-      );
-    }
-    subs.add(
-      session.checkoutServiceBundleStream.listen((bundle) {
+final agentPushNotificationsProvider =
+    StreamProvider<ProjectScoped<NotificationPushMessage>>((ref) {
+      final openProjects = ref.watch(projectSessionRegistryProvider);
+      final controller =
+          StreamController<ProjectScoped<NotificationPushMessage>>();
+      final subs = <StreamSubscription<dynamic>>[];
+      for (final id in openProjects) {
+        final session = ref.watch(projectSessionProvider(id)).value;
+        if (session == null) continue;
+        for (final bundle in session.checkoutServiceBundles) {
+          subs.add(
+            bundle.terminalService.pushNotificationStream.listen(
+              (m) => controller.add((entryId: id, message: m)),
+            ),
+          );
+        }
         subs.add(
-          bundle.terminalService.pushNotificationStream.listen(controller.add),
+          session.checkoutServiceBundleStream.listen((bundle) {
+            subs.add(
+              bundle.terminalService.pushNotificationStream.listen(
+                (m) => controller.add((entryId: id, message: m)),
+              ),
+            );
+          }),
         );
-      }),
-    );
-  }
-  ref.onDispose(() {
-    for (final s in subs) {
-      s.cancel();
-    }
-    controller.close();
-  });
-  return controller.stream;
-});
+      }
+      ref.onDispose(() {
+        for (final s in subs) {
+          s.cancel();
+        }
+        controller.close();
+      });
+      return controller.stream;
+    });
 
 /// Handler "needs you" escalations (handler:escalation) merged across all warm
 /// projects — same fan-out as [agentPushNotificationsProvider]. Drives the
@@ -220,27 +240,32 @@ final agentPushNotificationsProvider = StreamProvider<NotificationPushMessage>((
 /// Each subscribe therefore also seeds the project's currently-pending
 /// escalations; the consumer de-dupes by escalationId, so re-seeding the same id
 /// across rebuilds is harmless.
-final handlerEscalationsProvider = StreamProvider<HandlerEscalation>((ref) {
-  final openProjects = ref.watch(projectSessionRegistryProvider);
-  final controller = StreamController<HandlerEscalation>();
-  final subs = <StreamSubscription<HandlerEscalation>>[];
-  for (final id in openProjects) {
-    final session = ref.watch(projectSessionProvider(id)).value;
-    if (session == null) continue;
-    final handler = session.handlerService;
-    subs.add(handler.escalationStream.listen(controller.add));
-    for (final esc in handler.currentState.escalations) {
-      controller.add(esc);
-    }
-  }
-  ref.onDispose(() {
-    for (final s in subs) {
-      s.cancel();
-    }
-    controller.close();
-  });
-  return controller.stream;
-});
+final handlerEscalationsProvider =
+    StreamProvider<ProjectScoped<HandlerEscalation>>((ref) {
+      final openProjects = ref.watch(projectSessionRegistryProvider);
+      final controller = StreamController<ProjectScoped<HandlerEscalation>>();
+      final subs = <StreamSubscription<HandlerEscalation>>[];
+      for (final id in openProjects) {
+        final session = ref.watch(projectSessionProvider(id)).value;
+        if (session == null) continue;
+        final handler = session.handlerService;
+        subs.add(
+          handler.escalationStream.listen(
+            (esc) => controller.add((entryId: id, message: esc)),
+          ),
+        );
+        for (final esc in handler.currentState.escalations) {
+          controller.add((entryId: id, message: esc));
+        }
+      }
+      ref.onDispose(() {
+        for (final s in subs) {
+          s.cancel();
+        }
+        controller.close();
+      });
+      return controller.stream;
+    });
 
 /// The agent terminal the workspace is showing: the focused session's own tab.
 ///
@@ -288,6 +313,22 @@ final handlerStateProvider = StreamProvider<HandlerState>((ref) {
   final service = focusedSessionOrNull(ref)?.handlerService;
   if (service == null) return const Stream<HandlerState>.empty();
   return seededStream(() => service.currentState, service.stateStream);
+});
+
+/// [handlerStateProvider] narrowed to the focused session — what the Handler
+/// tab renders.
+///
+/// Session-scoped for the reason the files, git and terminals tabs are
+/// checkout-scoped: the workspace panel answers for the session in focus, and a
+/// tab mixing two sessions' rows makes the reader do the routing.
+///
+/// The unnarrowed [handlerStateProvider] stays the source for every surface
+/// that genuinely spans sessions — above all the agent bar's NEEDS YOU pill,
+/// which is what says another session is waiting and so must never narrow.
+final focusedSessionHandlerStateProvider = Provider<HandlerState>((ref) {
+  final state = ref.watch(handlerStateProvider).value;
+  if (state == null) return const HandlerState.initial();
+  return state.forTerminal(ref.watch(activeSessionIdProvider));
 });
 
 /// Per-project SessionsService façade.

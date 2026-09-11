@@ -15,6 +15,7 @@ const ENTRIES = {
   checkout: "src/ui/entries/checkout.ts",
   dashboard: "src/ui/entries/dashboard.ts",
   devices: "src/ui/entries/devices.ts",
+  waitlist: "src/ui/entries/waitlist.ts",
 } as const;
 
 // Fonts reach the manifest as dependencies of styles.css, not as inputs, so

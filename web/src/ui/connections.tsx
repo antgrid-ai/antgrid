@@ -1,9 +1,9 @@
-import { Layout } from "./layout.js";
+import { Layout, type LayoutUser } from "./layout.js";
 import type { ConnectionSummary } from "../relay/push.js";
 import { fmtAge } from "./format.js";
 
 export function ConnectionsPage(props: {
-  user: { email: string | null };
+  user: LayoutUser;
   connections: ConnectionSummary[] | null;
   now: number;
 }) {

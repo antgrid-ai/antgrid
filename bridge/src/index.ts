@@ -11,6 +11,7 @@ import { resolveAbDir } from "./antgrid-dir";
 import { startOwnerWatchdog } from "./owner-watchdog";
 import { augmentHostPath } from "./host-path";
 import { runHookInvocation } from "./hook-runner";
+import { initCrashReporting, captureBridgeError, flushCrashReports } from "./crash-reporting";
 
 // Component-tagged child for this module's own lifecycle logs.
 const log = logger.child({ component: "bridge" });
@@ -60,6 +61,13 @@ program
   .argument("<event>")
   .argument("[payload]")
   .action(async (agent: string, event: string, payload?: string) => {
+    // Deliberately NOT crash-reported. A hook is spawned by the agent CLI, not
+    // by the app, so it is handed no bootstrap payload and there is no consent
+    // to act on — and the two costs land on a path the agent blocks on for
+    // every tool use: SDK init on entry, and a transport flush before an exit
+    // that is otherwise immediate. The field failure this would seem to catch
+    // (a hook that never runs at all — see the MSIX `<Application>` note in
+    // CLAUDE.md) is a CreateProcess denial, which no in-process SDK can observe.
     await runHookInvocation({ agent, event, payload });
     // Exit explicitly: hooks are advisory and must never linger. An agent that
     // holds this process's stdin open (copilot does) would otherwise keep the
@@ -103,6 +111,20 @@ program
       process.exit(64); // EX_USAGE
     }
 
+    // First thing after the payload, because the payload is where consent
+    // arrives — nothing before this point is reportable, which is the honest
+    // answer rather than a gap to close. Absence of the flag is OFF: a host
+    // started by the CLI or a test has nobody who consented to anything.
+    if (
+      initCrashReporting({
+        enabled: payload.telemetryEnabled ?? false,
+        dsn: process.env.SENTRY_DSN ?? "",
+        release: payload.ownerBuild,
+      })
+    ) {
+      log.debug("crash reporting enabled");
+    }
+
     const host = new HostServer({
       ...(payload.machine
         ? {
@@ -137,8 +159,6 @@ program
       // graceful path as SIGTERM (defined below) so PTYs are killed cleanly.
       onShutdownRequested: () => void shutdown("app-close"),
     });
-
-    await host.startControlPlane();    // bind loopback control + write host.json
 
     // RSS sampler runs for the whole host process when --debug-perf is set —
     // started here (not gated on a first project) so a machine-only warm-up
@@ -179,15 +199,22 @@ program
         await host.shutdown(reason);
       } catch (err) {
         log.error("Shutdown failed: %s", err);
+        captureBridgeError(err, "shutdown");
       }
+      // After the drain, not before: this is the last chance to send whatever
+      // the SDK's top-level handlers queued. ~15ms when there is nothing to
+      // send, so a clean exit is not measurably slower for a consenting host.
+      await flushCrashReports();
       clearTimeout(bail);
       process.exit(exitCode);
     };
 
-    // Wire teardown BEFORE the (possibly multi-second) first-project open, so an
-    // owner death or signal mid-open can't leave the host registered on the
-    // relay for an app that's already gone. The owner-watchdog self-exits when
-    // the spawning app's pid vanishes — the backstop for exits that never reach
+    // Wire teardown BEFORE the control plane comes up, so an owner death or a
+    // signal during bring-up or the first-project open can't leave the host
+    // registered on the relay for an app that's already gone. `host.shutdown()`
+    // is null-safe against a host that never started, which is what lets this
+    // sit ahead of it. The owner-watchdog self-exits when the spawning app's
+    // pid vanishes — the backstop for exits that never reach
     // the app's didRequestAppExit teardown (force-kill, crash, or a window close
     // under `flutter run --machine`), which would otherwise orphan this
     // machine-level host.
@@ -200,8 +227,25 @@ program
     process.on("SIGINT", () => shutdown("SIGINT"));
     process.on("SIGTERM", () => shutdown("SIGTERM"));
     process.on("SIGHUP", () => shutdown("SIGHUP"));
+    // These own the EXIT; Sentry's own handler for each owns the CAPTURE (it is
+    // installed by initCrashReporting above), which is what keeps a fatal marked
+    // `handled: false` rather than re-reported here as an ordinary handled
+    // error — so there is deliberately no captureBridgeError call in either.
+    //
+    // **These must be registered for as much of the process's life as possible.**
+    // The SDK decides whether to exit on its own AT CRASH TIME, by counting the
+    // OTHER uncaughtException listeners: with one of ours present it defers and
+    // this teardown sweeps the PTYs; as the sole listener it logs and
+    // `process.exit(1)`s, skipping the sweep. Hence the order below: everything
+    // between initCrashReporting and here is straight-line setup that opens
+    // nothing, whereas startControlPlane publishes host.json and only THEN
+    // spends seconds on the relay handshake and OAuth mint — with host.json on
+    // disk the app can drive project:open over loopback for that whole stretch,
+    // so it is not a window in which "no PTY exists yet" may be assumed.
     process.on("uncaughtException", (err) => { log.error("Uncaught exception: %s", err); shutdown("uncaughtException"); });
     process.on("unhandledRejection", (err) => { log.error("Unhandled rejection: %s", err); shutdown("unhandledRejection"); });
+
+    await host.startControlPlane();    // bind loopback control + write host.json
 
     // Inline the first project when one was provided. An eager warm-up spawn
     // (app launch) sends no firstProject — the control plane is already up from
@@ -214,6 +258,12 @@ program
         await host.open(payload.firstProject.projectId, payload.firstProject.projectPath, payload.firstProject.mode);
       } catch (err) {
         console.error(`antgrid-bridge: failed to open first project: ${(err as Error).message}`);
+        // Reported explicitly: this exit is a bare process.exit, so it reaches
+        // neither the shutdown path's flush nor either top-level handler, and a
+        // mint failure against a revoked credential pair lands here and nowhere
+        // else.
+        captureBridgeError(err, "first-project-open");
+        await flushCrashReports();
         process.exit(1);
       }
     }
@@ -234,6 +284,68 @@ program
     const cfg = await buildConfigFromBootstrap({ cwd: process.cwd(), io: consoleBootstrapIO() });
     writeConfigYaml(path, cfg);
     console.log(`Written to ${path}. Open this project in the Antgrid desktop app — it launches and manages the bridge for you.`);
+  });
+
+// antgrid watch subcommand — live capture of both wires this machine owns: the
+// relay socket, and the loopback socket a co-located desktop app rides. Reads
+// host.json for the control port + token, so it attaches to the ALREADY-RUNNING
+// host rather than starting anything.
+program
+  .command("watch")
+  .description("Stream relay and loopback frames from the running host (connection debugging)")
+  .option("--json", "Emit raw JSONL instead of the rendered table")
+  .option("--export <file>", "Append raw JSONL to a file as well")
+  .option("--limit <n>", "Buffered events to replay before following (default 200)")
+  .option("--no-follow", "Print the buffered snapshot and exit")
+  .option("--dir <path>", "ANTGRID_DIR of the target host (debug builds use ~/.antgrid-dev)")
+  .option("--join <file>", "Pair this capture against an app-side netwatch.log (implies --no-follow)")
+  .option("--remote", "Ask the connected app to capture its side and ship it here (the only way to reach a phone)")
+  .option("--local", "Show only loopback frames — the transport a desktop app on this machine uses")
+  .option("--relay", "Show only relay frames — the transport a phone uses")
+  .option("--bodies", "Record loopback frame plaintext while this runs (truncated per frame; metadata is always recorded)")
+  .option("--ui", "Open the capture in its own window instead of this terminal, and exit")
+  .option("--no-open", "With --ui, print the link rather than launching a browser")
+  .action(async (opts: { json?: boolean; export?: string; limit?: string; follow?: boolean; dir?: string; join?: string; remote?: boolean; local?: boolean; relay?: boolean; bodies?: boolean; ui?: boolean; open?: boolean }) => {
+    const { runNetwatchCli } = await import("./cli/netwatch");
+    const limit = opts.limit === undefined ? undefined : Number(opts.limit);
+    // Zero is admitted, and means it: the /netwatch stream reads `limit=0` as
+    // "no replay, live tail only", which is the natural way to watch what
+    // happens NEXT without a screenful of history in front of it.
+    if (limit !== undefined && (!Number.isFinite(limit) || limit < 0)) {
+      console.error("antgrid watch: --limit must be zero or a positive number");
+      process.exit(1);
+    }
+    process.exit(await runNetwatchCli({ ...opts, limit }));
+  });
+
+// antgrid calls subcommand — the headless model calls this machine spawns on the
+// user's own provider accounts: session titles, and the handler's decisions and
+// extractions. Same attachment as `watch` (host.json's port and bearer, an
+// already-running host, a ring that was recording before anyone attached), and
+// the same loopback-only reach: everything it asks for is a ControlRequest verb
+// answered in this process, so no prompt it can arm ever leaves the machine.
+program
+  .command("calls")
+  .description("Stream headless model calls from the running host (cost and retry-budget debugging)")
+  .option("--json", "Emit the raw records instead of the rendered attempts")
+  .option("--export <file>", "Append the records to a file as JSONL (metadata only, never prompt text)")
+  .option("--limit <n>", "Buffered records to replay before following (default 600; a call is three)")
+  .option("--no-follow", "Print the buffered snapshot and exit")
+  .option("--dir <path>", "ANTGRID_DIR of the target host (debug builds use ~/.antgrid-dev)")
+  .option("--purpose <kind>", "Show only title, decision or extraction calls")
+  .option("--prompts", "Record the prompt parts the bridge authored while this runs (scaffold, goal, a count for the backlog, a digest for the transcript)")
+  .option("--context", "Also record the transcript and PTY scrollback the prompt was built from, and the model's answer — anything the user typed or the agent read")
+  .action(async (opts: { json?: boolean; export?: string; limit?: string; follow?: boolean; dir?: string; purpose?: string; prompts?: boolean; context?: boolean }) => {
+    const { runModelwatchCli } = await import("./cli/modelwatch");
+    const limit = opts.limit === undefined ? undefined : Number(opts.limit);
+    // Zero is admitted for the reason it is on `watch`: `limit=0` on the stream
+    // means "no replay, live tail only", which is how you watch the NEXT call
+    // without a screenful of history in front of it.
+    if (limit !== undefined && (!Number.isFinite(limit) || limit < 0)) {
+      console.error("antgrid calls: --limit must be zero or a positive number");
+      process.exit(1);
+    }
+    process.exit(await runModelwatchCli({ ...opts, limit }));
   });
 
 // antgrid phones subcommand — inspect and drop local phone records. Whether a

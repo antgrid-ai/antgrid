@@ -1,0 +1,26 @@
+---
+import Rail from "./Rail.astro";
+
+// The drawer both session scenes carry, in one place because they are one
+// session in one window — spelling the list twice is how the workspace and the
+// handler quietly become two different machines with two different fleets.
+//
+// Three machines, not one: the drawer is where a fleet is actually reached, so
+// a scene showing only `This machine` sells a single-machine tool. The sample
+// project sits under the local band (that is where it opens), a second machine
+// is expanded to show projects arriving from elsewhere, and the third is left
+// collapsed with its aggregate dot lit — which is the app's own way of saying a
+// session over there needs a human without listing it.
+---
+<Rail
+  entries={[
+    { kind: "machine", label: "This machine", local: true },
+    { kind: "project", label: "demo-shop (sample)" },
+    { kind: "session", label: "Add checkout validation", active: true },
+    { kind: "session", label: "Fix flaky cart test" },
+    { kind: "machine", label: "macbook-pro" },
+    { kind: "project", label: "api" },
+    { kind: "project", label: "web" },
+    { kind: "machine", label: "prod-box", collapsed: true, attention: true },
+  ]}
+/>

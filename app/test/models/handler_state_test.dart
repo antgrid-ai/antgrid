@@ -405,4 +405,219 @@ void main() {
       expect(w.blockedTotal, 1);
     });
   });
+
+  group('forTerminal', () {
+    HandlerSnapshot snap(String id, String terminalId) => HandlerSnapshot(
+      snapshotId: id,
+      terminalId: terminalId,
+      at: 1,
+      action: 'reset_hard',
+      trigger: 'git reset --hard HEAD~1',
+      summary: 'stashed 3 files',
+      state: 'available',
+    );
+    HandlerActivityRecord rec(String id, String terminalId) =>
+        HandlerActivityRecord(
+          recordId: id,
+          at: 1,
+          terminalId: terminalId,
+          decision: 'handle',
+          reason: 'answered the lint prompt',
+        );
+    HandlerWrapUp wrap(String id, String terminalId) => HandlerWrapUp(
+      wrapUpId: id,
+      terminalId: terminalId,
+      at: 1,
+      goal: 'ship it',
+      outcomes: const [],
+      blockedTotal: 0,
+      blockedReasons: const [],
+    );
+
+    final mixed = HandlerState(
+      defaultTool: 'claude',
+      sessions: {'t1': _session('t1', pending: 1), 't2': _session('t2', pending: 2)},
+      escalations: [
+        _esc('e1', urgency: 'normal', at: 1),
+        HandlerEscalation(
+          escalationId: 'e2',
+          terminalId: 't2',
+          question: 'q',
+          reasoning: 'r',
+          draftReply: 'd',
+          urgency: 'normal',
+          at: 2,
+        ),
+      ],
+      activity: [rec('r1', 't1'), rec('r2', 't2')],
+      snapshots: [snap('s1', 't1'), snap('s2', 't2')],
+      wrapUps: [wrap('w1', 't1'), wrap('w2', 't2')],
+      pendingUndo: const {'s1', 's2'},
+      pendingInstructions: const {
+        't1': ['rename the codec'],
+        't2': ['bump the fixture'],
+      },
+    );
+
+    test('keeps every collection to the terminal asked for', () {
+      final one = mixed.forTerminal('t1');
+      expect(one.sessions.keys, ['t1']);
+      expect(one.escalations.map((e) => e.escalationId), ['e1']);
+      expect(one.activity.map((a) => a.recordId), ['r1']);
+      expect(one.snapshots.map((s) => s.snapshotId), ['s1']);
+      expect(one.wrapUps.map((w) => w.wrapUpId), ['w1']);
+      expect(one.pendingInstructionsFor('t1'), ['rename the codec']);
+      expect(one.pendingInstructionsFor('t2'), isEmpty);
+    });
+
+    test('drops a pending undo whose offer it no longer holds', () {
+      // The id would otherwise mark a row that is not on this screen, and
+      // outlive the offer it belongs to.
+      expect(mixed.forTerminal('t1').pendingUndo, {'s1'});
+    });
+
+    test('carries the project judge default through', () {
+      // Project-wide by definition, and the session card resolves its judge
+      // label against it.
+      expect(mixed.forTerminal('t1').defaultTool, 'claude');
+      expect(mixed.forTerminal(null).defaultTool, 'claude');
+    });
+
+    test('narrows an unfocused screen to nothing, never to everything', () {
+      // An unresolved focus names no session, so answering it with the whole
+      // project's state would undo the narrowing exactly when it is needed.
+      final none = mixed.forTerminal(null);
+      expect(none.anyArmed, isFalse);
+      expect(none.escalations, isEmpty);
+      expect(none.activity, isEmpty);
+      expect(none.snapshots, isEmpty);
+      expect(none.wrapUps, isEmpty);
+    });
+
+    test('a terminal with nothing armed still keeps its leftovers', () {
+      // Disarm is not the end of the session: the undo it took and the report
+      // it wrote are read afterwards, on this same tab. With every session
+      // gone, every offer is an orphan — and an orphan belongs to no live
+      // session, so no focus can be moved to reach it.
+      final after = mixed.copyWith(sessions: const {}).forTerminal('t1');
+      expect(after.anyArmed, isFalse);
+      expect(after.snapshots.map((s) => s.snapshotId), ['s1', 's2']);
+      expect(after.wrapUps.map((w) => w.wrapUpId), ['w1', 'w2']);
+    });
+
+    test('an offer whose session is gone is never stranded', () {
+      // A wrap-up DISARMS the session it reports on, so filtering these by
+      // terminalId alone would hide the account of every finished session — and
+      // the undo offer behind it — behind a focus that can never name it again.
+      // A live session still owns its own, so the narrowing holds where it can.
+      final t2Done = mixed.copyWith(
+        sessions: {'t1': _session('t1', pending: 1)},
+      );
+      final one = t2Done.forTerminal('t1');
+      expect(one.snapshots.map((s) => s.snapshotId), ['s1', 's2']);
+      expect(one.wrapUps.map((w) => w.wrapUpId), ['w1', 'w2']);
+      // The per-session collections stay narrowed regardless.
+      expect(one.sessions.keys, ['t1']);
+      expect(one.activity.map((a) => a.recordId), ['r1']);
+    });
+
+    test('leaves the project-wide count alone for the surfaces that need it', () {
+      // The agent bar's NEEDS YOU pill reads the unnarrowed state; narrowing in
+      // place would take away the only thing saying another session is waiting.
+      expect(mixed.pendingEscalations, 3);
+      expect(mixed.forTerminal('t1').pendingEscalations, 1);
+    });
+  });
+
+  group('personality on the wire', () {
+    Map<String, dynamic> wire({String? personality}) => {
+      'terminalId': 't1',
+      'state': 'watching',
+      'pendingEscalations': 0,
+      'armedAt': 1,
+      'goal': 'ship it',
+      'backlog': const [],
+      'personality': ?personality,
+    };
+
+    test('a reported posture round-trips', () {
+      for (final preset in HandlerPersonality.values) {
+        final s = HandlerSessionState.fromWire(
+          wire(personality: handlerPersonalityToWire(preset)),
+        )!;
+        expect(s.personality, preset);
+      }
+    });
+
+    test('a bridge that says nothing leaves it null', () {
+      // Never defaulted to watchdog here: the sheet supplies the default it
+      // shows, and a model that invents one cannot tell "not reported" from
+      // "reported as the default".
+      expect(HandlerSessionState.fromWire(wire())!.personality, isNull);
+    });
+
+    test('an unrecognised posture is null, not a confident guess', () {
+      expect(handlerPersonalityFromWire('yolo'), isNull);
+      expect(handlerPersonalityFromWire(42), isNull);
+    });
+  });
+
+  group('HandlerEntitlement.fromWire', () {
+    test('a refusal round-trips with the plan it names', () {
+      final e = HandlerEntitlement.fromWire({
+        'reason': 'not_entitled',
+        'tier': 'free',
+      })!;
+      expect(e.reason, HandlerEntitlementReason.notEntitled);
+      expect(e.tier, 'free');
+    });
+
+    test('an unreadable claim names no tier, because it has none to name', () {
+      final e = HandlerEntitlement.fromWire({'reason': 'unreadable'})!;
+      expect(e.reason, HandlerEntitlementReason.unreadable);
+      expect(e.tier, isNull);
+    });
+
+    test('a reason this app cannot name is still a refusal', () {
+      // Dropping it would restore the silence the field exists to end, and
+      // guessing which of the two known reasons it is would prescribe a fix
+      // that may be the wrong one — so the refusal stands with no reason.
+      final e = HandlerEntitlement.fromWire({'reason': 'seat_revoked'})!;
+      expect(e.reason, isNull);
+    });
+
+    test('nothing, or a malformed payload, is not a refusal', () {
+      // Presence is the whole signal, so inventing one out of noise would gate
+      // arming with nothing to say about why.
+      expect(HandlerEntitlement.fromWire(null), isNull);
+      expect(HandlerEntitlement.fromWire('not_entitled'), isNull);
+      expect(HandlerEntitlement.fromWire({'tier': 'free'}), isNull);
+    });
+  });
+
+  group('entitlement on the project state', () {
+    const refused = HandlerEntitlement(
+      reason: HandlerEntitlementReason.notEntitled,
+      tier: 'free',
+    );
+
+    test('a refusal can be cleared, not only set', () {
+      // An upgrade lifts it, and a gate that could only ever latch on would
+      // outlive the thing it describes with no frame able to correct it.
+      final gated = const HandlerState.initial().copyWith(entitlement: refused);
+      expect(gated.entitlement, refused);
+      expect(gated.copyWith(clearEntitlement: true).entitlement, isNull);
+      // An untouched copy carries it, like every other field here.
+      expect(gated.copyWith(defaultTool: 'claude-code').entitlement, refused);
+    });
+
+    test('it survives a narrowing that names no session', () {
+      // Project-scoped like defaultTool: the shield that most needs it sits
+      // over a session that is not armed, which is exactly when forTerminal
+      // has nothing to narrow to.
+      final state = const HandlerState.initial().copyWith(entitlement: refused);
+      expect(state.forTerminal(null).entitlement, refused);
+      expect(state.forTerminal('t1').entitlement, refused);
+    });
+  });
 }

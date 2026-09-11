@@ -36,46 +36,10 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     });
 
-    testWidgets('shows port list when ports available', (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-
-      final state = PreviewState(
-        ports: [
-          const PortInfo(port: 3000, processName: 'node'),
-          const PortInfo(port: 8080, label: 'vite'),
-        ],
-      );
-
-      await tester.pumpWidget(buildTestWidget(previewState: AsyncData(state)));
-      await tester.pump();
-
-      expect(find.text('Port 3000'), findsOneWidget);
-      expect(find.text('Port 8080'), findsOneWidget);
-      expect(find.text('node'), findsOneWidget);
-      expect(find.text('vite'), findsOneWidget);
-
-      debugDefaultTargetPlatformOverride = null;
-    });
-
-    testWidgets('marks https ports in the port list', (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-
-      final state = PreviewState(
-        ports: [
-          const PortInfo(port: 3000, processName: 'node'),
-          const PortInfo(port: 8443, label: 'vite', scheme: 'https'),
-        ],
-      );
-
-      await tester.pumpWidget(buildTestWidget(previewState: AsyncData(state)));
-      await tester.pump();
-
-      // http is the norm and stays unmarked; https is called out.
-      expect(find.text('node'), findsOneWidget);
-      expect(find.text('vite · https'), findsOneWidget);
-
-      debugDefaultTargetPlatformOverride = null;
-    });
+    // Detected ports with no tab open used to render as a standalone list;
+    // that surface is gone (see PreviewScreen's own doc on `state.ports`) —
+    // detected ports now show only through the open-tabs UI, covered by
+    // preview_tab_bar_test.dart.
 
     testWidgets('shows loading when preview state is loading', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;

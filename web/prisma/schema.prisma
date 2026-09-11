@@ -367,6 +367,21 @@ model AnalyticEvent {
   @@map("analytic_event")
 }
 
+// ---------- Marketing waitlist ----------
+
+model WaitlistSignup {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // Unique so a re-submit is an ON CONFLICT DO NOTHING rather than a duplicate
+  // row — POST /api/waitlist answers 200 either way and must never reveal which
+  // of the two happened. Stored already lowercased/trimmed by the route.
+  email     String   @unique(map: "waitlist_signup_email_key")
+  source    String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([createdAt], map: "waitlist_signup_created_at_idx")
+  @@map("waitlist_signup")
+}
+
 // ---------- Better-Auth OAuth Provider plugin ----------
 
 model OauthClient {

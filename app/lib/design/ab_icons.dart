@@ -102,6 +102,8 @@ abstract final class AbIcons {
   static const bell = Codicon.bell;
   static const gitCommit = Codicon.git_commit;
   static const gitBranch = Codicon.source_control;
+  static const gitPush = Codicon.repo_push;
+  static const gitPull = Codicon.repo_pull;
   static const code = Codicon.code;
   // Unchecked-state indicator for toggle rows (outline only, no fill).
   static const circle = Codicon.circle_large_outline;

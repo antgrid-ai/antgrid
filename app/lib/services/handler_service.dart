@@ -55,28 +55,41 @@ class HandlerService {
   // moved it. Held so [_retirePending] can spend that one frame on the goal.
   final Set<String> _armGoalExtractions = {};
 
-  // Judge picks, keyed by terminalId. `sessions` in [HandlerState] only holds
-  // currently-armed sessions, so a disarmed terminal's judge pick would
-  // otherwise vanish and the next arm would silently reset to Default — the
-  // exact bug moving this off project level was meant to fix. Bounded and
-  // insertion-ordered: terminal ids are per-session UUIDs, so an unbounded map
-  // would accumulate an entry for every slot the project ever opened, for the
-  // app's lifetime.
-  static const _judgeCacheCap = 50;
-  final Map<String, ({String? tool, String? model})> _lastKnownJudge = {};
+  // Per-session settings a picker seeds from, keyed by terminalId. `sessions`
+  // in [HandlerState] only holds currently-armed sessions, so a disarmed
+  // terminal's picks would otherwise vanish and the next arm would silently
+  // reset to the defaults — the exact bug moving this off project level was
+  // meant to fix. Bounded and insertion-ordered: terminal ids are per-session
+  // UUIDs, so an unbounded map would accumulate an entry for every slot the
+  // project ever opened, for the app's lifetime.
+  static const _settingsCacheCap = 50;
+  final Map<
+    String,
+    ({String? tool, String? model, HandlerPersonality? personality})
+  >
+  _lastKnownSettings = {};
 
-  // Records a clear (both null) too — a status snapshot showing an armed
-  // session is authoritative for that session's judge, including "cleared
-  // back to default". Skipping nulls here was the bug: a re-arm that cleared
-  // the judge left the previous non-null pick cached, so the next time a
-  // picker opened it silently re-seeded (and re-armed) the stale tool.
+  // Records a clear (nulls) too — a status snapshot showing an armed session is
+  // authoritative for that session's settings, including "cleared back to
+  // default". Skipping nulls here was the bug: a re-arm that cleared the judge
+  // left the previous non-null pick cached, so the next time a picker opened it
+  // silently re-seeded (and re-armed) the stale tool.
   //
   // Re-inserts so a refreshed entry counts as most-recent, evicts oldest at cap.
-  void _rememberJudge(String terminalId, String? tool, String? model) {
-    _lastKnownJudge.remove(terminalId);
-    _lastKnownJudge[terminalId] = (tool: tool, model: model);
-    while (_lastKnownJudge.length > _judgeCacheCap) {
-      _lastKnownJudge.remove(_lastKnownJudge.keys.first);
+  void _rememberSettings(
+    String terminalId,
+    String? tool,
+    String? model,
+    HandlerPersonality? personality,
+  ) {
+    _lastKnownSettings.remove(terminalId);
+    _lastKnownSettings[terminalId] = (
+      tool: tool,
+      model: model,
+      personality: personality,
+    );
+    while (_lastKnownSettings.length > _settingsCacheCap) {
+      _lastKnownSettings.remove(_lastKnownSettings.keys.first);
     }
   }
 
@@ -254,7 +267,12 @@ class HandlerService {
       final s = HandlerSessionState.fromWire(raw);
       if (s == null) continue;
       sessions[s.terminalId] = s;
-      _rememberJudge(s.terminalId, s.judgeTool, s.judgeModel);
+      _rememberSettings(
+        s.terminalId,
+        s.judgeTool,
+        s.judgeModel,
+        s.personality,
+      );
     }
     // Replace wholesale (welcome-replay safe) rather than merge — the
     // snapshot is the bridge's full current set of armed sessions, and it
@@ -319,7 +337,16 @@ class HandlerService {
       pendingUndo: pendingUndo,
       pendingInstructions: pendingInstructions,
     );
-    _emit(next);
+    // Set and cleared from the same frame, in two calls rather than one: the
+    // bridge omits the key the moment Handler is available again, and a
+    // refusal that could only ever latch on would survive the upgrade that
+    // lifted it. Never both arguments at once — see the copyWith rule.
+    final entitlement = HandlerEntitlement.fromWire(msg.entitlement);
+    _emit(
+      entitlement == null
+          ? next.copyWith(clearEntitlement: true)
+          : next.copyWith(entitlement: entitlement),
+    );
   }
 
   void _onHeavyJson(Map<String, dynamic> json) {
@@ -427,32 +454,36 @@ class HandlerService {
   /// appends to it, so never round-trip a stale copy back.
   ///
   /// [judgeTool]/[judgeModel] are this session's judge choice; `''` clears back
-  /// to default and a name sets it. Pass null (the default) to leave the
-  /// session's stored judge record untouched, for any caller that doesn't
-  /// surface a picker — the keys are omitted from the wire message, which the
-  /// bridge reads as "no change" (so arming without touching the judge picker
-  /// never rewrites its per-session record).
+  /// to default and a name sets it. [personality] is its posture, which has no
+  /// clear — every preset is a real choice, and the default is only what a
+  /// session that has never been given one runs under. Pass null (the default)
+  /// to leave the stored record untouched, for any caller that surfaces no
+  /// picker: the keys are omitted from the wire message, which the bridge reads
+  /// as "no change", so arming without opening the settings sheet never
+  /// rewrites what that sheet would have shown.
   void arm({
     required String terminalId,
     String? goal,
     List<HandlerInstructionItem>? backlog,
     String? judgeTool,
     String? judgeModel,
+    HandlerPersonality? personality,
   }) {
     if (_disposed) return;
-    if (judgeTool != null || judgeModel != null) {
-      // Optimistically mirror the bridge's applyJudgeChoice ('' clears, a
-      // name sets, an omitted field keeps its old value) so lastKnownJudge is
-      // right immediately: reopening a picker before the status snapshot
-      // round-trips would otherwise seed it with the pre-arm judge — and
-      // committing that stale value silently reverts this arm's choice.
-      final prev = lastKnownJudge(terminalId);
-      _rememberJudge(
+    if (judgeTool != null || judgeModel != null || personality != null) {
+      // Optimistically mirror the bridge's apply rules ('' clears, a name sets,
+      // an omitted field keeps its old value) so [lastKnownSettings] is right
+      // immediately: reopening the sheet before the status snapshot round-trips
+      // would otherwise seed it with the pre-arm values — and committing those
+      // stale ones silently reverts this arm's choice.
+      final prev = lastKnownSettings(terminalId);
+      _rememberSettings(
         terminalId,
         judgeTool != null ? (judgeTool.isEmpty ? null : judgeTool) : prev?.tool,
         judgeModel != null
             ? (judgeModel.trim().isEmpty ? null : judgeModel.trim())
             : prev?.model,
+        personality ?? prev?.personality,
       );
     }
     // Mirrors the condition the bridge queues an arm-time extraction on: a goal
@@ -485,6 +516,9 @@ class HandlerService {
         'backlog': ?backlog?.map((i) => i.toWire()).toList(),
         'judgeTool': ?judgeTool,
         'judgeModel': ?judgeModel,
+        'personality': ?(personality == null
+            ? null
+            : handlerPersonalityToWire(personality)),
       }),
     );
   }
@@ -643,27 +677,32 @@ class HandlerService {
     );
   }
 
-  /// The judge pick a picker would seed from (status snapshots and optimistic
-  /// [arm] writes feed the cache). Null = never picked.
+  /// The settings a picker seeds from (status snapshots and optimistic [arm]
+  /// writes feed the cache). Null = this terminal has never reported any.
   ///
-  /// Nothing in the app writes a judge override yet, so no surface reads this
-  /// back either — it is fed only by status snapshots. Kept rather than
-  /// deleted because this cache is the whole reason a re-arm does not silently
-  /// revert to Default; the clear-vs-stale rules on [_rememberJudge] are the
-  /// fix, and they are easy to get wrong a second time.
+  /// This cache is the whole reason a re-arm does not silently revert to the
+  /// defaults; the clear-vs-stale rules on [_rememberSettings] are the fix, and
+  /// they are easy to get wrong a second time.
   ///
   /// Cache first, armed-session state second: every status snapshot writes
   /// BOTH, and [arm] optimistically writes only the cache — so the cache is
   /// never staler than the armed entry and is fresher during the arm→snapshot
   /// round-trip. The armed fallback only matters if enough other terminals
   /// evicted this one's cache entry while it stayed armed.
-  ({String? tool, String? model})? lastKnownJudge(String terminalId) {
-    final cached = _lastKnownJudge[terminalId];
+  ({String? tool, String? model, HandlerPersonality? personality})?
+  lastKnownSettings(String terminalId) {
+    final cached = _lastKnownSettings[terminalId];
     if (cached != null) return cached;
     final armed = _state.sessions[terminalId];
     if (armed != null &&
-        (armed.judgeTool != null || armed.judgeModel != null)) {
-      return (tool: armed.judgeTool, model: armed.judgeModel);
+        (armed.judgeTool != null ||
+            armed.judgeModel != null ||
+            armed.personality != null)) {
+      return (
+        tool: armed.judgeTool,
+        model: armed.judgeModel,
+        personality: armed.personality,
+      );
     }
     return null;
   }

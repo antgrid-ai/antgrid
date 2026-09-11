@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AbConfigSchema } from "./config";
+import { KNOWN_TIERS } from "./entitlement";
 
 const BaseMessage = z.object({
   id: z.string().uuid(),
@@ -18,6 +19,7 @@ const FileTreeNodeSchema: z.ZodType<{
   size?: number;
   extension?: string;
   children?: any[];
+  truncated?: true;
 }> = z.lazy(() =>
   z.object({
     name: z.string(),
@@ -26,6 +28,9 @@ const FileTreeNodeSchema: z.ZodType<{
     size: z.number().optional(),
     extension: z.string().optional(),
     children: z.array(FileTreeNodeSchema).optional(),
+    // The directory's listing was cut at the tree's node budget — see
+    // MAX_TREE_NODES in file-tree.ts.
+    truncated: z.literal(true).optional(),
   }),
 );
 
@@ -102,7 +107,10 @@ const HandshakeAgentReadyMessage = BaseMessage.extend({
 const AppReadyMessage = BaseMessage.extend({
   type: z.literal("app:ready"),
   confirm: z.string(),
-  capabilities: z.object({ checkoutRouting: z.literal(true).optional() }).optional(),
+  capabilities: z.object({
+    checkoutRouting: z.literal(true).optional(),
+    pullsTree: z.literal(true).optional(),
+  }).optional(),
 });
 
 const TerminalStartCommand = BaseMessage.extend({
@@ -187,7 +195,15 @@ const AgentStatusMessage = BaseMessage.extend({
   services: z.array(ServiceStatusInfo).optional(),
   commands: z.array(CommandInfo).optional(),
   ports: z.array(PortInfo).optional(),
-  git: z.object({ branch: z.string() }).optional(),
+  // Counts are LOCAL (against the upstream ref), so they are as fresh as the
+  // last fetch — see [readSyncState] in git-sync.ts for why nothing here may
+  // reach the network. All three are optional so an older bridge still parses.
+  git: z.object({
+    branch: z.string(),
+    ahead: z.number().int().nonnegative().optional(),
+    behind: z.number().int().nonnegative().optional(),
+    hasUpstream: z.boolean().optional(),
+  }).optional(),
   agent: z.object({
     tool: z.string().optional(),
     name: z.string().optional(),
@@ -347,6 +363,199 @@ const GitUnstageResultMessage = BaseMessage.extend({
   success: z.boolean(),
   files: z.array(z.string()),
   error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitStashEntrySchema = z.object({
+  ref: z.string(),
+  /** "" when unparseable — see `parseStashSubject` in git-branches.ts. */
+  branch: z.string(),
+  message: z.string(),
+  createdAt: z.number(),
+});
+
+const GitStashListRequestMessage = BaseMessage.extend({
+  type: z.literal("git:stash-list"),
+  projectId: z.string(),
+  ...CheckoutScoped,
+});
+
+const GitStashListResultMessage = BaseMessage.extend({
+  type: z.literal("git:stash-list-result"),
+  projectId: z.string(),
+  stashes: z.array(GitStashEntrySchema),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitStashPopMessage = BaseMessage.extend({
+  type: z.literal("git:stash-pop"),
+  projectId: z.string(),
+  ref: z.string(),
+  ...CheckoutScoped,
+});
+
+const GitStashPopResultMessage = BaseMessage.extend({
+  type: z.literal("git:stash-pop-result"),
+  projectId: z.string(),
+  ref: z.string(),
+  success: z.boolean(),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitStashDropMessage = BaseMessage.extend({
+  type: z.literal("git:stash-drop"),
+  projectId: z.string(),
+  ref: z.string(),
+  ...CheckoutScoped,
+});
+
+const GitStashDropResultMessage = BaseMessage.extend({
+  type: z.literal("git:stash-drop-result"),
+  projectId: z.string(),
+  ref: z.string(),
+  success: z.boolean(),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitLogEntrySchema = z.object({
+  sha: z.string(),
+  shortSha: z.string(),
+  subject: z.string(),
+  authorName: z.string(),
+  authorEmail: z.string(),
+  authorDate: z.string(),
+});
+
+const GitLogRequestMessage = BaseMessage.extend({
+  type: z.literal("git:log"),
+  projectId: z.string(),
+  skip: z.number().int().nonnegative().default(0),
+  limit: z.number().int().positive().default(50),
+  ...CheckoutScoped,
+});
+
+const GitLogResultMessage = BaseMessage.extend({
+  type: z.literal("git:log-result"),
+  projectId: z.string(),
+  commits: z.array(GitLogEntrySchema),
+  skip: z.number().int().nonnegative(),
+  /** Whether a further page exists past `skip + commits.length` — what the
+   *  History tab's scroll-triggered fetch checks before asking for more. */
+  hasMore: z.boolean(),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitCommitFileEntrySchema = z.object({
+  path: z.string(),
+  status: z.enum(["M", "A", "D", "R"]),
+  oldPath: z.string().optional(),
+  additions: z.number().int(),
+  deletions: z.number().int(),
+});
+
+const GitCommitFilesRequestMessage = BaseMessage.extend({
+  type: z.literal("git:commit-files"),
+  projectId: z.string(),
+  sha: z.string(),
+  ...CheckoutScoped,
+});
+
+const GitCommitFilesResultMessage = BaseMessage.extend({
+  type: z.literal("git:commit-files-result"),
+  projectId: z.string(),
+  sha: z.string(),
+  files: z.array(GitCommitFileEntrySchema),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitCommitDiffRequestMessage = BaseMessage.extend({
+  type: z.literal("git:commit-diff"),
+  projectId: z.string(),
+  sha: z.string(),
+  path: z.string(),
+  ...CheckoutScoped,
+});
+
+const GitCommitDiffContentMessage = BaseMessage.extend({
+  type: z.literal("git:commit-diff-content"),
+  projectId: z.string(),
+  sha: z.string(),
+  path: z.string(),
+  diff: z.string().nullable(),
+  additions: z.number().int(),
+  deletions: z.number().int(),
+  ...CheckoutScoped,
+});
+
+/** Why a push/pull did not happen. Mirrors [GitSyncFailureKind] in git-sync.ts
+ *  and `GitSyncFailureKind` in the Dart model BY HAND; a receiver that meets an
+ *  unrecognized value must read it as "unknown" rather than reject the frame,
+ *  which is what lets a newer bridge add a kind without an app release. */
+const GitSyncFailureKindSchema = z.enum([
+  "no-remote", "no-upstream", "ambiguous-remote", "not-fast-forward",
+  "rejected", "diverged", "auth", "conflict", "dirty-tree", "detached", "unknown",
+]);
+
+const GitSyncMessage = BaseMessage.extend({
+  type: z.literal("git:sync"),
+  projectId: z.string(),
+  op: z.enum(["push", "pull"]),
+  ...CheckoutScoped,
+});
+
+const GitSyncResultMessage = BaseMessage.extend({
+  type: z.literal("git:sync-result"),
+  projectId: z.string(),
+  op: z.enum(["push", "pull"]),
+  success: z.boolean(),
+  /** Null on a detached HEAD — the one shape with no branch to name. */
+  branch: z.string().nullable(),
+  remote: z.string().optional(),
+  remoteBranch: z.string().optional(),
+  summary: z.string().optional(),
+  error: z.string().optional(),
+  failureKind: GitSyncFailureKindSchema.optional(),
+  /** The git invocation and its verbatim stderr, present only on failure. They
+   *  are carried rather than summarized because they are what the agent handoff
+   *  forwards — the app never re-parses git's prose to build its own copy. */
+  command: z.string().optional(),
+  stderr: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitSyncStatusMessage = BaseMessage.extend({
+  type: z.literal("git:sync-status"),
+  projectId: z.string(),
+  /** Ask the REMOTE, not just the local upstream ref (see [readSyncState] vs
+   *  [checkBranchAgainstRemote]). Costs a network round trip, so it is opt-in
+   *  and never set by the refresh that rides git:status. */
+  probeRemote: z.boolean().optional(),
+  ...CheckoutScoped,
+});
+
+const GitSyncStateMessage = BaseMessage.extend({
+  type: z.literal("git:sync-state"),
+  projectId: z.string(),
+  branch: z.string().nullable(),
+  remote: z.string().nullable(),
+  remoteBranch: z.string().nullable(),
+  ahead: z.number().int().nonnegative(),
+  behind: z.number().int().nonnegative(),
+  hasUpstream: z.boolean(),
+  hasRemote: z.boolean(),
+  /** Present only when a probe actually reached the remote; the same wire
+   *  strings [BranchRemoteState] already uses. Absent means the counts are
+   *  local-only — as fresh as the last fetch, which is what the up/down
+   *  indicator promises. */
+  state: z.enum([
+    "no-remote", "no-upstream", "gone", "in-sync",
+    "behind", "ahead", "diverged", "differs", "unreachable",
+  ]).optional(),
   ...CheckoutScoped,
 });
 
@@ -520,6 +729,20 @@ const StreamInvalidMessage = BaseMessage.extend({
   streamId: z.string(),
 });
 
+// Inbound app→agent, control plane only: the MIRROR of stream-invalid. The app
+// received a frame on a streamId it holds no transport for, so everything this
+// host pushes onto that stream is being discarded. Without it the loss is
+// unobservable from here and unbounded — stream ids outlive the app process that
+// bound them (a core keeps its stream across the peer's restart, and a re-open
+// reuses the same id), so a live PTY on a stream the new app never bound drops
+// one frame per frame for as long as the terminal runs.
+// Advisory, never authorization: it only mutes a stream this host already
+// chose to open, and delivery resumes the moment the app proves it is bound.
+const StreamUnboundMessage = BaseMessage.extend({
+  type: z.literal("stream-unbound"),
+  streamId: z.string(),
+});
+
 // Outbound result for a control-plane verb (e.g. project:start). Success is
 // usually conveyed by a fresh agent:projects re-advertisement; this carries the
 // FAILURE feedback (NOT_ALLOWED / UNKNOWN_PROJECT / OPEN_FAILED) back to the
@@ -543,6 +766,11 @@ const TreeFullMessage = BaseMessage.extend({
   type: z.literal("tree:full"),
   projectId: z.string(),
   root: FileTreeNodeSchema,
+  // Which revision of the watcher's tree this is. A resync push is the only
+  // full tree that still reaches an app unasked, and an app that cannot name
+  // the revision it holds cannot ask "still this one?" on the next resume —
+  // see `sinceSeq` below. Optional so a pre-seq bridge still parses.
+  seq: z.number().int().nonnegative().optional(),
   ...CheckoutScoped,
 });
 
@@ -572,6 +800,35 @@ const FileContentMessage = BaseMessage.extend({
   encoding: z.enum(["utf8", "base64"]).default("utf8"),
   mimeType: z.string().optional(),
   error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const FileResolvePathMessage = BaseMessage.extend({
+  type: z.literal("file:resolve-path"),
+  projectId: z.string(),
+  requestId: z.string(),
+  // Raw path as it appeared in terminal output (an OSC 8 `file://` hyperlink
+  // target) — absolute on the bridge machine, or already checkout-relative.
+  path: z.string(),
+  ...CheckoutScoped,
+});
+
+const FileResolvePathResultMessage = BaseMessage.extend({
+  type: z.literal("file:resolve-path-result"),
+  projectId: z.string(),
+  requestId: z.string(),
+  // Checkout-relative, `/`-separated — the only form the app's file tree
+  // understands. Null when the path does not resolve inside this checkout (a
+  // path from elsewhere, a symlink escape, or unparsable garbage).
+  relPath: z.string().nullable(),
+  isDirectory: z.boolean(),
+  // Absolute path, set only when relPath is null AND the path is a
+  // recognized image outside the checkout (see file-tree.ts's
+  // EXTERNAL_SAFE_IMAGE_MIME) — an image-generation tool's own output
+  // directory, typically. Lets the app preview it read-only via `file:read`
+  // (which applies the same extension gate again) instead of refusing the
+  // link outright.
+  externalImagePath: z.string().nullable(),
   ...CheckoutScoped,
 });
 
@@ -797,6 +1054,17 @@ const BacklogWire = z.array(InstructionItemWire).refine(
 // stay in lockstep, or the hot path admits what the union rejects. Field-level
 // rules (BacklogWire) ride along through `.shape`; a whole-payload `.refine`
 // would have to be written on both.
+// How far Handler leans toward answering on the user's behalf: it moves where
+// the line between `handle` and `escalate` sits, and the tone of `notify`.
+// Nothing else — the evidence a transition must cite is the anti-inflation
+// guard, and a posture able to relax it would let a confident preset report
+// progress that never happened.
+//
+// A bounded preset, deliberately not a free-text guidance field: the value is
+// interpolated into the judge prompt, and a fixed set carries no injection.
+export const HandlerPersonalitySchema = z.enum(["watchdog", "closer", "autopilot"]);
+export type HandlerPersonality = z.infer<typeof HandlerPersonalitySchema>;
+
 export const HandlerConfigureWire = z.object({
   terminalId: z.string(),
   armed: z.boolean(),
@@ -812,6 +1080,11 @@ export const HandlerConfigureWire = z.object({
   // tool / CLI default model); absent = leave the stored choice untouched.
   judgeTool: z.string().optional(),
   judgeModel: z.string().optional(),
+  // Absent = leave the session's stored posture untouched, the same
+  // absent-keeps rule judgeTool follows. There is no "clear to default": every
+  // preset is a real choice, and the default is only what a session that has
+  // never been given one judges as.
+  personality: HandlerPersonalitySchema.optional(),
 });
 
 const HandlerConfigureMessage = BaseMessage.extend({
@@ -826,8 +1099,7 @@ const HandlerConfigureMessage = BaseMessage.extend({
 // envelope below rides on `.shape` so the two cannot drift apart.
 //
 // Keep whole-payload rules off this schema too: stacking is one line typed on a
-// phone (or one preset chip), and a cross-field precondition would put a form in
-// front of it.
+// phone, and a cross-field precondition would put a form in front of it.
 export const HandlerInstructWire = z.object({
   terminalId: z.string(),
   // Untrusted remote text that ends up interpolated into the extraction prompt.
@@ -1028,6 +1300,33 @@ const HandlerSessionSnapshot = z.object({
   // handler/engine.ts). Optional and appended LAST: an older app still parses
   // the snapshot, and every key it reads keeps its position.
   observability: z.enum(["full", "escalate_only", "unsupported"]).optional(),
+  // The posture this session actually judges under, resolved by the bridge and
+  // so always present on a status frame — an app reading it never has to know
+  // what an absent value would have meant. Optional and appended LAST for the
+  // same reason `observability` is: an older app still parses the snapshot.
+  personality: HandlerPersonalitySchema.optional(),
+});
+
+// Why this machine will not run the Handler, in the words the app has to answer
+// with. Mirrors `EntitlementRefusal` (./entitlement.ts) — the REFUSED half of
+// the verdict only, which is what makes presence on a status frame mean
+// "refused" with no second boolean to disagree with.
+//
+// A refusal is otherwise invisible: it leaves the slot in the ordinary
+// not-armed state, which is exactly what a tap that never registered looks
+// like, and the engine's warn line is on a machine the reader may not be
+// sitting at. This is the one thing the bridge knows and the app cannot derive.
+//
+// The two reasons are two different sentences, and collapsing them would send
+// half the users to the wrong fix: `not_entitled` is the paywall and the app
+// offers the upgrade, `unreadable` is a machine whose credentials stopped
+// answering and the app says to sign in again.
+export const HandlerEntitlementWire = z.object({
+  reason: z.enum(["not_entitled", "unreadable"]),
+  // The tier the claim carried, when it carried a recognised one — so the
+  // upgrade copy can name the plan the machine is actually on. Absent for
+  // `unreadable`, which is the case of having no readable tier at all.
+  tier: z.enum(KNOWN_TIERS).optional(),
 });
 
 const HandlerStatusMessage = BaseMessage.extend({
@@ -1050,6 +1349,16 @@ const HandlerStatusMessage = BaseMessage.extend({
   // and [] mean the same thing — unlike `observability`, presence here is not a
   // capability signal, so a bridge with nothing to report simply omits it.
   wrapUps: z.array(HandlerWrapUpWire).optional(),
+  // Present ONLY while this machine refuses Handler; absent is the ordinary
+  // entitled machine AND every bridge predating the field, which want the same
+  // rendering. Appended LAST for the reason `wrapUps` is — an older app still
+  // parses the frame and every key it already reads keeps its position.
+  //
+  // Project-scoped rather than per session, because entitlement is neither: it
+  // is a fact about the account behind the machine, and a session-shaped copy
+  // would have nowhere to live on the surface that needs it most — the shield
+  // over a session that is not armed and, while this is set, cannot become so.
+  entitlement: HandlerEntitlementWire.optional(),
 });
 
 const HandlerEscalationMessage = BaseMessage.extend({
@@ -1482,21 +1791,31 @@ const TerminalSnapshotMessage = BaseMessage.extend({
 
 const FileTreeSnapshotRequestMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot:request"),
-  // The seq of the snapshot the requester already holds. Matching the current
-  // one is answered `unchanged` with no tree — the request is sent on every
-  // reconnect and resume by every open checkout, and the tree is most of it.
+  /** The revision the caller's tree is already at. Matched against the
+   *  watcher's current seq: still equal means the caller is current and is
+   *  answered `file:tree:unchanged` instead of the whole tree. Only a caller
+   *  that can vouch the seq came from THIS agent process may send it — a
+   *  restarted agent reseeds the counter randomly per watched root
+   *  (`conn-state.ts`) precisely so a stale claim surviving the trip would
+   *  not be confirmed rather than corrected (see file_service.dart). */
   sinceSeq: z.number().int().nonnegative().optional(),
   ...CheckoutScoped,
 });
 
 const FileTreeSnapshotMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot"),
-  // Absent only with `unchanged`, which is only ever sent to a requester that
-  // named the seq it holds — an older app never does, so it never sees a
-  // tree-less reply.
-  tree: FileTreeNodeSchema.optional(),
+  tree: FileTreeNodeSchema,
   seq: z.number().int().nonnegative(),
-  unchanged: z.boolean().optional(),
+  ...CheckoutScoped,
+});
+
+/** The cheap answer to a `sinceSeq` request the watcher has not moved past.
+ *  Its own type rather than a tree-less `file:tree:snapshot`: a snapshot whose
+ *  tree is sometimes absent puts a "when is this null?" question on every
+ *  future reader of the frame that normally carries the tree. */
+const FileTreeUnchangedMessage = BaseMessage.extend({
+  type: z.literal("file:tree:unchanged"),
+  seq: z.number().int().nonnegative(),
   ...CheckoutScoped,
 });
 
@@ -1882,6 +2201,40 @@ const AgentQuestionResolveMessage = BaseMessage.extend({
   answer: z.union([z.string(), z.array(z.string())]),
 });
 
+// ── Netwatch: shipping a remote app's half of the frame capture ───────────────
+// Both ride the machine CONTROL plane and are consumed by relay-client.ts before
+// anything project-scoped sees them. Deliberately absent from
+// CHECKOUT_VARIABLE_MESSAGE_TYPES: neither reads nor writes a working tree.
+
+// Agent -> app: arm or disarm the app's own frame capture. A phone has no env
+// var and no UI for this, so `antgrid watch --remote` is the only control
+// surface. `ttlMs` is a DEAD-MAN SWITCH, not a preference: a CLI killed with
+// SIGKILL sends no disarm, and a phone left capturing forever costs battery and
+// bandwidth with nothing on the device able to stop it. The watcher re-arms
+// well inside the window while it runs.
+const NetwatchConfigureMessage = BaseMessage.extend({
+  type: z.literal("netwatch:configure"),
+  enabled: z.boolean(),
+  ttlMs: z.number().int().positive().optional(),
+});
+
+// App -> agent: a batch of the app's own capture events. The element shape is
+// `NetwatchEvent` (netwatch.ts) minus the fields this side stamps itself, and is
+// passthrough on purpose — a bridge must forward an event from a NEWER app
+// without understanding every field, since the whole point is reading what that
+// app saw. `dropped` counts what the app's own budget discarded, so a gap in
+// `seq` is never mistaken for a frame that went missing on the wire.
+const NetwatchEventsMessage = BaseMessage.extend({
+  type: z.literal("netwatch:events"),
+  events: z.array(z.record(z.string(), z.unknown())).max(1000),
+  dropped: z.number().int().nonnegative().optional(),
+  /** The app's own clock when it sent this batch. The bridge subtracts it from
+   *  its own receive time to shift every `at` in the batch onto ONE clock — see
+   *  `Netwatch.ingestRemote`. Absent means no correction, which is right for an
+   *  app on this same machine. */
+  sentAt: z.number().optional(),
+});
+
 export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentHelloMessage,
   PortDetectedMessage,
@@ -1904,6 +2257,8 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   TreeUpdateMessage,
   FileReadMessage,
   FileContentMessage,
+  FileResolvePathMessage,
+  FileResolvePathResultMessage,
   FileSearchMessage,
   FileSearchCancelMessage,
   FileSearchResultMessage,
@@ -1921,6 +2276,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentToolsMessage,
   StreamReadyMessage,
   StreamInvalidMessage,
+  StreamUnboundMessage,
   ControlResultMessage,
   AppReadyMessage,
   CommandRunMessage,
@@ -1951,6 +2307,22 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   GitStageResultMessage,
   GitUnstageMessage,
   GitUnstageResultMessage,
+  GitStashListRequestMessage,
+  GitStashListResultMessage,
+  GitStashPopMessage,
+  GitStashPopResultMessage,
+  GitStashDropMessage,
+  GitStashDropResultMessage,
+  GitLogRequestMessage,
+  GitLogResultMessage,
+  GitCommitFilesRequestMessage,
+  GitCommitFilesResultMessage,
+  GitCommitDiffRequestMessage,
+  GitCommitDiffContentMessage,
+  GitSyncMessage,
+  GitSyncResultMessage,
+  GitSyncStatusMessage,
+  GitSyncStateMessage,
   AgentEnableRelayMessage,
   AgentDisableRelayMessage,
   AgentActivationPendingMessage,
@@ -1984,6 +2356,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   TerminalSnapshotMessage,
   FileTreeSnapshotRequestMessage,
   FileTreeSnapshotMessage,
+  FileTreeUnchangedMessage,
   PreviewSnapshotRequestMessage,
   PreviewSnapshotMessage,
   RequestMessage,
@@ -2013,9 +2386,14 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentPermissionResolveMessage,
   AgentQuestionResolveMessage,
   AgentTaskStopMessage,
+  NetwatchConfigureMessage,
+  NetwatchEventsMessage,
 ]);
 
 export type AbMessage = z.infer<typeof AbMessageSchema>;
+
+export type NetwatchConfigure = z.infer<typeof NetwatchConfigureMessage>;
+export type NetwatchEvents = z.infer<typeof NetwatchEventsMessage>;
 
 export type TerminalNotificationMessage = z.infer<typeof TerminalNotificationMessage>;
 
@@ -2035,6 +2413,8 @@ export type TreeFull = z.infer<typeof TreeFullMessage>;
 export type TreeUpdate = z.infer<typeof TreeUpdateMessage>;
 export type FileRead = z.infer<typeof FileReadMessage>;
 export type FileContent = z.infer<typeof FileContentMessage>;
+export type FileResolvePath = z.infer<typeof FileResolvePathMessage>;
+export type FileResolvePathResult = z.infer<typeof FileResolvePathResultMessage>;
 export type PortInfo = z.infer<typeof PortInfoSchema>;
 export type PortsUpdate = z.infer<typeof PortsUpdateMessage>;
 export type PreviewUrl = z.infer<typeof PreviewUrlMessage>;
@@ -2044,6 +2424,7 @@ export type ProjectAdvertEntry = AgentProjects["projects"][number];
 export type AgentTools = z.infer<typeof AgentToolsMessage>;
 export type StreamReady = z.infer<typeof StreamReadyMessage>;
 export type StreamInvalid = z.infer<typeof StreamInvalidMessage>;
+export type StreamUnbound = z.infer<typeof StreamUnboundMessage>;
 export type ControlResult = z.infer<typeof ControlResultMessage>;
 export type AppReady = z.infer<typeof AppReadyMessage>;
 export type CommandRun = z.infer<typeof CommandRunMessage>;
@@ -2056,6 +2437,7 @@ export type HandlerConfigureMsg = z.infer<typeof HandlerConfigureMessage>;
 export type HandlerInstructMsg = z.infer<typeof HandlerInstructMessage>;
 export type HandlerSessionSnapshot = z.infer<typeof HandlerSessionSnapshot>;
 export type HandlerStatusMsg = z.infer<typeof HandlerStatusMessage>;
+export type HandlerEntitlement = z.infer<typeof HandlerEntitlementWire>;
 export type HandlerEscalationMsg = z.infer<typeof HandlerEscalationMessage>;
 export type HandlerActivityMsg = z.infer<typeof HandlerActivityMessage>;
 export type HandlerSnapshotMsg = z.infer<typeof HandlerSnapshotMessage>;
@@ -2076,6 +2458,25 @@ export type GitStage = z.infer<typeof GitStageMessage>;
 export type GitStageResult = z.infer<typeof GitStageResultMessage>;
 export type GitUnstage = z.infer<typeof GitUnstageMessage>;
 export type GitUnstageResult = z.infer<typeof GitUnstageResultMessage>;
+export type GitStashEntryWire = z.infer<typeof GitStashEntrySchema>;
+export type GitStashListRequest = z.infer<typeof GitStashListRequestMessage>;
+export type GitStashListResult = z.infer<typeof GitStashListResultMessage>;
+export type GitStashPop = z.infer<typeof GitStashPopMessage>;
+export type GitStashPopResult = z.infer<typeof GitStashPopResultMessage>;
+export type GitStashDrop = z.infer<typeof GitStashDropMessage>;
+export type GitStashDropResult = z.infer<typeof GitStashDropResultMessage>;
+export type GitLogEntryWire = z.infer<typeof GitLogEntrySchema>;
+export type GitLogRequest = z.infer<typeof GitLogRequestMessage>;
+export type GitLogResult = z.infer<typeof GitLogResultMessage>;
+export type GitCommitFileEntryWire = z.infer<typeof GitCommitFileEntrySchema>;
+export type GitCommitFilesRequest = z.infer<typeof GitCommitFilesRequestMessage>;
+export type GitCommitFilesResult = z.infer<typeof GitCommitFilesResultMessage>;
+export type GitCommitDiffRequest = z.infer<typeof GitCommitDiffRequestMessage>;
+export type GitCommitDiffContent = z.infer<typeof GitCommitDiffContentMessage>;
+export type GitSync = z.infer<typeof GitSyncMessage>;
+export type GitSyncResult = z.infer<typeof GitSyncResultMessage>;
+export type GitSyncStatus = z.infer<typeof GitSyncStatusMessage>;
+export type GitSyncState = z.infer<typeof GitSyncStateMessage>;
 export type FileSearch = z.infer<typeof FileSearchMessage>;
 export type FileSearchCancel = z.infer<typeof FileSearchCancelMessage>;
 export type SearchMatch = z.infer<typeof SearchMatchSchema>;
@@ -2124,6 +2525,7 @@ export type TerminalSnapshotRequest = z.infer<typeof TerminalSnapshotRequestMess
 export type TerminalSnapshot = z.infer<typeof TerminalSnapshotMessage>;
 export type FileTreeSnapshotRequest = z.infer<typeof FileTreeSnapshotRequestMessage>;
 export type FileTreeSnapshot = z.infer<typeof FileTreeSnapshotMessage>;
+export type FileTreeUnchanged = z.infer<typeof FileTreeUnchangedMessage>;
 export type PreviewSnapshotRequest = z.infer<typeof PreviewSnapshotRequestMessage>;
 export type PreviewSnapshot = z.infer<typeof PreviewSnapshotMessage>;
 export type PreviewUrlEntry = z.infer<typeof PreviewUrlEntrySchema>;
@@ -2160,6 +2562,40 @@ export type AgentSessionAction = z.infer<typeof AgentSessionActionMessage>;
 export type AgentPermissionResolve = z.infer<typeof AgentPermissionResolveMessage>;
 export type AgentQuestionResolve = z.infer<typeof AgentQuestionResolveMessage>;
 
+/**
+ * Types whose wire text must never be recorded verbatim, however loudly an
+ * operator asks for bodies.
+ *
+ * `antgrid watch --bodies` exists to show what crossed a socket, and its output
+ * is printed to a terminal, streamed over `/netwatch`, and appended to an
+ * `--export` file that ends up pasted into bug reports. That is fine for a
+ * `tree:full` and catastrophic for these three: `agent:enableRelay` carries the
+ * account device's Ed25519 PRIVATE key plus `clientSecret` and `licenseToken`;
+ * `agent:question-resolve` is the answer to a question the agent may have
+ * flagged `isSecret`, which the UI masks on the way in; `terminal:input` is
+ * literally the user's keystrokes, password prompts inside the PTY included.
+ * The `tunnel:*` set is the preview proxy's own wire (tunnel-protocol.ts) and
+ * carries the proxied site's request and response headers verbatim — `Cookie`,
+ * `Authorization`, `Set-Cookie`. They are named here rather than there because
+ * one list is the only way this stays checkable; they are also the case that
+ * proves the check must key off the CLAIMED type, since `parseMessageFast`
+ * refuses them and they reach the ring down the `unparseable` path.
+ *
+ * Metadata (type, id, byte count) is still recorded — only the payload is
+ * withheld, so a capture still shows that the frame crossed and when.
+ *
+ * Add a type here in the same commit that gives it a secret-bearing field.
+ */
+export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
+  "agent:enableRelay",
+  "agent:question-resolve",
+  "terminal:input",
+  "tunnel:http-request",
+  "tunnel:http-start",
+  "tunnel:http-chunk",
+  "tunnel:ws-open",
+]);
+
 /** The exhaustive checkout-variable protocol set. Any new filesystem-facing
  * type belongs here (and gets an explicit schema decision + contract test). */
 export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
@@ -2167,14 +2603,20 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "terminal:snapshot:request", "terminal:snapshot",
   "agent:status",
   "tree:full", "tree:update", "file:read", "file:content",
+  "file:resolve-path", "file:resolve-path-result",
   "file:search", "file:search-cancel", "file:search-result", "file:search-done",
   "file:upload-start", "file:upload-ready", "file:upload-chunk", "file:upload-ack", "file:upload-done", "file:upload-result",
   "git:status", "git:diff", "git:diff-content", "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
   "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
+  "git:stash-list", "git:stash-list-result", "git:stash-pop", "git:stash-pop-result",
+  "git:stash-drop", "git:stash-drop-result",
+  "git:log", "git:log-result", "git:commit-files", "git:commit-files-result",
+  "git:commit-diff", "git:commit-diff-content",
+  "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "command:run", "command:output", "command:done",
   "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
-  "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "preview:snapshot:request", "preview:snapshot",
+  "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged", "preview:snapshot:request", "preview:snapshot",
   "session:result", "control:result",
 ]);
 
@@ -2237,8 +2679,9 @@ const KNOWN_TYPES = new Set<string>([
   "terminal:start", "terminal:stop", "terminal:resize", "terminal:size", "agent:status",
   "ping", "pong", "handshake:client-hello", "handshake:agent-hello", "handshake:agent-ready",
   "tree:full", "tree:update", "file:read", "file:content",
+  "file:resolve-path", "file:resolve-path-result",
   "ports:update", "preview:url",
-  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "control:result", "app:ready",
+  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "stream-unbound", "control:result", "app:ready",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
   "handler:snapshot", "handler:undo", "handler:dismiss",
@@ -2246,6 +2689,11 @@ const KNOWN_TYPES = new Set<string>([
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
   "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
+  "git:stash-list", "git:stash-list-result", "git:stash-pop", "git:stash-pop-result",
+  "git:stash-drop", "git:stash-drop-result",
+  "git:log", "git:log-result", "git:commit-files", "git:commit-files-result",
+  "git:commit-diff", "git:commit-diff-content",
+  "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "file:search", "file:search-cancel", "file:search-result", "file:search-done",
   "file:upload-start", "file:upload-ready", "file:upload-chunk",
   "file:upload-ack", "file:upload-done", "file:upload-result",
@@ -2262,7 +2710,7 @@ const KNOWN_TYPES = new Set<string>([
   "session:result", "session:updated",
   "client:focus-state",
   "terminal:snapshot:request", "terminal:snapshot",
-  "file:tree:snapshot:request", "file:tree:snapshot",
+  "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged",
   "preview:snapshot:request", "preview:snapshot",
   "request", "response",
   "agent:turn-start", "agent:session-reset", "agent:turn-end",
@@ -2274,6 +2722,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
+  "netwatch:configure", "netwatch:events",
 ]);
 
 export function parseMessageFast(raw: string): AbMessage | null {

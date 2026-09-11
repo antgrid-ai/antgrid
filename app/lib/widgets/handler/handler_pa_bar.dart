@@ -6,15 +6,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
+import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_list_row.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
 import '../../providers/value_controller.dart';
+import '../../util/detached.dart';
 import '../transcript/format.dart';
 import 'handler_backlog_drawer.dart';
 import 'handler_item_status.dart';
+import 'handler_session_settings.dart';
 
 /// Opens the backlog drawer for one armed terminal.
 typedef HandlerBacklogOpener = void Function(String terminalId);
@@ -260,7 +264,50 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
         // Unstyled: AbListRow already renders a subtitle as muted chrome, and
         // restating it here would silently drop the row's line height.
         subtitle: hint == null ? null : Text(hint),
-        trailing: AbIcon(AbIcons.chevronUp, size: 12, color: p.textMuted),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // The posture, always — including the default. This bar is on
+            // screen for the whole time a session is armed, and it is the only
+            // place the setting is visible at all; showing it only once it has
+            // been changed makes "no chip" a state the user has to know how to
+            // read. It costs width the title is already short of (see the
+            // subtitle note above), which is the trade.
+            Builder(
+              builder: (chipContext) => GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => detached(
+                  'HandlerPaBar',
+                  'open session settings',
+                  () =>
+                      showHandlerSessionSettingsSheet(chipContext, terminalId),
+                ),
+                child: AbChip.system(
+                  // An em-dash where the bridge has reported no posture at all,
+                  // never the default's name: this chip is read as a live fact
+                  // about the session, and naming a preset the far end has
+                  // never heard of is a claim about a control over nothing (see
+                  // handlerPersonalityFromWire). The chip still opens the sheet,
+                  // which is where that gets explained.
+                  label: session.personality == null
+                      ? '—'
+                      : handlerPersonalityLabel(
+                          session.personality!,
+                        ).toUpperCase(),
+                  // Tinted where nothing is judging: the posture is stored and
+                  // inert, and a bar naming it in ordinary chrome while every
+                  // pause escalates says the opposite of what is happening.
+                  color:
+                      session.observability == HandlerObservability.escalateOnly
+                      ? p.warning
+                      : p.textMuted,
+                ),
+              ),
+            ),
+            const SizedBox(width: AbTokens.space6),
+            AbIcon(AbIcons.chevronUp, size: 12, color: p.textMuted),
+          ],
+        ),
         onTap: () => openBacklog(terminalId),
       ),
     );

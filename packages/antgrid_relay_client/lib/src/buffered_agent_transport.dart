@@ -75,6 +75,7 @@ abstract class BufferedAgentTransport implements AgentTransport {
     String method, {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
+    bool countsTowardHealth = true,
   }) {
     final requestId = 'r${_nextRequestId++}';
     final completer = Completer<Map<String, dynamic>>();
@@ -113,26 +114,36 @@ abstract class BufferedAgentTransport implements AgentTransport {
     if (type == 'response') {
       final requestId = json['requestId'] as String?;
       final completer = requestId != null ? pending.remove(requestId) : null;
-      if (completer != null) {
-        final ok = json['ok'] == true;
-        if (ok) {
-          final result =
-              (json['result'] as Map?)?.cast<String, dynamic>() ?? const {};
-          completer.complete(result);
-        } else {
-          final err = (json['error'] as Map?)?.cast<String, dynamic>();
-          completer.completeError(
-            RpcException(
-              err?['code'] as String? ?? 'E_UNKNOWN',
-              err?['message'] as String? ?? '',
-            ),
-          );
-        }
+      if (completer == null) {
+        noteOrphanResponse(requestId, channel);
+        return;
+      }
+      final ok = json['ok'] == true;
+      if (ok) {
+        final result =
+            (json['result'] as Map?)?.cast<String, dynamic>() ?? const {};
+        completer.complete(result);
+      } else {
+        final err = (json['error'] as Map?)?.cast<String, dynamic>();
+        completer.completeError(
+          RpcException(
+            err?['code'] as String? ?? 'E_UNKNOWN',
+            err?['message'] as String? ?? '',
+          ),
+        );
       }
       return;
     }
     outbound.add(InboundMessage(channel, json));
   }
+
+  /// A `response` arrived for a request that is already gone — it timed out and
+  /// dropped its completer, so the reply is discarded (never leaked to the
+  /// public stream). Default no-op; a relay-backed transport overrides it to
+  /// record the frame, because "the RPC timed out and the answer landed 200ms
+  /// later" is otherwise invisible at BOTH endpoints — the timeout is local,
+  /// and the agent only ever saw a request it answered.
+  void noteOrphanResponse(String? requestId, String channel) {}
 
   /// `true` once the transport can carry an RPC (and hence a hydrator's pull).
   /// The base answer — "connected" — is right for [LocalTransport] (born
@@ -140,6 +151,11 @@ abstract class BufferedAgentTransport implements AgentTransport {
   /// session's live establishment, since a stream stays `connected` across a
   /// session-down window where a send would silently drop.
   bool get isEstablished => _currentState == TransportState.connected;
+
+  int _establishmentEpoch = 0;
+
+  @override
+  int get establishmentEpoch => _establishmentEpoch;
 
   /// Tier-3: register [run] as the hydrator for [key] and, when the transport
   /// is already established, invoke it now. Re-invoked on every future
@@ -187,6 +203,10 @@ abstract class BufferedAgentTransport implements AgentTransport {
   /// a [StreamTransport] on each handshake establishment (from
   /// `refreshSnapshot`). One failing hydrator never blocks the others.
   void redriveHydrators() {
+    // Bumped BEFORE the replay, so a hydrator running as part of this
+    // establishment already sees the new epoch and re-pulls unconditionally
+    // rather than claiming a revision the previous agent issued.
+    _establishmentEpoch++;
     for (final run in _hydrators.values) {
       unawaited(_runHydrator(run));
     }

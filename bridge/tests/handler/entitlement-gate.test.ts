@@ -73,7 +73,10 @@ function credentialed(tier: string | null): () => TierClaim {
   return () => ({ credentialed: true, tier });
 }
 
-interface StatusFrame { sessions: Array<{ terminalId: string; state: string }> }
+interface StatusFrame {
+  sessions: Array<{ terminalId: string; state: string }>;
+  entitlement?: { reason: string; tier?: string };
+}
 function lastStatus(sent: AbMessage[]): StatusFrame {
   return sent.filter((m) => m.type === "handler:status").at(-1) as never as StatusFrame;
 }
@@ -226,5 +229,66 @@ describe("the local/offline developer flow", () => {
     const { engine, sent } = makeEngine(undefined, { entitlement: undefined });
     engine.arm({ terminalId: "t1", goal: GOAL });
     expect(lastStatus(sent).sessions).toHaveLength(1);
+  });
+});
+
+describe("what the app is told about a refusal", () => {
+  // The gate's own behaviour is above; this is the half the USER meets. A
+  // refusal that only reaches the bridge log is indistinguishable from a tap
+  // that never registered, which is the failure these assert against.
+
+  it("says nothing on an entitled machine", () => {
+    const { engine, sent } = makeEngine(credentialed("pro"));
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    // Presence IS the refusal, so an available Handler must not send the key
+    // at all — an app reading it as a gate would refuse every arm on a paid
+    // account.
+    expect(lastStatus(sent).entitlement).toBeUndefined();
+  });
+
+  it("says nothing on a machine with no credentials to fail closed on", () => {
+    const { engine, sent } = makeEngine(() => ({ credentialed: false, tier: null }));
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    // `unwired` is an ALLOWED verdict. Reporting it would gate the offline
+    // developer flow the gate deliberately exempts.
+    expect(lastStatus(sent).entitlement).toBeUndefined();
+  });
+
+  it("names the paywall and the plan the machine is on", async () => {
+    const { engine, sent } = makeEngine(credentialed("free"));
+    await capturingWarnings(() => { engine.arm({ terminalId: "t1", goal: GOAL }); });
+    // The tier rides along so the app can say "you are on Free" rather than
+    // only "you need Pro" — the second leaves the user unable to tell whether
+    // they already bought it.
+    expect(lastStatus(sent).entitlement).toEqual({ reason: "not_entitled", tier: "free" });
+  });
+
+  it("distinguishes an unreadable claim from the paywall, and names no tier", async () => {
+    const { engine, sent } = makeEngine(credentialed(null));
+    await capturingWarnings(() => { engine.arm({ terminalId: "t1", goal: GOAL }); });
+    // Two different fixes: this one is answered by signing in again, and an
+    // upgrade offer here would sell a plan the user may already hold. There is
+    // no tier to name — being unable to read one is the whole condition.
+    expect(lastStatus(sent).entitlement).toEqual({ reason: "unreadable" });
+  });
+
+  it("rides every emit, not only the one the refused arm raises", () => {
+    // The shield the user has yet to press is the surface that most needs it,
+    // and it is on screen long before any arm.
+    const { engine, sent } = makeEngine(credentialed("free"));
+    engine.emitStatus();
+    expect(lastStatus(sent).entitlement).toEqual({ reason: "not_entitled", tier: "free" });
+  });
+
+  it("stops being sent the moment the tier grants again", () => {
+    // Derived per emit rather than latched at the refusal: an app told once
+    // that Handler is gated has no other way to learn it no longer is.
+    let tier = "free";
+    const { engine, sent } = makeEngine(() => ({ credentialed: true, tier }));
+    engine.emitStatus();
+    expect(lastStatus(sent).entitlement).toEqual({ reason: "not_entitled", tier: "free" });
+    tier = "pro";
+    engine.emitStatus();
+    expect(lastStatus(sent).entitlement).toBeUndefined();
   });
 });

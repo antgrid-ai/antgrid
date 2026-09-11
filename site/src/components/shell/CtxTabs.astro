@@ -1,0 +1,42 @@
+---
+import { Icon } from "astro-icon/components";
+
+// The context pane's tab strip. The five tabs, their order, their icons and the
+// count badge on Git are the app's; the underline on the active one is how the
+// app marks it.
+//
+// The reason this is a strip and not a set of columns is the correction worth
+// keeping: only ONE of Files / Git / Terminals / Preview / Handler is on screen
+// at a time. The app is three columns, never four, and a scene that paints a
+// diff beside a preview beside a terminal is promising a layout that does not
+// exist.
+const TABS = [
+  { label: "Preview", icon: "tabler:browser" },
+  { label: "Files", icon: "tabler:files" },
+  { label: "Git", icon: "tabler:git-branch" },
+  { label: "Terminals", icon: "tabler:terminal-2" },
+  { label: "Handler", icon: "tabler:shield-lock" },
+] as const;
+
+interface Props {
+  active: (typeof TABS)[number]["label"];
+  /** The changed-file count the app hangs off the Git tab. */
+  gitCount?: number;
+}
+const { active, gitCount } = Astro.props;
+---
+<div class="flex h-9 items-stretch gap-0.5 border-b border-ab-line bg-ab-deepest px-1.5">
+  {TABS.map((t) => (
+    <span
+      class={`flex items-center gap-1 whitespace-nowrap border-b-2 px-1.5 text-meta ${
+        t.label === active ? "border-ab-text text-ab-text" : "border-transparent text-ab-mute"
+      }`}
+    >
+      <Icon name={t.icon} class="shrink-0" width="12" height="12" aria-hidden="true" />
+      {t.label}
+      {t.label === "Git" && gitCount !== undefined && (
+        <span class="rounded bg-ab-elevated px-1 font-mono text-pip text-ab-text2">{gitCount}</span>
+      )}
+    </span>
+  ))}
+</div>

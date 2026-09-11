@@ -66,6 +66,7 @@ class _CapturingLauncher extends LocalAgentLauncher {
   DeviceRecord? capturedDevice;
   String? capturedLicenseApiUrl;
   String? capturedRelayUrl;
+  bool? capturedTelemetryEnabled;
 
   // Provide a minimal HostController so the super() constructor doesn't fail;
   // openProject is fully overridden so _host is never used.
@@ -77,11 +78,13 @@ class _CapturingLauncher extends LocalAgentLauncher {
     DeviceRecord? device,
     String? licenseApiUrl,
     String? relayUrl,
+    bool telemetryEnabled = false,
   }) async {
     callCount++;
     capturedDevice = device;
     capturedLicenseApiUrl = licenseApiUrl;
     capturedRelayUrl = relayUrl;
+    capturedTelemetryEnabled = telemetryEnabled;
     // Use a LocalTransport with port 0 / empty token — connect() is never
     // called, so _ch stays null and send/dispose are safe no-ops.
     return LaunchResult(
@@ -219,6 +222,13 @@ void main() {
           fakeLauncher.capturedRelayUrl,
           equals(_testRelayUrl),
           reason: 'relayUrl must be passed when a device record exists',
+        );
+        expect(
+          fakeLauncher.capturedTelemetryEnabled,
+          isTrue,
+          reason:
+              'the telemetry setting must reach the host bootstrap — the seeded '
+              'default is on, so a dropped argument reads as a silent opt-out',
         );
       },
       timeout: const Timeout(Duration(seconds: 15)),

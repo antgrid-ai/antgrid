@@ -91,9 +91,18 @@ class PreviewProxyServer {
           // preceded it, so the upstream socket has to carry these or it opens
           // anonymously behind an authenticated page.
           final handshakeHeaders = _upstreamHandshakeHeaders(request);
-          return webSocketHandler((WebSocketChannel channel, String? protocol) {
-            onWebSocketConnect!(channel, '/${request.url}', handshakeHeaders);
-          })(request);
+          // Chromium refuses a 101 that answers its `Sec-WebSocket-Protocol`
+          // with none ("Sent non-empty 'Sec-WebSocket-Protocol' header but no
+          // response was received"), and every Vite-family dev server asks for
+          // `vite-hmr`. The echo is optimistic: the upstream handshake has not
+          // run yet — the bridge forwards the same list — so the browser hears
+          // its own first choice, not the server's. Dev servers ask for one.
+          return webSocketHandler(
+            (WebSocketChannel channel, String? protocol) {
+              onWebSocketConnect!(channel, '/${request.url}', handshakeHeaders);
+            },
+            protocols: _requestedSubprotocols(request),
+          )(request);
         }
         return shelf.Response.forbidden('WebSocket not supported');
       }
@@ -102,12 +111,32 @@ class PreviewProxyServer {
     };
   }
 
+  /// The browser's `Sec-WebSocket-Protocol` list in its order of preference.
+  /// shelf echoes the first REQUESTED entry it is also given, so handing it
+  /// the request's own list is what makes the echo the browser's first choice.
+  /// An empty list echoes nothing, exactly as a null would.
+  ///
+  /// `splitUpstreamWsHeaders` (`bridge/src/tunnel-manager.ts`) reads the same
+  /// header to decide what is offered upstream, so ORDER and the trim/drop-
+  /// empty rules must agree with it: a disagreement echoes the browser a
+  /// subprotocol the dev server was never asked for, and neither end can
+  /// detect that. Only the dedup is one-sided — Bun's WebSocket constructor
+  /// refuses duplicates, and shelf takes this list as a set anyway.
+  List<String> _requestedSubprotocols(shelf.Request request) {
+    return (request.headers['sec-websocket-protocol'] ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+  }
+
   /// The browser's handshake headers, with `Origin` repointed at the dev
   /// server's own origin. The WebView's origin is this proxy — a different port
   /// on a fallback bind, and always plain http for an https target — and a dev
   /// server that checks Origin would reject that as cross-site. The headers the
   /// upstream handshake owns (`Sec-WebSocket-*`, `Connection`, `Upgrade`,
-  /// `Host`) are dropped by the bridge, which is what mints them.
+  /// `Host`) are dropped by the bridge, which is what mints them — and it
+  /// mints `Sec-WebSocket-Protocol` from the list this map still carries.
   Map<String, String> _upstreamHandshakeHeaders(shelf.Request request) {
     final headers = <String, String>{};
     request.headers.forEach((key, value) {
@@ -191,36 +220,24 @@ class PreviewProxyServer {
         if (rewritten != null) responseHeaders['location'] = rewritten;
       }
 
-      // A String body makes shelf re-encode to UTF-8 on the way out, so decoding
-      // to bytes here is not an extra pass — it replaces one.
-      if (response.bodyEncoding == kTunnelGzipEncoding) {
-        return shelf.Response(
-          response.status,
-          headers: responseHeaders,
-          body: gzip.decode(base64Decode(response.body)),
-          // shelf stamps `charset=utf-8` on a charset-less content-type only for
-          // a String body, and gzip is the first encoding that puts TEXT on the
-          // byte path. Restate it here or a charset-less `text/*` page decodes
-          // as latin-1 in the WebView — `nosniff` denies it a second guess.
-          encoding: _charsetlessTextType(responseHeaders['content-type'])
-              ? utf8
-              : null,
-        );
-      }
-      if (response.bodyEncoding == 'base64') {
-        final bodyBytes = base64Decode(response.body);
-        return shelf.Response(
-          response.status,
-          headers: responseHeaders,
-          body: bodyBytes,
-        );
-      } else {
-        return shelf.Response(
-          response.status,
-          headers: responseHeaders,
-          body: response.body,
-        );
-      }
+      // shelf writes a byte stream chunked (content-length is stripped above),
+      // so the WebView gets each slice as it arrives instead of waiting on the
+      // whole body. An error on that stream is deliberately NOT caught: it
+      // must reach dart:io, which destroys the connection without the
+      // terminating chunk, so the browser sees ERR_INCOMPLETE_CHUNKED_ENCODING
+      // rather than a complete-looking truncated bundle it would cache.
+      return shelf.Response(
+        response.status,
+        headers: responseHeaders,
+        body: response.body,
+        // Every body is bytes now, so shelf never stamps a charset by itself:
+        // restate utf-8 for a charset-less text type or the WebView decodes it
+        // as latin-1 — `nosniff` denies it a second guess. Binary types stay
+        // bare.
+        encoding: _charsetlessTextType(responseHeaders['content-type'])
+            ? utf8
+            : null,
+      );
     } catch (e) {
       return shelf.Response.internalServerError(body: 'Tunnel error: $e');
     }

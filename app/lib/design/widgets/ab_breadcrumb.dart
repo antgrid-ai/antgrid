@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../ab_colors.dart';
 import '../ab_tokens.dart';
 
+const double _leadingSegmentMaxWidth = 140;
+
 /// Mono breadcrumb chip. All but the last segment render dimmed; the last
 /// segment ("leaf") renders in the brightest foreground tone, matching the
 /// Antgrid workspace head pattern.
@@ -19,7 +21,20 @@ class AbBreadcrumb extends StatelessWidget {
   final Widget? leafOverride;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      // Keep the active session/file readable when fixed ancestor segments
+      // would consume the row. The leaf still owns the rename affordance.
+      final visibleSegments =
+          segments.length > 1 &&
+              constraints.maxWidth < _leadingSegmentMaxWidth * segments.length
+          ? [segments.last]
+          : segments;
+      return _buildSegments(context, visibleSegments);
+    },
+  );
+
+  Widget _buildSegments(BuildContext context, List<String> segments) {
     final palette = context.antgrid;
     final children = <Widget>[];
     for (var i = 0; i < segments.length; i++) {
@@ -45,18 +60,49 @@ class AbBreadcrumb extends StatelessWidget {
         color: isLast ? palette.textPrimary : palette.textMuted,
         fontWeight: isLast ? FontWeight.w500 : FontWeight.w400,
       );
+      final segment = isLast && leafOverride != null
+          ? DefaultTextStyle.merge(style: style, child: leafOverride!)
+          : Text(
+              segments[i],
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              // Default TextWidthBasis.parent reports the full incoming
+              // constraint as this Text's width regardless of content length —
+              // for the CAPPED leading segment below that means a short
+              // project name still claims the entire 140px ConstrainedBox,
+              // leaving the leaf nothing to grow into. longestLine reports the
+              // actual ink width instead (unchanged once ellipsis is actually
+              // clipping, since that already fills the available width).
+              textWidthBasis: TextWidthBasis.longestLine,
+              style: style,
+            );
+      // Only the LAST segment (the leaf — a session or file name, the thing
+      // the user is actually looking for) is Flexible. A leading segment
+      // (the project/agent name) is usually short but was given an EQUAL
+      // flex share under `mainAxisSize.min` — Flutter's single-pass flex
+      // layout hands each flex child its own slice of the free space and
+      // never redistributes what a shorter sibling didn't use, so the leaf
+      // ellipsized at half the row while the other half sat empty next to
+      // it.
+      //
+      // A leading segment is capped with ConstrainedBox instead of left
+      // unflexed: RenderFlex hands a NON-flex Row child an UNBOUNDED main-axis
+      // constraint in its first layout pass (it's meant to report its own
+      // natural size before free space is split among flex children) — so an
+      // unflexed segment would render at its full, uncapped width and could
+      // overflow the row outright for a long project/agent name, instead of
+      // ellipsizing. The cap keeps it non-flex (natural width, no wasted
+      // share) while still bounded; the leaf, still the sole flex child,
+      // claims 100% of whatever's left after it.
       children.add(
-        Flexible(
-          fit: FlexFit.loose,
-          child: isLast && leafOverride != null
-              ? DefaultTextStyle.merge(style: style, child: leafOverride!)
-              : Text(
-                  segments[i],
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: style,
+        isLast
+            ? Flexible(fit: FlexFit.loose, child: segment)
+            : ConstrainedBox(
+                constraints: const BoxConstraints(
+                  maxWidth: _leadingSegmentMaxWidth,
                 ),
-        ),
+                child: segment,
+              ),
       );
     }
     return Row(mainAxisSize: MainAxisSize.min, children: children);

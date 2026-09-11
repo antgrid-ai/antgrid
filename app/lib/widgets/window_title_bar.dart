@@ -21,6 +21,7 @@ import '../providers/providers.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
+import '../util/detached.dart';
 import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';
 import 'agent_panel.dart';
@@ -179,7 +180,7 @@ class _PaneSlotPlaceholder extends StatelessWidget {
 ///
 /// The row's own middle is deliberately empty — it is the primary drag
 /// target, and neither VS Code nor Zed centres a window title there.
-class WindowTitleBarContents extends ConsumerWidget {
+class WindowTitleBarContents extends ConsumerStatefulWidget {
   const WindowTitleBarContents({super.key});
 
   @visibleForTesting
@@ -195,29 +196,74 @@ class WindowTitleBarContents extends ConsumerWidget {
   static const searchSlotKey = Key('window-title-bar-search');
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<WindowTitleBarContents> createState() =>
+      _WindowTitleBarContentsState();
+}
+
+class _WindowTitleBarContentsState
+    extends ConsumerState<WindowTitleBarContents> {
+  final _trailingKey = GlobalKey();
+
+  /// Measured width of the trailing cluster (project-action chips like
+  /// [RemoteAccessControl]/[RemoteHostChip], the context-panel toggle, and
+  /// the window controls) — the centred search box must never extend under
+  /// it. Null before the first post-frame measurement, when
+  /// [_analyticalReservedRight] stands in instead: it knows nothing about the
+  /// CHIPS specifically (their width is text-dependent — "Remote on" vs
+  /// "Remote off" vs a machine name — so no formula can predict it the way
+  /// [_searchGutter] predicts the leading cluster's fixed icon slots), which
+  /// is exactly what let the search box paint the chips over on a narrow
+  /// window before this measurement existed: [reservedRight] used to cover
+  /// only the window-control strip, so nothing ever held the box back from
+  /// the dynamic chips sitting between the elastic gap and those controls.
+  double? _measuredTrailingWidth;
+
+  double _analyticalReservedRight() =>
+      paintsWindowControls ? AbTokens.captionButtonWidth * 3 : 0.0;
+
+  /// Re-measures the trailing cluster after every build in which it might
+  /// have changed size (a chip's label flipping between "Remote on"/"Remote
+  /// off", a host name changing, the context-panel toggle mounting). Cheap to
+  /// call unconditionally: the callback only triggers a rebuild when the
+  /// measured width actually moved, so a stable trailing cluster costs one
+  /// no-op check per frame, not a rebuild loop.
+  void _scheduleTrailingMeasure() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final box = _trailingKey.currentContext?.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) return;
+      final width = box.size.width;
+      if (width != _measuredTrailingWidth) {
+        setState(() => _measuredTrailingWidth = width);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final panel = ref.watch(contextPanelControlProvider);
     final sidebar = ref.watch(sidebarControlProvider);
 
     final nav = ref.watch(navControllerProvider);
     final navNotifier = ref.read(navControllerProvider.notifier);
 
+    _scheduleTrailingMeasure();
+
     return LayoutBuilder(
       builder: (context, constraints) {
         // Pixel-centred on the bar's own width, the way VS Code centres its
         // command/search box — not in the free space left over between the
         // leading and trailing clusters, which drifts off-centre whenever
-        // those two clusters aren't the same width. The window-controls
-        // strip is carved out on the right first, same as VS Code reserves
-        // its caption-button gutter, so the box never sits under
-        // minimize/maximize/close, and [_searchGutter] keeps it off the
-        // leading cluster and the two pane toggles. The variable trailing
-        // chips are NOT reserved for, so on a narrow-enough window the box
-        // can still overlap those, same as VS Code's does — hence the paint
-        // order below.
-        final reservedRight = paintsWindowControls
-            ? AbTokens.captionButtonWidth * 3
-            : 0.0;
+        // those two clusters aren't the same width. The ENTIRE trailing
+        // cluster is carved out on the right first (measured — see
+        // [_measuredTrailingWidth], since the project-action chips in it are
+        // text-dependent and no formula can size them the way [_searchGutter]
+        // sizes the leading cluster's fixed icon slots), so the box never
+        // sits under minimize/maximize/close OR under a chip like "Remote
+        // on"/"Remote off"/a host name, and [_searchGutter] keeps it off the
+        // leading cluster and the two pane toggles.
+        final reservedRight =
+            _measuredTrailingWidth ?? _analyticalReservedRight();
         final centerWidth = (constraints.maxWidth - reservedRight).clamp(
           0.0,
           double.infinity,
@@ -240,10 +286,13 @@ class WindowTitleBarContents extends ConsumerWidget {
         );
         return Stack(
           children: [
-            // Under the row, not over it: an overlap the gutter can't prevent
+            // Under the row, not over it: an overlap the reserve can't prevent
             // must cost the box its pixels, never the row its taps. A text
             // field spanning the bar swallowed both pane toggles at tablet
-            // widths, and those are the only way back to a hidden pane.
+            // widths, and those are the only way back to a hidden pane. With
+            // [_measuredTrailingWidth] known this overlap shouldn't happen —
+            // it's the pre-measurement frame (and any transient staleness)
+            // this paint order still guards, not the everyday case.
             Positioned(
               left: gutter,
               top: 0,
@@ -289,7 +338,7 @@ class WindowTitleBarContents extends ConsumerWidget {
                     SizedBox(
                       width: searchWidth,
                       child: const KeyedSubtree(
-                        key: searchSlotKey,
+                        key: WindowTitleBarContents.searchSlotKey,
                         child: SessionSearchField(),
                       ),
                     ),
@@ -297,7 +346,12 @@ class WindowTitleBarContents extends ConsumerWidget {
                 ),
               ),
             ),
-            _titleBarRow(ref: ref, sidebar: sidebar, panel: panel),
+            _titleBarRow(
+              ref: ref,
+              sidebar: sidebar,
+              panel: panel,
+              trailingKey: _trailingKey,
+            ),
           ],
         );
       },
@@ -337,6 +391,7 @@ class WindowTitleBarContents extends ConsumerWidget {
     required WidgetRef ref,
     required ({bool hidden, VoidCallback toggle})? sidebar,
     required ({bool hidden, VoidCallback toggle})? panel,
+    required GlobalKey trailingKey,
   }) {
     return Row(
       children: [
@@ -352,12 +407,13 @@ class WindowTitleBarContents extends ConsumerWidget {
         // frame after either mounts is briefly null — a widget that appears
         // and disappears here changes how much room the centred search field
         // below has on the left, and it visibly hops sideways between routes
-        // as a result. Unlike [contextPanelSlotKey], `sidebar` is null only in
-        // that brief window (every desktop route publishes a real one once
-        // mounted), so a same-footprint placeholder is enough here — there's
-        // no route where this button should read as permanently disabled.
+        // as a result. Unlike [WindowTitleBarContents.contextPanelSlotKey],
+        // `sidebar` is null only in that brief window (every desktop route
+        // publishes a real one once mounted), so a same-footprint placeholder
+        // is enough here — there's no route where this button should read as
+        // permanently disabled.
         KeyedSubtree(
-          key: sidebarSlotKey,
+          key: WindowTitleBarContents.sidebarSlotKey,
           child: sidebar == null
               ? const _PaneSlotPlaceholder()
               : AbIconButton(
@@ -383,50 +439,66 @@ class WindowTitleBarContents extends ConsumerWidget {
         // trailing clusters apart and gives the drag region room either side
         // of the search box.
         const Expanded(child: SizedBox.shrink()),
-        // Session controls (mode toggle, agent mark, handler shield, name) live
-        // ONLY in the agent bar (`AgentBar`/`agent_panel.dart`) and carry no
-        // title-bar fallback: a panel mode that unmounts the agent bar (e.g. an
-        // expanded context panel) simply leaves them unreachable until the
-        // agent bar is restored, rather than relocating any of them up here.
-        KeyedSubtree(
-          key: chipSlotKey,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: titleBarProjectActions(ref),
-          ),
+        // Wrapped in one measured group (`trailingKey`) so [build] can reserve
+        // exactly its width for the centred search box — see
+        // [_WindowTitleBarContentsState._measuredTrailingWidth]. Must stay a
+        // single subtree with nothing of the elastic gap or the leading
+        // cluster inside it, or the measurement covers more than this cluster
+        // actually occupies and over-reserves.
+        Row(
+          key: trailingKey,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Session controls (mode toggle, agent mark, handler shield, name)
+            // live ONLY in the agent bar (`AgentBar`/`agent_panel.dart`) and
+            // carry no title-bar fallback: a panel mode that unmounts the
+            // agent bar (e.g. an expanded context panel) simply leaves them
+            // unreachable until the agent bar is restored, rather than
+            // relocating any of them up here.
+            KeyedSubtree(
+              key: WindowTitleBarContents.chipSlotKey,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: titleBarProjectActions(ref),
+              ),
+            ),
+            const SizedBox(width: AbTokens.space8),
+            // Always shown, unlike the cluster above: hidden is the DEFAULT
+            // panel mode on tablets and phone landscape, and dropping this
+            // control at narrow widths would strand exactly those users with
+            // no way to bring the context panel back.
+            //
+            // Slot always renders the SAME button, even on routes with no
+            // context panel to toggle (New Session/settings) — `onTap:
+            // panel?.toggle` falls into AbIconButton's own disabled styling
+            // (opacity 0.4, no hover/focus) rather than the button
+            // disappearing, which both keeps the bar's right-hand chrome from
+            // shifting the centred search field sideways when navigating to
+            // and from those routes AND keeps the control visible so it reads
+            // as "unavailable here", not missing.
+            KeyedSubtree(
+              key: WindowTitleBarContents.contextPanelSlotKey,
+              child: AbIconButton(
+                icon: (panel?.hidden ?? true)
+                    ? AbIcons.layoutSidebarRightOff
+                    : AbIcons.layoutSidebarRight,
+                // Same emphasis in both live states: while hidden this button
+                // is the ONLY way back (there is no collapsed strip), so
+                // dimming it would make the sole recovery affordance the
+                // faintest thing in the bar. Omit the tooltip while disabled
+                // — there's no action for it to describe.
+                tooltip: panel == null
+                    ? null
+                    : (panel.hidden
+                          ? 'Show context panel'
+                          : 'Hide context panel'),
+                onTap: panel?.toggle,
+              ),
+            ),
+            const SizedBox(width: AbTokens.space8),
+            const AbWindowControls(),
+          ],
         ),
-        const SizedBox(width: AbTokens.space8),
-        // Always shown, unlike the cluster above: hidden is the DEFAULT panel
-        // mode on tablets and phone landscape, and dropping this control at
-        // narrow widths would strand exactly those users with no way to bring
-        // the context panel back.
-        //
-        // Slot always renders the SAME button, even on routes with no context
-        // panel to toggle (New Session/settings) — `onTap: panel?.toggle`
-        // falls into AbIconButton's own disabled styling (opacity 0.4, no
-        // hover/focus) rather than the button disappearing, which both keeps
-        // the bar's right-hand chrome from shifting the centred search field
-        // sideways when navigating to and from those routes AND keeps the
-        // control visible so it reads as "unavailable here", not missing.
-        KeyedSubtree(
-          key: contextPanelSlotKey,
-          child: AbIconButton(
-            icon: (panel?.hidden ?? true)
-                ? AbIcons.layoutSidebarRightOff
-                : AbIcons.layoutSidebarRight,
-            // Same emphasis in both live states: while hidden this button is
-            // the ONLY way back (there is no collapsed strip), so dimming it
-            // would make the sole recovery affordance the faintest thing in
-            // the bar. Omit the tooltip while disabled — there's no action
-            // for it to describe.
-            tooltip: panel == null
-                ? null
-                : (panel.hidden ? 'Show context panel' : 'Hide context panel'),
-            onTap: panel?.toggle,
-          ),
-        ),
-        const SizedBox(width: AbTokens.space8),
-        const AbWindowControls(),
       ],
     );
   }
@@ -438,7 +510,13 @@ class WindowTitleBarContents extends ConsumerWidget {
 /// `agent_panel.dart` — the mobile header and the desktop `AgentBar` — kept as
 /// one widget so the two cannot drift apart.
 class TitleBarBreadcrumb extends ConsumerWidget {
-  const TitleBarBreadcrumb({super.key});
+  const TitleBarBreadcrumb({super.key, this.showBranchPill = true});
+
+  /// False on the mobile agent-panel header ([AgentPanel]), which folds the
+  /// pill into its overflow menu instead — a phone-width row has no space to
+  /// spare for an unshrinkable sibling beside the title. Desktop's
+  /// [AgentBar] keeps the default, where the pill still sits inline.
+  final bool showBranchPill;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -480,30 +558,66 @@ class TitleBarBreadcrumb extends ConsumerWidget {
           ),
           SessionSharedWorkspaceBadge(session: active),
         ],
-        if (gitBranch != null) ...[
+        if (showBranchPill && gitBranch != null) ...[
           const SizedBox(width: AbTokens.space8),
-          // Bounded, not Flexible: the breadcrumb is the only child that should
-          // absorb slack, and a second flexible sibling would split it evenly
-          // and truncate the name long before the row is actually tight. The
-          // cap is what keeps a long branch from making the badge + pill an
-          // unshrinkable floor on a narrow window.
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 160),
-            child: AbBranchPill(
-              branch: gitBranch,
-              onTap: () async {
-                await Clipboard.setData(ClipboardData(text: gitBranch));
-                if (!context.mounted) return;
-                showAbSnackBar(
-                  context,
-                  'Copied "$gitBranch"',
-                  duration: const Duration(seconds: 2),
-                );
-              },
-            ),
+          // FlexFit.loose, not Expanded: the breadcrumb keeps first claim on
+          // slack (it has the higher flex below), and this only gives up its
+          // own width once the row is actually tight — a bare ConstrainedBox
+          // here does not shrink with the row at all, since a non-flex Row
+          // child is sized from its own content, capped but never squeezed,
+          // which is what let the fixed badges above push this row into
+          // overflow on a narrow agent panel. AbBranchPill's own Flexible
+          // Text (see its doc) is what turns this shrink into an ellipsis
+          // instead of a second overflow one widget down.
+          Flexible(
+            fit: FlexFit.loose,
+            child: SessionBranchPill(maxWidth: 160),
           ),
         ],
       ],
     );
+  }
+}
+
+/// The active session's git branch pill — tap to copy. Extracted so both the
+/// inline breadcrumb ([TitleBarBreadcrumb]) and the mobile overflow menu
+/// ([AgentPanel]'s header) share one behavior instead of drifting apart.
+/// Renders nothing while there is no branch to show.
+class SessionBranchPill extends ConsumerWidget {
+  const SessionBranchPill({super.key, this.maxWidth});
+
+  /// Caps the pill's width when it sits beside the breadcrumb — an
+  /// unshrinkable sibling would otherwise floor the title's own space on a
+  /// narrow window. Null renders it at its natural width, for a slot (the
+  /// mobile overflow menu) nothing else competes with for room.
+  final double? maxWidth;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final terminalState = ref.watch(terminalStateProvider).value;
+    final gitBranch = terminalState?.gitBranch;
+    if (gitBranch == null) return const SizedBox.shrink();
+
+    final pill = AbBranchPill(
+      branch: gitBranch,
+      ahead: terminalState?.gitAhead ?? 0,
+      behind: terminalState?.gitBehind ?? 0,
+      onTap: () => detached('WindowTitleBar', 'copy branch name', () async {
+        await Clipboard.setData(ClipboardData(text: gitBranch));
+        if (!context.mounted) return;
+        showAbSnackBar(
+          context,
+          'Copied "$gitBranch"',
+          duration: const Duration(seconds: 2),
+        );
+      }),
+    );
+    final width = maxWidth;
+    return width == null
+        ? pill
+        : ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: width),
+            child: pill,
+          );
   }
 }

@@ -1,0 +1,106 @@
+---
+import { Icon } from "astro-icon/components";
+import AppWindow from "./AppWindow.astro";
+import SessionRail from "./SessionRail.astro";
+import AgentPane from "./AgentPane.astro";
+import CtxTabs from "./CtxTabs.astro";
+
+// Handler, where Handler actually lives: a tab in the context pane, beside the
+// running session, NOT a screen of its own. It shares this window and this
+// transcript with the workspace scene because in the app it is the same window
+// and the same transcript — only the open tab differs.
+//
+// Section names, wrap-up verdicts and activity lines are the app's
+// (widgets/handler/handler_screen.dart): Needs you / Sessions / Wrap-up / Undo
+// / Activity, and Done / Failed / Blocked / Skipped. Tones are the app's too,
+// and they are not interchangeable: `Needs you` is the accent, while the amber
+// warning is reserved for the flagged reason itself — here
+// "Completion not verified", which is the exact event this scene turns on.
+//
+// The load-bearing row is the escalation: the pitch is that we don't believe
+// the agent, so this scene has to show the judge refusing a claim. A ledger of
+// green ticks argues the opposite of the product.
+interface Props {
+  class?: string;
+}
+const { class: cls = "" } = Astro.props;
+
+const wrapUp = [
+  { verdict: "Done", label: "validate cart and email", tone: "text-ab-ok" },
+  { verdict: "Skipped", label: "fix lint", tone: "text-ab-dim" },
+  { verdict: "Blocked", label: "open a PR", tone: "text-ab-attn" },
+];
+
+const activity = [
+  { label: "Completion not verified: no test command ran", at: "02:58", tone: "text-ab-attn" },
+  { label: "Auto-answered: allow write to tests/checkout.test.ts", at: "02:52", tone: "text-ab-mute" },
+  { label: "Armed", at: "02:41", tone: "text-ab-mute" },
+];
+---
+<AppWindow panes={3} class={cls}>
+  <SessionRail slot="rail" />
+
+  <AgentPane />
+
+  <div slot="ctx" class="appwin-ctx min-w-0 border-l border-ab-line">
+    <CtxTabs active="Handler" gitCount={3} />
+
+    <div class="flex h-8 items-center gap-2 border-b border-ab-line px-2.5">
+      <span class="flex shrink-0 items-center gap-1 rounded border border-signal/35 bg-signal/10 px-1.5 py-0.5 text-pip text-signal">
+        <Icon name="tabler:shield-lock" width="10" height="10" aria-hidden="true" />
+        Armed
+      </span>
+      <span class="flex-1"></span>
+      <span class="shrink-0 font-mono text-pip text-ab-dim">Judge</span>
+    </div>
+
+    <div class="flex flex-col gap-3 p-3">
+      <div class="flex items-center gap-2 font-mono text-pip uppercase tracking-[0.16em] text-signal">
+        Needs you
+        <span class="rounded-full bg-signaldeep px-1.5 tracking-normal text-signal">1</span>
+        <span class="h-px flex-1 bg-ab-line"></span>
+      </div>
+
+      <div class="rounded-md border border-ab-line-strong bg-ab-surface px-2.5 py-2">
+        <div class="mb-1.5 text-row leading-snug text-ab-text">
+          Claimed the checkout suite passed. It never ran.
+        </div>
+        <div class="text-meta leading-relaxed text-ab-mute">
+          The goal says <span class="text-ab-text2">tests green before a PR</span>. This phase produced three file
+          edits and no test run, so <span class="text-ab-attn">completion is not verified</span>. Wrap-up held.
+        </div>
+        <div class="mt-2 flex flex-wrap gap-1.5">
+          <span class="rounded border border-signalbtn bg-signalbtn px-2 py-0.5 text-meta font-medium text-ab-deepest">Run the suite, then report</span>
+          <span class="rounded border border-ab-line-strong px-2 py-0.5 text-meta text-ab-text2">Custom reply…</span>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2 font-mono text-pip uppercase tracking-[0.16em] text-ab-dim">
+        Wrap-up
+        <span class="rounded-full bg-ab-elevated px-1.5 tracking-normal text-ab-text2">3</span>
+        <span class="h-px flex-1 bg-ab-line"></span>
+      </div>
+      <div class="flex flex-col gap-1">
+        {wrapUp.map((r) => (
+          <div class="flex items-baseline gap-2 text-row text-ab-text2">
+            <span class="min-w-0 flex-1 truncate">{r.label}</span>
+            <span class={`shrink-0 font-mono text-pip ${r.tone}`}>{r.verdict}</span>
+          </div>
+        ))}
+      </div>
+
+      <div class="flex items-center gap-2 font-mono text-pip uppercase tracking-[0.16em] text-ab-dim">
+        Activity
+        <span class="h-px flex-1 bg-ab-line"></span>
+      </div>
+      <div class="flex flex-col gap-1">
+        {activity.map((a) => (
+          <div class="flex items-baseline gap-2 text-meta">
+            <span class={`min-w-0 flex-1 ${a.tone}`}>{a.label}</span>
+            <span class="shrink-0 font-mono text-pip text-ab-dim">{a.at}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+</AppWindow>

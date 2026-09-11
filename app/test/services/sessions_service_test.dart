@@ -1,3 +1,4 @@
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -5,6 +6,7 @@ import 'package:antgrid/services/session_delete_policy.dart';
 
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session.dart';
+import 'package:antgrid/services/pending_reply.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
@@ -46,6 +48,41 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(svc.currentState.projectId, 'p');
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test(
+    'a list request in flight fails with SessionDownException when the '
+    'session goes down, and leaves no entry for a late reply to double-hit',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      final future = svc.requestList();
+      await Future<void>.delayed(Duration.zero);
+      final listMsg = t.sent.firstWhere((m) => m['type'] == 'session:list');
+      final requestId = listMsg['requestId'] as String;
+
+      final expectation = expectLater(
+        future,
+        throwsA(isA<SessionDownException>()),
+      );
+      t.emitState(TransportState.disconnected);
+      await expectation;
+
+      // A late reply naming the same requestId must be a no-op: the registry's
+      // fail already de-registered the coalescing map entry (see
+      // `_newPending`'s onAbandon), so nothing is left for this to complete.
+      t.emit('session:list:result', {
+        'requestId': requestId,
+        'sessions': const <Map<String, dynamic>>[],
+      });
+      await Future<void>.delayed(Duration.zero);
 
       await svc.dispose();
       await session.close();
@@ -445,6 +482,25 @@ void main() {
     await svc.dispose();
     await session.close();
   });
+
+  test(
+    'a reconnect landing inside the delete window is accepted, not a '
+    'thrown SessionDownException',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      final future = svc.delete('sess-1');
+      t.emitState(TransportState.disconnected);
+
+      expect(await future, SessionDeleteAck.accepted);
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
 
   // The backstop de-registers the pending entry, which is why a late refusal
   // has no future left to fail. It still has to reach the user: _handleResult
