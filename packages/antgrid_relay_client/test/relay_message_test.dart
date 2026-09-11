@@ -107,6 +107,44 @@ void main() {
       expect(msg.serverTime, isNull);
     });
 
+    test('parses a routed-frame drop report with channel and bytes', () {
+      // The only path a flow-control un-charge takes in production: socket text
+      // → parseRelayMessage → errorStream → MachineSession. A dropped field
+      // here shrinks the sender's window for the rest of the session, silently.
+      final msg =
+          parseRelayMessage({
+                'type': 'error',
+                'code': 'MESSAGE_RATE_LIMITED',
+                'message': 'too many frames',
+                'retryable': true,
+                'channel': 'preview',
+                'bytes': 1234,
+              })
+              as ErrorMessage;
+      expect(msg.channel, 'preview');
+      expect(msg.bytes, 1234);
+    });
+
+    test('error drops an unusable byte count rather than the whole frame', () {
+      ErrorMessage parse(Map<String, dynamic> extra) =>
+          parseRelayMessage({
+                'type': 'error',
+                'code': 'PROTOCOL_VIOLATION',
+                'message': 'bad frame',
+                'retryable': false,
+                ...extra,
+              })
+              as ErrorMessage;
+
+      final plain = parse({});
+      expect(plain.channel, isNull);
+      expect(plain.bytes, isNull);
+
+      expect(parse({'bytes': -1}).bytes, isNull);
+      expect(parse({'bytes': '1234'}).bytes, isNull);
+      expect(parse({'channel': 7}).channel, isNull);
+    });
+
     test('parses peer-online, peer-offline', () {
       expect(
         parseRelayMessage({'type': 'peer-online', 'peerId': 'a'}),

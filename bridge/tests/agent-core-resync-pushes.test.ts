@@ -75,8 +75,20 @@ async function bootCore(): Promise<{ bus: MessageBus; sent: AbMessage[] }> {
 const countOf = (sent: AbMessage[], type: string) => sent.filter((m) => m.type === type).length;
 
 test("a resync re-sends the file tree even when nothing about it changed", async () => {
-  const { sent } = await bootCore();
-  await waitFor(() => sent.some((m) => m.type === "tree:full"), "the first tree:full");
+  const { bus, sent } = await bootCore();
+  // The precondition is a CACHED tree, not a delivered one: the open-time build
+  // is retained rather than pushed (MessageBus.retain), and what this test is
+  // about is the dedup having a byte-identical frame to swallow the resync
+  // against.
+  await waitFor(
+    () => bus.getSnapshot(["tree:full"]).length > 0,
+    "a tree:full in the replay cache",
+  );
+  // The open-time build reaches the cache and nothing else. Pushing it spent
+  // the largest frame the bridge produces on a client that pulls its own copy
+  // regardless — and, over a relay, before that client had a stream bound to
+  // receive it.
+  expect(countOf(sent, "tree:full")).toBe(0);
   const before = countOf(sent, "tree:full");
 
   // A second handshake is a reconnected app: its whole point is that the app
@@ -86,6 +98,55 @@ test("a resync re-sends the file tree even when nothing about it changed", async
 
   await waitFor(() => countOf(sent, "tree:full") > before, "the re-synced tree:full");
   await waitFor(() => countOf(sent, "agent:status") > 1, "the re-synced agent:status");
+});
+
+test("a resync skips the tree for a client that pulls it, and re-sends everything else", async () => {
+  const { bus, sent } = await bootCore();
+  core!.setOwnerPullsTreeProvider(() => true);
+  await waitFor(
+    () => bus.getSnapshot(["tree:full"]).length > 0,
+    "a tree:full in the replay cache",
+  );
+  const before = countOf(sent, "tree:full");
+  const statusBefore = countOf(sent, "git:status");
+
+  core!.onHandshakeComplete();
+
+  // Positive evidence the resync ran at all, before trusting the negative below.
+  await waitFor(() => countOf(sent, "agent:status") > 1, "the re-synced agent:status");
+  await waitFor(() => countOf(sent, "git:status") > statusBefore, "the re-synced git:status");
+  expect(countOf(sent, "tree:full")).toBe(before);
+});
+
+test("a resync still pushes the tree for a client that does not pull it", async () => {
+  const { bus, sent } = await bootCore();
+  core!.setOwnerPullsTreeProvider(() => false);
+  await waitFor(
+    () => bus.getSnapshot(["tree:full"]).length > 0,
+    "a tree:full in the replay cache",
+  );
+  const before = countOf(sent, "tree:full");
+
+  core!.onHandshakeComplete();
+
+  await waitFor(() => countOf(sent, "tree:full") > before, "the re-synced tree:full");
+});
+
+test("a resync pushes the tree when the peer half of the guard is the one that doesn't pull", async () => {
+  // Both providers must agree, not just the owner: a modern desktop reconnected
+  // over loopback while a legacy phone is still established on the relay slot.
+  const { bus, sent } = await bootCore();
+  core!.setOwnerPullsTreeProvider(() => true);
+  core!.setPeerPullsTreeProvider(() => false);
+  await waitFor(
+    () => bus.getSnapshot(["tree:full"]).length > 0,
+    "a tree:full in the replay cache",
+  );
+  const before = countOf(sent, "tree:full");
+
+  core!.onHandshakeComplete();
+
+  await waitFor(() => countOf(sent, "tree:full") > before, "the re-synced tree:full");
 });
 
 test("a tree snapshot request re-sends an UNCHANGED git status", async () => {
@@ -100,6 +161,42 @@ test("a tree snapshot request re-sends an UNCHANGED git status", async () => {
 
   await waitFor(() => sent.some((m) => m.type === "file:tree:snapshot"), "the tree snapshot");
   await waitFor(() => countOf(sent, "git:status") > before, "git:status after the request");
+});
+
+test("a tree request naming the current revision is answered without the tree", async () => {
+  const { bus, sent } = await bootCore();
+  bus.dispatchInbound(createMessage("file:tree:snapshot:request", {}), "control", "loopback");
+  await waitFor(() => sent.some((m) => m.type === "file:tree:snapshot"), "the first tree snapshot");
+  const first = sent.find((m) => m.type === "file:tree:snapshot");
+  const seq = first?.type === "file:tree:snapshot" ? first.seq : -1;
+
+  bus.dispatchInbound(
+    createMessage("file:tree:snapshot:request", { sinceSeq: seq }),
+    "control",
+    "loopback",
+  );
+
+  await waitFor(() => sent.some((m) => m.type === "file:tree:unchanged"), "the unchanged answer");
+  const unchanged = sent.find((m) => m.type === "file:tree:unchanged");
+  expect(unchanged?.type === "file:tree:unchanged" ? unchanged.seq : -1).toBe(seq);
+  // The point of the whole exchange: the tree crossed once, not twice.
+  expect(countOf(sent, "file:tree:snapshot")).toBe(1);
+});
+
+test("a tree request naming an unrecognised revision still gets the tree", async () => {
+  const { bus, sent } = await bootCore();
+
+  // Equality, never "at least": an agent that restarted is counting from zero
+  // again, so a client claim from the previous process is exactly the one that
+  // must be answered with the tree rather than confirmed.
+  bus.dispatchInbound(
+    createMessage("file:tree:snapshot:request", { sinceSeq: 9999 }),
+    "control",
+    "loopback",
+  );
+
+  await waitFor(() => sent.some((m) => m.type === "file:tree:snapshot"), "the tree snapshot");
+  expect(countOf(sent, "file:tree:unchanged")).toBe(0);
 });
 
 test("a preview snapshot request re-emits the detected ports alongside it", async () => {

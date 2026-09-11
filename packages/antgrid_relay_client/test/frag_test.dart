@@ -146,13 +146,13 @@ void main() {
       final r = FragReassembler(
         timeoutMs: 1000,
         globalBudgetBytes: 10000000,
-        onComplete: (json, _) => done.add(json),
+        onComplete: (json, _, __, ___) => done.add(json),
         onAbort: (_) {},
         now: () => 0,
       );
 
       for (final f in buildFragments(json, 't1', null, 1000)) {
-        expect(r.accept(f), isTrue);
+        expect(r.accept(f, frameId: 'f', epoch: 1), isTrue);
       }
 
       expect(done, [json]);
@@ -162,11 +162,18 @@ void main() {
       final r = FragReassembler(
         timeoutMs: 1000,
         globalBudgetBytes: 10000000,
-        onComplete: (_, __) {},
+        onComplete: (_, __, ___, ____) {},
         onAbort: (_) {},
         now: () => 0,
       );
-      expect(r.accept(jsonEncode({'type': 'file:content'})), isFalse);
+      expect(
+        r.accept(
+          jsonEncode({'type': 'file:content'}),
+          frameId: 'f',
+          epoch: 1,
+        ),
+        isFalse,
+      );
     });
 
     test('consumes malformed fragment marker with invalid JSON', () {
@@ -174,12 +181,12 @@ void main() {
       final r = FragReassembler(
         timeoutMs: 1000,
         globalBudgetBytes: 10000000,
-        onComplete: (json, _) => done.add(json),
+        onComplete: (json, _, __, ___) => done.add(json),
         onAbort: (_) {},
         now: () => 0,
       );
 
-      expect(r.accept('{"__frag":'), isTrue);
+      expect(r.accept('{"__frag":', frameId: 'f', epoch: 1), isTrue);
       expect(done, isEmpty);
     });
 
@@ -188,12 +195,19 @@ void main() {
       final r = FragReassembler(
         timeoutMs: 1000,
         globalBudgetBytes: 10000000,
-        onComplete: (json, _) => done.add(json),
+        onComplete: (json, _, __, ___) => done.add(json),
         onAbort: (_) {},
         now: () => 0,
       );
 
-      expect(r.accept('{"__frag":{"id":"a","i":0,"n":1},"data":1}'), isTrue);
+      expect(
+        r.accept(
+          '{"__frag":{"id":"a","i":0,"n":1},"data":1}',
+          frameId: 'f',
+          epoch: 1,
+        ),
+        isTrue,
+      );
       expect(done, isEmpty);
     });
 
@@ -202,7 +216,7 @@ void main() {
       final r = FragReassembler(
         timeoutMs: 1000,
         globalBudgetBytes: 10000000,
-        onComplete: (json, _) => done.add(json),
+        onComplete: (json, _, __, ___) => done.add(json),
         onAbort: (_) {},
         now: () => 0,
       );
@@ -211,7 +225,7 @@ void main() {
         '__frag': {'id': 'h', 'i': 0, 'n': 1000000000},
         'data': 'x',
       });
-      expect(r.accept(hostile), isTrue);
+      expect(r.accept(hostile, frameId: 'f', epoch: 1), isTrue);
       expect(done, isEmpty);
     });
 
@@ -225,17 +239,43 @@ void main() {
       final r = FragReassembler(
         timeoutMs: 1000,
         globalBudgetBytes: 10000000,
-        onComplete: (json, _) => done.add(json),
+        onComplete: (json, _, __, ___) => done.add(json),
         onAbort: (_) {},
         now: () => 0,
       );
 
-      r.accept(frames[2]);
-      r.accept(frames[0]);
-      r.accept(frames[0]);
-      r.accept(frames[1]);
+      r.accept(frames[2], frameId: 'f2', epoch: 1);
+      r.accept(frames[0], frameId: 'f0', epoch: 1);
+      r.accept(frames[0], frameId: 'f0b', epoch: 1);
+      r.accept(frames[1], frameId: 'f1', epoch: 1);
 
       expect(done, [json]);
+    });
+
+    test('completed message carries the completing fragment identity', () {
+      final json = jsonEncode({
+        'type': 'x',
+        'blob': List.filled(2500, 'z').join(),
+      });
+      final frames = buildFragments(json, 't4', null, 1000);
+      final seen = <({String frameId, int epoch})>[];
+      final r = FragReassembler(
+        timeoutMs: 1000,
+        globalBudgetBytes: 10000000,
+        onComplete: (_, __, frameId, epoch) =>
+            seen.add((frameId: frameId, epoch: epoch)),
+        onAbort: (_) {},
+        now: () => 0,
+      );
+
+      // Arrival order, not index order: the LAST to arrive is what the message
+      // must be attributed to, and it straddles a rekey here so the two
+      // candidate epochs are distinguishable.
+      r.accept(frames[0], frameId: 'opened', epoch: 1);
+      r.accept(frames[2], frameId: 'middle', epoch: 2);
+      r.accept(frames[1], frameId: 'completed', epoch: 2);
+
+      expect(seen, [(frameId: 'completed', epoch: 2)]);
     });
 
     test('timeout abort emits preserved hint', () {
@@ -255,12 +295,12 @@ void main() {
       final r = FragReassembler(
         timeoutMs: 1000,
         globalBudgetBytes: 10000000,
-        onComplete: (_, __) {},
+        onComplete: (_, __, ___, ____) {},
         onAbort: aborts.add,
         now: () => clock,
       );
 
-      r.accept(frames[0]);
+      r.accept(frames[0], frameId: 'f', epoch: 1);
       clock = 2000;
       r.sweep();
 

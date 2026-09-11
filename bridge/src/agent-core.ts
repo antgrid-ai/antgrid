@@ -21,6 +21,7 @@ import { FileUploadManager } from "./file-upload";
 import { FileSearcher } from "./file-search";
 import { PortDetector } from "./port-detector";
 import { TunnelManager } from "./tunnel-manager";
+import type { SendOutcome } from "./send-scheduler";
 import { type DeviceIdentity } from "./device";
 import { displayStartupBanner } from "./banner";
 import { generateEphemeralKeypair, type EphemeralKeypair } from "./key-exchange";
@@ -37,6 +38,7 @@ import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
 import { detectInstalledTools } from "./tool-detector";
+import { modelwatch } from "./modelwatch";
 import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
@@ -49,7 +51,7 @@ import { SessionNamer } from "./session-namer";
 import { antigravityCliHome } from "./agents/antigravity/title";
 import { AntigravityTitleWatcher } from "./agents/antigravity/title-watcher";
 import { resolveStructuredTitle } from "./agents/title-dispatch";
-import { buildTitleContext, generateTitleFromContext } from "./agents/title-generate";
+import { buildTitleContext, generateTitleFromContext, type TitleGeneration } from "./agents/title-generate";
 import { TitleAttempts, type TitleOutcome } from "./agents/title-attempts";
 import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
@@ -227,7 +229,13 @@ export interface AgentCore {
    *  and are sent through this hook directly. Pass `null` to clear it (the
    *  promotion controller does this on teardown so a dead relay closure
    *  isn't retained). */
-  setPlainHook(fn: ((data: object) => void) | null): void;
+  setPlainHook(fn: ((data: object) => Promise<SendOutcome>) | null): void;
+  /** Abort every in-flight tunneled HTTP response, on every checkout runtime
+   *  and on main. Driven from the transport's peer-online/peer-offline hooks:
+   *  a body in flight across a peer loss or a (re)establishment is dead by
+   *  construction, and the relay client's queue clear only reaches a run that
+   *  happens to be parked on a send at that instant. WS tunnels are untouched. */
+  abortTunnelStreams(): void;
   /** Wire a provider that returns the Ed25519 pubkey (standard base64) of the
    *  phone currently paired on the transport, or null when there is no relay
    *  peer (e.g. local/loopback transport, or pre-handshake). The mobile-access
@@ -238,6 +246,11 @@ export interface AgentCore {
   setPeerPubkeyProvider(fn: (() => string | null) | null): void;
   /** Current remote app capability; cleared when that transport detaches. */
   setPeerCheckoutRoutingProvider(fn: (() => boolean) | null): void;
+  /** Current remote app's tree-pull capability; cleared when that transport detaches. */
+  setPeerPullsTreeProvider(fn: (() => boolean) | null): void;
+  /** Same question for the loopback owner. Wired once at listener bind — the
+   *  listener outlives any single owner. */
+  setOwnerPullsTreeProvider(fn: (() => boolean) | null): void;
   /** Stream-gating state. The transport's peer-online/offline callbacks flip
    *  `peerOnline` to suppress the heavy stream while the paired phone is gone. */
   readonly connState: ConnState;
@@ -660,6 +673,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (force) republishAb(stamped); else sendAb(stamped);
   }
 
+  /** Stamps the checkout like [sendFromRuntime] but only seeds the replay
+   *  cache — see MessageBus.retain. */
+  function retainFromRuntime(runtime: CheckoutRuntime, msg: AbMessage): void {
+    retainAb({ ...msg, checkoutId: runtime.checkout.id } as AbMessage);
+  }
+
   function internalTerminalId(runtime: CheckoutRuntime, terminalId: string): string {
     if (sessions?.get(terminalId) || runtime.checkout.id === "main") return terminalId;
     const computed = runtime.configuredTerminalIds.get(terminalId)
@@ -700,6 +719,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       : null;
     if (!terminalId) { sendAb(msg); return; }
     const { runtime, externalId } = terminalOwner(terminalId);
+    const session = msg.type === "terminal:notification" ? sessions?.get(terminalId) : undefined;
+    const tool = session?.tool ?? (session?.command ? undefined : runtime.config.agent?.tool);
+    if (session && msg.type === "terminal:notification" && tool === "codex") {
+      // Codex's TUI is configured to emit approvals only. Use the hook's wire
+      // channel so mobile push and the work-status reducer also see the prompt,
+      // without a second terminal notification producing a duplicate toast.
+      sendFromRuntime(runtime, createMessage("notification:push", {
+        notificationType: "permission_request",
+        message: msg.body ?? msg.title ?? "Codex needs approval",
+        sessionId: session.id,
+        sessionTitle: session.name,
+        projectId: project.id,
+      }));
+      return;
+    }
     sendFromRuntime(runtime, { ...msg, terminalId: externalId } as AbMessage);
   }
 
@@ -712,11 +746,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // in local mode, where there is no relay peer.
   let peerPubkeyProvider: (() => string | null) | null = null;
   let peerCheckoutRoutingProvider: (() => boolean) | null = null;
+  let peerPullsTreeProvider: (() => boolean) | null = null;
+  let ownerPullsTreeProvider: (() => boolean) | null = null;
   function setPeerPubkeyProvider(fn: (() => string | null) | null) {
     peerPubkeyProvider = fn;
   }
   function setPeerCheckoutRoutingProvider(fn: (() => boolean) | null) {
     peerCheckoutRoutingProvider = fn;
+  }
+  function setPeerPullsTreeProvider(fn: (() => boolean) | null) {
+    peerPullsTreeProvider = fn;
+  }
+  function setOwnerPullsTreeProvider(fn: (() => boolean) | null) {
+    ownerPullsTreeProvider = fn;
   }
 
   // Mobile-access gate, shared by every inbound path (bus verbs AND the
@@ -734,6 +776,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   function currentPeerCanRouteCheckouts(): boolean {
     return peerCheckoutRoutingProvider?.() === true;
+  }
+
+  /** A re-sync push reaches EVERY bus subscriber, so it may only be skipped when
+   *  every attached client pulls the tree for itself. No provider wired at all
+   *  means the core is driven by something that named no capability (a bare bus,
+   *  as in the unit tests) — that client gets the push. */
+  function everyClientPullsTrees(): boolean {
+    const wired = [ownerPullsTreeProvider, peerPullsTreeProvider]
+      .filter((p): p is () => boolean => p !== null);
+    return wired.length > 0 && wired.every((p) => p());
   }
 
   function handleTunnelMessage(raw: unknown) {
@@ -757,6 +809,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
           log.error("tunnel:http-request handler failed: %s", err)
         );
+        break;
+      case "tunnel:http-cancel":
+        runtime.tunnelManager.onHttpCancel(msg);
         break;
       case "tunnel:ws-open":
         runtime.tunnelManager.onWsOpen(msg);
@@ -1511,8 +1566,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (runtime.checkout.id !== checkoutIdOf(msg)) break;
         const fw = runtime.fileWatcher;
         if (!fw) break;
-        const { tree, seq } = fw.getTreeSnapshot();
-        sendFromRuntime(runtime, createMessage("file:tree:snapshot", { tree, seq }));
+        // A caller that names the revision it holds, and is still right about
+        // it, is told so instead of being sent the tree again. A phone
+        // foregrounding re-asks EVERY bound checkout at once and nothing else
+        // gates that, so on an idle project every one of those answers was a
+        // byte-identical megabyte. `currentSeq` reads the counter without
+        // walking the tree, so the confirmation costs no disk either.
+        if (msg.sinceSeq !== undefined && msg.sinceSeq === fw.currentSeq()) {
+          sendFromRuntime(runtime, createMessage("file:tree:unchanged", { seq: msg.sinceSeq }));
+        } else {
+          const { tree, seq } = fw.getTreeSnapshot();
+          sendFromRuntime(runtime, createMessage("file:tree:snapshot", { tree, seq }));
+        }
+        // Outside the branch above on purpose: staging, a branch move and a
+        // commit all change the decorations without touching a watched path,
+        // so an unchanged tree says nothing about the status drawn on it.
         // The app asks for this on every (re)connect and on a pull-to-refresh,
         // and the git decorations belong to the same picture as the tree —
         // answering with a tree alone left the changes list showing whatever
@@ -1632,7 +1700,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   /** Same wire as [sendAb] but bypasses the bus's payload-equality dedup. Only
    *  the explicit re-sync paths use it — see MessageBus.republish. */
   let republishAb: (msg: AbMessage) => void = (_m) => {};
-  let sendPlain: (data: object) => void = (_d) => {};
+  /** Same bus as [sendAb] but caches for replay WITHOUT delivering — see
+   *  MessageBus.retain. */
+  let retainAb: (msg: AbMessage) => void = (_m) => {};
+  let sendPlain: (data: object) => Promise<SendOutcome> = async () => "dropped";
   // Replay-cache eviction for torn-down chat sessions; bound with the bus in
   // attachTransport, like sendAb.
   let dropSessionReplay: (sessionId: string) => void = (_s) => {};
@@ -2528,17 +2599,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       );
     }
 
-    // Re-send the file tree. Forced for the same reason as the status/git pair
-    // above: an idle project's tree is byte-identical to the cached one, so the
-    // ordinary dedup would drop the very re-push this resync exists to perform.
-    for (const runtime of checkoutRuntimes.values()) {
-      await yieldToEventLoop();
-      // Re-tested after the yield, not just on entry: `sendFullTree` walks the
-      // whole tree synchronously and `stop()` does not disable it, so a
-      // teardown that started during the yield would be walking a directory
-      // Git is removing.
-      if (runtime.disposed) continue;
-      runtime.fileWatcher?.sendFullTree({ force: true });
+    // Re-send the file tree, but only for a client that cannot pull it. An app
+    // advertising `pullsTree` asks per checkout with `file:tree:snapshot:request`
+    // on every establishment, so the push is the largest frame the bridge
+    // produces spent on bytes already in flight the other way — ahead of that
+    // app's replies in the same FIFO.
+    //
+    // Forced, for the same reason as the status/git pair above: an idle
+    // project's tree is byte-identical to the cached one, so the ordinary dedup
+    // would drop the very re-push this branch exists to perform.
+    if (!everyClientPullsTrees()) {
+      for (const runtime of checkoutRuntimes.values()) {
+        await yieldToEventLoop();
+        // Re-tested after the yield, not just on entry: `sendFullTree` walks the
+        // whole tree synchronously and `stop()` does not disable it, so a
+        // teardown that started during the yield would be walking a directory
+        // Git is removing.
+        if (runtime.disposed) continue;
+        runtime.fileWatcher?.sendFullTree({ force: true });
+      }
     }
 
     // Re-emit the detected-port list. ports:update is only pushed on change,
@@ -2655,7 +2734,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
     const fw = new FileWatcher(
       { id: project.id, path: runtime.checkout.path, name: project.name },
-      (msg, opts) => sendFromRuntime(runtime, msg, opts?.force),
+      (msg, opts) => {
+        if (opts?.replayOnly) retainFromRuntime(runtime, msg);
+        else sendFromRuntime(runtime, msg, opts?.force);
+      },
       connState,
       () => scheduleGitRefresh(runtime),
     );
@@ -2672,7 +2754,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // by this point it has already nulled `manager`. The delete path cannot:
     // [withCheckoutRuntimeLock] holds teardown behind this whole function.
     if (runtime.disposed || !manager) return;
-    fw.sendFullTree();
+    // Cached, not pushed. Nothing reads an open-time tree: every client pulls
+    // its own with `file:tree:snapshot:request`, and this one is built before
+    // any app has a stream bound to receive it — so the push was discarded on
+    // arrival while holding half the control channel's window (see
+    // MessageBus.retain).
+    fw.sendFullTree({ replayOnly: true });
     fw.startWatching();
 
     runtime.configController.watch((result, diff) => {
@@ -3469,7 +3556,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
     const fw = new FileWatcher(
       project,
-      (msg: AbMessage, opts) => (opts?.force ? republishAb(msg) : sendAb(msg)),
+      (msg: AbMessage, opts) => {
+        if (opts?.replayOnly) retainAb(msg);
+        else if (opts?.force) republishAb(msg);
+        else sendAb(msg);
+      },
       connState,
       () => scheduleGitRefresh(mainRuntime),
     );
@@ -3483,7 +3574,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     uploadManager.startSweeper();
     mainRuntime.uploadManager = uploadManager;
     await yieldToEventLoop();
-    fw.sendFullTree();
+    // Cached, not pushed. Nothing reads an open-time tree: every client pulls
+    // its own with `file:tree:snapshot:request`, and this one is built before
+    // any app has a stream bound to receive it — so the push was discarded on
+    // arrival while holding half the control channel's window (see
+    // MessageBus.retain).
+    fw.sendFullTree({ replayOnly: true });
     fw.startWatching();
 
     const mainSearcher = new FileSearcher(
@@ -3608,10 +3704,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // title thrown away for reasons unrelated to generating it, which releases
     // the claim without spending the budget.
     let outcome: TitleOutcome = "abandoned";
+    // Held out here so the record below can name the call the verdict belongs
+    // to: the two exits after a successful spawn settle as `abandoned`, and
+    // those are the calls that were paid for and their answer thrown away.
+    let result: TitleGeneration | undefined;
     try {
       // No cwd: a naming spawn runs in a throwaway directory of its own
       // (headlessScratchCwd), never this session's checkout.
-      const result = await generateTitleFromContext(context, { tool });
+      result = await generateTitleFromContext(context, { tool, terminalId: target.terminalId });
       if (!result.ok) {
         outcome = result.reason;
         return;
@@ -3631,6 +3731,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       namer?.onStructuredTitle(target.terminalId, result.title, "self");
     } finally {
       titleAttempts.settle(target.terminalId, key, outcome);
+      // After the settle and inside a catch of its own: that call decides
+      // whether this session may ever be named again, and an observer must
+      // never be what breaks it. `abandoned` is recorded like any other verdict
+      // — it is the one outcome nothing else counts, and the only place the
+      // spawn's own records can be told a paid-for answer was discarded.
+      try {
+        if (result) modelwatch.record({
+          callId: result.callId, phase: "outcome", purpose: "title", attempt: 1,
+          requestedTool: tool, actualTool: result.actualTool, reach: result.reach,
+          terminalId: target.terminalId, outcome,
+        });
+      } catch { /* an observer must never fail a naming run */ }
     }
   }
 
@@ -3656,14 +3768,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // Persist the agent's native resume id for this slot every turn
       // (overwrite-latest), independent of title resolution. terminalId is the
       // slot id (stamped as ANTGRID_TERMINAL_ID at spawn).
-      if (!body.titleOnly) {
-        const prevAgentSession = sessions?.get(body.terminalId)?.agentSessionId;
-        sessions?.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
+      // True only when the manager REFUSED this id — an ephemeral thread the
+      // agent's own store disowns. The slot still holds a different
+      // conversation, so nothing below may name it after the id in this post.
+      // An UNKNOWN slot is not a refusal: a service PTY never had an identity.
+      let idRefused = false;
+      if (!body.titleOnly && sessions) {
+        const slot = sessions.get(body.terminalId);
+        const prevAgentSession = slot?.agentSessionId;
+        idRefused = slot !== undefined
+          && !sessions.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
         // A new conversation under a STILL-LIVE PTY (`/clear`, `/new`) reaches
         // no exit path, so this is the only place the previous conversation's
         // title rank can be released. Left latched, it vetoes every
         // first-message title the new conversation resolves.
-        if (prevAgentSession && prevAgentSession !== body.sessionId) {
+        if (!idRefused && prevAgentSession && prevAgentSession !== body.sessionId) {
           namer?.forgetStructuredTitle(body.terminalId);
         }
       }
@@ -3676,7 +3795,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       const hookTool = body.agent ? BY_HOOK_NAME[body.agent] : undefined;
       const chatSlot = sessions?.get(body.terminalId)?.mode === "chat";
       const nameFromHook = (fallback?: string) => {
-        if (!hookTool || !body.sessionId || chatSlot) return;
+        if (!hookTool || !body.sessionId || chatSlot || idRefused) return;
         maybeGenerateTitle(hookTool, {
           terminalId: body.terminalId,
           agentSessionId: body.sessionId,
@@ -3725,6 +3844,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });
 
+  // `params` is z.unknown() on RequestMessage, so `...CheckoutScoped`'s default
+  // never runs on this path -- the "main" default has to live here instead.
+  const TerminalSnapshotRpcParams = z.object({
+    terminalId: z.string().min(1),
+    checkoutId: z.string().default("main"),
+    history: z.boolean().default(false),
+  });
+
   // Intercepted before the generic dispatchRpc registry — like sessions.list/
   // sessions.delete's own special-casing — because it needs `structured`
   // (StructuredAgentManager) in closure scope, which rpc/methods.ts's registry
@@ -3747,13 +3874,95 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return createMessage("response", { requestId: msg.requestId, ok: true, result: { frames } });
   }
 
+  // Correlated RPC twin of `terminal:snapshot:request` (see that case below,
+  // which stays untouched -- old apps and `resyncState`'s unsolicited push
+  // still need it). This is intercepted here rather than registered in
+  // rpc/methods.ts for the same reason session.transcriptSnapshot is: a
+  // MethodDef handler cannot see `manager`, `checkoutRuntimes`, `mainRuntime`,
+  // `internalTerminalId`, `prepareCheckoutRuntime` or `sessions`, all of which
+  // are closure-scoped here.
+  async function handleTerminalSnapshotRpc(msg: RpcRequest): Promise<AbMessage> {
+    const parsed = TerminalSnapshotRpcParams.safeParse(msg.params ?? {});
+    if (!parsed.success) {
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: {
+          code: "E_BAD_PARAMS",
+          message: parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; "),
+        },
+      });
+    }
+    const { terminalId, checkoutId, history } = parsed.data;
+    if (!manager) {
+      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
+    }
+    if (sessions?.isCheckoutDeleting(checkoutId) === true) {
+      log.warn("Refusing terminal.snapshot for checkout %s: its delete is in flight (project %s)", checkoutId, project.id);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "CHECKOUT_DELETING", message: "This session's workspace is being deleted." },
+      });
+    }
+    const checkout = await checkoutRuntimes.resolve(checkoutId);
+    if (!checkout) {
+      log.warn("Rejecting terminal.snapshot for unknown checkout %s (project %s)", checkoutId, project.id);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "UNKNOWN_CHECKOUT", message: "The requested checkout is not available." },
+      });
+    }
+    // Re-checked after the store lookup: a delete that started during that
+    // await would otherwise have this checkout re-prepared right here.
+    if (sessions?.isCheckoutDeleting(checkoutId) === true) {
+      log.warn("Refusing terminal.snapshot for checkout %s: its delete is in flight (project %s)", checkoutId, project.id);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "CHECKOUT_DELETING", message: "This session's workspace is being deleted." },
+      });
+    }
+    // Never `runtimeFor`/`terminalOwner`/`?? mainRuntime` -- see the guard this
+    // mirrors at the `terminal:snapshot:request` case below. `internalTerminalId`
+    // WRITES `runtime.configuredTerminalIds` and the module-level
+    // `terminalOwners`, so resolving the wrong runtime here would permanently
+    // corrupt `sendTerminalFrame`'s id rewrite for this terminal.
+    const runtime = checkoutId === "main" ? mainRuntime : await prepareCheckoutRuntime(checkout);
+    if (runtime.disposed) {
+      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
+    }
+    let snap: { text: string; seq: number } | null;
+    try {
+      snap = await manager.getAttachSnapshot(internalTerminalId(runtime, terminalId), { history });
+    } catch (err) {
+      log.warn("terminal.snapshot for terminal %s failed: %s", terminalId, err);
+      return createMessage("response", {
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "E_HANDLER", message: "terminal snapshot failed" },
+      });
+    }
+    if (!snap) {
+      log.warn("terminal.snapshot requested for unknown terminal %s", terminalId);
+      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
+    }
+    return createMessage("response", {
+      requestId: msg.requestId,
+      ok: true,
+      result: { snapshot: { terminalId, scrollback: snap.text, seq: snap.seq, composed: true } },
+    });
+  }
+
   function attachTransport(bus: MessageBus) {
     sendAb = (m) => bus.publish(m, "control");
     republishAb = (m) => bus.republish(m, "control");
+    retainAb = (m) => bus.retain(m, "control");
     dropSessionReplay = (sessionId) => bus.dropSessionReplay(sessionId);
     dropCheckoutReplay = (checkoutId) => bus.dropCheckoutReplay(checkoutId);
     // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.
-    sendPlain = (data) => busPlainHook?.(data);
+    sendPlain = (data) => busPlainHook?.(data) ?? Promise.resolve("dropped");
     bus.setInboundHandler((msg, channel, source) => {
       // Mobile-access gate: the single chokepoint through which both RPC
       // requests and plain Ab messages enter the core dispatch. Drops EVERY
@@ -3795,8 +4004,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // Same failure, same fix, as the machine control plane's own
           // `state.snapshot` intercept (`host-server.ts`); an unchanged
           // payload is a cheap no-op, since the bus dedups on it. Skipped for
-          // a pull that could not carry the status anyway (the app's separate
-          // tree pull) — nothing there to keep fresh.
+          // a pull that could not carry the status anyway — nothing there to
+          // keep fresh.
           for (const runtime of checkoutRuntimes.values()) {
             if (runtime.disposed) continue;
             sendStatus(runtime);
@@ -3804,6 +4013,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         if (msg.method === "session.transcriptSnapshot") {
           void handleTranscriptSnapshotRequest(msg).then((res) => bus.publish(res, channel));
+          return;
+        }
+        if (msg.method === "terminal.snapshot") {
+          // `.catch` before the publish, not after: the handler awaits
+          // `checkoutRuntimes.resolve` (a store read) and
+          // `prepareCheckoutRuntime` (config load + runtime start), neither of
+          // which is guarded inside it. An unhandled rejection here reaches
+          // `index.ts`'s `unhandledRejection` hook, which shuts the whole host
+          // down over one failed screen pull.
+          void handleTerminalSnapshotRpc(msg)
+            .catch((err) => {
+              log.warn("terminal.snapshot failed for project %s: %s", project.id, err);
+              return createMessage("response", {
+                requestId: msg.requestId,
+                ok: false,
+                error: { code: "E_HANDLER", message: "terminal snapshot failed" },
+              });
+            })
+            .then((res) => bus.publish(res, channel));
           return;
         }
         void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));
@@ -3857,9 +4085,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   }
 
   // Plaintext (tunnel) sender wired by the caller after transport construction.
-  let busPlainHook: ((data: object) => void) | null = null;
-  function setPlainHook(fn: ((data: object) => void) | null) {
+  let busPlainHook: ((data: object) => Promise<SendOutcome>) | null = null;
+  function setPlainHook(fn: ((data: object) => Promise<SendOutcome>) | null) {
     busPlainHook = fn;
+  }
+
+  function abortTunnelStreams(): void {
+    for (const runtime of checkoutRuntimes.values()) runtime.tunnelManager?.abortHttpStreams();
+    tunnelManager?.abortHttpStreams();
   }
 
   return {
@@ -3907,8 +4140,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     handleTunnelMessage,
     onHandshakeComplete,
     setPlainHook,
+    abortTunnelStreams,
     setPeerPubkeyProvider,
     setPeerCheckoutRoutingProvider,
+    setPeerPullsTreeProvider,
+    setOwnerPullsTreeProvider,
     connState,
     deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean> {
       if (!sessions) return false;

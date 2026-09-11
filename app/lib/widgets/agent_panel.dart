@@ -35,6 +35,7 @@ import '../providers/session_mode.dart';
 import '../providers/sessions.dart';
 import '../providers/visible_surface.dart';
 import '../screens/terminal_screen.dart';
+import '../services/pending_reply.dart' show SessionDownException;
 import '../util/ab_log.dart';
 import '../util/device_id.dart';
 import '../util/detached.dart';
@@ -56,6 +57,7 @@ import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
 import 'window_title_bar.dart';
 import 'workspace_menu_button.dart';
+import 'workspace_readiness_chip.dart';
 
 class AgentPanel extends ConsumerWidget {
   const AgentPanel({super.key});
@@ -118,6 +120,7 @@ class AgentPanel extends ConsumerWidget {
               const Expanded(
                 child: TitleBarBreadcrumb(showBranchPill: false),
               ),
+              const WorkspaceReadinessChip(),
               const SizedBox(width: AbTokens.space6),
               const _SessionOverflowButton(),
             ],
@@ -360,6 +363,7 @@ class AgentBar extends ConsumerWidget {
         // mobile header above.
         const SizedBox(width: AbTokens.space12),
         const Expanded(child: TitleBarBreadcrumb()),
+        const WorkspaceReadinessChip(),
         const SizedBox(width: AbTokens.space6),
         const SessionModeControl(),
         const SizedBox(width: AbTokens.space8),
@@ -805,6 +809,8 @@ class _EditableSessionLeafState extends ConsumerState<EditableSessionLeaf> {
       await svc.rename(id, name);
     } on TimeoutException {
       report("the agent didn't answer. Check the connection and try again.");
+    } on SessionDownException catch (e) {
+      report(e.toString());
     }
   }
 

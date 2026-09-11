@@ -8,6 +8,7 @@ import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/open_checkout.dart';
 import 'package:antgrid/providers/projects.dart';
 import 'package:antgrid/providers/remote_access.dart';
+import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 
 import '../helpers/prefs_test_mock.dart';
@@ -41,6 +42,7 @@ void main() {
         lastOpenedAt: DateTime.now(),
       ),
     );
+    final pendingForgets = await PendingForgetsStore.open();
 
     hostReads = 0;
     clipboardWrites = 0;
@@ -62,6 +64,7 @@ void main() {
       ProviderScope(
         overrides: [
           projectStoreProvider.overrideWithValue(projectStore),
+          pendingForgetsStoreProvider.overrideWithValue(pendingForgets),
           localDeviceUuidProvider.overrideWith((_) async => localUuid),
           // Counts the reach rather than serving one: the host client is a live
           // loopback socket, and what these tests are about is whether it is

@@ -8,7 +8,9 @@
     "preview": "astro preview",
     "check": "astro check",
     "test": "playwright test",
-    "build:og": "node scripts/shoot-og.mjs"
+    "test:scripts": "node --test scripts/*.test.mjs",
+    "build:og": "node scripts/shoot-og.mjs",
+    "sync:changelog": "node scripts/sync-changelog.mjs"
   },
   "dependencies": {
     "@astrojs/sitemap": "3.7.4",

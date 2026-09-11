@@ -8,6 +8,7 @@ import '../design/widgets/ab_snack_bar.dart';
 import '../models/workspace_view.dart';
 import '../services/file_service.dart';
 import '../services/preview_service.dart';
+import '../widgets/attachment_preview_dialog.dart';
 import '../widgets/terminal_hyperlink_sheet.dart';
 import 'ab_log.dart';
 
@@ -222,6 +223,13 @@ Future<void> openContentLink(
 /// Opens a path a `file://` link named in the Files tab. See
 /// [FileService.resolveTerminalPath] for why only the bridge can relativize
 /// the path, and [FileService.revealDirectory] for the folder case.
+///
+/// A path outside the checkout falls back to
+/// [FileResolvePathResultMessage.externalImagePath] — a recognized image type
+/// (an image-generation tool's own output, typically), previewed read-only in
+/// the attachment-preview dialog instead of refused outright. Anything else
+/// outside the checkout is still refused: see that field's own doc for the
+/// narrow, extension-only trust the bridge extends it.
 Future<void> _openFileLink(
   BuildContext context,
   String rawUri,
@@ -240,7 +248,17 @@ Future<void> _openFileLink(
     if (!context.mounted) return;
     final relPath = result.relPath;
     if (relPath == null) {
-      showAbSnackBar(context, 'That path is outside this workspace.');
+      final externalImagePath = result.externalImagePath;
+      if (externalImagePath == null) {
+        showAbSnackBar(context, 'That path is outside this workspace.');
+        return;
+      }
+      await showFilePreviewDialog(
+        context,
+        service,
+        path: externalImagePath,
+        displayName: _fileNameOf(externalImagePath),
+      );
       return;
     }
     revealView(WorkspaceView.files);
@@ -256,6 +274,17 @@ Future<void> _openFileLink(
       fields: {'error': '$error', 'stack': '$stack'},
     );
   }
+}
+
+/// The last path segment of [path], tolerating either separator convention.
+///
+/// Not `package:path`'s `basename`: that resolves against the APP's own
+/// platform, but this path names a file on the BRIDGE machine, which may run
+/// a different OS — same reasoning as [terminalFilePath]'s own doc.
+String _fileNameOf(String path) {
+  final normalized = path.replaceAll('\\', '/');
+  final segments = normalized.split('/').where((s) => s.isNotEmpty);
+  return segments.isEmpty ? path : segments.last;
 }
 
 /// Opens a `localhost`/IP-literal `http(s)` link in the Preview tab, with the

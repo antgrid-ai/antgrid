@@ -280,10 +280,14 @@ class CommandHandler {
   /// stream. [StreamTransport.refreshSnapshot] does exactly that, and the
   /// frames surface through the [_attachStream] subscription as
   /// `antgrid-message` events, so type waiters resolve instead of racing the
-  /// deduped burst. `snapshot-complete` marks the STATE half landed; the tree
-  /// is pulled in a round trip of its own and can surface after it, so a
-  /// `tree:full` waiter has to be a type waiter, not a read of what landed by
-  /// the event.
+  /// deduped burst.
+  ///
+  /// The production pull EXCLUDES `tree:full` — the app's file tree arrives
+  /// through `FileService`'s per-checkout `file:tree:snapshot:request`
+  /// hydrator instead, and pulling it here as well doubled the heaviest frame
+  /// on every connect. This client has no such hydrator, and the bus replays
+  /// nothing on subscribe, so a project stream asks for the heavy types in a
+  /// round trip of its own to keep the evals' `tree:full` waiters answerable.
   Future<void> _handleSnapshot(Map<String, dynamic> cmd) async {
     final session = _session;
     if (session == null) {
@@ -295,8 +299,46 @@ class CommandHandler {
     }
     final streamId = cmd['streamId'] as String? ?? kControlStreamId;
     _attachStream(streamId);
-    await session.streamFor(streamId).refreshSnapshot();
+    final transport = session.streamFor(streamId);
+    await transport.refreshSnapshot();
+    // The control plane's bus never caches a tree; asking would spend a round
+    // trip on an empty answer.
+    if (streamId != kControlStreamId) {
+      await _pullHeavyFrames(transport, streamId);
+    }
     _emit({'event': 'snapshot-complete', 'streamId': streamId});
+  }
+
+  /// Frames the production snapshot pull leaves to the app's hydrators. Kept
+  /// in lockstep with `_kHeavyReplayTypes` in `machine_session.dart`.
+  static const _kHeavyReplayTypes = <String>['tree:full'];
+
+  /// Emitted directly rather than pushed back through the transport: the
+  /// [_attachStream] subscription only sees what the transport itself fans
+  /// out, and a raw `request` bypasses that path.
+  Future<void> _pullHeavyFrames(
+    StreamTransport transport,
+    String streamId,
+  ) async {
+    try {
+      final snap = await transport.request(
+        'state.snapshot',
+        params: {'types': _kHeavyReplayTypes},
+      );
+      for (final raw in (snap['frames'] as List?) ?? const []) {
+        if (raw is! Map) continue;
+        _emit({
+          'event': 'antgrid-message',
+          'streamId': streamId,
+          'channel': 'control',
+          'data': raw.cast<String, dynamic>(),
+        });
+      }
+    } catch (_) {
+      // A missing tree is the waiter's problem to report, with its own
+      // message; failing the whole snapshot here would hide the state half
+      // that did land.
+    }
   }
 
   Future<void> _handleDisconnect() async {

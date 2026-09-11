@@ -32,6 +32,9 @@ import { claudeForkHandoff, claudeNativeForkArgs } from "./claude-code/fork";
 import { codexForkHandoff, codexNativeForkArgs } from "./codex/fork";
 import { opencodeForkHandoff, opencodeNativeForkArgs } from "./opencode/fork";
 import { terminalForkHandoff } from "./fork-handoff";
+import {
+  readClaudeCodeUsage, readCodexUsage, readCopilotUsage, readOpencodeUsage,
+} from "./usage-envelope";
 
 import { pickHeadlessFrom, type AgentKey, type AgentSpec } from "./types";
 
@@ -76,6 +79,14 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     // NOT `--bare`, which looks made for this (skips hooks, plugins, memory):
     // it also forces ANTHROPIC_API_KEY-only auth and never reads OAuth or the
     // keychain, so it fails closed for every subscription user.
+    //
+    // `haiku` — an alias, not a dated snapshot, so it survives the next Haiku
+    // release rather than 404ing when this one is retired. Measured against the
+    // exact readonly argv below: a single `claude-haiku-4-5-20251001` key in
+    // `modelUsage`, `is_error: false`, at ~22% of an unpinned call's cost — see
+    // title-generate.ts for why this must be read off the tool that actually
+    // serves the call rather than the one requested.
+    cheapNamingModel: "haiku",
     headless: {
       readonly: {
         // The prompt goes BEFORE --allowedTools, not last. --allowedTools is
@@ -93,6 +104,16 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
         // and one per agent pause buries the sessions the user actually started
         // under /resume. Valid only with --print, which this argv already uses.
         noHistory: "flag",
+        usage: {
+          from: "stdout",
+          // AFTER the variadic --allowedTools value, which is where the run that
+          // captured the envelope put it and is the harder of the two positions:
+          // it parsed with the tools list intact and the prompt still ahead of
+          // every variadic flag, so a placement before --allowedTools would be
+          // safe too. It is also where this argv already appends --model.
+          argv: (cmd) => [...cmd, "--output-format", "json"],
+          read: readClaudeCodeUsage,
+        },
       },
     },
     transcript: readClaudeTranscript,
@@ -121,7 +142,8 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     approvalPolicies: { bypass: { terminalArgs: ["--dangerously-bypass-approvals-and-sandbox"], chat: true, risk: "bypasses-approvals-and-sandbox" } },
     hookName: "codex",
     hookDir: "~/.codex/hooks",
-    notificationSource: "plugin",
+    // Approval prompts use OSC; the Stop hook supplies completion messages.
+    notificationSource: "osc",
     titleSource: "structured",
     resume: (id) => ["resume", id],
     resumeIsSubcommand: true,
@@ -135,6 +157,14 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     driver: createCodexDriver,
     // codex offers no sandbox tighter than read-only, so there is no sealed
     // entry to write: `--sandbox read-only` is the floor.
+    //
+    // "gpt-5.4-mini", the lowest-priority tier in this account's own
+    // ~/.codex/models_cache.json, verified against the readonly argv below: the
+    // CLI's own plain-mode banner echoed "model: gpt-5.4-mini" and the call
+    // completed. A dated, account-scoped slug rather than an alias — codex has
+    // none — so it is the likeliest of the declared entries to need re-verifying
+    // first if a title call starts failing for this vendor.
+    cheapNamingModel: "gpt-5.4-mini",
     headless: {
       readonly: {
         // --skip-git-repo-check because a project need not be a git repo:
@@ -151,19 +181,30 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
         // user's own work rather than at whichever bookkeeping pass ran most
         // recently.
         noHistory: "flag",
+        usage: {
+          from: "stdout",
+          // Immediately BEFORE the prompt, which is this argv's last element and
+          // is positional: that is where the run that captured the envelope put
+          // it, and a flag after a positional prompt has never been run here.
+          argv: (cmd) => [...cmd.slice(0, -1), "--json", ...cmd.slice(-1)],
+          read: readCodexUsage,
+        },
       },
     },
     transcript: readCodexTranscript,
     // null = the DB is undeterminable (missing/locked/schema drift), which is
-    // not a confirmation that the thread is gone.
+    // not a confirmation that the thread is gone. Passed through rather than
+    // collapsed here: callers separate "codex disowns this thread" from "codex
+    // could not say", and only the former may refuse a resume.
     resumable: ({ agentSessionId, codexHome }) =>
-      codexThreadExistsSync(agentSessionId, codexHome ?? join(homedir(), ".codex")) ?? true,
+      codexThreadExistsSync(agentSessionId, codexHome ?? codexHomeDir()),
+    sessionStoreIsAuthoritative: true,
     // The CLI's live state DB is the only source populated for bridge-spawned
     // `codex-tui` sessions. session_index.jsonl is not read at all: every name
     // in it is one the Codex DESKTOP app generated, and we name sessions
     // ourselves (see ResolvedTitle).
     resolveTitle: async ({ sessionId, codexHome }) =>
-      await resolveCodexThreadTitle(sessionId, codexHome ?? join(homedir(), ".codex")),
+      await resolveCodexThreadTitle(sessionId, codexHome ?? codexHomeDir()),
     update: {
       npmPackage: "@openai/codex",
       command: "codex",
@@ -191,6 +232,14 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     },
     hooks: opencodeHooks,
     driver: createOpencodeDriver,
+    // "openai/gpt-5.4-mini" — the `provider/model` form this CLI's own `--model`
+    // requires, verified against the transcript argv below via the run's own
+    // log (`modelID=gpt-5.4-mini`, and a counter-run with no --model logging
+    // `gpt-5.6-terra-fast` for the same call, proving the flag is not ignored).
+    // The account's free tiers (`opencode/*-free`) are not candidates however
+    // cheap: their availability is not something a naming call can rely on, and
+    // a throttled call produces no title at all.
+    cheapNamingModel: "openai/gpt-5.4-mini",
     headless: {
       // "transcript", not "readonly": --agent plan selects opencode's built-in
       // restricted Plan agent (edits denied by default; non-interactive `run`
@@ -220,6 +269,16 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
         // remote config is the live risk if a team serves model settings that way.
         env: { OPENCODE_DB: ":memory:" },
         noHistory: "ephemeral-store",
+        usage: {
+          from: "stdout",
+          // Before the positional prompt, as codex's is, and for the same
+          // reason: that is the argv that was run.
+          argv: (cmd) => [...cmd.slice(0, -1), "--format", "json", ...cmd.slice(-1)],
+          // Tokens only. The reader takes no cost and no model name from this
+          // stream, and neither omission is a gap to fill later — see it for
+          // the measured reasons.
+          read: readOpencodeUsage,
+        },
       },
     },
     transcript: readOpencodeTranscript,
@@ -272,7 +331,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
       copilotSessionExistsSync(
         agentSessionId,
         copilotHome ?? process.env.COPILOT_HOME ?? join(homedir(), ".copilot"),
-      ) ?? true,
+      ),
     resolveTitle: async ({ sessionId, copilotHome }) =>
       await resolveCopilotSessionTitle(
         sessionId,
@@ -280,6 +339,21 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
       ),
     // No `update`: github-copilot ships no self-updater (IDE-bound), so a
     // request for one fails soft via updateSpecFor → null.
+    //
+    // No `cheapNamingModel`, and its absence is measured rather than unexamined:
+    // `--model` is inert on this account (`model_picker_enabled: false` on every
+    // catalog entry), so EVERY candidate — including the model this CLI itself
+    // resolves to with no flag, and Claude Haiku 4.5 in three spellings — is
+    // refused locally, exit 1, before any API call. Declaring one would turn
+    // every borrowed title for this vendor into a permanent hard failure.
+    // `COPILOT_MODEL` reaches the same resolver and fails identically, so it is
+    // not a way around this either.
+    //
+    // Which leaves the call itself as the only thing left to decline, and that
+    // is measured too: a `-p` run answering "Reply with the single word: ok"
+    // reported `totalPremiumRequestCost: 1` — a whole premium request, the
+    // same unit a real turn of work spends, for six words of session title.
+    billsPerCall: true,
     headless: {
       // "readonly", not "sealed": -p reads the working tree with no flag asking
       // it to. Measured — it answered a "read package.json" prompt even under
@@ -304,6 +378,16 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
         // where the same move would take the credentials with it.
         scratchEnv: ["COPILOT_HOME"],
         noHistory: "ephemeral-store",
+        usage: {
+          // The only vendor whose usage costs stdout nothing: with this flag the
+          // output was byte-identical to a run without it, so no parser here
+          // sees any difference. Copilot ALSO ships `--output-format json`,
+          // which would rewrite stdout the way the other three vendors' flags
+          // do — it is not the flag to reach for.
+          from: "side-file",
+          argv: (cmd, path) => [...cmd, "--usage-output-file", path],
+          read: readCopilotUsage,
+        },
       },
     },
   },
@@ -366,6 +450,16 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
           ["kilo", "run", "--agent", "plan", ...(model ? ["--model", model] : []), prompt],
         env: { KILO_DB: ":memory:" },
         noHistory: "ephemeral-store",
+        // No usage descriptor. `kilo run --format json` exists and its event
+        // shape was read out of the shipped binary, but no successful run has
+        // ever been captured: this machine has no Kilo Gateway credentials, so
+        // every model routes through a 401 and no step_finish part — the only
+        // usage carrier — has been seen on the wire. A descriptor written from
+        // that schema would be the guess this field exists to refuse. Two
+        // further things the capture would have to settle: the cost field
+        // carries NO currency unit anywhere in the envelope, and `metrics.source`
+        // is literally "provider" | "computed", so kilo itself says when a
+        // number was computed locally rather than returned by the provider.
       },
     },
   },

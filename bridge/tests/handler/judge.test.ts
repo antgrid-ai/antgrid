@@ -86,6 +86,40 @@ describe("runDecision", () => {
     expect(timedOut).toBe(1);
   });
 
+  // The sibling above scripts a hung judge with EMPTY stdout, where `r1.value` is
+  // already null and returning it is indistinguishable from returning null. This
+  // is the case the invariant actually exists for: an attempt that answered, and
+  // then hung on the way out. Null reads upstream as "the judge could not run"
+  // and parks the session, so a decision the caller's own shape gate would have
+  // escalated with its text attached must survive the timeout leg intact.
+  it("keeps a shape-rejected decision when the attempt that produced it also timed out", async () => {
+    const calls: string[][] = [];
+    const spawn = ((cmd: string[]) => {
+      calls.push(cmd);
+      let close!: () => void;
+      let resolveExit!: (code: number) => void;
+      return {
+        stdout: new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(GOOD));
+            close = () => c.close();
+          },
+        }),
+        exited: new Promise<number>((r) => { resolveExit = r; }),
+        kill() { close(); resolveExit(1); },
+      };
+    }) as unknown as typeof Bun.spawn;
+    let timedOut = 0;
+    const d = await runDecision({
+      tool: "claude-code", goal: GOAL, backlogText: "", context: "C",
+      cwd: ".", timeoutMs: 50, spawn, onTimeout: () => { timedOut += 1; },
+      retryIfShape: () => "reply names no terminal",
+    });
+    expect(d?.decision).toBe("continue");
+    expect(calls.length).toBe(1); // still no retry leg after a timeout
+    expect(timedOut).toBe(1);
+  });
+
   // The retry inherits whatever the first attempt left of the budget, so a hung
   // one spends the rest of it — and returns the same null a failed spawn does.
   // Leaving the hook silent there is what makes the budget unmeasurable from the
@@ -173,6 +207,29 @@ describe("runDecision", () => {
     });
     expect(calls[0].join(" ")).toContain("codex");
     expect(calls[0].join(" ")).toContain("/x");
+  });
+
+  // AgentSpec.cheapNamingModel is a NAMING field and must stay one. It names the
+  // cheapest model a vendor will answer on, chosen for a 3-to-6 word task where a
+  // weak answer costs a session title; a judge decides whether a supervised agent
+  // keeps running, and downgrading that silently would be invisible in every
+  // suite here — the verdict shape parses identically whatever model produced it.
+  // The judge is also never borrowed (pickJudge gates per tool), so it has no
+  // serving-vs-requested question to answer and no reason to consult the field.
+  it("passes no --model when the session set none, whatever the agent declares", async () => {
+    const { spawn, calls } = fakeSpawn([GOOD]);
+    await runDecision({ tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+    expect(calls[0]).not.toContain("--model");
+    expect(calls[0]).not.toContain("haiku");
+  });
+
+  // The session's own judgeModel is the ONLY thing that puts one there.
+  it("passes the session's judgeModel when it set one", async () => {
+    const { spawn, calls } = fakeSpawn([GOOD]);
+    await runDecision({
+      tool: "claude-code", model: "claude-opus-5", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn,
+    });
+    expect(calls[0]).toEqual(expect.arrayContaining(["--model", "claude-opus-5"]));
   });
 });
 

@@ -34,6 +34,7 @@ class FakeLiveRelay extends RelayService {
   final _messages = StreamController<IncomingRouteMessage>.broadcast();
   final _states = StreamController<AppState>.broadcast();
   final _presence = StreamController<bool>.broadcast();
+  final _errors = StreamController<ErrorMessage>.broadcast();
   final sent = <SentFrame>[];
   late AppState _current;
 
@@ -43,6 +44,8 @@ class FakeLiveRelay extends RelayService {
   Stream<AppState> get stateStream => _states.stream;
   @override
   Stream<bool> get peerPresenceStream => _presence.stream;
+  @override
+  Stream<ErrorMessage> get errorStream => _errors.stream;
   @override
   AppState get currentState => _current;
 
@@ -65,10 +68,15 @@ class FakeLiveRelay extends RelayService {
 
   void presence(bool online) => _presence.add(online);
 
+  /// A typed relay error as the socket would deliver it — a routed-frame drop
+  /// report carries the discarded frame's `channel` and `bytes`.
+  void injectError(ErrorMessage e) => _errors.add(e);
+
   Future<void> closeStreams() async {
     await _messages.close();
     await _states.close();
     await _presence.close();
+    await _errors.close();
   }
 }
 

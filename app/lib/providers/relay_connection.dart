@@ -12,6 +12,10 @@ import '../util/netwatch.dart';
 import 'device_revocation.dart';
 import 'providers.dart';
 
+/// Window the dropped-frame count in [RelayConnection._noteDroppedFrame] is
+/// accumulated over. Reported on the line so the count reads as a rate.
+const Duration _kDropLogBurstWindow = Duration(seconds: 1);
+
 /// Owns exactly one relay socket (one [RelayService]) and its single
 /// [MachineSession] for one bare machine `deviceUuid`. v3: there is ONE socket
 /// per machine — the control plane and every project ride sealed streams inside
@@ -166,7 +170,11 @@ class RelayConnection {
         // A dropped frame is not a connection fault — the socket stays open and
         // the ladder is unaffected. It reaches the session so services holding
         // re-issuable work can recover it instead of waiting out a timeout.
-        if (e.code == 'MESSAGE_RATE_LIMITED') {
+        // Both codes the relay uses for a discarded ROUTED frame: the rate
+        // limiter's, and `ROUTE_FAILED` for a recipient whose socket refused
+        // the write. Keep in lockstep with `handleDroppedFrameError` in the
+        // bridge's relay-client.ts.
+        if (e.code == 'MESSAGE_RATE_LIMITED' || e.code == 'ROUTE_FAILED') {
           _noteDroppedFrame();
           mechanisms.session?.noteFramesDropped();
         }
@@ -250,7 +258,7 @@ class RelayConnection {
     _droppedFramesTotal++;
     // Drops arrive in bursts (a page load overruns the bucket for as long as it
     // takes to issue its subresources); one line per frame buries the count.
-    _dropLogBurst ??= Timer(const Duration(seconds: 1), () {
+    _dropLogBurst ??= Timer(_kDropLogBurstWindow, () {
       _dropLogBurst = null;
       AbLog.warn(
         'relay',
@@ -258,6 +266,7 @@ class RelayConnection {
         fields: {
           'machine': machineDeviceId,
           'frames': _droppedFrames,
+          'windowMs': _kDropLogBurstWindow.inMilliseconds,
           'total': _droppedFramesTotal,
         },
       );

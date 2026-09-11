@@ -5,6 +5,7 @@ import { Wordmark } from "./wordmark.js";
 import { Mark } from "./mark.js";
 import { absoluteUrl } from "./origin.js";
 import { SALESIQ_CONTROLLER_SCRIPT, salesIqSupportLauncher } from "./salesiq.js";
+import { Analytics } from "./analytics.js";
 
 /** Which nav entry the current page IS, so it can be marked. Pages without an
  *  entry of their own (account, sign-in, checkout) pass nothing. */
@@ -147,6 +148,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
         {user && (
           <script dangerouslySetInnerHTML={{ __html: ACCOUNT_MENU_SCRIPT }} />
         )}
+        <Analytics />
       </body>
     </html>
   );

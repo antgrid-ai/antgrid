@@ -5,6 +5,7 @@ import Seo from "../components/Seo.astro";
 import Nav from "../components/Nav.astro";
 import Footer from "../components/Footer.astro";
 import SalesIqSupport from "../components/SalesIqSupport.astro";
+import { ANALYTICS } from "../config";
 interface Props {
   title: string;
   description: string;
@@ -115,5 +116,20 @@ const { title, description, ogImage, ogImageAlt, path, robots } = Astro.props;
       );
       reveals.forEach((el) => { if (!el.classList.contains("in")) io.observe(el); });
     </script>
+    {/* Last thing in the document, and the head would be the wrong place for it:
+        everything up there is chosen for what it does to the first frame, and
+        this does nothing to it. `defer` is what keeps that true — Chrome fetches
+        a deferred script at Low priority, under the font preloads and the CSS
+        that DO paint, then runs it once parsing is done.
+
+        `is:inline` is load-bearing for a different reason than the OS script's:
+        here the data-* attributes ARE the configuration, so the tag has to reach
+        the browser as written rather than as something a bundler rewrote. */}
+    <script
+      is:inline
+      defer
+      src={ANALYTICS.src}
+      data-website-id={ANALYTICS.websiteId}
+      data-domains={ANALYTICS.domains}></script>
   </body>
 </html>

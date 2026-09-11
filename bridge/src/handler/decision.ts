@@ -5,6 +5,7 @@ import { pickHeadlessFrom, type HeadlessCommand, type JudgeTier } from "../agent
 import type { CapCommand } from "../structured/chat-session";
 import { ItemTransitionSchema } from "./backlog";
 import { extractJsonObject } from "./json-extract";
+import { unwrapEnvelope } from "../agents/usage-envelope";
 import { MAX_REPLY_CHARS } from "./reply-shape";
 import type { HandlerPersonality } from "../protocol";
 
@@ -245,8 +246,14 @@ export function buildShapeRetryPrompt(originalPrompt: string, rejection: string)
   ].join("\n");
 }
 
+// An UNWRAPPER ahead of the existing scan, never a rewrite of it. Where the CLI
+// was asked for a usage envelope, the judge's answer is a JSON string INSIDE it,
+// and extractJsonObject cannot reach a brace that sits in a string literal — it
+// returns the envelope, which parses, fails the schema, and costs a retry and
+// then a fail-closed escalation on a decision that was correct and present.
+// Plain text is not an envelope and comes through untouched.
 export function parseDecisionFromOutput(stdout: string): { decision: HandlerDecision | null; error?: string } {
-  const obj = extractJsonObject(stdout);
+  const obj = extractJsonObject(unwrapEnvelope(stdout)?.text ?? stdout);
   if (obj === null) return { decision: null, error: "no JSON object found in output" };
   const parsed = HandlerDecisionSchema.safeParse(obj);
   if (parsed.success) return { decision: parsed.data };

@@ -273,3 +273,54 @@ describe("Layout support chat", () => {
     }
   });
 });
+
+describe("Layout analytics", () => {
+  // Analytics is the rare surface that fails silently in BOTH directions, which
+  // is why it is pinned rather than left to review: a tag dropped in a layout
+  // refactor stops the numbers with no error anywhere, and a tag that loses its
+  // domain gate quietly files every `bun run dev` session and the whole
+  // app.staging.antgrid.ai deploy as real traffic — read back later as usage
+  // that never happened.
+  //
+  // The gate is enforced by the tracker, not the server: s.js returns early
+  // unless location.hostname is in data-domains. So the attribute IS the
+  // mechanism, and asserting it is the whole test — deliberately without loading
+  // s.js, since a third-party origin must never be able to fail this suite.
+  //
+  // Counted, not merely present: a second tag reaching the document — a nested
+  // component picking up Analytics, or a partial layout later wrapping this one
+  // — loads s.js twice and doubles every pageview, which reads as growth rather
+  // than as a bug.
+  const expectTag = (html: string) => {
+    expect(html.split('src="https://wa.radhaai.com/s.js"')).toHaveLength(2);
+    expect(html).toContain('data-website-id="bfb955b0-5839-4106-8856-b17106233619"');
+    expect(html).toContain('data-domains="app.antgrid.ai"');
+  };
+
+  test("signed-out pages carry the tag", () => {
+    // Login, signup, invite and reset all render this shape, and they are the
+    // whole top of the funnel — the pages whose numbers answer whether anyone
+    // is arriving at all.
+    expectTag(Layout({ title: "Test", children: "x" }).toString());
+  });
+
+  test("signed-in pages carry the tag", () => {
+    expectTag(
+      Layout({
+        title: "Test",
+        user: { id: "user-1", email: "gita@example.com" },
+        children: "x",
+      }).toString()
+    );
+  });
+
+  test("loads deferred, below the assets that actually paint", () => {
+    // Without `defer` this is a parser-blocking third-party fetch sitting in
+    // front of the rest of the document — an outage at the analytics host would
+    // become an outage of the sign-in page.
+    const markup = Layout({ title: "Test", children: "x" }).toString();
+    const at = markup.indexOf("wa.radhaai.com");
+    const tag = markup.slice(markup.lastIndexOf("<script", at), markup.indexOf(">", at));
+    expect(tag).toContain("defer");
+  });
+});

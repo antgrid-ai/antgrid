@@ -9,7 +9,7 @@ describe("ConnState", () => {
     expect(state.appFocusPaused).toBe(false);
     expect(state.peerOnline).toBe(true);
     expect(state.suppressed).toBe(false);
-    expect(state.fileSeq).toBe(0);
+    expect(state.fileSeq("any")).toBe(0);
     expect(state.terminalSeq("any")).toBe(0);
   });
 
@@ -43,10 +43,16 @@ describe("ConnState", () => {
     expect(state.terminalSeq("t2")).toBe(1);
   });
 
-  it("bumpFileSeq increments monotonically", () => {
-    expect(state.bumpFileSeq()).toBe(1);
-    expect(state.bumpFileSeq()).toBe(2);
-    expect(state.fileSeq).toBe(2);
+  it("bumpFileSeq counts each watched root independently", () => {
+    expect(state.bumpFileSeq("/a")).toBe(1);
+    expect(state.bumpFileSeq("/a")).toBe(2);
+    // A sibling worktree's churn must not advance this root's revision: that
+    // is the whole reason a resuming client's "still at 2?" can match on an
+    // idle checkout of a project whose other checkouts are busy.
+    expect(state.bumpFileSeq("/b")).toBe(1);
+    expect(state.fileSeq("/a")).toBe(2);
+    expect(state.fileSeq("/b")).toBe(1);
+    expect(state.fileSeq("/never-watched")).toBe(0);
   });
 
   it("clearTerminal removes a terminal's seq state", () => {

@@ -11,6 +11,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_diff_stat.dart';
+import '../design/widgets/ab_disclosure_chevron.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
@@ -731,7 +732,7 @@ class _CollapseToggle extends StatelessWidget {
 }
 
 /// The small inline header the History section carries at the bottom of the
-/// left column (see [_GitPanelBody._buildFileList]) — a label plus a fold
+/// left column (see [_GitPanelBody._buildLeftColumn]) — a label plus a fold
 /// toggle for expanded commits. No back affordance: unlike the top-level
 /// [_GitChangesHeader], this never stands alone as the whole panel's chrome,
 /// so there is never a "back to history" to offer. No write actions either —
@@ -745,13 +746,31 @@ class _GitHistorySectionHeader extends StatelessWidget {
   const _GitHistorySectionHeader({
     required this.fileService,
     required this.history,
+    this.collapsed = false,
+    this.onToggleCollapsed,
   });
 
   final FileService fileService;
   final GitHistoryState history;
 
+  /// Whether the WHOLE section is folded shut — see
+  /// [GitPaneState.historyCollapsed]. Purely how this renders;
+  /// [onToggleCollapsed] is what actually flips it. Distinct from
+  /// [GitHistoryState.expandedShas], which folds individual commits within an
+  /// already-visible list — "Collapse All" below acts on that, not on this.
+  final bool collapsed;
+
+  /// Null in the compact (phone-width) layout's `_ChangesHistorySwitcher` tab,
+  /// where History already gets the whole screen when selected — collapsing
+  /// it there has nothing to hand the freed space to. Side-by-side always
+  /// passes one (`_GitPanelBody._buildLeftColumn`), even with no working-tree
+  /// changes to give the space to: the section still folds, and the rest of
+  /// the column just sits blank above it.
+  final VoidCallback? onToggleCollapsed;
+
   @override
   Widget build(BuildContext context) {
+    final toggle = onToggleCollapsed;
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: AbTokens.space12,
@@ -761,13 +780,26 @@ class _GitHistorySectionHeader extends StatelessWidget {
         child: Row(
           children: [
             Expanded(
-              child: Text(
-                'History',
-                overflow: TextOverflow.ellipsis,
-                style: AbTokens.sansStyle(color: context.antgrid.textMuted),
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: toggle,
+                child: Row(
+                  children: [
+                    if (toggle != null) AbDisclosureChevron(expanded: !collapsed),
+                    Expanded(
+                      child: Text(
+                        'History',
+                        overflow: TextOverflow.ellipsis,
+                        style: AbTokens.sansStyle(
+                          color: context.antgrid.textMuted,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-            if (history.expandedShas.isNotEmpty)
+            if (!collapsed && history.expandedShas.isNotEmpty)
               SizedBox(
                 width: AbTokens.rowHeightSm,
                 child: AbIconButton(
@@ -1136,19 +1168,49 @@ class _GitPanelBody extends ConsumerWidget {
   /// underneath it, in one fixed 3:2 split rather than a tab switching
   /// between them — both stay on screen and each scrolls independently,
   /// so seeing what changed and seeing how it got there never cost a tap
-  /// to switch between.
+  /// to switch between. Tapping the History header (`historyCollapsed`)
+  /// always folds it down to just that header row, bottom-anchored — even
+  /// with no working-tree changes, when there is nothing else in the column
+  /// to give the freed space to; the rest of the column just sits blank
+  /// above it rather than the toggle being refused.
   ///
-  /// With no working-tree changes the Changes tree has nothing to show but
-  /// an empty state, so it is dropped entirely rather than reserving 3/5 of
-  /// the column for it — History takes the full column instead.
+  /// With no working-tree changes AND History expanded, the Changes tree has
+  /// nothing to show but an empty state, so it is dropped entirely rather
+  /// than reserving 3/5 of the column for it — History takes the full column
+  /// instead.
   Widget _buildLeftColumn(BuildContext context) {
+    final hasChanges = state.gitFileEntries.isNotEmpty;
+    final collapsed = state.git.historyCollapsed;
+
+    final historyHeader = _GitHistorySectionHeader(
+      fileService: fileService,
+      history: state.git.history,
+      collapsed: collapsed,
+      onToggleCollapsed: fileService.toggleHistoryCollapsed,
+    );
+
+    if (collapsed) {
+      // Folded to just its header, bottom-anchored, so Changes (or, with none,
+      // blank space) gets the rest of the column instead of sharing the fixed
+      // 3:2 split below.
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: hasChanges
+                ? _buildFileList(context)
+                : const SizedBox.shrink(),
+          ),
+          const AbSeparator.horizontal(),
+          historyHeader,
+        ],
+      );
+    }
+
     final historyColumn = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _GitHistorySectionHeader(
-          fileService: fileService,
-          history: state.git.history,
-        ),
+        historyHeader,
         const AbSeparator.horizontal(),
         Expanded(
           child: _HistoryList(git: state.git, fileService: fileService),
@@ -1156,7 +1218,7 @@ class _GitPanelBody extends ConsumerWidget {
       ],
     );
 
-    if (state.gitFileEntries.isEmpty) {
+    if (!hasChanges) {
       return historyColumn;
     }
 
@@ -1495,6 +1557,13 @@ class _HistoryListState extends State<_HistoryList> {
   }
 
   void _onScroll() {
+    // A hovered row's tooltip is a fixed-position overlay entry — it has no
+    // idea the list under it just moved, since a scroll carries no pointer
+    // event to tell it the target left the cursor. Left alone it lingers
+    // over the row's new (scrolled) position until its own show timer
+    // expires, reading as the tooltip sliding toward the list's edge and
+    // popping off.
+    Tooltip.dismissAllToolTips();
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
     if (position.pixels >= position.maxScrollExtent - 400) {

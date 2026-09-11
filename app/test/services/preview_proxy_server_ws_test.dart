@@ -61,8 +61,7 @@ void main() {
         requestId: 'x',
         status: 200,
         headers: {},
-        body: '',
-        bodyEncoding: 'utf8',
+        body: Stream.empty(),
       ),
       onWebSocketConnect: (channel, path, headers) {
         forwarded = headers;

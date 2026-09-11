@@ -362,10 +362,10 @@ void main() {
     // `isNotEmpty`, not a count: the session builds its own main-checkout
     // TerminalService, so both it and the one under test answer this frame.
     expect(
-      t.sent.where(
-        (m) =>
-            m['type'] == 'terminal:snapshot:request' &&
-            m['terminalId'] == 'wt-1:setup',
+      t.requests.where(
+        (r) =>
+            r.method == 'terminal.snapshot' &&
+            r.params?['terminalId'] == 'wt-1:setup',
       ),
       isNotEmpty,
     );

@@ -1011,6 +1011,21 @@ class FileTreeSnapshotMessage {
   });
 }
 
+/// The agent confirming the revision a `file:tree:snapshot:request` claimed:
+/// the tree has not moved, so none was sent. Carries no tree by design — see
+/// the schema note on `FileTreeUnchangedMessage` in the bridge's protocol.ts.
+class FileTreeUnchangedMessage {
+  final String id;
+  final int timestamp;
+  final int seq;
+
+  const FileTreeUnchangedMessage({
+    required this.id,
+    required this.timestamp,
+    required this.seq,
+  });
+}
+
 class PreviewSnapshotRequestMessage {
   final String id;
   final int timestamp;
@@ -1332,6 +1347,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         requestId: requestId,
         relPath: json['relPath'] as String?,
         isDirectory: json['isDirectory'] as bool? ?? false,
+        externalImagePath: json['externalImagePath'] as String?,
       );
 
     case 'ports:update':
@@ -1385,8 +1401,14 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         attributes: attributes,
       );
 
-    case 'tunnel:http-response':
-      return TunnelHttpResponse.fromJson(json);
+    case 'tunnel:http-start':
+      return TunnelHttpStartMessage.fromJson(json);
+
+    case 'tunnel:http-chunk':
+      return TunnelHttpChunkMessage.fromJson(json);
+
+    case 'tunnel:http-end':
+      return TunnelHttpEndMessage.fromJson(json);
 
     case 'tunnel:ws-data':
       return TunnelWsDataMessage.fromJson(json);
@@ -1876,6 +1898,15 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         timestamp: timestamp,
         tree: tree,
         seq: seq,
+      );
+
+    case 'file:tree:unchanged':
+      final unchangedSeq = json['seq'];
+      if (unchangedSeq is! int) return null;
+      return FileTreeUnchangedMessage(
+        id: id,
+        timestamp: timestamp,
+        seq: unchangedSeq,
       );
 
     case 'preview:snapshot:request':
