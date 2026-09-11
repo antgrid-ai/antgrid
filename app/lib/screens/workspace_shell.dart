@@ -29,8 +29,11 @@ import '../models/ab_message.dart';
 import '../models/handler_state.dart' show HandlerEscalation;
 import '../models/preferences_models.dart';
 import '../models/session_entry.dart';
+import '../project/checkout_readiness.dart' show CheckoutReadiness;
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
+import '../providers/checkout_readiness.dart'
+    show checkoutReadinessProvider, focusedWaitStartedAtProvider;
 import '../providers/demo_mode.dart';
 import '../providers/device_provisioning.dart' show localDeviceUuidProvider;
 import '../providers/local_transport_fault.dart';
@@ -67,6 +70,7 @@ import '../widgets/session_search_modal.dart';
 import '../widgets/session_start_refusal.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../widgets/resizable_pane.dart';
+import '../widgets/terminal_elapsed.dart';
 import '../widgets/workspace_tab_bar.dart';
 import '../widgets/ab_banner.dart';
 import '../widgets/ab_host_banner.dart';
@@ -97,6 +101,14 @@ abstract final class _MobilePage {
 /// drag detector layered over the shell would have had to reproduce all of that
 /// by inspection, and would have fought the PageView for every swipe.
 const double _kBackOverscrollThreshold = 48.0;
+
+/// Pixel floors for the desktop split's [ResizablePane], passed as
+/// `minLeftWidth`/`minRightWidth`. `AgentBar` (`widgets/agent_panel.dart`) is
+/// a row of fixed-size controls that overflows — a visible RenderFlex error,
+/// not a graceful reflow — once squeezed narrower than this; the workspace
+/// tab bar + panel content need comparable room on the other side.
+const double _kAgentPanelMinWidth = 420.0;
+const double _kContextPanelMinWidth = 320.0;
 
 /// Desktop panel arrangement. Persisted by NAME as
 /// `ProjectPreferences.panelMode`, so reordering these is safe; renaming one
@@ -153,6 +165,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// applied once, while in portrait.
   _PanelMode? _panelMode;
   bool _prefsApplied = false;
+
+  /// Set once, never cleared. The boot overlay is a LAUNCH surface: it must
+  /// never re-cover a workspace that has already been handed to the user, no
+  /// matter how far readiness regresses afterwards. A mid-session regression
+  /// is reported by the readiness chip and the pane chrome, in place.
+  bool _bootHandedOff = false;
   SessionUiKey? _sessionUiKey;
   final _mobileScaffoldKey = GlobalKey<ScaffoldState>();
 
@@ -1225,9 +1243,26 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         ],
       );
     }
-    final isLocalMode = ref.watch(selectedRegistrationIdProvider) != null;
+    // selectedTargetProvider?.isLocal, not selectedRegistrationIdProvider != null
+    // — the latter is the compound `<machineUuid>.<projectId>` id for a remote
+    // target too, so it reads true for both and a remote cold open never saw
+    // the phased boot screen at all.
+    final isLocalTarget = ref.watch(selectedTargetProvider)?.isLocal == true;
 
-    // Only listen while prefs haven't been applied yet.
+    // Dropped the moment the checkout is usable, so the next surface that asks
+    // "how long have I been waiting" measures its own wait rather than
+    // inheriting a stamp from an activation that finished minutes ago. A deep
+    // link, a tapped notification and a resume all reach a boot screen without
+    // passing through the drawer activation that sets it.
+    ref.listen(checkoutReadinessProvider, (_, next) {
+      if (next == CheckoutReadiness.ready) {
+        ref.read(focusedWaitStartedAtProvider.notifier).set(null);
+      }
+    });
+
+    // Prefs application is unconditional and independent of readiness: it owns
+    // the workspace view index, expanded paths and selected file, none of
+    // which depend on how far the checkout has attached.
     if (!_prefsApplied) {
       ref.listen(projectPreferencesProvider, (_, next) {
         final prefs = next.value;
@@ -1237,13 +1272,36 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       });
 
       final prefs = ref.read(projectPreferencesProvider).value;
-      if (prefs != null) {
-        _applyPrefs(prefs);
-      } else if (isLocalMode) {
-        return const _LocalBootStatus();
-      } else {
-        return const _WorkspaceBootStatus();
+      if (prefs != null) _applyPrefs(prefs);
+    }
+
+    // The boot overlay is a ONE-WAY latch: CheckoutReadiness is
+    // level-triggered and oscillates for the life of the session (every
+    // re-establishment and every mobile foreground drives
+    // _rehydrateTerminals), so a bare predicate would re-mount this full-screen
+    // overlay mid-session — unmounting the GlobalKey-identified
+    // _agentPanelKey/_contextPanelKey panels, the exact destruction
+    // test/workspace_panel_reparent_test.dart exists to prevent. Once handed
+    // off, a readiness regression is reported in place by the pane chrome and
+    // the readiness chip, never by re-covering the workspace.
+    if (!_bootHandedOff) {
+      final readiness = ref.watch(checkoutReadinessProvider);
+      const holding = {
+        CheckoutReadiness.cold,
+        CheckoutReadiness.reachingMachine,
+        CheckoutReadiness.openingSession,
+        CheckoutReadiness.loadingScreen,
+      };
+      if (!_prefsApplied || holding.contains(readiness)) {
+        return isLocalTarget
+            ? const _LocalBootStatus()
+            : const _WorkspaceBootStatus();
       }
+      // Reached on `ready`, `blocked` (the blocking-error gate above already
+      // owns that screen) and `stalled` — a stalled checkout hands off to the
+      // WORKSPACE, where the Retry lives inline in the pane and the terminal
+      // list, not to workspaceBlockingError's full-screen takeover.
+      _bootHandedOff = true;
     }
 
     // Watched rather than listened to, and only past the boot gate above,
@@ -2359,6 +2417,16 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           Expanded(
             child: ResizablePane(
               initialRatio: _splitRatio,
+              // Floors under the plain 0.2/0.8 ratio: AgentBar is a row of
+              // fixed-size controls (mark, approval badge, breadcrumb, mode
+              // control, handler control, menu button) that don't shrink
+              // below their own content, and the workspace tab bar +
+              // panel's own content need comparable room. Below these, the
+              // ratio-only clamp let a drag squeeze either bar past its
+              // minimum and threw a RenderFlex overflow instead of just
+              // stopping the drag.
+              minLeftWidth: _kAgentPanelMinWidth,
+              minRightWidth: _kContextPanelMinWidth,
               onRatioChanged: (r) {
                 _splitRatio = r;
                 _updatePrefs();
@@ -2614,10 +2682,38 @@ class _WorkspaceBootStatusState extends ConsumerState<_WorkspaceBootStatus> {
     return _PhaseStatus.pending;
   }
 
+  /// Running at [CheckoutReadiness.openingSession], done past it — pending
+  /// before the relay ladder has even handed off to a session.
+  static _PhaseStatus _openingSessionStatus(CheckoutReadiness readiness) =>
+      switch (readiness) {
+        CheckoutReadiness.cold ||
+        CheckoutReadiness.blocked ||
+        CheckoutReadiness.reachingMachine => _PhaseStatus.pending,
+        CheckoutReadiness.openingSession => _PhaseStatus.running,
+        CheckoutReadiness.loadingScreen ||
+        CheckoutReadiness.stalled ||
+        CheckoutReadiness.ready => _PhaseStatus.done,
+      };
+
+  /// Running at [CheckoutReadiness.loadingScreen], done at `ready`, failed at
+  /// `stalled` — which is what surfaces [_AgentLinkFailureFooter]'s Retry
+  /// below via [hasFailed].
+  static _PhaseStatus _loadingTerminalStatus(CheckoutReadiness readiness) =>
+      switch (readiness) {
+        CheckoutReadiness.cold ||
+        CheckoutReadiness.blocked ||
+        CheckoutReadiness.reachingMachine ||
+        CheckoutReadiness.openingSession => _PhaseStatus.pending,
+        CheckoutReadiness.loadingScreen => _PhaseStatus.running,
+        CheckoutReadiness.stalled => _PhaseStatus.failed,
+        CheckoutReadiness.ready => _PhaseStatus.done,
+      };
+
   List<_Phase> _phases({
     required RelayConnectionState? conn,
     required AgentReachability reach,
     required String agentLabel,
+    required CheckoutReadiness readiness,
   }) {
     // disconnected / null collapse to "before connecting" — the relay row
     // shows as running while we wait for the first state event.
@@ -2662,12 +2758,16 @@ class _WorkspaceBootStatusState extends ConsumerState<_WorkspaceBootStatus> {
       ),
       _Phase('agent', 'agent link', pairDetail, pairStatus),
       _Phase(
-        'workspace',
-        'workspace',
-        'awaiting hello',
-        reached >= _kReachedAuthenticated
-            ? _PhaseStatus.running
-            : _PhaseStatus.pending,
+        'opening-session',
+        'opening session',
+        '',
+        _openingSessionStatus(readiness),
+      ),
+      _Phase(
+        'loading-terminal',
+        'loading terminal',
+        '',
+        _loadingTerminalStatus(readiness),
       ),
     ];
   }
@@ -2677,11 +2777,14 @@ class _WorkspaceBootStatusState extends ConsumerState<_WorkspaceBootStatus> {
     final connAsync = ref.watch(connectionStateProvider);
     final reach = ref.watch(agentReachabilityProvider);
     final agentLabel = ref.watch(focusedMachineNameProvider) ?? 'agent';
+    final readiness = ref.watch(checkoutReadinessProvider);
+    final waitStartedAtMs = ref.watch(focusedWaitStartedAtProvider);
 
     final rawPhases = _phases(
       conn: connAsync.value?.connectionState,
       reach: reach,
       agentLabel: agentLabel,
+      readiness: readiness,
     );
     // Identify the currently-running phase (if any) and decorate its detail
     // with elapsed seconds. Done in a post-frame callback so we don't call
@@ -2762,6 +2865,18 @@ class _WorkspaceBootStatusState extends ConsumerState<_WorkspaceBootStatus> {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
+                    // Total wait, distinct from each phase's own `· Ns`
+                    // ([_activeSince] resets on every phase change, so it can
+                    // only ever show the CURRENT phase's time) — stamped once,
+                    // at activation, so this counts the whole wait the user
+                    // has actually sat through.
+                    if (waitStartedAtMs != null) ...[
+                      const Spacer(),
+                      TerminalElapsed(
+                        startedAtMs: waitStartedAtMs,
+                        color: context.antgrid.textMuted,
+                      ),
+                    ],
                   ],
                 ),
                 const SizedBox(height: AbTokens.space12),
@@ -3417,13 +3532,13 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
 
 /// Local-mode boot indicator: ticks elapsed seconds until `agent:hello`
 /// arrives. Local mode skips the relay/auth/pair phases.
-class _LocalBootStatus extends StatefulWidget {
+class _LocalBootStatus extends ConsumerStatefulWidget {
   const _LocalBootStatus();
   @override
-  State<_LocalBootStatus> createState() => _LocalBootStatusState();
+  ConsumerState<_LocalBootStatus> createState() => _LocalBootStatusState();
 }
 
-class _LocalBootStatusState extends State<_LocalBootStatus> {
+class _LocalBootStatusState extends ConsumerState<_LocalBootStatus> {
   Timer? _ticker;
   late final DateTime _since;
 
@@ -3442,6 +3557,10 @@ class _LocalBootStatusState extends State<_LocalBootStatus> {
     super.dispose();
   }
 
+  void _cancel() {
+    ref.read(machineConnectionProvider.notifier).cancelActiveAgent();
+  }
+
   @override
   Widget build(BuildContext context) {
     final secs = DateTime.now().difference(_since).inSeconds;
@@ -3451,31 +3570,42 @@ class _LocalBootStatusState extends State<_LocalBootStatus> {
       alignment: Alignment.center,
       child: Padding(
         padding: const EdgeInsets.all(AbTokens.space16),
-        child: Row(
+        child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              '▸ ',
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: context.antgrid.accent,
-                fontWeight: FontWeight.w600,
-              ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '▸ ',
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: context.antgrid.accent,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                Text(
+                  'starting agent',
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: context.antgrid.textPrimary,
+                  ),
+                ),
+                Text(
+                  detail,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: context.antgrid.textMuted,
+                  ),
+                ),
+              ],
             ),
-            Text(
-              'starting agent',
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: context.antgrid.textPrimary,
-              ),
-            ),
-            Text(
-              detail,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: context.antgrid.textMuted,
-              ),
-            ),
+            // A local bridge that never says hello strands here just as hard
+            // as a remote one on the phased screen — the same escape hatch,
+            // so no boot surface is ever a dead end.
+            const SizedBox(height: AbTokens.space12),
+            _CancelLink(onTap: _cancel),
           ],
         ),
       ),

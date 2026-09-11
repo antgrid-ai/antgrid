@@ -40,6 +40,16 @@ void main() {
   List<Map<String, dynamic>> sentOf(FakeAgentTransport t, String type) =>
       t.sent.where((m) => m['type'] == type).toList();
 
+  /// RPCs issued since [after] whose method is [method] — the terminal
+  /// snapshot pull moved off `sent` onto the correlated `terminal.snapshot`
+  /// RPC, which `t.requests` records but `sentOf` cannot see.
+  List<({String method, Map<String, dynamic>? params, Duration timeout})>
+  requestsOf(FakeAgentTransport t, String method, {int after = 0}) => t
+      .requests
+      .skip(after)
+      .where((r) => r.method == method)
+      .toList();
+
   test('sessions:list re-fires on re-establishment', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);
@@ -142,8 +152,8 @@ void main() {
     await session.close();
   });
 
-  test('terminal:snapshot:request re-fires for every live tab on '
-      're-establishment', () async {
+  test('terminal.snapshot re-fires for every live tab on re-establishment',
+      () async {
     // The agent DROPS terminal output while suppressed yet keeps bumping the
     // seq, and only a tab the app has never seen is pulled at discovery, so
     // without this hydrator a returning tab renders its pre-departure frame
@@ -159,15 +169,20 @@ void main() {
     });
     await Future<void>.delayed(Duration.zero);
 
-    t.clearSent();
-    expect(sentOf(t, 'terminal:snapshot:request'), isEmpty);
+    // Discovery already pulled both tabs once; mark the boundary rather than
+    // clearing (this transport has no `clearRequests`) so what follows can
+    // only be the re-drive's own requests.
+    final before = t.requests.length;
     t.redriveHydrators();
     await Future<void>.delayed(Duration.zero);
 
     // The exited tab is pulled too, deliberately: whatever it printed as it
     // died went into the suppressed window, and nothing will re-emit it.
-    final pulls = sentOf(t, 'terminal:snapshot:request');
-    expect(pulls.map((m) => m['terminalId']), unorderedEquals(['a', 'b']));
+    final pulls = requestsOf(t, 'terminal.snapshot', after: before);
+    expect(
+      pulls.map((r) => r.params?['terminalId']),
+      unorderedEquals(['a', 'b']),
+    );
 
     await session.close();
   });
@@ -188,12 +203,12 @@ void main() {
       // The agent has never confirmed 'c', so it would answer a pull for it with
       // a warning and no frame; its own terminal:started carries the pull.
       session.terminalService.createAdHocTerminal('c', name: 'c');
-      t.clearSent();
+      final before = t.requests.length;
       t.redriveHydrators();
       await Future<void>.delayed(Duration.zero);
 
-      final pulls = sentOf(t, 'terminal:snapshot:request');
-      expect(pulls.map((m) => m['terminalId']), ['a']);
+      final pulls = requestsOf(t, 'terminal.snapshot', after: before);
+      expect(pulls.map((r) => r.params?['terminalId']), ['a']);
 
       await session.close();
     },

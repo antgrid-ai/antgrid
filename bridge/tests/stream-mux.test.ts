@@ -295,6 +295,57 @@ describe("StreamMux (unit, stub transport)", () => {
     expect(sent).toHaveLength(3);
   });
 
+  test("stream-unbound mutes only that stream, and only outbound — a re-open reuses the id, so it must never detach", () => {
+    // The mirror of stream-invalid. Without it a core whose peer restarted
+    // streams a live PTY at an app that binds nothing, one frame per frame.
+    const { transport, sent, closed } = makeTransport();
+    const mux = new StreamMux(transport);
+    const busA = new MessageBus();
+    const busB = new MessageBus();
+    const a = mux.attach(busA, {});
+    const b = mux.attach(busB, {});
+
+    mux.markUnbound(a.streamId);
+    busA.publish(createMessage("pong", {}), "control");
+    busB.publish(createMessage("pong", {}), "control");
+    expect(sent.map((s) => s.streamId)).toEqual([b.streamId]);
+    // Muted, not torn down: host-server re-publishes stream-ready with the
+    // SAME id, so a detach here would break the reconnect that heals this.
+    expect(closed).toEqual([]);
+  });
+
+  test("a muted stream resumes on the peer's own traffic, and on a fresh E2E session", () => {
+    const { transport, sent } = makeTransport();
+    const mux = new StreamMux(transport);
+    const bus = new MessageBus();
+    const handle = mux.attach(bus, {});
+
+    // Inbound on the stream is the peer proving it holds a transport — the one
+    // retraction that needs no cooperation from whoever muted it.
+    mux.markUnbound(handle.streamId);
+    expect(mux.dispatchInbound(handle.streamId, JSON.stringify(createMessage("pong", {})), "control", "phone-1")).toBe(true);
+    bus.publish(createMessage("pong", {}), "control");
+    expect(sent).toHaveLength(1);
+
+    // A new session re-adverts every project and the app rebinds off that, so
+    // the previous session's mute must not silence this one.
+    mux.markUnbound(handle.streamId);
+    bus.publish(createMessage("pong", {}), "control");
+    expect(sent).toHaveLength(1);
+    mux.notifyPeerOnline();
+    bus.publish(createMessage("pong", {}), "control");
+    expect(sent).toHaveLength(2);
+  });
+
+  test("markUnbound/markBound for an id we hold no stream for are no-ops", () => {
+    // The notice races a detach: the app answers a frame we sent just before
+    // the core shut down. Nothing to mute, and nothing to throw at the caller.
+    const { transport } = makeTransport();
+    const mux = new StreamMux(transport);
+    expect(() => mux.markUnbound("deadbeefdeadbeef")).not.toThrow();
+    expect(() => mux.markBound("deadbeefdeadbeef")).not.toThrow();
+  });
+
   test("a stream-open rejection (SESSION_LIMIT_EXCEEDED) settles onRejected for that stream only — the transport and every other stream stay live", () => {
     const { transport, closed } = makeTransport();
     const mux = new StreamMux(transport);

@@ -397,6 +397,42 @@ test("a terminal snapshot request is answered by the asking checkout alone", asy
   expect(sent.filter((message) => message.type === "terminal:snapshot").length).toBe(1);
 });
 
+test("a terminal.snapshot RPC is answered once, with no broadcast alongside it", async () => {
+  await initRepo();
+  const { bus, sent } = await startWithIsolatedSession();
+  // cwd deliberately outside the project: on Windows a live PTY holds its own
+  // cwd open and the fixture's teardown rm would hit EBUSY.
+  bus.dispatchInbound(
+    createMessage("terminal:start", { terminalId: "adhoc", cwd: tmpdir() }),
+    "control",
+    "loopback",
+  );
+  await waitFor(sent, (message) =>
+    message.type === "terminal:started" && message.terminalId === "adhoc",
+  );
+  sent.length = 0;
+
+  const requestId = crypto.randomUUID();
+  bus.dispatchInbound(
+    createMessage("request", { requestId, method: "terminal.snapshot", params: { terminalId: "adhoc" } }),
+    "control",
+    "loopback",
+  );
+  await waitFor(sent, (message) =>
+    message.type === "response" && (message as { requestId?: string }).requestId === requestId,
+  );
+  // Same isolation concern as the message-path test above: every runtime sees
+  // the inbound frame, so the guard has to short-circuit before the isolated
+  // runtime serializes anything, and the reply must never fan out a second
+  // `terminal:snapshot` broadcast that an old app on the same bus would apply
+  // over its own history claim.
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  expect(sent.filter((message) =>
+    message.type === "response" && (message as { requestId?: string }).requestId === requestId,
+  ).length).toBe(1);
+  expect(sent.filter((message) => message.type === "terminal:snapshot")).toEqual([]);
+});
+
 /** Dispatch `fire` from inside the very delivery of the first `session:updated`
  *  that carries `deleting: true`, then run the isolated session's delete to
  *  completion. Dispatching from the subscriber removes the scheduler gap, so the

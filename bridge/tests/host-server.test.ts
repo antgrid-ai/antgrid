@@ -39,6 +39,7 @@ function stubRelayClient(): RelayClient {
     connect: () => {},
     close: () => {},
     attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {} }),
+    noteStreamBound: () => {},
     sendPushDeliver: () => {},
   } as unknown as RelayClient;
 }
@@ -314,6 +315,43 @@ test("control plane: project:open then project:list round-trip over HTTP", async
 
   const relisted = await call({ id: "4", type: "project:list" });
   expect(relisted.body.projects.some((p: any) => p.projectId === projectId)).toBe(false);
+});
+
+test("control plane: project:sessions peeks a warm core's live session list", async () => {
+  host = new HostServer({});
+  const cp = await host.startControlPlane();
+  const folder = tempFolder();
+  const projectId = computeProjectId(folder);
+
+  const call = async (body: object) => {
+    const res = await fetch(`http://127.0.0.1:${cp.port}/control`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${cp.token}` },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json() };
+  };
+
+  // Cold: no core open, no sessions.json on disk yet → empty peek, not an error.
+  const cold = await call({ id: "1", type: "project:sessions", projectId });
+  expect(cold.body).toEqual({ id: "1", ok: true, type: "project:sessions", sessions: [] });
+
+  await host.open(projectId, folder, "local");
+  const warm = await call({ id: "2", type: "project:sessions", projectId });
+  expect(warm.body.ok).toBe(true);
+  expect(warm.body.sessions).toEqual([]); // freshly opened, no sessions started yet
+});
+
+test("control plane: project:sessions rejects a malformed projectId", async () => {
+  host = new HostServer({});
+  const cp = await host.startControlPlane();
+  const res = await fetch(`http://127.0.0.1:${cp.port}/control`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${cp.token}` },
+    body: JSON.stringify({ id: "1", type: "project:sessions", projectId: "../../etc" }),
+  });
+  const body = await res.json();
+  expect(body).toEqual({ id: "1", ok: false, error: { code: "E_BAD_PARAMS", message: "invalid projectId" } });
 });
 
 test("shares one paired-phones store across cores", async () => {

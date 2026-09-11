@@ -273,10 +273,62 @@ describe("FileWatcher", () => {
       expect(msg.type).toBe("file:resolve-path-result");
       if (msg.type === "file:resolve-path-result") {
         expect(msg.relPath).toBeNull();
+        // Non-image, so the narrow external-image exception doesn't apply
+        // either — see the next test for the case where it does.
+        expect(msg.externalImagePath).toBeNull();
       }
     }
 
     watcher.stop();
+  });
+
+  it("reports externalImagePath for a recognized image outside the checkout root", () => {
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+
+    const outsideDir = mkdtempSync(join(tmpdir(), "antgrid-watcher-external-"));
+    const outsidePng = join(outsideDir, "generated.png");
+    writeFileSync(outsidePng, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    try {
+      watcher.handleResolvePathRequest("req-6", outsidePng);
+
+      expect(messages[0].type).toBe("file:resolve-path-result");
+      if (messages[0].type === "file:resolve-path-result") {
+        expect(messages[0].relPath).toBeNull();
+        expect(messages[0].externalImagePath).toBe(outsidePng);
+      }
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+      watcher.stop();
+    }
+  });
+
+  it("does not report externalImagePath for a recognized image that doesn't exist", () => {
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+
+    const outsideDir = mkdtempSync(join(tmpdir(), "antgrid-watcher-external-"));
+    try {
+      watcher.handleResolvePathRequest("req-7", join(outsideDir, "missing.png"));
+
+      expect(messages[0].type).toBe("file:resolve-path-result");
+      if (messages[0].type === "file:resolve-path-result") {
+        expect(messages[0].relPath).toBeNull();
+        expect(messages[0].externalImagePath).toBeNull();
+      }
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+      watcher.stop();
+    }
   });
 
   it("resolves a path already given relative to the checkout", () => {
@@ -384,6 +436,53 @@ describe("FileWatcher pause", () => {
 
     expect(changes).toBeGreaterThan(0);
     fw.stop();
+  });
+
+  // The throttle is what bounds a remote app's tree-delta bill: sustained churn
+  // otherwise pins it at one frame per narrow window for as long as an agent
+  // keeps writing. Asserted on RATE, not on a constant, so retuning the windows
+  // does not rewrite the test.
+  it("widens its coalescing window under sustained churn", async () => {
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+
+    const churn = setInterval(() => {
+      writeFileSync(join(tempDir, "churn.ts"), `export const n = ${Date.now()}`);
+      watcher.handleNativeEvent("churn.ts");
+    }, 20);
+    await new Promise((r) => setTimeout(r, 2_000));
+    clearInterval(churn);
+
+    const updates = messages.filter((m) => m.type === "tree:update").length;
+    // 2s of continuous churn: ~20 frames on the narrow window alone, ~4 once
+    // widened. Anything at or above 10 means the widening never engaged.
+    expect(updates).toBeGreaterThan(0);
+    expect(updates).toBeLessThan(10);
+
+    watcher.stop();
+  });
+
+  // The narrow window is the one a user watches: a single save must not pay the
+  // storm's latency because an unrelated burst happened to precede it.
+  it("keeps the narrow window for an isolated change", async () => {
+    const messages: AbMessage[] = [];
+    const watcher = new FileWatcher(
+      { id: "test", name: "Test", path: tempDir },
+      (msg) => messages.push(msg),
+      createConnState(),
+    );
+
+    writeFileSync(join(tempDir, "lone.ts"), "export const a = 1");
+    watcher.handleNativeEvent("lone.ts");
+    await new Promise((r) => setTimeout(r, 250));
+
+    expect(messages.some((m) => m.type === "tree:update")).toBe(true);
+
+    watcher.stop();
   });
 
   it("getTreeSnapshot returns current tree + fileSeq", () => {

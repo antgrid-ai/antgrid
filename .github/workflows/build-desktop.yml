@@ -640,6 +640,16 @@ jobs:
         # for the web service) — the desktop build never touches Postgres or web.
         run: bun install --ignore-scripts
 
+      # The Windows-only half of the transport cipher. `ci-android.yml` runs
+      # `flutter test` on ubuntu, where the CNG group skips itself entirely, so
+      # this is the ONLY place the bcrypt.dll binding is exercised — a release
+      # gate rather than a merge gate. It pins the hand-written struct layout and
+      # the golden transport vectors, both of which fail at runtime with nothing
+      # but a swallowed warning.
+      - name: Test Windows transport cipher (CNG)
+        working-directory: app
+        run: flutter test test/config/cng_aes_gcm_test.dart
+
       - name: Build bridge (Windows x64 binary)
         shell: pwsh
         run: |
@@ -1028,3 +1038,11 @@ jobs:
             --notes-file release-notes.md \
             $prerelease \
             $assets
+
+  sync-changelog:
+    needs: publish
+    if: ${{ needs.publish.result == 'success' }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/sync-changelog.yml

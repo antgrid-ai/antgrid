@@ -26,14 +26,20 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
     super.httpClient,
   });
 
+  /// Throws when the account cannot be reached or is not signed in.
+  /// NEVER answers an empty list for a failure: callers prune local state
+  /// against this result, and a 401 from a stale cookie or a 5xx is
+  /// otherwise indistinguishable from 'this account has no devices'.
   Future<List<DeviceSummary>> list() async {
     final cookie = await cookieProvider();
-    if (cookie == null) return const [];
+    if (cookie == null) throw Exception('Not signed in');
     final res = await client.get(
       Uri.parse('$licenseApiUrl/account/devices'),
       headers: {'cookie': cookie},
     );
-    if (res.statusCode != 200) return const [];
+    if (res.statusCode != 200) {
+      throw Exception('Device list failed: ${res.statusCode}');
+    }
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     final list = (body['devices'] as List).cast<Map<String, dynamic>>();
     return list

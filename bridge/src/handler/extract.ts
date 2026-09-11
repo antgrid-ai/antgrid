@@ -10,6 +10,7 @@
 import { z } from "zod";
 import { clip, isTerminalStatus, oneLine, type InstructionItem } from "./backlog";
 import { extractJsonObject } from "./json-extract";
+import { unwrapEnvelope } from "../agents/usage-envelope";
 
 // An item is one thing the user asked for, in their own words — a line, not a
 // document. MAX_BACKLOG_ITEMS bounds how MANY items renderBacklog interpolates
@@ -184,7 +185,9 @@ export function parseExtractionOutput(stdout: string): {
   amend: Amendment[];
   error?: string;
 } {
-  const obj = extractJsonObject(stdout);
+  // Same envelope unwrap the decision parser makes, for the same reason: this
+  // runs on the same judge argv.
+  const obj = extractJsonObject(unwrapEnvelope(stdout)?.text ?? stdout);
   if (obj === null) return { items: null, amend: [], error: "no JSON object found in output" };
   const parsed = ExtractionResultSchema.safeParse(obj);
   if (!parsed.success) return { items: null, amend: [], error: parsed.error.message.slice(0, 500) };

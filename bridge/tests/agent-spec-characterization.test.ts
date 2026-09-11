@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Database } from "bun:sqlite";
 
-import { resumeArgv, sessionResumable } from "../src/agent-resume";
+import { agentSessionGone, resumeArgv, sessionResumable } from "../src/agent-resume";
 import { initialPromptArgv } from "../src/initial-prompt";
 import { updateSpecFor } from "../src/update/specs";
 import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
@@ -139,6 +139,46 @@ function livePath(): string {
 }
 
 describe("resume pre-flight", () => {
+  // Which agents let a store MISS refuse a resume. Strictly narrower than the
+  // table below: copilot can say "gone" and is still asked, because the index
+  // it answers from is not the one `--resume` consults. Adding an agent here
+  // means its CLI exits rather than starting fresh on an id its store lacks —
+  // measure that before flipping one.
+  const storeMissRefusesResume: PerAgent<boolean> = {
+    "claude-code": false,
+    codex: true,
+    opencode: false,
+    "cursor-agent": false,
+    "github-copilot": false,
+    kilo: false,
+    kimi: false,
+    "mistral-vibe": false,
+  };
+
+  for (const key of AGENT_KEYS) {
+    test(`${key}: a store that lacks the id refuses the resume only if authoritative`, () => {
+      expect(
+        agentSessionGone({
+          tool: key,
+          agentSessionId: RESUME_ID,
+          codexHome: codexStore(["other"]),
+          copilotHome: copilotStore(["other"]),
+        }),
+      ).toBe(storeMissRefusesResume[key]);
+    });
+
+    test(`${key}: an undeterminable store never refuses the resume`, () => {
+      expect(
+        agentSessionGone({
+          tool: key,
+          agentSessionId: RESUME_ID,
+          codexHome: join(tmp("ab-spec-nohome-"), "missing"),
+          copilotHome: join(tmp("ab-spec-nohome-"), "missing"),
+        }),
+      ).toBe(false);
+    });
+  }
+
   // The one discriminating table: both stores exist and neither holds the id,
   // so codex and copilot can say "gone" and nobody else can.
   const storesLackTheId: PerAgent<boolean> = {

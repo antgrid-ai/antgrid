@@ -11,19 +11,30 @@
  * dollar-brace anywhere below would terminate or interpolate this string, so the
  * page uses neither.
  *
+ * Two feeds share this one document — netwatch's relay/loopback frames and
+ * modelwatch's headless model calls — switched by a tab rather than served as a
+ * second page, because they share a session and a credential. Everything
+ * stateful is duplicated per feed on purpose rather than made generic: the two
+ * must reconnect, dedup and arm independently, and two small parallel code
+ * paths are far easier to keep that way than one path parameterised over both.
+ *
  * Every field rendered here was written by a peer — a message type from the
- * relay, a body from an agent's stdout, a detail map an older app stamped — so
- * NOTHING in this page may reach the DOM as markup. Values go in through
+ * relay, a body from an agent's stdout, a usage envelope a vendor CLI reported —
+ * so NOTHING in this page may reach the DOM as markup. Values go in through
  * textContent only; `clean()` additionally drops control characters and bidi
  * overrides, which cannot execute but can silently reorder a line so it reads as
- * a different frame than the one recorded.
+ * a different frame than the one recorded. A model-call event is additionally
+ * untrusted in its SHAPE, not just its text: most of its fields are absent until
+ * a later phase fills them in, and nothing between the ring and this page
+ * validates one, so the calls-feed code never assumes a field is present or
+ * well-typed before reading it.
  */
 const PAGE = String.raw`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>antgrid netwatch</title>
+<title>antgrid capture</title>
 <style nonce="__NONCE__">
 :root{
   --bg:#0b0d10; --panel:#12151a; --panel2:#171b22; --line:#242b35;
@@ -52,6 +63,7 @@ button,input{font:inherit;color:inherit}
 .seg button{background:none;border:0;padding:3px 9px;color:var(--dim);cursor:pointer}
 .seg button+button{border-left:1px solid var(--line)}
 .seg button.on{background:var(--panel2);color:var(--fg)}
+#feedtabs button.err{color:var(--drop)}
 .tog{background:none;border:1px solid var(--line);border-radius:5px;padding:3px 9px;
      color:var(--dim);cursor:pointer}
 .tog:hover,.seg button:hover{color:var(--fg)}
@@ -122,39 +134,141 @@ button,input{font:inherit;color:inherit}
 #gate{padding:28px;max-width:640px;font-family:var(--mono);color:var(--dim);line-height:1.8}
 #gate .b{color:var(--fg)}
 #gate code{color:var(--accent)}
+
+/* ---- tab strip and the model-calls feed. Its selectors are its own: the two
+   feeds are independent, so styling one is never done by reaching into the
+   netwatch pane's rules above. ---- */
+#tabbar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--panel);
+        border-bottom:1px solid var(--line);flex:none}
+#apptitle{font-weight:600;letter-spacing:.02em}
+#apptitle small{color:var(--dim);font-weight:400}
+.pane{display:flex;flex-direction:column;flex:1;min-height:0}
+
+#mcbar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--panel);
+       border-bottom:1px solid var(--line);flex-wrap:wrap;flex:none}
+#mcdot{width:8px;height:8px;border-radius:50%;background:var(--dimmer);flex:none}
+#mcdot.live{background:var(--rx);box-shadow:0 0 6px var(--rx)}
+#mcdot.retry{background:var(--warn)}
+#mcdot.dead{background:var(--drop)}
+#mctitle{font-weight:600;letter-spacing:.02em}
+#mctitle small{color:var(--dim);font-weight:400}
+#mcq{flex:1;min-width:140px;background:var(--bg);border:1px solid var(--line);border-radius:5px;
+     padding:3px 8px;font-family:var(--mono)}
+#mcq:focus{outline:none;border-color:var(--accent)}
+#mccounts{color:var(--dim);font-family:var(--mono);white-space:nowrap;margin-left:auto}
+#mcnote{padding:4px 10px;background:#2a2110;color:var(--warn);border-bottom:1px solid var(--line);
+        font-family:var(--mono);flex:none}
+#mcerr{padding:4px 10px;background:#2a1414;color:var(--drop);border-bottom:1px solid var(--line);
+       font-family:var(--mono);flex:none}
+#mcwrap{display:flex;flex:1;min-height:0;position:relative}
+#mcmain{display:flex;flex-direction:column;flex:1;min-width:0}
+
+.mcols{display:grid;grid-template-columns:90px 76px 150px 130px 42px 128px 92px minmax(0,1fr);
+       gap:10px;padding:0 10px;font-family:var(--mono);white-space:nowrap}
+#mchead{background:var(--panel);border-bottom:1px solid var(--line);color:var(--dimmer);
+        padding-top:3px;padding-bottom:3px;text-transform:uppercase;font-size:10px;
+        letter-spacing:.05em;flex:none}
+#mcscroll{flex:1;overflow-y:auto;overflow-x:hidden;min-height:0}
+#mcrows{padding-bottom:8px}
+.r .mcols>div{overflow:hidden;text-overflow:ellipsis}
+
+.oc-good{color:var(--rx)}
+.oc-bad{color:var(--drop)}
+.oc-warn{color:var(--warn)}
+.oc-info{color:var(--tx)}
+.oc-dim{color:var(--dim)}
+.bodyline.mcx{padding-left:10px}
+
+#mcjump{position:absolute;left:50%;transform:translateX(-50%);bottom:16px;background:var(--accent);
+        color:#08111f;border:0;border-radius:14px;padding:5px 14px;cursor:pointer;font-weight:600;
+        box-shadow:0 4px 14px rgba(0,0,0,.5)}
+
+#mcdetail{width:400px;flex:none;border-left:1px solid var(--line);background:var(--panel);
+          overflow-y:auto;padding:10px}
+#mcdetail h2{margin:0 0 8px;font-size:12px;color:var(--dim);font-weight:600;display:flex;
+             align-items:center;gap:6px}
+#mcdetail h2 button{background:none;border:1px solid var(--line);border-radius:4px;
+                    padding:2px 7px;color:var(--dim);cursor:pointer;font-weight:400}
+#mcdetail h2 .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;
+                 font-family:var(--mono);color:var(--fg)}
+.tb{margin:10px 0 0;padding:8px;background:var(--bg);border:1px solid var(--line);
+    border-radius:5px;font-family:var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;
+    max-height:30vh;overflow:auto}
+.tbl{margin:10px 0 0;color:var(--dimmer);font-family:var(--mono)}
 </style>
 </head>
 <body>
 <div id="page">
-  <header id="bar">
-    <span id="dot" title="stream status"></span>
-    <span id="title">netwatch <small>antgrid</small></span>
-    <span class="seg" id="seg">
-      <button data-t="all" class="on">all</button>
-      <button data-t="relay">relay</button>
-      <button data-t="local">local</button>
+  <header id="tabbar">
+    <span id="apptitle">antgrid <small>capture</small></span>
+    <span class="seg" id="feedtabs">
+      <button data-f="nw" class="on">netwatch</button>
+      <button data-f="mc">calls</button>
     </span>
-    <button class="tog" id="dropsonly" title="Show only frames that never crossed">drops</button>
-    <input id="q" placeholder="filter  type, channel, reason, detail, body" spellcheck="false" autocomplete="off">
-    <button class="tog" id="pause" title="Freeze the view; frames keep arriving (Space)">pause</button>
-    <button class="tog warn" id="bodies" title="Record loopback frame plaintext while this window is open">bodies</button>
-    <button class="tog" id="remote" title="Ask the connected app to capture its own side">remote</button>
-    <button class="tog" id="exp" title="Download what is on screen as JSONL">export</button>
-    <button class="tog" id="clear" title="Empty this view; the host keeps its ring">clear</button>
-    <span id="counts"></span>
   </header>
-  <div id="note" hidden></div>
-  <div id="err" hidden></div>
-  <div id="wrap">
-    <div id="main">
-      <div id="head" class="cols">
-        <div>time</div><div></div><div>wire</div><div>ch</div><div>kind</div>
-        <div class="by">bytes</div><div>frame</div><div>type / detail</div>
+  <div id="nwPane" class="pane">
+    <header id="bar">
+      <span id="dot" title="stream status"></span>
+      <span id="title">netwatch <small>antgrid</small></span>
+      <span class="seg" id="seg">
+        <button data-t="all" class="on">all</button>
+        <button data-t="relay">relay</button>
+        <button data-t="local">local</button>
+      </span>
+      <button class="tog" id="dropsonly" title="Show only frames that never crossed">drops</button>
+      <input id="q" placeholder="filter  type, channel, reason, detail, body" spellcheck="false" autocomplete="off">
+      <button class="tog" id="pause" title="Freeze the view; frames keep arriving (Space)">pause</button>
+      <button class="tog warn" id="bodies" title="Record loopback frame plaintext while this window is open">bodies</button>
+      <button class="tog" id="remote" title="Ask the connected app to capture its own side">remote</button>
+      <button class="tog" id="exp" title="Download what is on screen as JSONL">export</button>
+      <button class="tog" id="clear" title="Empty this view; the host keeps its ring">clear</button>
+      <span id="counts"></span>
+    </header>
+    <div id="note" hidden></div>
+    <div id="err" hidden></div>
+    <div id="wrap">
+      <div id="main">
+        <div id="head" class="cols">
+          <div>time</div><div></div><div>wire</div><div>ch</div><div>kind</div>
+          <div class="by">bytes</div><div>frame</div><div>type / detail</div>
+        </div>
+        <div id="scroll"><div id="rows"></div></div>
       </div>
-      <div id="scroll"><div id="rows"></div></div>
+      <aside id="detail" hidden></aside>
+      <button id="jump" hidden>new frames below</button>
     </div>
-    <aside id="detail" hidden></aside>
-    <button id="jump" hidden>new frames below</button>
+  </div>
+  <div id="mcPane" class="pane" hidden>
+    <header id="mcbar">
+      <span id="mcdot" title="stream status"></span>
+      <span id="mctitle">calls <small>antgrid</small></span>
+      <span class="seg" id="mcpurpose">
+        <button data-p="all" class="on">all</button>
+        <button data-p="title">title</button>
+        <button data-p="decision">decision</button>
+        <button data-p="extraction">extraction</button>
+      </span>
+      <input id="mcq" placeholder="filter  purpose, tool, model, outcome" spellcheck="false" autocomplete="off">
+      <button class="tog" id="mcpause" title="Freeze the view; calls keep arriving (Space)">pause</button>
+      <button class="tog warn" id="mcprompts" title="Record the scaffold, goal and a context digest for headless model calls">prompts</button>
+      <button class="tog" id="mcexp" title="Download what is on screen as JSONL">export</button>
+      <button class="tog" id="mcclear" title="Empty this view; the host keeps its ring">clear</button>
+      <span id="mccounts"></span>
+    </header>
+    <div id="mcnote"></div>
+    <div id="mcerr" hidden></div>
+    <div id="mcmarks" class="mark" hidden></div>
+    <div id="mcwrap">
+      <div id="mcmain">
+        <div id="mchead" class="mcols">
+          <div>time</div><div>purpose</div><div>agent</div><div>model</div>
+          <div>#</div><div>wall / api</div><div>outcome</div><div>tokens</div>
+        </div>
+        <div id="mcscroll"><div id="mcrows"></div></div>
+      </div>
+      <aside id="mcdetail" hidden></aside>
+      <button id="mcjump" hidden>new calls below</button>
+    </div>
   </div>
 </div>
 <div id="gate" hidden></div>
@@ -165,7 +279,8 @@ button,input{font:inherit;color:inherit}
 /* How many events this page keeps. Matches the host ring's default so a viewer
    opened early holds everything the host would still replay; the DOM cap is far
    lower because a scrolling build outruns any renderer long before it outruns
-   memory. */
+   memory. Shared by both feeds — it bounds a count of held items, not anything
+   about what either feed's items mean. */
 var MAX_EVENTS = 16384;
 var MAX_ROWS = 3000;
 var SESSION_KEY = "antgrid.netwatch.session";
@@ -178,12 +293,48 @@ var page = el("page"), gate = el("gate"), dot = el("dot"), rows = el("rows"),
     scroll = el("scroll"), detail = el("detail"), counts = el("counts"),
     note = el("note"), err = el("err"), jump = el("jump"), q = el("q");
 
+var nwPane = el("nwPane"), mcPane = el("mcPane");
+var mcDot = el("mcdot"), mcRows = el("mcrows"), mcScrollEl = el("mcscroll"),
+    mcDetailEl = el("mcdetail"), mcCountsEl = el("mccounts"), mcNoteEl = el("mcnote"),
+    mcErrEl = el("mcerr"), mcMarksEl = el("mcmarks"), mcJumpEl = el("mcjump"), mcQEl = el("mcq");
+/* The "calls" tab button itself, so a dead feed can be seen from the netwatch
+   tab — #mcdot and #mcerr both live inside #mcPane, which is exactly the pane
+   that is hidden while the operator is looking at the other one. */
+var mcTabBtn = el("feedtabs").querySelector('[data-f="mc"]');
+
+/* The sentence #mcnote carries whenever prompts capture is OFF — the one
+   boundary a viewer needs before ever touching the toggle: this page cannot
+   reach the transcript/answer arm no matter what it POSTs. Shown from load
+   rather than only after arming, because a viewer deciding whether to arm
+   anything is exactly who needs to read it first. */
+var MC_NOTE_BASE = "the transcript excerpt and the model's answer are captured only from the CLI " +
+  "(antgrid calls --context) and cannot be armed from this page.";
+mcNoteEl.textContent = MC_NOTE_BASE;
+
 var token = null;
 var all = [];
 var seen = Object.create(null);
 var view = { transport:"all", drops:false, query:"", paused:false };
 var follow = true, selected = null, dropped = 0, shed = 0, evicted = 0;
 var queued = [], painting = false, everConnected = false;
+
+/* The calls feed's own state, deliberately never touching anything above.
+   mcRecordsList holds RAW records (deduped, capped) exactly as they arrived —
+   the source of truth for export and for the fold below — and is distinct from
+   the folded Attempt objects mcFoldAll derives from it on every render. */
+var mcRecordsList = [];
+var mcSeen = Object.create(null);
+var mcView = { purpose:"all", query:"", paused:false };
+var mcFollow = true, mcSelected = null, mcShed = 0, mcEvicted = 0;
+/* Whether anything actually ARRIVED since the last repaint. mcRebuild is the
+   one paint path for this feed — a new record, a filter change, an unpause all
+   run it — so without this the "new calls below" button would appear on a
+   scrolled-up pane the moment someone typed in the filter box, asserting a
+   backlog that does not exist. Netwatch keeps the two apart structurally: only
+   its append() raises the button, never its rebuild(). */
+var mcArrived = false;
+var mcPainting = false, mcEverConnected = false;
+var mcArms = { prompts: { on:false, timer:null } };
 
 /* ---- launch ------------------------------------------------------------ */
 
@@ -232,6 +383,8 @@ function showExpired(){
 
 function fail(message){ err.hidden = false; err.textContent = message; }
 function clearFail(){ err.hidden = true; err.textContent = ""; }
+function mcFail(message){ mcErrEl.hidden = false; mcErrEl.textContent = message; }
+function mcClearFail(){ mcErrEl.hidden = true; mcErrEl.textContent = ""; }
 
 /* ---- sanitising -------------------------------------------------------- */
 
@@ -525,10 +678,19 @@ function setStatus(kind, title){
   dot.className = kind;
   dot.title = title;
 }
+function mcSetStatus(kind, title){
+  mcDot.className = kind;
+  mcDot.title = title;
+  // #mcdot lives inside #mcPane, invisible while the netwatch tab is active —
+  // without this, a dead calls feed is a silent hole until someone happens to
+  // click over and look.
+  if (mcTabBtn) mcTabBtn.classList.toggle("err", kind === "retry" || kind === "dead");
+}
 
 /* fetch rather than EventSource, which cannot set a header: this is the only
    shape in which the session token never appears in a URL, and therefore never
-   in history, a referrer or a screenshot of the address bar. */
+   in history, a referrer or a screenshot of the address bar. Both feeds share
+   this rationale and the one session it buys — see mcReadStream below. */
 async function readStream(){
   var limit = everConnected ? 400 : (launch.n ? Number(launch.n) : 400);
   if (!isFinite(limit) || limit < 0) limit = 400;
@@ -639,9 +801,15 @@ function schedule(which, ttlMs){
   var a = arms[which];
   if (a.timer) clearTimeout(a.timer);
   a.timer = setTimeout(function(){
+    // This timer has already fired — it is spent the moment it runs — so
+    // nothing later may find it still sitting in a.timer and skip clearing it.
+    a.timer = null;
+    if (!a.on) return; // disarmed while this renewal was in flight
     postArm(which, true, false).then(function(reply){
+      if (!a.on) return; // disarmed while the POST itself was in flight
       schedule(which, reply.ttlMs);
     }, function(e){
+      if (!a.on) return;
       setArm(which, false);
       fail(which + " capture lapsed — " + clean(e.message, 80));
     });
@@ -705,6 +873,766 @@ function exportJsonl(){
   setTimeout(function(){ URL.revokeObjectURL(url); }, 10000);
 }
 
+/* ============================================================================
+   ---- model calls ----------------------------------------------------------
+   The /modelwatch feed. Independent of everything above: its own state, its
+   own DOM, its own stream and its own arm. The one thing it shares is the
+   session token — one ticket buys a session that reads both feeds, and a
+   session that is no longer valid is no longer valid for either of them.
+
+   Every record read here was written by this machine's own headless spawns,
+   but the SHAPE is still not trusted: nothing between the ring and this page
+   validates a record, so a hostile or merely buggy write arrives looking
+   exactly like a legitimate one and nothing below assumes a field is present
+   or well-typed before reading it. Rendering
+   is folded from raw records the way the CLI folds them — joined by callId and
+   attempt, later records filling in fields a start record couldn't know — but
+   unlike the CLI's batch-until-outcome model, a record is rendered the moment
+   it arrives: a start with no end yet is its own live row ("in flight"),
+   updated in place as its end and outcome land, because an operator watching
+   this page wants to see a call that is still running, not wait for it to
+   finish.
+   ============================================================================ */
+
+/* ---- fold ---------------------------------------------------------------- */
+
+function shallowCopy(obj){
+  var out = {};
+  for (var k in obj) { if (Object.prototype.hasOwnProperty.call(obj, k)) out[k] = obj[k]; }
+  return out;
+}
+
+/* Keyed by callId AND attempt, as the CLI keys it — one row per attempt, a
+   retry's own row rather than merged into the call it retried. A callId that
+   is missing or not a string never collides two unrelated malformed records
+   into one row: it falls back to this record's own seq, which the host
+   guarantees is unique. */
+function mcAttemptKey(ev){
+  var callId = (typeof ev.callId === "string" && ev.callId) ? ev.callId : ("seq:" + ev.seq);
+  var attempt = (typeof ev.attempt === "number" && isFinite(ev.attempt)) ? ev.attempt : 1;
+  return callId + "#" + attempt;
+}
+
+/* The fields a later record may fill in. Mirrors modelwatch.ts's ModelCallEvent
+   minus the identity fields (callId/attempt/purpose/requestedTool/actualTool/
+   reach), which only the FIRST record for a key gets to set. */
+var MC_FOLD_FIELDS = ["requestedModel", "actualModel", "terminalId", "conversationId", "projectId",
+  "wallMs", "apiMs", "budgetMs", "remainingMs", "exitCode", "timedOut", "outcome", "outcomeDetail",
+  "promptChars", "stdoutChars", "prompt", "stdout", "usage"];
+
+/* Fold one record into the attempt it describes, mutating a copy rather than
+   the record itself: base may already be referenced by a rendered row, and a
+   later record filling in a field must never make an object a subscriber
+   already holds appear to change under it. An absent field never overwrites a
+   present one — the three phases are additive by construction. */
+function mcFoldInto(base, ev){
+  var next = base ? shallowCopy(base) : {
+    callId: typeof ev.callId === "string" ? ev.callId : "",
+    attempt: (typeof ev.attempt === "number" && isFinite(ev.attempt)) ? ev.attempt : 1,
+    purpose: typeof ev.purpose === "string" ? ev.purpose : "?",
+    at: (typeof ev.at === "number" && isFinite(ev.at)) ? ev.at : Date.now(),
+    requestedTool: typeof ev.requestedTool === "string" ? ev.requestedTool : "",
+    actualTool: typeof ev.actualTool === "string" ? ev.actualTool : "",
+    reach: typeof ev.reach === "string" ? ev.reach : "",
+    ended: false
+  };
+  next.ended = next.ended || ev.phase === "end";
+  for (var i = 0; i < MC_FOLD_FIELDS.length; i++) {
+    var k = MC_FOLD_FIELDS[i];
+    if (ev[k] !== undefined) next[k] = ev[k];
+  }
+  return next;
+}
+
+/* Recomputed from mcRecordsList on every render rather than maintained
+   incrementally: a few hundred calls a day means at most a few thousand
+   records held at once, so refolding the whole list is cheap, and a derived
+   value can never drift out of sync with the records it was derived from —
+   there is no second data structure for an evicted record or a malformed one
+   to leave stranded. */
+function mcFoldAll(){
+  var map = Object.create(null);
+  var order = [];
+  for (var i = 0; i < mcRecordsList.length; i++) {
+    try {
+      var ev = mcRecordsList[i];
+      if (!ev || typeof ev !== "object") continue;
+      var key = mcAttemptKey(ev);
+      var existing = map[key];
+      map[key] = mcFoldInto(existing, ev);
+      if (!existing) order.push(key);
+    } catch (e) {
+      // One bad record must not break the fold for every other one.
+    }
+  }
+  var out = [];
+  for (var j = 0; j < order.length; j++) out.push(map[order[j]]);
+  return out;
+}
+
+/* ---- filtering ------------------------------------------------------------
+   Reads only fields that exist identically on a raw record and on a folded
+   Attempt, so the same function filters both the rendered rows and the export
+   (which reads records before they are folded). */
+
+function mcHaystack(a){
+  try {
+    var bits = [a.purpose, a.requestedTool, a.actualTool, a.requestedModel, a.actualModel,
+                a.outcome, a.outcomeDetail, a.callId, a.terminalId, a.reach];
+    var out = "";
+    for (var i = 0; i < bits.length; i++) {
+      var v = bits[i];
+      out += " " + (typeof v === "string" ? v : (v === undefined || v === null ? "" : String(v)));
+    }
+    return out;
+  } catch (e) {
+    return "";
+  }
+}
+
+function mcMatches(a){
+  try {
+    if (mcView.purpose !== "all" && a.purpose !== mcView.purpose) return false;
+    if (!mcView.query) return true;
+    return mcHaystack(a).toLowerCase().indexOf(mcView.query) !== -1;
+  } catch (e) {
+    return false;
+  }
+}
+
+/* ---- formatting, agreeing with the CLI's semantics ------------------------
+   antgrid calls is the reference: same rounding, same refusals to sum. See
+   usageNote below for the one vocabulary this deliberately carries whole. */
+
+function mcDuration(ms){
+  if (typeof ms !== "number" || !isFinite(ms)) return "—";
+  if (Math.abs(ms) < 1000) return Math.round(ms) + "ms";
+  return (ms / 1000).toFixed(1) + "s";
+}
+
+function mcTokens(n){
+  if (typeof n !== "number" || !isFinite(n)) return null;
+  return n < 1000 ? String(n) : (n / 1000).toFixed(1) + "k";
+}
+
+/* Which agent ran, and which was asked for when they differ (a borrow bills a
+   vendor the session did not pick). */
+function mcToolCell(a){
+  var req = typeof a.requestedTool === "string" ? a.requestedTool : "";
+  var act = typeof a.actualTool === "string" ? a.actualTool : "";
+  if (req === act) return clean(act, 20);
+  return clean(req, 16) + "→" + clean(act, 16);
+}
+
+/* default is not a missing value: it is a call that named no model at all
+   and ran on whatever this machine's CLI defaults to. */
+function mcModelCell(a){
+  var requested = (typeof a.requestedModel === "string" && a.requestedModel) ? clean(a.requestedModel, 16) : "default";
+  var actual = typeof a.actualModel === "string" ? a.actualModel : "";
+  if (!actual || actual === a.requestedModel) return requested;
+  return requested + "→" + clean(actual, 16);
+}
+
+/* Matched on the outcome's WORDS rather than an enumerated list, exactly as
+   the CLI does — the vocabulary belongs to the callers (handler/judge.ts, the
+   title path's own), and a closed list here would silently call the next verb
+   they invent a success. Keep in lockstep with UNUSABLE_OUTCOME_RE in
+   cli/modelwatch.ts — the two are compared in netwatch-ui-modelcalls.test.ts. */
+var MC_UNUSABLE_RE = /fail|timeout|reject|unparse|exhaust|unavailable|abandon|skip|no-judge/;
+function mcAnswerWasUsable(outcome){
+  return !MC_UNUSABLE_RE.test(outcome);
+}
+
+function mcRetryWasMoot(a){
+  return typeof a.outcome === "string" && a.outcome !== "" && mcAnswerWasUsable(a.outcome);
+}
+
+/* The verdict, preferring what the caller made of the answer over how the
+   process exited — see cli/modelwatch.ts's outcomeCell for why. */
+function mcOutcomeCell(a){
+  if (typeof a.outcome === "string" && a.outcome) {
+    return { text: clean(a.outcome, 20), cls: mcAnswerWasUsable(a.outcome) ? "oc-good" : "oc-warn" };
+  }
+  if (a.timedOut === true) return { text: "timed out", cls: "oc-bad" };
+  if (!a.ended) return { text: "in flight", cls: "oc-info" };
+  if (typeof a.exitCode === "number" && a.exitCode !== 0) return { text: "exit " + a.exitCode, cls: "oc-warn" };
+  return { text: "ran", cls: "oc-dim" };
+}
+
+/* Below this, a retry cannot land whatever the arithmetic says it is owed —
+   same floor the CLI uses (RETRY_FLOOR_MS in cli/modelwatch.ts). Absence means
+   "this call had no retry to starve", not "plenty left": only the
+   shared-budget callers record it at all. */
+var MC_RETRY_FLOOR_MS = 5000;
+function mcRetryBudgetNote(a){
+  if (typeof a.remainingMs !== "number" || !isFinite(a.remainingMs) || mcRetryWasMoot(a)) return null;
+  if (a.remainingMs <= 0) return { text: "nothing left for a retry", cls: "oc-bad" };
+  if (a.remainingMs < MC_RETRY_FLOOR_MS) {
+    return { text: mcDuration(a.remainingMs) + " left for the retry — unreachable", cls: "oc-bad" };
+  }
+  return { text: mcDuration(a.remainingMs) + " left for the retry", cls: "dim" };
+}
+
+/* Carried whole from the CLI: same cells, same refusals to sum. Read/write
+   cache tokens stay separate because they are priced separately; reasoning
+   tokens appear only when nonzero because whether they double-count out is
+   the vendor's own choice; money is tagged with its unit and never folded into
+   anything, because the three CLIs report dollars, nothing, and fractional
+   premium requests. numTurns and permissionDenials are deliberately left
+   out of this cell (as the CLI leaves them out of its own) — they show up in
+   the detail pane instead. */
+function mcUsageNote(a){
+  var u = a.usage;
+  if (!u || typeof u !== "object") return null;
+  var parts = [];
+  var push = function(label, n){
+    var t = mcTokens(n);
+    if (t) parts.push(label + " " + t);
+  };
+  push("in", u.inputTokens);
+  push("cache r", u.cacheReadTokens);
+  push("cache w", u.cacheWriteTokens);
+  push("out", u.outputTokens);
+  if (u.reasoningTokens) push("reasoning", u.reasoningTokens);
+  if (u.money && typeof u.money === "object" && typeof u.money.amount === "number") {
+    parts.push(u.money.amount + " " + clean(u.money.unit, 20));
+  }
+  if (u.modelsBilled) parts.push(String(u.modelsBilled) + " models");
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+/* ---- rendering ------------------------------------------------------------
+   Eight columns: time, purpose, agent requested/actual, model, attempt,
+   duration wall/api, outcome, tokens. The duration cell pairs wall with the
+   vendor's own API time, where the CLI's pairs it with the budget — the budget
+   is a column the CLI has and this row does not, and the leftover a retry
+   inherits from it is carried by mcRetryBudgetNote instead.
+   Left out of the row on purpose: the callId itself (the attempt marker plus
+   adjacency is the whole of the grouping, same as the CLI's own "↳" — showing
+   the id again would just repeat the join key), and the prompt/stdout text
+   (multiple named parts of very different sensitivity, arm-gated and often
+   long — squeezed into one inline line they would lose which part is which;
+   the detail pane below renders them properly). */
+
+function mcRowFor(a){
+  var oc = mcOutcomeCell(a);
+  var r = document.createElement("div");
+  r.className = "r";
+  r.__attempt = a;
+
+  var c = document.createElement("div");
+  c.className = "mcols";
+  c.appendChild(cell("t dim", clock(typeof a.at === "number" ? a.at : Date.now())));
+  c.appendChild(cell("dim", clean(a.purpose || "", 10)));
+  var borrowed = typeof a.requestedTool === "string" && typeof a.actualTool === "string" &&
+                 a.requestedTool !== a.actualTool;
+  c.appendChild(cell(borrowed ? "" : "dim", mcToolCell(a)));
+  var swapped = typeof a.actualModel === "string" && a.actualModel && a.actualModel !== a.requestedModel;
+  c.appendChild(cell(swapped ? "" : "dim", mcModelCell(a)));
+  var attemptNum = (typeof a.attempt === "number" && isFinite(a.attempt) && a.attempt > 0) ? a.attempt : 1;
+  c.appendChild(cell("dim", attemptNum <= 1 ? " #1" : ("↳#" + attemptNum)));
+  c.appendChild(cell(a.timedOut === true ? "oc-bad" : "dim", mcDuration(a.wallMs) + " / " + mcDuration(a.apiMs)));
+  c.appendChild(cell(oc.cls, oc.text));
+  c.appendChild(cell("dim", mcUsageNote(a) || ""));
+  r.appendChild(c);
+
+  var extras = [];
+  var budget = mcRetryBudgetNote(a);
+  if (budget) extras.push(budget);
+  if (typeof a.outcomeDetail === "string" && a.outcomeDetail) extras.push({ text: clean(a.outcomeDetail, 96), cls: "oc-warn" });
+  if (a.reach === "unavailable") extras.push({ text: "no headless entry", cls: "oc-warn" });
+  if (a.ended && a.stdoutChars === 0) extras.push({ text: "no output", cls: "oc-warn" });
+  if (typeof a.terminalId === "string" && a.terminalId) extras.push({ text: "t:" + clean(a.terminalId, 8), cls: "dim" });
+  if (extras.length > 0) {
+    var d = document.createElement("div");
+    d.className = "bodyline mcx";
+    for (var i = 0; i < extras.length; i++) {
+      if (i > 0) d.appendChild(document.createTextNode("  ·  "));
+      var sp = document.createElement("span");
+      sp.className = extras[i].cls;
+      sp.textContent = extras[i].text;
+      d.appendChild(sp);
+    }
+    r.appendChild(d);
+  }
+  return r;
+}
+
+function mcAtBottom(){
+  return mcScrollEl.scrollHeight - mcScrollEl.scrollTop - mcScrollEl.clientHeight < 24;
+}
+
+function mcPaintCounts(attemptCount){
+  var bits = [mcRows.childElementCount + " shown", attemptCount + " calls", mcRecordsList.length + " records held"];
+  if (mcShed) bits.push(mcShed + " shed");
+  if (mcEvicted) bits.push(mcEvicted + " evicted");
+  mcCountsEl.textContent = bits.join("  ·  ");
+}
+
+function mcRebuild(){
+  var attempts = mcFoldAll();
+  var keep = [];
+  for (var i = attempts.length - 1; i >= 0 && keep.length < MAX_ROWS; i--) {
+    try { if (mcMatches(attempts[i])) keep.push(attempts[i]); } catch (e) {}
+  }
+  keep.reverse();
+  // Every row is rebuilt from scratch on every paint (the fold-in-place design
+  // updates a call in place by replacing its whole row), so a selection tied to
+  // the OLD node is about to be destroyed under it. Re-attach by the same key
+  // mcFoldAll groups by, not by DOM identity, and refresh the open detail pane
+  // to whatever this attempt looks like now — otherwise a call selected while
+  // "in flight" would show its start-phase snapshot forever.
+  var prevKey = (mcSelected && mcSelected.__attempt) ? mcAttemptKey(mcSelected.__attempt) : null;
+  var reselected = null;
+  var frag = document.createDocumentFragment();
+  for (var j = 0; j < keep.length; j++) {
+    try {
+      var row = mcRowFor(keep[j]);
+      if (prevKey !== null && mcAttemptKey(keep[j]) === prevKey) {
+        row.classList.add("sel");
+        reselected = row;
+      }
+      frag.appendChild(row);
+    } catch (e) {}
+  }
+  mcRows.replaceChildren();
+  mcRows.appendChild(frag);
+  if (prevKey !== null) {
+    if (reselected) {
+      mcSelected = reselected;
+      if (!mcDetailEl.hidden) mcShowDetail(reselected.__attempt);
+    } else {
+      // Filtered out or evicted since the last paint — nothing left to
+      // reattach the selection to.
+      mcClearSelection();
+    }
+  }
+  if (mcFollow) mcScrollEl.scrollTop = mcScrollEl.scrollHeight;
+  else if (mcArrived) mcJumpEl.hidden = false;
+  mcArrived = false;
+  mcPaintCounts(attempts.length);
+}
+
+function mcSchedulePaint(){
+  if (mcPainting) return;
+  mcPainting = true;
+  requestAnimationFrame(function(){
+    mcPainting = false;
+    try {
+      if (!mcView.paused) mcRebuild();
+      else mcPaintCounts(mcFoldAll().length);
+    } catch (e) {
+      // A bad frame must not wedge every frame after it.
+    }
+  });
+}
+
+/* A NOTICE, not a row: mcRebuild() replaceChildren()s #mcrows on every paint
+   (the fold-in-place design), so a mark planted there — including the one
+   naming records this reader never got to see — is wiped by the very next
+   arrival, sometimes before it is ever rendered. #mcmarks sits outside that
+   container and mcRebuild never touches it, so the latest notice survives
+   until the next one replaces it. */
+function mcMark(text){
+  mcMarksEl.hidden = false;
+  mcMarksEl.textContent = text;
+}
+
+/* ---- detail ---------------------------------------------------------------
+   Scalar fields the netwatch pane's FIELDS array does for frames. usage is
+   an object, so it is spread into its own dt/dd pairs rather than named
+   whole — the same reason modelwatch-log.ts's export allow-list cannot name
+   usage either. */
+
+var MC_FIELDS = ["callId", "purpose", "attempt", "requestedTool", "actualTool", "reach",
+  "requestedModel", "actualModel", "terminalId", "conversationId", "projectId",
+  "wallMs", "apiMs", "exitCode", "timedOut", "budgetMs", "remainingMs",
+  "outcome", "outcomeDetail", "promptChars", "stdoutChars"];
+
+var MC_USAGE_FIELDS = ["inputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens",
+  "reasoningTokens", "numTurns", "permissionDenials", "modelsBilled"];
+
+function mcClearSelection(){
+  if (mcSelected) mcSelected.classList.remove("sel");
+  mcSelected = null;
+  mcDetailEl.hidden = true;
+  mcDetailEl.replaceChildren();
+}
+
+function mcShowDetail(a){
+  try {
+    mcDetailEl.hidden = false;
+    mcDetailEl.replaceChildren();
+
+    var h = document.createElement("h2");
+    var nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = clean((a.purpose || "?") + "  " + mcToolCell(a), 60);
+    h.appendChild(nm);
+    var copy = document.createElement("button");
+    copy.textContent = "copy json";
+    copy.addEventListener("click", function(){
+      if (!navigator.clipboard) return;
+      var text;
+      try { text = JSON.stringify(a, null, 2); } catch (e) { text = "{}"; }
+      navigator.clipboard.writeText(text).then(function(){
+        copy.textContent = "copied";
+        setTimeout(function(){ copy.textContent = "copy json"; }, 1200);
+      }, function(){});
+    });
+    h.appendChild(copy);
+    var close = document.createElement("button");
+    close.textContent = "close";
+    close.addEventListener("click", mcClearSelection);
+    h.appendChild(close);
+    mcDetailEl.appendChild(h);
+
+    var dl = document.createElement("dl");
+    dl.className = "kv";
+    var add = function(k, v){
+      var dt = document.createElement("dt"); dt.textContent = k;
+      var dd = document.createElement("dd"); dd.textContent = v;
+      dl.appendChild(dt); dl.appendChild(dd);
+    };
+    try { add("at", new Date(a.at).toISOString()); } catch (e) { add("at", String(a.at)); }
+    for (var i = 0; i < MC_FIELDS.length; i++) {
+      var k = MC_FIELDS[i];
+      if (a[k] !== undefined && a[k] !== null) add(k, clean(a[k], 200));
+    }
+    var u = a.usage;
+    if (u && typeof u === "object") {
+      for (var j = 0; j < MC_USAGE_FIELDS.length; j++) {
+        var uk = MC_USAGE_FIELDS[j];
+        if (u[uk] !== undefined && u[uk] !== null) add("usage." + uk, clean(u[uk], 60));
+      }
+      if (u.money && typeof u.money === "object") {
+        add("usage.money", clean(u.money.amount, 20) + " " + clean(u.money.unit, 20));
+      }
+    }
+    mcDetailEl.appendChild(dl);
+
+    var addText = function(label, value){
+      var lbl = document.createElement("div");
+      lbl.className = "tbl";
+      lbl.textContent = label;
+      mcDetailEl.appendChild(lbl);
+      var pre = document.createElement("pre");
+      pre.className = "tb";
+      pre.textContent = cleanBody(typeof value === "string" ? value : String(value));
+      mcDetailEl.appendChild(pre);
+    };
+    var p = a.prompt;
+    var wroteText = false;
+    if (p && typeof p === "object") {
+      if (typeof p.scaffold === "string") { addText("scaffold", p.scaffold); wroteText = true; }
+      if (typeof p.goal === "string") { addText("goal", p.goal); wroteText = true; }
+      if (typeof p.backlogChars === "number") { addText("backlog", p.backlogChars + " chars — never recorded"); wroteText = true; }
+      if (p.context && typeof p.context === "object" && typeof p.context.sha256 === "string") {
+        var chars = typeof p.context.chars === "number" ? p.context.chars : "?";
+        addText("context", p.context.sha256.slice(0, 12) + "…  " + chars + " chars");
+        wroteText = true;
+      }
+      if (typeof p.contextText === "string") { addText("ctx text", p.contextText); wroteText = true; }
+    }
+    if (typeof a.stdout === "string") { addText("answer", a.stdout); wroteText = true; }
+    if (!wroteText) {
+      var hint = document.createElement("div");
+      hint.className = "tbl";
+      hint.textContent = "no prompt or answer text recorded — arm prompts above for the scaffold " +
+        "and goal; the transcript excerpt and the model's answer are recorded only from the CLI " +
+        "(antgrid calls --context) and cannot be armed from this page";
+      mcDetailEl.appendChild(hint);
+    }
+  } catch (e) {
+    mcDetailEl.replaceChildren();
+    var errLine = document.createElement("div");
+    errLine.className = "tbl";
+    errLine.textContent = "could not render this record";
+    mcDetailEl.appendChild(errLine);
+  }
+}
+
+mcRows.addEventListener("click", function(e){
+  var r = e.target.closest ? e.target.closest(".r") : null;
+  if (!r || !r.__attempt) return;
+  if (mcSelected) mcSelected.classList.remove("sel");
+  mcSelected = r;
+  r.classList.add("sel");
+  mcShowDetail(r.__attempt);
+});
+
+/* ---- ingest ---------------------------------------------------------------
+   Keyed by (seq, at) rather than netwatch's (origin, seq, at): every
+   ModelCallEvent comes from this one process, so there is no second origin for
+   a bare seq comparison to be confused by, and neither field being the right
+   type cannot throw building the key (String() never throws on a JSON value). */
+
+function mcFresh(ev){
+  var key = String(ev.seq) + ":" + String(ev.at);
+  if (mcSeen[key]) return false;
+  mcSeen[key] = 1;
+  return true;
+}
+
+function mcIngest(ev){
+  try {
+    if (!ev || typeof ev !== "object") return;
+    if (!mcFresh(ev)) return;
+    mcRecordsList.push(ev);
+    mcArrived = true;
+    if (mcRecordsList.length > MAX_EVENTS) {
+      mcRecordsList.splice(0, mcRecordsList.length - MAX_EVENTS);
+      mcSeen = Object.create(null);
+    }
+    mcSchedulePaint();
+  } catch (e) {
+    // A hostile or merely malformed record must not break this feed, and must
+    // not touch the netwatch feed running beside it.
+  }
+}
+
+/* ---- stream ---------------------------------------------------------------
+   Its own reconnect loop with its own local backoff, so a netwatch stall never
+   pauses this one or vice versa — the only thing they share is the session
+   token, which is correct: a session invalid for one feed is invalid for
+   both, since it is the same bearer. */
+
+async function mcReadStream(){
+  var limit = mcEverConnected ? 400 : (launch.n ? Number(launch.n) : 400);
+  if (!isFinite(limit) || limit < 0) limit = 400;
+  var res = await fetch("/modelwatch?limit=" + limit + "&follow=1", {
+    headers: { authorization: "Bearer " + token },
+    cache: "no-store"
+  });
+  if (res.status === 401) {
+    token = null;
+    try { sessionStorage.removeItem(SESSION_KEY); } catch (e) {}
+    throw new Error("unauthorized");
+  }
+  if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
+
+  mcClearFail();
+  mcSetStatus("live", "streaming from the host");
+  if (mcEverConnected) mcMark("reconnected");
+  mcEverConnected = true;
+
+  var reader = res.body.getReader();
+  var dec = new TextDecoder();
+  var buf = "";
+  for (;;) {
+    var chunk = await reader.read();
+    if (chunk.done) break;
+    buf += dec.decode(chunk.value, { stream: true });
+    var i;
+    while ((i = buf.indexOf("\n\n")) !== -1) {
+      var block = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      if (block.charAt(0) === ":") continue;
+      var name = null, data = [];
+      block.split("\n").forEach(function(l){
+        if (l.indexOf("event:") === 0) name = l.slice(6).trim();
+        else if (l.indexOf("data:") === 0) data.push(l.slice(5).trim());
+      });
+      if (!data.length) continue;
+      var payload;
+      try { payload = JSON.parse(data.join("\n")); } catch (e) { continue; }
+      if (name === "replayed") {
+        mcEvicted = (payload && typeof payload.evicted === "number") ? payload.evicted : 0;
+        var buffered = (payload && typeof payload.buffered === "number") ? payload.buffered : 0;
+        var replayed = (payload && typeof payload.replayed === "number") ? payload.replayed : 0;
+        var missed = buffered - replayed;
+        mcMark("live" + (missed > 0 ? "  ·  " + missed + " older buffered records not replayed" : ""));
+        continue;
+      }
+      if (name === "shed") {
+        var dropped = (payload && typeof payload.dropped === "number") ? payload.dropped : 0;
+        mcShed += dropped;
+        mcMark(dropped + " records dropped — this reader is behind the capture");
+        continue;
+      }
+      mcIngest(payload);
+    }
+  }
+}
+
+async function mcRun(){
+  var backoff = 400;
+  for (;;) {
+    try {
+      await mcReadStream();
+      backoff = 400;
+      mcSetStatus("retry", "stream ended, reconnecting");
+    } catch (e) {
+      var why = e && e.message ? e.message : String(e);
+      // Deliberately does NOT call showExpired(): that hides the whole page,
+      // including a netwatch stream that may still be open and delivering
+      // frames on its own still-valid connection. This feed's own credential
+      // dying is this feed's own problem to report — see mcSetStatus for how
+      // that reaches the tab even while the calls pane itself is hidden.
+      if (!token) { mcSetStatus("dead", "unauthorized"); mcFail("session expired — reload the viewer for a fresh link"); return; }
+      mcSetStatus("retry", why);
+      mcFail("lost the host — retrying (" + clean(why, 80) + ")");
+    }
+    await new Promise(function(r){ setTimeout(r, backoff); });
+    backoff = Math.min(backoff * 2, 5000);
+  }
+}
+
+/* ---- arming -----------------------------------------------------------
+   The viewer may arm ONLY the prompts arm — never context, and never both
+   together. A 403 with code CONTEXT_ARM_FORBIDDEN can arrive for this
+   prompts-only request whenever the CLI already holds the context arm up
+   (arming prompts is what starts admitting transcript text once context is
+   armed — see uiArmRefusal in control-listener.ts) — mcToggleArm below names
+   that explicitly rather than leaving the button looking merely broken. */
+
+function mcArmRequest(on){
+  return { id:"ui-arm", type:"modelwatch:arm", arms:["prompts"], enabled:on, ttlMs: on ? ARM_TTL_MS : 0 };
+}
+
+async function mcPostArm(on, keepalive){
+  var opts = {
+    method: "POST",
+    headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+    body: JSON.stringify(mcArmRequest(on))
+  };
+  if (keepalive) opts.keepalive = true;
+  var res = await fetch("/netwatch/ui/arm", opts);
+  var reply = null;
+  try { reply = await res.json(); } catch (e) {}
+  if (!res.ok || !reply || !reply.ok) {
+    var msg = (reply && reply.error && typeof reply.error.message === "string") ? reply.error.message : "HTTP " + res.status;
+    var e2 = new Error(msg);
+    if (reply && reply.error && typeof reply.error.code === "string") e2.code = reply.error.code;
+    throw e2;
+  }
+  return reply;
+}
+
+function mcSchedule(ttlMs){
+  var a = mcArms.prompts;
+  if (a.timer) clearTimeout(a.timer);
+  a.timer = setTimeout(function(){
+    // Spent the moment it fires — nothing later may find this id still
+    // sitting in a.timer and think there is something left to clear.
+    a.timer = null;
+    if (!a.on) return; // disarmed while this renewal was in flight
+    mcPostArm(true, false).then(function(reply){
+      if (!a.on) return; // disarmed while the POST itself was in flight
+      mcSchedule(reply.ttlMs);
+    }, function(e){
+      if (!a.on) return;
+      // CONTEXT_ARM_FORBIDDEN means the CLI is holding the context arm up —
+      // this page's own prompts grant from mcToggleArm has not lapsed, the
+      // host's dead-man timer from that grant is still running. Disarming
+      // here would blame the wrong arm, misreport an active capture as
+      // stopped, and skip the pagehide purge (mcSetArm's disarm branch gates
+      // on a.on). Keep the toggle lit and retry on the same cadence.
+      if (e && e.code === "CONTEXT_ARM_FORBIDDEN") {
+        mcFail("prompts renewal deferred — " + clean(e.message, 120));
+        mcSchedule(ARM_TTL_MS);
+        return;
+      }
+      mcSetArm(false);
+      mcFail("prompts capture lapsed — " + clean(e.message, 80));
+    });
+  }, Math.max(1000, Math.floor((ttlMs || ARM_TTL_MS) * 0.4)));
+}
+
+/* Mirrors the host's own purge-on-disarm (forgetTextNoArmStillAdmits in
+   modelwatch.ts): once THIS page's own arm goes down, holding onto text the
+   host itself no longer admits — in the records list, in any export — would
+   defeat the whole point of the arm being temporary. Metadata is left alone;
+   only the fields the prompts arm alone gates are dropped. */
+function mcForgetCapturedText(){
+  for (var i = 0; i < mcRecordsList.length; i++) {
+    var e = mcRecordsList[i];
+    if (!e || typeof e !== "object") continue;
+    if (e.prompt !== undefined) delete e.prompt;
+    if (e.stdout !== undefined) delete e.stdout;
+  }
+}
+
+function mcSetArm(on){
+  var a = mcArms.prompts;
+  a.on = on;
+  if (!on && a.timer) { clearTimeout(a.timer); a.timer = null; }
+  el("mcprompts").classList.toggle("on", on);
+  if (on) {
+    mcNoteEl.textContent = "prompts armed — scaffold, goal and a context digest are captured for " +
+      "headless model calls from now, and stay in this window — and in any export — until " +
+      "disarmed. " + MC_NOTE_BASE;
+  } else {
+    mcNoteEl.textContent = MC_NOTE_BASE;
+    mcForgetCapturedText();
+    // Without a repaint the purge is invisible until the next call arrives:
+    // any row or open detail pane already on screen keeps showing text this
+    // page just deleted.
+    mcSchedulePaint();
+  }
+}
+
+function mcToggleArm(){
+  var btn = el("mcprompts");
+  var want = !mcArms.prompts.on;
+  btn.classList.add("busy");
+  mcPostArm(want, false).then(function(reply){
+    mcClearFail();
+    mcSetArm(want);
+    if (want) mcSchedule(reply.ttlMs);
+  }, function(e){
+    // CONTEXT_ARM_FORBIDDEN is a transient, externally-caused refusal (the CLI
+    // is already holding the context arm up), not a permission the viewer
+    // lacks — say so in words rather than leaving a dead-looking toggle.
+    var msg = (e && e.code === "CONTEXT_ARM_FORBIDDEN")
+      ? "prompts capture is unavailable right now — " + clean(e.message, 160)
+      : "could not " + (want ? "arm " : "disarm ") + "prompts — " + clean(e && e.message, 120);
+    mcFail(msg);
+  }).then(function(){ btn.classList.remove("busy"); });
+}
+
+window.addEventListener("pagehide", function(){
+  if (!token) return;
+  if (mcArms.prompts.on) { try { mcPostArm(false, true); } catch (e) {} }
+});
+
+/* ---- export -------------------------------------------------------------
+   Raw records, unfolded — one per phase, exactly as they arrived — the same
+   choice cli/modelwatch.ts's --json mode makes and for the same reason:
+   folding here would be this page deciding what a reader who exports sees. */
+
+function mcExportJsonl(){
+  var list = [];
+  for (var i = 0; i < mcRecordsList.length; i++) { if (mcMatches(mcRecordsList[i])) list.push(mcRecordsList[i]); }
+  if (!list.length) { mcFail("nothing to export under the current filter"); return; }
+  var lines = [];
+  for (var j = 0; j < list.length; j++) {
+    try { lines.push(JSON.stringify(list[j])); } catch (e) {}
+  }
+  if (!lines.length) { mcFail("nothing to export under the current filter"); return; }
+  var text = lines.join("\n") + "\n";
+  var url = URL.createObjectURL(new Blob([text], { type: "application/x-ndjson" }));
+  var d = new Date();
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "modelcalls-" + d.getFullYear() + pad(d.getMonth()+1,2) + pad(d.getDate(),2) + "-" +
+               pad(d.getHours(),2) + pad(d.getMinutes(),2) + pad(d.getSeconds(),2) + ".jsonl";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 10000);
+}
+
+function mcClearAll(){
+  mcRecordsList = [];
+  mcSeen = Object.create(null);
+  mcArrived = false;
+  mcShed = 0;
+  mcEvicted = 0;
+  mcClearSelection();
+  mcRebuild();
+}
+
 /* ---- controls ---------------------------------------------------------- */
 
 el("seg").addEventListener("click", function(e){
@@ -752,11 +1680,67 @@ jump.addEventListener("click", function(){
   scroll.scrollTop = scroll.scrollHeight;
 });
 
+el("feedtabs").addEventListener("click", function(e){
+  var b = e.target.closest ? e.target.closest("button") : null;
+  if (!b) return;
+  var f = b.getAttribute("data-f");
+  Array.prototype.forEach.call(el("feedtabs").children, function(c){ c.classList.toggle("on", c === b); });
+  nwPane.hidden = f !== "nw";
+  mcPane.hidden = f !== "mc";
+  // A hidden pane's [hidden] rule gives it no layout box, so any scrollTop
+  // write made while it was hidden was a no-op against a 0/0/0 box. Restore
+  // position now that the pane just regained a layout box — otherwise the
+  // pane you switch TO opens on its oldest rows.
+  if (f === "nw" && follow) scroll.scrollTop = scroll.scrollHeight;
+  if (f === "mc" && mcFollow) mcScrollEl.scrollTop = mcScrollEl.scrollHeight;
+});
+
+el("mcpurpose").addEventListener("click", function(e){
+  var b = e.target.closest ? e.target.closest("button") : null;
+  if (!b) return;
+  mcView.purpose = b.getAttribute("data-p");
+  Array.prototype.forEach.call(el("mcpurpose").children, function(c){ c.classList.toggle("on", c === b); });
+  mcRebuild();
+});
+var mcQTimer = null;
+mcQEl.addEventListener("input", function(){
+  if (mcQTimer) clearTimeout(mcQTimer);
+  mcQTimer = setTimeout(function(){
+    mcView.query = mcQEl.value.trim().toLowerCase();
+    mcRebuild();
+  }, 90);
+});
+el("mcpause").addEventListener("click", function(){
+  mcView.paused = !mcView.paused;
+  el("mcpause").classList.toggle("on", mcView.paused);
+  if (!mcView.paused) mcRebuild();
+});
+el("mcprompts").addEventListener("click", mcToggleArm);
+el("mcexp").addEventListener("click", mcExportJsonl);
+el("mcclear").addEventListener("click", mcClearAll);
+
+mcScrollEl.addEventListener("scroll", function(){
+  mcFollow = mcAtBottom();
+  if (mcFollow) mcJumpEl.hidden = true;
+});
+mcJumpEl.addEventListener("click", function(){
+  mcFollow = true;
+  mcJumpEl.hidden = true;
+  mcScrollEl.scrollTop = mcScrollEl.scrollHeight;
+});
+
 document.addEventListener("keydown", function(e){
-  var typing = e.target === q;
-  if (e.key === "/" && !typing) { e.preventDefault(); q.focus(); q.select(); return; }
-  if (e.key === "Escape") { if (typing) q.blur(); else clearSelection(); return; }
-  if (e.key === " " && !typing) { e.preventDefault(); el("pause").click(); }
+  var mcActive = !mcPane.hidden;
+  var activeQ = mcActive ? mcQEl : q;
+  var activePause = mcActive ? el("mcpause") : el("pause");
+  var typing = e.target === q || e.target === mcQEl;
+  if (e.key === "/" && !typing) { e.preventDefault(); activeQ.focus(); activeQ.select(); return; }
+  if (e.key === "Escape") {
+    if (typing) e.target.blur();
+    else { clearSelection(); mcClearSelection(); }
+    return;
+  }
+  if (e.key === " " && !typing) { e.preventDefault(); activePause.click(); }
 });
 
 /* ---- boot -------------------------------------------------------------- */
@@ -796,7 +1780,9 @@ async function obtainToken(){
   token = await obtainToken();
   if (!token) { showExpired(); return; }
   paintCounts();
+  mcPaintCounts(0);
   run();
+  mcRun();
 })();
 
 })();

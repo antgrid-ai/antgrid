@@ -1347,6 +1347,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         requestId: requestId,
         relPath: json['relPath'] as String?,
         isDirectory: json['isDirectory'] as bool? ?? false,
+        externalImagePath: json['externalImagePath'] as String?,
       );
 
     case 'ports:update':

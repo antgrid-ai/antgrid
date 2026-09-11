@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AgentDescriptor } from "./protocol";
+import type { AgentDescriptor, SessionEntry } from "./protocol";
 import type { BranchRemoteStatus, StashEntry } from "./git-branches";
 import { MAX_CAPABILITY_CARD_PROJECTS, type OsCard, type RepoCard } from "./capability-card";
 import { MAX_REMOTE_DIRECTORY_WIRE_MACHINES, MAX_REMOTE_DIRECTORY_WIRE_ROWS } from "./session-bus/constants";
@@ -16,6 +16,19 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     mode: z.enum(["local", "remote"]),
   }),
   z.object({ id: z.string().min(1), type: z.literal("project:start"), projectId: z.string().min(1) }),
+  // Loopback-only session peek for a LOCAL project the app has not opened this
+  // run (so its cached Recent/drawer row never learned of a session started or
+  // resumed while it was cold). Deliberately ungated beyond the shape check —
+  // unlike `sessions.list` over the relay control plane (mobile-access-gated,
+  // seen-catalog-bound), the loopback bearer token IS the authorization: only a
+  // same-machine caller holding host.json's token can reach this endpoint at
+  // all. See `_peekLocalProjectSessions` in app_shell.dart, the app-side caller.
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("project:sessions"),
+    projectId: z.string().min(1),
+    includeArchived: z.boolean().optional(),
+  }),
   z.object({ id: z.string().min(1), type: z.literal("project:stop"), projectId: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("project:forget"), projectId: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("host:shutdown") }),
@@ -105,6 +118,43 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   // and in anything the operator pastes. What it buys is scoped to reading the
   // capture stream and arming capture — see netwatch-ui-session.ts.
   z.object({ id: z.string().min(1), type: z.literal("netwatch:ui") }),
+  // Arms or disarms MODELWATCH's prompt capture — the parts of a headless model
+  // prompt the recorder is allowed to keep. Metadata about every model call is
+  // recorded unconditionally and no verb can turn it off, so as with
+  // netwatch:local the only thing left worth asking for is text. Answered
+  // in-process: nothing is forwarded to the app, so it adds no wire message
+  // type, and it neither reads nor writes a working tree, so it needs no entry
+  // in CHECKOUT_VARIABLE_MESSAGE_TYPES either.
+  //
+  // The arms are NAMED rather than folded into one flag because the text they
+  // admit is not comparable. `prompts` gives the scaffold we wrote ourselves
+  // plus a digest of the transcript; `context` gives that transcript, which is
+  // whatever the user typed and whatever the agent read back at them. See
+  // armContextCapture in modelwatch.ts for why the second one is a separate
+  // decision rather than a stronger setting of the first.
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("modelwatch:arm"),
+    arms: z.array(z.enum(["prompts", "context"])).min(1),
+    enabled: z.boolean(),
+    // Optional for netwatch:local's reason — a disarm has no window to state —
+    // and zero is admitted here rather than refused, so a caller that spells
+    // "off" as `{enabled: false, ttlMs: 0}` is answered instead of being
+    // rejected over a field it was not arming with. Positivity is the arming
+    // path's concern and is enforced there.
+    ttlMs: z.number().int().nonnegative().optional(),
+  }),
+  // Mints a single-use launch ticket for the capture viewer and reports the URL
+  // that spends it, on netwatch:ui's terms and for netwatch:ui's document: the
+  // session a ticket buys reads both feeds, so a second page and a second
+  // exchange would buy nothing. It is a verb of its own so that a caller asking
+  // to watch model calls never has to name the other feature to get a window,
+  // which is the whole reason the CLI can carry two subcommands.
+  //
+  // The document opens on the frame capture and reaches the calls feed by its
+  // tab: which feed a link lands on is not carried in the ticket, so a caller
+  // that wants the calls view has to say so on the page.
+  z.object({ id: z.string().min(1), type: z.literal("modelwatch:ui") }),
   // Discloses a checkout's absolute path to the caller. Deliberately confined
   // to THIS plane: checkout paths are host-local (checkout-types.ts) and the
   // loopback socket + token is the only transport that can reach this schema —
@@ -219,6 +269,7 @@ export type ControlResponse =
   | { id: string; ok: true; type: "tools:list"; tools: ToolSummary[]; agents?: AgentDescriptor[] }
   | { id: string; ok: true; type: "project:open"; running: boolean; connect: ConnectInfo | null }
   | { id: string; ok: true; type: "project:start"; running: boolean; connect: ConnectInfo | null }
+  | { id: string; ok: true; type: "project:sessions"; sessions: SessionEntry[] }
   | { id: string; ok: true; type: "project:stop" }
   | { id: string; ok: true; type: "project:forget" }
   | { id: string; ok: true; type: "host:shutdown" }
@@ -247,4 +298,17 @@ export type ControlResponse =
   /** `url` carries the ticket in its FRAGMENT, which no browser sends to a
    *  server and no proxy logs — the page reads it, spends it and strips it. */
   | { id: string; ok: true; type: "netwatch:ui"; url: string; expiresInMs: number }
+  /** BOTH arms' state after the request, never just the one named: the
+   *  transcript and the model's answer are admitted only while both are up
+   *  (`sessionTextArmed` in modelwatch.ts), so a caller that armed `context`
+   *  alone would otherwise read `ok` as "the transcript is being recorded"
+   *  while nothing is. `ttlMs` is the SHORTEST window this request armed after
+   *  the host's clamps, and `0` on a disarm — the two arms hold independent
+   *  timers and take different ceilings (the context one is far shorter), so
+   *  the field describes the call rather than the state, and reports the
+   *  shortest because its one consumer is a heartbeat that must re-arm before
+   *  the first of them lapses. */
+  | { id: string; ok: true; type: "modelwatch:arm"; prompts: boolean; context: boolean; ttlMs: number }
+  /** The same fragment-carried ticket as netwatch:ui's, for the same document. */
+  | { id: string; ok: true; type: "modelwatch:ui"; url: string; expiresInMs: number }
   | { id: string; ok: false; error: { code: string; message: string } };

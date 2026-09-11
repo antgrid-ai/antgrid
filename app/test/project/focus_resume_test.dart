@@ -122,9 +122,14 @@ void main() {
       (m) => m['type'] == 'client:focus-state' && m['paused'] == false,
     );
     expect(declaredAt, isNonNegative);
+    // The pull is a correlated RPC now, not a message — `request` appends its
+    // own frame into `sent` on the same ordinal as `send`, so the ordering
+    // check below stays honest keyed on the request frame's `method`.
     final pullIndices = [
       for (var i = 0; i < t.sent.length; i++)
-        if (t.sent[i]['type'] == 'terminal:snapshot:request') i,
+        if (t.sent[i]['type'] == 'request' &&
+            t.sent[i]['method'] == 'terminal.snapshot')
+          i,
     ];
     expect(pullIndices, isNotEmpty);
     expect(pullIndices.every((i) => i > declaredAt), isTrue);

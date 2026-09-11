@@ -60,6 +60,7 @@ import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
 import 'window_title_bar.dart';
 import 'workspace_menu_button.dart';
+import 'workspace_readiness_chip.dart';
 
 class AgentPanel extends ConsumerWidget {
   const AgentPanel({super.key});
@@ -120,6 +121,7 @@ class AgentPanel extends ConsumerWidget {
               // inside the breadcrumb on desktop, but on a phone-width row it
               // competes with the title for the one flexible slot.
               const Expanded(child: TitleBarBreadcrumb(showBranchPill: false)),
+              const WorkspaceReadinessChip(),
               const SizedBox(width: AbTokens.space6),
               const _SessionOverflowButton(compact: true),
             ],
@@ -591,6 +593,7 @@ class AgentBar extends ConsumerWidget {
         // mobile header above.
         const SizedBox(width: AbTokens.space12),
         const Expanded(child: TitleBarBreadcrumb()),
+        const WorkspaceReadinessChip(),
         const SizedBox(width: AbTokens.space6),
         const WorkspaceMenuButton(),
         const _SessionOverflowButton(compact: false),

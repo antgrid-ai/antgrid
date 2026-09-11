@@ -385,7 +385,35 @@ export interface TerminalSessionOptions {
 }
 
 const BATCH_INTERVAL_MS = 16;
-const BATCH_MAX_BYTES = 4096;
+
+/**
+ * Byte cap on a coalesced `terminal:output` frame. Binds only above
+ * BATCH_MAX_BYTES/BATCH_INTERVAL_MS of PTY output — under that the timer
+ * flushes first, so interactive echo latency is the interval's business, not
+ * this constant's.
+ *
+ * Sized against the relay's route limiter, which counts FRAMES, not bytes:
+ * `rateLimitMsgPerSec` (relay/src/config.ts) is 1200/s per (pair, channel) and
+ * an exceeded bucket DROPS the frame rather than queuing it, which for terminal
+ * output is corrupted scrollback. At 4 KB that put a hard ceiling near 5 MB/s of
+ * sustained output from one terminal; at 16 KB it is near 20 MB/s. Far below
+ * MAX_FRAME_PAYLOAD (1.5 MB, packages/antgrid-wire/src/frag.ts), so the frame
+ * itself is never the limit.
+ *
+ * The app-side receive cost per KB of output confirms the same direction and
+ * bounds it: measured on Windows over `app/test/config/frame_batch_bench.dart`,
+ * ~27 us/KB at 4 KB and 8 KB, ~21 us/KB at 16 KB and 32 KB, then WORSE again
+ * past 64 KB. So 8 KB buys nothing on that axis and 256 KB is a regression.
+ *
+ * One cross-platform consequence, deliberate: a batch this size seals to ~22 KB
+ * of JSON (escape-heavy output inflates ~1.35x), which crosses the 10,000-byte
+ * `BackgroundCipher.defaultChannelPolicy` threshold in cryptography_flutter. On
+ * Linux — the one platform with neither a plugin nor a native cipher — that
+ * moves the pure Dart AES-GCM off the UI isolate and onto a spawned one: same
+ * CPU, better responsiveness, but re-measure here if Linux ever gets its own
+ * native cipher.
+ */
+const BATCH_MAX_BYTES = 16384;
 
 /**
  * Some dev orchestrators inject network overrides into every child process

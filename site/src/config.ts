@@ -47,6 +47,10 @@ export const links = {
   storeListing: "https://apps.microsoft.com/detail/9N0P7ZRL4D9W",
   downloadLinux: `${RELEASES_URL}/releases/latest/download/antgrid-linux.AppImage`,
   support: "/support",
+  // Deep-linkable per release: every entry on the page is anchored on its
+  // own tag, so a support reply can point at the exact build a reader is
+  // asking about rather than at the top of the list.
+  changelog: "/changelog",
   security: "/security",
   // Verification surfaces for /security. `HEAD` rather than a branch name:
   // GitHub resolves it to whatever the repo's default branch is, so renaming

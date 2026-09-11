@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { connect } from "node:net";
 import { ControlListener } from "../src/control-listener";
 import { netwatchUiPage } from "../src/netwatch-ui-page";
+import { ControlRequestSchema } from "../src/control-protocol";
 import type { ControlRequest, ControlResponse } from "../src/control-protocol";
 import {
   TICKET_TTL_MS,
@@ -226,6 +227,70 @@ describe("viewer routes", () => {
     // The refusal is at the door, not at the handler: nothing downstream had to
     // know a viewer exists.
     expect(seen).toEqual([]);
+  });
+
+  it("reaches exactly the three arming verbs and refuses every other verb ControlRequestSchema knows", async () => {
+    // "cannot reach a control verb outside the arming pair" above pins ONE
+    // sample (project:stop). A set widened to admit some OTHER verb — a
+    // plausible-sounding addition — would leave that test green. Drive every
+    // literal `type` the schema accepts and assert the split exactly.
+    const port = await start();
+    const token = await session(port);
+    const armable: Record<string, unknown> = {
+      "netwatch:local": { id: "a", type: "netwatch:local", bodies: false },
+      "netwatch:remote": { id: "a", type: "netwatch:remote", enabled: false },
+      "modelwatch:arm": { id: "a", type: "modelwatch:arm", arms: ["prompts"], enabled: false },
+    };
+    const notArmable: Record<string, unknown> = {
+      "project:list": { id: "a", type: "project:list" },
+      "project:resolve": { id: "a", type: "project:resolve", folder: "x" },
+      "tools:list": { id: "a", type: "tools:list" },
+      "project:open": { id: "a", type: "project:open", projectId: "p", projectPath: "/x", mode: "local" },
+      "project:start": { id: "a", type: "project:start", projectId: "p" },
+      "project:sessions": { id: "a", type: "project:sessions", projectId: "p" },
+      "project:stop": { id: "a", type: "project:stop", projectId: "p" },
+      "project:forget": { id: "a", type: "project:forget", projectId: "p" },
+      "host:shutdown": { id: "a", type: "host:shutdown" },
+      "phones:list": { id: "a", type: "phones:list" },
+      "phones:unpair": { id: "a", type: "phones:unpair", phonePubkey: "x" },
+      "mobile-access:get": { id: "a", type: "mobile-access:get" },
+      "mobile-access:set": { id: "a", type: "mobile-access:set", enabled: true },
+      "agent-reach:get": { id: "a", type: "agent-reach:get" },
+      "agent-reach:set": { id: "a", type: "agent-reach:set", enabled: true },
+      "git:branches": { id: "a", type: "git:branches", projectId: "p", projectPath: "/x" },
+      "git:remote-state": { id: "a", type: "git:remote-state", projectId: "p", projectPath: "/x", branch: "main" },
+      "git:checkout": { id: "a", type: "git:checkout", projectId: "p", projectPath: "/x", branch: "main" },
+      "netwatch:ui": { id: "a", type: "netwatch:ui" },
+      "modelwatch:ui": { id: "a", type: "modelwatch:ui" },
+      "checkout:path": { id: "a", type: "checkout:path", projectId: "p", checkoutId: "c" },
+      // Reads, but not viewer reads: the card and the directory name every
+      // project and session this machine holds, which is the inventory a viewer
+      // session exists to be narrowed away from.
+      "machine:capability-card": { id: "a", type: "machine:capability-card", projects: [] },
+      "session-bus:remote-directory": { id: "a", type: "session-bus:remote-directory", machines: [] },
+    };
+    // The two maps are exhaustive over the union by hand, which nothing but
+    // this line keeps true: a verb added to the schema without a decision here
+    // would otherwise ship untested against the narrowing.
+    expect(Object.keys(armable).length + Object.keys(notArmable).length).toBe(
+      ControlRequestSchema.options.length,
+    );
+    for (const [type, body] of Object.entries(armable)) {
+      const res = await fetch(`http://127.0.0.1:${port}/netwatch/ui/arm`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect([res.status, type]).toEqual([200, type]);
+    }
+    for (const [type, body] of Object.entries(notArmable)) {
+      const res = await fetch(`http://127.0.0.1:${port}/netwatch/ui/arm`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect([res.status, type]).toEqual([403, type]);
+    }
   });
 
   it("refuses an arm with no credential at all", async () => {

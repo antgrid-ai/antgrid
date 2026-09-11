@@ -57,6 +57,7 @@ function makeSessionLimitedRelayFactory(code = "SESSION_LIMIT_EXCEEDED") {
         streamOpts.onRejected?.(code, "Concurrent remote agent limit reached (0). Close another session or upgrade your plan.");
         return { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
       },
+      noteStreamBound: () => {},
       sendPushDeliver: () => {},
     }) as unknown as RelayClient;
 }
@@ -80,6 +81,7 @@ function makeAuthenticatingRelayFactory() {
         streamOpts.onAdmitted?.("s1");
         return { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
       },
+      noteStreamBound: () => {},
       sendPushDeliver: () => {},
     }) as unknown as RelayClient;
 }

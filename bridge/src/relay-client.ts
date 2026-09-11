@@ -120,6 +120,10 @@ const RATE_DIAGNOSTIC_WINDOW_MS = 1_500;
 const RATE_LIMIT_BURST_MS = 1_000;
 const MAX_OUTBOUND_DIAGNOSTIC_FRAMES = 4_096;
 const MAX_DIAGNOSTIC_TYPES = 8;
+/** At most one unknown-streamId warn per stream per this interval. */
+const UNKNOWN_STREAM_LOG_INTERVAL_MS = 30_000;
+/** Ceiling on the unknown-stream throttle maps before they are cleared whole. */
+const MAX_TRACKED_UNKNOWN_STREAMS = 64;
 const FRAG_ID_SEED = randomBytes(8).toString("hex");
 let fragIdCounter = 0;
 
@@ -141,7 +145,17 @@ interface OutboundFrameDiagnostic {
 }
 
 interface RateLimitBurst {
-  startedAt: number;
+  /** The FIRST REJECTION, not the first send of the burst that provoked it:
+   *  the outbound sample ring keeps only RATE_DIAGNOSTIC_WINDOW_MS of history,
+   *  so how long this sender had been sending before the relay pushed back is
+   *  not recoverable here. The summary reports `rejectionWindowMs` to say so. */
+  firstRejectionAt: number;
+  /** The most recent rejection counted into `errors`. Paired with
+   *  `firstRejectionAt` so the summary reports the span the rejections actually
+   *  occupy: ending at Date.now() would report the coalescing timer's fixed
+   *  window instead, and 340 rejections inside 5ms would read as 340 per
+   *  second. */
+  lastRejectionAt: number;
   errors: number;
   timer: ReturnType<typeof setTimeout>;
   outboundAtOnset: string;
@@ -289,6 +303,9 @@ export class RelayClient {
   /** True from the moment a heartbeat `ping` is sent until a reply (or any
    *  other inbound frame) proves the socket is still alive. */
   private awaitingPong = false;
+  /** When the outstanding probe went out; only meaningful while
+   *  {@link awaitingPong}. */
+  private awaitingPongSince = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private authenticated = false;
   private readonly epoch: number;
@@ -324,6 +341,10 @@ export class RelayClient {
   private fragSweep: ReturnType<typeof setInterval> | null = null;
   private outboundFrameDiagnostics: OutboundFrameDiagnostic[] = [];
   private rateLimitBurst: RateLimitBurst | null = null;
+  /** Unknown-stream drop throttle: last log time and frames suppressed since,
+   *  per streamId (see {@link logUnknownStreamDrop}). */
+  private unknownStreamLoggedAt = new Map<string, number>();
+  private unknownStreamSuppressed = new Map<string, number>();
   private droppedFrames = 0;
   private droppedFramesAt = 0;
 
@@ -499,6 +520,13 @@ export class RelayClient {
         }
       },
     });
+  }
+
+  /** We just told the app which stream a project is on (`stream-ready`), so any
+   *  `stream-unbound` mute on it is answered. Call it BEFORE publishing, or the
+   *  frames the re-advert is meant to unblock ride out while still muted. */
+  noteStreamBound(streamId: string): void {
+    this.mux.markBound(streamId);
   }
 
   /**
@@ -1218,7 +1246,7 @@ export class RelayClient {
       return;
     }
     if (!this.mux.dispatchInbound(streamId, mJson, channel, peerId)) {
-      log.warn("Dropping inbound frame for unknown streamId %s", streamId);
+      this.logUnknownStreamDrop(streamId, msgType, frameId);
       netwatch.record({
         dir: "rx", kind: "drop", transport: "relay", channel,
         streamId, msgType, frameId, bytes, reason: "unknown-stream",
@@ -1226,9 +1254,67 @@ export class RelayClient {
     }
   }
 
+  /**
+   * One warn per stream per {@link UNKNOWN_STREAM_LOG_INTERVAL_MS}, carrying how
+   * many frames it stands for in `framesDropped`. Sum that field to get the
+   * loss — counting LINES gives the throttle's rate, not the drop rate.
+   *
+   * The unbound-stream drop is not self-limiting: nothing in the protocol heals
+   * a peer pushing onto an id this side holds no stream for, so a live PTY on an
+   * unbound stream drops one frame per frame, indefinitely — measured at ~13/sec
+   * for 20+ minutes on the app side, which left 5,976 of the last 6,000 lines of
+   * one log saying this and nothing else. Unthrottled, the line added to make
+   * the loss visible is what buries every other clue about it.
+   *
+   * `frameId` names only the one frame this line was emitted for, not the
+   * `framesDropped` frames it stands for, so it is evidence in a single
+   * direction: an id recurring across lines is a frame being re-delivered, a
+   * non-recurring one rules nothing out. Absent for a reassembled transfer,
+   * which spans N sealed frames with N ids.
+   *
+   * The netwatch tap at the call site is deliberately NOT throttled — a capture
+   * is opened to see every frame, and is bounded by how long it runs.
+   */
+  private logUnknownStreamDrop(
+    streamId: string,
+    msgType: string | undefined,
+    frameId: string | undefined,
+  ): void {
+    const now = Date.now();
+    const last = this.unknownStreamLoggedAt.get(streamId);
+    if (last !== undefined && now - last < UNKNOWN_STREAM_LOG_INTERVAL_MS) {
+      this.unknownStreamSuppressed.set(streamId, (this.unknownStreamSuppressed.get(streamId) ?? 0) + 1);
+      return;
+    }
+    // Bounded against a peer that sprays ids: the maps exist to rate-limit a
+    // handful of stale streams, not to accumulate one entry per id ever seen.
+    if (this.unknownStreamLoggedAt.size > MAX_TRACKED_UNKNOWN_STREAMS) {
+      this.unknownStreamLoggedAt.clear();
+      this.unknownStreamSuppressed.clear();
+    }
+    this.unknownStreamLoggedAt.set(streamId, now);
+    // Always present, and counts this frame as well as the ones it stands for.
+    // Omitting it at 1 would leave a reader summing LINES for a loss rate, and
+    // one line here can stand for hundreds of frames.
+    const framesDropped = (this.unknownStreamSuppressed.get(streamId) ?? 0) + 1;
+    this.unknownStreamSuppressed.delete(streamId);
+    log.warn(
+      `Dropping inbound frame for unknown streamId ${streamId}: ` +
+      `framesDropped=${framesDropped} msgType=${msgType ?? "unknown"} ` +
+      `frameId=${frameId ?? "none"}`,
+    );
+  }
+
   private dispatchControlPlane(mJson: string, channel: Channel, peerId: string): void {
     const msg = parseMessageFast(mJson);
     if (msg) {
+      // Consumed here like `netwatch:events` below: this is a statement about
+      // the SOCKET's stream table, not a verb, and the bus it would reach is
+      // the one whose stream the app just said it cannot receive.
+      if (msg.type === "stream-unbound") {
+        this.mux.markUnbound(msg.streamId);
+        return;
+      }
       // Consumed here and never forwarded: a capture batch is diagnostics about
       // this socket, not a verb, and letting it reach `onMessage`/the bus would
       // hand every project core a message type it has no case for. The frame
@@ -1969,8 +2055,9 @@ export class RelayClient {
    *  caused it. Coalesce the burst and report the sample taken at its onset. */
   private handleDroppedFrameError(code: string, message: string): void {
     const now = Date.now();
-    if (this.rateLimitBurst && now - this.rateLimitBurst.startedAt < RATE_LIMIT_BURST_MS) {
+    if (this.rateLimitBurst && now - this.rateLimitBurst.firstRejectionAt < RATE_LIMIT_BURST_MS) {
       this.rateLimitBurst.errors++;
+      this.rateLimitBurst.lastRejectionAt = now;
       return;
     }
     if (this.rateLimitBurst) this.finishRateLimitBurst();
@@ -1983,7 +2070,7 @@ export class RelayClient {
 
     const timer = setTimeout(() => this.finishRateLimitBurst(), RATE_LIMIT_BURST_MS);
     timer.unref?.();
-    this.rateLimitBurst = { startedAt: now, errors: 1, timer, outboundAtOnset, code };
+    this.rateLimitBurst = { firstRejectionAt: now, lastRejectionAt: now, errors: 1, timer, outboundAtOnset, code };
 
     this.opts.onError?.(code, message);
   }
@@ -1998,7 +2085,7 @@ export class RelayClient {
     log.error(
       `Relay dropped-frame burst summary: device=${this.opts.identity.deviceId} ` +
       `code=${burst.code} rejectedFrames=${burst.errors} duplicateCallbacksSuppressed=${burst.errors - 1} ` +
-      `durationMs=${Date.now() - burst.startedAt} ` +
+      `rejectionWindowMs=${burst.lastRejectionAt - burst.firstRejectionAt} ` +
       `outboundAtOnset(${RATE_DIAGNOSTIC_WINDOW_MS}ms)={${burst.outboundAtOnset}}`,
     );
   }
@@ -2137,7 +2224,7 @@ export class RelayClient {
       if (session.missedPongs >= MAX_MISSED_PONGS) {
         // Unresponsive: drop this device's keys and wait for its rekey (the app
         // owns retry pacing). The socket and every sibling session stay up.
-        log.warn("E2E session with %s declared dead (2 missed pongs) — dropping keys, awaiting rekey", session.peerId);
+        log.warn("E2E session with %s declared dead (%d missed pongs) — dropping keys, awaiting rekey", session.peerId, MAX_MISSED_PONGS);
         this.dropSession(session.peerId);
         continue;
       }
@@ -2152,11 +2239,16 @@ export class RelayClient {
       // Half-open socket (e.g. after machine sleep): our previous probe went
       // unanswered for a full interval. Force-close rather than leaving it to
       // linger until OS TCP timeout; the close handler owns reconnection.
-      log.warn("relay socket unresponsive — closing to trigger reconnect");
+      log.warn(
+        `relay socket unresponsive — ping unanswered for ${Date.now() - this.awaitingPongSince}ms ` +
+        `(probe interval ${HEARTBEAT_INTERVAL}ms), peers=${[...this.sessions.keys()].join(",") || "none"} ` +
+        `sealed=${this.sessions.size}; closing to trigger reconnect`,
+      );
       this.ws.close();
       return;
     }
     this.awaitingPong = true;
+    this.awaitingPongSince = Date.now();
     this.sendJson({ type: "ping" });
   }
 
@@ -2250,6 +2342,8 @@ export class RelayClient {
     (c as unknown as { phoneEd25519ByDeviceId: Map<string, string> }).phoneEd25519ByDeviceId = new Map();
     (c as unknown as { outboundFrameDiagnostics: OutboundFrameDiagnostic[] }).outboundFrameDiagnostics = [];
     (c as unknown as { rateLimitBurst: RateLimitBurst | null }).rateLimitBurst = null;
+    (c as unknown as { unknownStreamLoggedAt: Map<string, number> }).unknownStreamLoggedAt = new Map();
+    (c as unknown as { unknownStreamSuppressed: Map<string, number> }).unknownStreamSuppressed = new Map();
     (c as unknown as { droppedFrames: number }).droppedFrames = 0;
     (c as unknown as { droppedFramesAt: number }).droppedFramesAt = 0;
     (c as unknown as { mux: StreamMux }).mux = new StreamMux({

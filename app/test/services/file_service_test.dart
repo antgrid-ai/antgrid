@@ -898,6 +898,80 @@ void main() {
       await session.close();
     });
 
+    // Activation follows the focused checkout, so a user moving between two
+    // sessions in one project deactivates and re-activates these bundles
+    // constantly. The transport never dropped, so the agent is the same one
+    // that issued the seq and the claim still holds — without this every switch
+    // bought a full tree.
+    test('re-activating on the same establishment claims the seq', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session)..activate();
+      await Future<void>.delayed(Duration.zero);
+
+      t.emit('file:tree:snapshot', {
+        'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
+        'seq': 5,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      svc.deactivate();
+      svc.activate();
+      await Future<void>.delayed(Duration.zero);
+      expect(treeRequests(t).last['sinceSeq'], 5);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    // The other half: a checkout that was off screen through a reconnect has no
+    // comparable claim, because the agent it would be claiming against may be a
+    // different process counting from zero.
+    test('re-activating after a reconnect claims nothing', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session)..activate();
+      await Future<void>.delayed(Duration.zero);
+
+      t.emit('file:tree:snapshot', {
+        'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
+        'seq': 5,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      svc.deactivate();
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+      svc.activate();
+      await Future<void>.delayed(Duration.zero);
+      expect(treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    // Pull-to-refresh is the user saying the tree on screen is wrong. Answering
+    // `file:tree:unchanged` would make that gesture do visibly nothing.
+    test('requestFullTree claims nothing', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session)..activate();
+      await Future<void>.delayed(Duration.zero);
+
+      t.emit('file:tree:snapshot', {
+        'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
+        'seq': 5,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      svc.requestFullTree();
+      await Future<void>.delayed(Duration.zero);
+      expect(treeRequests(t).last.containsKey('sinceSeq'), isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
+
     test('file:tree:unchanged keeps both the tree and the claim', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);

@@ -29,6 +29,7 @@ import { generateEphemeralKeypair } from "./key-exchange";
 import { joinRelayWsPath } from "./relay-url";
 import { createMessage } from "./protocol";
 import { armBodyCapture, armRemoteIngest } from "./netwatch";
+import { armContextCapture, armPromptCapture, isContextCaptureArmed, isPromptCaptureArmed } from "./modelwatch";
 import { mintUiTicket, TICKET_TTL_MS } from "./netwatch-ui-session";
 import { detectInstalledTools, type DetectOptions } from "./tool-detector";
 import { isChatCapableTool } from "./structured/chat-capable";
@@ -218,7 +219,7 @@ export interface OpenResult {
 const HEARTBEAT_REFRESH_INTERVAL_MS = 60_000;
 
 /**
- * Ceiling on a loopback body-capture window.
+ * Ceiling on a capture window armed over this plane.
  *
  * A `setTimeout` delay past the runtime's 32-bit millisecond max fires
  * IMMEDIATELY rather than late, so an ambitious ttl would disarm the capture on
@@ -233,8 +234,40 @@ const HEARTBEAT_REFRESH_INTERVAL_MS = 60_000;
  * `Timer` does not misfire on a huge duration, it simply never fires, and the
  * phone has no UI, no env var and no verb of its own that can stop an upload —
  * the TTL is the only control the device has over its own capture.
+ *
+ * Bounds modelwatch's two arms as well, where the length decides more than it
+ * does for either of the above: a lapse there does not merely stop admitting
+ * text, it PURGES what the ring already holds (`forgetCapturedText`), because
+ * that ring is sized to keep days rather than seconds. So the window is both
+ * how long prompt text is taken AND how long any of it survives.
  */
-const NETWATCH_MAX_TTL_MS = 3_600_000;
+const CAPTURE_MAX_TTL_MS = 3_600_000;
+
+/**
+ * The context arm's own ceiling, a twelfth of the one above.
+ *
+ * It is a separate number because what the two arms admit is not comparable.
+ * `prompts` records the scaffold we wrote ourselves, a handler goal, a count and
+ * a digest; `context` records the transcript and PTY scrollback a decision prompt
+ * is built around, which is whatever the user typed and whatever the agent read
+ * back at them — a pasted key, an `.env` the agent opened, a password entered at
+ * a prompt. Giving the dangerous half the harmless half's hour would make the
+ * second switch modelwatch.ts insists on a naming difference and nothing more.
+ *
+ * Five minutes is what a watcher actually asks for (`CAPTURE_TTL_MS` in
+ * cli/watch-transport.ts) and it costs a live run nothing, because the heartbeat
+ * renews well inside it for as long as the run lasts. What it bounds is the run
+ * that is no longer there: the window is also how long admitted text SURVIVES —
+ * a lapse purges the ring (`forgetCapturedText`) — so it is the ceiling on how
+ * long a transcript excerpt outlives the watcher that took it.
+ */
+const CONTEXT_CAPTURE_MAX_TTL_MS = 300_000;
+
+/** Every arming verb on this plane goes through here, so a ceiling cannot be
+ *  applied to one capture and forgotten on the next one added beside it. */
+function clampCaptureTtl(ttlMs: number): number {
+  return Math.min(ttlMs, CAPTURE_MAX_TTL_MS);
+}
 
 /**
  * Host-side, memory-first cache over `session-bus/pair-budget.ts`'s per-session
@@ -1732,6 +1765,7 @@ export class HostServer {
       if (this.cores.get(projectId)?.core.isRelayRegistered()) {
         const streamId = this.streamIds.get(projectId);
         if (streamId) {
+          this.controlPlaneRelay?.noteStreamBound(streamId);
           bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
         }
       }
@@ -1765,6 +1799,7 @@ export class HostServer {
           // ProjectSession services without a fresh project:start.
           const streamId = this.streamIds.get(projectId);
           if (streamId) {
+            this.controlPlaneRelay?.noteStreamBound(streamId);
             bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
           }
           this.sendProjectsAdvertisement(bus);
@@ -1867,6 +1902,23 @@ export class HostServer {
           return { id: req.id, ok: false, error: { code: "NOT_OPEN", message: `project ${req.projectId} is not open; use project:open with a path` } };
         }
         return { id: req.id, ok: true, type: "project:start", running: existing.running, connect: existing.connect };
+      }
+      case "project:sessions": {
+        // Same shape guard as the gated remote sessions.list peek
+        // (handleSessionsListRpc): a bad id would otherwise read
+        // `agents/<anything>/sessions.json` off disk via readPersisted below.
+        // No seen-catalog/mobile-access gate here — the loopback bearer token
+        // already proves this caller IS this machine.
+        if (!isSafeProjectId(req.projectId)) {
+          return { id: req.id, ok: false, error: { code: "E_BAD_PARAMS", message: "invalid projectId" } };
+        }
+        // Warm core reports true live per-session `running`; a cold project's
+        // disk file is authoritative otherwise. Mirrors handleSessionsListRpc's
+        // routing.
+        const entry = this.cores.get(req.projectId);
+        const liveSessions = entry?.core.listSessions(req.includeArchived ?? false);
+        const sessions = liveSessions ?? await SessionManager.readPersisted(resolveAbDir(), req.projectId, req.includeArchived ?? false);
+        return { id: req.id, ok: true, type: "project:sessions", sessions };
       }
       case "project:stop":
         await this.stop(req.projectId);
@@ -1993,7 +2045,7 @@ export class HostServer {
         if (req.enabled && typeof req.ttlMs !== "number") {
           return { id: req.id, ok: false, error: { code: "TTL_REQUIRED", message: "arming a remote capture requires ttlMs" } };
         }
-        const ttlMs = req.enabled ? Math.min(req.ttlMs as number, NETWATCH_MAX_TTL_MS) : req.ttlMs;
+        const ttlMs = req.enabled ? clampCaptureTtl(req.ttlMs as number) : req.ttlMs;
         // Open this machine's door to the app's batches for the same window the
         // app is being told to record for, and only for it — an unarmed bridge
         // ignores `netwatch:events` outright. The grace outlives the app's own
@@ -2025,7 +2077,7 @@ export class HostServer {
         if (typeof req.ttlMs !== "number" || req.ttlMs <= 0) {
           return { id: req.id, ok: false, error: { code: "TTL_REQUIRED", message: "arming body capture requires a positive ttlMs" } };
         }
-        const ttlMs = Math.min(req.ttlMs, NETWATCH_MAX_TTL_MS);
+        const ttlMs = clampCaptureTtl(req.ttlMs);
         armBodyCapture(true, ttlMs);
         return { id: req.id, ok: true, type: "netwatch:local", bodies: true, ttlMs };
       }
@@ -2041,6 +2093,64 @@ export class HostServer {
           id: req.id,
           ok: true,
           type: "netwatch:ui",
+          url: `http://127.0.0.1:${control.port}/netwatch/ui#t=${mintUiTicket()}`,
+          expiresInMs: TICKET_TTL_MS,
+        };
+      }
+      case "modelwatch:arm": {
+        // Bridge-local in netwatch:local's strongest sense: it arms two module
+        // flags in THIS process and sends nothing, which is why it carries no
+        // wire message type and why CHECKOUT_VARIABLE_MESSAGE_TYPES has no
+        // entry for it — there is no working tree anywhere in its reach. Its
+        // only door is the loopback control listener, bound to 127.0.0.1 behind
+        // the host.json bearer; a phone speaks AbMessage verbs over the relay
+        // and cannot name a ControlRequest at all. That is not incidental to
+        // this feature: it is what keeps a prompt on the machine that ran it.
+        if (!req.enabled) {
+          for (const arm of req.arms) {
+            if (arm === "prompts") armPromptCapture(false, 0);
+            else armContextCapture(false, 0);
+          }
+          return { id: req.id, ok: true, type: "modelwatch:arm", prompts: isPromptCaptureArmed(), context: isContextCaptureArmed(), ttlMs: 0 };
+        }
+        // The same refusal netwatch:local makes of itself, for the same reason:
+        // the TTL is the dead man's switch, so an arm without one is the single
+        // request that cannot be honoured — a watcher killed with SIGKILL sends
+        // no disarm. Answered here rather than left to armPromptCapture's own
+        // refusal, which is silent and would read to the caller as an armed
+        // capture.
+        if (typeof req.ttlMs !== "number" || req.ttlMs <= 0) {
+          return { id: req.id, ok: false, error: { code: "TTL_REQUIRED", message: "arming prompt capture requires a positive ttlMs" } };
+        }
+        // Clamped per arm, never once for both: the context arm is the dangerous
+        // one and carries its own, shorter ceiling.
+        let shortest = Infinity;
+        for (const arm of req.arms) {
+          const ttl = arm === "prompts"
+            ? clampCaptureTtl(req.ttlMs)
+            : Math.min(clampCaptureTtl(req.ttlMs), CONTEXT_CAPTURE_MAX_TTL_MS);
+          if (arm === "prompts") armPromptCapture(true, ttl);
+          else armContextCapture(true, ttl);
+          shortest = Math.min(shortest, ttl);
+        }
+        // Re-read rather than echoed: an arm this request did not name is
+        // reported as it actually stands, which is the only way a caller that
+        // armed `context` alone learns it will still get no text.
+        return { id: req.id, ok: true, type: "modelwatch:arm", prompts: isPromptCaptureArmed(), context: isContextCaptureArmed(), ttlMs: shortest };
+      }
+      case "modelwatch:ui": {
+        // The same document netwatch:ui serves, for the reason given on the
+        // verb, and the same port rule: the viewer is served by the listener
+        // answering this request, so its port is the one the caller is already
+        // talking to — never a published or configured one that could drift.
+        const control = this.control;
+        if (!control) {
+          return { id: req.id, ok: false, error: { code: "NO_CONTROL_PLANE", message: "the loopback control plane is not bound" } };
+        }
+        return {
+          id: req.id,
+          ok: true,
+          type: "modelwatch:ui",
           url: `http://127.0.0.1:${control.port}/netwatch/ui#t=${mintUiTicket()}`,
           expiresInMs: TICKET_TTL_MS,
         };

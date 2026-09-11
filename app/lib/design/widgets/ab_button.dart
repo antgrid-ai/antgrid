@@ -101,7 +101,7 @@ class _AbButtonState extends State<AbButton> {
     );
 
     if (!interactive) {
-      return Opacity(opacity: 0.4, child: visual);
+      return Opacity(opacity: AbTokens.opacityDisabled, child: visual);
     }
 
     return FocusableActionDetector(

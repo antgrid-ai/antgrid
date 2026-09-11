@@ -6,12 +6,17 @@
 // being prepared. These pin the pane's side of "a queued start is not a stopped
 // session"; the auto-start paths that share the rule are pinned by
 // `new_session_queued_start_test.dart` and `session_setup_test.dart`.
+import 'dart:async';
+
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/models/terminal_models.dart';
+import 'package:antgrid/project/checkout_readiness.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/checkout_readiness.dart'
+    show checkoutReadinessProvider;
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
@@ -57,6 +62,32 @@ SessionEntry _entry(SessionSetup? setup) => SessionEntry(
   checkoutKind: 'managed-worktree',
   setup: setup,
 );
+
+/// A RUNNING session with no tab yet — the shape `CheckoutReadiness.stalled`
+/// reaches in practice: the checkout's `agent:status` never arrived, so there
+/// is no per-terminal pull for a per-tab Retry to name.
+SessionEntry _runningEntry() => SessionEntry(
+  id: _sessionId,
+  name: 'Fix auth bug',
+  createdAt: 0,
+  lastUsedAt: 0,
+  archived: false,
+  running: true,
+  checkoutId: 'main',
+  checkoutKind: 'main',
+);
+
+/// Records whether `retryAgentConnection` ran, without exercising its real
+/// body — the real body reaches into the relay connection manager, which this
+/// test's provider tree does not wire up.
+class _SpyMachineConnectionNotifier extends MachineConnectionNotifier {
+  bool retryAgentConnectionCalled = false;
+
+  @override
+  Future<void> retryAgentConnection() async {
+    retryAgentConnectionCalled = true;
+  }
+}
 
 /// Mounts the pane over a hand-seeded session list and a real per-project
 /// session on a fake wire, so a press is asserted where it lands rather than
@@ -220,4 +251,92 @@ void main() {
       findsOneWidget,
     );
   });
+
+  // On a local target `retryAgentConnection` opens with
+  // `if (target == null || target.isLocal) return;`, so routing this Retry
+  // through it paints a button that provably cannot act. Stalled is only
+  // reachable with the session already resolved, so re-establishing the
+  // machine connection is the wrong lever on a remote target too.
+  testWidgets(
+    "a stalled checkout's Retry drives the checkout re-attach, not the "
+    'machine reconnect',
+    (tester) async {
+      final transport = FakeAgentTransport();
+      final cache = await CachedSessionsStore.open();
+      final session = ProjectSession(
+        projectId: _projectId,
+        transport: transport,
+        mode: ProjectSessionMode.local,
+        cachedSessionsStore: cache,
+        onClose: () async => await transport.dispose(),
+      );
+      // Not awaited: close() flushes CachedSessionsStore through
+      // SharedPreferencesAsync, and awaiting that real I/O inside
+      // testWidgets' fake-async zone wedges teardown with no timeout (see
+      // terminal_list_view_empty_state_test.dart). The timer this test cares
+      // about is retired directly below instead.
+      addTearDown(() => unawaited(session.close()));
+      final spy = _SpyMachineConnectionNotifier();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            selectedRegistrationIdProvider.overrideWith((ref) => _projectId),
+            projectSessionProvider(
+              _projectId,
+            ).overrideWith((ref) async => session),
+            activeSessionIdProvider.overrideWith(
+              () => ValueController<String?>(_sessionId),
+            ),
+            freshSessionsStateProvider.overrideWithValue(
+              SessionsState(projectId: _projectId, sessions: [_runningEntry()]),
+            ),
+            // No tab has arrived — the shape a checkout stuck attaching
+            // actually produces. Decoupled from the real per-project
+            // TerminalService the widget resolves, which is what lets this
+            // pin that service's own state below rather than a stub's.
+            terminalStateProvider.overrideWith(
+              (ref) => Stream.value(const TerminalState()),
+            ),
+            checkoutReadinessProvider.overrideWithValue(
+              CheckoutReadiness.stalled,
+            ),
+            machineConnectionProvider.overrideWith(() => spy),
+          ],
+          child: MaterialApp(
+            theme: ThemeData.dark().copyWith(
+              extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
+            ),
+            home: const Scaffold(body: TerminalScreen()),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text("couldn't reach the agent"), findsOneWidget);
+      expect(find.text('Retry'), findsOneWidget);
+
+      final terminalService = session.servicesForCheckout('main').terminalService;
+      // Nothing has subscribed to the real service's own stream (the pane
+      // reads the stubbed `terminalStateProvider` above), so its attach
+      // verdict is still the constructor default — this is what proves the
+      // change below came from the tap, not from bootstrap.
+      expect(terminalService.currentState.attach, CheckoutAttachStatus.unknown);
+
+      await tester.tap(find.text('Retry'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        terminalService.currentState.attach,
+        CheckoutAttachStatus.attaching,
+        reason: 'retryCheckoutAttach ran on the real per-project service',
+      );
+      expect(spy.retryAgentConnectionCalled, isFalse);
+
+      // No pending timer to retire: nothing subscribes to the real service's
+      // stream here, and the checkout bound is armed only over a live one.
+    },
+  );
 }

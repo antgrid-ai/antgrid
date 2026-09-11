@@ -10,8 +10,10 @@ import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../models/terminal_models.dart';
+import '../project/checkout_readiness.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
+import '../providers/checkout_readiness.dart' show checkoutReadinessProvider;
 import '../providers/new_session_picker.dart' show enterNewSession;
 import '../providers/providers.dart';
 import '../providers/session_setup.dart';
@@ -42,8 +44,12 @@ class TerminalScreen extends ConsumerWidget {
         ? null
         : ref.watch(projectSessionProvider(projectId)).value;
     final terminalAsync = ref.watch(terminalStateProvider);
+    // Watched unconditionally: the branch below returns before a
+    // TerminalState exists to read `attach` off, which is exactly the window
+    // this provider names — `session`/`terminalAsync` alone can't.
+    final readiness = ref.watch(checkoutReadinessProvider);
     if (session == null || !terminalAsync.hasValue) {
-      return const AbLoading(message: 'waiting for agent...');
+      return AbLoading(message: _bootstrapWaitMessage(readiness));
     }
     final terminalService = session
         .servicesForCheckout(ref.watch(focusedCheckoutIdProvider))
@@ -114,6 +120,28 @@ class TerminalScreen extends ConsumerWidget {
           return const _NoSessionEmptyState();
         }
       }
+      // The race is only ever won by waiting it out — except when readiness
+      // itself has given up. A per-terminal failure never escalates this;
+      // only the checkout-wide verdict does.
+      if (readiness == CheckoutReadiness.stalled) {
+        // Retry re-pulls this checkout's durable state rather than re-dialling
+        // the machine: `stalled` is only reachable with the supervisor already
+        // connected, so the connection is not what failed, and re-establishing
+        // it would re-pull every checkout's tree to fix one workspace's
+        // missing tabs. No in-flight label — the re-ask clears the verdict
+        // synchronously, so this arm is gone before one could paint.
+        return AbEmptyState.error(
+          title: "couldn't reach the agent",
+          action: AbButton(
+            label: 'Retry',
+            onTap: () => detached(
+              'TerminalScreen',
+              'retry checkout attach failed',
+              terminalService.retryCheckoutAttach,
+            ),
+          ),
+        );
+      }
       return const AbLoading(message: 'waiting for agent...');
     }
 
@@ -129,6 +157,19 @@ class TerminalScreen extends ConsumerWidget {
     );
   }
 }
+
+/// Copy for the pre-session-list wait, keyed off the checkout-wide verdict
+/// rather than the local `session`/`terminalAsync` pair — this fires before
+/// either has anything to derive a message from.
+String _bootstrapWaitMessage(CheckoutReadiness readiness) => switch (readiness) {
+  CheckoutReadiness.reachingMachine => 'reaching machine',
+  CheckoutReadiness.openingSession => 'opening session',
+  CheckoutReadiness.cold ||
+  CheckoutReadiness.blocked ||
+  CheckoutReadiness.loadingScreen ||
+  CheckoutReadiness.stalled ||
+  CheckoutReadiness.ready => 'waiting for agent...',
+};
 
 /// Rendered inside the terminal/chat pane when the focused session is in the
 /// `stopped` state. Project-open auto-starts the most-recent session, so
