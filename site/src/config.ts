@@ -7,6 +7,31 @@ export const APP_URL = import.meta.env.PUBLIC_APP_URL ?? "https://app.antgrid.ai
 // anything under here is a cross-origin request the web service must allow.
 export const WEB_URL = import.meta.env.PUBLIC_WEB_URL ?? "https://app.antgrid.ai";
 
+// Self-hosted Umami, on our own infrastructure. Cookieless and first-party, so
+// nothing here needs a consent banner — see /privacy §4, which has to keep
+// saying that for as long as this points where it does.
+//
+// `domains` is the only thing keeping dev and preview traffic out of the
+// numbers, and it is worth knowing it is the TRACKER that enforces it, not the
+// server: s.js disables itself outright unless location.hostname matches one of
+// these. That is why the tag can be identical in every build — `astro dev` on
+// localhost, the Playwright run, a build shot for an OG card and an Azure
+// preview hostname are all silent without a build-mode branch anywhere.
+//
+// Derived from SITE_URL rather than written out again, because the host that is
+// canonical is by definition the only host whose visits are real. The www
+// variant is listed too: whether it redirects to the apex or serves the site is
+// a DNS-level decision no build can see, and getting it wrong drops those
+// readers with no error anywhere — the tracker just returns. The `www.` strip is
+// what keeps that true in both directions: a SITE_URL naming the www host would
+// otherwise gate on www and www.www, excluding the apex.
+const canonicalHost = new URL(SITE_URL).hostname.replace(/^www\./, "");
+export const ANALYTICS = {
+  src: "https://wa.radhaai.com/s.js",
+  websiteId: "1b36bb4c-d7aa-4ae1-aa96-3c6d2025fcda",
+  domains: [canonicalHost, `www.${canonicalHost}`].join(","),
+};
+
 // Public releases repo. `releases/latest/download/<asset>` redirects to the
 // newest stable release's asset of that exact filename, so these URLs never
 // change across versions — cutting a release never requires a site deploy.
