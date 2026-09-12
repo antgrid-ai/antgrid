@@ -57,14 +57,41 @@ class TerminalHistoryModel extends ChangeNotifier {
   bool _atOldest = false;
   String? _failure;
   bool _refused = false;
+  int? _seekBefore;
+  bool _replacePage = false;
+  bool _towardNewer = false;
+  bool _discardOutstandingPage = false;
+
+  /// A cached drag target supersedes a remote seek without opening a second
+  /// wire request. Its eventual reply still retires the transport deadline.
+  void retainWindow() {
+    _discardOutstandingPage = loading;
+    _seekBefore = null;
+    _replacePage = false;
+  }
+
+  /// Selects an indexed window without queueing intermediate drag positions.
+  void seek(int beforeRowId, {bool newer = false}) {
+    final b = _boundary;
+    if (b == null || b.firstRowId >= b.nextRowId) return;
+    _discardOutstandingPage = false;
+    _seekBefore = beforeRowId.clamp(b.firstRowId + 1, b.nextRowId);
+    _towardNewer = newer;
+    _replacePage = true;
+    _atOldest = false;
+    _failure = null;
+    notifyListeners();
+  }
+
+  bool get hasPendingSeek => _seekBefore != null;
 
   /// What the agent last said about this run's archive. Null until the first
   /// frame carries one -- every `terminal:frame` and every
   /// `terminal:history:page` restates it.
   TerminalHistoryBoundary? get boundary => _boundary;
 
-  /// Loaded rows, oldest first. Contiguous by construction: paging only ever
-  /// walks backwards from [cursor], so there is never a hole in the middle.
+  /// Loaded rows, oldest first. Older pages prepend; indexed seeks replace
+  /// the window, so unloaded ranges are never spliced into the middle.
   List<TerminalHistoryRow> get rows => UnmodifiableListView(_rows);
 
   /// Whether a request is outstanding.
@@ -113,15 +140,11 @@ class TerminalHistoryModel extends ChangeNotifier {
       !_atOldest &&
       !loading;
 
-  /// The exclusive `beforeRowId` the next request must carry.
-  ///
-  /// Derived rather than stored, because it is exactly "the oldest row already
-  /// held" -- the bridge answers `rowId < beforeRowId` -- and a stored copy
-  /// could disagree with the list after an expiry reset.
+  /// The exclusive endpoint for a seek, or the oldest cached row when paging.
   int? get cursor {
     final b = _boundary;
     if (b == null) return null;
-    return _rows.isEmpty ? b.nextRowId : _rows.first.rowId;
+    return _seekBefore ?? (_rows.isEmpty ? b.nextRowId : _rows.first.rowId);
   }
 
   /// A reopened reader starts at the newest archived window. Live boundaries
@@ -194,6 +217,19 @@ class TerminalHistoryModel extends ChangeNotifier {
     // already placed.
     if (page.requestId != _outstandingRequestId) return false;
     _outstandingRequestId = null;
+    if (_discardOutstandingPage) {
+      _discardOutstandingPage = false;
+      notifyListeners();
+      return true;
+    }
+    // A drag may have moved again while this request was in flight.
+    if (_seekBefore != null && _requestedBeforeRowId != _seekBefore) {
+      notifyListeners();
+      return true;
+    }
+    final replacePage = _replacePage;
+    _seekBefore = null;
+    _replacePage = false;
     final previous = _boundary;
     _boundary = page.history;
     _failure = null;
@@ -214,6 +250,10 @@ class TerminalHistoryModel extends ChangeNotifier {
     // Strictly older than everything held: the cursor is exclusive and the
     // bridge orders by rowId, so this only ever drops a duplicate of a page
     // this model already placed.
+    if (replacePage) {
+      _rows.clear();
+      _bytes = 0;
+    }
     final oldestHeld = _rows.isEmpty ? null : _rows.first.rowId;
     final fresh = oldestHeld == null
         ? page.rows
@@ -225,9 +265,12 @@ class TerminalHistoryModel extends ChangeNotifier {
       // Stable row IDs let the view keep its anchor while newer rows leave it.
       while (_rows.isNotEmpty &&
           (_rows.length > maxRows || _bytes > maxBytes)) {
-        _bytes -= _rowBytes(_rows.removeLast());
+        _bytes -= _rowBytes(
+          _towardNewer ? _rows.removeAt(0) : _rows.removeLast(),
+        );
       }
     }
+    _towardNewer = false;
     // Two ways to be at the top, and the second is the one that matters: an
     // empty page proves it, but so does a full page whose oldest row IS the
     // first row retained -- and detecting that here saves one round trip that
@@ -287,6 +330,10 @@ class TerminalHistoryModel extends ChangeNotifier {
   /// very ids being dropped. Nothing is reported for it -- the client gave up
   /// on the request, and a failure banner would blame the agent for that.
   void _discardRows() {
+    _discardOutstandingPage = false;
+    _seekBefore = null;
+    _replacePage = false;
+    _towardNewer = false;
     _rows.clear();
     _bytes = 0;
     _atOldest = false;

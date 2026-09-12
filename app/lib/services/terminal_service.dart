@@ -721,6 +721,9 @@ class TerminalService {
     // loading for good.
     if (tab.history.applyPage(msg)) {
       _historyRequestDeadlines.remove(msg.terminalId)?.cancel();
+      if (tab.history.hasPendingSeek) {
+        requestTerminalHistoryPage(msg.terminalId);
+      }
     }
   }
 

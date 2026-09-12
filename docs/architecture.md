@@ -84,13 +84,29 @@ Acknowledgment is consumption, not evidence that the Flutter engine painted.
 Normal-buffer rows are archived at the parser's scroll boundary in indexed
 SQLite storage. Frames carry the matching epoch and row boundary. Archived rows
 keep their original width, soft-wrap metadata, styles, and hyperlink targets;
-resize reflows only live rows. Growing the viewport adds blank space rather than
+bridge resize reflows only live rows. The reader wraps presentation to its local
+grid without rewriting archived rows. Growing the PTY viewport adds blank space rather than
 unscrolling archived rows. App scrolling requests pages of at most 200 rows /
 256 KiB and keeps at most 2,000 rows / 16 MiB cached. Retention defaults to
 256 MiB per run and 2 GiB per machine; committed history survives restarts until
 eviction or session deletion. Explicit history clear starts a new epoch. Disk
 failure disables further recording with visible status while valid live frames
 continue. Fullscreen replay and time navigation are outside this history model.
+
+The terminal uses one external scrollbar over the retained archive range. Its
+thumb is independent of the bounded native history cache; indexed seeks reuse
+`beforeRowId` and replace the loaded window. A drag coalesces intermediate targets
+while one request is in flight. Ordinary scrolling enters history, while an
+application owning mouse input retains its wheel events; the external track and
+Shift+wheel remain terminal-history controls.
+
+Browsing captures an immutable normal-buffer screen at its archive boundary.
+Later frames update the live engine without moving the reader. Alternate-buffer
+screens remain a separate live endpoint, never archived redraws. Reaching the
+bottom, End, or the Live shortcut returns to the current frame. Typing, paste,
+quick actions, and attachments return live and use the existing authorized input
+path. Copy and selection stay in history. The history toolbar and modal close
+control are absent; loading and errors belong to the scrolling surface.
 
 Retention counts encoded rows, saved final screens, and archive ownership
 metadata. SQLite page and journal overhead is additional. Host environment

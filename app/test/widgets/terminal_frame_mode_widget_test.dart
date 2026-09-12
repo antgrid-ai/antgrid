@@ -18,9 +18,6 @@
 //     output does — proven at the controller the wrapper drives, since
 //     neither is called from the wrapper itself.
 //
-// None of this depends on how a tab REACHES frame mode: every tab built here
-// is passed `mode: TerminalDisplayMode.frame` explicitly, so the file tests
-// the display contract alone and stays valid whatever selects the mode.
 
 import 'dart:async';
 import 'dart:convert';
@@ -28,7 +25,6 @@ import 'dart:convert';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
-import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -43,9 +39,11 @@ import 'package:antgrid/widgets/clipboard_image.dart';
 import 'package:antgrid/widgets/send_to_agent_button.dart';
 import 'package:antgrid/widgets/terminal_drop_target.dart';
 import 'package:antgrid/widgets/terminal_history_view.dart';
+import 'package:antgrid/widgets/terminal_history_scrollbar.dart';
 import 'package:antgrid/widgets/terminal_quick_actions_bar.dart';
 import 'package:antgrid/widgets/terminal_upload_button.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -79,11 +77,7 @@ bool _skipWithoutNative() {
 late SharedPreferencesWithCache _settingsPrefs;
 const _myClientId = 'this-install';
 
-/// What the pane says to a drop it will not take while the archive is up.
-const _dropRefusal = 'Close the scrollback to attach a file';
-
-/// What the shared attach pipeline says to the same drop when it does reach
-/// it, which is how a case tells the two refusals apart.
+/// Oversized files exercise upload validation without a remote upload round trip.
 const _pipelineRefusal = '"shot.png" is larger than the 20 MB upload limit';
 
 /// The hover offer the drop target paints once it has accepted a drag.
@@ -92,15 +86,6 @@ const _dropOffer = 'Drop to attach';
 /// What the touch key row says in place of keys that would reach the covered
 /// pane.
 const _keysWithdrawn = 'Keys are off while the scrollback is open';
-
-/// What the pane says to a paste whose clipboard read landed after the archive
-/// went up.
-const _pasteRefusal = 'Close the scrollback to paste';
-
-/// What the pane says when an upload it accepted FINISHES under the archive:
-/// the bytes are staged on the machine and the path is not typed.
-const _uploadCovered =
-    'Upload finished while the scrollback was open — close it and attach again';
 
 /// Every key in the touch strip that writes to the PTY, and the bytes it
 /// writes — mirroring `TerminalQuickActionsBar`'s own table.
@@ -225,14 +210,13 @@ void _archive(TerminalTab tab, {int nextRowId = 400}) =>
 GhosttyTerminalView _liveView(WidgetTester tester) =>
     tester.widget<GhosttyTerminalView>(find.byType(GhosttyTerminalView).first);
 
-/// The pinned affordance that opens the reader, matched on its tooltip so it
-/// cannot be confused with the reader's own toolbar buttons.
-final Finder _scrollbackButton = find.byWidgetPredicate(
-  (w) => w is AbIconButton && w.tooltip == 'Scrollback',
+/// The external scrollbar stays outside native terminal mouse handling.
+final Finder _historyScrollbar = find.byWidgetPredicate(
+  (w) => w is TerminalHistoryScrollbar,
 );
 
 final Finder _backToLiveButton = find.byWidgetPredicate(
-  (w) => w is AbIconButton && w.tooltip == 'Back to live',
+  (w) => w is AbButton && w.label == 'Live \u2193',
 );
 
 /// Runs out everything a press or a mount books before the wire is read: the
@@ -251,15 +235,6 @@ Future<void> _settle(WidgetTester tester) async {
 Iterable<Map<String, dynamic>> _inputs(
   ({TerminalService service, FakeAgentTransport transport}) h,
 ) => h.transport.sent.where((m) => m['type'] == 'terminal:input');
-
-/// Ctrl+K: an app-level chord with nothing to do with the terminal, so what
-/// reaches a `CallbackShortcuts` above the pane measures how much of the
-/// focus tree the reader's key guard is stopping.
-Future<void> _pressCtrlK(WidgetTester tester) async {
-  await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
-  await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
-  await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
-}
 
 /// Ctrl+V — the paste chord on every platform `flutter_test` defaults to.
 Future<void> _pressPasteChord(WidgetTester tester) async {
@@ -963,7 +938,7 @@ void main() {
       await tester.pump();
 
       expect(find.byType(TerminalHistoryView), findsNothing);
-      expect(_scrollbackButton, findsNothing);
+      expect(_historyScrollbar, findsNothing);
     });
 
     testWidgets('a user still pushing at the top opens exactly one reader', (
@@ -1000,7 +975,7 @@ void main() {
       );
       await tester.pump();
       expect(
-        _scrollbackButton,
+        _historyScrollbar,
         findsNothing,
         reason:
             'a control that opens an empty reader is worse than no '
@@ -1012,10 +987,12 @@ void main() {
       _archive(tab);
       await tester.pump();
 
-      expect(_scrollbackButton, findsOneWidget);
+      expect(_historyScrollbar, findsOneWidget);
     });
 
-    testWidgets('tapping the affordance opens the reader', (tester) async {
+    testWidgets('the scrollbar opens history and remains available', (
+      tester,
+    ) async {
       final h = await _makeService(addTearDown);
       final tab = _tab(id: 't1');
       _archive(tab);
@@ -1025,17 +1002,11 @@ void main() {
       );
       await tester.pump();
 
-      await tester.tap(_scrollbackButton);
+      await tester.tap(_historyScrollbar);
       await tester.pump();
 
       expect(find.byType(TerminalHistoryView), findsOneWidget);
-      expect(
-        _scrollbackButton,
-        findsNothing,
-        reason:
-            'the reader is its own way back, so the control that raised '
-            'it has nothing left to offer',
-      );
+      expect(_historyScrollbar, findsOneWidget);
     });
 
     testWidgets('closing returns the live pane without remounting it', (
@@ -1051,7 +1022,7 @@ void main() {
       await tester.pump();
       final before = tester.element(find.byType(GhosttyTerminalView).first);
 
-      await tester.tap(_scrollbackButton);
+      await tester.tap(_historyScrollbar);
       await tester.pump();
       expect(find.byType(TerminalHistoryView), findsOneWidget);
 
@@ -1059,7 +1030,7 @@ void main() {
       await tester.pump();
 
       expect(find.byType(TerminalHistoryView), findsNothing);
-      expect(_scrollbackButton, findsOneWidget);
+      expect(_historyScrollbar, findsOneWidget);
       expect(
         identical(
           tester.element(find.byType(GhosttyTerminalView).first),
@@ -1083,7 +1054,7 @@ void main() {
         _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
       );
       await tester.pump();
-      await tester.tap(_scrollbackButton);
+      await tester.tap(_historyScrollbar);
       await tester.pump();
       expect(find.byType(TerminalHistoryView), findsOneWidget);
 
@@ -1102,68 +1073,64 @@ void main() {
             'nothing refills it — left up, it would go on showing a run that '
             'is over',
       );
-      expect(_scrollbackButton, findsNothing);
+      expect(_historyScrollbar, findsNothing);
     });
   });
 
-  group('D1: the reader must never let a key reach the live program', () {
-    testWidgets(
-      'a key press with the pane behind still focused writes nothing to the pty',
-      (tester) async {
-        if (_skipWithoutNative()) return;
-        final pty = <int>[];
-        final h = await _makeService(addTearDown);
-        final tab = _tab(id: 't1', pty: pty);
-        _archive(tab);
+  group('history focus and input routing', () {
+    testWidgets('Escape returns live even when its pane retained focus', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      final pty = <int>[];
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1', pty: pty);
+      _archive(tab);
 
-        await tester.pumpWidget(
-          _wrap(
-            _pane(tab, h.service),
-            terminalState: Stream.value(_stateWith()),
-          ),
-        );
-        await tester.pump();
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
 
-        // The control: this key does reach the guest from a pane the user can
-        // see, so the assertion below cannot pass merely because nothing in
-        // this harness types at all.
-        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
-        await tester.pump();
-        expect(pty, isNotEmpty);
+      // The control: this key does reach the guest from a pane the user can
+      // see, so the assertion below cannot pass merely because nothing in
+      // this harness types at all.
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(pty, isNotEmpty);
 
-        await tester.tap(_scrollbackButton);
-        await tester.pump();
-        await tester.pump();
+      await tester.tap(_historyScrollbar);
+      await tester.pump();
+      await tester.pump();
 
-        // The window the backstop exists for: the reader is up, but the live
-        // pane holds the keyboard. A rebuild that re-asserted autofocus, a
-        // reader that could not take focus, or simply the frame before the
-        // hand-off lands all look exactly like this.
-        final live = _liveView(tester).focusNode!;
-        live.requestFocus();
-        await tester.pump();
-        expect(live.hasFocus, isTrue);
+      // The window the backstop exists for: the reader is up, but the live
+      // pane holds the keyboard. A rebuild that re-asserted autofocus, a
+      // reader that could not take focus, or simply the frame before the
+      // hand-off lands all look exactly like this.
+      final live = _liveView(tester).focusNode!;
+      live.requestFocus();
+      await tester.pump();
+      expect(live.hasFocus, isTrue);
 
-        pty.clear();
-        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
-        await tester.pump();
+      pty.clear();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
 
-        expect(
-          pty,
-          isEmpty,
-          reason:
-              'the reader covers the pane edge to edge, so a forwarded '
-              'key is typed into a program the user cannot see',
-        );
-        expect(
-          find.byType(TerminalHistoryView),
-          findsNothing,
-          reason:
-              'swallowing the key must not also swallow the only way out '
-              'of the reader',
-        );
-      },
-    );
+      expect(
+        pty,
+        isEmpty,
+        reason:
+            'the reader covers the pane edge to edge, so a forwarded '
+            'key is typed into a program the user cannot see',
+      );
+      expect(
+        find.byType(TerminalHistoryView),
+        findsNothing,
+        reason:
+            'swallowing the key must not also swallow the only way out '
+            'of the reader',
+      );
+    });
 
     testWidgets(
       'Escape dismisses the reader instead of interrupting the agent',
@@ -1182,7 +1149,7 @@ void main() {
           ),
         );
         await tester.pump();
-        await tester.tap(_scrollbackButton);
+        await tester.tap(_historyScrollbar);
         await tester.pump();
         await tester.pump();
 
@@ -1219,7 +1186,7 @@ void main() {
         final live = _liveView(tester).focusNode!;
         expect(live.hasFocus, isTrue);
 
-        await tester.tap(_scrollbackButton);
+        await tester.tap(_historyScrollbar);
         await tester.pump();
         await tester.pump();
 
@@ -1260,73 +1227,148 @@ void main() {
     );
 
     testWidgets(
-      'a key swallowed with the pane behind focused hands the keyboard back',
+      'copy and modifier chords keep history open without PTY input',
       (tester) async {
-        if (_skipWithoutNative()) return;
         final pty = <int>[];
         final h = await _makeService(addTearDown);
         final tab = _tab(id: 't1', pty: pty);
         _archive(tab);
-
-        var fired = 0;
         await tester.pumpWidget(
           _wrap(
-            CallbackShortcuts(
-              bindings: {
-                const SingleActivator(
-                  LogicalKeyboardKey.keyK,
-                  control: true,
-                ): () =>
-                    fired++,
-              },
-              child: _pane(tab, h.service),
-            ),
+            _pane(tab, h.service),
             terminalState: Stream.value(_stateWith()),
           ),
         );
         await tester.pump();
-
-        await tester.tap(_scrollbackButton);
+        await tester.tap(_historyScrollbar);
         await tester.pump();
         await tester.pump();
-
-        final live = _liveView(tester).focusNode!;
-        live.requestFocus();
-        await tester.pump();
-        expect(live.hasFocus, isTrue);
-
         pty.clear();
-        await _pressCtrlK(tester);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
         await tester.pump();
-
-        expect(
-          pty,
-          isEmpty,
-          reason:
-              'stopping the focus tree is the only thing that keeps a key '
-              'out of a program the user cannot see',
-        );
-        expect(
-          live.hasFocus,
-          isFalse,
-          reason:
-              'but the swallow may not be the resting state: it stops the '
-              'WHOLE tree, so the keyboard has to go back to the archive',
-        );
-
-        await _pressCtrlK(tester);
+        expect(find.byType(TerminalHistoryView), findsOneWidget);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
         await tester.pump();
-
-        expect(
-          fired,
-          greaterThan(0),
-          reason:
-              'an app-level shortcut is not the terminal, and reading '
-              'history must not cost the user every binding in the app',
-        );
+        expect(find.byType(TerminalHistoryView), findsOneWidget);
         expect(pty, isEmpty);
       },
     );
+
+    testWidgets(
+      'touch IME commits once and the live keyboard remains usable after history',
+      (tester) async {
+        if (_skipWithoutNative()) return;
+        debugHasPhysicalKeyboardOverride = false;
+        addTearDown(() {
+          debugHasPhysicalKeyboardOverride = null;
+        });
+        final pty = <int>[];
+        final h = await _makeService(addTearDown);
+        final tab = _tab(id: 't1', pty: pty);
+        _archive(tab);
+        tab.history.applyPage(
+          TerminalHistoryPageMessage(
+            id: 'history',
+            timestamp: 0,
+            terminalId: 't1',
+            runId: 'run-1',
+            attachmentId: 'att-1',
+            requestId: 'seed',
+            expired: false,
+            beforeRowId: 0,
+            history: const TerminalHistoryBoundary(
+              epoch: 1,
+              firstRowId: 0,
+              nextRowId: 400,
+              status: 'recording',
+            ),
+            rows: List.generate(
+              400,
+              (i) => TerminalHistoryRow(
+                rowId: i,
+                cols: 80,
+                wrapped: false,
+                spans: [
+                  TerminalHistorySpan(text: 'row $i', cells: 7, sgr: '\x1b[0m'),
+                ],
+              ),
+            ),
+          ),
+        );
+        await tester.pumpWidget(
+          _wrap(
+            _pane(tab, h.service),
+            terminalState: Stream.value(_stateWith()),
+          ),
+        );
+        await tester.pump();
+        final keyboard = _liveView(tester).softKeyboardController!;
+        await tester.tap(_historyScrollbar);
+        await tester.pump();
+        await tester.pump();
+        expect(find.byType(GhosttyTerminalView), findsNWidgets(2));
+        final historyKeyboard = tester
+            .widget<GhosttyTerminalView>(find.byType(GhosttyTerminalView).last)
+            .softKeyboardController!;
+        historyKeyboard.show();
+        await tester.pump();
+        expect(tester.testTextInput.hasAnyClients, isTrue);
+        pty.clear();
+        h.transport.sent.clear();
+        final seed = tester.testTextInput.editingState!['text'] as String;
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: '${seed}hello',
+            selection: TextSelection.collapsed(offset: seed.length + 5),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(find.byType(TerminalHistoryView), findsNothing);
+        expect(_inputs(h).map((m) => m['data']), ['hello']);
+        expect(pty, isEmpty);
+        keyboard.show();
+        await tester.pump();
+        expect(tester.testTextInput.hasAnyClients, isTrue);
+        final liveSeed = tester.testTextInput.editingState!['text'] as String;
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: '$liveSeed\n',
+            selection: TextSelection.collapsed(offset: liveSeed.length + 1),
+          ),
+        );
+        await tester.pump();
+        expect(utf8.decode(pty), '\r');
+        expect(_inputs(h).map((m) => m['data']), ['hello']);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets('Enter returns live and reaches the terminal exactly once', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      final pty = <int>[];
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1', pty: pty);
+      _archive(tab);
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      await tester.tap(_historyScrollbar);
+      await tester.pump();
+      await tester.pump();
+      pty.clear();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(find.byType(TerminalHistoryView), findsNothing);
+      expect(utf8.decode(pty), '\r');
+      expect(_liveView(tester).focusNode!.hasFocus, isTrue);
+    });
 
     testWidgets(
       'a reader closed while another pane holds the keyboard does not take '
@@ -1353,7 +1395,7 @@ void main() {
           ),
         );
         await tester.pump();
-        await tester.tap(_scrollbackButton);
+        await tester.tap(_historyScrollbar);
         await tester.pump();
         await tester.pump();
 
@@ -1381,85 +1423,37 @@ void main() {
     );
   });
 
-  group('the reader is a lid on the live pane, not a layer over it', () {
-    testWidgets(
-      'the touch quick-action keys are withdrawn, not left live beneath it',
-      (tester) async {
-        // The bar exists only where there is no physical keyboard, which is no
-        // host `flutter test` runs on.
-        debugHasPhysicalKeyboardOverride = false;
-        addTearDown(() => debugHasPhysicalKeyboardOverride = null);
-
-        final h = await _makeService(addTearDown);
-        final tab = _tab(id: 't1');
-        _archive(tab);
-
-        await tester.pumpWidget(
-          _wrap(
-            // Wide enough for the WHOLE strip: the bar scrolls horizontally,
-            // and a key parked off-screen is one the loop below cannot press.
-            _pane(tab, h.service, width: 1000),
-            terminalState: Stream.value(_stateWith()),
-          ),
-        );
+  group('input actions return to live', () {
+    testWidgets('each touch action returns live and sends exactly once', (
+      tester,
+    ) async {
+      debugHasPhysicalKeyboardOverride = false;
+      addTearDown(() => debugHasPhysicalKeyboardOverride = null);
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1');
+      _archive(tab);
+      await tester.pumpWidget(
+        _wrap(
+          _pane(tab, h.service, width: 1000),
+          terminalState: Stream.value(_stateWith()),
+        ),
+      );
+      await tester.pump();
+      for (final entry in _touchKeys.entries) {
+        await tester.tap(_historyScrollbar);
         await tester.pump();
-
-        // Every key that writes to the PTY, not one of them: the withdrawal
-        // is a cover over a strip, so a key the cover happens to miss would
-        // still be live.
-        Future<void> tapEveryKey() async {
-          for (final label in _touchKeys.keys) {
-            await tester.tap(find.text(label), warnIfMissed: false);
-            await tester.pump();
-          }
-        }
-
-        // The control: these keys do reach the PTY from a pane the user can
-        // see, so the assertion below cannot pass because the harness never
-        // delivered a press at all.
-        await tapEveryKey();
-        expect(_inputs(h).map((m) => m['data']), _touchKeys.values);
-        h.transport.sent.clear();
-
-        await tester.tap(_scrollbackButton);
-        await tester.pump();
-
-        await tapEveryKey();
-        expect(
-          _inputs(h),
-          isEmpty,
-          reason:
-              'the bar sits OUTSIDE the Stack the reader covers and writes '
-              'to the PTY through a plain callback — left live, a phone user '
-              'reading history taps a visible Esc and cancels the turn',
-        );
-        expect(
-          find.byType(TerminalQuickActionsBar),
-          findsOneWidget,
-          reason:
-              'and it may not be unmounted to achieve that: it is a row of '
-              'the pane Column, so taking it out resizes the agent PTY (see '
-              'the wire case in "the reader is not the terminal")',
-        );
-        expect(
-          find.text(_keysWithdrawn),
-          findsOneWidget,
-          reason: 'a key that no longer answers has to say so where it was',
-        );
-
-        await tester.tap(_backToLiveButton);
-        await tester.pump();
+        expect(find.byType(TerminalHistoryView), findsOneWidget);
+        expect(find.byType(TerminalQuickActionsBar), findsOneWidget);
         expect(find.text(_keysWithdrawn), findsNothing);
-        await tapEveryKey();
-        expect(
-          _inputs(h).map((m) => m['data']),
-          _touchKeys.values,
-          reason: 'the keys come back with the live pane',
-        );
-      },
-    );
+        h.transport.sent.clear();
+        await tester.tap(find.text(entry.key));
+        await tester.pump();
+        expect(find.byType(TerminalHistoryView), findsNothing);
+        expect(_inputs(h).map((m) => m['data']), [entry.value]);
+      }
+    });
 
-    testWidgets('a drag over the archive is refused before it is offered', (
+    testWidgets('a drag over history remains accepted and offered', (
       tester,
     ) async {
       final h = await _makeService(addTearDown);
@@ -1493,34 +1487,15 @@ void main() {
       await enter();
       expect(find.text(_dropOffer), findsOneWidget);
 
-      // The reader goes up MID-DRAG, with the offer already painted — the only
-      // order that reaches a refusal with the hover state already true. A drag
-      // that STARTS under the reader is answered `none`, and `onDropEnter`
-      // fires only for a region that answered otherwise (super_drag_and_drop
-      // 0.9.1, `drop_internal.dart`, `_DropSession.update`), so that one never
-      // paints an offer at all.
-      await tester.tap(_scrollbackButton);
+      await tester.tap(_historyScrollbar);
       await tester.pump();
 
-      expect(
-        find.text(_dropOffer),
-        findsNothing,
-        reason:
-            'the hover overlay is the last child of the drop target own '
-            'Stack — above the reader — so an offer left standing paints '
-            '"Drop to attach" over the archive and is then refused',
-      );
-      expect(
-        await dragOver(),
-        DropOperation.none,
-        reason:
-            'the pane refuses a drop under the reader, so answering copy '
-            'is an offer it will not take',
-      );
+      expect(find.text(_dropOffer), findsOneWidget);
+      expect(await dragOver(), DropOperation.copy);
     });
 
     testWidgets(
-      'a clipboard read outliving the live pane cannot stage into the archive',
+      'a delayed image paste returns live and reaches upload validation',
       (tester) async {
         final h = await _makeService(
           addTearDown,
@@ -1553,7 +1528,7 @@ void main() {
 
         await _pressPasteChord(tester);
 
-        await tester.tap(_scrollbackButton);
+        await tester.tap(_historyScrollbar);
         await tester.pump();
 
         clipboard.complete(
@@ -1561,93 +1536,65 @@ void main() {
             fileName: 'shot.png',
             mimeType: 'image/png',
             // Over the cap for the same reason the drop case is: the pipeline
-            // answers a file this size from memory, so the refusal below names
-            // which of the two refused it.
+            // answers a file this size from memory without a remote upload.
             bytes: Uint8List(UploadService.kMaxUploadBytes + 1),
           ),
         );
         await tester.pump();
         await tester.pump();
 
-        expect(
-          find.text(_dropRefusal),
-          findsOneWidget,
-          reason:
-              'the reader went up inside the clipboard read, so the '
-              'continuation has to re-ask rather than trust the check the key '
-              'made',
-        );
-        expect(
-          find.text(_pipelineRefusal),
-          findsNothing,
-          reason:
-              'reaching the pipeline means the continuation ran into the '
-              'covered pane; with a file it could stage, it would have typed '
-              'the path into a prompt the archive is covering',
-        );
+        expect(find.byType(TerminalHistoryView), findsNothing);
+        expect(find.text(_pipelineRefusal), findsOneWidget);
       },
     );
 
-    testWidgets('a file dropped on the archive is refused, not staged', (
-      tester,
-    ) async {
-      final h = await _makeService(addTearDown);
-      final tab = _tab(id: 't1');
-      _archive(tab);
+    testWidgets(
+      'a file dropped on history returns live and reaches upload validation',
+      (tester) async {
+        final h = await _makeService(addTearDown);
+        final tab = _tab(id: 't1');
+        _archive(tab);
 
-      await tester.pumpWidget(
-        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
-      );
-      await tester.pump();
+        await tester.pumpWidget(
+          _wrap(
+            _pane(tab, h.service),
+            terminalState: Stream.value(_stateWith()),
+          ),
+        );
+        await tester.pump();
 
-      // Over the upload cap on purpose: the shared pipeline answers a drop
-      // that size from memory, so the control below can reach it without an
-      // upload this harness has no agent to finish.
-      final oversized = Uint8List(UploadService.kMaxUploadBytes + 1);
-      Future<void> drop() => tester
-          .widget<TerminalDropTarget>(find.byType(TerminalDropTarget))
-          .attach(bytes: oversized, fileName: 'shot.png');
+        // Over the upload cap on purpose: the shared pipeline answers a drop
+        // that size from memory, so the control below can reach it without an
+        // upload this harness has no agent to finish.
+        final oversized = Uint8List(UploadService.kMaxUploadBytes + 1);
+        Future<void> drop() => tester
+            .widget<TerminalDropTarget>(find.byType(TerminalDropTarget))
+            .attach(bytes: oversized, fileName: 'shot.png');
 
-      // The control: dropped on the live pane the file reaches the shared
-      // attach pipeline, which refuses it in its own words — so the seam this
-      // case drives is the real one, and the assertion below cannot pass
-      // because nothing was ever wired to it.
-      await drop();
-      await tester.pump();
-      expect(find.text(_pipelineRefusal), findsOneWidget);
-      ScaffoldMessenger.of(
-        tester.element(find.byType(Scaffold)),
-      ).clearSnackBars();
-      await tester.pump();
+        // The control: dropped on the live pane the file reaches the shared
+        // attach pipeline, which refuses it in its own words — so the seam this
+        // case drives is the real one, and the assertion below cannot pass
+        // because nothing was ever wired to it.
+        await drop();
+        await tester.pump();
+        expect(find.text(_pipelineRefusal), findsOneWidget);
+        ScaffoldMessenger.of(
+          tester.element(find.byType(Scaffold)),
+        ).clearSnackBars();
+        await tester.pump();
 
-      await tester.tap(_scrollbackButton);
-      await tester.pump();
-      await drop();
-      await tester.pump();
+        await tester.tap(_historyScrollbar);
+        await tester.pump();
+        await drop();
+        await tester.pump();
 
-      expect(
-        find.text(_dropRefusal),
-        findsOneWidget,
-        reason:
-            'the callback a drop is routed into is gated on its own: the '
-            'case above pins the region refusing the OPERATION, this one pins '
-            'what a call that reached the callback anyway meets',
-      );
-      expect(
-        find.text(_pipelineRefusal),
-        findsNothing,
-        reason: 'the refusal is ahead of the pipeline, not inside it',
-      );
-      // `_inputs` is deliberately NOT asserted here. The path a drop types is
-      // emitted by the uploader after an upload this harness has no agent to
-      // finish, so the wire stays empty with the gate and without it. The pair
-      // above is what pins that harm instead: a drop reaches the PTY only
-      // through the uploader's own insert, so a refusal proven to be ahead of
-      // the pipeline is a refusal ahead of the typing.
-    });
+        expect(find.byType(TerminalHistoryView), findsNothing);
+        expect(find.text(_pipelineRefusal), findsOneWidget);
+      },
+    );
 
     testWidgets(
-      'a file picked before the reader went up is refused, not staged',
+      'a delayed desktop file picker returns live and validates the file',
       (tester) async {
         debugHasPhysicalKeyboardOverride = true;
         addTearDown(() => debugHasPhysicalKeyboardOverride = null);
@@ -1667,7 +1614,7 @@ void main() {
         await tester.pump();
 
         // Held across the gesture the way the platform picker holds it: the
-        // control is withdrawn while the OS dialog is up, and its continuation
+        // picker remains open while history opens, and its continuation
         // runs into whatever the pane has become.
         final onPicked = tester
             .widget<TerminalAttachOverlayButton>(
@@ -1690,25 +1637,18 @@ void main() {
         ).clearSnackBars();
         await tester.pump();
 
-        await tester.tap(_scrollbackButton);
+        await tester.tap(_historyScrollbar);
         await tester.pump();
         await onPicked(picked);
         await tester.pump();
 
-        expect(
-          find.text(_dropRefusal),
-          findsOneWidget,
-          reason:
-              'the picker outlives the button, so the continuation has to '
-              'ask the pane again rather than trust the state that built it',
-        );
-        expect(find.text(_pipelineRefusal), findsNothing);
+        expect(find.byType(TerminalHistoryView), findsNothing);
+        expect(find.text(_pipelineRefusal), findsOneWidget);
       },
     );
 
     testWidgets(
-      'a file picked from the touch strip before the reader went up is '
-      'refused, not staged',
+      'a delayed touch file picker returns live and validates the file',
       (tester) async {
         // The strip is built only where there is no physical keyboard, and the
         // desktop attach button only where there is one — so neither case can
@@ -1731,7 +1671,7 @@ void main() {
         await tester.pump();
 
         // Held across the gesture the way the platform picker holds it: the
-        // strip is withdrawn while the OS dialog is up, and its continuation
+        // picker remains open while history opens, and its continuation
         // runs into whatever the pane has become.
         final onPicked = tester
             .widget<TerminalQuickActionsBar>(
@@ -1754,131 +1694,27 @@ void main() {
         ).clearSnackBars();
         await tester.pump();
 
-        await tester.tap(_scrollbackButton);
+        await tester.tap(_historyScrollbar);
         await tester.pump();
         await onPicked(picked);
         await tester.pump();
 
-        expect(
-          find.text(_dropRefusal),
-          findsOneWidget,
-          reason:
-              'the picker outlives the strip, so the continuation has to '
-              'ask the pane again rather than trust the state that built it',
-        );
-        expect(find.text(_pipelineRefusal), findsNothing);
+        expect(find.byType(TerminalHistoryView), findsNothing);
+        expect(find.text(_pipelineRefusal), findsOneWidget);
       },
     );
 
-    testWidgets('an upload that finishes under the reader types nothing', (
-      tester,
-    ) async {
-      // A physical keyboard and a LOCAL session, so neither the touch strip
-      // nor the desktop attach button is built and the overlay column holds
-      // only the progress strip and the scrollback control this drives.
-      debugHasPhysicalKeyboardOverride = true;
-      addTearDown(() => debugHasPhysicalKeyboardOverride = null);
-      final h = await _makeService(addTearDown);
-      final tab = _tab(id: 't1');
-      _archive(tab);
-
-      await tester.pumpWidget(
-        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
-      );
-      await tester.pump();
-
-      // The REAL UploadService, driven through the bridge's own protocol and
-      // under the cap, so the path genuinely comes back — the multi-second
-      // wait every attach gesture's reader check is made before.
-      Future<void> upload({required bool openReaderMidUpload}) async {
-        unawaited(
-          tester
-              .widget<TerminalDropTarget>(find.byType(TerminalDropTarget))
-              .attach(
-                bytes: Uint8List.fromList(const [1, 2, 3]),
-                fileName: 'shot.png',
-              ),
-        );
-        await tester.pump();
-        final requestId =
-            h.transport.sent.lastWhere(
-                  (m) => m['type'] == 'file:upload-start',
-                )['requestId']
-                as String;
-        if (openReaderMidUpload) {
-          await tester.tap(_scrollbackButton);
-          await tester.pump();
-        }
-        h.transport.emit('file:upload-ready', {
-          'requestId': requestId,
-          'uploadId': 'u1',
-        });
-        await tester.pump();
-        h.transport.emit('file:upload-ack', {'uploadId': 'u1', 'seq': 0});
-        await tester.pump();
-        h.transport.emit('file:upload-result', {
-          'requestId': requestId,
-          'uploadId': 'u1',
-          'ok': true,
-          'path': '/staged/shot.png',
-        });
-        await tester.pump();
-        await tester.pump();
-      }
-
-      // The control: finished over the live pane, the path IS typed — so the
-      // assertion below cannot pass because this harness never carried an
-      // upload to completion.
-      await upload(openReaderMidUpload: false);
-      expect(_inputs(h).map((m) => m['data']), ['"/staged/shot.png" ']);
-      h.transport.sent.clear();
-
-      await upload(openReaderMidUpload: true);
-      expect(
-        _inputs(h),
-        isEmpty,
-        reason:
-            'the gesture that started this upload checked the reader '
-            'before the round trip, and the reader went up inside it — the '
-            'path would be typed into a prompt the archive is covering',
-      );
-      expect(
-        find.text(_uploadCovered),
-        findsOneWidget,
-        reason:
-            'the bytes reached the machine and nothing reached the '
-            'prompt, so a silent refusal reads as a finished attach',
-      );
-
-      // Refused, not held: the path is gone, not queued behind the reader.
-      await tester.tap(_backToLiveButton);
-      await tester.pump(const Duration(milliseconds: 1300));
-      expect(_inputs(h), isEmpty);
-    });
-
     testWidgets(
-      'a clipboard text read outliving the live pane is not typed into it',
+      'an upload finishing during history returns live and types its path once',
       (tester) async {
+        // A physical keyboard and a LOCAL session, so neither the touch strip
+        // nor the desktop attach button is built and the overlay column holds
+        // only the progress strip and the scrollback control this drives.
+        debugHasPhysicalKeyboardOverride = true;
+        addTearDown(() => debugHasPhysicalKeyboardOverride = null);
         final h = await _makeService(addTearDown);
-        final pty = <int>[];
-        final tab = _tab(id: 't1', pty: pty);
+        final tab = _tab(id: 't1');
         _archive(tab);
-
-        // The platform's clipboard reply, held until the archive is up: the
-        // chord checks the pane once, when the key arrives.
-        final clipboard = Completer<Map<String, Object?>>();
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          (call) async => call.method == 'Clipboard.getData'
-              ? await clipboard.future
-              : null,
-        );
-        addTearDown(
-          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-            SystemChannels.platform,
-            null,
-          ),
-        );
 
         await tester.pumpWidget(
           _wrap(
@@ -1887,39 +1723,104 @@ void main() {
           ),
         );
         await tester.pump();
-        _liveView(tester).focusNode!.requestFocus();
-        await tester.pump();
-        await _pressPasteChord(tester);
 
-        await tester.tap(_scrollbackButton);
-        await tester.pump();
-        clipboard.complete(<String, Object?>{'text': 'rm -rf /'});
-        await tester.pump();
-        await tester.pump();
+        // The REAL UploadService, driven through the bridge's own protocol and
+        // under the cap, so the path genuinely comes back — the multi-second
+        // wait every attach gesture's reader check is made before.
+        Future<void> upload({required bool openReaderMidUpload}) async {
+          unawaited(
+            tester
+                .widget<TerminalDropTarget>(find.byType(TerminalDropTarget))
+                .attach(
+                  bytes: Uint8List.fromList(const [1, 2, 3]),
+                  fileName: 'shot.png',
+                ),
+          );
+          await tester.pump();
+          final requestId =
+              h.transport.sent.lastWhere(
+                    (m) => m['type'] == 'file:upload-start',
+                  )['requestId']
+                  as String;
+          if (openReaderMidUpload) {
+            await tester.tap(_historyScrollbar);
+            await tester.pump();
+          }
+          h.transport.emit('file:upload-ready', {
+            'requestId': requestId,
+            'uploadId': 'u1',
+          });
+          await tester.pump();
+          h.transport.emit('file:upload-ack', {'uploadId': 'u1', 'seq': 0});
+          await tester.pump();
+          h.transport.emit('file:upload-result', {
+            'requestId': requestId,
+            'uploadId': 'u1',
+            'ok': true,
+            'path': '/staged/shot.png',
+          });
+          await tester.pump();
+          await tester.pump();
+        }
 
-        expect(
-          pty,
-          isEmpty,
-          reason:
-              'the reader went up inside the clipboard read, and this '
-              'branch writes the payload straight to the guest',
-        );
-        expect(find.text(_pasteRefusal), findsOneWidget);
+        // The control: finished over the live pane, the path IS typed — so the
+        // assertion below cannot pass because this harness never carried an
+        // upload to completion.
+        await upload(openReaderMidUpload: false);
+        expect(_inputs(h).map((m) => m['data']), ['"/staged/shot.png" ']);
+        h.transport.sent.clear();
 
-        // The control: the same chord on the live pane does reach the guest,
-        // so the assertion above cannot pass because this harness never
-        // delivered a paste at all.
-        await tester.tap(_backToLiveButton);
-        await tester.pump();
-        _liveView(tester).focusNode!.requestFocus();
-        await tester.pump();
-        await _pressPasteChord(tester);
-        await tester.pump();
-        expect(utf8.decode(pty), 'rm -rf /');
+        await upload(openReaderMidUpload: true);
+        expect(find.byType(TerminalHistoryView), findsNothing);
+        expect(_inputs(h).map((m) => m['data']), ['"/staged/shot.png" ']);
+        await tester.pump(const Duration(milliseconds: 1300));
+        expect(_inputs(h).map((m) => m['data']), ['"/staged/shot.png" ']);
       },
     );
 
-    testWidgets('the attach control is withdrawn under the reader', (
+    testWidgets('a delayed text paste returns live and delivers exactly once', (
+      tester,
+    ) async {
+      final h = await _makeService(addTearDown);
+      final pty = <int>[];
+      final tab = _tab(id: 't1', pty: pty);
+      _archive(tab);
+
+      // The platform's clipboard reply, held until the archive is up: the
+      // chord checks the pane once, when the key arrives.
+      final clipboard = Completer<Map<String, Object?>>();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async =>
+            call.method == 'Clipboard.getData' ? await clipboard.future : null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      _liveView(tester).focusNode!.requestFocus();
+      await tester.pump();
+      await _pressPasteChord(tester);
+
+      await tester.tap(_historyScrollbar);
+      await tester.pump();
+      clipboard.complete(<String, Object?>{'text': 'echo hello'});
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(TerminalHistoryView), findsNothing);
+      expect(utf8.decode(pty), 'echo hello');
+      await tester.pump(const Duration(milliseconds: 1300));
+      expect(utf8.decode(pty), 'echo hello');
+    });
+
+    testWidgets('the attach control remains available while browsing', (
       tester,
     ) async {
       // Desktop's only attach route, and only on a relay session: a local
@@ -1936,16 +1837,10 @@ void main() {
       await tester.pump();
       expect(find.byType(TerminalAttachOverlayButton), findsOneWidget);
 
-      await tester.tap(_scrollbackButton);
+      await tester.tap(_historyScrollbar);
       await tester.pump();
 
-      expect(
-        find.byType(TerminalAttachOverlayButton),
-        findsNothing,
-        reason:
-            'the same rule the send-to-agent offer is held to: built under '
-            'a full-bleed reader it is painted underneath and untappable',
-      );
+      expect(find.byType(TerminalAttachOverlayButton), findsOneWidget);
 
       await tester.tap(_backToLiveButton);
       await tester.pump();
@@ -1965,7 +1860,7 @@ void main() {
         _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
       );
       await tester.pump();
-      await tester.tap(_scrollbackButton);
+      await tester.tap(_historyScrollbar);
       await tester.pump();
       expect(find.byType(TerminalHistoryView), findsOneWidget);
 
@@ -1992,7 +1887,7 @@ void main() {
             'scrolled off yet" about a run whose boundary says otherwise',
       );
       expect(
-        _scrollbackButton,
+        _historyScrollbar,
         findsOneWidget,
         reason:
             'the new epoch has archived rows of its own, so the way back '
@@ -2050,11 +1945,40 @@ void main() {
               'wheel, which is every pane this feature exists for',
         );
 
-        await tester.tap(_scrollbackButton);
+        await tester.tap(_historyScrollbar);
         await tester.pump();
         expect(find.byType(TerminalHistoryView), findsOneWidget);
       },
     );
+
+    testWidgets('Shift wheel opens history without sending mouse reports', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      final pty = <int>[];
+      final h = await _makeService(addTearDown);
+      final tab = _tab(id: 't1', pty: pty);
+      _archive(tab);
+      await tester.pumpWidget(
+        _wrap(_pane(tab, h.service), terminalState: Stream.value(_stateWith())),
+      );
+      await tester.pump();
+      tab.ghostty.appendOutputBytes('\x1b[?1000h'.codeUnits);
+      await tester.pump();
+      final pointer = TestPointer(1, PointerDeviceKind.mouse);
+      await tester.sendEventToBinding(
+        pointer.hover(tester.getCenter(find.byType(GhosttyTerminalView).first)),
+      );
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      pty.clear();
+      await tester.sendEventToBinding(pointer.scroll(const Offset(0, -60)));
+      await tester.pump();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      expect(find.byType(TerminalHistoryView), findsOneWidget);
+      expect(pty, isEmpty);
+    });
 
     testWidgets('a live selection does not withdraw the control', (
       tester,
@@ -2085,13 +2009,13 @@ void main() {
       expect(find.byType(SendToAgentButton), findsOneWidget);
 
       expect(
-        _scrollbackButton,
+        _historyScrollbar,
         findsOneWidget,
         reason:
             'suppressing it here leaves a Claude Code pane with a live '
             'selection no route to the archive at all',
       );
-      await tester.tap(_scrollbackButton);
+      await tester.tap(_historyScrollbar);
       await tester.pump();
       expect(find.byType(TerminalHistoryView), findsOneWidget);
     });
@@ -2122,7 +2046,7 @@ void main() {
       );
       await tester.pump();
 
-      await tester.tap(_scrollbackButton);
+      await tester.tap(_historyScrollbar);
       await tester.pump();
       expect(
         find.byType(SendToAgentButton),
@@ -2165,7 +2089,7 @@ void main() {
       await _settleWire(tester, h);
       expect(_resizes(h), hasLength(1));
 
-      await tester.tap(_scrollbackButton);
+      await tester.tap(_historyScrollbar);
       await _settleWire(tester, h);
       h.transport.sent.clear();
 
@@ -2210,7 +2134,7 @@ void main() {
         expect(_resizes(h), isNotEmpty);
         h.transport.sent.clear();
 
-        await tester.tap(_scrollbackButton);
+        await tester.tap(_historyScrollbar);
         await _settleWire(tester, h);
         expect(
           _resizes(h),

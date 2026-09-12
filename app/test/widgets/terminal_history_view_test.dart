@@ -373,6 +373,157 @@ void main() {
   // that assert on rendered rows.
   group('TerminalHistoryView', () {
     testWidgets(
+      'wide history stays seekable without native trimming on a narrow pane',
+      (tester) async {
+        GhosttyVt.newTerminal(cols: 8, rows: 2).close();
+        final model = TerminalHistoryModel()
+          ..applyBoundary(_boundary(nextRowId: 400));
+        model.markRequested('seed');
+        model.applyPage(
+          _page(
+            requestId: 'seed',
+            history: _boundary(nextRowId: 400),
+            rows: List.generate(
+              400,
+              (i) => _row(
+                rowId: i,
+                cols: 1000,
+                spans: [_span('${i.toString().padLeft(4, '0')}${'x' * 996}')],
+              ),
+            ),
+          ),
+        );
+        final key = GlobalKey<TerminalHistoryViewState>();
+        Widget pane(double width) => _wrap(
+          TerminalHistoryView(
+            key: key,
+            model: model,
+            onLoadMore: () {},
+            onClose: () {},
+            initialRowId: 200,
+            fontSize: 13,
+            fontWeight: FontWeight.w400,
+            boldFontWeight: FontWeight.w700,
+            minimumContrastRatio: 1,
+          ),
+          width: width,
+        );
+        String topText() {
+          final terminal = _mountedTerminal(tester).controller.terminal;
+          return List.generate(
+            4,
+            (x) => terminal.gridRef(VtPoint.viewport(x, 0)).graphemes,
+          ).join();
+        }
+
+        await tester.pumpWidget(pane(160));
+        await tester.pumpAndSettle();
+        expect(
+          _mountedTerminal(tester).controller.terminal.totalRows,
+          lessThan(8000),
+        );
+        expect(topText(), '0200');
+        await tester.pumpWidget(pane(100));
+        await tester.pumpAndSettle();
+        expect(
+          _mountedTerminal(tester).controller.terminal.totalRows,
+          lessThan(8000),
+        );
+        expect(topText(), '0200');
+        key.currentState!.seekRow(20);
+        await tester.pumpAndSettle();
+        expect(topText(), '0020');
+      },
+    );
+    testWidgets(
+      'indexed scrollbar seeks backward and forward beyond cache limits',
+      (tester) async {
+        GhosttyVt.newTerminal(cols: 8, rows: 2).close();
+        final model = TerminalHistoryModel(maxRows: 200)
+          ..applyBoundary(_boundary(nextRowId: 10000));
+        final key = GlobalKey<TerminalHistoryViewState>();
+        var requests = 0;
+        void load() {
+          if (!model.canLoadMore) return;
+          final end = model.cursor!;
+          final id = 'page-${requests++}';
+          model.markRequested(id);
+          model.applyPage(
+            _page(
+              requestId: id,
+              rows: _rowsBelow(end, count: end < 200 ? end : 200),
+              history: _boundary(nextRowId: 10000),
+            ),
+          );
+        }
+
+        await tester.pumpWidget(
+          _wrap(
+            TerminalHistoryView(
+              key: key,
+              model: model,
+              onLoadMore: load,
+              onClose: () {},
+              initialRowId: 5000,
+              fontSize: 13,
+              fontWeight: FontWeight.w400,
+              boldFontWeight: FontWeight.w700,
+              minimumContrastRatio: 1,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          _mountedTerminal(tester).controller.plainText,
+          contains('row 5000'),
+        );
+        key.currentState!.seekRow(1000);
+        await tester.pumpAndSettle();
+        expect(
+          _mountedTerminal(tester).controller.plainText,
+          contains('row 1000'),
+        );
+        key.currentState!.seekRow(9000);
+        await tester.pumpAndSettle();
+        expect(
+          _mountedTerminal(tester).controller.plainText,
+          contains('row 9000'),
+        );
+        expect(model.rows.length, lessThanOrEqualTo(200));
+        expect(requests, 3);
+      },
+    );
+
+    testWidgets(
+      'frozen screen joins its exact archive boundary while new output arrives',
+      (tester) async {
+        GhosttyVt.newTerminal(cols: 8, rows: 2).close();
+        final model = _loadedModel(nextRowId: 1000);
+        final screen = List.generate(10, (i) => _plainRow(1000 + i));
+        await tester.pumpWidget(
+          _wrap(
+            TerminalHistoryView(
+              model: model,
+              onLoadMore: () {},
+              onClose: () {},
+              historyEndRow: 1000,
+              screenRows: screen,
+              fontSize: 13,
+              fontWeight: FontWeight.w400,
+              boldFontWeight: FontWeight.w700,
+              minimumContrastRatio: 1,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final before = _mountedTerminal(tester).controller.plainText;
+        expect(before, contains('row 999\nrow 1000'));
+        model.applyBoundary(_boundary(nextRowId: 1400));
+        await tester.pumpAndSettle();
+        expect(_mountedTerminal(tester).controller.plainText, before);
+      },
+    );
+    testWidgets(
       'reopening fetches newly archived rows even after reaching oldest',
       (tester) async {
         GhosttyVt.newTerminal(cols: 8, rows: 2).close();

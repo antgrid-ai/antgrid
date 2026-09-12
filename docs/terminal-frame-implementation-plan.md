@@ -180,7 +180,12 @@ fullscreen recordings is outside this implementation.
   Reject stale geometry and frames by attachment/order, not by arrival time alone.
 - Apply each frame atomically to the native Ghostty controller, without generating
   duplicate scrollback. Use a separate history model/view above the live screen,
-  exposed by the normal scroll gesture and a return-to-live action. While browsing
+  controlled by one external archive-sized scrollbar, normal scroll gestures,
+  and a contextual Live action. Indexed seeks replace the bounded cache window
+  in either direction; one in-flight request coalesces newer drag targets.
+  Normal-buffer browsing joins an immutable screen to its exact history boundary;
+  alternate-buffer redraws remain a separate live endpoint. Typing, pasting, and
+  quick actions return live before sending input. While browsing
   history or making a selection, maintain a stable viewed revision and bounded
   latest-live state so redraws do not move selected text under the user.
 - Preserve the existing geometry-driver policy. Passive viewers render the PTY's

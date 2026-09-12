@@ -65,6 +65,98 @@ List<TerminalHistoryRow> _rowsBelow(int exclusiveEnd, {int count = 200}) =>
     );
 
 void main() {
+  test('a drag back into cache rejects the pending remote window', () {
+    final model = TerminalHistoryModel()..applyBoundary(_boundary());
+    model.markRequested('seed');
+    model.applyPage(_page(requestId: 'seed', rows: _rowsBelow(1000)));
+    model.seek(400);
+    model.markRequested('remote');
+    model.retainWindow();
+    expect(model.loading, isTrue);
+    model.applyPage(_page(requestId: 'remote', rows: _rowsBelow(400)));
+    expect(model.rows.first.rowId, 800);
+    expect(model.rows.last.rowId, 999);
+    expect(model.hasPendingSeek, isFalse);
+    expect(model.loading, isFalse);
+  });
+  test('indexed seeks replace the window and can return toward newer rows', () {
+    final model = TerminalHistoryModel(maxRows: 200)
+      ..applyBoundary(_boundary(nextRowId: 10000));
+    model.seek(4000);
+    expect(model.cursor, 4000);
+    model.markRequested('middle');
+    model.applyPage(
+      _page(
+        requestId: 'middle',
+        rows: _rowsBelow(4000),
+        history: _boundary(nextRowId: 10000),
+      ),
+    );
+    expect(model.rows.first.rowId, 3800);
+    model.seek(9000, newer: true);
+    model.markRequested('newer');
+    model.applyPage(
+      _page(
+        requestId: 'newer',
+        rows: _rowsBelow(9000),
+        history: _boundary(nextRowId: 10000),
+      ),
+    );
+    expect(model.rows.first.rowId, 8800);
+    expect(model.rows.last.rowId, 8999);
+    expect(model.rows.length, 200);
+    model.markRequested('older-again');
+    model.applyPage(
+      _page(
+        requestId: 'older-again',
+        rows: _rowsBelow(8800),
+        history: _boundary(nextRowId: 10000),
+      ),
+    );
+    expect(model.rows.first.rowId, 8600);
+    expect(model.rows.last.rowId, 8799);
+  });
+
+  test('drag targets coalesce while one page is outstanding', () {
+    final model = TerminalHistoryModel()
+      ..applyBoundary(_boundary(nextRowId: 10000));
+    model.seek(2000);
+    model.markRequested('old-target');
+    model.seek(3000);
+    model.seek(8000);
+    expect(model.markRequested('duplicate'), isFalse);
+    expect(
+      model.applyPage(_page(requestId: 'old-target', rows: _rowsBelow(2000))),
+      isTrue,
+    );
+    expect(model.rows, isEmpty);
+    expect(model.cursor, 8000);
+    expect(model.hasPendingSeek, isTrue);
+    model.markRequested('target');
+    model.applyPage(
+      _page(
+        requestId: 'target',
+        rows: _rowsBelow(8000),
+        history: _boundary(nextRowId: 10000),
+      ),
+    );
+    expect(model.rows.last.rowId, 7999);
+    expect(model.hasPendingSeek, isFalse);
+  });
+
+  test('history clear abandons an outstanding seek', () {
+    final model = TerminalHistoryModel()..applyBoundary(_boundary());
+    model.seek(400);
+    model.markRequested('old');
+    model.applyBoundary(_boundary(epoch: 2, nextRowId: 0));
+    expect(model.hasPendingSeek, isFalse);
+    expect(
+      model.applyPage(_page(requestId: 'old', rows: _rowsBelow(400))),
+      isFalse,
+    );
+    model.seek(10);
+    expect(model.canLoadMore, isFalse);
+  });
   test(
     'reopening replaces a pending first page only when its boundary is stale',
     () {
