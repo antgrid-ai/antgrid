@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:uuid/uuid.dart';
@@ -23,74 +22,12 @@ class TerminalService {
   StreamSubscription<void>? _resumeSub;
   bool _disposed = false;
 
-  final Map<String, int> _snapshotSeq = {};
   final Map<String, Timer> _resizeTimers = {};
   final Map<String, String?> _resizeBaseDrivers = {};
   final Map<String, Timer> _pendingTerminalTimers = {};
   final Set<String> _deletedTerminalIds = {};
   final Set<String> _pendingTerminalIds = {};
   final Set<String> _canceledPendingTerminalIds = {};
-
-  /// Terminals whose Ghostty engine has had bytes written into it since the tab
-  /// was built. Drives the `history` flag on a snapshot request: the agent's
-  /// history blob ERASES before it paints, so asking for one against an engine
-  /// that already holds the user's scrollback destroys it, and asking for a
-  /// screen-only blob against an empty engine leaves a scrolling build log
-  /// showing its last few rows and nothing above them.
-  ///
-  /// Keyed to the ENGINE's life, not the terminal's: [_createTab] is the only
-  /// place a fresh controller is born, and an exit-then-respawn under the same
-  /// id keeps the same engine — with the dead run's output still on it, which is
-  /// history worth protecting. Deliberately not derived from the engine's own
-  /// line contents: a guest that cleared its screen presents as empty while
-  /// holding thousands of lines above.
-  final Set<String> _paintedTerminalIds = {};
-
-  /// Terminals this client has asked for a history blob and not yet been
-  /// answered for.
-  ///
-  /// A reply fans out to every client, so [_applySnapshot] refuses a history
-  /// blob against a painted engine. Without this claim that refusal would
-  /// also swallow OUR OWN answer whenever live output lands during the round
-  /// trip -- routine on a busy terminal -- leaving the cold attach with a
-  /// screen and no history, which is the whole loss the flag exists to fix.
-  ///
-  /// Consumed by the next snapshot that actually applies, whatever it is: an
-  /// older agent strips the request key and answers screen-only, and a claim
-  /// nothing retires would later admit ANOTHER device's erase.
-  final Set<String> _awaitingHistoryIds = {};
-
-  /// Epoch ms of this client's outstanding screen pull per terminal.
-  ///
-  /// Deliberately separate from [_awaitingHistoryIds], which answers a
-  /// different question: membership there proves the engine was EMPTY when the
-  /// pull went out, and it is consumed by any snapshot that applies, including
-  /// another device's. This map is retired only where a screen actually
-  /// arrives.
-  final Map<String, int> _snapshotRequestedAtMs = {};
-  final Map<String, Timer> _snapshotDeadlines = {};
-  final Set<String> _snapshotFailedIds = {};
-
-  /// True once the bridge has answered `terminal.snapshot` with
-  /// `E_UNKNOWN_METHOD` — the ONLY signal that means "old bridge, no RPC
-  /// intercept". A pull that goes unanswered for any other reason (the
-  /// mobile-access gate, the checkout-routing gate, an over-cap
-  /// `SendScheduler` drop) looks identical to a dropped legacy request on a
-  /// fully current bridge, so keying this off a timeout would permanently pin
-  /// a capable machine to the legacy path. Cleared at the top of every
-  /// [_rehydrateTerminals] so a stream re-attach onto a since-upgraded bridge
-  /// tries the RPC again.
-  bool _rpcSnapshotUnsupported = false;
-
-  /// Per-terminal generation of the outstanding snapshot pull, bumped on
-  /// every new pull and every retirement.
-  ///
-  /// Replaces a deadline timer on the RPC arm: `_pullTerminalSnapshot`'s
-  /// `await` re-checks this after every suspension point, so a late-arriving
-  /// `E_TIMEOUT` for a pull that live output already retired
-  /// ([_handleTerminalOutput]) can never stamp `_snapshotFailedIds` over a
-  /// pane that is visibly painting.
-  final Map<String, int> _snapshotGeneration = {};
 
   // --- Frame mode (live `terminal:frame` display) ---
 
@@ -107,37 +44,9 @@ class TerminalService {
   /// the only code reachable before an attachment exists).
   final Set<String> _frameSubscribePending = {};
 
-  /// Epoch ms the outstanding `terminal:subscribe` in [_frameSubscribePending]
-  /// went out, for the same elapsed readout the legacy path gives
-  /// [_snapshotRequestedAtMs].
   final Map<String, int> _frameSubscribeRequestedAtMs = {};
 
-  /// The bound on an outstanding `terminal:subscribe`, mirroring
-  /// [_snapshotDeadlines].
-  ///
-  /// A subscribe going unanswered is a routine bridge outcome, not a race:
-  /// `agent-core` breaks with no reply for a deleting checkout, a disposed
-  /// owner or a stale client generation, and `TerminalFrameDelivery` returns
-  /// silently while the connection is suppressed — which is exactly the state
-  /// a reconnect passes through, and a reconnect is where every tab
-  /// re-subscribes. Unbounded, a terminal already committed to frame mode
-  /// then sits on its last frame with both legacy protocols refused
-  /// ([_onHeavyJson]'s D6/D8 guards) and nothing left that can repaint it.
   final Map<String, Timer> _frameSubscribeDeadlines = {};
-
-  /// terminalId -> a frame accepted for the live attachment whose own
-  /// `cols`/`rows` did not match the tab's geometry yet.
-  ///
-  /// Held rather than discarded because the bridge will not send it again:
-  /// `TerminalFrameDelivery` stamps `attachment.revision` at SEND time and
-  /// refuses any revision at or below it, and the source only mints a new one
-  /// on a guest write or a resize — so an idle guest produces nothing further
-  /// and there is no NACK in the protocol. `terminal:size` rides the status
-  /// channel while the frame rides the preview channel, each with its own
-  /// credit window, so the frame overtaking its own resize is ordinary
-  /// skew; the body is self-contained, which is what makes a deferred apply
-  /// still correct.
-  final Map<String, TerminalFrameMessage> _frameDeferred = {};
 
   /// terminalId -> the live attachment once `terminal:subscribed` has been
   /// accepted for it. Absent means no live frame-mode attachment: subscribe
@@ -151,6 +60,10 @@ class TerminalService {
   /// name anything on the other end.
   final Map<String, ({String runId, String attachmentId})> _frameAttachment =
       {};
+  final Map<String, String> _historyRunId = {};
+  final Map<String, ({String runId, String attachmentId})>
+  _endedHistoryAttachment = {};
+  final Map<String, int?> _pendingExitCodes = {};
 
   /// terminalId -> the highest `terminal:frame` `sequence` this client has
   /// processed (applied or dropped as stale) for its live attachment. Acks
@@ -158,16 +71,18 @@ class TerminalService {
   final Map<String, int> _frameHighestSequence = {};
 
   /// Terminals whose live frame attachment has painted at least one frame.
-  /// The frame-mode analogue of [_paintedTerminalIds]: NOT cleared on a
   /// reconnect or a resubscribe attempt (the engine's last frame is still
   /// current-looking on screen right up until a fresh one replaces it), only
   /// on a genuinely fresh engine ([_createTab]) or a deletion.
   final Set<String> _framePaintedIds = {};
 
-  /// Terminals whose live frame attachment ended for a reason OTHER than
-  /// `ENDED` -- DISPLAY_FAILED, ACK_TIMEOUT, HISTORY_DISABLED, or any code
-  /// this client does not recognize (a newer agent's failure must surface,
-  /// never be silently ignored). See [TerminalAttachStage.failed].
+  /// Terminals whose live frame attachment reported a failure other than
+  /// `ENDED` -- DISPLAY_FAILED, ACK_TIMEOUT, or any code this client does not
+  /// recognize (a newer agent's failure must surface, never be silently
+  /// ignored). `HISTORY_DISABLED` is deliberately absent: it scopes to the
+  /// archive, and badging a pane that is still painting for a scrollback
+  /// refusal hides a terminal that works -- it lands on the terminal's
+  /// [TerminalHistoryModel] instead. See [TerminalAttachStage.failed].
   final Set<String> _frameFailedIds = {};
 
   /// Terminals whose live frame attachment ended with `ENDED` -- the run
@@ -179,6 +94,15 @@ class TerminalService {
   /// terminalId -> the last `terminal:display:status.message` for it, shown
   /// alongside [_frameFailedIds] / [_frameEndedIds].
   final Map<String, String> _frameStatusMessage = {};
+
+  /// terminalId -> the bound on an outstanding `terminal:history:request`.
+  ///
+  /// A history page is the one frame-mode reply with no other path back to the
+  /// user: nothing else restates it, and the model reads as loading until it
+  /// lands. An agent that drops the request (a checkout deleting under it, a
+  /// run rotated away, a wire that went quiet) would otherwise leave the pane
+  /// spinning for good.
+  final Map<String, Timer> _historyRequestDeadlines = {};
 
   Timer? _checkoutAttachDeadline;
   bool _sawAgentStatus = false;
@@ -259,34 +183,11 @@ class TerminalService {
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
   }
 
-  static const _snapshotHydratorKey = 'terminal:snapshots';
+  static const _frameHydratorKey = 'terminal:frames';
 
-  /// Registers the terminal snapshot pull and subscribes the focus-resume
-  /// re-drive. This is the terminal's ONLY reconnect recovery: the agent drops
-  /// terminal output while suppressed but keeps bumping the seq, so a tab that
-  /// was already on screen when the stream went away renders whatever it held
-  /// then, forever — nothing else re-pulls it (the discovery pulls only fire
-  /// for a tab the app has never seen). Only the checkout on screen carries
-  /// this — see [ProjectSession.setActiveCheckouts].
-  ///
-  /// A seq cutoff is only meaningful against the PTY generation it was taken
-  /// from, and the agent's counter is per PTY: it is deleted on exit
-  /// (`ConnState.clearTerminal`), so a same-id respawn starts again at 1. A
-  /// disconnect is exactly the window in which a terminal can exit and respawn
-  /// unwitnessed — neither `terminal:exited` nor `terminal:started` arrives —
-  /// and nothing on the wire distinguishes the new run from the old, so a
-  /// surviving cutoff sits above every seq the new PTY will ever emit and
-  /// filters its entire output. The tab then renders blank behind a live
-  /// process, with no user action that clears it. Dropped wholesale rather
-  /// than reasoned about per tab: losing a still-valid cutoff costs a few
-  /// duplicated lines on the next snapshot, keeping a stale one costs the pane.
   void activate() {
     if (_disposed) return;
-    session.hydrateCheckout(
-      checkoutId,
-      _snapshotHydratorKey,
-      _rehydrateTerminals,
-    );
+    session.hydrateCheckout(checkoutId, _frameHydratorKey, _rehydrateTerminals);
     _resumeSub ??= session.focusResumed.listen(
       (_) => detached(
         'TerminalService',
@@ -298,7 +199,7 @@ class TerminalService {
 
   void deactivate() {
     if (_disposed) return;
-    session.unhydrateCheckout(checkoutId, _snapshotHydratorKey);
+    session.unhydrateCheckout(checkoutId, _frameHydratorKey);
     unawaited(_resumeSub?.cancel());
     _resumeSub = null;
   }
@@ -314,39 +215,13 @@ class TerminalService {
     _checkoutAttachDeadline = null;
   }
 
-  /// Drops the checkout bound and every per-terminal one when the last watcher
-  /// goes away.
-  ///
-  /// The pulls are disowned along with their bounds: on the RPC arm the
-  /// request's own timeout IS the bound and this service cannot cancel it,
-  /// so disowning the reply is the only reachable half of the same rule —
-  /// nothing may stamp a verdict onto a service no surface is reading.
-  /// [_resumeAttachBounds] undoes both halves when a watcher comes back.
   void _dropAttachBounds() {
     _cancelCheckoutAttachDeadline();
-    for (final timer in _snapshotDeadlines.values) {
-      timer.cancel();
-    }
-    _snapshotDeadlines.clear();
-    // The RPC arm's bound is the transport's own request timeout, which this
-    // service cannot cancel. Disowning the pulls is the reachable half of the
-    // same rule: nothing is left that can stamp a verdict onto a service no
-    // surface is reading.
-    for (final terminalId in _snapshotRequestedAtMs.keys.toList()) {
-      _abandonSnapshotPull(terminalId);
+    for (final terminalId in _frameSubscribePending.toList()) {
+      _clearPendingSubscribe(terminalId);
     }
   }
 
-  /// The `onCancel` counterpart: re-arms the checkout bound AND re-opens the
-  /// pulls [_dropAttachBounds] disowned.
-  ///
-  /// Disowning is not free on the RPC arm — the reply it discards is the only
-  /// one that pull will ever get, and nothing else re-issues it: a focus swap
-  /// between checkouts drops the last subscriber without re-establishing the
-  /// transport or raising `focusResumed`, so neither hydrator re-drive runs.
-  /// Without this the tab comes back at [TerminalAttachStage.cold] — dimmed,
-  /// captioned "attaching to terminal", offering no Retry — and holds the
-  /// checkout at [CheckoutAttachStatus.attaching] for as long as it is open.
   void _resumeAttachBounds() {
     _armCheckoutAttachDeadline();
     if (_disposed) return;
@@ -374,11 +249,6 @@ class TerminalService {
 
   Future<void> _rehydrateTerminals() async {
     if (_disposed) return;
-    // A stream re-attach can land on a restarted, upgraded bridge, so a
-    // verdict earned against the old one must not survive it — otherwise a
-    // machine that has since gained the RPC intercept stays pinned to the
-    // legacy message path for the life of the client.
-    _rpcSnapshotUnsupported = false;
     // The re-establish edge, and the only one there is: nothing publishes a
     // transport transition the pane could listen for — `sessionDownEvents`
     // fires from retry exhaustion, not a live socket loss, and StreamTransport
@@ -386,13 +256,6 @@ class TerminalService {
     // hydrator re-drive that reopens the pulls, which is exactly what a
     // recovered send would have needed anyway.
     _syncInputPaused();
-    // Cleared first and unconditionally, because a request is not a promise of
-    // a reply: an id the agent no longer knows is answered with a log line and
-    // no frame, and a send in a keyless window vanishes. Only the tabs whose
-    // reply lands re-arm a cutoff (in _applySnapshot), so a clear made
-    // conditional on one would strand a cutoff above every seq a respawned PTY
-    // emits and leave the pane blank behind a live process.
-    _snapshotSeq.clear();
     // A checkout that was merely slow is not a broken one, and this path is a
     // fresh attempt at the thing that timed out. The verdict is dropped and
     // re-bounded together — a cleared failure with no deadline behind it would
@@ -497,9 +360,7 @@ class TerminalService {
       for (final entry in tabs.entries)
         entry.key: TerminalHydration(
           stage: _stageFor(entry.key),
-          requestedAtMs: entry.value.mode == TerminalDisplayMode.frame
-              ? _frameSubscribeRequestedAtMs[entry.key]
-              : _snapshotRequestedAtMs[entry.key],
+          requestedAtMs: _frameSubscribeRequestedAtMs[entry.key],
           message: _frameStatusMessage[entry.key],
         ),
     };
@@ -509,25 +370,8 @@ class TerminalService {
   // that already holds current bytes is routine — every re-establishment and
   // every focus resume issues one for every live tab — and must never present
   // as a wait or escalate to a failure.
-  TerminalAttachStage _stageFor(String id) {
-    if (_state.tabs[id]?.mode == TerminalDisplayMode.frame) {
-      return _frameStageFor(id);
-    }
-    final painted = _paintedTerminalIds.contains(id);
-    if (_snapshotFailedIds.contains(id)) return TerminalAttachStage.failed;
-    if (_snapshotRequestedAtMs.containsKey(id)) {
-      return painted
-          ? TerminalAttachStage.refreshing
-          : TerminalAttachStage.awaitingScreen;
-    }
-    return painted ? TerminalAttachStage.painted : TerminalAttachStage.cold;
-  }
+  TerminalAttachStage _stageFor(String id) => _frameStageFor(id);
 
-  /// [_stageFor]'s frame-mode counterpart. The frame protocol's own
-  /// subscribed/frame/display:status sequence answers the same question the
-  /// legacy branch answers from snapshot-pull bookkeeping (D7: hydration
-  /// comes from the PROTOCOL, not from output arriving) -- attach progress
-  /// and the eventual chrome both still come from one function.
   TerminalAttachStage _frameStageFor(String id) {
     if (_frameEndedIds.contains(id)) return TerminalAttachStage.ended;
     if (_frameFailedIds.contains(id)) return TerminalAttachStage.failed;
@@ -592,34 +436,6 @@ class TerminalService {
     });
   }
 
-  /// Drops the bookkeeping for [terminalId]'s outstanding pull, reporting
-  /// whether anything was actually retired.
-  ///
-  /// The answer gates the re-emission: this runs on the live-output path, where
-  /// republishing per frame would push a full workspace rebuild behind every
-  /// byte the guest writes.
-  bool _retireSnapshotPull(String terminalId) {
-    final deadline = _snapshotDeadlines.remove(terminalId);
-    deadline?.cancel();
-    final hadRequest = _snapshotRequestedAtMs.remove(terminalId) != null;
-    final hadFailure = _snapshotFailedIds.remove(terminalId);
-    return deadline != null || hadRequest || hadFailure;
-  }
-
-  /// Retires [terminalId]'s pull AND disowns any reply still on the wire for
-  /// it, by moving the generation the reply was issued under.
-  ///
-  /// Only for the cases where the answer has stopped being wanted: the tab is
-  /// gone, its engine has been rebuilt, or its PTY exited. Retiring alone must
-  /// NOT disown — live output retires the bound, because a visibly streaming
-  /// pane needs no failure verdict, but the history that pull is carrying is
-  /// exactly what a cold attach is still owed. Dropping it there loses the
-  /// scrollback on precisely the busiest terminals, silently.
-  void _abandonSnapshotPull(String terminalId) {
-    _snapshotGeneration[terminalId] = (_snapshotGeneration[terminalId] ?? 0) + 1;
-    _retireSnapshotPull(terminalId);
-  }
-
   void _onHeavyJson(Map<String, dynamic> json) {
     if (_disposed) return;
     final parsed = parseAbMessage(json);
@@ -628,34 +444,9 @@ class TerminalService {
       _handleTerminalFrame(parsed);
       return;
     }
-    if (parsed is TerminalSnapshotMessage) {
-      // D8/(a): a frame-mode terminal owns its engine outright. This reply
-      // can be the fan-out of another client's still-legacy request, or our
-      // own dual-protocol-window pull racing a subscribe that has since
-      // succeeded -- either way it must never paint over a frame.
-      if (_state.tabs[parsed.terminalId]?.mode == TerminalDisplayMode.frame) {
-        return;
-      }
-      // Arming is _applySnapshot's job, not this one's: it bails on a tab that
-      // vanished between request and reply, and a cutoff armed for scrollback
-      // nothing rendered filters the live output of the tab that replaces it.
-      _applySnapshot(parsed);
+    if (parsed is TerminalHistoryPageMessage) {
+      _handleTerminalHistoryPage(parsed);
       return;
-    }
-    if (parsed is TerminalOutputMessage) {
-      // D6: the bridge withholds raw output per SUBSCRIPTION, but a
-      // transition window exists on both edges of a resubscribe -- this is
-      // this client's own backstop against interleaving the two protocols
-      // into one engine.
-      if (_state.tabs[parsed.terminalId]?.mode == TerminalDisplayMode.frame) {
-        return;
-      }
-      final seq = parsed.seq;
-      final cutoff = _snapshotSeq[parsed.terminalId];
-      if (seq != null && cutoff != null && seq <= cutoff) {
-        return; // stale — already in snapshot
-      }
-      _handleTerminalOutput(parsed);
     }
   }
 
@@ -682,18 +473,16 @@ class TerminalService {
     // second ack -- "ack the highest and drop the superseded ones unparsed".
     if (msg.sequence <= highest) return;
     _frameHighestSequence[msg.terminalId] = msg.sequence;
-    // D4: the frame's own geometry only ever DETECTS a frame that predates a
-    // resize the driver already believes it sent -- never adopted as the
-    // tab's own geometry, which stays authoritative from terminal:size.
+    // Every frame restates the archive boundary, and it is true whether or not
+    // this screen's geometry lets it paint -- a deferred frame's rows scrolled
+    // off just the same.
+    tab.history.applyBoundary(msg.history);
     if (msg.cols != tab.cols || msg.rows != tab.rows) {
-      // Held for the `terminal:size` that is still in flight behind it, not
-      // discarded -- see [_frameDeferred]. Only the newest is worth keeping:
-      // an older mismatched screen is superseded by construction.
-      _frameDeferred[msg.terminalId] = msg;
-    } else {
-      _frameDeferred.remove(msg.terminalId);
-      _paintFrame(tab, msg);
+      final tabs = Map<String, TerminalTab>.from(_state.tabs);
+      tabs[msg.terminalId] = tab.copyWith(cols: msg.cols, rows: msg.rows);
+      _setState(_state.copyWith(tabs: tabs));
     }
+    _paintFrame(tab, msg);
     _ackFrame(
       msg.terminalId,
       runId: msg.runId,
@@ -714,23 +503,12 @@ class TerminalService {
       checkoutId: checkoutId,
       terminalId: msg.terminalId,
     );
-    // D3: one frame, one appendOutputBytes call, nothing prepended -- the
-    // frame wraps its own preamble (alt-screen exit, 3J, cursor home, SGR
-    // reset) and is fully self-contained. _legacyAttachErase must NEVER
-    // reach this path (see its own doc comment for why).
+    tab.ghostty.resize(cols: msg.cols, rows: msg.rows);
     tab.ghostty.appendOutputBytes(utf8.encode(msg.ansi));
     // D10: every cell a live selection's row/col anchors pointed at was
     // just replaced wholesale. See TerminalTab.replaceEpoch's doc comment.
     tab.replaceEpoch.value++;
     final firstPaint = _framePaintedIds.add(msg.terminalId);
-    // The legacy-side claim means exactly what a painted frame makes true:
-    // bytes have been written into this engine since the tab was built. It is
-    // what keeps an erase-first history blob off a screen that already holds
-    // one, and what lets a terminal that later falls back to legacy read as a
-    // refresh rather than a cold wait.
-    _paintedTerminalIds.add(msg.terminalId);
-    // A screen the bridge skipped as oversize does not retire the attachment,
-    // so the notice it sent is spent the moment one fits again.
     final recovered = _frameFailedIds.remove(msg.terminalId);
     if (recovered) _frameStatusMessage.remove(msg.terminalId);
     // Gated, not unconditional: a live stream applies up to
@@ -739,249 +517,63 @@ class TerminalService {
     if (firstPaint || recovered) _publishHydration();
   }
 
-  /// Re-evaluates the frame [_frameDeferred] held for [terminalId] now that
-  /// its geometry may have caught up.
-  void _applyDeferredFrame(String terminalId) {
-    final msg = _frameDeferred.remove(terminalId);
-    if (msg == null) return;
-    final tab = _state.tabs[terminalId];
-    if (tab == null || tab.mode != TerminalDisplayMode.frame) return;
-    final attachment = _frameAttachment[terminalId];
-    if (attachment == null ||
-        attachment.runId != msg.runId ||
-        attachment.attachmentId != msg.attachmentId) {
-      return;
-    }
-    // Still mismatched means a further resize is outstanding, and this screen
-    // describes neither geometry — dropped, since the one that follows it
-    // will.
-    if (msg.cols != tab.cols || msg.rows != tab.rows) return;
-    _paintFrame(tab, msg);
-  }
-
   void _ackFrame(
     String terminalId, {
     required String runId,
     required String attachmentId,
     required int sequence,
   }) {
-    session.sendForCheckout(
-      checkoutId,
-      createAbMessage('terminal:ack', {
-        'terminalId': terminalId,
-        'runId': runId,
-        'attachmentId': attachmentId,
-        'sequence': sequence,
-      }),
+    detached(
+      'terminal',
+      'acknowledge consumed frame',
+      () => session.sendForCheckout(
+        checkoutId,
+        createAbMessage('terminal:ack', {
+          'terminalId': terminalId,
+          'runId': runId,
+          'attachmentId': attachmentId,
+          'sequence': sequence,
+        }),
+      ),
     );
   }
 
-  /// Erase for the LEGACY payload only — an older agent's raw byte tail, up to
-  /// ten thousand characters of it, which is several screens.
-  ///
-  /// `CSI 3 J` is in it because a body taller than the screen SCROLLS: `2J`
-  /// clears the visible rows, and the tail then pushes each of them into the
-  /// buffer above as it draws past the bottom, so every attach stacks another
-  /// copy of the same output into the user's history with no way to clear it.
-  /// The re-attach now fires on every focus resume, so that is unbounded.
-  /// Erasing history the tail is about to reprint is the lesser loss, and it is
-  /// what this path did before the composed blob existed.
-  ///
-  /// A composed blob takes no erase at all — it is exactly one screen and
-  /// carries its own preamble, which deliberately stops at `2J` so the app's
-  /// own scrollback survives it.
-  static final Uint8List _legacyAttachErase = Uint8List.fromList(
-    utf8.encode('\x1b[3J\x1b[2J\x1b[H'),
-  );
-
-  /// Adapter for the broadcast path: `terminal:snapshot` (the legacy
-  /// message-path reply, and the `resyncState` push it shares a wire shape
-  /// with) always applies as if it might be fanned out to another device.
-  void _applySnapshot(TerminalSnapshotMessage msg) {
-    _applySnapshotFields(
-      terminalId: msg.terminalId,
-      scrollback: msg.scrollback,
-      seq: msg.seq,
-      composed: msg.composed,
-      history: msg.history,
-      fromBroadcast: true,
-    );
-  }
-
-  /// Applies one screen pull's fields to the tab's engine, however it arrived
-  /// — a `terminal:snapshot` broadcast (any client's request, or an
-  /// unsolicited `resyncState` push) or a `terminal.snapshot` RPC reply.
-  ///
-  /// [fromBroadcast] gates ONLY the fan-out refusal below: an RPC reply is
-  /// correlated by `requestId` and can only ever be the answer to OUR OWN
-  /// request (a phase-1 reply, another device's blob and a `resyncState` push
-  /// are all structurally incapable of completing it), so the boolean claim
-  /// [_awaitingHistoryIds] exists to consume is meaningless on that path —
-  /// always false there, so the refusal condition is vacuous and skipped.
-  void _applySnapshotFields({
-    required String terminalId,
-    required String scrollback,
-    required int seq,
-    required bool composed,
-    required bool history,
-    required bool fromBroadcast,
-  }) {
-    final tab = _state.tabs[terminalId];
-    if (tab == null) return;
-    // A blob describes the instant its seq was read, and one terminal has
-    // several snapshot producers on a single re-establishment: the agent's
-    // resync push, this service's hydrator pull, a focus-resume pull, and any
-    // other client's request — replies are published on the project bus, so
-    // every attached client gets them. The frame that lands last is not the
-    // one that describes the latest instant, and applying an older one both
-    // repaints a screen the tab has moved past and lowers the cutoff BELOW
-    // frames already applied, which nothing refilters and nothing re-sends.
-    //
-    // Safe against a respawn's counter reset (the agent's seq is per PTY and
-    // starts again at 1) because every path into a new generation drops the
-    // cutoff first — terminal:started, the exit handler, and the re-drive.
-    // Equal seqs are still applied: a screen-only push and a `history` reply
-    // can describe the same instant, and only the second carries the history.
-    final held = _snapshotSeq[terminalId];
-    if (held != null && seq < held) return;
-    // Consumed here, not at the guards above: a frame that never applied
-    // leaves the claim standing for the answer that does. Only the legacy
-    // send arm ever adds to this set — see its doc comment — so on the RPC
-    // path this is always false and the fan-out refusal below never fires.
-    final wasAwaited = _awaitingHistoryIds.remove(terminalId);
-    // A history blob erases before it paints, and a BROADCAST reply fans out
-    // to every client on the project -- so this one may be the answer to
-    // another device's cold attach. Only a client whose engine is empty asked
-    // for it; for a painted engine the erase would destroy the user's own
-    // scrollback, which is exactly what the warm preamble exists to avoid.
-    // Dropped rather than degraded: a painted engine has been taking live
-    // output all along, so it needs no repaint either.
-    if (fromBroadcast &&
-        history &&
-        !wasAwaited &&
-        _paintedTerminalIds.contains(terminalId)) {
-      return;
-    }
-    _snapshotSeq[terminalId] = seq;
-    // Deliberately NOT `clear()`. That resets the engine, and a reset takes
-    // the guest's MODES with it — alt screen, bracketed paste, focus events,
-    // mouse tracking, synchronised output. A fullscreen TUI sets those once at
-    // startup and never sends them again, and they are far outside the byte
-    // tail this snapshot carries, so nothing here can put them back: the
-    // engine would sit on the primary screen with mouse off while the guest
-    // draws into an alt screen, until the agent itself is restarted.
-    //
-    // A composed blob is self-contained: it opens with its own preamble (alt
-    // screen exit, margin reset, screen erase, cursor home, SGR reset),
-    // repaints the visible screen, restores its own modes, and ends in a
-    // RELATIVE cursor placement. Anything prepended lands ahead of that
-    // preamble — the wrong-screen bug the preamble exists to fix — and anything
-    // appended lands after the cursor is placed, so the blob goes on verbatim.
-    if (!composed) tab.ghostty.appendOutputBytes(_legacyAttachErase);
-    tab.ghostty.appendOutputBytes(utf8.encode(scrollback));
-    // Retired here and nowhere earlier. This method has three other exits — a
-    // tab that vanished between request and reply, a blob older than the cutoff,
-    // and a history blob aimed at another device's cold attach — and clearing on
-    // any of them would report our own outstanding pull as answered by a frame
-    // that painted nothing. Leaving it outstanding there is correct; the
-    // deadline owns it.
-    final retired = _retireSnapshotPull(terminalId);
-    final firstPaint = _paintedTerminalIds.add(terminalId);
-    if (retired || firstPaint) _publishHydration();
-  }
-
-  /// Resumes whatever protocol [terminalId] is on after a stream re-attach, a
-  /// fresh discovery, or an explicit retry.
-  ///
-  /// A terminal frame mode is actually SERVING (D1: never mixed) re-subscribes
-  /// and nothing else -- D6/D8 mean it owns its pane outright, so the legacy
-  /// pull is never requested again while it is being served. Every other tab
-  /// keeps the pull that has always hydrated it; running both at once for a
-  /// fresh terminal IS the dual-protocol transition window, open from the
-  /// subscribe until it resolves either way.
-  ///
-  /// A latch left standing over an attachment that is gone would be the one
-  /// state nothing can recover: the D6/D8 guards keep refusing both legacy
-  /// protocols while frame mode has nothing left to paint with. So a tab whose
-  /// frame mode is no longer serving -- retired, refused, or facing a PTY that
-  /// frame mode cannot attach to at all -- is put back on legacy here, where
-  /// the fallback is a pull that bounds itself.
+  /// Reattaches the terminal with a fresh viewer attachment.
   void _attachTerminal(String terminalId) {
-    final tab = _state.tabs[terminalId];
-    final canSubscribe = tab != null && _hasLivePty(tab);
-    final wasServing = _frameOwnsPane(terminalId);
-    // Frame identity is connection- and PTY-generation-scoped and does not
-    // survive a re-establishment or a same-id respawn (see
-    // [_frameAttachment]'s doc comment), so whatever the last connection or
-    // run told us is dropped before asking again rather than trusted.
+    if (!_state.tabs.containsKey(terminalId)) return;
+    _unsubscribeFrame(terminalId);
     _resetFrameTracking(terminalId);
-    final stillFrame = canSubscribe && wasServing;
-    if (!stillFrame) _demoteToLegacy(terminalId);
-    if (canSubscribe) _subscribeFrame(terminalId);
-    if (stillFrame) return;
-    _requestTerminalSnapshot(terminalId);
-  }
-
-  /// Whether the frame protocol OWNS [terminalId]'s engine -- the same
-  /// question [_onHeavyJson]'s D6/D8 guards ask, and deliberately the same
-  /// answer: a committed `TerminalDisplayMode.frame` that has not since ended
-  /// or failed.
-  ///
-  /// An outstanding `terminal:subscribe` does NOT count. Until
-  /// `terminal:subscribed` lands, D6/D8 still admit `terminal:output` and
-  /// `terminal:snapshot`, so legacy is the only protocol that can paint the
-  /// pane -- and that is precisely the dual-protocol transition window. Were a
-  /// pending subscribe treated as ownership here, a re-attach inside that
-  /// window would drop the legacy pull while frame mode had nothing to paint
-  /// with, leaving the pane blank until the subscribe deadline demoted it; a
-  /// subscribe the bridge never answers at all (an old agent, a suppressed
-  /// connection, a deleting checkout) reopens that window on every re-attach.
-  bool _frameOwnsPane(String terminalId) {
-    if (_frameEndedIds.contains(terminalId)) return false;
-    if (_frameFailedIds.contains(terminalId)) return false;
-    return _state.tabs[terminalId]?.mode == TerminalDisplayMode.frame;
-  }
-
-  /// Leaves the alternate screen a frame may have put the engine on.
-  ///
-  /// A frame serialized from a guest running a full-screen TUI carries
-  /// `?1049h` in its own body, and the only thing that normally undoes it is
-  /// the NEXT frame's preamble. At a frame-to-legacy boundary there is no next
-  /// frame: the raw byte tail a legacy attach writes would paint into the
-  /// alternate screen and be thrown away the moment anything emits `?1049l`.
-  static final Uint8List _frameExitAltScreen = Uint8List.fromList(
-    utf8.encode('\x1b[?1049l'),
-  );
-
-  /// Writes [_frameExitAltScreen] for a tab that is leaving frame mode.
-  /// Deliberately NOT prepended to a frame: D3's rule stands.
-  void _leaveFrameScreen(TerminalTab tab) {
-    tab.ghostty.appendOutputBytes(_frameExitAltScreen);
-  }
-
-  /// Puts [terminalId] back on the legacy protocol, reporting whether it was
-  /// on the frame protocol to begin with.
-  bool _demoteToLegacy(String terminalId) {
-    final tab = _state.tabs[terminalId];
-    if (tab == null || tab.mode != TerminalDisplayMode.frame) return false;
-    _leaveFrameScreen(tab);
-    final tabs = Map<String, TerminalTab>.from(_state.tabs);
-    tabs[terminalId] = tab.copyWith(mode: TerminalDisplayMode.legacy);
-    _setState(_state.copyWith(tabs: tabs));
-    return true;
+    _subscribeFrame(terminalId);
   }
 
   /// Drops everything this client believes about [terminalId]'s frame-mode
   /// attachment, short of whether it has ever painted (see
   /// [_framePaintedIds]'s own doc comment for why that survives this).
   void _resetFrameTracking(String terminalId) {
+    _endedHistoryAttachment.remove(terminalId);
+    _pendingExitCodes.remove(terminalId);
+    _historyRequestDeadlines.remove(terminalId)?.cancel();
+    _state.tabs[terminalId]?.history.cancelRequest();
     _frameAttachment.remove(terminalId);
     _clearPendingSubscribe(terminalId);
     _frameHighestSequence.remove(terminalId);
-    _frameDeferred.remove(terminalId);
     _frameFailedIds.remove(terminalId);
     _frameEndedIds.remove(terminalId);
     _frameStatusMessage.remove(terminalId);
+  }
+
+  /// Drops the archive [terminalId] was paging, the bound on its outstanding
+  /// request included.
+  ///
+  /// The archive is addressed by row ids scoped to one run and reachable only
+  /// through a live frame attachment, so every exit from frame mode -- a
+  /// respawn, a re-attach, a demotion -- leaves every loaded row and the
+  /// cursor derived from them naming ids the agent will not serve. Routed
+  /// through one call so that holds of the EXITS themselves, rather than of
+  /// the order two unrelated helpers happen to run in at one call site.
+  void _discardFrameArchive(String terminalId) {
+    _historyRequestDeadlines.remove(terminalId)?.cancel();
+    _state.tabs[terminalId]?.history.reset();
   }
 
   /// Retires the bookkeeping for an outstanding `terminal:subscribe`, its
@@ -1027,13 +619,10 @@ class TerminalService {
   /// can still hydrate it rather than waiting on a reply that is not coming.
   void _failFrameSubscribe(String terminalId) {
     _clearPendingSubscribe(terminalId);
-    // Still legacy means the dual-protocol window's own pull already owns the
-    // pane and is bounded in its own right; there is nothing to recover.
-    if (!_demoteToLegacy(terminalId)) {
-      _publishHydration();
-      return;
-    }
-    _requestTerminalSnapshot(terminalId);
+    _frameFailedIds.add(terminalId);
+    _frameStatusMessage[terminalId] =
+        'Terminal connection failed. Reconnect or upgrade the bridge.';
+    _publishHydration();
   }
 
   /// Best-effort `terminal:unsubscribe` for whatever live frame attachment
@@ -1054,179 +643,81 @@ class TerminalService {
     );
   }
 
-  /// Issues one terminal's screen pull: `terminal.snapshot` RPC unless this
-  /// establishment has already learned the bridge doesn't answer it, in which
-  /// case the legacy message.
-  void _requestTerminalSnapshot(String terminalId) {
-    final wantsHistory = !_paintedTerminalIds.contains(terminalId);
-    final generation = (_snapshotGeneration[terminalId] ?? 0) + 1;
-    _snapshotGeneration[terminalId] = generation;
-    if (_rpcSnapshotUnsupported) {
-      _sendLegacySnapshotRequest(terminalId, wantsHistory);
-    } else {
-      _stampSnapshotPull(terminalId);
-      detached(
-        'TerminalService',
-        'terminal snapshot pull',
-        () => _pullTerminalSnapshot(terminalId, wantsHistory, generation),
+  bool requestTerminalHistoryPage(String terminalId) {
+    if (_disposed) return false;
+    final tab = _state.tabs[terminalId];
+    if (tab == null || tab.mode != TerminalDisplayMode.frame) return false;
+    final attachment =
+        _frameAttachment[terminalId] ?? _endedHistoryAttachment[terminalId];
+    if (attachment == null) return false;
+    final model = tab.history;
+    if (!model.canLoadMore) return false;
+    final boundary = model.boundary;
+    final cursor = model.cursor;
+    if (boundary == null || cursor == null) return false;
+    final requestId = const Uuid().v4();
+    if (!model.markRequested(requestId)) return false;
+    // Armed BEFORE the send, never after: the model reads as outstanding from
+    // the line above, so a send that throws at the call would otherwise leave
+    // the pane waiting on a bound that was never armed.
+    _historyRequestDeadlines[terminalId]?.cancel();
+    _historyRequestDeadlines[terminalId] = Timer(snapshotAttachTimeout, () {
+      if (_disposed) return;
+      _historyRequestDeadlines.remove(terminalId);
+      // Addressed to the MODEL, not to the terminal: the live screen is
+      // unaffected by a page that never came, and demoting a painting
+      // terminal because its scrollback stalled would trade the thing that
+      // works for the thing that does not.
+      //
+      // Named, because this map is keyed by terminal while the model is the
+      // authority on which request is outstanding: the model can abandon the
+      // request behind this bound without the bound's knowledge (an epoch
+      // turnover discards the very rows its answer would be addressed by), and
+      // a timeout reported for a request the client itself gave up on is a
+      // banner nothing on screen explains.
+      _state.tabs[terminalId]?.history.noteRequestFailed(
+        "The agent didn't answer this scrollback request.",
+        requestId: requestId,
       );
-    }
-    _publishHydration();
-  }
-
-  /// Records the pull's start for hydration purposes, without arming a local
-  /// deadline — the RPC arm's bound is `request(timeout: …)` itself, not a
-  /// separate timer (see [_snapshotGeneration]'s doc comment).
-  void _stampSnapshotPull(String terminalId) {
-    _snapshotRequestedAtMs[terminalId] = DateTime.now().millisecondsSinceEpoch;
-    _snapshotFailedIds.remove(terminalId);
-  }
-
-  /// The legacy `terminal:snapshot:request` message. Claims
-  /// [_awaitingHistoryIds] and arms a local [_snapshotDeadlines] timer — both
-  /// meaningless on the RPC arm, whose bound is the request's own timeout and
-  /// whose "did I ask for history" is carried by the correlated reply itself.
-  void _sendLegacySnapshotRequest(String terminalId, bool wantsHistory) {
-    if (wantsHistory) {
-      _awaitingHistoryIds.add(terminalId);
-    } else {
-      _awaitingHistoryIds.remove(terminalId);
-    }
+    });
     session.sendForCheckout(
       checkoutId,
-      createAbMessage('terminal:snapshot:request', {
+      createAbMessage('terminal:history:request', {
         'terminalId': terminalId,
-        // See [_paintedTerminalIds]. An agent that predates the key strips it
-        // (the request schema is a `z.object`) and answers with the legacy
-        // prelude-plus-byte-tail blob, which `_applySnapshotFields` puts its
-        // own erase ahead of.
-        'history': wantsHistory,
+        'runId': attachment.runId,
+        'attachmentId': attachment.attachmentId,
+        'requestId': requestId,
+        'epoch': boundary.epoch,
+        'beforeRowId': cursor,
       }),
     );
-    _stampSnapshotPull(terminalId);
-    _snapshotDeadlines.remove(terminalId)?.cancel();
-    // Bounded unconditionally, exactly as the RPC arm is by its own request
-    // timeout. A terminal whose process has exited may have no screen left to
-    // serialize — the manager disposes it on exit unless the transcript is
-    // retained, and the handler answers a missing screen with a log line and
-    // NO frame — but leaving that pull unbounded is worse than calling it
-    // failed: the stamp pins the pane at `awaitingScreen` forever, dimmed
-    // behind "attaching to terminal" with a counter that never stops and no
-    // Retry. `_deriveAttach` skips a tab with no live PTY, so this can never
-    // hold the CHECKOUT back either way.
-    _snapshotDeadlines[terminalId] = Timer(snapshotAttachTimeout, () {
-      if (_disposed) return;
-      _snapshotDeadlines.remove(terminalId);
-      _failSnapshotPull(terminalId);
-    });
+    return true;
   }
 
-  /// The RPC arm's pull. Every `await` re-checks [_disposed] and the
-  /// terminal's [_snapshotGeneration] before touching state, so a reply for a
-  /// pull that has since been disowned ([_abandonSnapshotPull]) or superseded
-  /// by a fresh one touches nothing.
-  ///
-  /// Live output is deliberately NOT such an event: it retires the bound but
-  /// leaves the pull owned, because the history this reply carries is what a
-  /// cold attach is waiting for and a busy terminal is where it matters most.
-  Future<void> _pullTerminalSnapshot(
-    String terminalId,
-    bool wantsHistory,
-    int generation,
-  ) async {
-    Map<String, dynamic> res;
-    try {
-      res = await session.transport.request(
-        'terminal.snapshot',
-        params: {
-          'terminalId': terminalId,
-          'checkoutId': checkoutId,
-          'history': wantsHistory,
-        },
-        timeout: snapshotAttachTimeout,
-        // A rekey-driven re-establish re-drives this same pull for every live
-        // tab, and letting a run of timeouts on a link that cannot carry it
-        // count toward the session's rekey trigger turns that re-drive into
-        // an unbreakable loop (see `AgentTransport.request`'s doc comment).
-        countsTowardHealth: false,
-      );
-    } on RpcException catch (e) {
-      if (_disposed) return;
-      // Recorded ahead of the generation check, and for every terminal: the
-      // verdict is about the BRIDGE, not about this pull. Behind the check, a
-      // terminal busy enough to have moved the generation on would keep
-      // spending a full round trip per pull without ever learning the peer
-      // cannot answer — and the busiest terminal is the agent's own.
-      if (e.code == 'E_UNKNOWN_METHOD') {
-        // The ONLY code that means an old bridge — see
-        // [_rpcSnapshotUnsupported]'s doc comment.
-        _rpcSnapshotUnsupported = true;
-        if (_snapshotGeneration[terminalId] != generation) return;
-        // Re-issued under the SAME generation: a continuation of this pull,
-        // not a new one.
-        _sendLegacySnapshotRequest(terminalId, wantsHistory);
-        return;
-      }
-      if (_snapshotGeneration[terminalId] != generation) return;
-      _failSnapshotPull(terminalId);
-      return;
-    } catch (_) {
-      // Anything the transport can raise that is not an `RpcException` still
-      // ends this pull. Without this the stamp in `_snapshotRequestedAtMs`
-      // stands with no bound behind it — the RPC arm arms no local timer — and
-      // the pane counts up in `awaitingScreen` forever with no strip and no
-      // Retry.
-      if (_disposed || _snapshotGeneration[terminalId] != generation) return;
-      _failSnapshotPull(terminalId);
+  /// One answered `terminal:history:request`.
+  void _handleTerminalHistoryPage(TerminalHistoryPageMessage msg) {
+    final tab = _state.tabs[msg.terminalId];
+    if (tab == null || tab.mode != TerminalDisplayMode.frame) return;
+    final attachment =
+        _frameAttachment[msg.terminalId] ??
+        _endedHistoryAttachment[msg.terminalId];
+    // D5, applied to the archive: a page answering an attachment this client
+    // has since replaced describes a run it is no longer reading, and its row
+    // ids belong to that run's epoch counter, not this one's.
+    if (attachment == null ||
+        attachment.runId != msg.runId ||
+        attachment.attachmentId != msg.attachmentId) {
       return;
     }
-    if (_disposed || _snapshotGeneration[terminalId] != generation) return;
-    final snap = (res['snapshot'] as Map?)?.cast<String, dynamic>();
-    if (snap == null) {
-      // Not a failure for a terminal with no PTY behind it: the bridge has no
-      // screen left to serialize (an exited PTY whose screen was disposed, a
-      // retained transcript) and has said so explicitly rather than answering
-      // with nothing. `_deriveAttach` skips such a tab, so cold holds nothing
-      // back.
-      //
-      // A LIVE one is a failure, exactly as the legacy arm's deadline calls it:
-      // retiring alone drops the tab to TerminalAttachStage.cold, which
-      // `_deriveAttach` counts as a wait nothing can end — the checkout never
-      // leaves `attaching`, the boot overlay never hands off, and the pane
-      // offers no Retry.
-      final tab = _state.tabs[terminalId];
-      if (tab != null && _hasLivePty(tab)) {
-        _failSnapshotPull(terminalId);
-        return;
-      }
-      if (_retireSnapshotPull(terminalId)) _publishHydration();
-      return;
+    // The model does its own correlation on requestId -- a late answer to a
+    // superseded request names this same attachment and must not be inserted.
+    // The bound is retired on its verdict and never ahead of it: this map is
+    // keyed by terminal alone, so retiring it for a loser would leave the
+    // request that IS outstanding with nothing left to end it, and the pane
+    // loading for good.
+    if (tab.history.applyPage(msg)) {
+      _historyRequestDeadlines.remove(msg.terminalId)?.cancel();
     }
-    _applySnapshotFields(
-      terminalId: terminalId,
-      scrollback: snap['scrollback'] as String? ?? '',
-      seq: snap['seq'] as int? ?? 0,
-      composed: snap['composed'] == true,
-      // Passed, never recomputed: `_applySnapshotFields` adds this id to
-      // `_paintedTerminalIds` on a successful apply, so a recompute after
-      // would always read false.
-      history: wantsHistory,
-      fromBroadcast: false,
-    );
-  }
-
-  /// Marks [terminalId]'s outstanding pull failed — the legacy arm's deadline
-  /// callback, and the RPC arm's non-`E_UNKNOWN_METHOD` catch, both funnel
-  /// here. Must never write [_snapshotSeq]: only an applied snapshot may set a
-  /// cutoff, and one armed on a request rather than a reply would sit above
-  /// every seq a respawned PTY emits.
-  void _failSnapshotPull(String terminalId) {
-    _snapshotDeadlines.remove(terminalId)?.cancel();
-    _snapshotRequestedAtMs.remove(terminalId);
-    if (!_paintedTerminalIds.contains(terminalId)) {
-      _snapshotFailedIds.add(terminalId);
-    }
-    _publishHydration();
   }
 
   /// Re-drives ONE terminal's screen pull.
@@ -1236,15 +727,6 @@ class TerminalService {
   /// checkout — and would turn a user's tap into a multi-megabyte fan-out.
   void retryAttach(String terminalId) {
     if (_disposed || !_state.tabs.containsKey(terminalId)) return;
-    // Dropping the cutoff before the request is what lets a fresh reply paint
-    // at all, and is precedented: the reconnect re-drive clears every cutoff
-    // first and unconditionally, for the same reason.
-    _snapshotSeq.remove(terminalId);
-    _snapshotFailedIds.remove(terminalId);
-    // Which protocol a retry re-drives is _attachTerminal's judgement: a
-    // terminal frame mode is still serving re-subscribes alone (D1's
-    // no-mixed-mode rule holds for a retry too), and one it is not falls back
-    // to the pull, which is the whole point of offering a Retry.
     _attachTerminal(terminalId);
   }
 
@@ -1280,7 +762,7 @@ class TerminalService {
     // rather than kept alive behind the activation gate's back.
     await session.hydrateCheckout(
       checkoutId,
-      _snapshotHydratorKey,
+      _frameHydratorKey,
       _rehydrateTerminals,
     );
   }
@@ -1332,6 +814,10 @@ class TerminalService {
     _clearPendingSubscribe(terminalId);
     final tab = _state.tabs[terminalId];
     if (tab == null) return; // Tab gone since we asked; nothing to attach.
+    if (_historyRunId[terminalId] != msg.runId) {
+      _discardFrameArchive(terminalId);
+      _historyRunId[terminalId] = msg.runId;
+    }
     _frameAttachment[terminalId] = (
       runId: msg.runId,
       attachmentId: msg.attachmentId,
@@ -1340,12 +826,6 @@ class TerminalService {
     _frameFailedIds.remove(terminalId);
     _frameEndedIds.remove(terminalId);
     _frameStatusMessage.remove(terminalId);
-    // D8(i): the frame carries its own preamble and will erase the screen
-    // outright, so an outstanding legacy history pull for this terminal must
-    // never be left free to paint into the engine the frame protocol now
-    // owns. Disowning (not deleting) matches _abandonSnapshotPull's own
-    // contract, in case a reply for it is already on the wire.
-    _abandonSnapshotPull(terminalId);
     final tabs = Map<String, TerminalTab>.from(_state.tabs);
     tabs[terminalId] = tab.copyWith(mode: TerminalDisplayMode.frame);
     _setState(_state.copyWith(tabs: tabs));
@@ -1365,16 +845,12 @@ class TerminalService {
     // Resolved FIRST and regardless of mode, or a tab already committed to
     // frame mode drops the only word it will ever get that its re-subscribe
     // was refused, and then waits out the bound instead.
-    if (requestId != null && _frameSubscribeRequestId[terminalId] == requestId) {
+    if (requestId != null &&
+        _frameSubscribeRequestId[terminalId] == requestId) {
       _clearPendingSubscribe(terminalId);
-      // Still legacy: the dual-protocol window's pull already owns the pane,
-      // so the refusal changes nothing the user can see.
-      if (!_demoteToLegacy(terminalId)) {
-        _publishHydration();
-        return;
-      }
-      // Already committed, so the refusal leaves nothing serving this pane.
-      _requestTerminalSnapshot(terminalId);
+      _frameFailedIds.add(terminalId);
+      _frameStatusMessage[terminalId] = msg.message;
+      _publishHydration();
       return;
     }
     if (tab.mode != TerminalDisplayMode.frame) return;
@@ -1389,23 +865,29 @@ class TerminalService {
         msg.attachmentId != attachment.attachmentId) {
       return;
     }
+    if (msg.code == 'HISTORY_DISABLED') {
+      // Names exactly what it broke. The live display is unaffected, and
+      // badging the whole terminal failed for a scrollback problem would
+      // hide a pane that is still painting. No bridge emits this today; the
+      // code is in the wire enum, so the app answers it correctly rather than
+      // falling through to the generic failure below.
+      _historyRequestDeadlines.remove(terminalId)?.cancel();
+      // Closes paging as well as recording the sentence: the refusal is
+      // addressed at the RUN, so the next scroll tick asking again earns the
+      // same refusal and a bound that expires over this message.
+      tab.history.noteHistoryUnavailable(msg.message);
+      return;
+    }
     _frameStatusMessage[terminalId] = msg.message;
     if (msg.code == 'ENDED') {
       // D7: lifecycle, not failure. The only notice that definitionally ends
       // the attachment, so the only one that drops it here.
+      _endedHistoryAttachment[terminalId] = attachment;
       _frameAttachment.remove(terminalId);
       _frameEndedIds.add(terminalId);
+      final exitCode = _pendingExitCodes.remove(terminalId) ?? msg.exitCode;
+      _completeTerminal(terminalId, exitCode);
     } else {
-      // DISPLAY_FAILED, ACK_TIMEOUT, HISTORY_DISABLED, and any code this
-      // client does not recognize (a newer agent) -- D7: must surface as a
-      // generic failure, never be silently ignored.
-      //
-      // The attachment deliberately SURVIVES: `reportOversize` reuses
-      // DISPLAY_FAILED to say one screen was skipped without retiring
-      // anything, and the viewer that stops acking a still-live attachment is
-      // the one the bridge then kills for real with ACK_TIMEOUT. Where the
-      // notice really was terminal, nothing further arrives on it anyway, and
-      // the next attach drops it ([_frameOwnsPane]).
       _frameFailedIds.add(terminalId);
     }
     _publishHydration();
@@ -1417,28 +899,10 @@ class TerminalService {
 
   // --- Message handlers ---
 
-  void _handleTerminalOutput(TerminalOutputMessage msg) {
-    final tab = _state.tabs[msg.terminalId];
-    if (tab == null) return;
-    // Only the live output path closes an echo timer. Snapshots are a
-    // reconnect artifact, not a response to anything the user typed.
-    perfRecorder.noteTerminalOutput(
-      projectId: session.projectId,
-      checkoutId: checkoutId,
-      terminalId: msg.terminalId,
-    );
-    tab.ghostty.appendOutputBytes(utf8.encode(msg.data));
-    // Live bytes answer the question an outstanding pull was asking. Without
-    // this, a terminal that starts streaming while its snapshot request is in
-    // flight — the common case for a busy TUI, and for a request the agent
-    // answers with nothing — waits out the whole bound and then reports a
-    // failure over a pane that is visibly live.
-    final retired = _retireSnapshotPull(msg.terminalId);
-    final firstPaint = _paintedTerminalIds.add(msg.terminalId);
-    if (retired || firstPaint) _publishHydration();
-  }
-
   void _handleTerminalStarted(TerminalStartedMessage msg) {
+    _pendingExitCodes.remove(msg.terminalId);
+    _discardFrameArchive(msg.terminalId);
+    _historyRunId.remove(msg.terminalId);
     if (_canceledPendingTerminalIds.contains(msg.terminalId)) {
       _settlePendingTerminal(msg.terminalId);
       requestStop(msg.terminalId);
@@ -1453,9 +917,6 @@ class TerminalService {
 
     if (existing != null) {
       existing.ghostty.setSessionRunning(true);
-      if (existing.mode == TerminalDisplayMode.frame) {
-        _leaveFrameScreen(existing);
-      }
       // A start on an id the app already holds is a RESPAWN, and the new PTY
       // carries whatever `TerminalManager.lastDriverGeometry` held — the size
       // of whichever terminal resized last in that bridge process, or 80x24 on
@@ -1471,10 +932,7 @@ class TerminalService {
         clearExitCode: true,
         type: msg.terminalType,
         sizeEpoch: existing.sizeEpoch + 1,
-        // D1: a respawn is a fresh PTY generation, so the legacy-or-frame
-        // choice starts over -- whatever the dead run negotiated does not
-        // carry forward to the one replacing it.
-        mode: TerminalDisplayMode.legacy,
+        mode: TerminalDisplayMode.frame,
       );
     } else {
       final tab = _createTab(
@@ -1501,7 +959,6 @@ class TerminalService {
     // handler covers the ordinary case; this covers the start whose exit was
     // never delivered, which is every window where outbound frames were dropped
     // (a remote-access flip drops status frames too).
-    _snapshotSeq.remove(msg.terminalId);
     // Newly-discovered (or respawned) terminal — negotiate a protocol for it.
     // Legacy fetches its scrollback so stale terminal:output can be dropped
     // via the per-terminal seq cutoff; frame mode subscribes instead.
@@ -1526,8 +983,8 @@ class TerminalService {
     }
     final tabs = Map<String, TerminalTab>.from(_state.tabs);
     tabs[msg.terminalId] = tab.copyWith(
-      cols: msg.cols,
-      rows: msg.rows,
+      cols: _framePaintedIds.contains(msg.terminalId) ? null : msg.cols,
+      rows: _framePaintedIds.contains(msg.terminalId) ? null : msg.rows,
       driverClientId: msg.driverClientId,
       // The caller booked that size the moment `sendResize` queued it, so a
       // frame cancelled here would otherwise leave its gate shut against a
@@ -1535,31 +992,31 @@ class TerminalService {
       sizeEpoch: dropped ? tab.sizeEpoch + 1 : null,
     );
     _setState(_state.copyWith(tabs: tabs));
-    // The geometry a frame was waiting on may have just landed — see
-    // [_frameDeferred].
-    _applyDeferredFrame(msg.terminalId);
   }
 
   void _handleTerminalExited(TerminalExitedMessage msg) {
     _settlePendingTerminal(msg.terminalId);
     _canceledPendingTerminalIds.remove(msg.terminalId);
-    // A pull issued before this exit may still be in flight; its eventual
-    // reply — success or timeout alike — describes an engine that has just
-    // gone stopped, so it is disowned rather than applied.
-    _abandonSnapshotPull(msg.terminalId);
-    // The agent's seq counter is per PTY, not per terminal id: it is deleted on
-    // exit (`ConnState.clearTerminal`), so a same-id respawn restarts at 1.
-    // A cutoff kept from the previous run sits above every seq the next one
-    // emits, and would filter its entire output as already-snapshotted.
-    _snapshotSeq.remove(msg.terminalId);
     final tab = _state.tabs[msg.terminalId];
     if (tab == null) return;
 
+    if (_frameAttachment.containsKey(msg.terminalId) &&
+        !_frameEndedIds.contains(msg.terminalId)) {
+      tab.ghostty.setSessionRunning(false);
+      _pendingExitCodes[msg.terminalId] = msg.exitCode;
+      return;
+    }
+    _completeTerminal(msg.terminalId, msg.exitCode);
+  }
+
+  void _completeTerminal(String terminalId, int? exitCode) {
+    final tab = _state.tabs[terminalId];
+    if (tab == null) return;
     tab.ghostty.setSessionRunning(false);
     final tabs = Map<String, TerminalTab>.from(_state.tabs);
-    tabs[msg.terminalId] = tab.copyWith(
+    tabs[terminalId] = tab.copyWith(
       sessionState: TerminalSessionState.exited,
-      exitCode: msg.exitCode,
+      exitCode: exitCode,
     );
     _setState(_state.copyWith(tabs: tabs));
   }
@@ -1612,29 +1069,32 @@ class TerminalService {
         final respawned =
             info.running &&
             existing.sessionState == TerminalSessionState.exited;
-        // A respawn detected only through this replay (no terminal:started
-        // reached this client) is still a fresh PTY generation: a stale
-        // frame attachment left pointing at the dead run's runId would
-        // silently swallow every frame the new one sends (D5's own-runId
-        // guard), which is worse than legacy's equivalent gap here (an
-        // uncleared seq cutoff, at most a few duplicated lines).
         if (respawned) {
+          _discardFrameArchive(info.terminalId);
+          _historyRunId.remove(info.terminalId);
           _resetFrameTracking(info.terminalId);
-          if (existing.mode == TerminalDisplayMode.frame) {
-            _leaveFrameScreen(existing);
-          }
         }
+        final awaitingFinal =
+            !info.running &&
+            _frameAttachment.containsKey(info.terminalId) &&
+            !_frameEndedIds.contains(info.terminalId);
         final updated = existing.copyWith(
           name: info.name,
-          sessionState: info.running
+          sessionState: awaitingFinal
+              ? existing.sessionState
+              : info.running
               ? TerminalSessionState.running
               : TerminalSessionState.exited,
           shell: info.shell,
-          cols: info.cols,
-          rows: info.rows,
+          cols: !respawned && _framePaintedIds.contains(info.terminalId)
+              ? null
+              : info.cols,
+          rows: !respawned && _framePaintedIds.contains(info.terminalId)
+              ? null
+              : info.rows,
           type: info.type,
           sizeEpoch: respawned ? existing.sizeEpoch + 1 : null,
-          mode: respawned ? TerminalDisplayMode.legacy : null,
+          mode: respawned ? TerminalDisplayMode.frame : null,
         );
         newTabs[info.terminalId] = info.driverClientId == null
             ? updated.copyWith(clearDriverClientId: true)
@@ -1706,16 +1166,6 @@ class TerminalService {
     // A tab can leave the status without ever exiting — a service dropped
     // from antgrid.yaml, a slot renamed. Its cutoff would otherwise outlive it
     // and filter the first bytes of whatever later claims the same id.
-    _snapshotSeq.removeWhere((id, _) => !newTabs.containsKey(id));
-    _paintedTerminalIds.removeWhere((id) => !newTabs.containsKey(id));
-    _awaitingHistoryIds.removeWhere((id) => !newTabs.containsKey(id));
-    _snapshotRequestedAtMs.removeWhere((id, _) => !newTabs.containsKey(id));
-    _snapshotFailedIds.removeWhere((id) => !newTabs.containsKey(id));
-    _snapshotDeadlines.removeWhere((id, timer) {
-      if (newTabs.containsKey(id)) return false;
-      timer.cancel();
-      return true;
-    });
     for (final terminalId in discovered) {
       // Only the tabs that survived the rebuild: one dropped along the way has
       // nowhere for the reply to land.
@@ -1734,16 +1184,6 @@ class TerminalService {
     String? driverClientId,
     TerminalSessionState? sessionState,
   }) {
-    // A fresh engine holds nothing, so the next snapshot request for this id is
-    // a COLD one. Cleared here rather than at every removal site because this is
-    // the single place a controller is built — a stale `true` would cost the
-    // user the history the new tab is about to be handed.
-    _paintedTerminalIds.remove(terminalId);
-    _awaitingHistoryIds.remove(terminalId);
-    _abandonSnapshotPull(terminalId);
-    // Same reasoning, frame-mode side: a fresh engine has painted nothing, so
-    // this id's next frame attachment starts at TerminalAttachStage.cold, not
-    // whatever a same-id tab before it left behind.
     _framePaintedIds.remove(terminalId);
     _resetFrameTracking(terminalId);
     final tab = TerminalTab(
@@ -1783,18 +1223,6 @@ class TerminalService {
       onResize: null,
       forwardGuestQueryReplies: false,
     );
-    // A bare BEL rings audibly like a native terminal — it is deliberately not a
-    // desktop notification (only OSC 9/777 raise those, via terminal:notification).
-    // Ring only the terminal the user is actually viewing: the focus coordinator
-    // keeps `isFocused` current (false for background projects, blurred agents,
-    // and while the app is backgrounded), so a background bell doesn't sound /
-    // buzz the device. `ringTerminalBell` throttles bursts.
-    //
-    // This fires only on legacy bytes: a `terminal:frame` is a SERIALIZED
-    // SCREEN, the engine's state at one instant, and BEL is a transient event
-    // with no state of its own -- appendOutputBytes-ing a frame's `ansi` can
-    // never contain one. Frame mode has no bell (a known gap, not a bug to
-    // silently work around).
     final ghostty = tab.ghostty;
     ghostty.onBellData = () {
       if (!ghostty.isFocused) return;
@@ -1994,6 +1422,8 @@ class TerminalService {
   /// reports the session running again (via `terminal:started` or `running:
   /// true` in a status snapshot), at which point a fresh controller is built.
   void deleteTerminal(String terminalId) {
+    _discardFrameArchive(terminalId);
+    _historyRunId.remove(terminalId);
     requestStop(terminalId);
     _deletedTerminalIds.add(terminalId);
     if (_pendingTerminalIds.contains(terminalId)) {
@@ -2004,27 +1434,16 @@ class TerminalService {
     if (tab == null) return;
     _resizeTimers.remove(terminalId)?.cancel();
     _resizeBaseDrivers.remove(terminalId);
-    _snapshotSeq.remove(terminalId);
-    _paintedTerminalIds.remove(terminalId);
-    _awaitingHistoryIds.remove(terminalId);
-    // The generation counter deliberately OUTLIVES the tab: ad-hoc ids are
-    // reused (`terminal_list_view.dart` mints the lowest free number), and
-    // resetting it to zero lets the pull just disowned here match the
-    // generation a recreated same-id tab issues — painting the deleted
-    // terminal's screen into the new one. One int per id is not worth that.
-    _abandonSnapshotPull(terminalId);
-    // Tell the bridge the viewer is gone so it retires the attachment instead
-    // of ticking an unread frame budget against a subscriber that will never
-    // ack again (mirrors the snapshot pull's own disowning, one line up).
     _unsubscribeFrame(terminalId);
     _framePaintedIds.remove(terminalId);
     _resetFrameTracking(terminalId);
-    // `replaceEpoch` is deliberately NOT disposed, while the engine below must
-    // be: a `ValueNotifier` holds no native resource, and `addListener` on a
-    // disposed one THROWS where `removeListener` is allowed. Disposing it only
-    // here would make this the single path that can fault a widget remounting
-    // on a stale tab object — the service's own dispose and a same-id respawn
-    // both leave theirs alive.
+    // `replaceEpoch` and `history` are deliberately NOT disposed, while the
+    // engine below must be: neither notifier holds a native resource, and
+    // `addListener` on a disposed one THROWS where `removeListener` is
+    // allowed. Disposing them only here would make this the single path that
+    // can fault a widget remounting on a stale tab object — the service's own
+    // dispose and a same-id respawn both leave theirs alive, and both are
+    // garbage the moment the tab holding them leaves the state.
     tab.ghostty.dispose();
     final tabs = Map<String, TerminalTab>.from(_state.tabs)..remove(terminalId);
     final isActive = _state.activeTerminalId == terminalId;
@@ -2160,7 +1579,7 @@ class TerminalService {
     // Same reason PreviewService deregisters its own: the registry is the
     // TRANSPORT's, which outlives this service, so a hydrator left behind
     // keeps pulling a dead checkout's snapshots on every reconnect forever.
-    session.unhydrateCheckout(checkoutId, _snapshotHydratorKey);
+    session.unhydrateCheckout(checkoutId, _frameHydratorKey);
     await _resumeSub?.cancel();
     _resumeSub = null;
     // Resolve any in-flight git action cleanly so its tier-2 timeout timer is
@@ -2185,21 +1604,18 @@ class TerminalService {
     for (final timer in _pendingTerminalTimers.values) {
       timer.cancel();
     }
-    for (final timer in _snapshotDeadlines.values) {
-      timer.cancel();
-    }
     for (final timer in _frameSubscribeDeadlines.values) {
       timer.cancel();
     }
+    for (final timer in _historyRequestDeadlines.values) {
+      timer.cancel();
+    }
+    _historyRequestDeadlines.clear();
     _checkoutAttachDeadline?.cancel();
     _checkoutAttachDeadline = null;
     _resizeTimers.clear();
     _pendingTerminalTimers.clear();
-    _snapshotDeadlines.clear();
-    _snapshotRequestedAtMs.clear();
-    _snapshotFailedIds.clear();
     _resizeBaseDrivers.clear();
-    _snapshotSeq.clear();
     _deletedTerminalIds.clear();
     _pendingTerminalIds.clear();
     _canceledPendingTerminalIds.clear();

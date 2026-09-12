@@ -43,6 +43,47 @@ the push. The app's capability literals live in the relay-client package
 `AppReadyMessage.capabilities` in `bridge/src/protocol.ts` — Zod strips a key the
 schema does not declare, and the fail direction is a silent return of the flood.
 
+## Terminal frames and history
+
+The bridge owns one authoritative headless VT per PTY run. Output, resize,
+terminal queries, and exit drain in parser order. Apps subscribe using terminal
+protocol version 1 and receive independent screens at a maximum of 20 FPS;
+`terminal:output` and attach snapshots are not app delivery paths. Unsupported
+peers require an upgrade. An attachment failure preserves the last valid screen
+and offers recovery through a fresh attachment, never raw-stream fallback.
+
+Subscription identity includes the authenticated connection, project stream,
+checkout, terminal, run, and attachment. A replacement PTY gets a new run ID;
+reconnect gets a new attachment ID. Consumption acknowledgments retire at most
+four frames / 1 MiB per viewer, bounded by 2 MiB across terminal attachments on
+the connection. Terminal payloads are coalesced before encryption and
+fragmentation; existing transport credits and authorization checks still apply.
+Acknowledgment is consumption, not evidence that the Flutter engine painted.
+
+Normal-buffer rows are archived at the parser's scroll boundary in indexed
+SQLite storage. Frames carry the matching epoch and row boundary. Archived rows
+keep their original width, soft-wrap metadata, styles, and hyperlink targets;
+resize reflows only live rows. Growing the viewport adds blank space rather than
+unscrolling archived rows. App scrolling requests pages of at most 200 rows /
+256 KiB and keeps at most 2,000 rows / 16 MiB cached. Retention defaults to
+256 MiB per run and 2 GiB per machine; committed history survives restarts until
+eviction or session deletion. Explicit history clear starts a new epoch. Disk
+failure disables further recording with visible status while valid live frames
+continue. Fullscreen replay and time navigation are outside this history model.
+
+Retention counts encoded rows, saved final screens, and archive ownership
+metadata. SQLite page and journal overhead is additional. Host environment
+variables `ANTGRID_TERMINAL_HISTORY_RUN_BYTES` and
+`ANTGRID_TERMINAL_HISTORY_MACHINE_BYTES` override the positive integer byte limits.
+Committed rows remain readable when recording stops. Final screen capture drains
+before emulator disposal; its immutable frame remains until acknowledgment or
+attachment expiry, and the app keeps the completed viewport available.
+
+The terminal protocol uses the existing authenticated transports: relay traffic
+is E2E encrypted; the current loopback listener uses a local bearer token.
+Qualification commands, measurement scope, and remaining real-agent checks are
+in [the terminal frame implementation plan](terminal-frame-implementation-plan.md).
+
 ## Shared packages (`packages/`)
 
 - **`antgrid_relay_client`** — pure Dart relay/crypto client, no Flutter.

@@ -4,7 +4,7 @@ export type Channel = "control" | "preview";
 
 export interface TransportSubscriber {
   /** Bus calls this to deliver an outbound message to the wire. */
-  deliver(msg: AbMessage, channel: Channel): void;
+  deliver(msg: AbMessage, channel: Channel, signal?: AbortSignal): unknown;
   /** Which wire this subscriber IS, for the audience-targeted publishes below.
    *  Left undefined by the subscribers that are not a client at all — the
    *  work-status fold and the push dispatcher — and those receive every emit
@@ -135,6 +135,16 @@ export class MessageBus {
     this.emit(msg, channel, { audience: { only } });
   }
 
+  async deliverTo(msg: AbMessage, channel: Channel, only: InboundSource, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
+    const pending: Promise<unknown>[] = [];
+    for (const sub of this.subs) {
+      if (sub.audience !== undefined && sub.audience !== only) continue;
+      pending.push(Promise.resolve(sub.deliver(msg, channel, signal)));
+    }
+    await Promise.all(pending);
+  }
+
   /** Publish to every wire EXCEPT the ones listed, plus every audience-less
    *  subscriber.
    *
@@ -173,6 +183,9 @@ export class MessageBus {
     // project-core.ts attachRelayStream).
     if (!deliver) return;
     for (const s of this.subs) {
+      // PTY bytes remain observable internally; app displays are frame-only.
+      if (s.audience !== undefined &&
+          (msg.type === "terminal:output" || msg.type === "terminal:snapshot")) continue;
       if (audience && s.audience !== undefined) {
         if (audience.only !== undefined && s.audience !== audience.only) continue;
         if (audience.except?.has(s.audience)) continue;

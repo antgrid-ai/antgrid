@@ -21,6 +21,8 @@ export interface TerminalAddress { projectId: string; checkoutId: string; termin
 const wireAddress = ({ checkoutId, terminalId }: TerminalAddress) => ({ checkoutId, terminalId });
 type ViewerMessage = TerminalFrame | TerminalSubscribed | TerminalDisplayStatus;
 export interface TerminalViewerTransport {
+  /** Shared by project streams on the same authenticated machine connection. */
+  budget?: { bytes: number };
   /** Resolve after handing off, not after consumption. Aborting must remove
    * unsent plaintext from the transport queue before encryption/fragmentation. */
   send(message: ViewerMessage, signal: AbortSignal): Promise<void>;
@@ -43,6 +45,7 @@ interface Run {
   capturedRevision: number;
   frame?: TerminalScreenFrame;
   finalRevision?: number;
+  released?: boolean;
   exitCode?: number | null;
   failure?: string;
   detach: () => void;
@@ -59,6 +62,8 @@ interface Attachment {
   progressAt: number;
   lastSent: number;
   pending: Map<number, number>;
+  unsent?: { sequence: number; revision: number; controller: AbortController };
+  awaitingConsumption?: boolean;
   ended: boolean;
   oversizeNotified: boolean;
 }
@@ -89,6 +94,16 @@ export class TerminalFrameHub {
       // is reset. Revision counters restart at 0 in the replacement, so every
       // attachment's high-water mark has to go with them or no frame ever
       // clears `frame.revision <= attachment.revision` again.
+      // `finalRevision` counts in the OLD emulator's numbering, which the
+      // replacement's counter — restarting at 0 like every other revision
+      // counter reset here — can never reach. Left standing it makes
+      // `tickAttachment`'s ENDED branch unreachable and its `lastFrame`
+      // exemption permanent, so the viewer is never retired and never paced
+      // again. Re-derived instead of dropped: the run really did finish, and
+      // `finish` is what re-reads it off the emulator that now holds the
+      // screen.
+      const finishedWith = existing.finalRevision !== undefined ? existing.exitCode ?? null : undefined;
+      existing.finalRevision = undefined;
       existing.detach();
       existing.source = source;
       existing.lastCapture = -Infinity;
@@ -98,6 +113,9 @@ export class TerminalFrameHub {
       existing.detach = source.onParsed(() => this.tick());
       for (const connection of this.connections) connection.resetRun(existing);
       this.tick();
+      // Caught, not voided: `index.ts` shuts the host down on an unhandled
+      // rejection.
+      if (finishedWith !== undefined) void this.finish(address, runId, finishedWith).catch(() => {});
       return runId;
     }
     this.remove(address);
@@ -112,9 +130,30 @@ export class TerminalFrameHub {
     if (!run || run.runId !== runId) return;
     await run.source.settle();
     if (this.runs.get(key(address)) !== run) return;
+    // The final revision shares the live capture budget, then remains cached
+    // until viewers acknowledge it or their attachments expire.
+    if (run.capturedRevision !== run.source.revision) {
+      const delay = TERMINAL_FRAME_INTERVAL_MS - (this.now() - run.lastCapture);
+      if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      if (this.runs.get(key(address)) !== run) return;
+      if (run.capturedRevision !== run.source.revision) this.captureInto(run, this.now(), true);
+    }
     run.finalRevision = run.source.revision;
     run.exitCode = exitCode;
     this.tick();
+  }
+
+  releaseFinished(address: TerminalAddress, runId: string, exitCode?: number | null): void {
+    const run = this.runs.get(key(address));
+    if (!run || run.runId !== runId) return;
+    // The immutable final frame outlives the emulator while slow viewers drain.
+    // Respawn and deletion still remove it explicitly.
+    if (run.finalRevision === undefined) this.remove(address, exitCode);
+    else {
+      run.released = true;
+      run.detach();
+      this.schedule();
+    }
   }
 
   /** `exitCode` is carried only so the ENDED notice each viewer gets can name
@@ -140,30 +179,35 @@ export class TerminalFrameHub {
   frame(run: Run, now: number): TerminalScreenFrame | undefined {
     if (run.failure) return undefined;
     if (run.capturedRevision !== run.source.revision && now - run.lastCapture >= TERMINAL_FRAME_INTERVAL_MS) {
-      // Charged on the ATTEMPT, never on the result. `capture()` returns null
-      // on three routine paths — an oversize screen, synchronized output
-      // (DECSET 2026, which modern TUIs hold continuously) and a pending tail
-      // off a parse boundary — and this tick runs on every `onParsed` as well
-      // as on the interval, so a throttle that only advanced on success let a
-      // busy PTY drive a full serialize per parse event. The oversize path is
-      // the expensive one: serializeNow() + linkOverlay() + encodedJsonBytes()
-      // all run before the size check returns null.
-      run.lastCapture = now;
-      const attemptedRevision = run.source.revision;
-      try {
-        const frame = run.source.capture(now);
-        if (frame) {
-          run.capturedRevision = frame.revision;
-          run.frame = frame;
-        } else if (run.source.oversize) {
-          // Nothing about re-serializing an UNCHANGED screen can make it fit,
-          // so this revision is considered done. The other two null paths are
-          // transient and must be retried, which the interval above bounds.
-          run.capturedRevision = attemptedRevision;
-        }
-      } catch (error) { run.failure = error instanceof Error ? error.message : String(error); }
+      this.captureInto(run, now);
     }
     return run.frame;
+  }
+
+  /** Serializes the source into `run.frame`, charging the throttle on the
+   *  ATTEMPT, never on the result. `capture()` returns null on three routine
+   *  paths — an oversize screen, synchronized output (DECSET 2026, which modern
+   *  TUIs hold continuously) and a pending tail off a parse boundary — and the
+   *  live caller runs on every `onParsed` as well as on the interval, so a
+   *  throttle that only advanced on success let a busy PTY drive a full
+   *  serialize per parse event. The oversize path is the expensive one:
+   *  serializeNow() + linkOverlay() + encodedJsonBytes() all run before the
+   *  size check returns null. */
+  private captureInto(run: Run, now: number, final = false): void {
+    run.lastCapture = now;
+    const attemptedRevision = run.source.revision;
+    try {
+      const frame = run.source.capture(now, { final });
+      if (frame) {
+        run.capturedRevision = frame.revision;
+        run.frame = frame;
+      } else if (run.source.oversize) {
+        // Nothing about re-serializing an UNCHANGED screen can make it fit,
+        // so this revision is considered done. The other two null paths are
+        // transient and must be retried, which the interval above bounds.
+        run.capturedRevision = attemptedRevision;
+      }
+    } catch (error) { run.failure = error instanceof Error ? error.message : String(error); }
   }
 
   tick(): void {
@@ -185,6 +229,11 @@ export class TerminalFrameHub {
   }
 
   schedule(): void {
+    for (const [address, run] of this.runs) {
+      if (run.released && ![...this.connections].some((connection) => connection.watches(run))) {
+        this.runs.delete(address);
+      }
+    }
     const needed = [...this.connections].some((connection) => connection.size > 0);
     if (needed && !this.timer) {
       this.timer = setInterval(() => this.tick(), TERMINAL_FRAME_INTERVAL_MS);
@@ -213,14 +262,19 @@ export class TerminalViewerConnection {
   private bytes = 0;
   private cursor = 0;
   private closed = false;
+  private readonly budget: { bytes: number };
 
   constructor(
     private readonly hub: TerminalFrameHub,
     private readonly transport: TerminalViewerTransport,
     private readonly now: () => number,
-  ) {}
+  ) { this.budget = transport.budget ?? { bytes: 0 }; }
 
   get size(): number { return this.attachments.size; }
+
+  watches(run: Run): boolean {
+    return [...this.attachments.values()].some((attachment) => attachment.run === run);
+  }
   get unacknowledgedBytes(): number { return this.bytes; }
   /** Whether this attachment is still live. For an owner recording state
    *  against a subscription across a microtask boundary: `retired` may already
@@ -279,9 +333,11 @@ export class TerminalViewerConnection {
       attachment.pending.delete(sequence);
       attachment.bytes -= bytes;
       this.bytes -= bytes;
+      this.budget.bytes -= bytes;
     }
     attachment.acknowledged = ack.sequence;
     attachment.progressAt = this.now();
+    attachment.awaitingConsumption = attachment.pending.size > 0;
     this.hub.tick();
     return true;
   }
@@ -347,8 +403,19 @@ export class TerminalViewerConnection {
       this.retire(attachment);
       return;
     }
+    if (attachment.unsent && attachment.unsent.revision < run.source.revision &&
+        now - attachment.lastSent >= TERMINAL_FRAME_INTERVAL_MS) {
+      const unsent = attachment.unsent;
+      attachment.unsent = undefined;
+      unsent.controller.abort();
+      const bytes = attachment.pending.get(unsent.sequence) ?? 0;
+      attachment.pending.delete(unsent.sequence);
+      attachment.bytes -= bytes;
+      this.bytes -= bytes;
+      this.budget.bytes -= bytes;
+    }
     if (attachment.pending.size >= TERMINAL_VIEWER_MAX_FRAMES ||
-        attachment.bytes >= TERMINAL_VIEWER_MAX_BYTES || this.bytes >= TERMINAL_CONNECTION_MAX_BYTES ||
+        attachment.bytes >= TERMINAL_VIEWER_MAX_BYTES || this.budget.bytes >= TERMINAL_CONNECTION_MAX_BYTES ||
         now - attachment.lastSent < TERMINAL_FRAME_INTERVAL_MS ||
         attachment.revision === run.source.revision) return;
     const frame = this.hub.frame(run, now);
@@ -371,16 +438,37 @@ export class TerminalViewerConnection {
       this.reportOversize(attachment);
       return;
     }
-    if (attachment.bytes + bytes > TERMINAL_VIEWER_MAX_BYTES || this.bytes + bytes > TERMINAL_CONNECTION_MAX_BYTES) return;
-    if (!attachment.pending.size) attachment.progressAt = now;
+    if (attachment.bytes + bytes > TERMINAL_VIEWER_MAX_BYTES || this.budget.bytes + bytes > TERMINAL_CONNECTION_MAX_BYTES) return;
+    if (!attachment.awaitingConsumption) attachment.progressAt = now;
+    attachment.awaitingConsumption = true;
     attachment.oversizeNotified = false;
     attachment.sequence++;
     attachment.pending.set(attachment.sequence, bytes);
     attachment.bytes += bytes;
     this.bytes += bytes;
+    this.budget.bytes += bytes;
     attachment.lastSent = now;
     attachment.revision = frame.revision;
-    this.safeSend(message, attachment.controller.signal, () => this.retire(attachment));
+    const unsent = {
+      sequence: attachment.sequence, revision: frame.revision, controller: new AbortController(),
+    };
+    attachment.unsent = unsent;
+    const owner = attachment.controller.signal;
+    const abort = () => unsent.controller.abort();
+    owner.addEventListener("abort", abort, { once: true });
+    const settled = () => {
+      owner.removeEventListener("abort", abort);
+      if (attachment.unsent === unsent) attachment.unsent = undefined;
+    };
+    try {
+      void this.transport.send(message, unsent.controller.signal).then(settled, () => {
+        settled();
+        if (!unsent.controller.signal.aborted) this.retire(attachment);
+      });
+    } catch {
+      settled();
+      this.retire(attachment);
+    }
   }
 
   /** Treats a transport that throws SYNCHRONOUSLY the same as one whose
@@ -429,8 +517,11 @@ export class TerminalViewerConnection {
     attachment.controller.abort();
     attachment.controller = new AbortController();
     this.bytes -= attachment.bytes;
+    this.budget.bytes -= attachment.bytes;
     attachment.bytes = 0;
     attachment.pending.clear();
+    attachment.unsent = undefined;
+    attachment.awaitingConsumption = false;
     attachment.revision = -1;
     attachment.oversizeNotified = false;
     attachment.progressAt = this.now();
@@ -451,6 +542,7 @@ export class TerminalViewerConnection {
     if (!this.attachments.delete(attachment.id)) return;
     attachment.controller.abort();
     this.bytes -= attachment.bytes;
+    this.budget.bytes -= attachment.bytes;
     attachment.pending.clear();
     attachment.bytes = 0;
     this.hub.schedule();

@@ -1036,6 +1036,7 @@ export class TerminalSession {
   }
 
   private respondToCapabilityQueries(data: string): void {
+    if (this.deferCapabilityReplies) return;
     const replies = this.capabilityResponder.feed(data);
     if (replies === "") return;
     if (this.deferCapabilityReplies) {

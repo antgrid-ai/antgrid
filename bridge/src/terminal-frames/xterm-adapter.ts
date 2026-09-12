@@ -10,6 +10,10 @@ interface ExtendedCell extends IBufferCell {
   isUnderlineColorPalette(): boolean;
 }
 interface BufferService {
+  buffers: { normal: {
+    ybase: number; ydisp: number;
+    lines: { trimStart(count: number): void };
+  } };
   buffer: { scrollTop: number; scrollBottom: number };
   scroll(...args: unknown[]): void;
 }
@@ -72,6 +76,15 @@ export class XtermFrameAdapter {
     const id = (cell as ExtendedCell).extended?.urlId;
     const uri = id ? this.core._oscLinkService.getLinkData(id)?.uri : undefined;
     return uri && uri.length <= 8192 && !/[\x00-\x1f\x7f-\x9f]/.test(uri) ? uri : undefined;
+  }
+
+  detachArchivedRows(): void {
+    const normal = this.core._bufferService.buffers.normal;
+    // Indexed history owns these rows. Reflowing them would merge immutable
+    // archived rows back into the live viewport and duplicate the boundary.
+    normal.lines.trimStart(normal.ybase);
+    normal.ybase = 0;
+    normal.ydisp = 0;
   }
 
   style(cell: IBufferCell): string {

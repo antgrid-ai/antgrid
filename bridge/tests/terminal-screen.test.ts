@@ -102,8 +102,9 @@ describe("TerminalScreen", () => {
 
     // The emulator is fed BEFORE the suppression drop, which is the only reason
     // the window a socket drop or a backgrounded app opens is recoverable at all.
-    const snap = await manager.getAttachSnapshot("t1");
-    expect(snap!.text).toContain("antgrid-suppressed-marker");
+    const screen = screensOf(manager).get("t1") as TerminalScreen;
+    await screen.settle();
+    expect(screen.serializeNow()).toContain("antgrid-suppressed-marker");
 
     manager.killAll();
   });
@@ -123,9 +124,15 @@ describe("TerminalScreen", () => {
       shortLivedSpawn({ terminalId: "retained", retainScrollbackOnExit: true }),
     );
     await waitFor(() => !manager.has(exiting) && !manager.has(retained), "both PTYs to exit");
-    expect(screens.has("exiting")).toBe(false);
+    // Released, though not on the exit tick itself: a non-retained exit holds
+    // its screen open for a fixed grace window first, so a frame consumer can
+    // settle the parse and publish the screen the PTY died holding
+    // (`EXIT_DRAIN_MS`). Waited for rather than asserted on a deadline, since
+    // the window is short enough that a loaded machine can close it between
+    // two polls here.
+    await waitFor(() => !screens.has("exiting"), "the exited screen's grace window to close");
     // The `worktree.setup` transcript is read AFTER its run failed, so its
-    // screen has to survive its own exit.
+    // screen has to survive its own exit — with no expiry, unlike the above.
     expect(screens.has("retained")).toBe(true);
 
     manager.spawn({ terminalId: "respawn" });

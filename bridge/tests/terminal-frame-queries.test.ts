@@ -104,15 +104,13 @@ describe("terminal frame queries", () => {
     expect(h.replies).toEqual([]);
   });
 
-  test("leaves OSC colour queries to the byte-level responder", async () => {
-    // Both terminators reach the same payload here, so answering at the parser
-    // would have to guess one; a guest reading until BEL never sees an ST.
+  test("answers colors at their parser position among cursor queries", async () => {
     const h = harness();
-    await h.write("\x1b]10;?\x07\x1b]11;?\x1b\\\x1b]12;?\x07");
-    expect(h.replies).toEqual([]);
-
-    const byteResponder = new VtCapabilityResponder(COLORS);
-    expect(byteResponder.feed("\x1b]11;?\x07")).toBe(`\x1b]11;${COLORS.background}\x07`);
+    await h.write("\x1b[4;7H\x1b]10;?\x07\x1b[6n\x1b]11;?\x1b\\\x1b]12;?\x07");
+    expect(h.replies).toEqual([
+      `\x1b]10;${COLORS.foreground}\x07`, "\x1b[4;7R",
+      `\x1b]11;${COLORS.background}\x07`, `\x1b]12;${COLORS.cursor}\x07`,
+    ]);
   });
 
   test("DECRQM answers exactly what the byte responder answers", async () => {

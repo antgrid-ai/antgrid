@@ -5,6 +5,7 @@ import {
   TERMINAL_HISTORY_PAGE_ROWS, TERMINAL_HISTORY_RUN_BYTES,
   TerminalHistoryRowSchema,
   type TerminalHistoryBoundary, type TerminalHistoryRow,
+  TerminalScreenFrameSchema, type TerminalScreenFrame,
 } from "./protocol";
 
 export interface HistoryPage {
@@ -57,11 +58,30 @@ export class TerminalHistoryStore {
         payload TEXT NOT NULL, bytes INTEGER NOT NULL,
         UNIQUE(runId, epoch, rowId)
       );
+      CREATE TABLE IF NOT EXISTS terminal_owners (
+        runId TEXT PRIMARY KEY REFERENCES terminal_runs(runId) ON DELETE CASCADE,
+        scope TEXT NOT NULL, terminalId TEXT NOT NULL, created INTEGER NOT NULL,
+        finalFrame TEXT, storedBytes INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS terminal_owner_lookup ON terminal_owners(scope, terminalId, created DESC);
       CREATE TRIGGER IF NOT EXISTS terminal_row_insert AFTER INSERT ON terminal_rows
         BEGIN UPDATE terminal_runs SET bytes = bytes + new.bytes WHERE runId = new.runId; END;
       CREATE TRIGGER IF NOT EXISTS terminal_row_delete AFTER DELETE ON terminal_rows
         BEGIN UPDATE terminal_runs SET bytes = bytes - old.bytes WHERE runId = old.runId; END;
     `);
+    const columns = this.db.query<{ name: string }, []>("PRAGMA table_info(terminal_owners)").all();
+    if (!columns.some((column) => column.name === "storedBytes")) {
+      this.db.exec("ALTER TABLE terminal_owners ADD COLUMN storedBytes INTEGER NOT NULL DEFAULT 0");
+    }
+    this.db.exec(`
+      UPDATE terminal_owners SET storedBytes = 128 + length(CAST(scope AS BLOB)) + length(CAST(terminalId AS BLOB))
+        + COALESCE(length(CAST(finalFrame AS BLOB)), 0);
+      CREATE TRIGGER IF NOT EXISTS terminal_owner_insert AFTER INSERT ON terminal_owners
+        BEGIN UPDATE terminal_runs SET bytes = bytes + new.storedBytes WHERE runId = new.runId; END;
+      CREATE TRIGGER IF NOT EXISTS terminal_owner_update AFTER UPDATE OF storedBytes ON terminal_owners
+        BEGIN UPDATE terminal_runs SET bytes = bytes + new.storedBytes - old.storedBytes WHERE runId = new.runId; END;
+    `);
+    this.reconcileAllBytes();
   }
 
   openRun(runId: string, onFailure: (error: Error) => void = () => {}): TerminalRunHistory {
@@ -79,6 +99,58 @@ export class TerminalHistoryStore {
     return this.db.query<RunRecord, [string]>(
       "SELECT epoch, nextRowId, bytes FROM terminal_runs WHERE runId = ?",
     ).get(runId);
+  }
+
+  bindRun(runId: string, scope: string, terminalId: string): void {
+    this.db.transaction(() => {
+      this.db.query("INSERT OR IGNORE INTO terminal_owners(runId, scope, terminalId, created, storedBytes) VALUES (?, ?, ?, ?, ?)")
+        .run(runId, scope, terminalId, Date.now(), 128 + Buffer.byteLength(scope) + Buffer.byteLength(terminalId));
+      this.evict(runId);
+    })();
+  }
+
+  ownsRun(runId: string, scope: string, terminalId: string): boolean {
+    return !!this.db.query("SELECT 1 FROM terminal_owners WHERE runId = ? AND scope = ? AND terminalId = ?")
+      .get(runId, scope, terminalId);
+  }
+
+  terminalIds(scope: string): string[] {
+    return this.db.query<{ terminalId: string }, [string]>(
+      "SELECT DISTINCT terminalId FROM terminal_owners WHERE scope = ? ORDER BY terminalId",
+    ).all(scope).map((row) => row.terminalId);
+  }
+
+  saveFinal(runId: string, frame: TerminalScreenFrame): void {
+    const payload = JSON.stringify(TerminalScreenFrameSchema.parse(frame));
+    this.db.transaction(() => {
+      this.db.query(`UPDATE terminal_owners SET finalFrame = ?, storedBytes =
+        128 + length(CAST(scope AS BLOB)) + length(CAST(terminalId AS BLOB)) + ? WHERE runId = ?`)
+        .run(payload, Buffer.byteLength(payload), runId);
+      this.evict(runId);
+    })();
+  }
+
+  latestFinal(scope: string, terminalId: string): { runId: string; frame?: TerminalScreenFrame } | undefined {
+    const row = this.db.query<{ runId: string; finalFrame: string | null }, [string, string]>(
+      "SELECT runId, finalFrame FROM terminal_owners WHERE scope = ? AND terminalId = ? ORDER BY created DESC LIMIT 1",
+    ).get(scope, terminalId);
+    if (!row) return undefined;
+    if (row.finalFrame === null) return { runId: row.runId };
+    const parsed = TerminalScreenFrameSchema.safeParse(JSON.parse(row.finalFrame));
+    return { runId: row.runId, frame: parsed.success ? parsed.data : undefined };
+  }
+
+  releaseRun(runId: string): void {
+    this.handles.get(runId)?.flush();
+    this.handles.get(runId)?.retire();
+    this.handles.delete(runId);
+  }
+
+  deleteTerminal(scope: string, terminalId: string): void {
+    const runs = this.db.query<{ runId: string }, [string, string]>(
+      "SELECT runId FROM terminal_owners WHERE scope = ? AND terminalId = ?",
+    ).all(scope, terminalId);
+    for (const run of runs) this.deleteRun(run.runId);
   }
 
   commit(runId: string, epoch: number, nextRowId: number, rows: readonly TerminalHistoryRow[]): void {
@@ -117,7 +189,10 @@ export class TerminalHistoryStore {
       const row = this.db.query<StoredRow, [string]>(
         "SELECT serial, bytes FROM terminal_rows WHERE runId = ? ORDER BY epoch, rowId LIMIT 1",
       ).get(runId);
-      if (!row) break; // reconciled already; nothing left to account for
+      if (!row) {
+        if (this.evictFinal(runId)) { runBytes = this.record(runId)!.bytes; continue; }
+        break;
+      }
       this.db.query("DELETE FROM terminal_rows WHERE serial = ?").run(row.serial);
       runBytes -= row.bytes;
     }
@@ -128,22 +203,41 @@ export class TerminalHistoryStore {
     }
     while (total > this.limits.machineBytes) {
       const row = this.db.query<StoredRow, []>("SELECT serial, bytes FROM terminal_rows ORDER BY serial LIMIT 1").get();
-      if (!row) break;
+      if (!row) {
+        const owners = this.db.query<{ runId: string; finalFrame: string | null }, []>(
+          "SELECT runId, finalFrame FROM terminal_owners ORDER BY created, rowid",
+        ).all();
+        const final = owners.find((owner) => owner.finalFrame !== null);
+        if (final) this.evictFinal(final.runId);
+        else {
+          const inactive = owners.find((owner) => !this.handles.has(owner.runId));
+          if (!inactive) break;
+          this.deleteRun(inactive.runId);
+        }
+        total = this.db.query<{ bytes: number }, []>("SELECT COALESCE(SUM(bytes), 0) AS bytes FROM terminal_runs").get()!.bytes;
+        continue;
+      }
       this.db.query("DELETE FROM terminal_rows WHERE serial = ?").run(row.serial);
       total -= row.bytes;
     }
   }
 
+  private evictFinal(runId: string): boolean {
+    return this.db.query(`UPDATE terminal_owners SET finalFrame = NULL,
+      storedBytes = 128 + length(CAST(scope AS BLOB)) + length(CAST(terminalId AS BLOB))
+      WHERE runId = ? AND finalFrame IS NOT NULL`).run(runId).changes > 0;
+  }
+
   private reconcileRunBytes(runId: string): void {
     const actual = this.db.query<{ bytes: number }, [string]>(
-      "SELECT COALESCE(SUM(bytes), 0) AS bytes FROM terminal_rows WHERE runId = ?",
+      "SELECT COALESCE(SUM(bytes), 0) + COALESCE((SELECT storedBytes FROM terminal_owners WHERE runId = ?1), 0) AS bytes FROM terminal_rows WHERE runId = ?1",
     ).get(runId)!.bytes;
     this.db.query("UPDATE terminal_runs SET bytes = ? WHERE runId = ?").run(actual, runId);
   }
 
   private reconcileAllBytes(): void {
     this.db.exec(
-      "UPDATE terminal_runs SET bytes = (SELECT COALESCE(SUM(bytes), 0) FROM terminal_rows WHERE terminal_rows.runId = terminal_runs.runId)",
+      "UPDATE terminal_runs SET bytes = (SELECT COALESCE(SUM(bytes), 0) FROM terminal_rows WHERE terminal_rows.runId = terminal_runs.runId) + COALESCE((SELECT storedBytes FROM terminal_owners WHERE terminal_owners.runId = terminal_runs.runId), 0)",
     );
   }
 
@@ -235,15 +329,10 @@ export class TerminalRunHistory {
     this.attempt(() => {
       const record = TerminalHistoryRowSchema.parse({ ...row, rowId: this.nextRowId });
       const bytes = Buffer.byteLength(JSON.stringify(record));
-      // A single row too large to ever fit inside one page is a per-row
-      // representability problem (an adversarial or pathological guest — see
-      // xterm-adapter.ts's per-span OSC-8 uri cap times its per-row span
-      // count), not a store failure. Drop just this row — its rowId is still
-      // consumed, exactly like a row lost to a real write failure below — and
-      // keep recording, rather than routing it through `attempt`'s catch,
-      // which would latch `disabled` and throw away every row already queued
-      // in `pending`.
-      if (bytes > MAX_ROW_BYTES) { this.nextRowId++; return; }
+      if (bytes > MAX_ROW_BYTES) {
+        this.flush();
+        throw new Error("Terminal history row exceeds the page limit; history recording stopped.");
+      }
       if (this.pendingBytes + bytes > TERMINAL_HISTORY_PAGE_BYTES) this.flush();
       if (this.disabled) return;
       this.nextRowId++;

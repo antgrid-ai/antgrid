@@ -487,6 +487,19 @@ async function waitUntil(predicate: () => boolean, what: string, timeoutMs = 500
  *  would receive, `relaySent` what a phone's relay stream would. A single
  *  audience-less collector cannot tell the two apart — it stands in for an
  *  internal fold (work status, push), which by design still sees everything. */
+const internalMessages = new WeakMap<MessageBus, AbMessage[]>();
+
+async function expectNoStreamAfterInput(bus: MessageBus, sent: AbMessage[], data: string, source: "loopback" | "relay" = "loopback"): Promise<void> {
+  const internal = internalMessages.get(bus)!;
+  internal.length = 0;
+  bus.dispatchInbound(createMessage("terminal:input", { terminalId: "adhoc", data }), "control", source);
+  // Observing internal output proves the PTY was active while the transport
+  // remained frame-only, including when no attachment can deliver a screen.
+  await waitFor(internal, (m) => m.type === "terminal:output" && m.terminalId === "adhoc", "internal PTY output");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(sent.some((m) => m.type === "terminal:output" || m.type === "terminal:snapshot")).toBe(false);
+}
+
 async function bootWithTerminal(): Promise<{ bus: MessageBus; sent: AbMessage[]; relaySent: AbMessage[] }> {
   core = await buildAgentCore({
     folder: root,
@@ -496,6 +509,9 @@ async function bootWithTerminal(): Promise<{ bus: MessageBus; sent: AbMessage[];
   const bus = new MessageBus();
   const sent: AbMessage[] = [];
   const relaySent: AbMessage[] = [];
+  const internal: AbMessage[] = [];
+  internalMessages.set(bus, internal);
+  bus.subscribe({ deliver: (message) => internal.push(message) });
   bus.subscribe({ audience: "loopback", deliver: (message) => sent.push(message) });
   bus.subscribe({ audience: "relay", deliver: (message) => relaySent.push(message) });
   core.attachTransport(bus);
@@ -560,7 +576,7 @@ describe("wiring", () => {
     expect(sent.some((m) => m.type === "terminal:history:page" && m.requestId === foreignRequestId)).toBe(false);
   });
 
-  test("mode exclusivity: a frame-subscribed terminal stops the legacy terminal:output stream, and unsubscribing resumes it", async () => {
+  test("unsubscribing stops frames without enabling raw output", async () => {
     const { bus, sent } = await bootWithTerminal();
     sent.length = 0;
 
@@ -586,15 +602,13 @@ describe("wiring", () => {
       "control",
       "loopback",
     );
-    // No ack to wait on for unsubscribe — give the bus a beat, then prove
-    // legacy output actually resumes rather than staying suppressed forever.
     await new Promise((resolve) => setTimeout(resolve, 100));
     sent.length = 0;
-    bus.dispatchInbound(createMessage("terminal:input", { terminalId: "adhoc", data: "echo bye\r" }), "control", "loopback");
-    await waitFor(sent, (m) => m.type === "terminal:output" && m.terminalId === "adhoc", "terminal:output after unsubscribe");
+    await expectNoStreamAfterInput(bus, sent, "echo bye\r");
+    expect(sent.some((m) => m.type === "terminal:frame")).toBe(false);
   });
 
-  test("a dropped connection retires its subscription and resumes legacy output for that terminal", async () => {
+  test("a dropped connection retires its subscription without enabling raw output", async () => {
     const { bus, sent } = await bootWithTerminal();
     sent.length = 0;
 
@@ -609,8 +623,7 @@ describe("wiring", () => {
     core!.noteClientGone("loopback");
 
     sent.length = 0;
-    bus.dispatchInbound(createMessage("terminal:input", { terminalId: "adhoc", data: "echo back\r" }), "control", "loopback");
-    await waitFor(sent, (m) => m.type === "terminal:output" && m.terminalId === "adhoc", "terminal:output after noteClientGone");
+    await expectNoStreamAfterInput(bus, sent, "echo back\r");
   });
 
   test("subscribing to an unknown terminal gets no reply", async () => {
@@ -656,7 +669,7 @@ describe("wiring", () => {
   // The marks now follow `subscribe`'s reported attachment id and the
   // `TerminalViewerTransport.retired` hook, and nothing else.
 
-  test("a hub-side ACK_TIMEOUT releases mode exclusivity: the terminal is never left with neither frames nor output", async () => {
+  test("ACK_TIMEOUT reports recovery without enabling raw output", async () => {
     const { bus, sent } = await bootWithTerminal();
     sent.length = 0;
 
@@ -680,8 +693,7 @@ describe("wiring", () => {
     );
 
     sent.length = 0;
-    bus.dispatchInbound(createMessage("terminal:input", { terminalId: "adhoc", data: "echo two\r" }), "control", "loopback");
-    await waitFor(sent, (m) => m.type === "terminal:output" && m.terminalId === "adhoc", "terminal:output after ACK_TIMEOUT");
+    await expectNoStreamAfterInput(bus, sent, "echo two\r");
   }, 60_000);
 
   test("a terminal:unsubscribe naming an attachment the connection does not hold changes nothing", async () => {
@@ -719,6 +731,14 @@ describe("wiring", () => {
   test("a terminal that exits tells its frame viewer ENDED, with the exit code", async () => {
     const { bus, sent } = await bootWithTerminal();
     sent.length = 0;
+    bus.subscribe({ audience: "loopback", deliver: (message) => {
+      if (message.type === "terminal:frame") {
+        bus.dispatchInbound(createMessage("terminal:ack", {
+          terminalId: message.terminalId, runId: message.runId,
+          attachmentId: message.attachmentId, sequence: message.sequence,
+        }), "control", "loopback");
+      }
+    } });
 
     const requestId = crypto.randomUUID();
     bus.dispatchInbound(
@@ -742,7 +762,7 @@ describe("wiring", () => {
     expect(ended.exitCode).not.toBeUndefined();
   }, 40_000);
 
-  test("a same-id respawn ends the old run's subscription and resumes legacy output", async () => {
+  test("a same-id respawn ends the old subscription and requires a fresh attachment", async () => {
     const { bus, sent } = await bootWithTerminal();
     sent.length = 0;
 
@@ -759,8 +779,6 @@ describe("wiring", () => {
 
     sent.length = 0;
     bus.dispatchInbound(createMessage("terminal:start", { terminalId: "adhoc", cwd: tmpdir() }), "control", "loopback");
-    // The subscription is over and the viewer is told so under the run id it
-    // holds — the protocol switch back to raw output is announced, not silent.
     const ended = await waitFor(
       sent,
       (m) => m.type === "terminal:display:status" && m.code === "ENDED" && m.runId === subscribed.runId,
@@ -769,8 +787,8 @@ describe("wiring", () => {
     expect(ended.type).toBe("terminal:display:status");
 
     sent.length = 0;
-    bus.dispatchInbound(createMessage("terminal:input", { terminalId: "adhoc", data: "echo two\r" }), "control", "loopback");
-    await waitFor(sent, (m) => m.type === "terminal:output" && m.terminalId === "adhoc", "terminal:output after respawn");
+    await expectNoStreamAfterInput(bus, sent, "echo two\r");
+    expect(sent.some((m) => m.type === "terminal:frame")).toBe(false);
   }, 40_000);
 
   test("a relay viewer that backgrounds and returns keeps its subscription and resumes receiving frames", async () => {
@@ -816,8 +834,7 @@ describe("wiring", () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     sent.length = 0;
-    bus.dispatchInbound(createMessage("terminal:input", { terminalId: "adhoc", data: "echo back\r" }), "control", "loopback");
-    await waitFor(sent, (m) => m.type === "terminal:output" && m.terminalId === "adhoc", "terminal:output for the reconnected client");
+    await expectNoStreamAfterInput(bus, sent, "echo back\r");
   }, 30_000);
 
   test("mode exclusivity is GLOBAL per terminal: suppression holds even for output driven by a DIFFERENT source than the frame subscriber", async () => {
@@ -851,18 +868,10 @@ describe("wiring", () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 100));
     sent.length = 0;
-    bus.dispatchInbound(createMessage("terminal:input", { terminalId: "adhoc", data: "echo bye\r" }), "control", "relay");
-    await waitFor(sent, (m) => m.type === "terminal:output" && m.terminalId === "adhoc", "terminal:output after unsubscribe, relay-driven");
+    await expectNoStreamAfterInput(bus, sent, "echo bye\r", "relay");
   });
 
-  test("mode exclusivity is per viewer: a relay frame subscription leaves the desktop's terminal:output stream alone", async () => {
-    // The plan's D2 gate has two halves, and the second is the one a global
-    // suppression silently fails: "a frame-mode viewer never receives live raw
-    // PTY output" AND "while other connections still do". Two clients watch the
-    // same terminal here — the phone in frame mode, the desktop in legacy mode
-    // — and each must see exactly its own protocol. Suppressing the output
-    // stream for the whole terminal because ONE client subscribed blacks out a
-    // desktop terminal the moment a phone opens the same one.
+  test("an unsubscribed desktop receives no raw output while a relay viewer receives frames", async () => {
     const { bus, sent, relaySent } = await bootWithTerminal();
     sent.length = 0;
     relaySent.length = 0;
@@ -877,10 +886,8 @@ describe("wiring", () => {
 
     bus.dispatchInbound(createMessage("terminal:input", { terminalId: "adhoc", data: "echo hi\r" }), "control", "loopback");
 
-    // The phone gets frames and no raw output; the desktop gets raw output and
-    // none of the phone's frames.
     await waitFor(relaySent, (m) => m.type === "terminal:frame" && m.terminalId === "adhoc", "terminal:frame on the relay wire");
-    await waitFor(sent, (m) => m.type === "terminal:output" && m.terminalId === "adhoc", "terminal:output on the loopback wire");
+    expect(sent.some((m) => m.type === "terminal:output")).toBe(false);
     expect(relaySent.some((m) => m.type === "terminal:output" && m.terminalId === "adhoc")).toBe(false);
     expect(sent.some((m) => m.type === "terminal:frame")).toBe(false);
   }, 30_000);

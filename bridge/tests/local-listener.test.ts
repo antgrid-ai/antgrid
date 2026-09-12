@@ -77,11 +77,11 @@ describe("LocalListener handshake", () => {
     const ws2 = await openWs("secret-token", 2);
     await nextMessage(ws2); // ready — ws2 is now the owner
 
-    const m = createMessage("terminal:output", { terminalId: "s", data: "out" });
+    const m = createMessage("terminal:input", { terminalId: "s", data: "out" });
     bus.publish(m, "control");
 
     const got = await nextMessage(ws2);
-    expect(got.type).toBe("terminal:output");
+    expect(got.type).toBe("terminal:input");
     ws2.close();
   });
 
@@ -108,7 +108,7 @@ describe("LocalListener handshake", () => {
       reason: 'checkout routing update required',
     });
 
-    bus.publish(createMessage('terminal:output', { terminalId: 's', data: 'must not arrive' }), 'control');
+    bus.publish(createMessage('terminal:input', { terminalId: 's', data: 'must not arrive' }), 'control');
   });
 
   test("ownerPullsTree is true with no owner attached", () => {
@@ -186,11 +186,11 @@ describe("LocalListener routing", () => {
     const ws = await openWs();
     await nextMessage(ws);
 
-    const m = createMessage("terminal:output", { terminalId: "s", data: "out" });
+    const m = createMessage("terminal:input", { terminalId: "s", data: "out" });
     bus.publish(m, "control");
 
     const got = await nextMessage(ws);
-    expect(got.type).toBe("terminal:output");
+    expect(got.type).toBe("terminal:input");
     expect(got.channel).toBe("control");
     ws.close();
   });

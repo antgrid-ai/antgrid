@@ -31,26 +31,14 @@ describe("TerminalManager", () => {
     manager.killAll();
   });
 
-  test("attach snapshot opens with the attach preamble and carries the live seq", async () => {
+  test("same-id respawn assigns a new terminal run", () => {
     manager.spawn({ terminalId: "t1" });
-    await new Promise((r) => setTimeout(r, 800));
-
-    const seqBefore = manager.getScrollback("t1")!.seq;
-    const attach = await manager.getAttachSnapshot("t1");
-    expect(attach).not.toBeNull();
-    // The app applies this verbatim, so the sequence that lands its engine on
-    // the right buffer has to be the first thing in it.
-    expect(attach!.text.startsWith("\x1b[?1049l\x1b[r")).toBe(true);
-    // The cutoff describes the blob exactly. It is read AFTER the barrier, and
-    // anything that arrived during one is replayed into the body — so on an
-    // idle terminal there is nothing to replay and it cannot have moved.
-    expect(attach!.seq).toBe(seqBefore);
-
+    const firstRun = manager.runId("t1");
+    expect(firstRun).toBeDefined();
+    manager.spawn({ terminalId: "t1" });
+    expect(manager.runId("t1")).not.toBe(firstRun);
+    expect(manager.runId("nope")).toBeUndefined();
     manager.killAll();
-  });
-
-  test("attach snapshot is null for an unknown terminal", async () => {
-    expect(await manager.getAttachSnapshot("nope")).toBeNull();
   });
 
   test("kill terminal emits terminal:exited", async () => {

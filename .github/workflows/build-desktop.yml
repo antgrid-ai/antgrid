@@ -269,6 +269,10 @@ jobs:
         # for the web service) — the desktop build never touches Postgres or web.
         run: bun install --ignore-scripts
 
+      - name: Qualify native terminal frames
+        working-directory: app
+        run: flutter test -j 2 test/terminal_frame_prototype_test.dart
+
       - name: Build bridge (universal macOS binary)
         run: |
           set -euo pipefail
@@ -637,6 +641,10 @@ jobs:
         # for the web service) — the desktop build never touches Postgres or web.
         run: bun install --ignore-scripts
 
+      - name: Qualify native terminal frames
+        working-directory: app
+        run: flutter test -j 2 test/terminal_frame_prototype_test.dart
+
       - name: Build bridge (Windows x64 binary)
         shell: pwsh
         run: |
@@ -837,6 +845,10 @@ jobs:
         # --ignore-scripts skips the root/web postinstall (Prisma client codegen
         # for the web service) — the desktop build never touches Postgres or web.
         run: bun install --ignore-scripts
+
+      - name: Qualify native terminal frames
+        working-directory: app
+        run: flutter test -j 2 test/terminal_frame_prototype_test.dart
 
       - name: Build bridge (Linux x64 binary)
         run: |

@@ -17,7 +17,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { TerminalHistoryStore } from "../src/terminal-frames/history";
+import { TerminalHistoryStore, type TerminalRunHistory } from "../src/terminal-frames/history";
+import { TerminalFrameSource } from "../src/terminal-frames/source";
 import { TERMINAL_HISTORY_PAGE_ROWS, type TerminalHistoryRow } from "../src/terminal-frames/protocol";
 
 let root: string;
@@ -47,24 +48,53 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<b
 }
 
 describe("D4: large-session pages read by index", () => {
-  test("page() answers a backward-paged walk in bounded time and memory, with no repeated or skipped rowId", () => {
+  test("saved screens and archived run metadata share the retention budget", async () => {
+    const store = new TerminalHistoryStore(join(root, "bounded.sqlite"), { runBytes: 1024, machineBytes: 2048 });
+    const source = new TerminalFrameSource(80, 24);
+    try {
+      source.feed("x".repeat(1600));
+      await source.settle();
+      const frame = source.capture(0)!;
+      for (let index = 0; index < 40; index++) {
+        const runId = crypto.randomUUID();
+        store.openRun(runId);
+        store.bindRun(runId, "project", `terminal-${index}`);
+        store.saveFinal(runId, frame);
+        expect(store.record(runId)!.bytes).toBeLessThanOrEqual(1024);
+        expect(store.latestFinal("project", `terminal-${index}`)?.frame).toBeUndefined();
+        store.releaseRun(runId);
+      }
+      const db = (store as unknown as { db: Database }).db;
+      const total = db.query<{ bytes: number }, []>("SELECT SUM(bytes) AS bytes FROM terminal_runs").get()!.bytes;
+      expect(total).toBeLessThanOrEqual(2048);
+      expect(store.latestFinal("project", "terminal-0")).toBeUndefined();
+    } finally { source.dispose(); store.close(); }
+  });
+  test("page() answers a backward-paged walk in bounded memory and at a cost the archive's size does not move, with no repeated or skipped rowId", () => {
     const dbPath = join(root, "history.sqlite");
     const store = new TerminalHistoryStore(dbPath);
     let reader: TerminalHistoryStore | undefined;
     try {
-      const runId = crypto.randomUUID();
-      store.openRun(runId); // creates the terminal_runs row store.commit() needs
+      // Seeded via store.commit() directly, in large batches, rather than one
+      // handle.append() per row — this is purely about getting a big enough
+      // table fast; page()'s own read path (what this test actually proves) is
+      // exercised entirely through the handles below.
+      const seed = (runId: string, rows: number): void => {
+        store.openRun(runId); // creates the terminal_runs row store.commit() needs
+        const CHUNK = 5_000;
+        for (let start = 0; start < rows; start += CHUNK) {
+          const batch: TerminalHistoryRow[] = [];
+          const size = Math.min(CHUNK, rows - start);
+          for (let i = 0; i < size; i++) batch.push({ rowId: start + i, ...row(80, `scrollline${start + i}`) });
+          store.commit(runId, 0, start + size, batch);
+        }
+      };
       const ROWS = 100_000;
-      // Seeded via store.commit() directly, in large batches, rather than
-      // 100,000 individual handle.append() calls — this is purely about
-      // getting a big enough table fast; page()'s own read path (what this
-      // test actually proves) is exercised entirely through the handle below.
-      const CHUNK = 5_000;
-      for (let start = 0; start < ROWS; start += CHUNK) {
-        const rows: TerminalHistoryRow[] = [];
-        for (let i = 0; i < CHUNK; i++) rows.push({ rowId: start + i, ...row(80, `scrollline${start + i}`) });
-        store.commit(runId, 0, start + CHUNK, rows);
-      }
+      const CONTROL_ROWS = TERMINAL_HISTORY_PAGE_ROWS * 5;
+      const runId = crypto.randomUUID();
+      const controlRunId = crypto.randomUUID();
+      seed(runId, ROWS);
+      seed(controlRunId, CONTROL_ROWS);
 
       // A fresh connection, not `store.openRun(runId)` again: `openRun`
       // caches one handle per runId for the LIFE of the store, constructed
@@ -75,26 +105,42 @@ describe("D4: large-session pages read by index", () => {
       // same file (WAL supports concurrent readers) is a real, fresh read.
       reader = new TerminalHistoryStore(dbPath);
       const handle = reader.openRun(runId);
+      const control = reader.openRun(controlRunId);
       const total = handle.boundary().nextRowId;
       expect(total).toBe(ROWS);
+      expect(control.boundary().nextRowId).toBe(CONTROL_ROWS);
 
-      // Calibrated against this exact shape: an index seek over 100,000 rows
-      // answers in well under a millisecond; the same query with its WHERE
-      // clause rewritten so SQLite cannot use the index (`rowId + 0 < ?`,
-      // proven below by temporarily making that exact edit to history.ts and
-      // watching this assertion go red) measures 15-20ms. The bound sits
-      // an order of magnitude above the fast path and well below the slow
-      // one, so it stays true on a loaded CI box without ever passing a
-      // real regression.
+      // The regression: the read query losing its index — rewrite its WHERE
+      // clause as `rowId + 0 < ?` and SQLite can no longer seek on rowId, so
+      // answering the OLDEST page means walking every newer row of the run
+      // first. Paging to the top of a long session then degrades with the
+      // session's length, which is the one thing this store exists to avoid.
+      //
+      // Stated as a ratio against the SAME read on a 1000-row archive, not as
+      // a millisecond ceiling: this suite runs 289 files in parallel, and any
+      // absolute bound tight enough to catch the scan is a coin flip on a
+      // loaded box (a ceiling of 10ms was measured at 38ms in a full run).
+      // The two sides are sampled alternately so a slow moment hits both, and
+      // each keeps its MINIMUM — contention only ever adds time, so the floor
+      // of many samples is the closest a shared machine gets to the real cost.
       const time = (fn: () => void): number => {
         const t0 = performance.now();
         fn();
         return performance.now() - t0;
       };
-      const oldestPageMs = time(() => handle.page(0, TERMINAL_HISTORY_PAGE_ROWS + 1));
-      const newestPageMs = time(() => handle.page(0, total));
-      expect(oldestPageMs).toBeLessThan(10);
-      expect(newestPageMs).toBeLessThan(10);
+      const oldestPage = (h: TerminalRunHistory) => time(() => h.page(0, TERMINAL_HISTORY_PAGE_ROWS + 1));
+      let bigFloorMs = Infinity;
+      let controlFloorMs = Infinity;
+      for (let sample = 0; sample < 20; sample++) {
+        controlFloorMs = Math.min(controlFloorMs, oldestPage(control));
+        bigFloorMs = Math.min(bigFloorMs, oldestPage(handle));
+      }
+      // Measured on this shape: 0.82-1.14x indexed (including four runs inside
+      // a full parallel suite), 13-15x once the index is gone. The 100x row
+      // count does not become a 100x ratio because both sides pay the same
+      // fixed cost — one boundary() plus 200 JSON+Zod row parses — and on the
+      // indexed side that constant IS the measurement. 4x sits between.
+      expect(bigFloorMs).toBeLessThan(controlFloorMs * 4);
 
       // Bounded memory: reading one 200-row page must not pull the archive's
       // 100,000 rows into the heap. Not exact (GC timing is not ours to
@@ -247,37 +293,20 @@ describe("D4: retention", () => {
   });
 });
 
-describe("D4: oversized row", () => {
-  test("a single row too large for any page is dropped, not the whole run", () => {
+describe("oversized history rows", () => {
+  test("preserves earlier rows and visibly disables recording instead of creating a silent gap", () => {
     const store = new TerminalHistoryStore(join(root, "history.sqlite"));
     try {
-      const runId = crypto.randomUUID();
-      const handle = store.openRun(runId);
+      const failures: Error[] = [];
+      const handle = store.openRun(crypto.randomUUID(), (error) => failures.push(error));
       handle.append(row(80, "before the oversized row"));
-
-      // Bigger than a page can ever return (see MAX_ROW_BYTES in history.ts:
-      // TERMINAL_HISTORY_PAGE_BYTES minus the page envelope) — a row no
-      // amount of retrying could ever make representable.
-      const hugeText = "z".repeat(300_000);
-      handle.append(row(80, hugeText));
-
+      handle.append(row(80, "z".repeat(300_000)));
       handle.append(row(80, "after the oversized row"));
-      handle.flush();
-
-      // The pre-fix bug: append() routed the oversized row's JSON.parse
-      // failure through `attempt`, which latches `disabled` and discards
-      // every row already queued in `pending` — losing "before" along with
-      // the row that was actually too big, and refusing every row after it
-      // for the rest of the run. The fix drops only the one row.
-      const after = handle.boundary();
-      expect(after.status).toBe("recording");
-      // Its rowId is still consumed (never reused) — same accounting as a
-      // row lost to a real write failure — so the surviving rows are 0 and 2.
-      expect(after.nextRowId).toBe(3);
-      const page = handle.page(after.epoch, after.nextRowId);
-      expect(page.rows.map((r) => r.rowId)).toEqual([0, 2]);
-      expect(page.rows[0]!.spans[0]!.text).toBe("before the oversized row");
-      expect(page.rows[1]!.spans[0]!.text).toBe("after the oversized row");
+      const boundary = handle.boundary();
+      expect(boundary.status).toBe("disabled");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]!.message).toContain("page limit");
+      expect(handle.page(boundary.epoch, boundary.nextRowId).rows.map(r => r.rowId)).toEqual([0]);
     } finally {
       store.close();
     }

@@ -5,6 +5,8 @@ import { hostname } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
 import { logger } from "./logger";
 const log = logger.child({ component: "agent-core" });
+// A machine's project streams share each physical viewer's terminal budget.
+const terminalConnectionBudgets = { loopback: { bytes: 0 }, relay: { bytes: 0 } };
 import { TerminalManager } from "./terminal-manager";
 import {
   TerminalFrameHub, TerminalViewerConnection,
@@ -626,61 +628,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // `viewerConnectionFor`) so a core that never receives `terminal:subscribe`
   // never allocates one.
   const viewerConnections = new Map<InboundSource, TerminalViewerConnection>();
-  // Terminals (INTERNAL, namespaced id — the same one `terminalOwners` and
-  // `runIds` key by) with at least one live frame-mode subscriber, and which
-  // source(s) hold one. Populated by the four inbound cases below, consulted
-  // by `sendTerminalFrame`.
-  //
-  // The set is the AUDIENCE the output stream is withheld from, which is why
-  // it holds sources rather than a boolean: the plan's gate is per viewer ("a
-  // connection with a frame attachment ... while OTHER connections still do"),
-  // so suppressing globally would let a phone subscribing to frames black out
-  // the desktop's live terminal — the same terminal, a different client, a
-  // mode it never opted into. `MessageBus.publishExcept` is what makes the
-  // per-viewer answer expressible; a subscriber that is not a wire at all (the
-  // work-status fold, the push dispatcher) declares no audience and so keeps
-  // seeing every frame, which it must.
-  //
-  // ENTIRELY driven by the hub, never by a wire verb: a mark is added when
-  // `subscribe()` reports a live attachment id and dropped when
-  // `TerminalViewerTransport.retired` fires for it. Marking off the inbound
-  // verbs instead diverged from the truth in both directions — an
-  // `terminal:unsubscribe` carrying an attachmentId the connection does not
-  // hold un-suppressed a terminal whose attachment was still streaming
-  // frames, and every retirement the hub performs on its own clock (ack
-  // timeout, a failed capture, the run being removed) left a terminal marked
-  // frame-mode with nothing left to send frames, i.e. delivering nothing at
-  // all on either protocol.
-  const frameSubscribedTerminals = new Map<string, Set<InboundSource>>();
-  /** The terminal each live attachment is marked against, so `retired` can
-   *  undo exactly what `subscribe` recorded. The hub deals in EXTERNAL,
-   *  wire-facing terminal ids; the marks are keyed by the internal namespaced
-   *  id `sendTerminalFrame` sees, and only the subscribe site holds both. */
-  const frameAttachments = new Map<string, { terminalId: string; source: InboundSource }>();
-
-  function markFrameSubscribed(internalTerminalId: string, source: InboundSource): void {
-    let set = frameSubscribedTerminals.get(internalTerminalId);
-    if (!set) {
-      set = new Set();
-      frameSubscribedTerminals.set(internalTerminalId, set);
-    }
-    set.add(source);
-  }
-
-  function markFrameUnsubscribed(internalTerminalId: string, source: InboundSource): void {
-    const set = frameSubscribedTerminals.get(internalTerminalId);
-    if (!set) return;
-    set.delete(source);
-    if (set.size === 0) frameSubscribedTerminals.delete(internalTerminalId);
-  }
-
-  function releaseFrameAttachment(attachmentId: string): void {
-    const held = frameAttachments.get(attachmentId);
-    if (!held) return;
-    frameAttachments.delete(attachmentId);
-    markFrameUnsubscribed(held.terminalId, held.source);
-  }
-
   /** Outbound authorization for one viewer connection's transport, rechecked
    *  by the hub on every tick immediately before it sends (D5). Loopback is
    *  exempt from the mobile-access switch by the same convention as every
@@ -693,13 +640,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  come back (see `tickAttachment`). */
   function viewerTransportFor(source: InboundSource): TerminalViewerTransport {
     return {
+      budget: terminalConnectionBudgets[source],
       authorized(address: TerminalAddress): boolean {
         if (sessions?.isCheckoutDeleting(address.checkoutId) === true) return false;
         if (source !== "loopback" && (connState.suppressed || !currentPhoneAllowed())) return false;
         return true;
-      },
-      retired(_address: TerminalAddress, attachmentId: string): void {
-        releaseFrameAttachment(attachmentId);
       },
       async send(message, signal): Promise<void> {
         if (signal.aborted) return;
@@ -714,7 +659,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // control plane's priority instead of queued behind preview traffic.
         // The channel comes off PREVIEW_CHANNEL_MESSAGE_TYPES rather than a
         // literal, because the app-side gate reads the same set.
-        sendAbToItsChannel(message, source);
+        await sendTerminalTo(message, source, signal);
       },
     };
   }
@@ -860,21 +805,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       ? msg.terminalId
       : null;
     if (!terminalId) { sendAb(msg); return; }
-    // D2: the passive `terminal:output` stream, not `terminal:exited` or
-    // `terminal:notification` — those are one-shot lifecycle events a
-    // frame-mode viewer still needs (ENDED aside, the hub raises nothing for
-    // them), and suppressing them would leave a frame-mode client with no way
-    // to learn its terminal exited at all. `terminal:snapshot`'s own explicit
-    // request/reply is untouched too: unlike the unsolicited output stream, a
-    // client that actually asked for one is legacy by its own choice (a
-    // frame-mode client subscribes instead) and already self-filters replies
-    // via its `history` label — see that schema's own comment.
-    // Withheld from the frame-mode wires ONLY, never dropped outright: two
-    // clients can watch the same terminal in different modes, and a phone
-    // subscribing to frames must not black out the desktop's output stream.
-    const withheld = msg.type === "terminal:output"
-      ? frameSubscribedTerminals.get(terminalId)
-      : undefined;
     const { runtime, externalId } = terminalOwner(terminalId);
     const session = msg.type === "terminal:notification" ? sessions?.get(terminalId) : undefined;
     const tool = session?.tool ?? (session?.command ? undefined : runtime.config.agent?.tool);
@@ -892,10 +822,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       return;
     }
     const stamped = { ...msg, terminalId: externalId } as AbMessage;
-    if (withheld?.size) {
-      sendAbExcept({ ...stamped, checkoutId: runtime.checkout.id } as AbMessage, withheld);
-      return;
-    }
     sendFromRuntime(runtime, stamped);
   }
 
@@ -1713,42 +1639,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "terminal:snapshot:request": {
-        // Same wrong-checkout guard as the tree and preview requests below, and
-        // for the same reason: every checkout runtime sees this frame, so
-        // without it one request is answered N times and the app applies
-        // whichever reply lands last — another checkout's screen, under a seq
-        // that then filters the right one's output. It stays outside the
-        // closure below because serializing N screens is real work.
         if (runtime.checkout.id !== checkoutIdOf(msg)) break;
-        // Detaching the body moved it out from under the dispatcher's own
-        // `.catch`, so it owns its rejections now — same shape as the
-        // `session:*` handlers above. Unhandled, one failed snapshot reaches
-        // `index.ts`'s `unhandledRejection` hook, which shuts the whole host
-        // down.
-        void (async () => {
-          try {
-            const snap = await manager.getAttachSnapshot(
-              internalTerminalId(runtime, msg.terminalId),
-              { history: msg.history === true },
-            );
-            if (runtime.disposed) return;
-            if (!snap) {
-              log.warn("snapshot requested for unknown terminal %s", msg.terminalId);
-              return;
-            }
-            sendFromRuntime(runtime, createMessage("terminal:snapshot", {
-              terminalId: msg.terminalId,
-              scrollback: snap.text,
-              seq: snap.seq,
-              composed: true,
-              // Echoed so the OTHER clients this reply fans out to can
-              // refuse it -- see the field on the schema.
-              history: msg.history === true,
-            }));
-          } catch (err) {
-            log.warn("snapshot for terminal %s failed: %s", msg.terminalId, err);
-          }
-        })();
+        sendAbToItsChannel(createMessage("terminal:display:status", {
+          checkoutId: checkoutIdOf(msg), terminalId: msg.terminalId,
+          code: "UPGRADE_REQUIRED", message: "Upgrade the app to view terminal frames.",
+        }), client);
         break;
       }
       // Wave 5: the frame display protocol. All four arrive here already
@@ -1775,8 +1670,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const internalId = internalTerminalId(owner, msg.terminalId);
         if ((clientGenerations.get(client) ?? 0) !== clientGeneration) break;
         const connection = viewerConnectionFor(client);
-        void connection
-          .subscribe({ projectId: project.id, checkoutId, terminalId: msg.terminalId }, msg.version, msg.requestId)
+        void (async () => {
+          await manager?.restoreArchivedTerminal(internalId);
+          if (owner.disposed || sessions?.isCheckoutDeleting(checkoutId) === true ||
+              (clientGenerations.get(client) ?? 0) !== clientGeneration) return;
+          return connection.subscribe(
+            { projectId: project.id, checkoutId, terminalId: msg.terminalId }, msg.version, msg.requestId,
+          );
+        })()
           .then((attachmentId) => {
             // Retired already, between the hub reporting the id and this
             // continuation: the release fired before there was a mark, so
@@ -1790,8 +1691,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               dropViewerConnection(client);
               return;
             }
-            frameAttachments.set(attachmentId, { terminalId: internalId, source: client });
-            markFrameSubscribed(internalId, client);
+          }).catch((error) => {
+            log.warn("terminal %s attach failed: %s", internalId, error);
+            sendAbToItsChannel(createMessage("terminal:display:status", {
+              checkoutId, terminalId: msg.terminalId, requestId: msg.requestId,
+              code: "DISPLAY_FAILED", message: "Terminal display unavailable. Reconnect to retry.",
+            }), client);
           });
         break;
       }
@@ -1839,7 +1744,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // this terminal no longer runs, so the request is dropped exactly like
         // `acknowledge`'s own `ack.runId !== attachment.run.runId` guard rather
         // than answered from a history run the app never subscribed to.
-        if (manager.runId(internalId) !== msg.runId) break;
+        if (!manager.ownsHistoryRun(internalId, msg.runId)) {
+          sendAbToItsChannel(createMessage("terminal:history:page", {
+            checkoutId, terminalId: msg.terminalId, runId: msg.runId,
+            attachmentId: msg.attachmentId, requestId: msg.requestId,
+            history: { epoch: msg.epoch, firstRowId: msg.beforeRowId, nextRowId: msg.beforeRowId, status: "disabled" },
+            expired: true, beforeRowId: msg.beforeRowId, rows: [],
+          }), client);
+          break;
+        }
         const page = manager.historyPage(msg.runId, msg.epoch, msg.beforeRowId);
         if (!page) break;
         // Bulk row data, targeted rather than broadcast: a history page answers
@@ -2015,6 +1928,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  is that the OTHER transport is never charged for a reply it did not ask
    *  for. See MessageBus.publishOnly. */
   let sendAbTo: (msg: AbMessage, only: InboundSource) => void = (_m, _o) => {};
+  let sendTerminalTo: (msg: AbMessage, only: InboundSource, signal: AbortSignal) => Promise<void> = async () => {};
   /** The same narrowing on the "preview" channel, so a terminal's bulk display
    *  payloads queue and get credited separately from the control plane, behind
    *  `send-scheduler.ts`'s control>preview priority, instead of competing with
@@ -2039,9 +1953,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function sendAbToItsChannel(msg: AbMessage, only: InboundSource): void {
     (PREVIEW_CHANNEL_MESSAGE_TYPES.has(msg.type) ? sendPreviewAbTo : sendAbTo)(msg, only);
   }
-  /** [sendAb] withheld from the wires listed — D2's mode exclusivity, which is
-   *  per CLIENT. See MessageBus.publishExcept. */
-  let sendAbExcept: (msg: AbMessage, except: ReadonlySet<InboundSource>) => void = (_m, _e) => {};
   // Replay-cache eviction for torn-down chat sessions; bound with the bus in
   // attachTransport, like sendAb.
   let dropSessionReplay: (sessionId: string) => void = (_s) => {};
@@ -2836,9 +2747,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Sessions advertise themselves through `session:updated`; the terminals
     // list now only reflects actually-spawned PTYs (agent or service).
     const terminalsForApp = manager.getStatus().flatMap((terminal) => {
+      if (terminal.terminalId.includes(":") && !terminalOwners.has(terminal.terminalId)) {
+        const prefix = `${runtime.checkout.id}:`;
+        if (runtime.checkout.id === "main" || !terminal.terminalId.startsWith(prefix)) return [];
+        const suffix = terminal.terminalId.slice(prefix.length);
+        if (suffix === "setup") return [];
+        const externalId = suffix === "setup:slot" ? "setup" : suffix;
+        if (internalTerminalId(runtime, externalId) !== terminal.terminalId) return [];
+      }
       const owner = terminalOwner(terminal.terminalId);
+      const session = sessions?.get(terminal.terminalId);
       return owner.runtime === runtime
-        ? [{ ...terminal, terminalId: owner.externalId }]
+        ? [{ ...terminal, terminalId: owner.externalId, name: session?.name ?? terminal.name,
+          type: terminal.type ?? (session ? "agent" as const : undefined) }]
         : [];
     });
 
@@ -2968,62 +2889,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
 
     // Re-send each terminal's screen so the app has current output.
-    //
-    // Serialized together, never one after another. Each snapshot waits out its
-    // OWN terminal's whole unparsed backlog, and the terminals share nothing —
-    // one `TerminalScreen`, one write buffer each — so awaiting them in turn
-    // just adds the timer round-trips up: measured 184 ms for a dozen idle
-    // terminals against 14 ms together, and a single flooding one holds every
-    // terminal behind it in `getStatus()` order for as long as it takes to
-    // drain. Nothing downstream cares about the order: the app keys the blob
-    // and its cutoff by terminalId.
-    //
-    // Each one SENDS at its own barrier rather than in a pass after the join,
-    // or the concurrency buys nothing: a blob describes the instant its seq was
-    // read, and holding it until the slowest terminal drains ships a screen the
-    // app has already been shown past — whose `2J` then erases the frames it
-    // applied in between, and whose seq re-arms the cutoff BELOW them so
-    // nothing refilters and nothing re-sends. `Promise.all` stays only as the
-    // join, so `resyncState`'s caller still waits for the whole set.
-    //
-    // Screen-only, never `history`: this is a PUSH, so nothing here knows what
-    // the app's engine holds, and a history blob erases before it paints. The
-    // app's own hydrator pull is what asks for history, per terminal, on the
-    // same re-establishment — see the `history` flag on terminal:snapshot:request.
-    if (manager) {
-      const mgr = manager;
-      await Promise.all(
-        mgr.getStatus().map(async (t) => {
-          let snap: Awaited<ReturnType<typeof mgr.getAttachSnapshot>>;
-          try {
-            snap = await mgr.getAttachSnapshot(t.terminalId);
-          } catch (err) {
-            // One terminal's failure must not cost the others theirs — awaited
-            // together, a rejection would abandon the whole resync.
-            log.warn("resync snapshot for terminal %s failed: %s", t.terminalId, err);
-            return;
-          }
-          // `null` means the screen is gone — an exited terminal, which
-          // `getStatus` still reports so the tab stays visible. Never a test on
-          // the STRING: every snapshot opens with the attach preamble, so an
-          // empty-screen blob is not an empty one and such a test would skip
-          // nothing it means to.
-          if (!snap) return;
-          // A snapshot, never an output frame: a composed blob is a whole
-          // screen, so appended as ordinary output it would stack a second copy
-          // into a live tab, and with no seq the app's cutoff cannot filter it.
-          sendTerminalFrame(createMessage("terminal:snapshot", {
-            // The INTERNAL id: sendTerminalFrame owns the external rewrite, and
-            // handing it an already-externalised one makes its own owner lookup
-            // miss and stamp an isolated checkout's replay as main's.
-            terminalId: t.terminalId,
-            scrollback: snap.text,
-            seq: snap.seq,
-            composed: true,
-          }));
-        }),
-      );
-    }
   }
 
   async function startCheckoutRuntime(
@@ -3393,6 +3258,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // disappears from the checkout the user is looking at and reappears in
       // the primary workspace under its namespaced internal id.
       onTerminalForgotten: (id) => {
+        const { runtime, externalId } = terminalOwner(id);
+        frameHub.remove({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId });
         terminalOwners.delete(id);
         setupTerminalIds.delete(id);
       },
@@ -3414,15 +3281,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // `unhandledRejection` hook, which takes the whole host down.
       onRunExited: (id, runId, exitCode) => {
         const { runtime, externalId } = terminalOwner(id);
-        void frameHub
+        return frameHub
           .finish({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId }, runId, exitCode)
           .catch((error) => log.warn("terminal %s: settling run %s for its viewers failed: %s", id, runId, error));
       },
-      onRunEnded: (id, _runId, exitCode) => {
+      onRunEnded: (id, runId, exitCode) => {
         const { runtime, externalId } = terminalOwner(id);
         // Each retired attachment releases its own mode-exclusivity mark
         // through `TerminalViewerTransport.retired`.
-        frameHub.remove({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId }, exitCode);
+        frameHub.releaseFinished({ projectId: project.id, checkoutId: runtime.checkout.id, terminalId: externalId }, runId, exitCode);
       },
       // A notification (osc9/osc777) means the session did something worth
       // surfacing — float it up the drawer. No-ops for non-session terminals.
@@ -3457,7 +3324,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (isOscTitleUnusable(tool) && !isDefaultSessionName(session.name)) return;
         namer?.onOscTitle(id, oscTitleForNaming(tool, title));
       },
-    }, connState, () => apiServer?.port ?? null);
+    }, connState, () => apiServer?.port ?? null, project.id);
 
     // One update-checker per tool for this project, built straight from the spec
     // table so a new tool needs only an `update` field in agents/registry.ts —
@@ -4248,76 +4115,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // `internalTerminalId`, `prepareCheckoutRuntime` or `sessions`, all of which
   // are closure-scoped here.
   async function handleTerminalSnapshotRpc(msg: RpcRequest): Promise<AbMessage> {
-    const parsed = TerminalSnapshotRpcParams.safeParse(msg.params ?? {});
-    if (!parsed.success) {
-      return createMessage("response", {
-        requestId: msg.requestId,
-        ok: false,
-        error: {
-          code: "E_BAD_PARAMS",
-          message: parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; "),
-        },
-      });
-    }
-    const { terminalId, checkoutId, history } = parsed.data;
-    if (!manager) {
-      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
-    }
-    if (sessions?.isCheckoutDeleting(checkoutId) === true) {
-      log.warn("Refusing terminal.snapshot for checkout %s: its delete is in flight (project %s)", checkoutId, project.id);
-      return createMessage("response", {
-        requestId: msg.requestId,
-        ok: false,
-        error: { code: "CHECKOUT_DELETING", message: "This session's workspace is being deleted." },
-      });
-    }
-    const checkout = await checkoutRuntimes.resolve(checkoutId);
-    if (!checkout) {
-      log.warn("Rejecting terminal.snapshot for unknown checkout %s (project %s)", checkoutId, project.id);
-      return createMessage("response", {
-        requestId: msg.requestId,
-        ok: false,
-        error: { code: "UNKNOWN_CHECKOUT", message: "The requested checkout is not available." },
-      });
-    }
-    // Re-checked after the store lookup: a delete that started during that
-    // await would otherwise have this checkout re-prepared right here.
-    if (sessions?.isCheckoutDeleting(checkoutId) === true) {
-      log.warn("Refusing terminal.snapshot for checkout %s: its delete is in flight (project %s)", checkoutId, project.id);
-      return createMessage("response", {
-        requestId: msg.requestId,
-        ok: false,
-        error: { code: "CHECKOUT_DELETING", message: "This session's workspace is being deleted." },
-      });
-    }
-    // Never `runtimeFor`/`terminalOwner`/`?? mainRuntime` -- see the guard this
-    // mirrors at the `terminal:snapshot:request` case below. `internalTerminalId`
-    // WRITES `runtime.configuredTerminalIds` and the module-level
-    // `terminalOwners`, so resolving the wrong runtime here would permanently
-    // corrupt `sendTerminalFrame`'s id rewrite for this terminal.
-    const runtime = checkoutId === "main" ? mainRuntime : await prepareCheckoutRuntime(checkout);
-    if (runtime.disposed) {
-      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
-    }
-    let snap: { text: string; seq: number } | null;
-    try {
-      snap = await manager.getAttachSnapshot(internalTerminalId(runtime, terminalId), { history });
-    } catch (err) {
-      log.warn("terminal.snapshot for terminal %s failed: %s", terminalId, err);
-      return createMessage("response", {
-        requestId: msg.requestId,
-        ok: false,
-        error: { code: "E_HANDLER", message: "terminal snapshot failed" },
-      });
-    }
-    if (!snap) {
-      log.warn("terminal.snapshot requested for unknown terminal %s", terminalId);
-      return createMessage("response", { requestId: msg.requestId, ok: true, result: { snapshot: null } });
-    }
     return createMessage("response", {
-      requestId: msg.requestId,
-      ok: true,
-      result: { snapshot: { terminalId, scrollback: snap.text, seq: snap.seq, composed: true } },
+      requestId: msg.requestId, ok: false,
+      error: { code: "UPGRADE_REQUIRED", message: "Upgrade the app to view terminal frames." },
     });
   }
 
@@ -4326,8 +4126,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     republishAb = (m) => bus.republish(m, "control");
     retainAb = (m) => bus.retain(m, "control");
     sendAbTo = (m, only) => bus.publishOnly(m, "control", only);
+    sendTerminalTo = (m, only, signal) => bus.deliverTo(m,
+      PREVIEW_CHANNEL_MESSAGE_TYPES.has(m.type) ? "preview" : "control", only, signal);
     sendPreviewAbTo = (m, only) => bus.publishOnly(m, "preview", only);
-    sendAbExcept = (m, except) => bus.publishExcept(m, "control", except);
     dropSessionReplay = (sessionId) => bus.dropSessionReplay(sessionId);
     dropCheckoutReplay = (checkoutId) => bus.dropCheckoutReplay(checkoutId);
     // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.

@@ -9,10 +9,14 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
+import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/ansi_palette.dart';
+import '../design/widgets/ab_button.dart';
+import '../design/widgets/ab_empty_state.dart';
+import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../models/terminal_models.dart';
 import '../project/project_session.dart';
@@ -30,6 +34,7 @@ import 'send_to_agent_comment.dart';
 import 'terminal_attachment_uploader.dart';
 import 'terminal_cell_metrics.dart';
 import 'terminal_drop_target.dart';
+import 'terminal_history_view.dart';
 import 'terminal_hydration_strip.dart';
 import 'terminal_hyperlink_preview.dart';
 import 'terminal_quick_actions_bar.dart';
@@ -37,8 +42,21 @@ import 'terminal_upload_button.dart';
 import 'terminal_upload_strip.dart';
 
 /// True on desktop platforms (not web) where a physical keyboard is guaranteed.
-final bool _hasPhysicalKeyboard =
-    !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+///
+/// A getter over an override rather than a plain `final`, because every
+/// touch-only branch it gates is otherwise unreachable from `flutter test`:
+/// the suite runs on a desktop host, so the constant is true in every test
+/// process there is — including the one that has to prove a quick-action key
+/// cannot reach the PTY from under the scrollback reader.
+bool get _hasPhysicalKeyboard =>
+    debugHasPhysicalKeyboardOverride ??
+    (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux));
+
+/// Forces [_hasPhysicalKeyboard] for the duration of a test, the way
+/// `debugDefaultTargetPlatformOverride` forces the platform: set it in
+/// `setUp`, clear it in `tearDown`.
+@visibleForTesting
+bool? debugHasPhysicalKeyboardOverride;
 
 /// The modifier keys `_TerminalViewWrapperState._realModifierState` mirrors. Both
 /// the sided and the generic spelling, because which one arrives depends on the
@@ -179,11 +197,53 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// rather than one hover behind it.
   String? _pendingHoverUri;
 
+  /// True while [TerminalHistoryView] covers the live pane.
+  ///
+  /// Per-SURFACE state, deliberately not on [TerminalTab]: one terminal is
+  /// mounted in several places at once (the agent panel, the pinned pane, the
+  /// terminal list), and a reader opened in one of them is not a reader
+  /// opened in the others.
+  bool _historyOpen = false;
+
+  /// Mirror of `widget.tab.history.boundary`'s epoch.
+  ///
+  /// A turnover is the run's archive being emptied and started over (the guest
+  /// sent `CSI 3 J` or `RIS`), which `TerminalHistoryModel.applyBoundary`
+  /// answers by discarding every loaded row. `hasHistory` can stay true
+  /// straight through it — the new epoch starts archiving at once — so the
+  /// boolean below cannot see the discontinuity and this is the only thing
+  /// that can.
+  int? _archiveEpoch;
+
+  /// Mirror of `widget.tab.history.hasHistory`.
+  ///
+  /// Mirrored rather than read live for the reason [_onFrameReplaced] guards
+  /// itself: `TerminalHistoryModel` notifies on every page and every request,
+  /// and this pane cares about exactly one bit of that — whether the archive
+  /// has anything in it at all — so subscribing the whole terminal subtree to
+  /// the raw notifier would rebuild it for paging it does not render.
+  bool _hasArchivedRows = false;
+
   /// Wraps the terminal subtree so we can detect when the user's primary
   /// focus is inside this view. Required for the paste interceptor, which
   /// must scope its effect to the focused terminal — `HardwareKeyboard`
   /// handlers fire app-wide otherwise.
   final FocusScopeNode _focusScope = FocusScopeNode();
+
+  final FocusNode _liveFocusNode = FocusNode(debugLabel: 'TerminalLiveView');
+
+  /// Scopes [TerminalHistoryView]'s own focus subtree.
+  ///
+  /// Its one job is to make "the keyboard is inside the reader" a question
+  /// this widget can answer: while that is true the focus tree delivers keys
+  /// to the reader and the live view's node is not on the path, so nothing
+  /// can reach the PTY. While it is false — the instant after the reader is
+  /// raised, or if something focuses the pane behind it — [_handleEarlyKey]
+  /// is the only thing standing between a keystroke and a program the user
+  /// cannot see.
+  final FocusScopeNode _readerScope = FocusScopeNode(
+    debugLabel: 'TerminalScrollbackReader',
+  );
 
   /// Explicit soft-keyboard handle for mobile. Terminal taps scroll/select
   /// only (`showKeyboardOnInteraction: false`); the IME is summoned solely by
@@ -400,16 +460,53 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         .setTerminalZoom(current + delta);
   }
 
-  /// Types [text] into this pane's terminal, saying so when the transport
-  /// refuses it.
+  /// Types [text] into this pane's terminal, saying so when it will not land.
   ///
   /// The keyboard's own writes go through the engine's transport (which has
   /// the strip beside it to explain a pause), but these are one-shot lines the
   /// user composed elsewhere — an uploaded file's path, a quick-action key —
   /// and a dropped one leaves no trace on screen at all.
-  void _typeIntoTerminal(String text) {
+  ///
+  /// Also where the reader is checked, and not only at the gestures: each of
+  /// those checks runs BEFORE an await, and the attach pipeline's upload round
+  /// trip ends in this method. A finished upload is refused rather than held,
+  /// so [coveredMessage] is what tells the user their bytes went nowhere.
+  void _typeIntoTerminal(String text, {String? coveredMessage}) {
+    if (_historyOpen) {
+      if (mounted) {
+        showAbSnackBar(
+          context,
+          coveredMessage ?? 'Close the scrollback to type into the terminal',
+        );
+      }
+      return;
+    }
     if (widget.terminalService.sendInput(widget.tab.terminalId, text)) return;
     if (mounted) showSendRefusedSnackBar(context);
+  }
+
+  /// The gated route into [_uploader], refused while the reader is up.
+  ///
+  /// Every attach gesture whose bytes arrive from an `await` comes through
+  /// here — the OS drop, a file picker, a pasted image — because the reader
+  /// can be raised inside that wait, and the affordance the user pressed is
+  /// withdrawn by the time the bytes land.
+  Future<void> _dropAttach({
+    required Uint8List bytes,
+    required String fileName,
+    String? mimeType,
+  }) async {
+    if (_historyOpen) {
+      if (mounted) {
+        showAbSnackBar(context, 'Close the scrollback to attach a file');
+      }
+      return;
+    }
+    await _uploader.attach(
+      bytes: bytes,
+      fileName: fileName,
+      mimeType: mimeType,
+    );
   }
 
   /// The one pipeline every attach gesture goes through. Its upload service is
@@ -448,7 +545,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // transport could not carry says so: the bytes are on the machine but
       // the line the user needs was dropped, not queued, and silence there
       // reads as a finished attach.
-      insert: _typeIntoTerminal,
+      insert: (text) => _typeIntoTerminal(
+        text,
+        coveredMessage:
+            'Upload finished while the scrollback was open — close it and '
+            'attach again',
+      ),
       onError: (message) {
         if (mounted) showAbSnackBar(context, message);
       },
@@ -456,6 +558,9 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     FocusManager.instance.addEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.addListener(_onFocusChange);
     widget.tab.replaceEpoch.addListener(_onFrameReplaced);
+    widget.tab.history.addListener(_onHistoryChanged);
+    _hasArchivedRows = widget.tab.history.hasHistory;
+    _archiveEpoch = widget.tab.history.boundary?.epoch;
     // Pinned: dispose can run after the ProviderScope is gone, and reading
     // through `ref` then throws.
     _container = ref.container;
@@ -481,6 +586,22 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       oldWidget.tab.replaceEpoch.removeListener(_onFrameReplaced);
       widget.tab.replaceEpoch.addListener(_onFrameReplaced);
     }
+    // Same identity test, same reason: `TerminalTab.copyWith` carries the SAME
+    // model instance, so this fires only for a genuinely different tab.
+    if (!identical(oldWidget.tab.history, widget.tab.history)) {
+      oldWidget.tab.history.removeListener(_onHistoryChanged);
+      widget.tab.history.addListener(_onHistoryChanged);
+    }
+    _hasArchivedRows = widget.tab.history.hasHistory;
+    _archiveEpoch = widget.tab.history.boundary?.epoch;
+    // A pane the frame protocol no longer owns has its resident scrollback
+    // back, so the reader is both unreachable and wrong: it renders rows the
+    // agent archived for a run this engine is no longer reading. Assigned
+    // rather than `setState`, because the build that observes it is the one
+    // this callback is already inside.
+    if (_historyOpen && (!_frameOwnsPane || !_hasArchivedRows)) {
+      _historyOpen = false;
+    }
     // The booking below is per-PTY, but this State is not: only
     // `terminal_screen` keys the wrapper by terminalId — the pinned pane
     // (`terminal_list_view`), `terminal_detail_view` and the setup banner all
@@ -491,6 +612,9 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // the exact stranding `sizeEpoch` exists to prevent, reached through the
     // widget tree instead of the wire.
     if (oldWidget.tab.terminalId == widget.tab.terminalId) return;
+    // The reader was opened over ONE terminal's archive. The slot now holds
+    // another, and its own archive is not what the user asked to read.
+    _historyOpen = false;
     _lastSentCols = null;
     _lastSentRows = null;
     _observedSizeEpoch = null;
@@ -522,6 +646,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     FocusManager.instance.removeEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.removeListener(_onFocusChange);
     widget.tab.replaceEpoch.removeListener(_onFrameReplaced);
+    widget.tab.history.removeListener(_onHistoryChanged);
     // Identity alone, no isAgentSurface check: a copy that never published
     // simply never matches. try/catch for the app-teardown case the pinned
     // container exists for.
@@ -536,6 +661,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // Nothing to retract from — the container is gone.
     }
     _focusScope.dispose();
+    _readerScope.dispose();
+    _liveFocusNode.dispose();
     _uploader.dispose();
     _hoveredLink.dispose();
     super.dispose();
@@ -583,7 +710,102 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     _selectionController.clear();
   }
 
+  /// Whether the frame protocol OWNS this pane's engine.
+  ///
+  /// The same question `TerminalService`'s D6/D8 guards ask, and deliberately
+  /// the same answer: a COMMITTED [TerminalDisplayMode.frame], which only a
+  /// `terminal:subscribed` reply produces. An outstanding subscribe is not it
+  /// — legacy is still what paints the pane in that window, and the engine
+  /// still holds the resident scrollback every affordance below keys off.
+  bool get _frameOwnsPane => widget.tab.mode == TerminalDisplayMode.frame;
+
+  /// Tracks the one bit of `TerminalHistoryModel` this pane renders: whether
+  /// the run has archived anything at all.
+  ///
+  /// Also the only place an open reader learns its archive was emptied under
+  /// it. `TerminalService._resetFrameTracking` calls `reset()` on a respawn or
+  /// a re-establishment, and the reader's engine holds whatever it last
+  /// ingested — nothing refills it, so a reader left standing over a reset
+  /// model shows rows the agent will never serve again.
+  ///
+  /// An archive epoch turnover empties it the same way while leaving
+  /// [_hasArchivedRows] true (see [_archiveEpoch]), and is closed rather than
+  /// re-paged for the same reason: a reader's FIRST page is loaded by its own
+  /// mount and by nothing else, so re-entering through the affordance — still
+  /// on screen, because the new epoch really does have rows — goes through
+  /// the one load path there is, instead of a second one here that has to be
+  /// kept in step with it.
+  void _onHistoryChanged() {
+    if (!mounted) return;
+    final has = widget.tab.history.hasHistory;
+    final epoch = widget.tab.history.boundary?.epoch;
+    final close = _historyOpen && (!has || epoch != _archiveEpoch);
+    if (has == _hasArchivedRows && epoch == _archiveEpoch && !close) return;
+    setState(() {
+      _hasArchivedRows = has;
+      _archiveEpoch = epoch;
+      if (close) _historyOpen = false;
+    });
+  }
+
+  /// Raises the scrollback reader over the live pane.
+  ///
+  /// Idempotent by contract: `GhosttyTerminalView.onScrollPastTop` fires once
+  /// per clamped scroll step, so a user still pushing at the top calls this on
+  /// every one of them.
+  void _openHistory() {
+    if (_historyOpen || !_frameOwnsPane || !_hasArchivedRows) return;
+    // The card names a link in the live pane and is laid out against a
+    // position in it. The reader is about to cover both.
+    _pendingHoverUri = null;
+    _hoveredLink.value = null;
+    // The keyboard is not moved from here: [TerminalHistoryView] takes it on
+    // mount — it has to, because the pane behind already holds this scope's
+    // focused child and autofocus would never fire — and [_handleEarlyKey]
+    // pulls it back if anything steals it while the archive is up. A second
+    // request here would only race the reader's own for the same frame.
+    setState(() => _historyOpen = true);
+  }
+
+  /// Dismisses the reader.
+  ///
+  /// Nothing hands the keyboard back explicitly, here or on the three closes
+  /// nobody asked for (an emptied archive, a pane leaving frame mode, a tab
+  /// swap): the reader holds the keyboard through a [FocusScope] of its own,
+  /// and detaching a scope that has the focus returns it to the child of the
+  /// enclosing scope that held it last — the live view. An explicit hand-back
+  /// would have to be conditional on the reader actually holding it anyway,
+  /// since those three can land while the user is typing in another pane.
+  void _closeHistory() {
+    if (!_historyOpen) return;
+    _pendingHoverUri = null;
+    _hoveredLink.value = null;
+    setState(() => _historyOpen = false);
+  }
+
+  /// The reader's last-resort dismissal.
+  ///
+  /// [TerminalHistoryView] answers Escape itself while one of its own nodes
+  /// holds the keyboard; this serves the two cases where none does — the
+  /// scope focused itself because nothing inside it could, and the pane
+  /// behind still holds focus, where [_handleEarlyKey] has already decided to
+  /// swallow the key rather than type it into a hidden program. Without this
+  /// that swallow would leave Escape doing nothing at all.
+  KeyEventResult _handleReaderKey(KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (event.logicalKey != LogicalKeyboardKey.escape) {
+      return KeyEventResult.ignored;
+    }
+    _closeHistory();
+    return KeyEventResult.handled;
+  }
+
   void _requestUserClaim() {
+    // The reader covers the pane edge to edge, so any pointer-down the
+    // translucent claim `Listener` sees while it is up landed in the archive.
+    // Booking a claim for one takes terminal-width ownership from whichever
+    // device is driving — and sends it a resize — in return for a scroll.
+    if (_historyOpen) return;
     if (!_hasPhysicalKeyboard) return;
     if (_claimRequestedByUser && !_claimed) return;
     setState(() {
@@ -618,6 +840,25 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     _trackHeldModifier(event);
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
+    }
+    if (_historyOpen) {
+      // The keyboard is inside the reader, so the focus tree will deliver
+      // there and the live view's node is not on that path. Its own key
+      // handling — Escape to dismiss included — is its to do.
+      if (_readerScope.hasFocus) return KeyEventResult.ignored;
+      // It is not, and the reader covers the pane completely: a key handed on
+      // from here would be typed into a program the user cannot see. In an
+      // agent pane Escape alone is cancel-the-current-turn, so the cost of
+      // forwarding is an interrupted run with nothing on screen to explain
+      // it. Swallowing is what stops the focus tree — see this method's own
+      // note on why only an early handler can.
+      _handleReaderKey(event);
+      // Swallowing stops the WHOLE tree, app-level shortcuts and the reader's
+      // own navigation map with them, so it may not be the resting state:
+      // pulling the keyboard back into the reader costs this one key and
+      // hands the next one to the focus tree normally.
+      _readerScope.requestFocus();
+      return KeyEventResult.handled;
     }
     _requestUserClaim();
 
@@ -795,7 +1036,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       final image = await widget.readImage();
       if (!mounted) return;
       if (image != null) {
-        await _uploader.attach(
+        // [_dropAttach], not `_uploader.attach` directly: `_historyOpen` was
+        // read when the chord was pressed, and the reader can go up inside the
+        // clipboard read above.
+        await _dropAttach(
           bytes: image.bytes,
           fileName: image.fileName,
           mimeType: image.mimeType,
@@ -804,8 +1048,15 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       }
     }
     final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (!mounted) return;
+    // Same gap as the image branch, one await later: this one would write the
+    // clipboard straight into a prompt the archive is covering.
+    if (_historyOpen) {
+      showAbSnackBar(context, 'Close the scrollback to paste');
+      return;
+    }
     final text = data?.text;
-    if (!mounted || text == null || text.isEmpty) return;
+    if (text == null || text.isEmpty) return;
     widget.tab.ghostty.writeBytes(utf8.encode(_sanitizePaste(text)));
   }
 
@@ -902,7 +1153,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   @override
   Widget build(BuildContext context) {
     final isExited = widget.tab.sessionState == TerminalSessionState.exited;
-    final showStoppedView = !widget.tab.isAgent && isExited;
+    final showStoppedView =
+        !widget.tab.isAgent && isExited && widget.tab.replaceEpoch.value == 0;
 
     // Read by terminalId, never held in State: three of this widget's five
     // mount sites are unkeyed and reuse this State across terminal swaps, so
@@ -925,6 +1177,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         // Stack this changes the box the terminal's LayoutBuilder measures by
         // a fixed height instead of being invisible to it.
         if (!showStoppedView) _buildHydrationStrip(hydration, inputPaused),
+        if (!showStoppedView && !widget.tab.isAgent && isExited)
+          AbButton(
+            label: 'Start',
+            onTap: () =>
+                widget.terminalService.requestStart(widget.tab.terminalId),
+          ),
         // Stopped state: centered start button; running: terminal view
         Expanded(
           child: showStoppedView
@@ -932,7 +1190,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
               : _buildTerminal(context, dim: chrome?.dim ?? false),
         ),
 
-        // Quick-action buttons — only on mobile/web (no physical keyboard)
+        // Quick-action buttons — only on mobile/web (no physical keyboard).
+        // Mounted whether or not the reader is up, and withdrawn in place by
+        // [_buildQuickActions]: this is a ROW of the pane, not an overlay, so
+        // dropping it grows the terminal above it — and the pane answers that
+        // by sending the agent a real `terminal:resize` on open and another on
+        // close.
         if (!_hasPhysicalKeyboard && !showStoppedView)
           ValueListenableBuilder<AttachProgress?>(
             valueListenable: _uploader.progress,
@@ -963,16 +1226,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       retry: true,
       dim: true,
     ),
-    TerminalAttachStage.cold ||
-    TerminalAttachStage.awaitingScreen => (
+    TerminalAttachStage.cold || TerminalAttachStage.awaitingScreen => (
       label: 'attaching to terminal',
       tone: AbStatusTone.warning,
       startedAtMs: hydration.requestedAtMs,
       retry: false,
       dim: true,
     ),
-    TerminalAttachStage.refreshing ||
-    TerminalAttachStage.painted => (
+    TerminalAttachStage.refreshing || TerminalAttachStage.painted => (
       label: null,
       tone: AbStatusTone.warning,
       startedAtMs: null,
@@ -1040,7 +1301,22 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
   Widget _buildTerminal(BuildContext context, {required bool dim}) {
     final agentTab = ref.watch(agentTerminalProvider);
-    final showSendButton = _hasSelection && agentTab != null;
+    // The reader is a full-bleed opaque layer, so an affordance built under it
+    // is painted underneath and untappable — an offer the user cannot take.
+    // Each one's own state survives (the engine keeps the selection, the
+    // uploader keeps its progress), so closing the reader brings them all
+    // straight back.
+    final showPaneChrome = !_historyOpen;
+    final showSendButton = _hasSelection && agentTab != null && showPaneChrome;
+    // The archive's PRIMARY entry, not a fallback for the scroll gesture:
+    // `GhosttyTerminalView` forwards the wheel to the guest as button 4/5 the
+    // moment mouse reporting is on and returns before anything can clamp, so
+    // `onScrollPastTop` never fires in a pane running an agent TUI — which is
+    // every pane this feature exists for. The control is therefore the only
+    // route there and may never be suppressed for another affordance; it
+    // shares the top-LEFT column instead, which was chosen precisely because
+    // `SendToAgentButton` owns top-right.
+    final showHistoryButton = _frameOwnsPane && _hasArchivedRows;
     // Desktop's only attach route. Mobile already has one in the quick-actions
     // bar, and a LOCAL session needs none: the agent reads the user's own disk,
     // so a path typed by hand or dropped by the OS already works.
@@ -1087,6 +1363,13 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       FontWeight.w400,
       terminalFontSize,
     );
+    // Hoisted for the same reason: the scrollback reader renders through its
+    // own engine, and type that is derived twice is type that can disagree —
+    // scrolling up would then change how the terminal looks.
+    final terminalBoldFontWeight = AbTokens.bumpedWeight(
+      FontWeight.w700,
+      terminalFontSize,
+    );
     final dpr = MediaQuery.devicePixelRatioOf(context);
     // Prefer what the view actually reported, but only while it still describes
     // these inputs; otherwise measure the cell ourselves so this frame's grid is
@@ -1099,6 +1382,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       key: _viewKey,
       controller: tab.ghostty,
       autofocus: true,
+      focusNode: _liveFocusNode,
       // Mobile: taps scroll/read; the IME comes only from the Keyboard
       // quick-action. Desktop has no IME bridge, so `true` is a no-op there.
       showKeyboardOnInteraction: _hasPhysicalKeyboard,
@@ -1116,7 +1400,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // in explicitly or the terminal, the surface that matters most here,
       // stays thin on exactly the displays the bump exists for.
       fontWeight: terminalFontWeight,
-      boldFontWeight: AbTokens.bumpedWeight(FontWeight.w700, terminalFontSize),
+      boldFontWeight: terminalBoldFontWeight,
       // Center the sub-cell remainder on all four sides so the
       // leftover-padding strip doesn't accumulate asymmetrically
       // (otherwise a TUI whose bg differs from chrome — e.g.
@@ -1137,37 +1421,21 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // terminal selection/hyperlinks match the rest of the system.
       selectionColor: context.antgrid.accent.withValues(alpha: 0.3),
       hyperlinkColor: context.antgrid.accent,
-      // Without this the package falls back to a bare `launchUrlString`, which
-      // uses the platform-default launch mode and reports nothing when it
-      // fails. Route through the app's helper so a link opens externally and a
-      // failure is visible, and so terminal-authored URIs are scheme-checked.
-      // `disclosed` is this widget answering for its own readout, not a guess
-      // from the platform: the card is up for THIS uri, so the destination was
-      // on screen when the activation landed. A desktop touchscreen, a Shift
-      // chord and a link that scrolled out from under a resting pointer all
-      // reach here with nothing shown, and all of them get the sheet — which a
-      // `defaultTargetPlatform` test silently exempted the first of.
-      onOpenHyperlink: (uri) => openContentLink(
-        context,
-        uri,
-        fileService: () => widget.terminalService.session
-            .existingServicesForCheckout(widget.terminalService.checkoutId)
-            ?.fileService,
-        previewService: () => widget.terminalService.session
-            .existingServicesForCheckout(widget.terminalService.checkoutId)
-            ?.previewService,
-        revealView: (view) =>
-            ref.read(workspaceMenuControlProvider)?.reveal(view),
-        disclosed: _hoveredLink.value?.uri == uri,
-      ),
+      onOpenHyperlink: _openHyperlink,
       onHyperlinkHover: _onHyperlinkHover,
       showHeader: false,
       showFocusRing: false,
+      // In frame mode the agent's VT is authoritative and the engine holds
+      // exactly ONE screen, so the track can never move and the wheel can
+      // never scroll it — a control that promises something the pane cannot
+      // do. The rows that left the screen are reached through
+      // [TerminalHistoryView] instead, which is what the gesture below opens.
+      // Legacy keeps its scrollback resident and keeps its scrollbar.
+      showVerticalScrollbar: !_frameOwnsPane,
       // Thin terminal-native scrollbar — thumb tracks
       // `borderStrong` so it reads as a 1px accent line against
       // the dark surface; track stays transparent to avoid a
       // chunky gutter.
-      showVerticalScrollbar: true,
       scrollbarThickness: 6,
       scrollbarThumbColor: context.antgrid.borderStrong,
       scrollbarTrackColor: const Color(0x00000000),
@@ -1220,6 +1488,13 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
           _invalidatedAnchors = null;
         });
       },
+      // A scroll clamped at the top means the user wanted more transcript than
+      // this engine holds. In frame mode that is never the end of the
+      // transcript, only the end of the one screen frame mode leaves resident
+      // — so the gesture keeps going into the archive. [_openHistory] is what
+      // holds the frame-mode and has-an-archive conditions, and is idempotent
+      // because this fires once per clamped step while the user keeps pushing.
+      onScrollPastTop: _openHistory,
       onZoomUpdate: _onZoomUpdate,
       onZoomEnd: _onZoomEnd,
     );
@@ -1239,7 +1514,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // accept: unlike the paste chord this displaces no native behaviour,
       // because a drop on the terminal does nothing at all today.
       child: TerminalDropTarget(
-        attach: _uploader.attach,
+        accepting: !_historyOpen,
+        attach: _dropAttach,
         onError: (m) {
           if (mounted) showAbSnackBar(context, m);
         },
@@ -1279,47 +1555,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                         lineHeightPx: cell.linePixels,
                       );
 
-                      // Driver → fill the viewport. Pin the grid to the last
-                      // settled width via `_TerminalGridFreeze` so transient
-                      // resizes (e.g. dragging the agent/workspace divider)
-                      // don't spam Ghostty grid resizes — Ink-style TUI
-                      // redraws (Claude Code) leak stale fragments when the
-                      // grid changes underneath them. The engine DOES reflow
-                      // its own soft-wrapped rows, but that reaches none of
-                      // this: such a TUI wraps its output itself, so every row
-                      // it wrote is a hard break reflow cannot re-join
-                      // (`terminal_reflow_contract_test.dart`).
-                      if (amDriver) {
-                        return _TerminalGridFreeze(
-                          onSettled: _onRenderSizeSettled,
-                          // Only when the engine is provably empty (cold,
-                          // awaitingScreen, failed) — never a painted screen,
-                          // however stale the pull sitting over it reads.
-                          child: dim
-                              ? Opacity(
-                                  opacity: AbTokens.opacityDisabled,
-                                  child: terminalView,
-                                )
-                              : terminalView,
-                        );
-                      }
-
-                      // Non-driver → size the grid to the driver's authoritative
-                      // cols AND rows, then letterbox it. No `_TerminalGridFreeze`
-                      // here — a viewer must track the authoritative geometry, not
-                      // pin a local one.
-                      //
-                      // Rows matter for the same reason cols do, and the attach
-                      // blob is what makes it acute: the agent serializes a screen
-                      // exactly `tab.rows` tall, so an engine with FEWER rows
-                      // scrolls the blob's opening rows away as it paints and every
-                      // absolute cursor move in the live stream that follows lands
-                      // short. A phone viewing a desktop-driven terminal is that
-                      // case by default.
-                      // Through `gridExtentFor` rather than inline: `cells *
-                      // metric` does not survive the view's own
-                      // `floor((extent - padding) / metric)`, and a cell lost
-                      // there is the mismatch this pinning exists to remove.
+                      // Both viewers paint the frame's grid. Driver arbitration
+                      // still derives PTY resize requests from the local viewport.
                       final authWidth = gridExtentFor(
                         cells: tab.cols,
                         metric: cell.charWidth,
@@ -1338,7 +1575,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       // become unreachable. Scaling keeps the whole driver screen
                       // visible with no gesture to arbitrate, and never enlarges —
                       // so the fits case is a plain centred letterbox on both axes.
-                      return FittedBox(
+                      final authoritativeView = FittedBox(
                         fit: BoxFit.scaleDown,
                         alignment: Alignment.center,
                         child: SizedBox(
@@ -1356,42 +1593,63 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                               : terminalView,
                         ),
                       );
+                      return amDriver
+                          ? _TerminalGridFreeze(
+                              onSettled: _onRenderSizeSettled,
+                              child: authoritativeView,
+                            )
+                          : authoritativeView;
                     },
                   ),
                 ),
                 // Top-LEFT, deliberately: `SendToAgentButton` owns top-right and
                 // both can be live at once, while the bottom edge is where the
                 // prompt — and the path this types into it — lands.
-                Positioned(
-                  top: AbTokens.space8,
-                  left: AbTokens.space8,
-                  child: ValueListenableBuilder<AttachProgress?>(
-                    valueListenable: _uploader.progress,
-                    builder: (context, attach, _) => Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (showAttachButton)
-                          TerminalAttachOverlayButton(
-                            pick: pickUploadFile,
-                            onPicked: (picked) => _uploader.attach(
-                              bytes: picked.bytes,
-                              fileName: picked.name,
-                            ),
-                            busy: attach != null,
-                            onError: (m) {
-                              if (mounted) showAbSnackBar(context, m);
-                            },
-                          ),
-                        if (attach != null) ...[
+                if (showPaneChrome)
+                  Positioned(
+                    top: AbTokens.space8,
+                    left: AbTokens.space8,
+                    child: ValueListenableBuilder<AttachProgress?>(
+                      valueListenable: _uploader.progress,
+                      builder: (context, attach, _) => Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
                           if (showAttachButton)
-                            const SizedBox(height: AbTokens.space6),
-                          TerminalUploadStrip(progress: attach),
+                            TerminalAttachOverlayButton(
+                              pick: pickUploadFile,
+                              onPicked: (picked) => _dropAttach(
+                                bytes: picked.bytes,
+                                fileName: picked.name,
+                              ),
+                              busy: attach != null,
+                              onError: (m) {
+                                if (mounted) showAbSnackBar(context, m);
+                              },
+                            ),
+                          if (attach != null) ...[
+                            if (showAttachButton)
+                              const SizedBox(height: AbTokens.space6),
+                            TerminalUploadStrip(progress: attach),
+                          ],
+                          if (showHistoryButton) ...[
+                            if (showAttachButton || attach != null)
+                              const SizedBox(height: AbTokens.space6),
+                            // The claim `Listener` at the top of this subtree is
+                            // translucent, so it stays on the hit path above
+                            // whatever the press actually lands on — pressing
+                            // this books the user claim exactly as pressing the
+                            // grid does, and the button takes only the tap.
+                            AbIconButton(
+                              icon: AbIcons.moveToTop,
+                              tooltip: 'Scrollback',
+                              onTap: _openHistory,
+                            ),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
                   ),
-                ),
                 if (showSendButton)
                   SendToAgentButton(
                     link: _sendToAgentLink,
@@ -1399,6 +1657,58 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       'TerminalView',
                       'send to agent failed',
                       _onSendToAgent,
+                    ),
+                  ),
+                if (_historyOpen)
+                  Positioned.fill(
+                    // OVER the live pane, never instead of it: the engine, its
+                    // focus, its selection and its grid bookkeeping all stay
+                    // mounted, so closing returns the pane exactly as it was
+                    // left — the same unmount hazard [_viewKey] exists for,
+                    // reached through a different route.
+                    child: MouseRegion(
+                      // Stated rather than left to the default, because the
+                      // reader depends on it: the pane's own hover region and
+                      // the live view's link-hover region both sit directly
+                      // below this one, and a transparent region here would
+                      // report a pointer moving over the READER to both —
+                      // repointing the destination card at a link in a pane
+                      // the user cannot see. Presses are not this flag's
+                      // business at all; the reader's own opaque root is what
+                      // keeps those off the terminal's gesture recognizers.
+                      opaque: true,
+                      // The reader's links report through the SAME
+                      // [_onHyperlinkHover], and the card they anchor is laid
+                      // out in the Stack's own space — which a
+                      // `Positioned.fill` shares, so a position sampled here
+                      // means what one sampled over the live pane means.
+                      // Without it a link hovered in the reader would repoint
+                      // a card still anchored where the live pane last saw
+                      // one.
+                      onHover: _onHoverPosition,
+                      onExit: (_) {
+                        _pendingHoverUri = null;
+                        _hoveredLink.value = null;
+                      },
+                      child: FocusScope(
+                        node: _readerScope,
+                        onKeyEvent: (_, event) => _handleReaderKey(event),
+                        child: TerminalHistoryView(
+                          model: tab.history,
+                          onLoadMore: () => widget.terminalService
+                              .requestTerminalHistoryPage(tab.terminalId),
+                          onClose: _closeHistory,
+                          // The live pane's own measured type, not a
+                          // re-derived copy, so zoom and the UI Size setting
+                          // land on both surfaces identically.
+                          fontSize: terminalFontSize,
+                          fontWeight: terminalFontWeight,
+                          boldFontWeight: terminalBoldFontWeight,
+                          minimumContrastRatio: _minContrastRatio,
+                          onOpenHyperlink: _openHyperlink,
+                          onHyperlinkHover: _onHyperlinkHover,
+                        ),
+                      ),
                     ),
                   ),
                 Positioned.fill(
@@ -1419,6 +1729,34 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       ),
     );
   }
+
+  /// Opens a terminal-authored link, for the live pane and the scrollback
+  /// reader alike — a link reached by scrolling up has to behave exactly as
+  /// one still on screen does.
+  ///
+  /// Without this the package falls back to a bare `launchUrlString`, which
+  /// uses the platform-default launch mode and reports nothing when it fails.
+  /// Routing through the app's helper is what makes a link open externally,
+  /// makes a failure visible, and scheme-checks terminal-authored URIs.
+  ///
+  /// `disclosed` is this widget answering for its own readout, not a guess
+  /// from the platform: the card is up for THIS uri, so the destination was on
+  /// screen when the activation landed. A desktop touchscreen, a Shift chord
+  /// and a link that scrolled out from under a resting pointer all reach here
+  /// with nothing shown, and all of them get the sheet — which a
+  /// `defaultTargetPlatform` test silently exempted the first of.
+  Future<void> _openHyperlink(String uri) => openContentLink(
+    context,
+    uri,
+    fileService: () => widget.terminalService.session
+        .existingServicesForCheckout(widget.terminalService.checkoutId)
+        ?.fileService,
+    previewService: () => widget.terminalService.session
+        .existingServicesForCheckout(widget.terminalService.checkoutId)
+        ?.previewService,
+    revealView: (view) => ref.read(workspaceMenuControlProvider)?.reveal(view),
+    disclosed: _hoveredLink.value?.uri == uri,
+  );
 
   /// Shows or hides the destination readout as the pointer enters and leaves
   /// links.
@@ -1571,43 +1909,31 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   }
 
   Widget _buildStoppedView(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.terminal,
-            size: 48,
-            color: colorScheme.onSurface.withValues(alpha: 0.3),
-          ),
-          const SizedBox(height: AbTokens.space16),
-          Text(
-            'Terminal stopped',
-            style: TextStyle(
-              color: colorScheme.onSurface.withValues(alpha: 0.5),
-            ),
-          ),
-          const SizedBox(
-            height: 24,
-          ), // 24px non-ladder vertical breathing room before CTA
-          FilledButton.icon(
-            onPressed: () =>
-                widget.terminalService.requestStart(widget.tab.terminalId),
-            icon: const Icon(Icons.play_arrow),
-            label: const Text('Start'),
-          ),
-        ],
+    return AbEmptyState(
+      icon: AbIcons.terminal,
+      title: 'Terminal stopped',
+      action: AbButton(
+        label: 'Start',
+        onTap: () => widget.terminalService.requestStart(widget.tab.terminalId),
       ),
     );
   }
 
+  /// The touch key strip, live or withdrawn.
+  ///
+  /// Withdrawn means covered, never unmounted: the bar is laid out in the pane
+  /// [Column] (see [build]), so keeping it there is what holds the row at one
+  /// height across an open and a close. Its keys reach the PTY through a plain
+  /// callback with no focus node in between — nothing the reader does to focus
+  /// stops them, and in an agent pane Esc alone cancels the turn — so the
+  /// notice covers them and [Visibility] pointer-ignores them. Either alone
+  /// keeps a tap off a key.
   Widget _buildQuickActions(bool uploadBusy) {
-    return TerminalQuickActionsBar(
+    final bar = TerminalQuickActionsBar(
       softKeyboardController: _softKeyboardController,
       onPick: pickUploadFile,
       onPicked: (picked) =>
-          _uploader.attach(bytes: picked.bytes, fileName: picked.name),
+          _dropAttach(bytes: picked.bytes, fileName: picked.name),
       uploadBusy: uploadBusy,
       onUploadError: (m) {
         if (mounted) showAbSnackBar(context, m);
@@ -1617,6 +1943,39 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       onZoomIn: () => _stepZoom(0.1),
       onZoomReset: () =>
           ref.read(appSettingsServiceProvider.notifier).setTerminalZoom(1.0),
+    );
+    if (!_historyOpen) return bar;
+    return Stack(
+      children: [
+        Visibility(
+          visible: false,
+          maintainState: true,
+          maintainAnimation: true,
+          maintainSize: true,
+          child: bar,
+        ),
+        Positioned.fill(child: _buildKeysWithdrawn(context)),
+      ],
+    );
+  }
+
+  /// Says the keys are off, in the space they occupy, so the strip does not
+  /// read as a row of controls that stopped answering.
+  Widget _buildKeysWithdrawn(BuildContext context) {
+    final p = context.antgrid;
+    return ColoredBox(
+      color: p.bgElevated,
+      child: Center(
+        child: Text(
+          'Keys are off while the scrollback is open',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: p.textMuted,
+          ),
+        ),
+      ),
     );
   }
 }

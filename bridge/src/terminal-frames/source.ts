@@ -7,7 +7,7 @@ import {
   type TerminalHistoryRow, type TerminalScreenFrame,
 } from "./protocol";
 import type { TerminalRunHistory } from "./history";
-import { installTerminalQueries, type TerminalQueryColors } from "./queries";
+import { installTerminalQueries, OscQueryTerminators, type TerminalQueryColors } from "./queries";
 export { TERMINAL_FRAME_INTERVAL_MS as FRAME_INTERVAL_MS } from "./protocol";
 export const TerminalFrameSchema = TerminalScreenFrameSchema;
 export type { TerminalScreenFrame };
@@ -37,18 +37,6 @@ export interface TerminalHistoryStatus {
   discarded: number;
 }
 
-/** The pre-resize state a row shrink destroys before anything can read it. */
-interface ResizeSnapshot {
-  baseY: number;
-  cols: number;
-  rows: number;
-  /** Normal-buffer cursor row. It decides how many rows a shrink pops off the
-   *  bottom rather than scrolling into scrollback. */
-  cursorY: number;
-  /** Blank rows at the bottom of the normal buffer, which a shrink may take
-   *  without losing anything. */
-  blankTail: number;
-}
 
 /** Independent display frames; no raw tail is ever written to the viewer. */
 export class TerminalFrameSource extends TerminalScreen {
@@ -58,15 +46,13 @@ export class TerminalFrameSource extends TerminalScreen {
   private atBoundary = false;
   private readonly listeners = new Set<() => void>();
   private readonly modes = new TerminalModeTracker();
+  private readonly oscTerminators = new OscQueryTerminators();
   private pendingChars = 0;
   private failed: Error | undefined;
   private _revision = 0;
   private _oversize = false;
   private syncSince: number | undefined;
   private readonly keyboard = { normal: [0], alternate: [0] };
-  /** Rows a grow-resize pulled back OUT of scrollback, encoded, in the order
-   *  they will leave again. */
-  private restored: string[] = [];
   private gaps = 0;
   private rewraps = 0;
   private discarded = 0;
@@ -162,6 +148,7 @@ export class TerminalFrameSource extends TerminalScreen {
     this.unparsed.push(data);
     this.pendingChars += data.length;
     try {
+      if (this.detachQueries) this.oscTerminators.feed(data);
       this.term.write(data, () => {
         if (this.failed) return;
         // FIFO: xterm parses writes in order and fires their callbacks in the
@@ -185,22 +172,56 @@ export class TerminalFrameSource extends TerminalScreen {
   }
 
   override resize(cols: number, rows: number): void {
-    // A resize belongs BETWEEN writes, including writes not parsed yet.
     this.term.write("", () => {
       if (this.isDisposed || this.failed) return;
       try {
-        const before = this.history ? this.resizeSnapshot() : undefined;
-        super.resize(cols, rows);
-        if (before) this.reconcileResize(before);
-      } catch {
-        // The one archive path that does not run under the adapter's own guard:
-        // reconciliation calls `history.append()` directly, and a store that has
-        // begun failing raises from inside this callback. Rows were evicted
-        // either way and their count is no longer recoverable, so this degrades
-        // history rather than reporting a clean geometry change.
-        this.gaps++;
+        if (!this.history) {
+          super.resize(cols, rows);
+        } else {
+          // The archive owns rows above the viewport. Keeping them in xterm
+          // during resize would rejoin them with live rows or pull them back
+          // into the viewport, violating the frame's history boundary.
+          this.adapter.detachArchivedRows();
+          const oldCols = this.term.cols;
+          const oldRows = this.term.rows;
+          const targetRows = Math.min(500, Math.max(1, Math.floor(rows) || 1));
+          const targetCols = Math.min(1000, Math.max(2, Math.floor(cols) || 2));
+          const buffer = this.term.buffer.normal;
+          const shed = Math.max(0, oldRows - targetRows);
+          const popped = Math.min(shed, oldRows - 1 - buffer.cursorY);
+          const crossed = shed - popped;
+          // A row shrink may recycle the whole ring in one call. Capture the
+          // crossing rows at their original width before any mutation.
+          for (let i = 0; i < crossed; i++) {
+            const row = this.adapter.normalRow(i);
+            if (row) this.archive(row);
+          }
+          for (let i = oldRows - popped; i < oldRows; i++) {
+            if (buffer.getLine(i)?.translateToString(true)) this.discarded++;
+          }
+          super.resize(oldCols, targetRows);
+          this.adapter.detachArchivedRows();
+          if (targetCols !== oldCols) {
+            const scrollback = this.term.options.scrollback!;
+            this.term.options.scrollback =
+                Math.ceil(oldCols * targetRows / targetCols) + targetRows;
+            try {
+              super.resize(targetCols, targetRows);
+              for (let i = 0; i < this.term.buffer.normal.baseY; i++) {
+                const row = this.adapter.normalRow(i);
+                if (row) this.archive(row);
+              }
+              this.adapter.detachArchivedRows();
+            } finally {
+              this.term.options.scrollback = scrollback;
+            }
+          }
+        }
+      } catch (error) {
+        this.fail(error instanceof Error ? error : new Error(String(error)));
       }
       this._revision++;
+      for (const listener of this.listeners) this.guarded(listener);
     });
   }
 
@@ -210,10 +231,7 @@ export class TerminalFrameSource extends TerminalScreen {
    *  attachment, and the next screen clears it. Never a latch: a display-sized
    *  problem must not destroy the authoritative VT or the row archive. */
   get oversize(): boolean { return this._oversize; }
-  /** Set once `feed()` has given up on this run — see its own doc. The rebuild
-   *  is TerminalManager's: it owns geometry and the reseed source, this class
-   *  only reports that it can no longer be trusted. Never clears itself; a
-   *  fresh run gets a fresh `TerminalFrameSource` instead. */
+  /** A parser failure is latched for the lifetime of its PTY run. */
   get failure(): Error | undefined { return this.failed; }
   get historyStatus(): TerminalHistoryStatus {
     return {
@@ -260,16 +278,26 @@ export class TerminalFrameSource extends TerminalScreen {
     this.detachQueries?.();
     this.detachQueries = installTerminalQueries(this.term, reply,
       () => this.keyboard[this.term.buffer.active.type].at(-1)!,
-      () => this.adapter.margins().top, colors);
+      () => this.adapter.margins().top, colors, (code) => this.oscTerminators.take(code));
   }
 
-  capture(now: number): TerminalScreenFrame | null {
+  /** `final` marks the capture published as the run's final frame, and
+   *  waives only the synchronized-output hold. The wait exists so a half-drawn
+   *  frame block is never published while its author is still drawing; a guest
+   *  that has exited inside one is never going to close it, so holding out
+   *  costs the viewer the screen the program died holding and buys nothing.
+   *  The frame still reports `syncTimedOut` even though nothing timed out: what
+   *  the flag tells a viewer is "published from inside an open block, so it may
+   *  be half-drawn", and that is exactly true of a waived hold. A viewer
+   *  distinguishing the two would be reading the elapsed timer, which no
+   *  consumer wants and no frame carries. */
+  capture(now: number, opts: { final?: boolean } = {}): TerminalScreenFrame | null {
     if (this.failed) throw this.failed;
     if (this.isDisposed || (this.hasPendingTail && !this.atBoundary)) return null;
     const syncing = this.term.modes.synchronizedOutputMode;
     if (syncing) this.syncSince ??= now;
     else this.syncSince = undefined;
-    const syncTimedOut = syncing && now - this.syncSince! >= SYNC_OUTPUT_TIMEOUT_MS;
+    const syncTimedOut = syncing && (opts.final === true || now - this.syncSince! >= SYNC_OUTPUT_TIMEOUT_MS);
     if (syncing && !syncTimedOut) return null;
 
     const buffer = this.term.buffer.active;
@@ -308,83 +336,16 @@ export class TerminalFrameSource extends TerminalScreen {
   private fail(error: Error): void {
     if (this.failed) return;
     this.failed = error;
+    this._revision++;
     this.unparsed.length = 0;
     this.pendingChars = 0;
-    this.restored = [];
+    for (const listener of this.listeners) this.guarded(listener);
   }
 
-  /**
-   * A grow-resize un-scrolls rows back into the viewport, and without this they
-   * are archived a SECOND time under fresh ids when they leave again. They come
-   * back out in the same order, so the repeat is matched by content and dropped;
-   * a row the guest overwrote first will not match, and is archived normally.
-   */
   private archive(row: Omit<TerminalHistoryRow, "rowId">): void {
-    if (this.restored.length) {
-      if (this.restored[0] === JSON.stringify(row)) { this.restored.shift(); return; }
-      this.restored = [];
-    }
-    this.history?.append(row);
+    try { this.history?.append(row); } catch { this.gaps++; }
   }
 
-  /** Read BEFORE the resize: everything it describes is what the resize is
-   *  about to destroy, and afterwards neither the count nor the content of what
-   *  xterm took is recoverable. */
-  private resizeSnapshot(): ResizeSnapshot {
-    const buffer = this.term.buffer.normal;
-    let blankTail = 0;
-    while (blankTail < this.term.rows
-      && !buffer.getLine(buffer.length - 1 - blankTail)?.translateToString(true)) blankTail++;
-    return {
-      baseY: buffer.baseY, cols: this.term.cols, rows: this.term.rows,
-      cursorY: buffer.cursorY, blankTail,
-    };
-  }
-
-  /**
-   * xterm moves rows into and out of scrollback inside `Buffer.resize` without
-   * ever calling `BufferService.scroll`; `onResize` fires only after the
-   * mutation and `onScroll`/`onLineFeed` never fire at all. This call site is
-   * the sole interception point.
-   *
-   * A row shrink is the family `baseY` alone cannot describe. xterm sheds one
-   * row per lost line, and each is either POPPED off the bottom — which it does
-   * for as long as anything sits below the cursor, leaving `baseY` untouched —
-   * or scrolled off the top; the cursor's row at the moment of the resize fixes
-   * the split. Of the rows that went up, only the ones the emulator's ring still
-   * holds can be read back: a ring already at its ceiling drops the rest inside
-   * the same call, and those are the hole. Every other family — a grow pulling
-   * rows back down, a reflow redistributing them — moves through `baseY` alone.
-   */
-  private reconcileResize(before: ResizeSnapshot): void {
-    const buffer = this.term.buffer.normal;
-    const rewrapped = this.term.cols !== before.cols;
-    if (rewrapped) this.rewraps++;
-    const shed = before.rows - this.term.rows;
-    const popped = shed > 0 ? Math.max(0, Math.min(shed, before.rows - 1 - before.cursorY)) : 0;
-    // The blank padding under a cursor parked mid-screen is what a shrink is
-    // for; only rows that held something are a loss worth reporting.
-    this.discarded += Math.max(0, popped - before.blankTail);
-    const crossed = shed > 0 ? shed - popped : buffer.baseY - before.baseY;
-    if (crossed > 0) {
-      const readable = Math.min(crossed, buffer.baseY);
-      // Read AFTER the resize: a column reflow changes the shape of the rows it
-      // pushes out, so a pre-resize snapshot would archive the wrong geometry.
-      for (let index = buffer.baseY - readable; index < buffer.baseY; index++) {
-        const row = this.adapter.normalRow(index);
-        if (row) this.archive(row);
-        else this.gaps++;
-      }
-      this.gaps += crossed - readable;
-    } else if (crossed < 0 && !rewrapped) {
-      this.restored = Array.from({ length: -crossed }, (_, index) =>
-        JSON.stringify(this.adapter.normalRow(buffer.baseY + index) ?? null));
-    } else if (crossed < 0) {
-      // A column grow REJOINS rows already published under separate ids into one
-      // wider live row. Nothing an append-only history can say puts that back.
-      this.gaps += -crossed;
-    }
-  }
 
   /** A cleared history starts a fresh epoch, which is the app's discontinuity
    *  signal — so the gaps and rewraps describing the old one go with it. */
@@ -395,7 +356,6 @@ export class TerminalFrameSource extends TerminalScreen {
     // way: a history that could not be cleared is still not describing this
     // epoch.
     this.guarded(() => this.history?.clear());
-    this.restored = [];
     this.gaps = 0;
     this.rewraps = 0;
     this.discarded = 0;

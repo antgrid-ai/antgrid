@@ -167,7 +167,8 @@ export class LocalListener implements TransportSubscriber {
   readonly audience = "loopback" as const;
 
   /** TransportSubscriber — bus -> wire (broadcast to owner only; spec invariant: ≤1 owner). */
-  deliver(msg: AbMessage, channel: Channel): void {
+  deliver(msg: AbMessage, channel: Channel, signal?: AbortSignal): void {
+    if (signal?.aborted) return;
     if (!this.ownerSocket) {
       // The frame is discarded with no log at any level, no retry and no notice
       // to anyone: a core emitting into a window where the desktop has quit,

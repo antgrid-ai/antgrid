@@ -7,6 +7,46 @@ export interface TerminalQueryColors {
   cursor: string;
 }
 
+/** Retains OSC delimiters which xterm's public parser callback omits. */
+export class OscQueryTerminators {
+  private state: "ground" | "escape" | "osc" | "oscEscape" | "string" | "stringEscape" = "ground";
+  private payload = "";
+  private completed: { code: number; terminator: string }[] = [];
+
+  feed(data: string): void {
+    for (const char of data) {
+      if (char === "\x18" || char === "\x1a") { this.state = "ground"; this.payload = ""; continue; }
+      if (this.state === "osc" || this.state === "oscEscape") {
+        if (char === "\x07" || char === "\x9c" || (this.state === "oscEscape" && char === "\\")) {
+          const match = /^(10|11|12);\?$/.exec(this.payload);
+          if (match) this.completed.push({ code: Number(match[1]), terminator: char === "\x07" ? "\x07" : "\x1b\\" });
+          this.state = "ground"; this.payload = ""; continue;
+        }
+        if (char === "\x1b") { this.state = "oscEscape"; continue; }
+        if (this.state === "oscEscape") { this.state = "escape"; this.payload = ""; }
+        else { if (this.payload.length < 32) this.payload += char; continue; }
+      }
+      if (this.state === "string" || this.state === "stringEscape") {
+        if (char === "\x9c" || (this.state === "stringEscape" && char === "\\")) this.state = "ground";
+        else this.state = char === "\x1b" ? "stringEscape" : "string";
+        continue;
+      }
+      if (this.state === "escape") {
+        if (char === "]") { this.state = "osc"; this.payload = ""; }
+        else if ("PX^_".includes(char)) this.state = "string";
+        else this.state = char === "\x1b" ? "escape" : "ground";
+      } else if (char === "\x1b") this.state = "escape";
+      else if (char === "\x9d") { this.state = "osc"; this.payload = ""; }
+      else if ("\x90\x98\x9e\x9f".includes(char)) this.state = "string";
+    }
+  }
+
+  take(code: number): string {
+    const next = this.completed.shift();
+    return next?.code === code ? next.terminator : "\x07";
+  }
+}
+
 /**
  * Answers capability queries at the PARSER position, so a query observes the
  * output that preceded it rather than later bytes in the same PTY chunk.
@@ -31,10 +71,8 @@ export interface TerminalQueryColors {
  * under xterm's identity. Anything not registered here is deliberately
  * unanswered, and an unanswered query costs a TUI a fallback, never a hang.
  *
- * OSC 10/11/12 are NOT answered here even though the byte responder answers
- * them: `registerOscHandler` surfaces the payload only, never the ST-vs-BEL
- * terminator the guest used, and a guest reading until BEL never sees one.
- * Those three stay with the byte-level responder, which sees raw bytes.
+ * OSC delimiter metadata is tracked from the same ordered input so color
+ * replies preserve the guest's BEL or ST terminator.
  */
 export function installTerminalQueries(
   term: Terminal,
@@ -47,6 +85,7 @@ export function installTerminalQueries(
    *  alternate-screen switch. */
   regionTop: () => number,
   colors: TerminalQueryColors,
+  oscTerminator: (code: number) => string = () => "\x07",
 ): () => void {
   const bytes = new VtCapabilityResponder(colors);
   // Private xterm state with no public accessor — same caution as
@@ -131,6 +170,13 @@ export function installTerminalQueries(
   };
 
   const subscriptions = [
+    ...([10, 11, 12] as const).map((code) => term.parser.registerOscHandler(code, (data) => {
+      if (data === "?") {
+        const color = code === 10 ? colors.foreground : code === 11 ? colors.background : colors.cursor;
+        send(`\x1b]${code};${color}${oscTerminator(code)}`);
+      }
+      return true;
+    })),
     term.parser.registerCsiHandler({ final: "c" }, (params) => {
       if (isDefaulted(params)) answer("\x1b[c");
       return true;

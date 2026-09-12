@@ -1,19 +1,24 @@
 # Serialized terminal frames: implementation plan
 
-Status: proposed implementation sequence. Production transport remains unchanged.
+Status: coordinated app/bridge replacement implemented; release qualification is
+tracked below. Both components must be upgraded together.
+
+The implementation uses snapshot-only viewing. Local-transport encryption and
+the full supported-host real-agent/paint-latency qualification remain open gates;
+the existing bearer-token loopback transport is not encrypted by this change.
 
 ## Outcome
 
 Make the bridge's headless VT the authoritative terminal state. Send independent
 serialized screens at a maximum of 20 frames per second to each active viewer.
 Retain normal-buffer scrollback separately and load it on demand. Preserve native
-OSC 8 hyperlinks, keyboard and mouse behavior, terminal lifecycle, and encrypted
-local/remote delivery.
+OSC 8 hyperlinks, keyboard and mouse behavior, terminal lifecycle, and existing
+transport authentication/encryption boundaries.
 
-An individual viewer uses either the existing output protocol or the new frame
-protocol for an attachment. A frame-mode viewer never receives live raw PTY output
-or legacy attach snapshots. Keeping compatibility for an older app does not mean
-mixing the two display paths in a viewer.
+Frames are the only app display protocol. Unsupported terminal protocol versions
+require an upgrade. Attach failures, unsubscribe, timeout, and reconnect never
+resume raw PTY streaming or legacy attach snapshots. Raw bytes remain available
+to bridge-internal consumers such as port detection and hooks.
 
 The [local prototype](terminal-frame-prototype.md) establishes basic serialization,
 native Ghostty link restoration, and bounded delivery. It does not establish
@@ -47,17 +52,16 @@ production agent compatibility, scalable history, or transport integration.
 
 ### Per-viewer negotiation and identity
 
-Add a versioned `terminalFramesV1` capability, mirrored in bridge `app:ready` and
-both Dart local and remote hello paths. A capability advertises support; a
-successful terminal subscription selects frame mode. Use a correlated subscription
-response so the app knows which mode is active and which run it attached to.
+The `terminalFramesV1` capability is mirrored in bridge `app:ready` and both Dart
+local and remote hello paths. A successful subscription supplies the authoritative
+run and attachment IDs; no other display mode is negotiated.
 
 Key a subscription by authenticated connection, project stream, checkout, terminal,
 PTY run ID, and attachment ID. The bridge binds it to the actual inbound source;
 a client-supplied viewer ID is not authorization. A same-name PTY respawn gets a
 new run ID. Reconnect or reattach gets a new attachment ID.
 
-Proposed application protocol surface, with final names settled in step 1:
+Application protocol surface (`bridge/src/protocol.ts`):
 
 | Operation | Essential fields and behavior |
 |---|---|
@@ -72,24 +76,21 @@ Use Zod for every wire payload, including RPC parameters/results. If using new
 message types, update `AbMessageSchema`, `KNOWN_TYPES`, exports, dispatch, Dart
 models/parser, and heavy/status classification. Mirror checkout-variable types
 in both languages. New RPCs need the same checkout resolution and deletion checks
-as `handleTerminalSnapshotRpc`, plus requester-only responses.
+as other checkout-scoped terminal operations, plus requester-only responses.
 
-Negotiate before enabling a display writer. During rollout, unsupported peers use
-the existing protocol from attachment start. A timeout is an attach failure, not
-proof that the peer is old. Switching modes requires retiring the old attachment,
-cancelling its pending work, and establishing a fresh display baseline.
+Subscribe before enabling a display writer. Unsupported peers receive an upgrade
+status. A timeout is an attachment failure; recovery retires the attachment,
+cancels pending work, and establishes a fresh frame baseline.
 
 ### Delivery and backpressure
 
-Replace broadcast display delivery with per-subscriber selection at the outbound
-boundary. Legacy consumers may still receive their existing output messages;
-frame subscribers receive only frames. Preserve internal bus consumers and the
-existing terminal-owner/checkout ID rewrite.
+Per-subscriber delivery replaces broadcast terminal display at the outbound
+boundary. Internal bus consumers and terminal-owner/checkout ID rewriting remain.
 
 Use a bounded credit window per viewer, with both frame-count and byte limits,
-plus a connection-wide terminal budget. A provisional starting point is at most
-four unacknowledged frames and 1 MiB of frame payload per viewer; validate these
-values against transport fragmentation limits and realistic maximum geometry.
+plus a 2 MiB connection-wide terminal budget. At most four unacknowledged frames
+and 1 MiB of encoded frame payload are allowed per viewer. Existing transport
+credit windows are unchanged.
 Reject unsupported geometry or an oversized frame explicitly, without cropping.
 
 - Keep a dirty revision instead of a FIFO of unsent serialized screens. When
@@ -129,7 +130,10 @@ OSC 8 adapter.
 
 Store immutable row IDs, text/style runs, link targets, original width, and soft-wrap
 metadata. Preserve archived physical rows at their original geometry in v1;
-resizing the live terminal does not rewrite the archive. Define the live/history
+resizing the live terminal does not rewrite the archive. Archived rows are never
+pulled back into the viewport when it grows; new viewport space is blank. Only
+live rows participate in resize reflow, and newly ejected rows are archived at
+their current width. Define the live/history
 boundary at the same parser revision as the frame, so scrolling between them
 neither repeats nor skips rows. Honor explicit history clears according to a
 documented policy, rather than accidentally retaining cleared rows in the UI.
@@ -149,8 +153,10 @@ failure should report unavailable history while preserving valid live viewing.
 
 Use bridge-managed session data paths keyed by run ID, never user-provided paths.
 Define local file permissions, retention on stop/restart/delete, and disk-full
-behavior. Proposed rollout defaults are finite per-session and machine-wide
-quotas, chosen from measured recordings before default enablement.
+behavior. Defaults are 256 MiB per run and 2 GiB per machine. SQLite retains
+committed rows and run identities across bridge restarts, until explicit deletion
+or eviction. The app cache is bounded by 2,000 rows and 16 MiB, with pages capped
+at 200 rows and 256 KiB. A history clear starts a new epoch.
 
 Fullscreen alternate-buffer redraws do not form a scrollback transcript. Keep
 normal-buffer history available, and retain the product's structured agent
@@ -160,7 +166,7 @@ fullscreen recordings is outside this implementation.
 ### App display, input, and links
 
 - Add a dedicated frame application path to `TerminalService`, with run and
-  attachment guards. Keep frame IDs separate from legacy output sequence cutoffs.
+  attachment guards. Frame sequences are scoped to each attachment.
   Reject stale geometry and frames by attachment/order, not by arrival time alone.
 - Apply each frame atomically to the native Ghostty controller, without generating
   duplicate scrollback. Use a separate history model/view above the live screen,
@@ -198,13 +204,19 @@ fullscreen recordings is outside this implementation.
 | 4. Encrypted viewer delivery | `agent-core.ts`, subscriber/transport adapters including local listener, scheduler integration, Dart handshake/session plumbing | Two viewers with different capabilities/speeds remain isolated; routing, access revocation, E2E, bounded queues, and mode exclusivity pass |
 | 5. Flutter live/history integration | `terminal_service.dart`, terminal models/view wrapper, dedicated history components using `app/lib/design/` | Atomic display, hydration/reconnect, input/mouse, links, selection, scrolling, and multi-viewer geometry pass |
 | 6. End-to-end qualification | Explicit terminal E2E suites and repeatable performance harness | Real agents and representative mobile/desktop links meet agreed budgets; required native tests execute rather than silently skip |
-| 7. Enable and simplify | Version-gated default, architecture/protocol documentation, prototype cleanup | Full gates pass; complete frame mode includes history; compatibility path remains only for unsupported attachments |
+| 7. Enable and simplify | Coordinated replacement, architecture/protocol documentation, prototype cleanup | Full gates pass; unsupported peers require an upgrade; no legacy display path |
 
-Keep the feature disabled by default through steps 1–5. The first integrated
-milestone is one negotiated terminal over the real encrypted local/remote paths,
-with a slow-viewer test. Default enablement waits for indexed history and the app
-scrolling experience, not just successful live painting. Remove duplicate
-experimental implementations after their fixtures use the production source.
+The replacement includes indexed history and the app scrolling experience.
+Archived terminal runs survive host restart and are advertised as stopped
+terminals; their current screens are restored lazily on subscribe. Persisted
+screens and ownership metadata share the retention budget with indexed rows.
+The host environment overrides are `ANTGRID_TERMINAL_HISTORY_RUN_BYTES` and
+`ANTGRID_TERMINAL_HISTORY_MACHINE_BYTES`, in positive integer bytes. SQLite's
+page and journal overhead is outside these payload limits.
+Qualification covers relay and loopback independently. The current loopback
+transport uses a bearer-token-authenticated local socket, while relay application
+traffic is E2E encrypted. A test using `LocalTestClient` does not establish local
+encryption. Experimental fixtures use the production frame source.
 
 ## Validation and release gates
 
@@ -234,7 +246,7 @@ Measure against existing raw streaming at representative small and large grids:
 - Actual encrypted bytes, frames sent/coalesced, unacknowledged bytes, and queue age.
 - Parser backlog, memory over session duration, indexed history latency, disk growth.
 - Zero/50/100/250 ms simulated round trips, bandwidth limits, stalled consumers,
-  and concurrent terminals/preview traffic.
+and concurrent terminals/preview traffic.
 
 Hard gates: no mixed display modes, no stale-run paint, no lost retained history
 rows, no unbounded queue/cache, no serialization while idle, maximum 20 captures
@@ -251,3 +263,66 @@ another Dart/Flutter analyzer. Run `npm run check:font-tokens` for the history U
 Update scoped `CLAUDE.md` files in the change that invalidates their terminal or
 capability invariants, and update `docs/architecture.md` and protocol documentation
 to describe the final implemented contract.
+
+## Repeatable qualification
+
+Run from the repository root:
+
+```powershell
+bun run --filter antgrid-bridge qualify:terminal-frames
+```
+
+The runner executes native Ghostty fixtures, the explicit terminal-frame E2E
+suite, and the production source/delivery/history benchmark. Phases can be run
+independently with `--phase=native`, `--phase=e2e`, or `--phase=performance`.
+Benchmark JSON reports are written to `.tmp/terminal-frame-qualification/` or
+the directory passed with `--output`. The performance matrix uses 0/50/100/250 ms
+acknowledgment delays with unlimited and 256 KiB/s simulated links. These are
+simulated delivery conditions, not measurements of a physical network RTT.
+
+Native fixtures cannot skip when the native library is missing. The desktop
+packaging workflow executes them on Windows, macOS, and Linux before producing
+artifacts. A host fixture run does not certify an iOS/Android renderer.
+
+The benchmark records actual AES-GCM application-envelope bytes for both frames
+and a diagnostic model of the removed streaming batcher. Route headers and
+fragmentation are excluded, so these numbers are not complete relay wire costs.
+It also records capture duration, capture/send rates, frame age at simulated-link
+handoff, history page latency/retention, process RSS and CPU, and a sampled parser
+queue peak. The CPU total includes the diagnostic baseline; queue sampling can
+miss brief peaks. JSON `measurementScope` restates these limits.
+
+Automated hard gates cover the 20 FPS ceiling, idle serialization, continued
+delivery, oversized displays, final-state convergence, and history retention.
+The benchmark currently uses 500 ms maximum active-output send gaps, 50 ms
+history-page p95, and a 2 s final-state drain budget. These are explicit harness
+limits, not measured product guarantees. Constrained links may fail the gap or
+drain budget and require tuning before release; reducing the frame rate itself
+is allowed.
+
+Release evidence must separately include native paint and input-to-paint latency,
+actual fragmented relay bytes, concurrent terminal/preview fairness, and exact
+Claude Code/Codex/OpenCode versions and exercised flows on supported hosts.
+The synthetic benchmark and Node PTY E2E suite do not establish those results.
+Do not mark cross-platform real-agent qualification complete from these commands.
+
+## Workspace validation, 2026-09-12
+
+The Windows bridge suite passed with platform-specific skips. The explicit
+terminal-frame E2E suite passed over loopback and encrypted relay transports,
+including final-frame consumption, same-ID respawn, and stalled-viewer recovery.
+The Dart relay-client suite and app-wide Dart analysis passed. The font-token
+check passed. Native Ghostty fixtures executed successfully earlier in this
+implementation; the latest Flutter service/widget edits still need execution.
+
+The complete eight-condition performance matrix passed after making the
+simulated link serialize sends and wait for initial attachment delivery before
+measuring idle behavior. Reports are generated by `qualify:terminal-frames
+--phase=performance`; their measurement-scope limits above still apply.
+
+The final Flutter test suite and serial Flutter CLI analysis gate were not
+completed: SDK-cache access requires approval outside the workspace, and automatic
+approval review rejected the test invocation because its usage limit was reached.
+Direct SDK `dart analyze` completed with no issues. These checks do not establish
+the unfinished loopback encryption, real-agent host matrix, actual fragmented
+relay byte costs, concurrent terminal/preview fairness, or input-to-paint latency.

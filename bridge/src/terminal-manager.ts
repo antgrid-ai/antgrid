@@ -8,32 +8,48 @@ import {
 import type { GracefulExitAsk } from "./agents/types";
 import { ScrollbackBuffer } from "./scrollback";
 import { TerminalModeTracker } from "./terminal-modes";
-import { MAX_ATTACH_BLOB, TerminalScreen } from "./terminal-screen";
+import { TerminalScreen } from "./terminal-screen";
 import { TerminalFrameSource } from "./terminal-frames/source";
 import { TerminalHistoryStore, type HistoryPage, type TerminalRunHistory } from "./terminal-frames/history";
-import type { TerminalHistoryBoundary, TerminalHistoryRow } from "./terminal-frames/protocol";
+import {
+  TERMINAL_FRAME_INTERVAL_MS,
+  type TerminalHistoryBoundary, type TerminalHistoryRow,
+} from "./terminal-frames/protocol";
 import { resolveTerminalHistoryPath } from "./antgrid-dir";
 import { ANTGRID_QUERY_COLORS } from "./vt-capability-responder";
 import { logger } from "./logger";
 const log = logger.child({ component: "terminal-manager" });
 
-/**
- * How many times an attach re-waits on the VT before it settles for replaying
- * an unparsed tail — see `getAttachSnapshot`. One extra round clears an
- * ordinary burst; nothing clears a guest that outruns the parser, so this only
- * needs to be past "briefly behind".
- */
-const SETTLE_ROUNDS = 3;
 import { createMessage, type AbMessage } from "./protocol";
 import type { ConnState } from "./conn-state";
 
+
 /**
- * Rebuild attempts per PTY run before a latched `TerminalFrameSource` is left
- * as-is — see `ensureLiveScreen`. A run that keeps overflowing the parser
- * backlog is not fixed by trying again, and an unbounded retry would rebuild
- * (and reseed from scrollback) on every single output chunk after that.
+ * How long a `TerminalFrameSource` outlives the PTY it was serializing.
+ *
+ * A program that prints its last line on the tick it exits leaves those bytes
+ * in xterm's write buffer — the parser works in slices, and `dispose()`
+ * discards whatever it has not reached — so a teardown on the exit itself
+ * publishes a final screen missing everything the program said on its way out.
+ * This window is what a frame consumer gets, through `onRunExited`, to settle
+ * that parse and ship the result.
+ *
+ * Bounded because neither half can be waited on for as long as it might want:
+ * a guest that outran the parser can leave the source's whole pending-character
+ * budget queued, and a viewer's transport can stall indefinitely. Draining that
+ * full budget measures at well under 100 ms, so five frame slots is several
+ * times the worst honest drain and still leaves room for the frame to go out.
+ * Nothing user-visible waits on it — `terminal:exited` and the stopped-tab
+ * metadata both land on the exit tick.
+ *
+ * EVERY terminal pays this, not just one a viewer is watching frames of:
+ * `constructScreen` builds a `TerminalFrameSource` for every PTY and falls back
+ * to a plain screen only where the xterm build refuses one. So an exit holds
+ * the emulator, scrollback and mode tracker for this long whatever display mode
+ * the app is in, and `TerminalFrameHub.finish` serializes one final frame per
+ * exit even with no attachment on the run.
  */
-const MAX_SCREEN_REBUILDS = 3;
+const EXIT_DRAIN_MS = 5 * TERMINAL_FRAME_INTERVAL_MS;
 
 // --- Terminal history store (D3: the real run lifecycle) ---------------------
 //
@@ -64,43 +80,17 @@ function historyStoreAllowed(): boolean {
 
 let historyStore: { path: string; store: TerminalHistoryStore } | undefined;
 
-/**
- * Opens the store fresh at `path`: directory `0o700`, file `0o600` on POSIX —
- * this file holds terminal OUTPUT (command text, program results), the same
- * sensitivity as a session transcript, so it gets the same treatment as every
- * other per-user store under abDir (see `handler/session-store.ts`,
- * `remote-access-policy.ts`). Windows has no POSIX mode bit; the file
- * inherits the user profile's ACL like the rest of `.antgrid`.
- *
- * Swept before opening, by deleting the file (and WAL mode's `-wal`/`-shm`
- * siblings) rather than by walking its rows: a run id lives only in
- * `TerminalManager.runIds`, in memory, which a fresh process always starts
- * empty — `retainScrollbackOnExit` included, since that flag keeps a *live*
- * process's memory around, not anything that survives a restart. So every row
- * already on disk at open time belongs to a run nothing on THIS boot can ever
- * name again, and deleting the file is the exact sweep the wave 4 spec asks
- * for, not an approximation of one. It is also the only sweep available
- * without widening `TerminalHistoryStore`'s frozen public surface with a
- * list-runs method it has no other reason to carry.
- */
+/** Opens the durable archive without discarding runs from earlier host processes. */
 function openHistoryStore(path: string): TerminalHistoryStore {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  for (const suffix of ["", "-wal", "-shm"]) {
-    try {
-      rmSync(path + suffix);
-    } catch (error) {
-      // ENOENT is the expected, silent case (a fresh install, or the `-wal`/
-      // `-shm` siblings simply not existing). Anything else — another holder
-      // has the file open, a permissions problem — means the sweep did
-      // nothing, which is exactly the failure mode D3 exists to prevent (see
-      // the block comment above): log it so a swept-nothing boot is at least
-      // observable instead of indistinguishable from a fresh install.
-      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
-        log.warn(`Terminal history sweep could not remove "${path}${suffix}": %s`, error);
-      }
-    }
-  }
-  const store = new TerminalHistoryStore(path);
+  const retention = (name: string): number | undefined => {
+    const value = process.env[name];
+    return value === undefined ? undefined : Number(value);
+  };
+  const store = new TerminalHistoryStore(path, {
+    runBytes: retention("ANTGRID_TERMINAL_HISTORY_RUN_BYTES"),
+    machineBytes: retention("ANTGRID_TERMINAL_HISTORY_MACHINE_BYTES"),
+  });
   if (process.platform !== "win32") {
     // The directory mode above only applies to a directory `mkdirSync` CREATES,
     // and abDir already exists on every install that has run setup or paired a
@@ -164,88 +154,6 @@ export function closeTerminalHistoryStore(): void {
   historyStore = undefined;
 }
 
-/**
- * Suppresses `append`/`clear` for exactly the span of a rebuild's reseed.
- * `ensureLiveScreen` replays up to 10,000 chars of RAW scrollback into a
- * fresh `TerminalFrameSource` reattached to the SAME history run, purely to
- * reconstruct the live screen for display — that replayed content was
- * already archived (in full or in part) by the source that just failed, so
- * letting `append`/`clear` through here would re-apply events the real
- * handle already recorded: a duplicate row under a FRESH rowId, or (worse) a
- * clear sitting in the replayed tail deleting rows the original clear
- * already removed itself, taking every row recorded SINCE that clear with
- * it. This is the trap the wave 4 spec calls out by name: wave 3 could not
- * catch it because no history was attached yet.
- *
- * `append` is suppressed only for the rows the FAILED source already
- * archived, not unconditionally: `remaining`, captured before the reseed
- * starts, is exactly how many rows `real` already has. The replayed tail
- * re-derives content in the same order the live source originally produced
- * it, so a genuine duplicate is always among the first `remaining` appends —
- * once they are consumed, anything further is content the failed source
- * never reached at all (most often the tail of `unparsed`, discarded by
- * `TerminalFrameSource.fail()`), which must be archived for real rather than
- * silently lost with it. `clear` has no equivalent partial case — a clear
- * either already ran against `real` or it did not reach it before the
- * failure, and either way replaying it here must not run it a second time —
- * so it stays suppressed for the WHOLE span, exactly like a not-yet-consumed
- * `append`.
- *
- * `flush`/`boundary` pass straight through — flushing is idempotent and
- * boundary reads are never destructive — until `release()`, called once the
- * reseed has actually been PARSED (`settle()`) and the replacement is about
- * to start receiving genuinely new PTY output (see `ensureLiveScreen`).
- *
- * Composition, not a subclass: `TerminalRunHistory`'s constructor takes a
- * store-internal record type `history.ts` does not export, so there is no
- * supported way to build one outside that file. That forces a cast at the
- * construction site, which is exactly the kind that hides a missing member —
- * so every one of `TerminalRunHistory`'s public members is forwarded here,
- * not just the four `TerminalFrameSource` happens to call today. `page` in
- * particular is what wave 5's delivery path exists to call, and `runId` would
- * otherwise answer `undefined` rather than fail.
- */
-class ReplayGuardedHistory {
-  private suppressed = true;
-  private remaining: number;
-  readonly runId: string;
-
-  constructor(private readonly real: TerminalRunHistory) {
-    this.runId = real.runId;
-    this.remaining = real.boundary().nextRowId;
-  }
-
-  append(row: Omit<TerminalHistoryRow, "rowId">): void {
-    if (this.suppressed && this.remaining > 0) { this.remaining--; return; }
-    this.real.append(row);
-  }
-  flush(): void { this.real.flush(); }
-  clear(): void { if (!this.suppressed) this.real.clear(); }
-  boundary(): TerminalHistoryBoundary { return this.real.boundary(); }
-  page(epoch: number, beforeRowId: number): HistoryPage { return this.real.page(epoch, beforeRowId); }
-  retire(): void { this.real.retire(); }
-
-  /**
-   * Called once the reseed that motivated this guard has settled. Answers
-   * whether the rebuild may have COST rows, which the caller reports as a
-   * history gap.
-   *
-   * `remaining` reaching zero means the replay re-derived at least as many
-   * rows as the archive holds, so everything past them — the only place
-   * never-archived content can be — was forwarded for real. Anything left
-   * over means the replay produced FEWER rows than the archive holds and all
-   * of them were suppressed, and nothing here can tell a row the failed
-   * source already recorded from one it dropped with `unparsed`. The
-   * scrollback is 10,000 chars against a run that may have printed
-   * megabytes, so on a long run this is the ordinary answer, not an edge
-   * case: a parser-backlog rebuild really does lose the rows between the last
-   * archived one and what that tail can reconstruct.
-   */
-  release(): boolean {
-    this.suppressed = false;
-    return this.remaining > 0;
-  }
-}
 
 export interface TerminalSpawnConfig {
   terminalId?: string;
@@ -308,15 +216,15 @@ export interface TerminalManagerCallbacks {
    *  first), so this can never fire for a run a fresh `onRunStarted` has
    *  already superseded at the same terminal id. */
   onRunEnded?: (terminalId: string, runId: string, exitCode?: number | null) => void;
-  /** The PTY has exited and the emulator SURVIVES it — the
-   *  `retainScrollbackOnExit` case, today only the checkout-setup transcript.
-   *  A frame consumer can settle the run against the real final screen here,
-   *  which is the one place that screen still exists; without retention the
-   *  screen is disposed in the same tick and `onRunEnded` is the only signal
-   *  there can be. Never fired for the non-retained exit, deliberately: a
-   *  consumer that awaited the screen there would be awaiting a disposed
-   *  emulator whose write callbacks never fire again. */
-  onRunExited?: (terminalId: string, runId: string, exitCode: number | null) => void;
+  /** The PTY has exited and the emulator is still alive — settle the run
+   *  against its real final screen here, the only point at which that screen
+   *  still exists. Fired for BOTH exit shapes: under `retainScrollbackOnExit`
+   *  the emulator outlives the exit with no expiry, and without it the emulator
+   *  is held open for `EXIT_DRAIN_MS` for exactly this callback's benefit
+   *  before `onRunEnded` follows. A consumer may therefore await the screen,
+   *  but only for that long — past the window it is disposed and its write
+   *  callbacks never fire again. */
+  onRunExited?: (terminalId: string, runId: string, exitCode: number | null) => void | Promise<void>;
 }
 
 /**
@@ -365,10 +273,6 @@ export class TerminalManager {
    *  cleared only where `disposeScreen` clears the screen, so it survives
    *  `retainScrollbackOnExit` exactly as the screen it identifies does. */
   private runIds = new Map<string, string>();
-  /** Rebuild attempts already spent on the CURRENT run — see
-   *  `ensureLiveScreen`. Paired 1:1 with `runIds`: both describe the run, not
-   *  the terminal, and both reset at the same spawn. */
-  private rebuildCounts = new Map<string, number>();
   private terminalTypes = new Map<string, "agent" | "service">();
   /** Metadata for exited terminals so they remain visible in status. */
   private stoppedTerminals = new Map<string, StoppedTerminalInfo>();
@@ -383,6 +287,14 @@ export class TerminalManager {
    *  owner row gone too `terminalOwner()` attributes the corpse to main and
    *  advertises it there forever. */
   private forgotten = new Set<string>();
+  /** Exit codes whose teardown is still inside its `EXIT_DRAIN_MS` window —
+   *  see `dropAfterFinalFrame`. The code is the one thing the deferral can
+   *  lose: whichever teardown reaches the slot first inside the window
+   *  (`spawn`'s same-id respawn, `forget`, `killAll`) calls `disposeScreen`
+   *  with no code of its own, and the run's viewers would be told it ENDED
+   *  with `exitCode: null` for a process that exited 7. */
+  private drains = new Map<string, number | null>();
+  private finalCaptures = new Map<string, Promise<void>>();
   private sendMessage: (msg: AbMessage) => void;
   private callbacks: TerminalManagerCallbacks;
   private connState: ConnState;
@@ -400,6 +312,7 @@ export class TerminalManager {
     callbacks: TerminalManagerCallbacks | undefined,
     connState: ConnState,
     getApiPort?: () => number | null,
+    private readonly historyScope = "default",
   ) {
     this.sendMessage = sendMessage;
     this.callbacks = callbacks ?? {};
@@ -506,10 +419,10 @@ export class TerminalManager {
             screen = this.ensureLiveScreen(terminalId) ?? screen;
           }
           screen?.feed(msg.data);
-          // Appended AFTER the feed above, not before: a rebuild inside
-          // `ensureLiveScreen` reseeds from THIS scrollback, and appending
-          // first would hand it a seed that already ends with the very chunk
-          // `feed` is about to write into the replacement a second time.
+          // Appended after the rebuild above, not before it: `ensureLiveScreen`
+          // reseeds a replacement from THIS scrollback, and appending first
+          // would hand it a seed already ending with the very chunk the feed
+          // then writes into the replacement a second time.
           //
           // BEFORE the suppression drop below either way. This placement is
           // what makes a suppressed window recoverable at all: a socket drop
@@ -569,15 +482,15 @@ export class TerminalManager {
             const retainedRunId = this.runIds.get(terminalId);
             if (retainedRunId) {
               try {
-                this.callbacks.onRunExited?.(terminalId, retainedRunId, msg.exitCode);
+                void Promise.resolve(this.callbacks.onRunExited?.(terminalId, retainedRunId, msg.exitCode)).catch((error) => {
+                  log.warn(`Terminal "${terminalId}" final capture failed: %s`, error);
+                });
               } catch (error) {
                 log.warn(`Terminal "${terminalId}" run-exited callback failed for run ${retainedRunId}: %s`, error);
               }
             }
           } else {
-            this.scrollbacks.delete(terminalId);
-            this.modeTrackers.delete(terminalId);
-            this.disposeScreen(terminalId, msg.exitCode);
+            this.dropAfterFinalFrame(terminalId, msg.exitCode);
           }
           this.connState.clearTerminal(terminalId);
           this.callbacks.onTerminalExited?.(terminalId);
@@ -607,7 +520,18 @@ export class TerminalManager {
     // even when nothing else about the slot changed.
     const runId = crypto.randomUUID();
     this.runIds.set(terminalId, runId);
-    screen = this.constructScreen(terminalId, session.cols, session.rows, this.openHistoryRun(terminalId, runId));
+    try {
+      screen = this.constructScreen(terminalId, session.cols, session.rows, this.openHistoryRun(terminalId, runId));
+    } catch (error) {
+      this.sessions.delete(terminalId);
+      this.scrollbacks.delete(terminalId);
+      this.modeTrackers.delete(terminalId);
+      this.runIds.delete(terminalId);
+      this.retainScrollback.delete(terminalId);
+      this.terminalTypes.delete(terminalId);
+      liveTerminalHistoryStore()?.deleteRun(runId);
+      throw error;
+    }
     this.screens.set(terminalId, screen);
     if (screen instanceof TerminalFrameSource) this.callbacks.onRunStarted?.(terminalId, runId, screen);
     // Before `session.spawn()`, which is what actually starts the PTY: the
@@ -698,72 +622,95 @@ export class TerminalManager {
     this.stoppedTerminals.clear();
   }
 
-  /**
-   * Disposes a terminal's screen, if any, and drops the two per-run map
-   * entries that pair with it — the run id (D1) and the rebuild budget (D4).
-   * The dispose runs under its own guard so a throw leaves every map
-   * consistent anyway: `resetMaps`' loop and all four exit-time cleanup sites
-   * route through this rather than repeating `get(id)?.dispose(); delete(id)`.
-   *
-   * Also deletes the run's history rows (D3), because every ordinary call
-   * site is exactly a "this run is over" signal: a same-id respawn's old
-   * run, `forget()`'s teardown, and a non-retained exit (the retained case
-   * skips this call entirely — see the `retainScrollback` guard around the
-   * `terminal:exited` handler's own `disposeScreen` call). A LIVE reattach
-   * never routes through here; it is `ensureLiveScreen`'s rebuild, which
-   * disposes the failed screen directly and reopens the SAME run. Deleting
-   * here doubles as the only eviction `TerminalHistoryStore`'s internal
-   * handle map ever gets outside the machine-wide byte cap — without it,
-   * every terminal ever spawned in the process's life would leave its handle
-   * cached there forever.
-   */
+  // Capture completion, rather than elapsed time, owns disposal: parser backlog
+  // and transport congestion can both exceed the minimum drain window.
+  private dropAfterFinalFrame(terminalId: string, exitCode: number | null): void {
+    const screen = this.screens.get(terminalId);
+    const runId = this.runIds.get(terminalId);
+    if (!(screen instanceof TerminalFrameSource) || !runId) {
+      this.scrollbacks.delete(terminalId);
+      this.modeTrackers.delete(terminalId);
+      this.disposeScreen(terminalId, exitCode);
+      return;
+    }
+    this.drains.set(terminalId, exitCode);
+    const grace = new Promise<void>((resolve) => { setTimeout(resolve, EXIT_DRAIN_MS).unref?.(); });
+    let finalCapture: void | Promise<void>;
+    try {
+      finalCapture = this.callbacks.onRunExited?.(terminalId, runId, exitCode);
+    } catch (error) {
+      log.warn(`Terminal "${terminalId}" run-exited callback failed for run ${runId}: %s`, error);
+    }
+    const draining = Promise.all([grace, screen.settle(), finalCapture!]).catch((error) => {
+      log.warn(`Terminal "${terminalId}" final drain failed: %s`, error);
+    }).then(() => {
+      if (this.runIds.get(terminalId) !== runId) return;
+      this.scrollbacks.delete(terminalId);
+      this.modeTrackers.delete(terminalId);
+      this.disposeScreen(terminalId, exitCode);
+    }).finally(() => {
+      this.finalCaptures.delete(runId);
+    });
+    this.finalCaptures.set(runId, draining);
+  }
+
+  // Persist before releasing the emulator; run history remains readable until
+  // retention eviction or explicit terminal deletion.
   private disposeScreen(terminalId: string, exitCode?: number | null): void {
+    const runId = this.runIds.get(terminalId);
+    // Claims the open drain window, if this call is what closed it early. A
+    // caller's own exit code always wins — an exit reported here is the truth,
+    // and a drain record is the fallback for the teardown paths that never saw
+    // one (see `drains`). The record is dropped, never the timer: the timer's
+    // own run-id check is the ONE thing that decides whether a drain still owns
+    // the slot, and cancelling here would make it unreachable and so unable to
+    // fail loudly.
+    const drain = this.drains.get(terminalId);
+    this.drains.delete(terminalId);
+    const endedWith = exitCode !== undefined ? exitCode : drain;
+    try {
+      const screen = this.screens.get(terminalId);
+      if (runId && screen instanceof TerminalFrameSource) {
+        const frame = screen.capture(performance.now(), { final: true });
+        if (frame) liveTerminalHistoryStore()?.saveFinal(runId, frame);
+      }
+    } catch (error) {
+      log.warn(`Terminal "${terminalId}" final screen persistence failed: %s`, error);
+    }
     try {
       this.screens.get(terminalId)?.dispose();
     } catch (error) {
       log.warn(`Terminal "${terminalId}" screen dispose failed: %s`, error);
     }
     this.screens.delete(terminalId);
-    const runId = this.runIds.get(terminalId);
     this.runIds.delete(terminalId);
-    this.rebuildCounts.delete(terminalId);
     if (runId) {
       try {
-        this.callbacks.onRunEnded?.(terminalId, runId, exitCode);
+        this.callbacks.onRunEnded?.(terminalId, runId, endedWith);
       } catch (error) {
         log.warn(`Terminal "${terminalId}" run-ended callback failed for run ${runId}: %s`, error);
       }
     }
     if (runId) {
       try {
-        liveTerminalHistoryStore()?.deleteRun(runId);
+        liveTerminalHistoryStore()?.releaseRun(runId);
       } catch (error) {
         log.warn(`Terminal "${terminalId}" history cleanup failed for run ${runId}: %s`, error);
       }
     }
   }
 
-  /**
-   * Builds the per-PTY emulator, preferring a `TerminalFrameSource`. Its
-   * constructor CAN throw (two `XtermFrameAdapter` API-shape checks, plus
-   * `patchScroll`'s "already installed" refusal) where `TerminalScreen`'s
-   * cannot — and both callers (`spawn`, `ensureLiveScreen`) need a terminal
-   * that still works on a host whose xterm build doesn't support it, so a
-   * throw here falls back rather than propagating. `history` is dropped
-   * silently on the fallback path: a plain `TerminalScreen` has nowhere to
-   * put it, and the caller has already logged the construction failure.
-   */
   private constructScreen(
     terminalId: string, cols: number, rows: number, history?: TerminalRunHistory,
-  ): TerminalScreen {
+  ): TerminalFrameSource {
     try {
       return new TerminalFrameSource(cols, rows, history);
     } catch (error) {
       log.error(
-        `Terminal "${terminalId}" frame source construction failed, falling back to a plain screen: %s`,
+        `Terminal "${terminalId}" frame source construction failed: %s`,
         error,
       );
-      return new TerminalScreen(cols, rows);
+      throw error;
     }
   }
 
@@ -787,9 +734,11 @@ export class TerminalManager {
     try {
       const store = terminalHistoryStore();
       if (!store) return undefined;
-      return store.openRun(runId, (error) => {
+      const handle = store.openRun(runId, (error) => {
         log.warn(`Terminal "${terminalId}" history unavailable for run "${runId}": %s`, error);
       });
+      store.bindRun(runId, this.historyScope, terminalId);
+      return handle;
     } catch (error) {
       log.warn(`Terminal "${terminalId}" failed to open history for run "${runId}": %s`, error);
       return undefined;
@@ -805,136 +754,18 @@ export class TerminalManager {
    * matters. Also re-flushes the session's held OSC replies at the same
    * parser boundary the frame source answers everything else from
    * (`onParsed`) — see `TerminalSession.flushCapabilityReplies`.
-   *
-   * WIDENS back to full scope for a plain `TerminalScreen` — the construction
-   * fallback at spawn, or a rebuild that fell back to one — since that is the
-   * ONLY responder there is in that case; leaving a session narrowed from an
-   * earlier, now-gone frame source would answer nothing but OSC 10/11/12 for
-   * the rest of the run.
    */
   private wireFrameQueries(session: TerminalSession, screen: TerminalScreen): void {
     if (!(screen instanceof TerminalFrameSource)) {
-      session.widenCapabilityResponder();
       return;
     }
     screen.answerQueries((data) => session.write(data), ANTGRID_QUERY_COLORS);
     session.narrowCapabilityResponder();
-    screen.onParsed(() => session.flushCapabilityReplies());
   }
 
-  /**
-   * Rebuilds `terminalId`'s screen once its `TerminalFrameSource` has latched
-   * a failure (`TerminalFrameSource.failure`), and otherwise returns it
-   * unchanged. Called from both the `terminal:output` handler (before
-   * `screen.feed`) and the head of `getAttachSnapshot`, so a failed source is
-   * never fed further bytes and never the reason an attach comes back `null`.
-   *
-   * Reseeded from the RAW scrollback tail rather than anything the failed
-   * source itself holds — the failure is a display failure, not proof of what
-   * the emulator last painted, and `ScrollbackBuffer` caps at 10_000 chars,
-   * two orders below the parser-backlog ceiling that likely caused the
-   * failure, so the reseed cannot retrigger it.
-   *
-   * Geometry comes from the live session where there is one, or from the
-   * stopped-terminal row for a retained, already-exited run (both carry
-   * `cols`/`rows`); with neither available there is nothing to rebuild
-   * against, so the latched source is left as the answer. Same run id
-   * throughout — this is a fresh emulator for the SAME PTY run, not a new
-   * one — and rebuilds are capped at `MAX_SCREEN_REBUILDS`: a run that keeps
-   * overflowing the parser is not fixed by trying again.
-   */
+  /** A raw tail cannot reconstruct authoritative state after parser failure. */
   private ensureLiveScreen(terminalId: string): TerminalScreen | undefined {
-    const current = this.screens.get(terminalId);
-    if (!(current instanceof TerminalFrameSource) || !current.failure) return current;
-    const rebuilds = this.rebuildCounts.get(terminalId) ?? 0;
-    if (rebuilds >= MAX_SCREEN_REBUILDS) {
-      // Nothing will rebuild this run's screen again, so a session left
-      // narrowed from the exhausted source would answer nothing but OSC
-      // 10/11/12 for the rest of the run — see `TerminalSession.widenCapabilityResponder`.
-      this.sessions.get(terminalId)?.widenCapabilityResponder();
-      return current;
-    }
-    // No widen call here: `geometry` falls back to a live session first, so
-    // reaching `undefined` means there IS no live session either — nothing to
-    // widen for.
-    const geometry = this.sessions.get(terminalId) ?? this.stoppedTerminals.get(terminalId);
-    if (!geometry) return current;
-    const failure = current.failure;
-    this.rebuildCounts.set(terminalId, rebuilds + 1);
-    // Reattach to the SAME run (D3) — never a fresh `openHistoryRun`-minted
-    // id, since this is a new EMULATOR for the same PTY run, not a new run —
-    // but guarded: the reseed below replays raw scrollback that the FAILED
-    // source (mostly) already archived, and an unguarded `append` here would
-    // duplicate every row the replay re-derives under fresh rowIds. See
-    // `ReplayGuardedHistory`'s own doc for the full trap this avoids.
-    const runId = this.runIds.get(terminalId);
-    const realHistory = runId ? this.openHistoryRun(terminalId, runId) : undefined;
-    const historyGuard = realHistory ? new ReplayGuardedHistory(realHistory) : undefined;
-    const replacement = this.constructScreen(
-      terminalId, geometry.cols, geometry.rows,
-      // `ReplayGuardedHistory` composes rather than subclasses `TerminalRunHistory`
-      // (see its own doc for why) — safe because `TerminalFrameSource` only
-      // calls the four methods this class defines on whatever it is handed.
-      historyGuard as unknown as TerminalRunHistory | undefined,
-    );
-    try {
-      current.dispose();
-    } catch (error) {
-      log.warn(`Terminal "${terminalId}" failed screen dispose during rebuild: %s`, error);
-    }
-    this.screens.set(terminalId, replacement);
-    if (replacement instanceof TerminalFrameSource && runId) {
-      // Re-registered under the SAME runId — a new emulator for the run the
-      // hub already knows, never a fresh one (see `onRunStarted`'s doc).
-      this.callbacks.onRunStarted?.(terminalId, runId, replacement);
-    }
-    if (replacement instanceof TerminalFrameSource) {
-      // Discard replies until the reseed below has actually been PARSED:
-      // `feed` only queues into xterm's write buffer, so wiring the real
-      // reply sink now would answer any query sitting in the replayed
-      // scrollback tail (a startup DA1/CPR, commonly) as if the guest had
-      // just asked it again — straight onto the live PTY as unsolicited
-      // input.
-      replacement.answerQueries(() => {}, ANTGRID_QUERY_COLORS);
-    }
-    const seed = this.scrollbacks.get(terminalId)?.getContents();
-    if (seed) replacement.feed(seed);
-    const session = this.sessions.get(terminalId);
-    if (replacement instanceof TerminalFrameSource) {
-      void replacement.settle().then(() => {
-        // The slot may have moved on by the time the reseed settles — a
-        // fast follow-up rebuild or dispose must not wire a live session (or
-        // release history archiving) onto a generation it no longer owns.
-        if (this.screens.get(terminalId) !== replacement) return;
-        // Only now does the replacement start archiving NEW rows — see
-        // `ReplayGuardedHistory`. Unconditional (not gated on `session`):
-        // the reseed above ran regardless of whether a session is live (a
-        // retained, already-exited run has none), so the guard must lift
-        // regardless too, or a subsequent respawn's live output through
-        // this same generation would stay suppressed forever. Shares the
-        // same narrow race the query-wiring below already accepts: a live
-        // chunk fed in the instant between this `settle()` call and its own
-        // callback firing can be parsed (and so archived or not) before this
-        // `.then()` microtask runs — bounded to that one window on one
-        // rebuild, never a steady leak.
-        // A rebuild that could not re-derive everything the archive already
-        // held is a hole in the row history, and the replacement starts with a
-        // clean `historyStatus` that would otherwise report the archive as
-        // complete — the plan's rule is that a parser overflow must surface as
-        // a recoverable error, never as silently-wrong authoritative state.
-        if (historyGuard?.release()) replacement.noteHistoryGap();
-        if (session) this.wireFrameQueries(session, replacement);
-      });
-    } else if (session) {
-      this.wireFrameQueries(session, replacement);
-    }
-    log.warn(
-      `Terminal "${terminalId}" frame source failed (rebuild %d/%d): %s`,
-      rebuilds + 1,
-      MAX_SCREEN_REBUILDS,
-      failure,
-    );
-    return replacement;
+    return this.screens.get(terminalId);
   }
 
   /**
@@ -954,6 +785,11 @@ export class TerminalManager {
     this.scrollbacks.delete(terminalId);
     this.modeTrackers.delete(terminalId);
     this.disposeScreen(terminalId);
+    try {
+      terminalHistoryStore()?.deleteTerminal(this.historyScope, terminalId);
+    } catch (error) {
+      log.warn(`Terminal "${terminalId}" history deletion failed: %s`, error);
+    }
     this.stoppedTerminals.delete(terminalId);
     this.terminalTypes.delete(terminalId);
     this.callbacks.onTerminalForgotten?.(terminalId);
@@ -977,6 +813,8 @@ export class TerminalManager {
     // Windows package destage both depend on. Sessions report their own exits,
     // so no poll loop is needed to notice them.
     await Promise.all(all.map((session) => session.close(gracefulBudget(session, budget, true))));
+    await Promise.all([...this.screens.values()].map((screen) => screen.settle()));
+    await Promise.all(this.finalCaptures.values());
 
     // Nothing has closed the inbound door yet — the transport is still
     // attached and the config watcher still armed — so a `session:start` or a
@@ -1077,96 +915,12 @@ export class TerminalManager {
 
   /**
    * Raw scrollback tail, for readers that want the program's OUTPUT — the
-   * handler's LLM context and the local API. Anything replayed INTO an app's
-   * terminal emulator wants `getAttachSnapshot` instead.
+   * handler's LLM context and the local API. App viewing uses frame subscriptions.
    */
   getScrollback(terminalId: string): { text: string; seq: number } | null {
     const buf = this.scrollbacks.get(terminalId);
     if (!buf) return null;
     return { text: buf.getContents(), seq: this.connState.terminalSeq(terminalId) };
-  }
-
-  /**
-   * What a (re)attaching app must be fed: the serialized SCREEN, then the
-   * latched modes the serializer does not carry.
-   *
-   * The app's engine OUTLIVES the attach and this blob is the only thing that
-   * corrects it, so a mode the blob does not carry is a mode the app keeps
-   * whatever the guest has since done to it — which is how mouse reporting, set
-   * once at TUI startup, went missing and took every click with it. Never hand
-   * an app plain `getScrollback` output: it is a suffix of a DIFF stream and
-   * reconstructs only the rows the program happened to rewrite most recently.
-   *
-   * The supplement goes strictly AFTER the whole blob, never interleaved — the
-   * serializer ends with a relative cursor restore.
-   *
-   * `opts.history` asks for the emulator's scrollback as well as the screen,
-   * and is the CALLER's call because only the app knows whether its engine
-   * holds a deeper copy that a history blob would erase. Pass it for a cold
-   * attach — an engine that has rendered nothing for this terminal — and never
-   * for a re-attach.
-   *
-   * The seq and the blob must describe the SAME instant, and the serialize
-   * barrier is a real suspension point, so the two are made to agree rather
-   * than assumed to. A chunk arriving while the barrier is pending is sent to
-   * the app immediately (this is the same ordered channel, so it lands BEFORE
-   * the reply) and would then be wiped by the blob's own `2J` — with its seq
-   * already above any cutoff read beforehand, so nothing refilters it and
-   * nothing re-sends it. Four kilobytes of a streaming build, gone from the tab
-   * for good. `pendingTail()` is what closes it: body + tail reconstructs the
-   * screen as of the LAST byte counted, so the cutoff can be read afterwards
-   * and be exact.
-   *
-   * The tail must come from xterm rather than from watching the chunks go by.
-   * `settle()`'s callback fires from inside the parser's own loop, which then
-   * keeps consuming the writes queued behind it, so most chunks that arrive
-   * across the barrier are in the body ALREADY — replaying everything seen
-   * paints them twice, into the user's scrollback, on every attach.
-   */
-  async getAttachSnapshot(
-    terminalId: string,
-    opts: { history?: boolean } = {},
-  ): Promise<{ text: string; seq: number } | null> {
-    // Head of the method: a latched TerminalFrameSource must never be what
-    // this returns `null` for. `null` reads to every caller in agent-core.ts
-    // as "unknown terminal", which would show an EMPTY pane over a terminal
-    // that is very much alive — worse than the frozen-but-present screen a
-    // failed rebuild attempt falls back to.
-    const screen = this.ensureLiveScreen(terminalId);
-    if (!screen) return null;
-    // Settled repeatedly while the parser is merely behind, because a tail is
-    // the expensive answer: those bytes have ALREADY gone out live, so
-    // replaying them puts a second copy of whatever they scrolled off the
-    // screen into the user's history, and the warm preamble stops at `2J`
-    // precisely so it never clears that. A chunk the parser catches up on lands
-    // in the BODY instead, which repaints the screen and scrolls nothing.
-    // Bounded because a guest can outrun the parser indefinitely, and there the
-    // duplicate rows are the lesser loss against a screen frozen a slice back.
-    for (let round = 0; round < SETTLE_ROUNDS; round++) {
-      await screen.settle();
-      // The screen can be replaced or disposed across the barrier: an exit and
-      // a same-id respawn both swap the map entry, and the barrier still fires
-      // on the dead one — whose screen would then be stamped with a seq the new
-      // PTY starts below and re-arm a cutoff above everything it will ever
-      // emit. A blank pane behind a live process. Re-tested every round, since
-      // each one is another suspension.
-      if (screen.isDisposed || this.screens.get(terminalId) !== screen) return null;
-      if (!screen.hasPendingTail) break;
-    }
-    // One synchronous run: the body, the chunks it does not yet contain, and
-    // the seq that counts both. Nothing can arrive between two statements, so
-    // the three describe one instant by construction.
-    const blob = screen.serializeNow(opts);
-    const tail = screen.pendingTail();
-    const seq = this.connState.terminalSeq(terminalId);
-    const supplement = this.modeTrackers.get(terminalId)?.supplementalPrelude() ?? "";
-    if (tail.length > MAX_ATTACH_BLOB) {
-      // `serializeNow` measures the body alone and structurally cannot see
-      // this half, which is the half a flood makes large: measured at 0.78 MB
-      // of replayed tail behind a 176-byte screen.
-      log.warn("attach tail %d bytes replayed after the screen, past the %d mark", tail.length, MAX_ATTACH_BLOB);
-    }
-    return { text: blob + tail + supplement, seq };
   }
 
   getStatus(): Array<{
@@ -1202,7 +956,17 @@ export class TerminalManager {
         type: this.terminalTypes.get(id),
       }));
 
-    return [...live, ...stopped];
+    const known = new Set([...live, ...stopped].map((terminal) => terminal.terminalId));
+    const archived = this.archivedTerminalIds().filter((id) => !known.has(id)).map((terminalId) => ({
+      terminalId, name: terminalId, running: false, shell: "", cols: 80, rows: 24,
+      type: this.terminalTypes.get(terminalId),
+    }));
+    return [...live, ...stopped, ...archived];
+  }
+
+  private archivedTerminalIds(): string[] {
+    try { return terminalHistoryStore()?.terminalIds(this.historyScope) ?? []; }
+    catch { return []; }
   }
 
   has(terminalId: string): boolean {
@@ -1224,7 +988,36 @@ export class TerminalManager {
    *  bare test run, or the feature disabled); an unknown or exhausted runId is
    *  `page()`'s own job to answer (`expired: true`), never this method's. */
   historyPage(runId: string, epoch: number, beforeRowId: number): HistoryPage | undefined {
-    return liveTerminalHistoryStore()?.openRun(runId).page(epoch, beforeRowId);
+    const store = terminalHistoryStore();
+    if (!store?.record(runId)) return undefined;
+    return store.openRun(runId).page(epoch, beforeRowId);
+  }
+
+  ownsHistoryRun(terminalId: string, runId: string): boolean {
+    return terminalHistoryStore()?.ownsRun(runId, this.historyScope, terminalId) === true;
+  }
+
+  async restoreArchivedTerminal(terminalId: string): Promise<void> {
+    if (this.runIds.has(terminalId)) return;
+    const store = terminalHistoryStore();
+    const saved = store?.latestFinal(this.historyScope, terminalId);
+    if (!saved || !store) return;
+    const history = store.openRun(saved.runId);
+    // A saved display is not PTY output and must never archive rows or replay
+    // a history clear while reconstructing the stopped viewport.
+    const readOnlyHistory = {
+      runId: saved.runId, append: () => {}, clear: () => {},
+      flush: () => history.flush(), boundary: () => history.boundary(),
+    } as unknown as TerminalRunHistory;
+    const source = new TerminalFrameSource(saved.frame?.cols ?? 80, saved.frame?.rows ?? 24, readOnlyHistory);
+    if (saved.frame) source.feed(saved.frame.ansi);
+    await source.settle();
+    if (this.runIds.has(terminalId) || !store.ownsRun(saved.runId, this.historyScope, terminalId)) {
+      source.dispose(); return;
+    }
+    this.screens.set(terminalId, source);
+    this.runIds.set(terminalId, saved.runId);
+    this.callbacks.onRunStarted?.(terminalId, saved.runId, source);
   }
 
   get size(): number {

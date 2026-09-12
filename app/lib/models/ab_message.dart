@@ -347,8 +347,11 @@ class TerminalHistoryRow {
   final int rowId;
   final int cols;
 
-  /// Whether this row continues into the next one — the width it was written
-  /// at is [cols], which may differ from the row above after a resize.
+  /// Whether this row CONTINUES the one above it — xterm's own `isWrapped`
+  /// sense, carried through the agent's serializer unchanged. A renderer
+  /// re-joining logical lines therefore breaks BEFORE a row that is not
+  /// wrapped, never after one. The width it was written at is [cols], which may
+  /// differ from the row above after a resize.
   final bool wrapped;
   final List<TerminalHistorySpan> spans;
 

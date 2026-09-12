@@ -4,19 +4,13 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
-bool _hasNative() {
-  try {
-    GhosttyVt.newTerminal(cols: 8, rows: 2).close();
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
 void main() {
   test(
-    'prototype xterm frames restore in native Ghostty, including OSC 8',
+    'independent xterm frames restore in native Ghostty, including OSC 8',
     () async {
+      // A missing native engine is a qualification failure, not a passing run
+      // that exercised only the TypeScript serializer.
+      GhosttyVt.newTerminal(cols: 8, rows: 2).close();
       final result = await Process.run('bun', [
         'run',
         'scripts/terminal-frame-fixtures.ts',
@@ -51,8 +45,8 @@ void main() {
           final cursor = fixture['cursor'] as Map<String, dynamic>;
           expect(rendered.cursor.row, cursor['row']);
           expect(rendered.cursor.col, cursor['col']);
-          final link = fixture['link'] as Map<String, dynamic>?;
-          if (link != null) {
+          for (final rawLink in fixture['links'] as List<dynamic>) {
+            final link = rawLink as Map<String, dynamic>;
             expect(
               controller.hyperlinkUriAt(
                 GhosttyTerminalCellPosition(
@@ -68,6 +62,5 @@ void main() {
         }
       }
     },
-    skip: _hasNative() ? false : 'Native Ghostty library unavailable',
   );
 }

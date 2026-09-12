@@ -389,7 +389,7 @@ export class RelayClient {
         this.recordQueueDrop("stream-detached", this.scheduler.dropStream(id));
         this.sendJson({ type: "stream-close", streamId: id });
       },
-      sendEnvelope: (id, msg, channel) => this.sendAppEnvelope(id, msg, channel),
+      sendEnvelope: (id, msg, channel, signal, authorized) => this.sendAppEnvelope(id, msg, channel, signal, authorized),
     });
     this.initSendScheduler();
     this.initFragReassembler();
@@ -1466,7 +1466,8 @@ export class RelayClient {
    * window the frames are written inside the synchronous `drain()` below, so
    * the promise is already resolved on return.
    */
-  private sendAppEnvelope(streamId: string, msg: unknown, channel: Channel): Promise<SendOutcome> {
+  private sendAppEnvelope(streamId: string, msg: unknown, channel: Channel, signal?: AbortSignal, authorized?: () => boolean): Promise<SendOutcome> {
+    if (signal?.aborted || authorized?.() === false) return Promise.resolve("dropped");
     const type = (msg as { type?: string } | null)?.type;
     if (!this.established) {
       // NEVER send app traffic in cleartext (the relay is zero-knowledge). During
@@ -1500,6 +1501,8 @@ export class RelayClient {
     }
 
     const frames: QueuedAppFrame[] = fragmented.frames.map((plaintext) => ({
+      signal,
+      authorized,
       channel,
       streamId,
       plaintext,
@@ -1529,8 +1532,10 @@ export class RelayClient {
       });
       return Promise.resolve("dropped");
     }
+    const abort = () => this.scheduler.dropAborted();
+    signal?.addEventListener("abort", abort, { once: true });
     this.drain();
-    return settled;
+    return settled.finally(() => signal?.removeEventListener("abort", abort));
   }
 
   private messageFragKey(msg: unknown): string | undefined {

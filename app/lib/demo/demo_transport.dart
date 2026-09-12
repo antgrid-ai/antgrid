@@ -31,6 +31,9 @@ class DemoTransport extends BufferedAgentTransport {
   bool _disposed = false;
   int _frameSeq = 0;
   int _turnSeq = 0;
+  int _attachmentSeq = 0;
+  final Map<String, _DemoScreen> _screens = {};
+  final Map<String, String> _attachments = {};
 
   /// Insertion order, and the tie-break [_rearm] sorts on. Beats enqueued
   /// together share one `due`, and Dart's sort is stable only below its
@@ -121,7 +124,7 @@ class DemoTransport extends BufferedAgentTransport {
     final due = List<_PendingBeat>.of(_queue);
     _queue.clear();
     for (final beat in due) {
-      dispatchDecoded(_stamp(beat.frame), beat.channel);
+      _dispatchBeat(beat);
     }
   }
 
@@ -208,16 +211,6 @@ class DemoTransport extends BufferedAgentTransport {
         };
       case 'sessions.list':
         result = <String, Object?>{'sessions': _entries};
-      case 'terminal.snapshot':
-        final s = _terminalSnapshot(params['terminalId'] as String?);
-        result = <String, Object?>{
-          'snapshot': <String, Object?>{
-            'terminalId': s['terminalId'],
-            'scrollback': s['scrollback'],
-            'seq': s['seq'],
-            'composed': s['composed'] ?? false,
-          },
-        };
       default:
         _enqueueAll(_kReplyDelay, <Map<String, Object?>>[
           <String, Object?>{
@@ -301,36 +294,58 @@ class DemoTransport extends BufferedAgentTransport {
       case 'preview:snapshot:request':
         return <Map<String, Object?>>[kDemoPreviewSnapshot, kDemoPortsUpdate];
 
-      case 'terminal:snapshot:request':
-        return <Map<String, Object?>>[
-          _terminalSnapshot(message['terminalId'] as String?),
-        ];
-
-      // The demo serves recorded scrollback, never a live serialized screen,
-      // so it genuinely cannot answer the frame protocol. Refusing the
-      // subscribe by its own requestId is what any agent that cannot serve
-      // frames owes the app, and it is the ONLY answer that keeps the demo
-      // whole: the tab stays on the legacy pull and the typed echo this
-      // transport does implement, with no failure badge (a refusal naming a
-      // still-legacy tab changes nothing the user can see) and without
-      // holding the client's subscribe bound open for its full duration.
       case 'terminal:subscribe':
         final terminalId = message['terminalId'] as String?;
-        final requestId = message['requestId'] as String?;
-        if (terminalId == null || requestId == null) {
-          return const <Map<String, Object?>>[];
+        if (terminalId == null || requestId == null) return const [];
+        if (message['version'] != 1) {
+          return [
+            {
+              'type': 'terminal:display:status',
+              'terminalId': terminalId,
+              'checkoutId': 'main',
+              'requestId': requestId,
+              'code': 'UPGRADE_REQUIRED',
+              'message': 'Upgrade the app to display terminal screens.',
+            },
+          ];
         }
-        return <Map<String, Object?>>[
-          <String, Object?>{
-            'type': 'terminal:display:status',
+        final attachmentId = 'demo-attachment-${_attachmentSeq++}';
+        _attachments[terminalId] = attachmentId;
+        return [
+          {
+            'type': 'terminal:subscribed',
             'checkoutId': 'main',
             'terminalId': terminalId,
             'requestId': requestId,
-            'code': 'UPGRADE_REQUIRED',
-            'message': 'The demo serves recorded terminals.',
+            'runId': 'demo-run-$terminalId',
+            'attachmentId': attachmentId,
+            'version': 1,
           },
+          _terminalFrame(terminalId),
         ];
-
+      case 'terminal:unsubscribe':
+        final terminalId = message['terminalId'] as String?;
+        if (_attachments[terminalId] == message['attachmentId']) {
+          _attachments.remove(terminalId);
+        }
+        return const [];
+      case 'terminal:resize':
+        final terminalId = message['terminalId'] as String?;
+        if (terminalId == null) return const [];
+        final screen = _screen(terminalId);
+        screen.cols = message['cols'] as int? ?? screen.cols;
+        screen.rows = message['rows'] as int? ?? screen.rows;
+        return [
+          {
+            'type': 'terminal:size',
+            'checkoutId': 'main',
+            'terminalId': terminalId,
+            'cols': screen.cols,
+            'rows': screen.rows,
+            'driverClientId': message['clientId'],
+          },
+          if (_attachments.containsKey(terminalId)) _terminalFrame(terminalId),
+        ];
       case 'terminal:start':
         return <Map<String, Object?>>[
           _terminalStarted(message['terminalId'] as String?),
@@ -662,6 +677,47 @@ class DemoTransport extends BufferedAgentTransport {
     ];
   }
 
+  _DemoScreen _screen(String terminalId) => _screens.putIfAbsent(
+    terminalId,
+    () => _DemoScreen(_terminalSnapshot(terminalId)['scrollback'] as String),
+  );
+
+  Map<String, Object?> _terminalFrame(String terminalId) {
+    final screen = _screen(terminalId);
+    return {
+      'type': 'terminal:frame',
+      'checkoutId': 'main',
+      'terminalId': terminalId,
+      'runId': 'demo-run-$terminalId',
+      'attachmentId': _attachments[terminalId],
+      'version': 1,
+      'sequence': ++screen.sequence,
+      'revision': screen.sequence,
+      'cols': screen.cols,
+      'rows': screen.rows,
+      'ansi': screen.ansi,
+      'syncTimedOut': false,
+      'history': {
+        'epoch': 0,
+        'firstRowId': 0,
+        'nextRowId': 0,
+        'status': 'recording',
+      },
+    };
+  }
+
+  void _dispatchBeat(_PendingBeat beat) {
+    if (beat.frame['type'] == 'terminal:output') {
+      final terminalId = beat.frame['terminalId'] as String;
+      _screen(terminalId).append(beat.frame['data'] as String);
+      if (_attachments.containsKey(terminalId)) {
+        dispatchDecoded(_stamp(_terminalFrame(terminalId)), beat.channel);
+      }
+      return;
+    }
+    dispatchDecoded(_stamp(beat.frame), beat.channel);
+  }
+
   /// A real search over the sample file bodies — cheaper than canning
   /// per-query results, and it keeps the result count honest for whatever the
   /// user types.
@@ -785,7 +841,7 @@ class DemoTransport extends BufferedAgentTransport {
     final now = DateTime.now();
     while (_queue.isNotEmpty && !_queue.first.due.isAfter(now)) {
       final beat = _queue.removeAt(0);
-      dispatchDecoded(_stamp(beat.frame), beat.channel);
+      _dispatchBeat(beat);
     }
     _rearm();
   }
@@ -826,4 +882,38 @@ class _PendingBeat {
   final int seq;
   final String channel;
   final Map<String, Object?> frame;
+}
+
+class _DemoScreen {
+  _DemoScreen(String initial) {
+    append(initial);
+  }
+  int cols = 96;
+  int rows = 30;
+  int sequence = 0;
+  final List<String> _lines = [''];
+
+  void append(String text) {
+    for (final rune in text.runes) {
+      if (rune == 10) {
+        _lines.add('');
+      } else if (rune == 8 || rune == 127) {
+        final last = _lines.last;
+        if (last.isNotEmpty) {
+          _lines[_lines.length - 1] = last.substring(0, last.length - 1);
+        }
+      } else if (rune >= 32) {
+        if (_lines.last.runes.length >= cols) _lines.add('');
+        _lines[_lines.length - 1] += String.fromCharCode(rune);
+      }
+    }
+    if (_lines.length > rows) _lines.removeRange(0, _lines.length - rows);
+  }
+
+  String get ansi {
+    final visible = _lines.skip(
+      _lines.length > rows ? _lines.length - rows : 0,
+    );
+    return '\x1b[?1049l\x1b[3J\x1b[2J\x1b[H\x1b[0m${visible.join('\r\n')}';
+  }
 }

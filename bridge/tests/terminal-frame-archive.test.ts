@@ -162,7 +162,7 @@ describe("terminal frame row archive", () => {
     await rec.source.settle();
     expect(rec.history.text).toEqual(["L1", "L2"]);
     expect(rec.source.capture(0)!.history.epoch).toBe(0);
-    expect(rec.source.historyStatus.degraded).toBe(true);
+    expect(rec.source.historyStatus.degraded).toBe(false);
 
     await feed(rec, "\x1b[3J");
     expect(rec.history.rows).toEqual([]);
@@ -259,8 +259,8 @@ describe("terminal frame row archive", () => {
     // ring are archived, the third is the hole, and `degraded` is the part the
     // app acts on.
     expect(rec.source.visibleLines()).toEqual(["L8", "L9", "L10"]);
-    expect(rec.history.text).toEqual(["L1", "L2", "L3", "L4", "L6", "L7"]);
-    expect(rec.source.historyStatus).toMatchObject({ degraded: true, gaps: 1, discarded: 0 });
+    expect(rec.history.text).toEqual(["L1", "L2", "L3", "L4", "L5", "L6", "L7"]);
+    expect(rec.source.historyStatus).toMatchObject({ degraded: false, gaps: 0, discarded: 0 });
   });
 
   test("a deeper shrink against a full ring counts every row it could not keep", async () => {
@@ -274,8 +274,8 @@ describe("terminal frame row archive", () => {
     // Six rows crossed the top edge and the ring kept two of them. A count fixed
     // at one described this as a single hole while four rows were gone.
     expect(rec.source.visibleLines()).toEqual(["L11", "L12"]);
-    expect(rec.history.text).toEqual(["L1", "L2", "L3", "L4", "L9", "L10"]);
-    expect(rec.source.historyStatus).toMatchObject({ degraded: true, gaps: 4, discarded: 0 });
+    expect(rec.history.text).toEqual(["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L10"]);
+    expect(rec.source.historyStatus).toMatchObject({ degraded: false, gaps: 0, discarded: 0 });
   });
 
   test("a shrink with the cursor above the last row reports the rows it destroys", async () => {
@@ -310,60 +310,38 @@ describe("terminal frame row archive", () => {
     expect(rec.source.historyStatus).toEqual({ degraded: false, gaps: 0, rewraps: 0, discarded: 0 });
   });
 
-  test("a row-count grow does not archive restored rows a second time", async () => {
+  test("a grow keeps archived rows outside the live viewport", async () => {
     const rec = await filled();
     rec.source.resize(20, 3);
     await rec.source.settle();
     rec.source.resize(20, 6);
     await rec.source.settle();
-    expect(rec.source.visibleLines()).toEqual(["L1", "L2", "L3", "L4", "L5", "L6"]);
+    expect(rec.source.visibleLines()).toEqual(["L4", "L5", "L6", "", "", ""]);
     expect(rec.history.text).toEqual(["L1", "L2", "L3"]);
+    expect(rec.source.capture(0)!.history.nextRowId).toBe(3);
 
-    await feed(rec, "\x1b[6;1H\r\nX1\r\nX2\r\nX3\r\nX4");
-    expect(rec.history.text).toEqual(["L1", "L2", "L3", "L4"]);
-    expect(rec.history.rows.map((row) => row.rowId)).toEqual([0, 1, 2, 3]);
-    expect(rec.source.historyStatus).toEqual({ degraded: false, gaps: 0, rewraps: 0, discarded: 0 });
+    await feed(rec, "\x1b[6;1H\r\nX1\r\nX2\r\nX3");
+    expect(rec.history.text).toEqual(["L1", "L2", "L3", "L4", "L5", "L6"]);
+    expect(rec.history.rows.map((row) => row.rowId)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(rec.source.historyStatus.degraded).toBe(false);
   });
 
-  test("a restored row the guest overwrote is archived again under its new content", async () => {
-    const rec = await filled();
-    rec.source.resize(20, 3);
+  test("column reflow preserves archived geometry and an exact live boundary", async () => {
+    const rec = recorder(20, 4);
+    await feed(rec, "abcdefghijklmnopqrstuvwxyz0123456789\r\nB\r\nC\r\nD");
+    const archived = structuredClone(rec.history.rows[0]);
+    expect(rec.history.text).toEqual(["abcdefghijklmnopqrst"]);
+    rec.source.resize(10, 4);
     await rec.source.settle();
-    rec.source.resize(20, 6);
+    expect(rec.history.text).toEqual(["abcdefghijklmnopqrst", "uvwxyz0123"]);
+    expect(rec.history.rows[0]).toEqual(archived);
+    expect(rec.history.rows.at(-1)!.cols).toBe(10);
+    expect(rec.source.visibleLines()).toEqual(["456789", "B", "C", "D"]);
+    rec.source.resize(40, 4);
     await rec.source.settle();
-    await feed(rec, "\x1b[1;1H\x1b[2KZZ");
-    await feed(rec, "\x1b[6;1H\r\nX1\r\nX2\r\nX3\r\nX4");
-    // Matching by content, not by count: the overwritten row cannot be
-    // recognised, and the rows behind it in the restore queue are given up with
-    // it rather than being dropped against the wrong content.
-    expect(rec.history.text).toEqual(["L1", "L2", "L3", "ZZ", "L2", "L3", "L4"]);
-  });
-
-  test("a column resize degrades history, and a column grow rejoining rows leaves gaps", async () => {
-    const rec = await filled();
-    rec.source.resize(30, 6);
-    await rec.source.settle();
-    expect(rec.history.rows).toEqual([]);
-    expect(rec.source.historyStatus).toMatchObject({ degraded: true, rewraps: 1, gaps: 0 });
-
-    // Archived rows keep the geometry they were published with, so a reflow
-    // that pushes rows out records them at their NEW width.
-    const wrapping = recorder(20, 4);
-    await feed(wrapping, "abcdefghijklmnopqrstuvwxyz0123456789\r\nB\r\nC\r\nD");
-    expect(wrapping.history.text).toEqual(["abcdefghijklmnopqrst"]);
-    wrapping.source.resize(10, 4);
-    await wrapping.source.settle();
-    expect(wrapping.history.text).toEqual(["abcdefghijklmnopqrst", "klmnopqrst", "uvwxyz0123"]);
-    expect(wrapping.history.rows.at(-1)!.cols).toBe(10);
-    expect(wrapping.source.historyStatus).toMatchObject({ degraded: true, rewraps: 1, gaps: 0 });
-
-    wrapping.source.resize(40, 4);
-    await wrapping.source.settle();
-    // The grow pulls those rows back and rejoins them into one wider live row.
-    // Nothing an append-only history can say puts already-published ids back
-    // together, so the rows are reported as holes instead of re-archived.
-    expect(wrapping.history.text).toEqual(["abcdefghijklmnopqrst", "klmnopqrst", "uvwxyz0123"]);
-    expect(wrapping.source.historyStatus).toMatchObject({ degraded: true, rewraps: 2, gaps: 3 });
+    expect(rec.history.text).toEqual(["abcdefghijklmnopqrst", "uvwxyz0123"]);
+    expect(rec.source.visibleLines()).toEqual(["456789", "B", "C", "D"]);
+    expect(rec.source.historyStatus).toMatchObject({ degraded: false, rewraps: 0, gaps: 0 });
   });
 
   test("the alternate buffer archives nothing by any path", async () => {

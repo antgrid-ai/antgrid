@@ -3,6 +3,7 @@ import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
 import 'layout_models.dart';
 import 'ab_message.dart';
+import 'terminal_history_model.dart';
 
 enum TerminalSessionState { starting, running, exited }
 
@@ -13,15 +14,8 @@ enum TerminalSessionState { starting, running, exited }
 /// `terminal:display:status` `UPGRADE_REQUIRED` rather than a screen.
 const int kTerminalFrameProtocolVersion = 1;
 
-/// Which wire protocol governs one terminal's screen.
-///
-/// Selected once, by a successful `terminal:subscribe`, and never mixed
-/// within one PTY generation: the legacy snapshot-plus-diff model and the
-/// frame-replace model paint the same engine in incompatible ways (a
-/// composed legacy blob and a bare frame both assume they own erasing the
-/// screen), so a terminal is one or the other for its life. A respawn -- a
-/// fresh PTY under the same id -- starts the choice over at [legacy].
-enum TerminalDisplayMode { legacy, frame }
+/// Independent frames are the sole terminal display protocol.
+enum TerminalDisplayMode { frame }
 
 class TerminalTab {
   final String terminalId;
@@ -58,6 +52,19 @@ class TerminalTab {
   /// losing the selection.
   final ValueNotifier<int> replaceEpoch;
 
+  /// The scrollback this terminal's engine no longer holds.
+  ///
+  /// Frame mode replaces the whole screen on every frame and keeps nothing
+  /// above it, so [ghostty]'s own `maxScrollbackLines` budget goes unused and
+  /// the rows that scrolled off live only in the agent's archive. This is the
+  /// app's window onto that archive, paged on demand.
+  ///
+  /// Threaded through [copyWith] as the SAME instance, exactly like [ghostty]
+  /// and [replaceEpoch]: a page the user is reading must survive every state
+  /// emission, and the boundary arrives on the frame path, which must never
+  /// reach `_setState`.
+  final TerminalHistoryModel history;
+
   /// Bumped whenever what the app knew about this PTY's geometry stops being
   /// trustworthy — a reconnect, a same-id respawn, or a resize the service
   /// queued and then discarded.
@@ -93,10 +100,12 @@ class TerminalTab {
     this.type,
     this.unread = false,
     this.sizeEpoch = 0,
-    this.mode = TerminalDisplayMode.legacy,
+    this.mode = TerminalDisplayMode.frame,
     GhosttyTerminalController? ghostty,
     ValueNotifier<int>? replaceEpoch,
-  }) : ghostty =
+    TerminalHistoryModel? history,
+  }) : history = history ?? TerminalHistoryModel(),
+       ghostty =
            ghostty ??
            GhosttyTerminalController(
              initialCols: cols,
@@ -146,6 +155,7 @@ class TerminalTab {
       mode: mode ?? this.mode,
       ghostty: ghostty,
       replaceEpoch: replaceEpoch,
+      history: history,
     );
   }
 }
