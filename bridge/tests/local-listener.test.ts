@@ -77,11 +77,11 @@ describe("LocalListener handshake", () => {
     const ws2 = await openWs("secret-token", 2);
     await nextMessage(ws2); // ready — ws2 is now the owner
 
-    const m = createMessage("terminal:output", { terminalId: "s", data: "out" });
+    const m = createMessage("terminal:input", { terminalId: "s", data: "out" });
     bus.publish(m, "control");
 
     const got = await nextMessage(ws2);
-    expect(got.type).toBe("terminal:output");
+    expect(got.type).toBe("terminal:input");
     ws2.close();
   });
 
@@ -108,7 +108,7 @@ describe("LocalListener handshake", () => {
       reason: 'checkout routing update required',
     });
 
-    bus.publish(createMessage('terminal:output', { terminalId: 's', data: 'must not arrive' }), 'control');
+    bus.publish(createMessage('terminal:input', { terminalId: 's', data: 'must not arrive' }), 'control');
   });
 
   test("ownerPullsTree is true with no owner attached", () => {
@@ -135,6 +135,33 @@ describe("LocalListener handshake", () => {
     expect(listener.ownerPullsTree).toBe(false);
     ws.close();
   });
+
+  // Opposite polarity to ownerPullsTree above: this one selects a display mode,
+  // so "no owner" and "owner said nothing" must both read false.
+  test("ownerSupportsTerminalFramesV1 is false with no owner attached", () => {
+    expect(listener.ownerSupportsTerminalFramesV1).toBe(false);
+  });
+
+  test("ownerSupportsTerminalFramesV1 reflects a present terminalFramesV1 capability", async () => {
+    const ws = await openWs("secret-token", 1, { checkoutRouting: true, terminalFramesV1: true });
+    await nextMessage(ws);
+    expect(listener.ownerSupportsTerminalFramesV1).toBe(true);
+    ws.close();
+  });
+
+  test("ownerSupportsTerminalFramesV1 is false when the capability is absent", async () => {
+    const ws = await openWs("secret-token", 1, { checkoutRouting: true, pullsTree: true });
+    await nextMessage(ws);
+    expect(listener.ownerSupportsTerminalFramesV1).toBe(false);
+    ws.close();
+  });
+
+  test("ownerSupportsTerminalFramesV1 is false for a wrong-typed capability", async () => {
+    const ws = await openWs("secret-token", 1, { terminalFramesV1: "yes" });
+    await nextMessage(ws);
+    expect(listener.ownerSupportsTerminalFramesV1).toBe(false);
+    ws.close();
+  });
 });
 
 describe("LocalListener routing", () => {
@@ -159,11 +186,11 @@ describe("LocalListener routing", () => {
     const ws = await openWs();
     await nextMessage(ws);
 
-    const m = createMessage("terminal:output", { terminalId: "s", data: "out" });
+    const m = createMessage("terminal:input", { terminalId: "s", data: "out" });
     bus.publish(m, "control");
 
     const got = await nextMessage(ws);
-    expect(got.type).toBe("terminal:output");
+    expect(got.type).toBe("terminal:input");
     expect(got.channel).toBe("control");
     ws.close();
   });

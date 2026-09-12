@@ -130,7 +130,7 @@ const COLD_ATTACH_PREAMBLE =
   "\x1b[?1049l\x1b[r\x1b[?7h\x1b[4l\x1b[?6l\x1b[?45l\x1b[?66l\x1b[?9l\x1b[0m\x1b[3J\x1b[2J\x1b[H";
 
 export class TerminalScreen {
-  private readonly term: Terminal;
+  protected readonly term: Terminal;
   private readonly addon: SerializeAddon;
   private disposed = false;
 
@@ -145,8 +145,12 @@ export class TerminalScreen {
    * and a caller replaying everything it watched arrive paints those bytes
    * twice. Only xterm can say which chunks it has consumed, and the per-write
    * callback is how it says so.
+   *
+   * Protected because a subclass overriding `feed()` must push onto THIS
+   * array: keeping its own would leave both tail accessors reading a queue
+   * that nothing ever fills.
    */
-  private readonly unparsed: string[] = [];
+  protected readonly unparsed: string[] = [];
 
   constructor(cols: number, rows: number) {
     this.term = new Terminal({

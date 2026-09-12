@@ -61,11 +61,7 @@ Future<({TerminalService service, FakeAgentTransport transport})> _makeService(
   return (service: service, transport: transport);
 }
 
-TerminalTab _tab({
-  required String id,
-  int cols = 80,
-  String? driverClientId,
-}) {
+TerminalTab _tab({required String id, int cols = 80, String? driverClientId}) {
   final tab = TerminalTab(
     terminalId: id,
     name: id,
@@ -188,9 +184,7 @@ void main() {
         terminalState: Stream.value(
           _stateWith(
             hydration: {
-              't1': const TerminalHydration(
-                stage: TerminalAttachStage.failed,
-              ),
+              't1': const TerminalHydration(stage: TerminalAttachStage.failed),
             },
           ),
         ),
@@ -208,7 +202,7 @@ void main() {
       ],
     });
     await tester.pump();
-    final before = h.transport.requests.length;
+    final before = h.transport.sent.length;
 
     expect(find.text("couldn't load this terminal"), findsOneWidget);
     expect(_dimmedTerminal, findsOneWidget);
@@ -218,12 +212,12 @@ void main() {
     await tester.tap(retry);
     await tester.pump();
 
-    final requests = h.transport.requests
+    final requests = h.transport.sent
         .skip(before)
-        .where((r) => r.method == 'terminal.snapshot')
+        .where((message) => message['type'] == 'terminal:subscribe')
         .toList();
     expect(requests, hasLength(1));
-    expect(requests.single.params?['terminalId'], 't1');
+    expect(requests.single['terminalId'], 't1');
 
     // The checkout bound is armed for as long as something watches the state
     // stream, and the binding checks for a pending timer BEFORE any tearDown
@@ -248,10 +242,7 @@ void main() {
             SizedBox(
               width: 300,
               height: 400,
-              child: TerminalViewWrapper(
-                tab: tab,
-                terminalService: h.service,
-              ),
+              child: TerminalViewWrapper(tab: tab, terminalService: h.service),
             ),
             terminalState: Stream.value(
               _stateWith(
@@ -312,9 +303,7 @@ void main() {
             // painted would otherwise render nothing at all — proving the
             // input-paused strip is not merely reachable but wins outright.
             hydration: {
-              't1': const TerminalHydration(
-                stage: TerminalAttachStage.painted,
-              ),
+              't1': const TerminalHydration(stage: TerminalAttachStage.painted),
             },
             inputPaused: true,
           ),
@@ -332,8 +321,7 @@ void main() {
   });
 
   testWidgets(
-    'the strip does not move the authoritative grid — the driver fills the '
-    'remainder, short by exactly the strip height',
+    'the strip overlays without changing the authoritative frame geometry',
     (tester) async {
       final h = await _makeService(addTearDown);
 
@@ -390,10 +378,8 @@ void main() {
       final withStrip = tester.getSize(find.byType(GhosttyTerminalView));
 
       expect(withStrip.width, withoutStrip.width);
-      expect(
-        withoutStrip.height - withStrip.height,
-        closeTo(stripHeight, 0.5),
-      );
+      expect(withStrip.height, withoutStrip.height);
+      expect(stripHeight, greaterThan(0));
     },
   );
 

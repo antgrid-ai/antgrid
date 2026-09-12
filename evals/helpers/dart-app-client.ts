@@ -365,7 +365,7 @@ export class DartAppClient {
     // per-install clientId.
     this.sendOnStream(
       streamId,
-      createMessage("terminal:resize", { terminalId, cols, rows, clientId: this.deviceId }),
+      createMessage("terminal:resize", { intent: "takeover", terminalId, cols, rows, clientId: this.deviceId }),
     );
   }
 

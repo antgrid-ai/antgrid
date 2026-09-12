@@ -1,9 +1,24 @@
+import 'package:flutter/foundation.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
 import 'layout_models.dart';
 import 'ab_message.dart';
+import 'terminal_history_model.dart';
 
 enum TerminalSessionState { starting, running, exited }
+
+/// Mirrors the bridge's `TERMINAL_PROTOCOL_VERSION`
+/// (`bridge/src/terminal-frames/protocol.ts`) -- the highest frame wire
+/// version this client can render, sent on every `terminal:subscribe`. Bump
+/// only in lockstep with that constant; a mismatch answers
+/// `terminal:display:status` `UPGRADE_REQUIRED` rather than a screen.
+const int kTerminalFrameProtocolVersion = 2;
+
+/// Independent frames are the sole terminal display protocol.
+enum TerminalDisplayMode { frame }
+
+/// Mirrors the bridge terminal:resize intent contract.
+enum TerminalResizeIntent { resize, takeover }
 
 class TerminalTab {
   final String terminalId;
@@ -16,6 +31,42 @@ class TerminalTab {
   final int? exitCode;
   final String? type; // "agent" | "service"
   final bool unread;
+
+  /// Which wire protocol currently owns this terminal's screen. See
+  /// [TerminalDisplayMode].
+  final TerminalDisplayMode mode;
+
+  /// Bumped every time this tab's engine content was REPLACED wholesale
+  /// rather than appended to -- currently only an applied frame-mode
+  /// `terminal:frame` (one `appendOutputBytes` call, self-contained). A
+  /// `ValueNotifier`, not a `TerminalState`/`copyWith` field: a live frame
+  /// replaces the screen up to 20x/s (`TERMINAL_FRAME_INTERVAL_MS`), and
+  /// running that through `TerminalService._setState` would reintroduce the
+  /// exact per-byte provider-rebuild cost this branch exists to remove.
+  /// Threaded through [copyWith] as the SAME instance, exactly like
+  /// [ghostty].
+  ///
+  /// The view layer owns terminal selection (there is no selection state on
+  /// the engine controller itself), and must treat any change here as "the
+  /// screen underneath a live selection is now different content" and CLEAR
+  /// the selection rather than re-resolve it from row/col anchors that now
+  /// point at the wrong glyphs -- Ctrl+C and `SendToAgentButton` read that
+  /// selection, and handing the user the wrong text on copy is worse than
+  /// losing the selection.
+  final ValueNotifier<int> replaceEpoch;
+
+  /// The scrollback this terminal's engine no longer holds.
+  ///
+  /// Frame mode replaces the whole screen on every frame and keeps nothing
+  /// above it, so [ghostty]'s own `maxScrollbackLines` budget goes unused and
+  /// the rows that scrolled off live only in the agent's archive. This is the
+  /// app's window onto that archive, paged on demand.
+  ///
+  /// Threaded through [copyWith] as the SAME instance, exactly like [ghostty]
+  /// and [replaceEpoch]: a page the user is reading must survive every state
+  /// emission, and the boundary arrives on the frame path, which must never
+  /// reach `_setState`.
+  final TerminalHistoryModel history;
 
   /// Bumped whenever what the app knew about this PTY's geometry stops being
   /// trustworthy — a reconnect, a same-id respawn, or a resize the service
@@ -52,8 +103,12 @@ class TerminalTab {
     this.type,
     this.unread = false,
     this.sizeEpoch = 0,
+    this.mode = TerminalDisplayMode.frame,
     GhosttyTerminalController? ghostty,
-  }) : ghostty =
+    ValueNotifier<int>? replaceEpoch,
+    TerminalHistoryModel? history,
+  }) : history = history ?? TerminalHistoryModel(),
+       ghostty =
            ghostty ??
            GhosttyTerminalController(
              initialCols: cols,
@@ -66,11 +121,13 @@ class TerminalTab {
              // than a narrow one.
              maxScrollback: 64 << 20,
              maxScrollbackLines: 10000,
-           );
+           ),
+       replaceEpoch = replaceEpoch ?? ValueNotifier<int>(0);
 
   bool get isAgent => type == 'agent';
 
   TerminalTab copyWith({
+    GhosttyTerminalController? ghostty,
     String? name,
     TerminalSessionState? sessionState,
     String? shell,
@@ -83,6 +140,7 @@ class TerminalTab {
     String? type,
     bool? unread,
     int? sizeEpoch,
+    TerminalDisplayMode? mode,
   }) {
     return TerminalTab(
       terminalId: terminalId,
@@ -98,7 +156,10 @@ class TerminalTab {
       type: type ?? this.type,
       unread: unread ?? this.unread,
       sizeEpoch: sizeEpoch ?? this.sizeEpoch,
-      ghostty: ghostty,
+      mode: mode ?? this.mode,
+      ghostty: ghostty ?? this.ghostty,
+      replaceEpoch: replaceEpoch,
+      history: history,
     );
   }
 }
@@ -110,6 +171,9 @@ class TerminalTab {
 /// an outstanding pull over an engine that already holds current bytes is a
 /// routine refresh, not a wait.
 enum TerminalAttachStage {
+  /// The bridge confirmed the terminal is absent; retain readable content.
+  unavailable,
+
   /// No pull has gone out and nothing has painted.
   cold,
 
@@ -127,6 +191,13 @@ enum TerminalAttachStage {
   /// A pull over an empty engine went unanswered past its bound. Only ever
   /// reachable for a terminal that has never painted.
   failed,
+
+  /// A frame-mode attachment's run completed (`terminal:display:status`
+  /// code `ENDED`) rather than failed. Lifecycle, not failure: the pane's
+  /// last painted frame IS its true final state, and unlike [failed] it must
+  /// never be dimmed or offered a retry. Unreachable in legacy mode, which
+  /// has no equivalent notice.
+  ended,
 }
 
 /// Whether the checkout has enough to show anything at all.
@@ -142,7 +213,11 @@ enum CheckoutAttachStatus {
 }
 
 class TerminalHydration {
-  const TerminalHydration({required this.stage, this.requestedAtMs});
+  const TerminalHydration({
+    required this.stage,
+    this.requestedAtMs,
+    this.message,
+  });
 
   final TerminalAttachStage stage;
 
@@ -151,15 +226,22 @@ class TerminalHydration {
   /// widget ticker so a 1 Hz rebuild never reaches the terminal beside it.
   final int? requestedAtMs;
 
+  /// The frame protocol's own text for [TerminalAttachStage.failed] /
+  /// [TerminalAttachStage.ended] (`terminal:display:status.message`), so the
+  /// view layer can show the agent's own reason instead of (or beside) a
+  /// generic label. Always null in legacy mode, which has no equivalent.
+  final String? message;
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is TerminalHydration &&
           other.stage == stage &&
-          other.requestedAtMs == requestedAtMs);
+          other.requestedAtMs == requestedAtMs &&
+          other.message == message);
 
   @override
-  int get hashCode => Object.hash(stage, requestedAtMs);
+  int get hashCode => Object.hash(stage, requestedAtMs, message);
 }
 
 class TerminalState {

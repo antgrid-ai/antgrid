@@ -18,6 +18,22 @@ void _collect(DemoTransport transport, List<InboundMessage> into) {
 Iterable<String> _types(List<InboundMessage> messages) =>
     messages.map((m) => m.json['type'] as String? ?? '');
 
+Future<void> _subscribe(
+  DemoTransport transport,
+  List<InboundMessage> seen,
+) async {
+  await transport.send({
+    'type': 'terminal:subscribe',
+    'terminalId': kDemoTerminalId,
+    'version': 2,
+    'requestId': 'req-1',
+  });
+  transport.drainScript();
+  await Future<void>.delayed(Duration.zero);
+  expect(_types(seen), contains('terminal:subscribed'));
+  expect(_types(seen), contains('terminal:frame'));
+}
+
 void main() {
   test('connect replays the snapshot and reports connected', () async {
     final transport = DemoTransport();
@@ -70,10 +86,9 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       seen.clear();
 
-      transport.drainScript();
-      await Future<void>.delayed(Duration.zero);
+      await _subscribe(transport, seen);
 
-      expect(_types(seen), contains('terminal:output'));
+      expect(_types(seen), contains('terminal:frame'));
       expect(_types(seen), contains('ports:update'));
       expect(_types(seen), contains('preview:url'));
     },
@@ -308,6 +323,8 @@ void main() {
 
       final seen = <InboundMessage>[];
       _collect(transport, seen);
+      await _subscribe(transport, seen);
+      seen.clear();
       await transport.send({
         'type': 'terminal:input',
         'terminalId': kDemoTerminalId,
@@ -316,11 +333,30 @@ void main() {
       transport.drainScript();
       await Future<void>.delayed(Duration.zero);
 
-      final output = seen.firstWhere(
-        (m) => m.json['type'] == 'terminal:output',
-      );
-      expect(output.json['data'], contains('sample project'));
+      final output = seen.lastWhere((m) => m.json['type'] == 'terminal:frame');
+      expect(output.json['ansi'], contains('sample project'));
     });
+
+    test(
+      'terminal:subscribe returns an independent screen immediately',
+      () async {
+        final transport = DemoTransport();
+        addTearDown(transport.dispose);
+        await transport.connect();
+
+        final seen = <InboundMessage>[];
+        _collect(transport, seen);
+        await _subscribe(transport, seen);
+
+        final subscribed = seen.firstWhere(
+          (m) => m.json['type'] == 'terminal:subscribed',
+        );
+        expect(subscribed.json['requestId'], 'req-1');
+        expect(subscribed.json['terminalId'], kDemoTerminalId);
+        final frame = seen.lastWhere((m) => m.json['type'] == 'terminal:frame');
+        expect(frame.json['ansi'], contains(kDemoShellPrompt));
+      },
+    );
   });
 
   group('dispose', () {

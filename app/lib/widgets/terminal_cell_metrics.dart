@@ -22,7 +22,7 @@ const double kGhosttyLineHeight = 1.35;
 /// itself — see `terminal_reflow_contract_test.dart`, which pins both halves.
 ///
 /// HAND-MIRRORED against the pinned fork (`ghostty_vte_flutter`, ref
-/// `6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee`):
+/// `757ed3c2946de82b5d64aeb331e53a82483ae8fc`):
 /// `_GhosttyTerminalViewState._measureMetrics` and
 /// `_snapLogicalExtentToPhysical` in `lib/src/terminal_view.dart`. The package
 /// defaults the wrapper does not override are folded in — `cellWidthScale = 1`,

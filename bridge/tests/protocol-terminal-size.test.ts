@@ -7,7 +7,7 @@ const ID = "00000000-0000-0000-0000-000000000000";
 
 test("terminal:resize carries clientId", () => {
   const msg = parseMessage(JSON.stringify({
-    type: "terminal:resize",
+    type: "terminal:resize", intent: "resize",
     id: ID, timestamp: 1,
     terminalId: "t1", cols: 80, rows: 24, clientId: "dev-abc",
   }));
@@ -26,4 +26,13 @@ test("terminal:size round-trips through createMessage + parseMessage", () => {
   expect(parsed!.type).toBe("terminal:size");
   // @ts-expect-error narrow at runtime
   expect(parsed!.driverClientId).toBe("dev-abc");
+});
+
+
+test("resize requires an explicit recognized intent", () => {
+  const payload = { type: "terminal:resize", id: ID, timestamp: 1,
+    terminalId: "t1", cols: 80, rows: 24, clientId: "viewer" };
+  expect(parseMessage(JSON.stringify(payload))).toBeNull();
+  expect(parseMessage(JSON.stringify({ ...payload, intent: "focus" }))).toBeNull();
+  expect(parseMessage(JSON.stringify({ ...payload, intent: "takeover" }))).not.toBeNull();
 });

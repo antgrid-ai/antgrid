@@ -28,6 +28,11 @@ export interface ProjectCoreRemoteDeps {
   /** False only while an established app has NOT advertised `pullsTree`; the
    *  re-sync's tree push exists for exactly that app. */
   currentPeerPullsTree?(): boolean;
+  /** Whether the established app renders terminals from `terminal:frame`.
+   *  Absent reads FALSE — the opposite of `currentPeerPullsTree`'s spirit — so
+   *  an unwired supplier keeps the legacy `terminal:output` path selected
+   *  rather than switching an app into a mode it cannot render. */
+  currentPeerTerminalFramesV1?(): boolean;
   /** The bare machine deviceUuid this host registers under. The phone addresses
    *  a project as `<machineUuid>.<projectId>`, so a push sealed without it is a
    *  push the phone cannot open. Required, unlike currentPeerSupportsCheckoutRouting:
@@ -402,6 +407,7 @@ export class ProjectCore {
     await listener.start();
     this.listener = listener;
     core.setOwnerPullsTreeProvider(() => listener.ownerPullsTree);
+    core.setOwnerTerminalFramesV1Provider(() => listener.ownerSupportsTerminalFramesV1);
 
     // Connect info is published via the control-plane `project:open` response
     // (no per-project discovery file). Surface it for the host to hand out.
@@ -533,6 +539,7 @@ export class ProjectCore {
     core.setPeerPubkeyProvider(() => remote.currentPeerPubkey());
     core.setPeerCheckoutRoutingProvider(() => remote.currentPeerSupportsCheckoutRouting?.() === true);
     core.setPeerPullsTreeProvider(() => remote.currentPeerPullsTree?.() === true);
+    core.setPeerTerminalFramesV1Provider(() => remote.currentPeerTerminalFramesV1?.() === true);
 
     // Fallback push path: while the paired phone can't receive in-band (no live
     // peer on this stream OR the app is backgrounded), seal a notification to its
@@ -628,6 +635,7 @@ export class ProjectCore {
         try { core.setPeerPubkeyProvider(null); } catch { /* best-effort */ }
         try { core.setPeerCheckoutRoutingProvider(null); } catch { /* best-effort */ }
         try { core.setPeerPullsTreeProvider(null); } catch { /* best-effort */ }
+        try { core.setPeerTerminalFramesV1Provider(null); } catch { /* best-effort */ }
       },
     };
   }
@@ -669,6 +677,7 @@ export class ProjectCore {
         try { core.setPeerPubkeyProvider(null); } catch {}
         try { core.setPeerCheckoutRoutingProvider(null); } catch {}
         try { core.setPeerPullsTreeProvider(null); } catch {}
+        try { core.setPeerTerminalFramesV1Provider(null); } catch {}
       },
     };
   }
@@ -686,6 +695,7 @@ export class ProjectCore {
     try { this.core?.setPeerPubkeyProvider(null); } catch {}
     try { this.core?.setPeerCheckoutRoutingProvider(null); } catch {}
     try { this.core?.setPeerPullsTreeProvider(null); } catch {}
+    try { this.core?.setPeerTerminalFramesV1Provider(null); } catch {}
     // Remove the primary stream's push dispatcher (additive bus subscriber) before
     // detaching — deliver() would otherwise hand a frame to a torn-down stream.
     try { this.relayPushUnsub?.(); } catch {}

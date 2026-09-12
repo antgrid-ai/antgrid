@@ -1,6 +1,6 @@
 import { describe, expect, test, it, mock } from "bun:test";
 import { MessageBus, type TransportSubscriber } from "../src/message-bus";
-import { createMessage } from "../src/protocol";
+import { createMessage, parseMessage, parseMessageFast, CHECKOUT_VARIABLE_MESSAGE_TYPES } from "../src/protocol";
 
 function makeSub(): TransportSubscriber & { sent: { msg: any; channel: string }[] } {
   const sent: any[] = [];
@@ -11,6 +11,24 @@ function makeSub(): TransportSubscriber & { sent: { msg: any; channel: string }[
 }
 
 describe("MessageBus", () => {
+  test("bell events reach both app wires without exposing or replaying raw output", () => {
+    const bus = new MessageBus();
+    const relay = makeSub();
+    const loopback = makeSub();
+    bus.subscribe({ ...relay, audience: "relay" });
+    bus.subscribe({ ...loopback, audience: "loopback" });
+    bus.publish(createMessage("terminal:output", { terminalId: "t", data: "\x07" }), "control");
+    const bell = createMessage("terminal:bell", {
+      terminalId: "t", runId: crypto.randomUUID(), checkoutId: "wt1",
+    });
+    bus.publish(bell, "control");
+    expect(relay.sent).toEqual([{ msg: bell, channel: "control" }]);
+    expect(loopback.sent).toEqual(relay.sent);
+    expect(bus.getSnapshot(["terminal:bell"])).toEqual([]);
+    expect(parseMessage(JSON.stringify(bell))).toEqual(bell);
+    expect(parseMessageFast(JSON.stringify(bell))).toEqual(bell);
+    expect(CHECKOUT_VARIABLE_MESSAGE_TYPES.has("terminal:bell")).toBe(true);
+  });
   test("publish fans out to all subscribers", () => {
     const bus = new MessageBus();
     const a = makeSub();

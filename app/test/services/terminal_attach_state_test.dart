@@ -1,24 +1,7 @@
-// The attach state TerminalService derives for each terminal, and for the
-// checkout as a whole.
-//
-// Three orthogonal facts are folded into one stage: whether the engine holds
-// bytes, whether a screen pull is outstanding, and whether that pull went
-// unanswered past its bound. The paint is what decides how an outstanding pull
-// reads — a re-pull over an engine that already holds current bytes fires on
-// every re-establishment and every mobile focus resume, so presenting it as a
-// wait would dim and mislabel a live terminal several times an hour.
-//
-// The bounds are constructor parameters so these cases drive a short window
-// instead of the production one.
-//
-// Engine-free by construction: nothing here reads `ghostty.plainText`, so a
-// host without the prebuilt libghostty-vt runs the whole suite. The seq-cutoff
-// invariant is observed through the stage a low-seq output frame produces —
-// a frame filtered by a cutoff never reaches the paint.
+// Terminal attach state is derived exclusively from the frame subscription
+// lifecycle. These tests deliberately contain no raw-output or snapshot path:
+// an unsupported bridge must fail the subscription and require an upgrade.
 
-import 'dart:async';
-
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/models/terminal_models.dart';
@@ -28,64 +11,39 @@ import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
 
-/// Short enough that a case can wait it out, long enough to survive a loaded
-/// host between the frame that arms it and the assertion that follows.
 const _attachBound = Duration(milliseconds: 30);
 const _checkoutBound = Duration(milliseconds: 30);
 const _pastBound = Duration(milliseconds: 120);
-
-/// A bound no case reaches, for the cases that are not about the bound.
 const _unreachedBound = Duration(seconds: 30);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  setUp(() {
-    useInMemoryPrefs();
-  });
+  setUp(useInMemoryPrefs);
 
-  /// A transport whose `terminal.snapshot` RPC is never answered.
-  ///
-  /// The discovery pull rides a correlated RPC, so a fake with no handler
-  /// reports the method as unimplemented and every pull below would resolve
-  /// — as a failure — before the case that is about the wait even begins.
-  /// Held open instead, the pull is outstanding exactly as it is against a
-  /// real bridge, and the cases that want a bound reach it through
-  /// `request`'s own timeout, which is what bounds the RPC arm in production.
-  FakeAgentTransport newTransport() => FakeAgentTransport()
-    ..requestHandler = (_, _) => Completer<Map<String, dynamic>>().future;
-
-  Future<ProjectSession> newSession(FakeAgentTransport t) async {
+  Future<ProjectSession> newSession(FakeAgentTransport transport) async {
     final cache = await CachedSessionsStore.open();
     return ProjectSession(
       projectId: 'p',
-      transport: t,
+      transport: transport,
       mode: ProjectSessionMode.local,
       cachedSessionsStore: cache,
-      onClose: () async => await t.dispose(),
+      onClose: transport.dispose,
     );
   }
 
-  /// The service under test, with its own bounds.
-  ///
-  /// The session builds a main-checkout TerminalService of its own, so the
-  /// outbound log carries both. Every count below is taken after a
-  /// [FakeAgentTransport.clearSent] over an action only this instance can take.
   TerminalService newService(
     ProjectSession session, {
     Duration snapshotAttachTimeout = _unreachedBound,
     Duration checkoutAttachTimeout = _unreachedBound,
-  }) => TerminalService.fromSession(
-    session,
-    snapshotAttachTimeout: snapshotAttachTimeout,
-    checkoutAttachTimeout: checkoutAttachTimeout,
-  )
-    // The heavy hydrator and the focus-resume re-drive are activation-gated,
-    // and every case here is about the checkout that is on screen — the one
-    // `ProjectSession.setActiveCheckouts` always names. Left inactive, a
-    // resume would re-pull nothing and the cases about a re-pull would pass
-    // while asserting over a service nothing ever asked to do anything.
-    ..activate();
+  }) =>
+      TerminalService.fromSession(
+          session,
+          snapshotAttachTimeout: snapshotAttachTimeout,
+          checkoutAttachTimeout: checkoutAttachTimeout,
+        )
+        ..activate()
+        ..setDisplayInterest('pane', 'a');
 
   Map<String, dynamic> terminalInfo(String id, {bool running = true}) => {
     'id': id,
@@ -94,643 +52,285 @@ void main() {
     'running': running,
   };
 
-  void emitStatus(FakeAgentTransport t, List<Map<String, dynamic>> terminals) {
-    t.emit('agent:status', {'projectId': 'p', 'terminals': terminals});
+  void emitStatus(
+    FakeAgentTransport transport,
+    List<Map<String, dynamic>> terminals,
+  ) {
+    transport.emit('agent:status', {'projectId': 'p', 'terminals': terminals});
   }
 
-  /// A composed blob, which carries its own preamble and takes no erase.
-  void emitSnapshot(
-    FakeAgentTransport t,
-    String id, {
-    required int seq,
-    bool history = false,
+  Map<String, dynamic> lastSubscribe(
+    FakeAgentTransport transport,
+    String terminalId,
+  ) => transport.sent.lastWhere(
+    (message) =>
+        message['type'] == 'terminal:subscribe' &&
+        message['terminalId'] == terminalId,
+  );
+
+  void acceptSubscribe(
+    FakeAgentTransport transport,
+    String terminalId, {
+    String runId = 'run-1',
+    String attachmentId = 'attachment-1',
   }) {
-    t.emit('terminal:snapshot', {
-      'terminalId': id,
-      'scrollback': 'SCREEN',
-      'seq': seq,
-      'composed': true,
-      'history': history,
+    transport.emit('terminal:subscribed', {
+      'terminalId': terminalId,
+      'requestId': lastSubscribe(transport, terminalId)['requestId'],
+      'runId': runId,
+      'attachmentId': attachmentId,
+      'version': kTerminalFrameProtocolVersion,
     });
   }
 
-  /// Drains the delivery chain and the microtask the hydration re-emit is
-  /// coalesced onto.
-  Future<void> settle() => Future<void>.delayed(Duration.zero);
-
-  /// The paused -> resumed edge, which re-pulls every live tab. Raised on the
-  /// union the agent gates on, so it needs the heavy subscriber the services
-  /// already hold.
-  Future<void> resumeFocus(ProjectSession session) async {
-    session.setLifecyclePaused(true);
-    await settle();
-    session.setLifecyclePaused(false);
-    await settle();
-    await settle();
+  void emitFrame(
+    FakeAgentTransport transport,
+    String terminalId, {
+    String runId = 'run-1',
+    String attachmentId = 'attachment-1',
+    int sequence = 1,
+    String ansi = 'SCREEN',
+  }) {
+    transport.emit('terminal:frame', {
+      'terminalId': terminalId,
+      'runId': runId,
+      'attachmentId': attachmentId,
+      'sequence': sequence,
+      'version': kTerminalFrameProtocolVersion,
+      'revision': sequence,
+      'cols': 80,
+      'rows': 24,
+      'ansi': ansi,
+      'syncTimedOut': false,
+      'history': {
+        'epoch': 1,
+        'firstRowId': 0,
+        'nextRowId': 0,
+        'status': 'recording',
+      },
+    });
   }
 
-  TerminalAttachStage stageOf(TerminalService svc, String id) =>
-      svc.currentState.hydration[id]!.stage;
+  Future<void> settle() => Future<void>.delayed(Duration.zero);
 
-  /// Snapshot pulls seen on the wire. The session builds a main-checkout
-  /// service of its own, so only the DELTA across an action taken on one
-  /// instance says anything about that instance.
-  int pullCount(FakeAgentTransport t) =>
-      t.requests.where((r) => r.method == 'terminal.snapshot').length;
+  TerminalAttachStage stageOf(TerminalService service, String terminalId) =>
+      service.currentState.hydration[terminalId]!.stage;
 
-  test('a discovered terminal reads awaitingScreen with a stamp until its '
-      'snapshot lands', () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session);
+  int subscribeCount(FakeAgentTransport transport, String terminalId) =>
+      transport.sent
+          .where(
+            (message) =>
+                message['type'] == 'terminal:subscribe' &&
+                message['terminalId'] == terminalId,
+          )
+          .length;
 
-    emitStatus(t, [terminalInfo('a')]);
+  test('a discovered terminal waits for an independent frame', () async {
+    final transport = FakeAgentTransport();
+    final session = await newSession(transport);
+    final service = newService(session);
+
+    emitStatus(transport, [terminalInfo('a')]);
     await settle();
 
-    expect(stageOf(svc, 'a'), TerminalAttachStage.awaitingScreen);
-    expect(
-      svc.currentState.hydration['a']!.requestedAtMs,
-      isNotNull,
-      reason: 'the elapsed readout has nothing to count from without a stamp',
-    );
-    expect(svc.currentState.attach, CheckoutAttachStatus.attaching);
+    expect(stageOf(service, 'a'), TerminalAttachStage.awaitingScreen);
+    expect(service.currentState.hydration['a']!.requestedAtMs, isNotNull);
+    expect(service.currentState.attach, CheckoutAttachStatus.attaching);
 
-    emitSnapshot(t, 'a', seq: 1, history: true);
+    acceptSubscribe(transport, 'a');
+    emitFrame(transport, 'a');
     await settle();
 
-    expect(stageOf(svc, 'a'), TerminalAttachStage.painted);
-    expect(svc.currentState.attach, CheckoutAttachStatus.ready);
+    expect(stageOf(service, 'a'), TerminalAttachStage.painted);
+    expect(service.currentState.attach, CheckoutAttachStatus.ready);
 
-    await svc.dispose();
+    await service.dispose();
     await session.close();
   });
 
-  // Every re-establishment and every mobile foreground re-pulls every live tab.
-  // Reading that as a wait would dim the pane and label it "attaching" over a
-  // screen that is real and current.
-  test('a re-pull over a painted engine reads refreshing, not awaitingScreen',
-      () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session);
+  test('a re-subscribe preserves a painted screen as refreshing', () async {
+    final transport = FakeAgentTransport();
+    final session = await newSession(transport);
+    final service = newService(session);
 
-    emitStatus(t, [terminalInfo('a')]);
+    emitStatus(transport, [terminalInfo('a')]);
     await settle();
-    t.emit('terminal:output', {'terminalId': 'a', 'data': 'live'});
+    acceptSubscribe(transport, 'a');
+    emitFrame(transport, 'a');
     await settle();
-    expect(stageOf(svc, 'a'), TerminalAttachStage.painted);
 
-    await resumeFocus(session);
+    service.retryAttach('a');
+    await settle();
 
-    expect(stageOf(svc, 'a'), TerminalAttachStage.refreshing);
-    expect(svc.currentState.attach, CheckoutAttachStatus.ready);
+    expect(stageOf(service, 'a'), TerminalAttachStage.refreshing);
+    expect(service.currentState.attach, CheckoutAttachStatus.ready);
 
-    await svc.dispose();
+    await service.dispose();
     await session.close();
   });
 
-  test('an unanswered pull over an empty engine reads failed, and later output '
-      'revives it', () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session, snapshotAttachTimeout: _attachBound);
-    // Never answered: the RPC arm's bound IS `request(timeout: …)`, so the
-    // fake has to actually hold the call open for the fake's own timer to
-    // fire — a null `requestHandler` fails instantly with a non-RPC error
-    // instead, which would reach `failed` for the wrong reason.
-    t.requestHandler = (_, _) => Completer<Map<String, dynamic>>().future;
+  test(
+    'an unanswered subscription fails and retry sends one fresh subscribe',
+    () async {
+      final transport = FakeAgentTransport();
+      final session = await newSession(transport);
+      final service = newService(session, snapshotAttachTimeout: _attachBound);
 
-    emitStatus(t, [terminalInfo('a')]);
-    await settle();
-    await Future<void>.delayed(_pastBound);
+      emitStatus(transport, [terminalInfo('a')]);
+      await settle();
+      await Future<void>.delayed(_pastBound);
 
-    expect(stageOf(svc, 'a'), TerminalAttachStage.failed);
+      expect(stageOf(service, 'a'), TerminalAttachStage.failed);
+      final before = subscribeCount(transport, 'a');
 
-    // The deadline bounds how long the pane may claim to be attaching; it is
-    // not a verdict on the PTY. A merely slow reply and a respawn both surface
-    // here as output arriving after the failure, and neither is a reason to go
-    // on showing one. (That a cutoff is armed on the reply and never on the
-    // request is pinned from the other side, in terminal_reattach_test.dart —
-    // no seq filter runs on this path, so nothing here could observe it.)
-    t.emit('terminal:output', {'terminalId': 'a', 'data': 'reborn', 'seq': 1});
-    await settle();
+      service.retryAttach('a');
+      await settle();
 
-    expect(stageOf(svc, 'a'), TerminalAttachStage.painted);
+      expect(subscribeCount(transport, 'a'), before + 1);
+      expect(stageOf(service, 'a'), TerminalAttachStage.awaitingScreen);
+      expect(
+        transport.requests.where(
+          (request) => request.method == 'terminal.snapshot',
+        ),
+        isEmpty,
+      );
 
-    await svc.dispose();
-    await session.close();
-  });
+      await service.dispose();
+      await session.close();
+    },
+  );
 
-  // Checkout-wide failure means only "no agent:status ever arrived". One
-  // terminal the agent cannot snapshot is that terminal's problem; the rest of
-  // the checkout is usable and must not be presented as broken.
   test('one failed terminal does not condemn the checkout', () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session, snapshotAttachTimeout: _attachBound);
-    // Held open the same way as above, so 'b' actually reaches its bound
-    // instead of failing instantly on an unset handler.
-    t.requestHandler = (_, _) => Completer<Map<String, dynamic>>().future;
+    final transport = FakeAgentTransport();
+    final session = await newSession(transport);
+    final service = newService(session, snapshotAttachTimeout: _attachBound);
 
-    emitStatus(t, [terminalInfo('a'), terminalInfo('b')]);
+    service.setDisplayInterest('second pane', 'b');
+    emitStatus(transport, [terminalInfo('a'), terminalInfo('b')]);
     await settle();
-    t.emit('terminal:output', {'terminalId': 'a', 'data': 'live'});
+    acceptSubscribe(transport, 'a', attachmentId: 'attachment-a');
+    emitFrame(transport, 'a', attachmentId: 'attachment-a');
     await settle();
     await Future<void>.delayed(_pastBound);
 
-    expect(stageOf(svc, 'a'), TerminalAttachStage.painted);
-    expect(stageOf(svc, 'b'), TerminalAttachStage.failed);
-    expect(svc.currentState.attach, CheckoutAttachStatus.ready);
+    expect(stageOf(service, 'a'), TerminalAttachStage.painted);
+    expect(stageOf(service, 'b'), TerminalAttachStage.failed);
+    expect(service.currentState.attach, CheckoutAttachStatus.ready);
 
-    await svc.dispose();
+    await service.dispose();
     await session.close();
   });
 
-  // A terminal whose process has exited has no screen left to serialize: the
-  // bridge answers the RPC `ok: true` with `snapshot: null` rather than a log
-  // line and no frame. It is snapshotted on purpose — a retained transcript is
-  // always already stopped — so that pull must read as neither a wait nor a
-  // fault.
   test(
-    "an exited terminal's pull is answered snapshot: null and reads neither "
-    'failed nor awaitingScreen',
+    'late agent status clears a checkout timeout, then its frame is ready',
     () async {
-      final t = newTransport();
-      final session = await newSession(t);
-      final svc = newService(session, snapshotAttachTimeout: _attachBound);
-      t.requestHandler = (_, _) => <String, dynamic>{'snapshot': null};
-
-      emitStatus(t, [terminalInfo('setup', running: false)]);
-      await settle();
-      await Future<void>.delayed(_pastBound);
-
-      expect(stageOf(svc, 'setup'), isNot(TerminalAttachStage.failed));
-      expect(stageOf(svc, 'setup'), isNot(TerminalAttachStage.awaitingScreen));
-      expect(
-        svc.currentState.attach,
-        CheckoutAttachStatus.ready,
-        reason: 'a wait nothing will ever end must not hold the checkout back',
+      final transport = FakeAgentTransport();
+      final session = await newSession(transport);
+      final service = newService(
+        session,
+        checkoutAttachTimeout: _checkoutBound,
       );
-
-      await svc.dispose();
-      await session.close();
-    },
-  );
-
-  // The mirror of the case above, and the whole reason it has to branch on the
-  // PTY: a LIVE terminal answered `snapshot: null` has no bound behind it on
-  // the RPC arm, so retiring alone leaves it cold — which `_deriveAttach`
-  // counts as a wait, holding the checkout at `attaching` with nothing left to
-  // end it and no Retry on the pane.
-  test(
-    "a live terminal's pull answered snapshot: null fails instead of "
-    'stranding the checkout',
-    () async {
-      final t = newTransport();
-      final session = await newSession(t);
-      final svc = newService(session, snapshotAttachTimeout: _attachBound);
-      t.requestHandler = (_, _) => <String, dynamic>{'snapshot': null};
-
-      emitStatus(t, [terminalInfo('a')]);
-      await settle();
-
-      expect(stageOf(svc, 'a'), TerminalAttachStage.failed);
-      expect(
-        svc.currentState.attach,
-        CheckoutAttachStatus.ready,
-        reason: 'one terminal that cannot be snapshotted leaves the checkout '
-            'usable — the failure belongs on its own pane',
-      );
-
-      await svc.dispose();
-      await session.close();
-    },
-  );
-
-  // The common case for a busy TUI, and for a pull the agent answers with
-  // nothing: without this the pane waits out the whole bound and then reports a
-  // failure over output the user can see arriving.
-  test('live output retires an outstanding pull', () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session, snapshotAttachTimeout: _attachBound);
-
-    emitStatus(t, [terminalInfo('a')]);
-    await settle();
-    expect(stageOf(svc, 'a'), TerminalAttachStage.awaitingScreen);
-
-    t.emit('terminal:output', {'terminalId': 'a', 'data': 'live'});
-    await settle();
-    await Future<void>.delayed(_pastBound);
-
-    expect(stageOf(svc, 'a'), TerminalAttachStage.painted);
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  test('retryAttach re-sends exactly one snapshot request and clears the '
-      'failure', () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session, snapshotAttachTimeout: _attachBound);
-    t.requestHandler = (_, _) => Completer<Map<String, dynamic>>().future;
-
-    emitStatus(t, [terminalInfo('a')]);
-    await settle();
-    await Future<void>.delayed(_pastBound);
-    expect(stageOf(svc, 'a'), TerminalAttachStage.failed);
-
-    // `requests`, not `sent`: the pull is an RPC now, and this transport has
-    // no `clearRequests` — the retry's own call is everything past this mark.
-    final before = t.requests.length;
-    svc.retryAttach('a');
-    await settle();
-
-    final pulls = t.requests
-        .skip(before)
-        .where((r) => r.method == 'terminal.snapshot')
-        .toList();
-    expect(pulls, hasLength(1));
-    expect(pulls.first.params?['terminalId'], 'a');
-    // A full hydrator re-drive would re-pull every checkout's tree as well,
-    // turning one tap into a multi-megabyte fan-out.
-    expect(t.requests.where((r) => r.method == 'state.snapshot'), isEmpty);
-    expect(stageOf(svc, 'a'), TerminalAttachStage.awaitingScreen);
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  test('a checkout that never sees agent:status reads failed', () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session, checkoutAttachTimeout: _checkoutBound);
-    // The bound belongs to a surface that is watching: it arms on the first
-    // subscription, which is what `terminalStateProvider` supplies in the app.
-    final sub = svc.stateStream.listen((_) {});
-    addTearDown(sub.cancel);
-
-    expect(svc.currentState.attach, CheckoutAttachStatus.unknown);
-
-    await Future<void>.delayed(_pastBound);
-
-    expect(svc.currentState.attach, CheckoutAttachStatus.failed);
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  // The slow-cellular case. A checkout that was merely slow is not a broken
-  // one: the deadline fired before the frame arrived, and the frame arriving is
-  // the answer.
-  test('a checkout that times out and THEN receives agent:status reads ready',
-      () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session, checkoutAttachTimeout: _checkoutBound);
-    // The bound belongs to a surface that is watching: it arms on the first
-    // subscription, which is what `terminalStateProvider` supplies in the app.
-    final sub = svc.stateStream.listen((_) {});
-    addTearDown(sub.cancel);
-
-    await Future<void>.delayed(_pastBound);
-    expect(svc.currentState.attach, CheckoutAttachStatus.failed);
-
-    emitStatus(t, [terminalInfo('a')]);
-    await settle();
-    expect(
-      svc.currentState.attach,
-      CheckoutAttachStatus.attaching,
-      reason: 'the verdict must clear the moment the frame lands',
-    );
-
-    emitSnapshot(t, 'a', seq: 1, history: true);
-    await settle();
-
-    expect(svc.currentState.attach, CheckoutAttachStatus.ready);
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  test('an agent:status cancels the checkout deadline', () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session, checkoutAttachTimeout: _checkoutBound);
-
-    // No terminals, so nothing but the deadline could move the checkout off
-    // ready once the frame has landed.
-    emitStatus(t, const []);
-    await settle();
-    expect(svc.currentState.attach, CheckoutAttachStatus.ready);
-
-    await Future<void>.delayed(_pastBound);
-
-    expect(svc.currentState.attach, CheckoutAttachStatus.ready);
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  // A tab can leave the status without ever exiting — a service dropped from
-  // antgrid.yaml, a slot renamed — and its bookkeeping would otherwise outlive
-  // it and fire against an id nothing holds.
-  test('a tab that leaves agent:status takes its hydration record with it',
-      () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session, snapshotAttachTimeout: _attachBound);
-
-    emitStatus(t, [terminalInfo('a'), terminalInfo('b')]);
-    await settle();
-    expect(svc.currentState.hydration.keys, unorderedEquals(['a', 'b']));
-
-    emitStatus(t, [terminalInfo('a')]);
-    await settle();
-    expect(svc.currentState.hydration.keys, ['a']);
-
-    // Past the bound the dropped tab's deadline would have fired had the prune
-    // not cancelled it.
-    await Future<void>.delayed(_pastBound);
-    expect(svc.currentState.hydration.keys, ['a']);
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  // A snapshot reply is published on the project bus, so a history blob can be
-  // the answer to ANOTHER device's cold attach. This client refuses it — the
-  // erase would take its own scrollback — and a refusal paints nothing, so it
-  // cannot stand in for the answer to this client's own outstanding pull.
-  test("another device's cold history blob does not clear this client's "
-      'outstanding pull', () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session);
-
-    emitStatus(t, [terminalInfo('a')]);
-    await settle();
-    // This client's own cold pull is answered first, which is what spends its
-    // history claim: a later history blob can then only be someone else's.
-    emitSnapshot(t, 'a', seq: 1, history: true);
-    await settle();
-    expect(stageOf(svc, 'a'), TerminalAttachStage.painted);
-
-    await resumeFocus(session);
-    final outstanding = svc.currentState.hydration['a']!.requestedAtMs;
-    expect(outstanding, isNotNull);
-
-    emitSnapshot(t, 'a', seq: 2, history: true);
-    await settle();
-
-    expect(
-      svc.currentState.hydration['a']!.requestedAtMs,
-      outstanding,
-      reason: 'a refused blob answered nothing, so the deadline still owns it',
-    );
-    expect(stageOf(svc, 'a'), TerminalAttachStage.refreshing);
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  test(
-    'a failed checkout clears its verdict and re-arms its bound on '
-    'retryCheckoutAttach',
-    () async {
-      final t = newTransport();
-      final session = await newSession(t);
-      final svc = newService(session, checkoutAttachTimeout: _checkoutBound);
-      // The bound belongs to a surface that is watching: it arms on the first
-      // subscription, which is what `terminalStateProvider` supplies in the
-      // app.
-      final sub = svc.stateStream.listen((_) {});
-      addTearDown(sub.cancel);
+      final subscription = service.stateStream.listen((_) {});
 
       await Future<void>.delayed(_pastBound);
-      expect(svc.currentState.attach, CheckoutAttachStatus.failed);
+      expect(service.currentState.attach, CheckoutAttachStatus.failed);
 
-      await svc.retryCheckoutAttach();
+      emitStatus(transport, [terminalInfo('a')]);
       await settle();
+      expect(service.currentState.attach, CheckoutAttachStatus.attaching);
 
-      expect(
-        svc.currentState.attach,
-        CheckoutAttachStatus.attaching,
-        reason: 'the failure must clear, and no agent:status has landed yet',
-      );
+      acceptSubscribe(transport, 'a');
+      emitFrame(transport, 'a');
+      await settle();
+      expect(service.currentState.attach, CheckoutAttachStatus.ready);
 
-      await svc.dispose();
+      await subscription.cancel();
+      await service.dispose();
       await session.close();
     },
   );
 
   test(
-    'the re-armed bound fails the checkout again if the retry is never '
-    'answered',
+    'retrying checkout hydration sends a fresh frame subscription',
     () async {
-      final t = newTransport();
-      final session = await newSession(t);
-      final svc = newService(session, checkoutAttachTimeout: _checkoutBound);
-      final sub = svc.stateStream.listen((_) {});
-      addTearDown(sub.cancel);
+      final transport = FakeAgentTransport();
+      final session = await newSession(transport);
+      final service = newService(session);
 
-      await Future<void>.delayed(_pastBound);
-      expect(svc.currentState.attach, CheckoutAttachStatus.failed);
-
-      await svc.retryCheckoutAttach();
+      emitStatus(transport, [terminalInfo('a')]);
       await settle();
-      expect(svc.currentState.attach, CheckoutAttachStatus.attaching);
+      final before = subscribeCount(transport, 'a');
 
-      await Future<void>.delayed(_pastBound);
+      await service.retryCheckoutAttach();
+      await settle();
 
-      expect(
-        svc.currentState.attach,
-        CheckoutAttachStatus.failed,
-        reason: 'a re-armed bound with nothing answering it must still end',
-      );
+      expect(subscribeCount(transport, 'a'), before + 1);
 
-      await svc.dispose();
+      await service.dispose();
       await session.close();
     },
   );
 
-  // FakeAgentTransport is not a StreamTransport, so this exercises the
-  // hydrator-rerun arm rather than `refreshDurableState` — the same arm a
-  // local project's TerminalService always takes.
-  test('a retry over a non-relay transport re-runs the checkout hydrator',
-      () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session);
+  test(
+    'a returning watcher reopens a subscription abandoned on departure',
+    () async {
+      final transport = FakeAgentTransport();
+      final session = await newSession(transport);
+      final service = newService(session);
+      final first = service.stateStream.listen((_) {});
 
-    emitStatus(t, [terminalInfo('a')]);
+      emitStatus(transport, [terminalInfo('a')]);
+      await settle();
+      service.setDisplayInterest('pane', null);
+      await first.cancel();
+      await settle();
+
+      final before = subscribeCount(transport, 'a');
+      service.setDisplayInterest('pane', 'a');
+      final second = service.stateStream.listen((_) {});
+      await settle();
+
+      expect(subscribeCount(transport, 'a'), before + 1);
+      expect(stageOf(service, 'a'), TerminalAttachStage.awaitingScreen);
+
+      await second.cancel();
+      await service.dispose();
+      await session.close();
+    },
+  );
+
+  test('a stale subscription cannot paint a recreated terminal', () async {
+    final transport = FakeAgentTransport();
+    final session = await newSession(transport);
+    final service = newService(session);
+
+    emitStatus(transport, [terminalInfo('a')]);
+    await settle();
+    final staleRequestId = lastSubscribe(transport, 'a')['requestId'];
+
+    service.deleteTerminal('a');
+    await settle();
+    emitStatus(transport, [terminalInfo('a')]);
     await settle();
 
-    final before = t.requests.length;
-    await svc.retryCheckoutAttach();
-    await settle();
-
-    final pulls = t.requests
-        .skip(before)
-        .where((r) => r.method == 'terminal.snapshot')
-        .toList();
-    expect(pulls, isNotEmpty);
-    expect(pulls.first.params?['terminalId'], 'a');
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  // Neither TerminalState nor TerminalTab defines `==` and the state rides a
-  // StreamProvider, so every emission notifies every listener in the workspace.
-  test('a burst of discovered terminals publishes once', () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session);
-
-    final emissions = <TerminalState>[];
-    final sub = svc.stateStream.listen(emissions.add);
-    await settle();
-
-    emitStatus(t, [
-      for (var i = 0; i < 6; i++) terminalInfo('t$i'),
-    ]);
-    await settle();
-
-    expect(svc.currentState.tabs, hasLength(6));
-    expect(
-      emissions,
-      hasLength(2),
-      reason: 'the rebuild, then one coalesced hydration re-emit for all six',
+    transport.emit('terminal:subscribed', {
+      'terminalId': 'a',
+      'requestId': staleRequestId,
+      'runId': 'stale-run',
+      'attachmentId': 'stale-attachment',
+      'version': kTerminalFrameProtocolVersion,
+    });
+    emitFrame(
+      transport,
+      'a',
+      runId: 'stale-run',
+      attachmentId: 'stale-attachment',
     );
-    expect(emissions.last.hydration.keys, hasLength(6));
-
-    await sub.cancel();
-    await svc.dispose();
-    await session.close();
-  });
-  // The RPC arm's bound is the request's own timeout, so a departing watcher
-  // can only disown the reply — and that reply is the ONLY one that pull will
-  // ever get. A focus swap between checkouts drops the last watcher without
-  // re-establishing the transport or resuming focus, so neither re-drive runs
-  // and nothing else would re-issue it.
-  test('a watcher that returns re-opens the pull its departure disowned',
-      () async {
-    final t = newTransport();
-    final session = await newSession(t);
-    final svc = newService(session);
-    final first = svc.stateStream.listen((_) {});
     await settle();
 
-    emitStatus(t, [terminalInfo('a')]);
-    await settle();
-    expect(stageOf(svc, 'a'), TerminalAttachStage.awaitingScreen);
+    expect(stageOf(service, 'a'), TerminalAttachStage.awaitingScreen);
 
-    // The drop publishes nothing on purpose — nobody is reading — so the
-    // tab's return to `cold` is not observable in `currentState` here. What
-    // the departure did is only legible in what the return has to do.
-    await first.cancel();
-    await settle();
-
-    final before = pullCount(t);
-    final second = svc.stateStream.listen((_) {});
-    await settle();
-
-    expect(
-      pullCount(t),
-      before + 1,
-      reason: 'without a re-issue the tab comes back cold — dimmed, captioned attaching, offering no Retry — and holds the checkout there for as long as it is open',
-    );
-    expect(stageOf(svc, 'a'), TerminalAttachStage.awaitingScreen);
-
-    await second.cancel();
-    await svc.dispose();
-    await session.close();
-  });
-
-  // The legacy arm is the only pull with no request timeout behind it, and the
-  // stamp it leaves is what the pane counts up from. An unanswerable pull —
-  // the bridge answers a screen it no longer has with a log line and no frame
-  // — is better called failed than left counting forever.
-  test('the legacy arm bounds a pull for a terminal with no live PTY',
-      () async {
-    final t = newTransport()
-      ..requestHandler = (_, _) =>
-          throw RpcException('E_UNKNOWN_METHOD', 'old bridge');
-    final session = await newSession(t);
-    final svc = newService(session, snapshotAttachTimeout: _attachBound);
-
-    emitStatus(t, [terminalInfo('a', running: false)]);
-    await settle();
-    await settle();
-    expect(stageOf(svc, 'a'), TerminalAttachStage.awaitingScreen);
-
-    await Future<void>.delayed(_pastBound);
-
-    expect(stageOf(svc, 'a'), TerminalAttachStage.failed);
-    expect(
-      svc.currentState.attach,
-      CheckoutAttachStatus.ready,
-      reason: 'a terminal with no PTY behind it never held the checkout back, '
-          'and calling its pull failed must not start',
-    );
-
-    await svc.dispose();
-    await session.close();
-  });
-
-  // Ad-hoc ids are reused — terminal_list_view.dart mints the lowest free
-  // number — so a generation counter reset on removal lets the pull that
-  // removal disowned match the generation the recreated tab issues.
-  test("a recreated terminal does not paint the deleted one's reply", () async {
-    final held = <Completer<Map<String, dynamic>>>[];
-    final t = FakeAgentTransport()
-      ..requestHandler = (_, _) {
-        final c = Completer<Map<String, dynamic>>();
-        held.add(c);
-        return c.future;
-      };
-    final session = await newSession(t);
-    final svc = newService(session);
-
-    emitStatus(t, [terminalInfo('a')]);
-    await settle();
-    // Both services on this transport pulled; which completer belongs to which
-    // is not observable, and answering both is enough — only `svc` is asserted
-    // on, and only `svc` deletes anything.
-    final stale = List.of(held);
-    expect(stale, isNotEmpty);
-
-    svc.deleteTerminal('a');
-    await settle();
-    // Reported running again, which is what lifts the local suppression and
-    // builds a fresh controller under the same id.
-    emitStatus(t, [terminalInfo('a')]);
-    await settle();
-
-    for (final c in stale) {
-      c.complete({
-        'snapshot': {
-          'terminalId': 'a',
-          'scrollback': 'THE DELETED SCREEN',
-          'seq': 50,
-          'composed': true,
-        },
-      });
-    }
-    await settle();
-    await settle();
-
-    expect(
-      stageOf(svc, 'a'),
-      TerminalAttachStage.awaitingScreen,
-      reason: 'accepting the stale reply reads painted, not refreshing: the '
-          'apply puts the deleted screen on the engine AND retires the fresh '
-          'pull that was still owed one',
-    );
-
-    await svc.dispose();
+    await service.dispose();
     await session.close();
   });
 }

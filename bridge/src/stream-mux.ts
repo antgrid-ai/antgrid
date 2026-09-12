@@ -61,7 +61,7 @@ export interface StreamMuxTransport {
   closeStream(streamId: string): void;
   /** Seal + fragment + send one stream-tagged app envelope on `channel`.
    *  Resolves when the message left the send queue. */
-  sendEnvelope(streamId: string, msg: unknown, channel: Channel): Promise<SendOutcome>;
+  sendEnvelope(streamId: string, msg: unknown, channel: Channel, signal?: AbortSignal, authorized?: () => boolean): Promise<SendOutcome>;
 }
 
 interface StreamEntry {
@@ -117,12 +117,22 @@ export class StreamMux {
       unboundAtPeer: false,
     };
     entry.unsub = bus.subscribe({
-      deliver: (msg, channel) => {
+      // This stream IS the relay wire, so an audience-targeted publish meant
+      // for the desktop's loopback socket must not be enveloped onto it.
+      audience: "relay",
+      deliver: (msg, channel, signal) => {
         // Ahead of mayDeliver: a stream nobody is receiving is not an
         // authorization question, and the switch is the more expensive read.
-        if (entry.unboundAtPeer) return;
-        if (!mayDeliver()) return;
-        void this.transport.sendEnvelope(streamId, msg, channel);
+        const canSend = () => !entry.unboundAtPeer && mayDeliver();
+        if (!canSend()) {
+          if (signal && !signal.aborted) return Promise.reject(new Error("Terminal delivery gated"));
+          return;
+        }
+        const sent = this.transport.sendEnvelope(streamId, msg, channel, signal, canSend);
+        if (signal) return sent.then((outcome) => {
+          if (outcome !== "sent" && !signal.aborted) throw new Error(`Terminal delivery ${outcome}`);
+        });
+        void sent;
       },
     });
     this.streams.set(streamId, entry);

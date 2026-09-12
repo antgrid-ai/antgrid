@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter/foundation.dart';
 
+import '../models/terminal_models.dart' show kTerminalFrameProtocolVersion;
 import 'demo_identity.dart';
 import 'demo_script.dart';
 import 'fixtures/demo_transcript_fixtures.dart';
@@ -31,6 +32,9 @@ class DemoTransport extends BufferedAgentTransport {
   bool _disposed = false;
   int _frameSeq = 0;
   int _turnSeq = 0;
+  int _attachmentSeq = 0;
+  final Map<String, _DemoScreen> _screens = {};
+  final Map<String, String> _attachments = {};
 
   /// Insertion order, and the tie-break [_rearm] sorts on. Beats enqueued
   /// together share one `due`, and Dart's sort is stable only below its
@@ -99,6 +103,15 @@ class DemoTransport extends BufferedAgentTransport {
           message['turnId'] as String?,
         );
         return;
+      // Answered without the round trip the rest of the script pretends to
+      // pay. This is not a beat of the demo's narrative but the refusal that
+      // tells the client which display protocol it is on, and the client
+      // holds a real timer open until it lands — so the delay that makes a
+      // reply feel local would instead make every terminal wait out that
+      // bound before it paints.
+      case 'terminal:subscribe':
+        _enqueueAll(Duration.zero, _repliesFor(message));
+        return;
     }
     _enqueueAll(_kReplyDelay, _repliesFor(message));
   }
@@ -112,7 +125,7 @@ class DemoTransport extends BufferedAgentTransport {
     final due = List<_PendingBeat>.of(_queue);
     _queue.clear();
     for (final beat in due) {
-      dispatchDecoded(_stamp(beat.frame), beat.channel);
+      _dispatchBeat(beat);
     }
   }
 
@@ -138,7 +151,6 @@ class DemoTransport extends BufferedAgentTransport {
   List<Map<String, Object?>> _openingFrames() => <Map<String, Object?>>[
     ...kDemoDurableFrames,
     kDemoTerminalStarted,
-    kDemoTerminalSnapshot,
     kDemoGitBranches,
     // Read through [_configPicks] rather than [demoCapabilities] directly, so
     // an answer built after the user has picked a model or mode carries the
@@ -199,16 +211,6 @@ class DemoTransport extends BufferedAgentTransport {
         };
       case 'sessions.list':
         result = <String, Object?>{'sessions': _entries};
-      case 'terminal.snapshot':
-        final s = _terminalSnapshot(params['terminalId'] as String?);
-        result = <String, Object?>{
-          'snapshot': <String, Object?>{
-            'terminalId': s['terminalId'],
-            'scrollback': s['scrollback'],
-            'seq': s['seq'],
-            'composed': s['composed'] ?? false,
-          },
-        };
       default:
         _enqueueAll(_kReplyDelay, <Map<String, Object?>>[
           <String, Object?>{
@@ -292,11 +294,58 @@ class DemoTransport extends BufferedAgentTransport {
       case 'preview:snapshot:request':
         return <Map<String, Object?>>[kDemoPreviewSnapshot, kDemoPortsUpdate];
 
-      case 'terminal:snapshot:request':
-        return <Map<String, Object?>>[
-          _terminalSnapshot(message['terminalId'] as String?),
+      case 'terminal:subscribe':
+        final terminalId = message['terminalId'] as String?;
+        if (terminalId == null || requestId == null) return const [];
+        if (message['version'] != kTerminalFrameProtocolVersion) {
+          return [
+            {
+              'type': 'terminal:display:status',
+              'terminalId': terminalId,
+              'checkoutId': 'main',
+              'requestId': requestId,
+              'code': 'UPGRADE_REQUIRED',
+              'message': 'Upgrade the app to display terminal screens.',
+            },
+          ];
+        }
+        final attachmentId = 'demo-attachment-${_attachmentSeq++}';
+        _attachments[terminalId] = attachmentId;
+        return [
+          {
+            'type': 'terminal:subscribed',
+            'checkoutId': 'main',
+            'terminalId': terminalId,
+            'requestId': requestId,
+            'runId': 'demo-run-$terminalId',
+            'attachmentId': attachmentId,
+            'version': kTerminalFrameProtocolVersion,
+          },
+          _terminalFrame(terminalId),
         ];
-
+      case 'terminal:unsubscribe':
+        final terminalId = message['terminalId'] as String?;
+        if (_attachments[terminalId] == message['attachmentId']) {
+          _attachments.remove(terminalId);
+        }
+        return const [];
+      case 'terminal:resize':
+        final terminalId = message['terminalId'] as String?;
+        if (terminalId == null) return const [];
+        final screen = _screen(terminalId);
+        screen.cols = message['cols'] as int? ?? screen.cols;
+        screen.rows = message['rows'] as int? ?? screen.rows;
+        return [
+          {
+            'type': 'terminal:size',
+            'checkoutId': 'main',
+            'terminalId': terminalId,
+            'cols': screen.cols,
+            'rows': screen.rows,
+            'driverClientId': message['clientId'],
+          },
+          if (_attachments.containsKey(terminalId)) _terminalFrame(terminalId),
+        ];
       case 'terminal:start':
         return <Map<String, Object?>>[
           _terminalStarted(message['terminalId'] as String?),
@@ -596,19 +645,12 @@ class DemoTransport extends BufferedAgentTransport {
     };
   }
 
-  /// Scrollback for [terminalId]. A tab the demo has no history for gets a
-  /// bare prompt rather than the sample terminal's, which `_applySnapshot`
-  /// erases the target buffer to write.
-  Map<String, Object?> _terminalSnapshot(String? terminalId) {
+  String _initialTerminalAnsi(String? terminalId) {
     if (terminalId == null || terminalId == kDemoTerminalId) {
-      return kDemoTerminalSnapshot;
+      return kDemoTerminalScreenAnsi;
     }
-    if (terminalId == kDemoServiceTerminalId) return kDemoServiceSnapshot;
-    return <String, Object?>{
-      ...kDemoTerminalSnapshot,
-      'terminalId': terminalId,
-      'scrollback': kDemoShellPrompt,
-    };
+    if (terminalId == kDemoServiceTerminalId) return kDemoServiceScreenAnsi;
+    return kDemoShellPrompt;
   }
 
   /// Echoes typed bytes so the terminal feels attached, then says plainly that
@@ -626,6 +668,49 @@ class DemoTransport extends BufferedAgentTransport {
         'data': isEnter ? '\r\n$kDemoRefusalText\r\n$kDemoShellPrompt' : data,
       },
     ];
+  }
+
+  _DemoScreen _screen(String terminalId) => _screens.putIfAbsent(
+    terminalId,
+    () => _DemoScreen(_initialTerminalAnsi(terminalId)),
+  );
+
+  Map<String, Object?> _terminalFrame(String terminalId) {
+    final screen = _screen(terminalId);
+    return {
+      'type': 'terminal:frame',
+      'checkoutId': 'main',
+      'terminalId': terminalId,
+      'runId': 'demo-run-$terminalId',
+      'attachmentId': _attachments[terminalId],
+      'version': kTerminalFrameProtocolVersion,
+      'sequence': ++screen.sequence,
+      'revision': screen.sequence,
+      'cols': screen.cols,
+      'rows': screen.rows,
+      'ansi': screen.ansi,
+      'syncTimedOut': false,
+      'history': {
+        'epoch': 0,
+        'firstRowId': 0,
+        'nextRowId': 0,
+        'status': 'recording',
+      },
+    };
+  }
+
+  void _dispatchBeat(_PendingBeat beat) {
+    // Script and input echoes use raw chunks only inside this in-memory
+    // authoritative screen. The app sees only the resulting independent frame.
+    if (beat.frame['type'] == 'terminal:output') {
+      final terminalId = beat.frame['terminalId'] as String;
+      _screen(terminalId).append(beat.frame['data'] as String);
+      if (_attachments.containsKey(terminalId)) {
+        dispatchDecoded(_stamp(_terminalFrame(terminalId)), beat.channel);
+      }
+      return;
+    }
+    dispatchDecoded(_stamp(beat.frame), beat.channel);
   }
 
   /// A real search over the sample file bodies — cheaper than canning
@@ -751,7 +836,7 @@ class DemoTransport extends BufferedAgentTransport {
     final now = DateTime.now();
     while (_queue.isNotEmpty && !_queue.first.due.isAfter(now)) {
       final beat = _queue.removeAt(0);
-      dispatchDecoded(_stamp(beat.frame), beat.channel);
+      _dispatchBeat(beat);
     }
     _rearm();
   }
@@ -792,4 +877,38 @@ class _PendingBeat {
   final int seq;
   final String channel;
   final Map<String, Object?> frame;
+}
+
+class _DemoScreen {
+  _DemoScreen(String initial) {
+    append(initial);
+  }
+  int cols = 96;
+  int rows = 30;
+  int sequence = 0;
+  final List<String> _lines = [''];
+
+  void append(String text) {
+    for (final rune in text.runes) {
+      if (rune == 10) {
+        _lines.add('');
+      } else if (rune == 8 || rune == 127) {
+        final last = _lines.last;
+        if (last.isNotEmpty) {
+          _lines[_lines.length - 1] = last.substring(0, last.length - 1);
+        }
+      } else if (rune >= 32) {
+        if (_lines.last.runes.length >= cols) _lines.add('');
+        _lines[_lines.length - 1] += String.fromCharCode(rune);
+      }
+    }
+    if (_lines.length > rows) _lines.removeRange(0, _lines.length - rows);
+  }
+
+  String get ansi {
+    final visible = _lines.skip(
+      _lines.length > rows ? _lines.length - rows : 0,
+    );
+    return '\x1b[?1049l\x1b[3J\x1b[2J\x1b[H\x1b[0m${visible.join('\r\n')}';
+  }
 }

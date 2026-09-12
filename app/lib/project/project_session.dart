@@ -18,6 +18,7 @@ import '../services/upload_service.dart';
 import '../services/pending_reply.dart';
 import '../storage/cached_sessions_store.dart';
 import '../util/device_id.dart';
+import '../util/detached.dart';
 import 'fragment_recovery.dart';
 import 'message_router.dart';
 import 'project_message_classification.dart';
@@ -57,6 +58,8 @@ class ProjectSession {
   late final CheckoutServices _mainCheckoutServices;
   final Map<String, CheckoutServices> _checkoutServices = {};
   Set<String> _pendingCheckoutSweep = const {};
+  Set<String>? _lastLiveCheckouts;
+  final Set<Future<void>> _checkoutDisposals = {};
 
   /// Checkouts whose bundles carry the heavy hydrators. Remembered rather than
   /// derived from [_checkoutServices]: the session list can build a bundle for
@@ -80,6 +83,7 @@ class ProjectSession {
   StreamSubscription? _sessionDownSub;
   StreamSubscription<TransportState>? _transportStateSub;
   StreamSubscription? _checkoutSessionSub;
+  StreamSubscription? _checkoutRefusalSub;
   bool _closed = false;
 
   /// Tracked replies registered via [newPending]. Untyped so one registry can
@@ -135,14 +139,19 @@ class ProjectSession {
     // session that has never been focused would produce no notifications at
     // all. Only the per-checkout PULLS are focus-gated — see
     // [CheckoutServices.activate].
-    _checkoutSessionSub = sessionsService.stateStream.listen((state) {
+    _checkoutSessionSub = sessionsService.listings.listen((listing) {
+      if (_closed) return;
       final live = <String>{'main'};
-      for (final entry in state.sessions) {
+      for (final entry in listing.sessions) {
         live.add(entry.checkoutId);
+      }
+      _lastLiveCheckouts = live;
+      for (final entry in listing.sessions) {
         if (entry.checkoutId != 'main') servicesForCheckout(entry.checkoutId);
       }
       _sweepCheckouts(live);
     });
+    _checkoutRefusalSub = statusStream.listen(_onCheckoutRefusal);
     handlerService = HandlerService.fromSession(this);
     agentSessionService = AgentSessionService.fromSession(this);
     if (transport is StreamTransport) {
@@ -240,6 +249,9 @@ class ProjectSession {
   void _markDown() {
     if (_down) return;
     _down = true;
+    for (final bundle in checkoutServiceBundles) {
+      bundle.terminalService.suspendDisplay();
+    }
     _failAllPending(const SessionDownException());
   }
 
@@ -276,7 +288,14 @@ class ProjectSession {
 
   /// Declares app-level background state to the agent, gating both the heavy
   /// stream and the fallback push. See [MessageRouter.setLifecyclePaused].
-  void setLifecyclePaused(bool paused) => _router.setLifecyclePaused(paused);
+  void setLifecyclePaused(bool paused) {
+    if (paused) {
+      for (final bundle in checkoutServiceBundles) {
+        bundle.terminalService.suspendDisplay();
+      }
+    }
+    _router.setLifecyclePaused(paused);
+  }
 
   /// Fires once the app has declared it can render again — with the
   /// declaration already on the wire — so a surface that rebuilds from
@@ -341,6 +360,10 @@ class ProjectSession {
     if (existing != null) return existing;
     final bundle = CheckoutServices(this, checkoutId);
     _checkoutServices[checkoutId] = bundle;
+    final live = _lastLiveCheckouts;
+    if (live != null && !live.contains(checkoutId)) {
+      _pendingCheckoutSweep = {..._pendingCheckoutSweep, checkoutId};
+    }
     if (_activeCheckouts.contains(checkoutId)) bundle.activate();
     _checkoutBundlesController.add(bundle);
     return bundle;
@@ -368,25 +391,18 @@ class ProjectSession {
     }
   }
 
-  /// Releases bundles whose session is gone. Deferred by one emission: the
+  /// Releases bundles whose session is gone. Deferred by one listing: the
   /// providers that read a bundle are driven by the SAME session list, so
   /// disposing on the emission that drops the session would tear it down under
-  /// a focus that has not moved off it yet. A bundle absent from two successive
-  /// listings has no reader left. Every service holds transport hydrators, so
+  /// a focus that has not moved off it yet. Unchanged listings still advance
+  /// cleanup; state equality says nothing about whether readers moved on.
+  /// Every service holds transport hydrators, so
   /// leaving them registered replays requests for a deleted checkout on every
   /// reconnect.
   void _sweepCheckouts(Set<String> live) {
     for (final id in _pendingCheckoutSweep) {
       if (live.contains(id)) continue;
-      unawaited(_checkoutServices.remove(id)?.dispose() ?? Future.value());
-      // Symmetric with the bridge's own dropCheckoutReplay: a removed worktree
-      // must not keep seeding a bundle that a stale id could still recreate.
-      _router.dropCheckoutReplay(id);
-      // A dead id lingering here would come back activated: servicesForCheckout
-      // activates on creation for anything this set names.
-      if (_activeCheckouts.contains(id)) {
-        _activeCheckouts = {..._activeCheckouts}..remove(id);
-      }
+      _releaseCheckout(id);
     }
     // Union, not just the bundle map: a checkout can leave durable frames the
     // router retains without ever getting a bundle (an archived session still
@@ -395,6 +411,38 @@ class ProjectSession {
       ..._checkoutServices.keys,
       ..._router.replayCheckoutIds,
     }.where((id) => !live.contains(id)).toSet();
+  }
+
+  void _onCheckoutRefusal(Map<String, dynamic> json) {
+    if (_closed || json['type'] != 'control:result' || json['ok'] != false) {
+      return;
+    }
+    final error = json['error'];
+    if (error is! Map || error['code'] != 'UNKNOWN_CHECKOUT') return;
+    final id = json['checkoutId'];
+    final live = _lastLiveCheckouts;
+    if (id is! String || live == null || live.contains(id)) return;
+    if (!_pendingCheckoutSweep.contains(id)) return;
+    _releaseCheckout(id);
+    _pendingCheckoutSweep = {..._pendingCheckoutSweep}..remove(id);
+  }
+
+  void _releaseCheckout(String id) {
+    if (id == 'main') return;
+    final bundle = _checkoutServices.remove(id);
+    _router.dropCheckoutReplay(id);
+    _activeCheckouts = {..._activeCheckouts}..remove(id);
+    if (bundle == null) return;
+    bundle.deactivate();
+    final disposal = bundle.dispose();
+    _checkoutDisposals.add(disposal);
+    detached('project_session', 'dispose deleted checkout', () async {
+      try {
+        await disposal;
+      } finally {
+        _checkoutDisposals.remove(disposal);
+      }
+    });
   }
 
   Iterable<CheckoutServices> get checkoutServiceBundles =>
@@ -467,10 +515,12 @@ class ProjectSession {
       if (_sessionDownSub != null) _sessionDownSub!.cancel(),
       if (_transportStateSub != null) _transportStateSub!.cancel(),
       if (_checkoutSessionSub != null) _checkoutSessionSub!.cancel(),
+      if (_checkoutRefusalSub != null) _checkoutRefusalSub!.cancel(),
       sessionsService.dispose(),
       handlerService.dispose(),
       agentSessionService.dispose(),
       for (final bundle in _checkoutServices.values) bundle.dispose(),
+      ..._checkoutDisposals,
     ]);
     // A session torn down with a reply in flight that outlives every
     // service's own cleanup (a future PendingReply site that forgets to

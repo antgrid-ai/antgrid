@@ -9,7 +9,7 @@ const log = logger.child({ component: "terminal-session" });
 import { createMessage, type AbMessage } from "./protocol";
 import { findOnPath } from "./tool-detector";
 import { TerminalNotificationScanner, type NotificationEvent } from "./notification-scanner";
-import { VtCapabilityResponder } from "./vt-capability-responder";
+import { ANTGRID_QUERY_COLORS, VtCapabilityResponder } from "./vt-capability-responder";
 import { padBareVerb, PtySubmitQueue } from "./pty-submit";
 import {
   createKillOnCloseJob,
@@ -386,33 +386,7 @@ export interface TerminalSessionOptions {
 
 const BATCH_INTERVAL_MS = 16;
 
-/**
- * Byte cap on a coalesced `terminal:output` frame. Binds only above
- * BATCH_MAX_BYTES/BATCH_INTERVAL_MS of PTY output — under that the timer
- * flushes first, so interactive echo latency is the interval's business, not
- * this constant's.
- *
- * Sized against the relay's route limiter, which counts FRAMES, not bytes:
- * `rateLimitMsgPerSec` (relay/src/config.ts) is 1200/s per (pair, channel) and
- * an exceeded bucket DROPS the frame rather than queuing it, which for terminal
- * output is corrupted scrollback. At 4 KB that put a hard ceiling near 5 MB/s of
- * sustained output from one terminal; at 16 KB it is near 20 MB/s. Far below
- * MAX_FRAME_PAYLOAD (1.5 MB, packages/antgrid-wire/src/frag.ts), so the frame
- * itself is never the limit.
- *
- * The app-side receive cost per KB of output confirms the same direction and
- * bounds it: measured on Windows over `app/test/config/frame_batch_bench.dart`,
- * ~27 us/KB at 4 KB and 8 KB, ~21 us/KB at 16 KB and 32 KB, then WORSE again
- * past 64 KB. So 8 KB buys nothing on that axis and 256 KB is a regression.
- *
- * One cross-platform consequence, deliberate: a batch this size seals to ~22 KB
- * of JSON (escape-heavy output inflates ~1.35x), which crosses the 10,000-byte
- * `BackgroundCipher.defaultChannelPolicy` threshold in cryptography_flutter. On
- * Linux — the one platform with neither a plugin nor a native cipher — that
- * moves the pure Dart AES-GCM off the UI isolate and onto a spawned one: same
- * CPU, better responsiveness, but re-measure here if Linux ever gets its own
- * native cipher.
- */
+// Bound internal output coalescing independently of the serialized viewer frames.
 const BATCH_MAX_BYTES = 16384;
 
 /**
@@ -990,27 +964,92 @@ export class TerminalSession {
    * The responder is stateful (it carries a query split across PTY chunks and
    * follows the guest's own mode changes), so it must live for the whole
    * session — see `vt-capability-responder.ts` for why this side answers at
-   * all and why it is the only side that does.
-   *
-   * The colours are Antgrid's design tokens and must stay in lockstep with
-   * `AbColors` (`app/lib/design/ab_colors.dart`): they are what the guest
-   * picks its own contrast against.
+   * all and why it is the only side that does. Starts at full scope: with no
+   * `TerminalFrameSource` installed yet (or its construction having fallen
+   * back to a plain `TerminalScreen`), this is the ONLY responder there is.
+   * ONE instance for the session's whole life — narrow/widen switch its
+   * `scope` in place (see `VtCapabilityResponder.setScope`) rather than
+   * swapping in a fresh one, which would forget `carry` and every DEC mode
+   * the guest had already set.
    */
-  private capabilityResponder = new VtCapabilityResponder({
-    foreground: "rgb:fafa/fafa/fafa", // ≈ textPrimary
-    background: "rgb:0909/0909/0b0b", // ≈ bgDeepest
-    cursor: "rgb:8181/8c8c/f8f8", //     ≈ accent indigo
-  });
+  private readonly capabilityResponder = new VtCapabilityResponder(ANTGRID_QUERY_COLORS);
+
+  /**
+   * Held OSC 10/11/12 replies while narrowed — see `deferCapabilityReplies`
+   * and `flushCapabilityReplies`.
+   */
+  private pendingCapabilityReplies: string[] = [];
+
+  /**
+   * Set while a live `TerminalFrameSource`'s parser-boundary responder is
+   * answering everything but OSC 10/11/12. While set,
+   * `respondToCapabilityQueries` holds its replies instead of writing them
+   * immediately: the byte responder runs synchronously off the raw PTY chunk,
+   * while the parser-boundary replies fire only once that chunk has actually
+   * been parsed (batched, and behind xterm's own async write buffer — see
+   * `TerminalScreen.feed`'s doc) — an immediate write would let an OSC reply
+   * overtake a same-chunk, or even earlier-chunk, DA1/CPR/DECRQM reply that
+   * had not been produced yet. `flushCapabilityReplies` is what releases the
+   * hold, from the same parser-completion boundary those replies fire from.
+   */
+  private deferCapabilityReplies = false;
+
+  /**
+   * Switches the byte-level responder above down to OSC 10/11/12 only. Called
+   * once a `TerminalFrameSource` has installed its own parser-boundary
+   * responder for everything else (`TerminalFrameSource.answerQueries`) — see
+   * the `scope` doc on `VtCapabilityResponderOptions` for why an unnarrowed
+   * instance left running alongside it would double-answer.
+   */
+  narrowCapabilityResponder(): void {
+    this.capabilityResponder.setScope("osc-colors");
+    this.deferCapabilityReplies = true;
+  }
+
+  /**
+   * Reverses `narrowCapabilityResponder`. A `TerminalFrameSource` that has
+   * latched and exhausted its rebuild budget, found no geometry to rebuild
+   * against, or fallen back to a plain `TerminalScreen` (at spawn or on a
+   * rebuild) leaves no parser-boundary responder running — this session's own
+   * byte-level one is the only one there is again, at every scope it used to
+   * cover, or DA1/CPR/DECRQM/Kitty go unanswered for the rest of the run. See
+   * `TerminalManager.wireFrameQueries` and `.ensureLiveScreen` for the call
+   * sites. Flushes anything still held from while narrowed, so a reply that
+   * arrived just before the switch is not stranded.
+   */
+  widenCapabilityResponder(): void {
+    this.capabilityResponder.setScope("full");
+    this.deferCapabilityReplies = false;
+    this.flushCapabilityReplies();
+  }
+
+  /**
+   * Writes every OSC 10/11/12 reply queued since the last flush, in the order
+   * they were queued. Called from the frame source's own `onParsed` — the
+   * same parser-completion boundary its DA1/CPR/DECRQM replies fire from — so
+   * a batch's OSC replies leave no earlier than everything the parser already
+   * answered for that same batch. See `deferCapabilityReplies`.
+   */
+  flushCapabilityReplies(): void {
+    if (this.pendingCapabilityReplies.length === 0) return;
+    const data = this.pendingCapabilityReplies.join("");
+    this.pendingCapabilityReplies.length = 0;
+    this.write(data);
+  }
 
   private respondToCapabilityQueries(data: string): void {
+    if (this.deferCapabilityReplies) return;
     const replies = this.capabilityResponder.feed(data);
     if (replies === "") return;
+    if (this.deferCapabilityReplies) {
+      this.pendingCapabilityReplies.push(replies);
+      return;
+    }
     // Through the queue like every other writer: a reply written raw would be the one
     // thing that can land BETWEEN an injected line and its deferred CR, which is the
     // interleave `pty-submit.ts` exists to make impossible. It costs these replies
     // nothing in the case that matters — the queue is a synchronous pass-through while
-    // no submit is in flight, which is the whole startup burst these queries arrive in —
-    // and query protocols are FIFO, an order the queue preserves.
+    // no submit is in flight, which is the whole startup burst these queries arrive in.
     this.write(replies);
   }
 

@@ -214,7 +214,7 @@ test("a preview snapshot request re-emits the detected ports alongside it", asyn
   await waitFor(() => countOf(sent, "ports:update") > before, "ports:update after the request");
 });
 
-test("a resync re-sends each terminal as a composed snapshot, never as output", async () => {
+test("a resync leaves terminal display to explicit frame subscriptions", async () => {
   const { bus, sent } = await bootCore();
   // cwd deliberately outside the project: on Windows a live PTY holds its own
   // cwd open and the fixture's teardown rm would hit EBUSY.
@@ -231,11 +231,6 @@ test("a resync re-sends each terminal as a composed snapshot, never as output", 
 
   core!.onHandshakeComplete();
 
-  await waitFor(() => sent.some((m) => m.type === "terminal:snapshot"), "the re-synced screen");
-  const snapshot = sent.find((m) => m.type === "terminal:snapshot");
-  if (snapshot?.type !== "terminal:snapshot") throw new Error("unreachable");
-  // A whole screen delivered as ordinary output would stack a second copy into
-  // a live tab, and with no seq the app's cutoff could not filter it out.
-  expect(snapshot.composed).toBe(true);
-  expect(typeof snapshot.seq).toBe("number");
+  await waitFor(() => sent.some((m) => m.type === "agent:status"), "the re-synced status");
+  expect(sent.filter((m) => m.type === "terminal:snapshot")).toEqual([]);
 });

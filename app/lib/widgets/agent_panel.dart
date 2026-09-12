@@ -57,6 +57,7 @@ import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
 import 'window_title_bar.dart';
 import 'workspace_menu_button.dart';
+import 'display_visibility.dart';
 import 'workspace_readiness_chip.dart';
 
 class AgentPanel extends ConsumerWidget {
@@ -86,66 +87,68 @@ class AgentPanel extends ConsumerWidget {
     // holding the old view up for the whole teardown reads as an ignored tap.
     final isChat = ref.watch(activeSessionModeProvider) == 'chat';
 
-    return Column(
-      children: [
-        // Two headers, one layout: mobile needs a button for its slide-in
-        // drawer, desktop toggles that drawer from the window title bar
-        // instead. Both carry the same session context (breadcrumb, branch
-        // pill, agent mark, mode, handler) — the title bar yields the controls
-        // while either is up (see agentBarMountedProvider) and never renders
-        // the name at all.
-        if (MediaQuery.sizeOf(context).width < kCompactBreakpoint)
-          AbToolbar.custom(
-            children: [
-              // Via provider, not Scaffold.of: the mobile drawer is a PageView
-              // page, so there is no ScaffoldState holding it.
-              AbIconButton(
-                icon: AbIcons.menu,
-                tooltip: 'Projects',
-                onTap: ref.watch(openDrawerProvider),
-              ),
-              const SizedBox(width: AbTokens.space6),
-              const SessionAgentMark(),
-              const SizedBox(width: AbTokens.space6),
-              const ActiveSessionApprovalBadge(),
-              // space12, not space8: the work-status badge overhangs the mark
-              // by 2px (see AgentWorkStatusBadge's Positioned offset in
-              // SessionAgentMark) and needs the wider gap to actually clear
-              // the breadcrumb — same convention as _SessionMark's use of
-              // space12 in recent_session_row_widget.dart.
-              const SizedBox(width: AbTokens.space12),
-              // Branch pill folded into the overflow menu below: it lives
-              // inside the breadcrumb on desktop, but on a phone-width row it
-              // competes with the title for the one flexible slot.
-              const Expanded(
-                child: TitleBarBreadcrumb(showBranchPill: false),
-              ),
-              const WorkspaceReadinessChip(),
-              const SizedBox(width: AbTokens.space6),
-              const _SessionOverflowButton(),
-            ],
-          )
-        else
-          const AgentBar(),
-        const SessionSetupBanner(),
-        Expanded(
-          child: isChat && activeId != null
-              // Keyed by session so switching sessions rebuilds the State —
-              // composer draft, expansion/dismiss sets, and scroll position
-              // must not leak from one session into another.
-              ? AgentTranscriptView(
-                  key: ValueKey(activeId),
-                  sessionId: activeId,
-                )
-              // Overlay is terminal-only; it must never paint over the transcript.
-              : const Stack(
-                  children: [TerminalScreen(), CommandOutputOverlay()],
+    return DisplayVisibility(
+      child: Column(
+        children: [
+          // Two headers, one layout: mobile needs a button for its slide-in
+          // drawer, desktop toggles that drawer from the window title bar
+          // instead. Both carry the same session context (breadcrumb, branch
+          // pill, agent mark, mode, handler) — the title bar yields the controls
+          // while either is up (see agentBarMountedProvider) and never renders
+          // the name at all.
+          if (MediaQuery.sizeOf(context).width < kCompactBreakpoint)
+            AbToolbar.custom(
+              children: [
+                // Via provider, not Scaffold.of: the mobile drawer is a PageView
+                // page, so there is no ScaffoldState holding it.
+                AbIconButton(
+                  icon: AbIcons.menu,
+                  tooltip: 'Projects',
+                  onTap: ref.watch(openDrawerProvider),
                 ),
-        ),
-        const HandlerAwayHint(),
-        const HandlerPaBar(),
-        const CommandTray(),
-      ],
+                const SizedBox(width: AbTokens.space6),
+                const SessionAgentMark(),
+                const SizedBox(width: AbTokens.space6),
+                const ActiveSessionApprovalBadge(),
+                // space12, not space8: the work-status badge overhangs the mark
+                // by 2px (see AgentWorkStatusBadge's Positioned offset in
+                // SessionAgentMark) and needs the wider gap to actually clear
+                // the breadcrumb — same convention as _SessionMark's use of
+                // space12 in recent_session_row_widget.dart.
+                const SizedBox(width: AbTokens.space12),
+                // Branch pill folded into the overflow menu below: it lives
+                // inside the breadcrumb on desktop, but on a phone-width row it
+                // competes with the title for the one flexible slot.
+                const Expanded(
+                  child: TitleBarBreadcrumb(showBranchPill: false),
+                ),
+                const WorkspaceReadinessChip(),
+                const SizedBox(width: AbTokens.space6),
+                const _SessionOverflowButton(),
+              ],
+            )
+          else
+            const AgentBar(),
+          const SessionSetupBanner(),
+          Expanded(
+            child: isChat && activeId != null
+                // Keyed by session so switching sessions rebuilds the State —
+                // composer draft, expansion/dismiss sets, and scroll position
+                // must not leak from one session into another.
+                ? AgentTranscriptView(
+                    key: ValueKey(activeId),
+                    sessionId: activeId,
+                  )
+                // Overlay is terminal-only; it must never paint over the transcript.
+                : const Stack(
+                    children: [TerminalScreen(), CommandOutputOverlay()],
+                  ),
+          ),
+          const HandlerAwayHint(),
+          const HandlerPaBar(),
+          const CommandTray(),
+        ],
+      ),
     );
   }
 }
