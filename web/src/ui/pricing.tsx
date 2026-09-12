@@ -1,10 +1,10 @@
-import { Layout } from "./layout.js";
+import { Layout, type LayoutUser } from "./layout.js";
 import { asset } from "./asset.js";
 import { FREE_WORKER_LIMIT } from "../billing/plans.js";
 import type { PlanRow } from "../models/plan.js";
 
 export type PricingPageProps = {
-  user: { email?: string | null };
+  user: LayoutUser;
   plans: PlanRow[];
 };
 
@@ -328,7 +328,7 @@ function EnterpriseCard({ plan }: { plan: PlanRow }) {
 // import type { PlanRow } from "../models/plan.js";
 // 
 // export type PricingPageProps = {
-//   user: { email?: string | null };
+//   user: LayoutUser;
 //   plans: PlanRow[];
 //   env: BillingEnv;
 //   /** Active paid plan slug, if any (trial | pro_yearly). */

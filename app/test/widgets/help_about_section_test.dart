@@ -25,7 +25,10 @@ void main() {
     final opened = <String>[];
     await tester.pumpWidget(
       _wrap(
-        HelpAboutSection(openUrl: (context, url) async => opened.add(url)),
+        HelpAboutSection(
+          openUrl: (context, url) async => opened.add(url),
+          openChat: (context, ref) async => opened.add('chat'),
+        ),
         overrides: [
           appVersionLabelProvider.overrideWith((ref) async => '1.2.3 (456)'),
         ],
@@ -36,9 +39,13 @@ void main() {
     await tester.tap(find.text('Getting started'));
     expect(opened, ['https://antgrid.ai/get-started']);
 
-    await tester.tap(find.text('Support'));
+    await tester.tap(find.text('Chat with support'));
+    expect(opened, ['https://antgrid.ai/get-started', 'chat']);
+
+    await tester.tap(find.text('Support centre'));
     expect(opened, [
       'https://antgrid.ai/get-started',
+      'chat',
       'https://antgrid.ai/support',
     ]);
   });
@@ -46,7 +53,10 @@ void main() {
   testWidgets('version row renders the resolved version label', (tester) async {
     await tester.pumpWidget(
       _wrap(
-        HelpAboutSection(openUrl: (context, url) async {}),
+        HelpAboutSection(
+          openUrl: (context, url) async {},
+          openChat: (context, ref) async {},
+        ),
         overrides: [
           appVersionLabelProvider.overrideWith((ref) async => '1.2.3 (456)'),
         ],

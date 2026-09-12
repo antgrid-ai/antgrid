@@ -78,7 +78,37 @@ test("targeted bus delivery preserves cancellation and rechecks authorization at
   const handle = mux.attach(bus, { mayDeliver: () => allowed });
   await bus.deliverTo(createMessage("terminal:display:status", { terminalId: "t", code: "ACK_TIMEOUT", message: "Reconnect" }), "control", "relay", controller.signal);
   expect(received).toBe(controller.signal);
+  mux.markUnbound(handle.streamId);
+  expect(gate!()).toBe(false);
+  mux.markBound(handle.streamId);
+  expect(gate!()).toBe(true);
   allowed = false;
   expect(gate!()).toBe(false);
   handle.detach();
+});
+
+test("muted terminal delivery fails without leaking loopback frames and resumes after rebind", async () => {
+  const bus = new MessageBus();
+  let sent = 0;
+  const mux = new StreamMux({
+    openStream: () => {}, closeStream: () => {},
+    sendEnvelope: async () => { sent++; return "sent"; },
+  });
+  const handle = mux.attach(bus, {});
+  const signal = new AbortController().signal;
+  const status = createMessage("terminal:display:status", {
+    terminalId: "t", code: "ACK_TIMEOUT", message: "Reconnect",
+  });
+  try {
+    await bus.deliverTo(status, "control", "loopback", signal);
+    expect(sent).toBe(0);
+    mux.markUnbound(handle.streamId);
+    await expect(bus.deliverTo(status, "control", "relay", signal)).rejects.toThrow("Terminal delivery gated");
+    expect(sent).toBe(0);
+    mux.markBound(handle.streamId);
+    await bus.deliverTo(status, "control", "relay", signal);
+    expect(sent).toBe(1);
+  } finally {
+    handle.detach();
+  }
 });

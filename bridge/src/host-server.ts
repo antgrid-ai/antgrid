@@ -1216,6 +1216,7 @@ export class HostServer {
       if (this.cores.get(projectId)?.core.isRelayRegistered()) {
         const streamId = this.streamIds.get(projectId);
         if (streamId) {
+          this.controlPlaneRelay?.noteStreamBound(streamId);
           bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
         }
       }
@@ -1249,6 +1250,7 @@ export class HostServer {
           // ProjectSession services without a fresh project:start.
           const streamId = this.streamIds.get(projectId);
           if (streamId) {
+            this.controlPlaneRelay?.noteStreamBound(streamId);
             bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
           }
           this.sendProjectsAdvertisement(bus);

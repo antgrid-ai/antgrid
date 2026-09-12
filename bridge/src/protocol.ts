@@ -747,6 +747,20 @@ const StreamInvalidMessage = BaseMessage.extend({
   streamId: z.string(),
 });
 
+// Inbound app→agent, control plane only: the MIRROR of stream-invalid. The app
+// received a frame on a streamId it holds no transport for, so everything this
+// host pushes onto that stream is being discarded. Without it the loss is
+// unobservable from here and unbounded — stream ids outlive the app process that
+// bound them (a core keeps its stream across the peer's restart, and a re-open
+// reuses the same id), so a live PTY on a stream the new app never bound drops
+// one frame per frame for as long as the terminal runs.
+// Advisory, never authorization: it only mutes a stream this host already
+// chose to open, and delivery resumes the moment the app proves it is bound.
+const StreamUnboundMessage = BaseMessage.extend({
+  type: z.literal("stream-unbound"),
+  streamId: z.string(),
+});
+
 // Outbound result for a control-plane verb (e.g. project:start). Success is
 // usually conveyed by a fresh agent:projects re-advertisement; this carries the
 // FAILURE feedback (NOT_ALLOWED / UNKNOWN_PROJECT / OPEN_FAILED) back to the
@@ -2386,6 +2400,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentToolsMessage,
   StreamReadyMessage,
   StreamInvalidMessage,
+  StreamUnboundMessage,
   ControlResultMessage,
   AppReadyMessage,
   CommandRunMessage,
@@ -2541,6 +2556,7 @@ export type ProjectAdvertEntry = AgentProjects["projects"][number];
 export type AgentTools = z.infer<typeof AgentToolsMessage>;
 export type StreamReady = z.infer<typeof StreamReadyMessage>;
 export type StreamInvalid = z.infer<typeof StreamInvalidMessage>;
+export type StreamUnbound = z.infer<typeof StreamUnboundMessage>;
 export type ControlResult = z.infer<typeof ControlResultMessage>;
 export type AppReady = z.infer<typeof AppReadyMessage>;
 export type CommandRun = z.infer<typeof CommandRunMessage>;
@@ -2848,7 +2864,7 @@ const KNOWN_TYPES = new Set<string>([
   "tree:full", "tree:update", "file:read", "file:content",
   "file:resolve-path", "file:resolve-path-result",
   "ports:update", "preview:url",
-  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "control:result", "app:ready",
+  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "stream-unbound", "control:result", "app:ready",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
   "handler:snapshot", "handler:undo", "handler:dismiss",

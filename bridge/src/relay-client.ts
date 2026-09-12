@@ -401,6 +401,13 @@ export class RelayClient {
     return this.mux.attach(bus, opts);
   }
 
+  /** We just told the app which stream a project is on (`stream-ready`), so any
+   *  `stream-unbound` mute on it is answered. Call it BEFORE publishing, or the
+   *  frames the re-advert is meant to unblock ride out while still muted. */
+  noteStreamBound(streamId: string): void {
+    this.mux.markBound(streamId);
+  }
+
   /**
    * Outbound app frames go through one queue per channel so that per-channel
    * order is the queue's order and nothing else, and so a frame is sealed only
@@ -1101,6 +1108,13 @@ export class RelayClient {
   private dispatchControlPlane(mJson: string, channel: Channel): void {
     const msg = parseMessageFast(mJson);
     if (msg) {
+      // Consumed here like `netwatch:events` below: this is a statement about
+      // the SOCKET's stream table, not a verb, and the bus it would reach is
+      // the one whose stream the app just said it cannot receive.
+      if (msg.type === "stream-unbound") {
+        this.mux.markUnbound(msg.streamId);
+        return;
+      }
       // Consumed here and never forwarded: a capture batch is diagnostics about
       // this socket, not a verb, and letting it reach `onMessage`/the bus would
       // hand every project core a message type it has no case for. The frame

@@ -385,7 +385,9 @@ export interface TerminalSessionOptions {
 }
 
 const BATCH_INTERVAL_MS = 16;
-const BATCH_MAX_BYTES = 4096;
+
+// Bound internal output coalescing independently of the serialized viewer frames.
+const BATCH_MAX_BYTES = 16384;
 
 /**
  * Some dev orchestrators inject network overrides into every child process

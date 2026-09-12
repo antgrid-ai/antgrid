@@ -6,6 +6,8 @@ import { createMessage, parseMessageFast } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { logger } from "./logger";
 
+const log = logger.child({ component: "stream-mux" });
+
 /** One `stream-invalid` per dead id per this window: a stranded phone replays a
  *  burst of verbs, and one notice is enough for it to rebind. */
 export const INVALID_NOTICE_COOLDOWN_MS = 5_000;
@@ -67,6 +69,13 @@ interface StreamEntry {
   unsub: () => void;
   opts: AttachStreamOpts;
   settled: boolean;
+  /** The app answered `stream-unbound` for this id: it holds no transport, so
+   *  every frame we push is discarded on arrival. Muted rather than detached —
+   *  the core stays running for its loopback owner, the advert stays dialable,
+   *  and a re-open reuses this same id (host-server publishes `stream-ready`
+   *  with the recorded streamId), so tearing the stream down here would break
+   *  the very reconnect that heals it. */
+  unboundAtPeer: boolean;
 }
 
 /**
@@ -100,20 +109,33 @@ export class StreamMux {
     // is awaiting — acceptable, since the same switch already refuses its next
     // request; the app times that out and resyncs from a snapshot.
     const mayDeliver = () => opts.mayDeliver?.() ?? true;
-    const unsub = bus.subscribe({
+    const entry: StreamEntry = {
+      bus,
+      unsub: () => {},
+      opts,
+      settled: false,
+      unboundAtPeer: false,
+    };
+    entry.unsub = bus.subscribe({
       // This stream IS the relay wire, so an audience-targeted publish meant
       // for the desktop's loopback socket must not be enveloped onto it.
       audience: "relay",
       deliver: (msg, channel, signal) => {
-        if (!mayDeliver()) return;
-        const sent = this.transport.sendEnvelope(streamId, msg, channel, signal, mayDeliver);
+        // Ahead of mayDeliver: a stream nobody is receiving is not an
+        // authorization question, and the switch is the more expensive read.
+        const canSend = () => !entry.unboundAtPeer && mayDeliver();
+        if (!canSend()) {
+          if (signal && !signal.aborted) return Promise.reject(new Error("Terminal delivery gated"));
+          return;
+        }
+        const sent = this.transport.sendEnvelope(streamId, msg, channel, signal, canSend);
         if (signal) return sent.then((outcome) => {
           if (outcome !== "sent" && !signal.aborted) throw new Error(`Terminal delivery ${outcome}`);
         });
         void sent;
       },
     });
-    this.streams.set(streamId, { bus, unsub, opts, settled: false });
+    this.streams.set(streamId, entry);
     this.transport.openStream(streamId);
     // A stream attached while the session is already established (drill-in) never
     // sees a fresh peer-online, so resume it now.
@@ -127,6 +149,11 @@ export class StreamMux {
       // teardown would send is gated too, leaving the browser socket mute for
       // the life of the page), and a cleared queue and a closed switch are
       // different facts to the one consumer that awaits this.
+      // The unbound mute stops at the bus deliberately: a tunnel run is driven
+      // by a request arriving ON this stream, and inbound traffic un-mutes it,
+      // so the muted case is a server-pushed frame on a tunnel that predates
+      // the mute. Refusing it would need a third outcome — tunnel-manager.ts
+      // branches on "sent", and "gated" is spoken for above.
       sendTunnel: (data) =>
         mayDeliver()
           ? this.transport.sendEnvelope(streamId, data, "preview")
@@ -194,6 +221,10 @@ export class StreamMux {
       this.notifyStreamInvalid(streamId);
       return false;
     }
+    // The peer is transmitting on this stream, so it holds a transport for it —
+    // the strongest possible retraction of an earlier `stream-unbound`, and the
+    // one that needs no cooperation from whoever muted it.
+    if (entry.unboundAtPeer) this.markBound(streamId);
     const msg = parseMessageFast(mJson);
     if (msg) {
       entry.bus.dispatchInbound(msg, channel, "relay");
@@ -204,9 +235,41 @@ export class StreamMux {
     return true;
   }
 
+  /** The app answered `stream-unbound`: it received a frame on [streamId] and
+   *  holds no transport for it, so everything we push there is discarded. Mute
+   *  until it proves otherwise — see {@link StreamEntry.unboundAtPeer} for why
+   *  this mutes rather than detaches.
+   *
+   *  Advisory, NOT authorization: the peer can only mute a stream this host
+   *  already opened for it, and the worst a lying peer achieves is silencing
+   *  its own project. The switch (`mayDeliver`) is unaffected. */
+  markUnbound(streamId: string): void {
+    const entry = this.streams.get(streamId);
+    if (!entry || entry.unboundAtPeer) return;
+    entry.unboundAtPeer = true;
+    log.warn("Stream %s unbound at the peer — muting until it rebinds", streamId);
+  }
+
+  /** The peer holds a transport for [streamId] again: resume delivery. Called
+   *  when it transmits on the stream, and by the host when it re-publishes
+   *  `stream-ready` — a re-open reuses the SAME id, so without this the mute
+   *  would outlive the reconnect that heals it. */
+  markBound(streamId: string): void {
+    const entry = this.streams.get(streamId);
+    if (!entry || !entry.unboundAtPeer) return;
+    entry.unboundAtPeer = false;
+    log.info("Stream %s rebound at the peer — resuming delivery", streamId);
+  }
+
   notifyPeerOnline(): void {
     this.peerOnline = true;
-    for (const entry of this.streams.values()) entry.opts.onPeerOnline?.();
+    // A fresh E2E session re-adverts every project and the app rebinds from
+    // that, so a mute earned by the PREVIOUS session must not silence this one.
+    // Costs at most one more notice per stream if the new peer is unbound too.
+    for (const entry of this.streams.values()) {
+      entry.unboundAtPeer = false;
+      entry.opts.onPeerOnline?.();
+    }
   }
 
   notifyPeerOffline(): void {

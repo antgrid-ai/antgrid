@@ -324,8 +324,9 @@ void main() {
         posted.add(req.url.path);
         return http.Response('', 202);
       }),
-      plausibleUrl: 'https://plausible.test',
-      plausibleDomain: 'antgrid.test',
+      umamiUrl: 'https://umami.test',
+      umamiWebsiteId: 'website-id',
+      umamiHostname: 'antgrid.test',
       eventsApiUrl: 'https://events.test',
       installId: 'install-1',
       platform: 'test',
