@@ -31,6 +31,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('pane', 't1');
 
     // Arrange: seed a running tab 't1' via agent:status (status tier).
     t.emit('agent:status', {
@@ -77,6 +78,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('pane', 't1');
       svc.setClientId('desktop');
 
       t.emit('agent:status', {
@@ -120,6 +122,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('pane', 't1');
       svc.setClientId('mobile');
 
       t.emit('agent:status', {
@@ -163,6 +166,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('pane', 't1');
 
     t.emit('agent:status', {
       'projectId': 'p',
@@ -210,6 +214,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('pane', 't1');
     svc.setClientId('desktop');
 
     t.emit('agent:status', {
@@ -267,6 +272,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('pane', 't1');
     svc.setClientId('mobile');
 
     t.emit('agent:status', {

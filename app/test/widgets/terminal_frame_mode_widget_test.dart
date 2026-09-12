@@ -136,6 +136,7 @@ class _FakeDropItem extends DropItem {
 Future<({TerminalService service, FakeAgentTransport transport})> _makeService(
   void Function(Future<void> Function()) registerTearDown, {
   ProjectSessionMode mode = ProjectSessionMode.local,
+  bool inputReady = false,
 }) async {
   final transport = FakeAgentTransport();
   final cache = await CachedSessionsStore.open();
@@ -147,6 +148,53 @@ Future<({TerminalService service, FakeAgentTransport transport})> _makeService(
     onClose: () async => await transport.dispose(),
   );
   final service = TerminalService.fromSession(session);
+  if (inputReady) {
+    service.setDisplayInterest('input-fixture', 't1');
+    transport.emit('agent:status', {
+      'projectId': 'p',
+      'terminals': [
+        {'terminalId': 't1', 'name': 't1', 'running': true},
+      ],
+    });
+    for (var i = 0; i < 8; i++) {
+      await Future<void>.value();
+    }
+    final request = transport.sent.lastWhere(
+      (m) => m['type'] == 'terminal:subscribe',
+    );
+    transport.emit('terminal:subscribed', {
+      'terminalId': 't1',
+      'runId': 'run',
+      'attachmentId': 'attachment',
+      'requestId': request['requestId'],
+      'version': 1,
+    });
+    for (var i = 0; i < 8; i++) {
+      await Future<void>.value();
+    }
+    transport.emit('terminal:frame', {
+      'terminalId': 't1',
+      'runId': 'run',
+      'attachmentId': 'attachment',
+      'version': 1,
+      'sequence': 1,
+      'revision': 1,
+      'cols': 80,
+      'rows': 24,
+      'ansi': '',
+      'syncTimedOut': false,
+      'history': {
+        'epoch': 1,
+        'firstRowId': 0,
+        'nextRowId': 0,
+        'status': 'recording',
+      },
+    });
+    for (var i = 0; i < 8; i++) {
+      await Future<void>.value();
+    }
+  }
+
   registerTearDown(() async {
     await service.dispose();
     await session.close();
@@ -1266,7 +1314,7 @@ void main() {
           debugHasPhysicalKeyboardOverride = null;
         });
         final pty = <int>[];
-        final h = await _makeService(addTearDown);
+        final h = await _makeService(addTearDown, inputReady: true);
         final tab = _tab(id: 't1', pty: pty);
         _archive(tab);
         tab.history.applyPage(
@@ -1429,7 +1477,7 @@ void main() {
     ) async {
       debugHasPhysicalKeyboardOverride = false;
       addTearDown(() => debugHasPhysicalKeyboardOverride = null);
-      final h = await _makeService(addTearDown);
+      final h = await _makeService(addTearDown, inputReady: true);
       final tab = _tab(id: 't1');
       _archive(tab);
       await tester.pumpWidget(
@@ -1712,7 +1760,7 @@ void main() {
         // only the progress strip and the scrollback control this drives.
         debugHasPhysicalKeyboardOverride = true;
         addTearDown(() => debugHasPhysicalKeyboardOverride = null);
-        final h = await _makeService(addTearDown);
+        final h = await _makeService(addTearDown, inputReady: true);
         final tab = _tab(id: 't1');
         _archive(tab);
 

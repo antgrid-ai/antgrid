@@ -103,6 +103,8 @@ void main() {
         onClose: () async => t.dispose(),
       );
       session.setActiveCheckouts({'main'});
+      session.terminalService.setDisplayInterest('pane', 'a');
+      session.fileService.setTreeInterest('files', true);
       t.emit('agent:status', {
         'projectId': 'p',
         'terminals': [
@@ -152,6 +154,8 @@ void main() {
       onClose: () async => t.dispose(),
     );
     session.setActiveCheckouts({'main'});
+    session.terminalService.setDisplayInterest('pane', 'a');
+    session.fileService.setTreeInterest('files', true);
     await Future<void>.delayed(Duration.zero);
 
     session.setLifecyclePaused(true);

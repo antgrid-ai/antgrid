@@ -124,6 +124,7 @@ class TerminalTab {
   bool get isAgent => type == 'agent';
 
   TerminalTab copyWith({
+    GhosttyTerminalController? ghostty,
     String? name,
     TerminalSessionState? sessionState,
     String? shell,
@@ -153,7 +154,7 @@ class TerminalTab {
       unread: unread ?? this.unread,
       sizeEpoch: sizeEpoch ?? this.sizeEpoch,
       mode: mode ?? this.mode,
-      ghostty: ghostty,
+      ghostty: ghostty ?? this.ghostty,
       replaceEpoch: replaceEpoch,
       history: history,
     );

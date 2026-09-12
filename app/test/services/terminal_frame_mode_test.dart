@@ -272,6 +272,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = session.terminalService;
+    svc.setDisplayInterest('frame-test-pane', 'a');
     svc.activate();
     await seedRunningTab(t, 'a');
     t.emit('terminal:display:status', {
@@ -322,6 +323,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = session.terminalService;
+      svc.setDisplayInterest('frame-test-pane', 'a');
       addTearDown(session.close);
       svc.activate();
       await seedRunningTab(t, 'a');
@@ -360,6 +362,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = session.terminalService;
+      svc.setDisplayInterest('frame-test-pane', 'a');
       svc.activate();
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -460,6 +463,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = session.terminalService;
+      svc.setDisplayInterest('frame-test-pane', 'a');
       await seedRunningTab(t, 'a');
       final staleRequest = lastSubscribeRequestId(t, 'a');
       svc.retryAttach('a');
@@ -478,7 +482,10 @@ void main() {
       }
       await Future<void>.delayed(Duration.zero);
       expect(svc.currentState.tabs.containsKey('a'), isTrue);
-      expect(svc.currentState.hydration['a']!.stage, TerminalAttachStage.cold);
+      expect(
+        svc.currentState.hydration['a']!.stage,
+        TerminalAttachStage.awaitingScreen,
+      );
       await svc.dispose();
       await session.close();
     },
@@ -488,6 +495,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = session.terminalService;
+    svc.setDisplayInterest('frame-test-pane', 'a');
     svc.activate();
     await seedRunningTab(t, 'a');
     final staleRequest = lastSubscribeRequestId(t, 'a');
@@ -525,6 +533,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('frame-test-pane', 'a');
 
     await seedRunningTab(t, 'a');
 
@@ -547,6 +556,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       // `_rehydrateTerminals` reaches the transport only as a registered
       // hydrator, and `activate()` is what registers it.
@@ -587,6 +597,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       // `_rehydrateTerminals` reaches the transport only as a registered
       // hydrator, and `activate()` is what registers it.
@@ -624,6 +635,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('frame-test-pane', 'a');
 
     t.emit('agent:status', {
       'projectId': 'p',
@@ -641,11 +653,12 @@ void main() {
   });
 
   test(
-    'terminal:subscribed commits the tab to frame mode at TerminalAttachStage.cold',
+    'terminal:subscribed commits the tab to frame mode at TerminalAttachStage.awaitingScreen',
     () async {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       expect(t.requests.where((r) => r.method == 'terminal.snapshot'), isEmpty);
@@ -653,7 +666,10 @@ void main() {
       await acceptSubscribe(t, 'a');
 
       expect(svc.currentState.tabs['a']!.mode, TerminalDisplayMode.frame);
-      expect(svc.currentState.hydration['a']!.stage, TerminalAttachStage.cold);
+      expect(
+        svc.currentState.hydration['a']!.stage,
+        TerminalAttachStage.awaitingScreen,
+      );
 
       await svc.dispose();
       await session.close();
@@ -666,6 +682,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       // Answer with a requestId this client never sent.
@@ -691,6 +708,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -723,6 +741,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -766,6 +785,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -810,6 +830,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('frame-test-pane', 'a');
 
     await seedRunningTab(t, 'a');
     await acceptSubscribe(t, 'a');
@@ -849,6 +870,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('frame-test-pane', 'a');
 
     await seedRunningTab(t, 'a');
     await acceptSubscribe(t, 'a');
@@ -870,6 +892,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -895,6 +918,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
       t.emit('terminal:exited', {'terminalId': 'a', 'exitCode': 7});
@@ -949,6 +973,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -976,6 +1001,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -1006,6 +1032,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -1033,6 +1060,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('frame-test-pane', 'a');
 
     await seedRunningTab(t, 'a');
     await acceptSubscribe(t, 'a');
@@ -1064,6 +1092,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
       // `_rehydrateTerminals` reaches the transport only as a registered
       // hydrator, and `activate()` is what registers it — without this a
       // re-drive iterates an empty map and re-attaches nothing at all, so
@@ -1122,6 +1151,7 @@ void main() {
         session,
         snapshotAttachTimeout: const Duration(milliseconds: 20),
       );
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -1161,6 +1191,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('frame-test-pane', 'a');
 
     await seedRunningTab(t, 'a');
     await acceptSubscribe(t, 'a');
@@ -1220,6 +1251,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('frame-test-pane', 'a');
 
     await seedRunningTab(t, 'a');
     await acceptSubscribe(t, 'a');
@@ -1270,6 +1302,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -1303,6 +1336,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('frame-test-pane', 'a');
 
     await seedRunningTab(t, 'a');
     await acceptSubscribe(t, 'a');
@@ -1343,6 +1377,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -1370,6 +1405,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -1415,6 +1451,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('frame-test-pane', 'a');
 
     await seedRunningTab(t, 'a');
     final tab = svc.currentState.tabs['a']!;
@@ -1439,6 +1476,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a', runId: 'run-7', attachmentId: 'att-7');
@@ -1465,6 +1503,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a', runId: 'run-9', attachmentId: 'att-9');
@@ -1491,6 +1530,7 @@ void main() {
         final t = FakeAgentTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a', runId: 'run-42', attachmentId: 'att-42');
@@ -1524,6 +1564,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
 
@@ -1541,6 +1582,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -1589,6 +1631,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -1611,6 +1654,7 @@ void main() {
         final t = FakeAgentTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a');
@@ -1655,6 +1699,7 @@ void main() {
         final t = FakeAgentTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a');
@@ -1696,6 +1741,7 @@ void main() {
         final t = FakeAgentTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a');
@@ -1721,6 +1767,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -1772,6 +1819,7 @@ void main() {
         final t = FakeAgentTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -1808,6 +1856,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -1863,6 +1912,7 @@ void main() {
         final t = FakeAgentTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -1903,6 +1953,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a', runId: 'run-9', attachmentId: 'att-9');
@@ -1946,6 +1997,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -1989,6 +2041,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -2040,6 +2093,7 @@ void main() {
         final t = FakeAgentTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -2091,6 +2145,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -2154,6 +2209,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -2196,6 +2252,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -2258,6 +2315,7 @@ void main() {
         final t = FakeAgentTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -2319,6 +2377,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -2370,6 +2429,7 @@ void main() {
         final t = FakeAgentTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -2424,6 +2484,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -2484,6 +2545,7 @@ void main() {
         final t = _UndeliverableTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -2532,6 +2594,7 @@ void main() {
         final t = _ThrowingTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -2575,6 +2638,7 @@ void main() {
         final t = FakeAgentTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -2616,6 +2680,7 @@ void main() {
         final t = FakeAgentTransport();
         final session = await newSession(t);
         final svc = TerminalService.fromSession(session);
+        svc.setDisplayInterest('frame-test-pane', 'a');
 
         await seedRunningTab(t, 'a');
         await acceptSubscribe(t, 'a', runId: 'run-1', attachmentId: 'att-1');
@@ -2651,6 +2716,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -2696,6 +2762,7 @@ void main() {
         session,
         snapshotAttachTimeout: configured,
       );
+      svc.setDisplayInterest('frame-test-pane', 'a');
 
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
@@ -2721,6 +2788,7 @@ void main() {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
+      svc.setDisplayInterest('frame-test-pane', 'a');
       await seedRunningTab(t, 'a');
       await acceptSubscribe(t, 'a');
       await applyHistoryBoundary(

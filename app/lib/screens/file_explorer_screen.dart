@@ -12,6 +12,8 @@ import '../providers/sessions.dart';
 import '../providers/visible_surface.dart';
 import '../widgets/workspace_tab_bar.dart';
 import '../services/file_service.dart';
+import '../services/tree_interest.dart';
+import '../providers/ui_attention_providers.dart';
 import '../constants/breakpoints.dart';
 import '../widgets/file_tree_view.dart';
 import '../widgets/file_viewer_router.dart';
@@ -40,6 +42,13 @@ class FileExplorerScreen extends ConsumerStatefulWidget {
 }
 
 class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
+  final _treeInterest = TreeInterest();
+  @override
+  void dispose() {
+    _treeInterest.dispose();
+    super.dispose();
+  }
+
   bool _searchOpen = false;
 
   @override
@@ -56,6 +65,11 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
   @override
   Widget build(BuildContext context) {
     final fileService = serviceWhenReady(ref, fileServiceProvider);
+    _treeInterest.update(
+      fileService,
+      ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.files &&
+          ref.watch(appLifecycleStateProvider) == AppLifecycleState.resumed,
+    );
     // Watched rather than listened to, because this is also the retry trigger:
     // a launch-time link reaches this screen before the project's FileService
     // exists, and the rebuild that finally lands the service is the frame the

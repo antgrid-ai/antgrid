@@ -33,8 +33,14 @@ itself never crosses the wire. An app must advertise the `checkoutRouting` capab
 managed session, rather than shown main's workspace beside an isolated agent.
 `WORKTREE_SESSIONS_SUPPORTED` (`bridge/src/worktree-capability.ts`) is the kill switch.
 
-Tree state flows pull-first. The app registers one tree hydrator per *active*
-checkout (`CheckoutServices.activate`, `app/lib/project/project_session.dart`) and
+Tree state flows pull-first. `FileService.setTreeInterest` registers one tree
+hydrator while Files is visible or a feature needs tree data, such as file
+mention suggestions. Checkout activation alone does not request a tree. Multiple
+consumers share the hydrator and the last release removes automatic refresh.
+The cached tree survives, with sequence-based unchanged responses on renewed
+demand. A gap invalidates the cached base; recovery waits for demand if no
+consumer is present. Incremental broadcasts still arrive, and Git status,
+badges, selected-file reads, and notifications remain independent. The app
 advertises `pullsTree` on both hellos, so the bridge's re-sync
 (`everyClientPullsTrees` in `bridge/src/agent-core.ts`) skips its `tree:full` push
 whenever every attached client pulls; a client that does not advertise it still gets
@@ -44,6 +50,35 @@ the push. The app's capability literals live in the relay-client package
 schema does not declare, and the fail direction is a silent return of the flood.
 
 ## Terminal frames and history
+
+Local and relay viewers use the same demand policy. A visible terminal pane
+registers a display lease with its checkout's `TerminalService`; multiple panes
+share one attachment. Layout visibility, including mobile pages and hidden
+`IndexedStack` children, determines demand independently of keyboard focus.
+Discovery and checkout activation retain terminal metadata without subscribing
+to hidden screens. Only displayed terminals participate in screen readiness.
+
+After visible screens arrive and settle for 500 ms, the focused checkout may
+prefetch uncached user terminals from its terminal list. Agent terminals,
+services, and setup transcripts are excluded. One speculative attachment may
+exist across the app. Its first independent frame is acknowledged and cached,
+then the attachment is retired and unsubscribed; late frames are discarded.
+A five-second deadline covers acceptance and the first frame. Failure stops
+prefetch for that focus visit without failing the checkout. Visible demand
+preempts speculation, or promotes the same terminal's existing attachment.
+
+Hidden screens share a global LRU with screen-count and retained-string-memory
+bounds in `app/lib/services/terminal_screen_cache.dart`. Prefetch does not create
+native engines. Hidden panes release their engines and preserve immutable frame
+payloads and the separately bounded history model. Reopening applies cached
+content through the frame application path and shows refresh progress, while
+pane keystrokes are refused until the new attachment delivers a frame.
+Confirmed send-to-agent handoffs can send to a running hidden agent before
+revealing it; they still refuse unavailable PTYs and disconnected transports
+and never buffer input for later delivery.
+Keystrokes are never buffered. Run changes, terminal/checkout deletion, and
+service disposal invalidate the corresponding cache. Visible history readers
+retain their live attachments; reopening reattaches before paging history.
 
 The bridge owns one authoritative headless VT per PTY run. Output, resize,
 terminal queries, and exit drain in parser order. Apps subscribe using terminal

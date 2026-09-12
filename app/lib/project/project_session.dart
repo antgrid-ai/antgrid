@@ -249,6 +249,9 @@ class ProjectSession {
   void _markDown() {
     if (_down) return;
     _down = true;
+    for (final bundle in checkoutServiceBundles) {
+      bundle.terminalService.suspendDisplay();
+    }
     _failAllPending(const SessionDownException());
   }
 
@@ -285,7 +288,14 @@ class ProjectSession {
 
   /// Declares app-level background state to the agent, gating both the heavy
   /// stream and the fallback push. See [MessageRouter.setLifecyclePaused].
-  void setLifecyclePaused(bool paused) => _router.setLifecyclePaused(paused);
+  void setLifecyclePaused(bool paused) {
+    if (paused) {
+      for (final bundle in checkoutServiceBundles) {
+        bundle.terminalService.suspendDisplay();
+      }
+    }
+    _router.setLifecyclePaused(paused);
+  }
 
   /// Fires once the app has declared it can render again — with the
   /// declaration already on the wire — so a surface that rebuilds from

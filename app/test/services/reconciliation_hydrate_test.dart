@@ -144,12 +144,14 @@ void main() {
   });
 
   test(
-    'terminal subscriptions refresh every retained tab on re-establishment',
+    'terminal subscriptions refresh every displayed tab on re-establishment',
     () async {
       // Attachments are scoped to one connection, so a returning client must
       // replace them even while the last independent frame remains visible.
       final t = FakeAgentTransport();
       final session = await makeSession(t);
+      session.terminalService.setDisplayInterest('pane a', 'a');
+      session.terminalService.setDisplayInterest('pane b', 'b');
       t.emit('agent:status', {
         'projectId': 'p',
         'terminals': [
@@ -180,6 +182,8 @@ void main() {
     () async {
       final t = FakeAgentTransport();
       final session = await makeSession(t);
+      session.terminalService.setDisplayInterest('pane a', 'a');
+      session.terminalService.setDisplayInterest('pane c', 'c');
       t.emit('agent:status', {
         'projectId': 'p',
         'terminals': [

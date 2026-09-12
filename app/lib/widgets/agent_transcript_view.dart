@@ -37,6 +37,8 @@ import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../providers/visible_surface.dart';
 import '../services/agent_session_service.dart';
+import '../services/tree_interest.dart';
+import '../providers/ui_attention_providers.dart';
 import '../services/attach_hydration.dart';
 import '../services/clipboard_image_reader.dart';
 import '../services/upload_service.dart';
@@ -84,6 +86,7 @@ class AgentTranscriptView extends ConsumerStatefulWidget {
 }
 
 class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
+  final _treeInterest = TreeInterest();
   late final ComposerController _input;
   final _scroll = ScrollController();
   final _panelFocus = FocusNode();
@@ -222,6 +225,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
 
   @override
   void dispose() {
+    _treeInterest.dispose();
     // Stop re-pulling this session's transcript on every reconnect now that its
     // view is gone — the view is keyed per session id, so this fires exactly
     // when the user navigates off / switches to another session.
@@ -911,6 +915,13 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     // churn (git statuses, pane state, expansion sets).
     final treeRoot = ref.watch(
       fileTreeStateProvider.select((s) => s.value?.root),
+    );
+    _treeInterest.update(
+      serviceWhenReady(ref, fileServiceProvider),
+      !_mentionDismissed &&
+          _input.mentionToken != null &&
+          ref.watch(agentSurfaceVisibleProvider) &&
+          ref.watch(appLifecycleStateProvider) == AppLifecycleState.resumed,
     );
     if (!identical(treeRoot, _mentionCacheRoot)) {
       _mentionCacheRoot = treeRoot;

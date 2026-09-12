@@ -203,7 +203,7 @@ void main() {
     await session.close();
   });
 
-  test('sendInput dispatches terminal:input with terminalId', () async {
+  test('sendInput refuses a terminal with no display attachment', () async {
     final t = FakeAgentTransport();
     final session = await newSession(t, projectId: 'proj-z');
     final svc = TerminalService.fromSession(session);
@@ -211,9 +211,7 @@ void main() {
     svc.sendInput('terminal-1', 'ls\n');
     await Future<void>.delayed(Duration.zero);
 
-    final sent = t.sent.firstWhere((m) => m['type'] == 'terminal:input');
-    expect(sent['terminalId'], 'terminal-1');
-    expect(sent['data'], 'ls\n');
+    expect(t.sent.where((m) => m['type'] == 'terminal:input'), isEmpty);
 
     await svc.dispose();
     await session.close();
@@ -343,6 +341,7 @@ void main() {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
+    svc.setDisplayInterest('setup pane', 'wt-1:setup');
 
     t.emit('agent:status', {
       'projectId': 'p',

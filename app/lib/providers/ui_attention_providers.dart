@@ -6,6 +6,7 @@ import '../models/settings_section.dart';
 import '../utils/agent_focus_coordinator.dart';
 import 'providers.dart';
 import 'value_controller.dart';
+import 'terminal_demand.dart';
 
 /// Current app lifecycle, mirrored from `workspace_shell`'s
 /// `didChangeAppLifecycleState`. Defaults to resumed.
@@ -74,6 +75,7 @@ final _agentFocusCoordinatorProvider = Provider<AgentFocusCoordinator>(
 /// surface change) — Riverpod rejects that with "rebuilt multiple times in the
 /// same frame". Watching lets the scheduler batch this recompute instead.
 final agentFocusBinderProvider = Provider<void>((ref) {
+  ref.watch(terminalDemandBinderProvider);
   final coordinator = ref.watch(_agentFocusCoordinatorProvider);
   final resumed =
       ref.watch(appLifecycleStateProvider) == AppLifecycleState.resumed;

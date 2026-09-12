@@ -38,6 +38,8 @@ import 'terminal_drop_target.dart';
 import 'terminal_history_view.dart';
 import 'terminal_history_capture.dart';
 import 'terminal_history_scrollbar.dart';
+import 'display_visibility.dart';
+import '../providers/ui_attention_providers.dart';
 import 'terminal_hydration_strip.dart';
 import 'terminal_hyperlink_preview.dart';
 import 'terminal_quick_actions_bar.dart';
@@ -143,6 +145,27 @@ class TerminalViewWrapper extends ConsumerStatefulWidget {
 }
 
 class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
+  TerminalService? _displayService;
+  int _displayUpdate = 0;
+
+  void _syncDisplay(bool visible) {
+    final service = widget.terminalService;
+    final id = widget.tab.terminalId;
+    final update = ++_displayUpdate;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || update != _displayUpdate) return;
+      final changed =
+          !identical(_displayService, service) ||
+          service.hasDisplayInterest(this, id) != visible;
+      if (!identical(_displayService, service)) {
+        _displayService?.setDisplayInterest(this, null);
+        _displayService = service;
+      }
+      service.setDisplayInterest(this, visible ? id : null);
+      if (changed) setState(() {});
+    });
+  }
+
   /// Most-recent text selected in the terminal view. Tracked via Ghostty's
   /// `onSelectionContentChanged` callback so we can show the send-to-agent
   /// overlay button only when the user has a non-empty selection.
@@ -645,6 +668,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
   @override
   void dispose() {
+    _displayService?.setDisplayInterest(this, null);
     FocusManager.instance.removeEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.removeListener(_onFocusChange);
     widget.tab.replaceEpoch.removeListener(_onFrameReplaced);
@@ -1213,6 +1237,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
   @override
   Widget build(BuildContext context) {
+    final visible =
+        DisplayVisibilityScope.of(context) &&
+        ref.watch(appLifecycleStateProvider) == AppLifecycleState.resumed;
+    _syncDisplay(visible);
+    if (!visible) return const SizedBox.shrink();
     final isExited = widget.tab.sessionState == TerminalSessionState.exited;
     final showStoppedView =
         !widget.tab.isAgent && isExited && widget.tab.replaceEpoch.value == 0;

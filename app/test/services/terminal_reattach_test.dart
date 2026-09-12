@@ -118,6 +118,7 @@ void main() {
       cachedSessionsStore: await CachedSessionsStore.open(),
       onClose: transport.dispose,
     )..setActiveCheckouts({'main'});
+    session.terminalService.setDisplayInterest('pane', 'a');
     addTearDown(session.close);
     return session;
   }
@@ -286,6 +287,7 @@ void main() {
       final session = await makeSession(t);
       await _seed(t);
       final isolated = session.servicesForCheckout('wt-1').terminalService;
+      isolated.setDisplayInterest('pane', 'a');
       await _seed(t, checkoutId: 'wt-1');
       expect(_lastSubscribe(t)['checkoutId'], 'main');
       expect(_lastSubscribe(t, checkoutId: 'wt-1')['checkoutId'], 'wt-1');

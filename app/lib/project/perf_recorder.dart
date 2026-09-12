@@ -19,6 +19,22 @@ const bool kDebugPerf = bool.fromEnvironment(
 /// echo latency, drawer rebuild counts, and process RSS samples to
 /// `<appSupport>/perf.log` when [kDebugPerf] is true. No-ops otherwise.
 class PerfRecorder {
+  final Map<String, int> _terminalDemand = {};
+  final Map<String, int> _terminalDemandGauges = {};
+  void setTerminalDemandGauge(String name, int value) {
+    if (!kDebugPerf) return;
+    _terminalDemandGauges[name] = value;
+  }
+
+  void noteTerminalDemand(String counter, [int amount = 1]) {
+    if (!kDebugPerf) return;
+    _terminalDemand.update(
+      counter,
+      (value) => value + amount,
+      ifAbsent: () => amount,
+    );
+  }
+
   int _drawerRebuilds = 0;
   Timer? _rssTimer;
   Timer? _echoSummaryTimer;
@@ -334,6 +350,9 @@ class PerfRecorder {
     if (!Platform.isWindows && !Platform.isMacOS && !Platform.isLinux) return;
     final rss = ProcessInfo.currentRss;
     _appendLine('rss bytes=$rss drawerRebuilds=$_drawerRebuilds');
+    _appendLine('terminal-demand ${jsonEncode(_terminalDemand)}');
+    _appendLine('terminal-demand-gauges ${jsonEncode(_terminalDemandGauges)}');
+    _terminalDemand.clear();
     _drawerRebuilds = 0;
   }
 

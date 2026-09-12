@@ -152,41 +152,47 @@ void main() {
     await session.close();
   });
 
-  test('a foregrounded pane clears a refusal the reconnect already fixed', () async {
-    final t = FakeAgentTransport();
-    final session = await newSession(t);
-    final svc = newService(session);
-    t.setEstablished(false);
+  test(
+    'a foregrounded pane clears a refusal the reconnect already fixed',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = newService(session);
+      t.setEstablished(false);
 
-    expect(svc.sendInput('terminal-1', 'y\n'), isFalse);
-    await settle();
-    expect(svc.currentState.inputPaused, isTrue);
+      expect(svc.sendInput('terminal-1', 'y\n'), isFalse);
+      await settle();
+      expect(svc.currentState.inputPaused, isTrue);
 
-    // A backgrounded app misses the re-establish that would have cleared the
-    // latch, so focus resume has to carry the same sync — otherwise the pane
-    // comes back saying input is paused over a transport that is fine.
-    t.setEstablishedQuietly(true);
-    await resumeFocus(session);
+      // A backgrounded app misses the re-establish that would have cleared the
+      // latch, so focus resume has to carry the same sync — otherwise the pane
+      // comes back saying input is paused over a transport that is fine.
+      t.setEstablishedQuietly(true);
+      await resumeFocus(session);
 
-    expect(svc.currentState.inputPaused, isFalse);
+      expect(svc.currentState.inputPaused, isFalse);
 
-    await svc.dispose();
-    await session.close();
-  });
+      await svc.dispose();
+      await session.close();
+    },
+  );
 
-  test('an established transport still sends', () async {
-    final t = FakeAgentTransport();
-    final session = await newSession(t);
-    final svc = newService(session);
+  test(
+    'an established transport without a fresh display refuses input',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = newService(session);
 
-    final ok = svc.sendInput('terminal-1', 'ls\n');
-    await settle();
+      final ok = svc.sendInput('terminal-1', 'ls\n');
+      await settle();
 
-    expect(ok, isTrue);
-    expect(inputFrames(t), hasLength(1));
-    expect(svc.currentState.inputPaused, isFalse);
+      expect(ok, isFalse);
+      expect(inputFrames(t), isEmpty);
+      expect(svc.currentState.inputPaused, isFalse);
 
-    await svc.dispose();
-    await session.close();
-  });
+      await svc.dispose();
+      await session.close();
+    },
+  );
 }

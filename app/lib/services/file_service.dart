@@ -30,10 +30,40 @@ class FileService {
   StreamSubscription<Map<String, dynamic>>? _statusSub;
   StreamSubscription<void>? _resumeSub;
   int _snapshotSeq = -1;
+
   /// The establishment [_snapshotSeq] was issued under — see [_claimableSeq].
   int _snapshotEpoch = -1;
   int _gitOpSeq = 0;
   bool _disposed = false;
+  bool _treeRecoveryPending = false;
+  final Set<Object> _treeOwners = {};
+  bool get hasTreeInterest => _treeOwners.isNotEmpty;
+
+  void setTreeInterest(Object owner, bool interested) {
+    if (_disposed) return;
+    final hadInterest = hasTreeInterest;
+    if (interested) {
+      _treeOwners.add(owner);
+    } else {
+      _treeOwners.remove(owner);
+    }
+    if (hadInterest == hasTreeInterest) return;
+    if (hasTreeInterest) {
+      session.hydrateCheckout(checkoutId, _treeHydratorKey, _pullTree);
+      // Background suppression drops deltas, so a visible tree must validate its
+      // revision even when resuming did not establish a new transport.
+      _resumeSub ??= session.focusResumed.listen(
+        (_) =>
+            detached('FileService', 'tree re-pull on focus resume', () async {
+              if (hasTreeInterest) await _pullTree();
+            }),
+      );
+    } else {
+      session.unhydrateCheckout(checkoutId, _treeHydratorKey);
+      unawaited(_resumeSub?.cancel());
+      _resumeSub = null;
+    }
+  }
 
   final _stateController = StreamController<FileTreeState>.broadcast();
   FileTreeState _state;
@@ -114,17 +144,9 @@ class FileService {
   static const _treeHydratorKey = 'file:tree';
   static const _syncHydratorKey = 'git:sync-state';
 
-  /// Pulls the tree rather than waiting for the bridge's push. A managed
-  /// checkout's `tree:full` goes out while its runtime is being prepared —
-  /// BEFORE the session list that makes the app build this bundle — so a
-  /// bundle that never activates would never see one and its file tree would
-  /// stay empty for the life of the session. As a hydrator it also re-pulls on
-  /// every reconnect. Also re-registers the selected-file / preview pulls if
-  /// this checkout had one open before it was last deactivated. Only the
-  /// checkout on screen carries these — see [ProjectSession.setActiveCheckouts].
+  /// Restores selected-file and preview pulls independently of full-tree demand.
   void activate() {
     if (_disposed) return;
-    session.hydrateCheckout(checkoutId, _treeHydratorKey, _pullTree);
     if (_stashesRequested) {
       session.hydrateCheckout(checkoutId, _stashHydratorKey, _hydrateStashes);
     }
@@ -138,33 +160,14 @@ class FileService {
     if (_state.preview.isOpen) {
       session.hydrateCheckout(checkoutId, 'file:preview', _hydratePreview);
     }
-    // A hydrator covers re-ESTABLISHMENT; this covers the other window the
-    // agent suppresses in, which re-establishes nothing. While the app is
-    // backgrounded the agent DROPS every `tree:update` and keeps bumping its
-    // file seq, so what resumes is a delta stream whose base is missing every
-    // add and remove from that window: a file the agent created stays invisible
-    // and a directory it deleted stays listed, for the life of the connection.
-    // Nothing self-corrects it — `_snapshotSeq` only ever advances on a full
-    // snapshot, which only this pull asks for.
-    _resumeSub ??= session.focusResumed.listen(
-      (_) => detached(
-        'FileService',
-        'tree re-pull on focus resume',
-        _pullTree,
-      ),
-    );
   }
 
-  /// Leaves [_state] intact — a re-[activate] renders the last tree while its
-  /// pull refreshes it.
+  /// Leaves cached content and feature-owned tree demand intact.
   void deactivate() {
     if (_disposed) return;
-    session.unhydrateCheckout(checkoutId, _treeHydratorKey);
     session.unhydrateCheckout(checkoutId, _stashHydratorKey);
     session.unhydrateCheckout(checkoutId, 'file:selected');
     session.unhydrateCheckout(checkoutId, 'file:preview');
-    unawaited(_resumeSub?.cancel());
-    _resumeSub = null;
   }
 
   /// The tree pull behind both the hydrator and the focus-resume re-drive.
@@ -218,6 +221,7 @@ class FileService {
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
     if (parsed is FileTreeSnapshotMessage) {
+      _treeRecoveryPending = false;
       _rememberSeq(parsed.seq);
       _setState(_state.copyWith(root: parsed.tree));
       return;
@@ -226,7 +230,9 @@ class FileService {
       // Nothing to apply — the agent is confirming the revision we claimed.
       // Guarded anyway so a confirmation that raced an applied delta cannot
       // walk the base backwards and re-admit an update already merged.
-      if (parsed.seq > _snapshotSeq) _rememberSeq(parsed.seq);
+      if (_snapshotSeq >= 0 && parsed.seq == _snapshotSeq) {
+        _treeRecoveryPending = false;
+      }
       return;
     }
     if (parsed is TreeUpdateMessage) {
@@ -243,10 +249,17 @@ class FileService {
       // confirmed.
       if (seq != null && _snapshotSeq >= 0 && seq == _snapshotSeq + 1) {
         _rememberSeq(seq);
+      } else {
+        _snapshotSeq = -1;
+        if (hasTreeInterest && !_treeRecoveryPending) {
+          _treeRecoveryPending = true;
+          detached('FileService', 'recover tree sequence gap', _pullTree);
+        }
       }
       return;
     }
     if (parsed is TreeFullMessage) {
+      _treeRecoveryPending = false;
       final seq = parsed.seq;
       if (seq != null && _snapshotSeq >= 0 && seq <= _snapshotSeq) {
         return;
@@ -305,9 +318,7 @@ class FileService {
     if (parsed is GitStashListResultMessage) {
       if (parsed.error == null) {
         _setState(
-          _state.copyWith(
-            git: _state.git.copyWith(stashes: parsed.stashes),
-          ),
+          _state.copyWith(git: _state.git.copyWith(stashes: parsed.stashes)),
         );
       }
       return;
@@ -566,8 +577,9 @@ class FileService {
     final loading = Set<String>.from(_state.git.history.filesLoadingShas)
       ..remove(msg.sha);
     if (msg.error != null) {
-      final errors = Map<String, String>.from(_state.git.history.filesErrorBySha)
-        ..[msg.sha] = msg.error!;
+      final errors = Map<String, String>.from(
+        _state.git.history.filesErrorBySha,
+      )..[msg.sha] = msg.error!;
       _setState(
         _state.copyWith(
           git: _state.git.copyWith(
@@ -597,7 +609,8 @@ class FileService {
 
   void _handleGitCommitDiffContent(GitCommitDiffContentMessage msg) {
     onFragmentSuccess?.call(FragHint('git:commit-diff-content', msg.path));
-    if (msg.path != _state.git.diffPath || msg.sha != _state.git.diffCommitSha) {
+    if (msg.path != _state.git.diffPath ||
+        msg.sha != _state.git.diffCommitSha) {
       return;
     }
     _diffLatch?.settle();
@@ -1036,7 +1049,9 @@ class FileService {
       session.action(() => latch.done, timeout: gitSyncTimeout).catchError((_) {
         if (_disposed || _syncLatch != latch) return;
         _syncLatch = null;
-        _setState(_state.copyWith(git: _state.git.copyWith(clearSyncing: true)));
+        _setState(
+          _state.copyWith(git: _state.git.copyWith(clearSyncing: true)),
+        );
         _emitOpFeedback('${op.label} timed out');
       }),
     );
@@ -1269,7 +1284,9 @@ class FileService {
     if (expanding) expanded.add(sha);
     _setState(
       _state.copyWith(
-        git: _state.git.copyWith(history: history.copyWith(expandedShas: expanded)),
+        git: _state.git.copyWith(
+          history: history.copyWith(expandedShas: expanded),
+        ),
       ),
     );
     if (expanding &&
@@ -1340,7 +1357,9 @@ class FileService {
     if (history.expandedShas.isEmpty) return;
     _setState(
       _state.copyWith(
-        git: _state.git.copyWith(history: history.copyWith(expandedShas: const {})),
+        git: _state.git.copyWith(
+          history: history.copyWith(expandedShas: const {}),
+        ),
       ),
     );
   }

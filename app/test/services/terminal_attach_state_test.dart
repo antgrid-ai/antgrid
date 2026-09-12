@@ -36,11 +36,14 @@ void main() {
     ProjectSession session, {
     Duration snapshotAttachTimeout = _unreachedBound,
     Duration checkoutAttachTimeout = _unreachedBound,
-  }) => TerminalService.fromSession(
-    session,
-    snapshotAttachTimeout: snapshotAttachTimeout,
-    checkoutAttachTimeout: checkoutAttachTimeout,
-  )..activate();
+  }) =>
+      TerminalService.fromSession(
+          session,
+          snapshotAttachTimeout: snapshotAttachTimeout,
+          checkoutAttachTimeout: checkoutAttachTimeout,
+        )
+        ..activate()
+        ..setDisplayInterest('pane', 'a');
 
   Map<String, dynamic> terminalInfo(String id, {bool running = true}) => {
     'id': id,
@@ -202,6 +205,7 @@ void main() {
     final session = await newSession(transport);
     final service = newService(session, snapshotAttachTimeout: _attachBound);
 
+    service.setDisplayInterest('second pane', 'b');
     emitStatus(transport, [terminalInfo('a'), terminalInfo('b')]);
     await settle();
     acceptSubscribe(transport, 'a', attachmentId: 'attachment-a');
@@ -277,10 +281,12 @@ void main() {
 
       emitStatus(transport, [terminalInfo('a')]);
       await settle();
+      service.setDisplayInterest('pane', null);
       await first.cancel();
       await settle();
 
       final before = subscribeCount(transport, 'a');
+      service.setDisplayInterest('pane', 'a');
       final second = service.stateStream.listen((_) {});
       await settle();
 

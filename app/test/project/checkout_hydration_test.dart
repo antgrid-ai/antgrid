@@ -1,14 +1,10 @@
 // Activation-gated checkout hydration (D-B1/D-B2).
 //
-// A bundle is built eagerly for every checkout with a session — the
-// notification aggregators in providers.dart fan in over every bundle, and
-// nothing else would ever construct one for a session that has never been
-// focused. But construction is not a pull: the heavy per-checkout hydrators
-// (tree, config, preview snapshot, terminal frames) and the focus-resume
-// re-drives that repeat them on every foreground only fire for a checkout
-// [ProjectSession.setActiveCheckouts] has named. Nine managed checkouts used
-// to put nine trees (and nine of everything else) on the wire at once on
-// every bind; only the checkout actually on screen should.
+// Checkout activation owns config and preview hydration. File trees and terminal
+// screens have separate feature/pane demand, tested by the service demand suites.
+// Construction still creates each checkout bundle for background notifications.
+// Reconnect and foreground resume must not fan config/preview reads out to every
+// bundle just because those bundles exist.
 //
 // `git:sync-status` stays eager (it feeds drawer/status chrome for every
 // checkout, not just the focused one) and is asserted on throughout so a
@@ -68,12 +64,7 @@ List<Map<String, dynamic>> _sentOf(
       (checkoutId == null || m['checkoutId'] == checkoutId);
 }).toList();
 
-const _heavyTypes = [
-  'file:tree:snapshot:request',
-  'config:read',
-  'preview:snapshot:request',
-  'terminal:subscribe',
-];
+const _heavyTypes = ['config:read', 'preview:snapshot:request'];
 
 /// Fires exactly one [MessageRouter.focusResumed] edge — the recipe every
 /// resume-driven test in the suite shares.
@@ -203,17 +194,14 @@ void main() {
     session.setActiveCheckouts({'B'});
     await Future<void>.delayed(Duration.zero);
 
-    expect(
-      _sentOf(t, 'file:tree:snapshot:request', checkoutId: 'B'),
-      hasLength(1),
-    );
-    expect(_sentOf(t, 'file:tree:snapshot:request', checkoutId: 'A'), isEmpty);
+    expect(_sentOf(t, 'config:read', checkoutId: 'B'), hasLength(1));
+    expect(_sentOf(t, 'config:read', checkoutId: 'A'), isEmpty);
 
     t.clearSent();
     t.redriveHydrators();
     await Future<void>.delayed(Duration.zero);
 
-    final pulls = _sentOf(t, 'file:tree:snapshot:request');
+    final pulls = _sentOf(t, 'config:read');
     expect(pulls, isNotEmpty);
     expect(pulls.every((m) => m['checkoutId'] == 'B'), isTrue);
   });
@@ -229,10 +217,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(session.existingServicesForCheckout('A')!.isActive, isTrue);
-      expect(
-        _sentOf(t, 'file:tree:snapshot:request', checkoutId: 'A'),
-        hasLength(1),
-      );
+      expect(_sentOf(t, 'config:read', checkoutId: 'A'), hasLength(1));
 
       // The list arrives after — servicesForCheckout must return the SAME
       // (already active) bundle rather than recreating and re-pulling it.
@@ -242,10 +227,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       await Future<void>.delayed(Duration.zero);
 
-      expect(
-        _sentOf(t, 'file:tree:snapshot:request', checkoutId: 'A'),
-        hasLength(1),
-      );
+      expect(_sentOf(t, 'config:read', checkoutId: 'A'), hasLength(1));
     },
   );
 
@@ -259,10 +241,7 @@ void main() {
       session.setActiveCheckouts({'A', 'D'});
       await Future<void>.delayed(Duration.zero);
 
-      expect(
-        _sentOf(t, 'file:tree:snapshot:request', checkoutId: 'D'),
-        hasLength(1),
-      );
+      expect(_sentOf(t, 'config:read', checkoutId: 'D'), hasLength(1));
 
       t.emit('session:list:result', {
         'sessions': [_sessionRow('sA', 'A')],
@@ -276,10 +255,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(session.existingServicesForCheckout('D')!.isActive, isTrue);
-      expect(
-        _sentOf(t, 'file:tree:snapshot:request', checkoutId: 'D'),
-        hasLength(1),
-      );
+      expect(_sentOf(t, 'config:read', checkoutId: 'D'), hasLength(1));
     },
   );
 
@@ -300,10 +276,7 @@ void main() {
     bundle.activate();
     bundle.activate();
     await Future<void>.delayed(Duration.zero);
-    expect(
-      _sentOf(t, 'file:tree:snapshot:request', checkoutId: 'A'),
-      hasLength(1),
-    );
+    expect(_sentOf(t, 'config:read', checkoutId: 'A'), hasLength(1));
 
     bundle.deactivate();
     bundle.deactivate();
@@ -311,7 +284,7 @@ void main() {
     t.clearSent();
     t.redriveHydrators();
     await Future<void>.delayed(Duration.zero);
-    expect(_sentOf(t, 'file:tree:snapshot:request', checkoutId: 'A'), isEmpty);
+    expect(_sentOf(t, 'config:read', checkoutId: 'A'), isEmpty);
   });
 
   test('deactivation leaves service state intact', () async {
@@ -374,11 +347,7 @@ void main() {
 
     await _resume(session);
 
-    for (final type in [
-      'file:tree:snapshot:request',
-      'preview:snapshot:request',
-      'terminal:subscribe',
-    ]) {
+    for (final type in ['preview:snapshot:request']) {
       expect(_sentOf(t, type, checkoutId: 'A'), isNotEmpty, reason: type);
       expect(_sentOf(t, type, checkoutId: 'B'), isEmpty, reason: type);
       expect(_sentOf(t, type, checkoutId: 'main'), isEmpty, reason: type);

@@ -3,6 +3,16 @@
 Status: coordinated app/bridge replacement implemented; release qualification is
 tracked below. Both components must be upgraded together.
 
+Demand-driven app subscriptions are implemented in `TerminalService` and
+`terminal_demand.dart`, with pane visibility supplied by `DisplayVisibility`.
+The local and relay policy is shared: visible panes retain subscriptions,
+hidden user terminals may receive one speculative screen, and tree hydration
+belongs to interested features rather than checkout activation. Scheduling and
+cache limits, cancellation, promotion, input gating, and history behavior are
+described in [architecture.md](architecture.md#terminal-frames-and-history).
+Qualification results and remaining release gates are recorded in
+[terminal-demand-qualification.md](terminal-demand-qualification.md).
+
 The implementation uses snapshot-only viewing. Local-transport encryption and
 the full supported-host real-agent/paint-latency qualification remain open gates;
 the existing bearer-token loopback transport is not encrypted by this change.
