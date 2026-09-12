@@ -1007,6 +1007,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (!manager) return;
     const runtime = runtimeFor(msg);
     switch (msg.type) {
+      case "terminal:bell":
+        // Only the authoritative VT may originate side effects.
+        break;
       case "terminal:input": {
         // The app sends a handler reply, an escalation chip and a composer send
         // as one `line + CR` frame, so the split has to happen here: two

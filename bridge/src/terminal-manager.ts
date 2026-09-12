@@ -533,7 +533,19 @@ export class TerminalManager {
       throw error;
     }
     this.screens.set(terminalId, screen);
-    if (screen instanceof TerminalFrameSource) this.callbacks.onRunStarted?.(terminalId, runId, screen);
+    if (screen instanceof TerminalFrameSource) {
+      let lastBellAt = -Infinity;
+      screen.onBell(() => {
+        if (this.runIds.get(terminalId) !== runId) return;
+        const now = Date.now();
+        // Match the app's audible throttle before encryption so binary output
+        // cannot turn a harmless BEL flood into an unbounded control queue.
+        if (now - lastBellAt < 500) return;
+        lastBellAt = now;
+        this.sendMessage(createMessage("terminal:bell", { terminalId, runId }));
+      });
+      this.callbacks.onRunStarted?.(terminalId, runId, screen);
+    }
     // Before `session.spawn()`, which is what actually starts the PTY: the
     // session's own byte-level responder must already be narrowed to
     // OSC-colors-only by the time the guest's first query byte can arrive,

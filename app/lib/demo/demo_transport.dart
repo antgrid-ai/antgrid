@@ -150,7 +150,6 @@ class DemoTransport extends BufferedAgentTransport {
   List<Map<String, Object?>> _openingFrames() => <Map<String, Object?>>[
     ...kDemoDurableFrames,
     kDemoTerminalStarted,
-    kDemoTerminalSnapshot,
     kDemoGitBranches,
     // Read through [_configPicks] rather than [demoCapabilities] directly, so
     // an answer built after the user has picked a model or mode carries the
@@ -645,19 +644,12 @@ class DemoTransport extends BufferedAgentTransport {
     };
   }
 
-  /// Scrollback for [terminalId]. A tab the demo has no history for gets a
-  /// bare prompt rather than the sample terminal's, which `_applySnapshot`
-  /// erases the target buffer to write.
-  Map<String, Object?> _terminalSnapshot(String? terminalId) {
+  String _initialTerminalAnsi(String? terminalId) {
     if (terminalId == null || terminalId == kDemoTerminalId) {
-      return kDemoTerminalSnapshot;
+      return kDemoTerminalScreenAnsi;
     }
-    if (terminalId == kDemoServiceTerminalId) return kDemoServiceSnapshot;
-    return <String, Object?>{
-      ...kDemoTerminalSnapshot,
-      'terminalId': terminalId,
-      'scrollback': kDemoShellPrompt,
-    };
+    if (terminalId == kDemoServiceTerminalId) return kDemoServiceScreenAnsi;
+    return kDemoShellPrompt;
   }
 
   /// Echoes typed bytes so the terminal feels attached, then says plainly that
@@ -679,7 +671,7 @@ class DemoTransport extends BufferedAgentTransport {
 
   _DemoScreen _screen(String terminalId) => _screens.putIfAbsent(
     terminalId,
-    () => _DemoScreen(_terminalSnapshot(terminalId)['scrollback'] as String),
+    () => _DemoScreen(_initialTerminalAnsi(terminalId)),
   );
 
   Map<String, Object?> _terminalFrame(String terminalId) {
@@ -707,6 +699,8 @@ class DemoTransport extends BufferedAgentTransport {
   }
 
   void _dispatchBeat(_PendingBeat beat) {
+    // Script and input echoes use raw chunks only inside this in-memory
+    // authoritative screen. The app sees only the resulting independent frame.
     if (beat.frame['type'] == 'terminal:output') {
       final terminalId = beat.frame['terminalId'] as String;
       _screen(terminalId).append(beat.frame['data'] as String);

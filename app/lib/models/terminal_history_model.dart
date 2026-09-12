@@ -53,6 +53,7 @@ class TerminalHistoryModel extends ChangeNotifier {
   TerminalHistoryBoundary? _boundary;
   final List<TerminalHistoryRow> _rows = <TerminalHistoryRow>[];
   String? _outstandingRequestId;
+  int? _requestedBeforeRowId;
   bool _atOldest = false;
   String? _failure;
   bool _refused = false;
@@ -123,6 +124,25 @@ class TerminalHistoryModel extends ChangeNotifier {
     return _rows.isEmpty ? b.nextRowId : _rows.first.rowId;
   }
 
+  /// A reopened reader starts at the newest archived window. Live boundaries
+  /// do not do this themselves: they must leave an active reader's place alone.
+  void prepareLatestWindow() {
+    final b = _boundary;
+    if (b == null ||
+        _refused ||
+        (b.status != 'recording' && b.status != 'disabled')) {
+      return;
+    }
+    if (_rows.isEmpty
+        ? !loading || _requestedBeforeRowId == b.nextRowId
+        : !loading && _rows.last.rowId == b.nextRowId - 1) {
+      return;
+    }
+    _discardRows();
+    _failure = null;
+    notifyListeners();
+  }
+
   /// The archive boundary carried by every frame.
   void applyBoundary(TerminalHistoryBoundary next) {
     final previous = _boundary;
@@ -152,6 +172,7 @@ class TerminalHistoryModel extends ChangeNotifier {
   bool markRequested(String requestId) {
     if (_outstandingRequestId != null) return false;
     _outstandingRequestId = requestId;
+    _requestedBeforeRowId = cursor;
     notifyListeners();
     return true;
   }
@@ -270,6 +291,7 @@ class TerminalHistoryModel extends ChangeNotifier {
     _bytes = 0;
     _atOldest = false;
     _outstandingRequestId = null;
+    _requestedBeforeRowId = null;
   }
 
   /// Forgets everything, boundary included -- a fresh PTY under the same id

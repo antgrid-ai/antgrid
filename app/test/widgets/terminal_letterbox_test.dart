@@ -299,54 +299,46 @@ void main() {
     },
   );
 
-  testWidgets(
-    'unclaimed + unfocused renders the driver fill path, not a fixed-width '
-    'letterbox (content tracks the panel)',
-    (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-      final h = await _makeService(addTearDown);
-      h.service.setClientId(_myClientId);
+  testWidgets('unclaimed + unfocused renders the authoritative frame grid', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    final h = await _makeService(addTearDown);
+    h.service.setClientId(_myClientId);
 
-      // Exactly the user-reported repro: a freshly-created session that never
-      // got keyboard focus (driverClientId == null). Before the fix this fell
-      // into the non-driver branch — a fixed-width SizedBox centered by an
-      // Align — so the panel grew (letterbox area) while the content stayed
-      // pinned at tab.cols. An unclaimed terminal must instead drive and fill
-      // the viewport without needing focus. (Assert on the widget tree, not
-      // engine cols: the headless engine does not run its grid layout without
-      // a focus context — see the letterbox tests above, which do the same.)
-      final tab = _tab(id: 't7', cols: 5, driverClientId: null);
+    // Exactly the user-reported repro: a freshly-created session that never
+    // got keyboard focus (driverClientId == null). Before the fix this fell
+    // into the non-driver branch — a fixed-width SizedBox centered by an
+    // Align — so the panel grew (letterbox area) while the content stayed
+    // pinned at tab.cols. An unclaimed terminal must instead drive and fill
+    // the viewport without needing focus. (Assert on the widget tree, not
+    // engine cols: the headless engine does not run its grid layout without
+    // a focus context — see the letterbox tests above, which do the same.)
+    final tab = _tab(id: 't7', cols: 5, driverClientId: null);
 
-      await tester.pumpWidget(
-        _wrap(
-          ExcludeFocus(
-            child: Center(
-              child: SizedBox(
-                width: 300,
-                height: 400,
-                child: TerminalViewWrapper(
-                  tab: tab,
-                  terminalService: h.service,
-                ),
-              ),
+    await tester.pumpWidget(
+      _wrap(
+        ExcludeFocus(
+          child: Center(
+            child: SizedBox(
+              width: 300,
+              height: 400,
+              child: TerminalViewWrapper(tab: tab, terminalService: h.service),
             ),
           ),
         ),
-      );
-      await tester.pumpAndSettle();
+      ),
+    );
+    await tester.pumpAndSettle();
 
-      // The driver fill path uses no scaler at all. That is the non-driver
-      // construct, and a driver whose content were scaled would be typing
-      // into a grid that does not match the size it renders at.
-      expect(find.byType(FittedBox), findsNothing);
-      expect(_wrappingScrollView, findsNothing);
+    expect(find.byType(FittedBox), findsOneWidget);
+    expect(_wrappingScrollView, findsNothing);
 
-      debugDefaultTargetPlatformOverride = null;
-    },
-  );
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets(
-    'driver: resizing the panel re-syncs the engine grid to the new width',
+    'driver resize requests new geometry without mutating the current frame',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       final h = await _makeService(addTearDown);
@@ -371,20 +363,26 @@ void main() {
       await tester.pumpAndSettle();
       await tester.pump(const Duration(milliseconds: 200));
       final colsAt300 = tab.ghostty.cols;
+      final requestedAt300 =
+          h.transport.sent
+                  .where((message) => message['type'] == 'terminal:resize')
+                  .last['cols']
+              as int;
 
       // Grow the panel and let the grid-freeze settle delay (150ms) elapse.
       await tester.pumpWidget(atWidth(600));
       await tester.pumpAndSettle();
       await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 150));
       final colsAt600 = tab.ghostty.cols;
 
-      expect(
-        colsAt600,
-        greaterThan(colsAt300),
-        reason:
-            'engine grid must widen with the panel; stuck at $colsAt300 means '
-            'the content never re-rendered to the new size',
-      );
+      expect(colsAt600, colsAt300);
+      final resizes = h.transport.sent
+          .where((message) => message['type'] == 'terminal:resize')
+          .toList();
+      expect(resizes, isNotEmpty);
+      expect(resizes.last['cols'] as int, greaterThan(requestedAt300));
 
       debugDefaultTargetPlatformOverride = null;
     },
@@ -456,7 +454,7 @@ void main() {
   });
 
   testWidgets(
-    'driver grid settles to a grown panel while the wrapper keeps rebuilding',
+    'driver keeps the authoritative frame grid while its wrapper rebuilds',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       final h = await _makeService(addTearDown);
@@ -496,10 +494,9 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(
-        tester.getSize(find.byType(GhosttyTerminalView)).width,
-        closeTo(300, _epsilon),
-      );
+      final authoritativeWidth = tester
+          .getSize(find.byType(GhosttyTerminalView))
+          .width;
 
       width.value = 600;
       for (var i = 0; i < 12; i++) {
@@ -509,6 +506,10 @@ void main() {
 
       expect(
         tester.getSize(find.byType(GhosttyTerminalView)).width,
+        closeTo(authoritativeWidth, _epsilon),
+      );
+      expect(
+        tester.getSize(find.byType(FittedBox)).width,
         closeTo(600, _epsilon),
       );
 

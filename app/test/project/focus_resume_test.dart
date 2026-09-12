@@ -90,55 +90,51 @@ void main() {
     await t.dispose();
   });
 
-  test('the resume declaration is enqueued before every snapshot pull it '
-      'triggers', () async {
-    final t = FakeAgentTransport();
-    final cache = await CachedSessionsStore.open();
-    final session = ProjectSession(
-      projectId: 'p',
-      transport: t,
-      mode: ProjectSessionMode.local,
-      cachedSessionsStore: cache,
-      onClose: () async => t.dispose(),
-    );
-    session.setActiveCheckouts({'main'});
-    t.emit('agent:status', {
-      'projectId': 'p',
-      'terminals': [
-        {'id': 'a', 'terminalId': 'a', 'name': 'a', 'running': true},
-      ],
-    });
-    await Future<void>.delayed(Duration.zero);
+  test(
+    'the resume declaration is enqueued before every terminal resubscribe',
+    () async {
+      final t = FakeAgentTransport();
+      final cache = await CachedSessionsStore.open();
+      final session = ProjectSession(
+        projectId: 'p',
+        transport: t,
+        mode: ProjectSessionMode.local,
+        cachedSessionsStore: cache,
+        onClose: () async => t.dispose(),
+      );
+      session.setActiveCheckouts({'main'});
+      t.emit('agent:status', {
+        'projectId': 'p',
+        'terminals': [
+          {'id': 'a', 'terminalId': 'a', 'name': 'a', 'running': true},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
 
-    session.setLifecyclePaused(true);
-    await Future<void>.delayed(Duration.zero);
-    t.clearSent();
+      session.setLifecyclePaused(true);
+      await Future<void>.delayed(Duration.zero);
+      t.clearSent();
 
-    session.setLifecyclePaused(false);
-    await Future<void>.delayed(Duration.zero);
-    await Future<void>.delayed(Duration.zero);
+      session.setLifecyclePaused(false);
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
 
-    final declaredAt = t.sent.indexWhere(
-      (m) => m['type'] == 'client:focus-state' && m['paused'] == false,
-    );
-    expect(declaredAt, isNonNegative);
-    // The pull is a correlated RPC now, not a message — `request` appends its
-    // own frame into `sent` on the same ordinal as `send`, so the ordering
-    // check below stays honest keyed on the request frame's `method`.
-    final pullIndices = [
-      for (var i = 0; i < t.sent.length; i++)
-        if (t.sent[i]['type'] == 'request' &&
-            t.sent[i]['method'] == 'terminal.snapshot')
-          i,
-    ];
-    expect(pullIndices, isNotEmpty);
-    expect(pullIndices.every((i) => i > declaredAt), isTrue);
+      final declaredAt = t.sent.indexWhere(
+        (m) => m['type'] == 'client:focus-state' && m['paused'] == false,
+      );
+      expect(declaredAt, isNonNegative);
+      final pullIndices = [
+        for (var i = 0; i < t.sent.length; i++)
+          if (t.sent[i]['type'] == 'terminal:subscribe') i,
+      ];
+      expect(pullIndices, isNotEmpty);
+      expect(pullIndices.every((i) => i > declaredAt), isTrue);
 
-    await session.close();
-  });
+      await session.close();
+    },
+  );
 
-  test('every surface the agent suppresses re-pulls on the resume edge',
-      () async {
+  test('every surface the agent suppresses re-pulls on the resume edge', () async {
     // The terminal was the first surface to grow this subscription, and for a
     // while the only one — while the file tree and the preview carried the same
     // defect. The agent drops `tree:update` and `preview:url` in exactly the

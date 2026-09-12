@@ -88,6 +88,13 @@ const TerminalNotificationMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+const TerminalBellMessage = BaseMessage.extend({
+  type: z.literal("terminal:bell"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  ...CheckoutScoped,
+});
+
 const PingMessage = BaseMessage.extend({
   type: z.literal("ping"),
 });
@@ -2367,6 +2374,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   TerminalStartedMessage,
   TerminalExitedMessage,
   TerminalNotificationMessage,
+  TerminalBellMessage,
   TerminalStartCommand,
   TerminalStopCommand,
   TerminalResizeCommand,
@@ -2528,6 +2536,7 @@ export type NetwatchConfigure = z.infer<typeof NetwatchConfigureMessage>;
 export type NetwatchEvents = z.infer<typeof NetwatchEventsMessage>;
 
 export type TerminalNotificationMessage = z.infer<typeof TerminalNotificationMessage>;
+export type TerminalBellMessage = z.infer<typeof TerminalBellMessage>;
 
 export type TerminalOutput = z.infer<typeof TerminalOutputMessage>;
 export type TerminalInput = z.infer<typeof TerminalInputMessage>;
@@ -2751,7 +2760,7 @@ export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
 /** The exhaustive checkout-variable protocol set. Any new filesystem-facing
  * type belongs here (and gets an explicit schema decision + contract test). */
 export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
-  "terminal:start", "terminal:stop", "terminal:input", "terminal:resize", "terminal:output", "terminal:started", "terminal:exited", "terminal:notification", "terminal:size",
+  "terminal:start", "terminal:stop", "terminal:input", "terminal:resize", "terminal:output", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell", "terminal:size",
   "terminal:snapshot:request", "terminal:snapshot",
   "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
   "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
@@ -2858,7 +2867,7 @@ export function parseMessage(raw: string): AbMessage | null {
  * Use this on the hot path (terminal:output) after the handshake is complete.
  */
 const KNOWN_TYPES = new Set<string>([
-  "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification",
+  "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell",
   "terminal:start", "terminal:stop", "terminal:resize", "terminal:size", "agent:status",
   "ping", "pong", "handshake:client-hello", "handshake:agent-hello", "handshake:agent-ready",
   "tree:full", "tree:update", "file:read", "file:content",

@@ -437,17 +437,17 @@ describe("gate: terminal frame mode", () => {
     )).toBe(0);
   }, 30_000);
 
-  test("terminal:exited and terminal:notification still reach a frame-mode viewer: only the passive output stream is withheld", async () => {
+  test("terminal:exited, terminal:notification and terminal:bell reach a frame-mode viewer", async () => {
     const terminalId = "frame-lifecycle-events";
-    // Both events are raised after the subscribe has certainly landed, so this
+    // Events are raised after the subscribe has certainly landed, so this
     // is about what a frame-mode viewer keeps receiving — not about what was
     // already in flight when it switched modes. A frame viewer has no other
     // way to learn its terminal exited or asked for attention: the hub raises
     // ENDED, and nothing else.
     await startTerminal(env.app, streamId, terminalId, "node", [
-      "-e", "setTimeout(() => process.stdout.write('\\x1b]9;FRAME_NOTIFY\\x07'), 700); setTimeout(() => process.exit(3), 1400);",
+      "-e", "setTimeout(() => process.stdout.write('\\x1b]9;FRAME_NOTIFY\\x07\\x07'), 700); setTimeout(() => process.exit(3), 1400);",
     ]);
-    await subscribeFrames(env.app, streamId, terminalId);
+    const subscription = await subscribeFrames(env.app, streamId, terminalId);
 
     const notification = await env.app.waitFor(
       (m: any) => m.type === "terminal:notification" && m._streamId === streamId && m.terminalId === terminalId,
@@ -455,6 +455,13 @@ describe("gate: terminal frame mode", () => {
     );
     expect(notification.kind).toBe("osc9");
     expect(notification.body).toContain("FRAME_NOTIFY");
+
+    const bell = await env.app.waitFor(
+      (m: any) => m.type === "terminal:bell" && m._streamId === streamId && m.terminalId === terminalId,
+      10_000,
+    );
+    expect(bell.runId).toBe(subscription.runId);
+    expect(bell.checkoutId).toBe("main");
 
     const exited = await env.app.waitFor(
       (m: any) => m.type === "terminal:exited" && m._streamId === streamId && m.terminalId === terminalId,

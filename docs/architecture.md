@@ -52,6 +52,13 @@ protocol version 1 and receive independent screens at a maximum of 20 FPS;
 peers require an upgrade. An attachment failure preserves the last valid screen
 and offers recovery through a fresh attachment, never raw-stream fallback.
 
+The authoritative parser emits bare BEL as a separate, ephemeral
+`terminal:bell` event scoped to the checkout, terminal, and run. The bridge
+throttles it to one event per run per 500 ms; the app rings only for its focused
+terminal's current run, with the existing window-wide audible throttle. Bells
+are never cached or included in screens, so restoring a frame does not repeat
+an alert. OSC notification and title terminators do not ring the bell.
+
 An absent terminal is different from a display failure: after attempting archived
 restoration, the bridge answers its subscribe request with a correlated
 `UNKNOWN_TERMINAL` status. The app drops an empty obsolete tab or retains its

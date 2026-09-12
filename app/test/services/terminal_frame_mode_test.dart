@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
@@ -304,6 +305,53 @@ void main() {
     await svc.dispose();
     await session.close();
   });
+
+  test(
+    'bell events ring only the focused current run and never repaint',
+    () async {
+      final calls = <MethodCall>[];
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        calls.add(call);
+        return null;
+      });
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = session.terminalService;
+      addTearDown(session.close);
+      svc.activate();
+      await seedRunningTab(t, 'a');
+      await acceptSubscribe(t, 'a');
+      final tab = svc.currentState.tabs['a']!;
+      tab.ghostty.setFocused(false);
+      t.emit('terminal:bell', {'terminalId': 'a', 'runId': 'run-1'});
+      await Future<void>.delayed(Duration.zero);
+      tab.ghostty.setFocused(true);
+      t.emit('terminal:bell', {'terminalId': 'a', 'runId': 'retired-run'});
+      t.emit('terminal:bell', {
+        'terminalId': 'a',
+        'runId': 'run-1',
+        'checkoutId': 'other',
+      });
+      t.emit('terminal:bell', {'terminalId': 'missing', 'runId': 'run-1'});
+      await Future<void>.delayed(Duration.zero);
+      expect(calls.where((call) => call.method == 'SystemSound.play'), isEmpty);
+      t.emit('terminal:bell', {'terminalId': 'a', 'runId': 'run-1'});
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        calls.where((call) => call.method == 'SystemSound.play'),
+        hasLength(1),
+      );
+      expect(
+        t.sent.where((message) => message['type'] == 'terminal:ack'),
+        isEmpty,
+      );
+    },
+  );
 
   test(
     'missing terminal retains its screen and history through a start timeout',

@@ -331,7 +331,6 @@ void main() {
         await session.close();
       },
     );
-
   });
 
   // A relay app builds its tabs from the replayed agent:status, never from the
@@ -340,7 +339,7 @@ void main() {
   // agent RETAINS past its own exit — a `worktree.setup` transcript, which the
   // banner's "View setup log" reads after the run — permanently unreachable:
   // it is always stopped by the time such a client first sees it.
-  test('a stopped terminal discovered in the status is still snapshotted', () async {
+  test('a stopped terminal subscribes for its retained final screen', () async {
     final t = FakeAgentTransport();
     final session = await newSession(t);
     final svc = TerminalService.fromSession(session);
@@ -359,13 +358,11 @@ void main() {
     await Future<void>.delayed(Duration.zero);
 
     expect(svc.currentState.tabs, contains('wt-1:setup'));
-    // `isNotEmpty`, not a count: the session builds its own main-checkout
-    // TerminalService, so both it and the one under test answer this frame.
     expect(
-      t.requests.where(
-        (r) =>
-            r.method == 'terminal.snapshot' &&
-            r.params?['terminalId'] == 'wt-1:setup',
+      t.sent.where(
+        (message) =>
+            message['type'] == 'terminal:subscribe' &&
+            message['terminalId'] == 'wt-1:setup',
       ),
       isNotEmpty,
     );

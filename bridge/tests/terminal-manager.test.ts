@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { TerminalManager } from "../src/terminal-manager";
 import { TerminalSession } from "../src/terminal-session";
+import type { TerminalFrameSource } from "../src/terminal-frames/source";
 import { createConnState, type ConnState } from "../src/conn-state";
 import type { AbMessage } from "../src/protocol";
 
@@ -61,6 +62,25 @@ describe("TerminalManager", () => {
     expect(manager.runId("t1")).not.toBe(firstRun);
     expect(manager.runId("nope")).toBeUndefined();
     manager.killAll();
+  });
+
+  test("parsed bells are run-scoped and throttled independently of remote viewer suppression", async () => {
+    let source: TerminalFrameSource | undefined;
+    manager = new TerminalManager((msg) => messages.push(msg), {
+      onRunStarted: (_id, _run, screen) => { source = screen; },
+    }, connState);
+    manager.spawn({ terminalId: "bell" });
+    connState.appFocusPaused = true;
+    source!.feed("\x1b]2;title\x07");
+    await source!.settle();
+    expect(messages.filter((m) => m.type === "terminal:bell")).toHaveLength(0);
+    source!.feed("\x07".repeat(500));
+    await source!.settle();
+    const bells = messages.filter((m) => m.type === "terminal:bell");
+    expect(bells).toHaveLength(1);
+    expect(bells[0]).toMatchObject({ terminalId: "bell", runId: manager.runId("bell") });
+    source!.capture(performance.now());
+    expect(messages.filter((m) => m.type === "terminal:bell")).toHaveLength(1);
   });
 
   test("kill terminal emits terminal:exited", async () => {

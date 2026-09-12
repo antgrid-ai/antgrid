@@ -796,6 +796,11 @@ class TerminalService {
       _handleGitCheckoutResult(message);
     } else if (message is TerminalNotificationMessage) {
       _handleNotification(message);
+    } else if (message is TerminalBellMessage) {
+      if (_frameAttachment[message.terminalId]?.runId == message.runId &&
+          _state.tabs[message.terminalId]?.ghostty.isFocused == true) {
+        ringTerminalBell();
+      }
     } else if (message is NotificationPushMessage) {
       _pushController.add(message);
     } else if (message is TerminalSizeMessage) {

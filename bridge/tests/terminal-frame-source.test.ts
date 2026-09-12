@@ -10,6 +10,32 @@ import type { TerminalRunHistory } from "../src/terminal-frames/history";
 const MAX_PENDING_CHARS = 1_000_000;
 
 const sources: TerminalFrameSource[] = [];
+test("bells are parser events and never replayed by independent captures", async () => {
+  const screen = source();
+  let bells = 0;
+  screen.onBell(() => { bells++; });
+  screen.feed("hello\x07\x1b]2;split title");
+  await screen.settle();
+  expect(bells).toBe(1);
+  screen.feed("\x07\x1b]9;notification\x07\x1b]8;;https://example.com\x07link\x1b]8;;\x07");
+  await screen.settle();
+  expect(bells).toBe(1);
+  screen.feed("\x1b[?1049hfull screen\x07");
+  await screen.settle();
+  expect(bells).toBe(2);
+  expect(screen.capture(0)?.ansi).not.toContain("\x07");
+  screen.capture(50);
+  expect(bells).toBe(2);
+});
+
+test("a throwing bell sink cannot corrupt the parser", async () => {
+  const screen = source();
+  screen.onBell(() => { throw new Error("viewer failed"); });
+  screen.feed("before\x07after");
+  await screen.settle();
+  expect(screen.visibleLines()[0]).toBe("beforeafter");
+  expect(screen.failure).toBeUndefined();
+});
 function source(cols = 40, rows = 6): TerminalFrameSource {
   const screen = new TerminalFrameSource(cols, rows);
   sources.push(screen);

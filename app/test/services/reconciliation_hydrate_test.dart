@@ -41,15 +41,6 @@ void main() {
       t.sent.where((m) => m['type'] == type).toList();
 
   /// RPCs issued since [after] whose method is [method] — the terminal
-  /// snapshot pull moved off `sent` onto the correlated `terminal.snapshot`
-  /// RPC, which `t.requests` records but `sentOf` cannot see.
-  List<({String method, Map<String, dynamic>? params, Duration timeout})>
-  requestsOf(FakeAgentTransport t, String method, {int after = 0}) => t
-      .requests
-      .skip(after)
-      .where((r) => r.method == method)
-      .toList();
-
   test('sessions:list re-fires on re-establishment', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);
@@ -152,40 +143,37 @@ void main() {
     await session.close();
   });
 
-  test('terminal.snapshot re-fires for every live tab on re-establishment',
-      () async {
-    // The agent DROPS terminal output while suppressed yet keeps bumping the
-    // seq, and only a tab the app has never seen is pulled at discovery, so
-    // without this hydrator a returning tab renders its pre-departure frame
-    // forever.
-    final t = FakeAgentTransport();
-    final session = await makeSession(t);
-    t.emit('agent:status', {
-      'projectId': 'p',
-      'terminals': [
-        {'id': 'a', 'terminalId': 'a', 'name': 'a', 'running': true},
-        {'id': 'b', 'terminalId': 'b', 'name': 'b', 'running': false},
-      ],
-    });
-    await Future<void>.delayed(Duration.zero);
+  test(
+    'terminal subscriptions refresh every retained tab on re-establishment',
+    () async {
+      // Attachments are scoped to one connection, so a returning client must
+      // replace them even while the last independent frame remains visible.
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      t.emit('agent:status', {
+        'projectId': 'p',
+        'terminals': [
+          {'id': 'a', 'terminalId': 'a', 'name': 'a', 'running': true},
+          {'id': 'b', 'terminalId': 'b', 'name': 'b', 'running': false},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
 
-    // Discovery already pulled both tabs once; mark the boundary rather than
-    // clearing (this transport has no `clearRequests`) so what follows can
-    // only be the re-drive's own requests.
-    final before = t.requests.length;
-    t.redriveHydrators();
-    await Future<void>.delayed(Duration.zero);
+      final before = t.sent.length;
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
 
-    // The exited tab is pulled too, deliberately: whatever it printed as it
-    // died went into the suppressed window, and nothing will re-emit it.
-    final pulls = requestsOf(t, 'terminal.snapshot', after: before);
-    expect(
-      pulls.map((r) => r.params?['terminalId']),
-      unorderedEquals(['a', 'b']),
-    );
+      final pulls = t.sent
+          .skip(before)
+          .where((message) => message['type'] == 'terminal:subscribe');
+      expect(
+        pulls.map((message) => message['terminalId']),
+        unorderedEquals(['a', 'b']),
+      );
 
-    await session.close();
-  });
+      await session.close();
+    },
+  );
 
   test(
     'an optimistic pending terminal is not pulled on re-establishment',
@@ -203,12 +191,14 @@ void main() {
       // The agent has never confirmed 'c', so it would answer a pull for it with
       // a warning and no frame; its own terminal:started carries the pull.
       session.terminalService.createAdHocTerminal('c', name: 'c');
-      final before = t.requests.length;
+      final before = t.sent.length;
       t.redriveHydrators();
       await Future<void>.delayed(Duration.zero);
 
-      final pulls = requestsOf(t, 'terminal.snapshot', after: before);
-      expect(pulls.map((r) => r.params?['terminalId']), ['a']);
+      final pulls = t.sent
+          .skip(before)
+          .where((message) => message['type'] == 'terminal:subscribe');
+      expect(pulls.map((message) => message['terminalId']), ['a']);
 
       await session.close();
     },

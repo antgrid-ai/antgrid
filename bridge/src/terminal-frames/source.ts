@@ -253,6 +253,11 @@ export class TerminalFrameSource extends TerminalScreen {
     return () => { this.listeners.delete(listener); };
   }
 
+  onBell(listener: () => void): () => void {
+    const subscription = this.term.onBell(() => this.guarded(listener));
+    return () => subscription.dispose();
+  }
+
   /**
    * Installs the parser-boundary query responder (`terminal-frames/queries.ts`)
    * for everything except OSC 10/11/12 — see that file's header for why those

@@ -55,6 +55,7 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'terminal:started',
   'terminal:exited',
   'terminal:notification',
+  'terminal:bell',
   'terminal:size',
   'terminal:snapshot:request',
   'terminal:snapshot',
@@ -201,6 +202,7 @@ const Set<String> _statusTypes = <String>{
   'terminal:started',
   'terminal:exited',
   'terminal:notification',
+  'terminal:bell',
   // Frame-mode negotiation and its error surface sit beside the terminal
   // lifecycle for the same reason: a subscription that was refused, timed out
   // or ended must still reach the UI while the app is paused, or the viewer

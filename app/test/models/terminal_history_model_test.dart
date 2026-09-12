@@ -65,6 +65,69 @@ List<TerminalHistoryRow> _rowsBelow(int exclusiveEnd, {int count = 200}) =>
     );
 
 void main() {
+  test(
+    'reopening replaces a pending first page only when its boundary is stale',
+    () {
+      final m = TerminalHistoryModel()..applyBoundary(_boundary());
+      m.markRequested('first');
+      m.prepareLatestWindow();
+      expect(m.loading, isTrue);
+      m.applyBoundary(_boundary(nextRowId: 1200));
+      m.prepareLatestWindow();
+      expect(m.loading, isFalse);
+      expect(m.cursor, 1200);
+      m.markRequested('latest');
+      expect(
+        m.applyPage(_page(requestId: 'first', rows: _rowsBelow(1000))),
+        isFalse,
+      );
+      expect(m.loading, isTrue);
+    },
+  );
+
+  test(
+    'reopening refreshes a stale newest window and abandons old requests',
+    () {
+      final m = TerminalHistoryModel()..applyBoundary(_boundary());
+      m.markRequested('seed');
+      m.applyPage(_page(requestId: 'seed', rows: _rowsBelow(1000)));
+      m.applyBoundary(_boundary(nextRowId: 1200));
+      expect(m.cursor, 800, reason: 'live output leaves active reading alone');
+      m.markRequested('older');
+      m.prepareLatestWindow();
+      expect(m.rows, isEmpty);
+      expect(m.cursor, 1200);
+      expect(m.canLoadMore, isTrue);
+      m.markRequested('latest');
+      expect(
+        m.applyPage(_page(requestId: 'older', rows: _rowsBelow(800))),
+        isFalse,
+      );
+      expect(m.noteRequestFailed('late timeout', requestId: 'older'), isFalse);
+      m.applyPage(
+        _page(
+          requestId: 'latest',
+          rows: _rowsBelow(1200),
+          history: _boundary(nextRowId: 1200),
+        ),
+      );
+      expect(m.rows.last.rowId, 1199);
+      m.prepareLatestWindow();
+      expect(m.rows, hasLength(200));
+    },
+  );
+
+  test('reopening leaves an unavailable cached archive readable', () {
+    final m = TerminalHistoryModel()..applyBoundary(_boundary());
+    m.markRequested('seed');
+    m.applyPage(_page(requestId: 'seed', rows: _rowsBelow(1000)));
+    m.applyBoundary(_boundary(nextRowId: 1200));
+    m.noteHistoryUnavailable('Unavailable');
+    m.prepareLatestWindow();
+    expect(m.rows, hasLength(200));
+    expect(m.failure, 'Unavailable');
+  });
+
   test('an empty model has nothing to ask for until a boundary arrives', () {
     final m = TerminalHistoryModel();
     expect(m.boundary, isNull);

@@ -183,6 +183,7 @@ class _TerminalHistoryViewState extends State<TerminalHistoryView> {
   /// What the engine currently holds, so a model notification that changed only
   /// the boundary or the loading flag does not rebuild it.
   (int firstRowId, int lastRowId, int count)? _rendered;
+  List<TerminalHistoryRow> _renderedRows = const [];
 
   /// Where to put the viewport back once the re-ingested rows have settled,
   /// in ENGINE rows above the live bottom. See [_restoreScrollOffset] for why
@@ -219,7 +220,7 @@ class _TerminalHistoryViewState extends State<TerminalHistoryView> {
       if (!mounted) return;
       _focusNode.requestFocus();
     });
-    _scheduleFirstPageIfEmpty();
+    _scheduleOpeningPage();
   }
 
   @override
@@ -234,19 +235,15 @@ class _TerminalHistoryViewState extends State<TerminalHistoryView> {
     // The swapped-in archive gets the same opening request a freshly mounted
     // reader gets -- a reused terminal id handed a new run arrives here rather
     // than through initState, and the reader stays on screen throughout.
-    _scheduleFirstPageIfEmpty();
+    _scheduleOpeningPage();
   }
 
-  /// Asks for the opening page when the model has nothing to show yet.
-  ///
-  /// An empty model renders no terminal, so the wheel and the scrollbar the
-  /// reader would page with do not exist at that state. A navigation key does
-  /// still fetch, through [_scrollFor]'s own no-viewport branch.
-  void _scheduleFirstPageIfEmpty() {
-    if (widget.model.rows.isNotEmpty || !widget.model.canLoadMore) return;
+  void _scheduleOpeningPage() {
+    final model = widget.model;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      widget.onLoadMore();
+      if (!mounted || widget.model != model) return;
+      model.prepareLatestWindow();
+      if (model.rows.isEmpty && model.canLoadMore) widget.onLoadMore();
     });
   }
 
@@ -291,9 +288,23 @@ class _TerminalHistoryViewState extends State<TerminalHistoryView> {
     _rendered = signature;
 
     final bar = preserveOffset ? _controller.viewportScrollbar : null;
-    final rowsFromBottom = bar == null
+    var rowsFromBottom = bar == null
         ? 0
         : math.max(0, bar.total - bar.length - bar.offset);
+    if (rowsFromBottom > 0 &&
+        rows.isNotEmpty &&
+        _renderedRows.isNotEmpty &&
+        rows.last.rowId < _renderedRows.last.rowId) {
+      final retained = _renderedRows
+          .where((row) => row.rowId <= rows.last.rowId)
+          .toList(growable: false);
+      // Count engine lines, not archive records: one evicted row can wrap over
+      // several display lines, including wide and combining characters.
+      final removedLines =
+          _renderedLineCount(_renderedRows) - _renderedLineCount(retained);
+      rowsFromBottom = math.max(0, rowsFromBottom - removedLines);
+    }
+    _renderedRows = rows.toList(growable: false);
     // Armed on every rebuild the guard lets through, null included: a reader
     // sitting at the live bottom when a page lands wants to stay there, and an
     // earlier target left standing would move them off it.
@@ -302,6 +313,21 @@ class _TerminalHistoryViewState extends State<TerminalHistoryView> {
     _controller.clear();
     if (rows.isNotEmpty) {
       _controller.appendOutputBytes(encodeTerminalHistoryRows(rows));
+    }
+  }
+
+  int _renderedLineCount(List<TerminalHistoryRow> rows) {
+    if (rows.isEmpty) return 0;
+    final terminal = GhosttyVt.newTerminal(
+      cols: _controller.cols,
+      rows: 1,
+      maxScrollback: 64 << 20,
+    );
+    try {
+      terminal.writeBytes(encodeTerminalHistoryRows(rows));
+      return terminal.totalRows;
+    } finally {
+      terminal.close();
     }
   }
 
@@ -331,9 +357,8 @@ class _TerminalHistoryViewState extends State<TerminalHistoryView> {
   /// existing engine-to-Flutter sync then carries over on its own -- there is
   /// nothing left here to race.
   ///
-  /// Prepending older rows leaves every row already on screen at the same
-  /// distance from the bottom, so the row count carries across the rebuild
-  /// unchanged. Retried rather than applied once because the engine parses
+  /// The target discounts newer lines evicted from the cache. Retried rather
+  /// than applied once because the engine parses
   /// the re-ingested rows off the widget tree's clock: the row this is
   /// clamped against may not exist yet in the frame the rebuild was
   /// scheduled from.

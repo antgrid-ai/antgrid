@@ -17,8 +17,8 @@ type State = "ground" | "esc" | "osc" | "osc_esc" | "dcs" | "dcs_esc";
  * Mirrors Ghostty's src/terminal/osc.zig rules (see the design doc):
  * OSC 9 with ConEmu numeric subcommands (9;4 progress, 9;9 set-CWD, …)
  * filtered; OSC 777 `notify` only; 2 KB cap; partial sequences buffered across
- * feed() calls. A bare BEL is NOT a notification — it passes through to the
- * terminal renderer, which rings it audibly like any native terminal.
+ * feed() calls. Bare BEL is handled by the authoritative VT's separate bell
+ * event, never as a desktop notification.
  * Pure — `nowMs` is injected so tests are deterministic.
  */
 export class TerminalNotificationScanner {
@@ -33,9 +33,7 @@ export class TerminalNotificationScanner {
       const ch = chunk[i];
       switch (this.state) {
         case "ground":
-          // A bare BEL is intentionally ignored — it stays in the raw stream
-          // and the renderer rings it (native-terminal bell), it is never a
-          // desktop notification. Only OSC 9/777 below raise notifications.
+          // The authoritative VT owns bells; only OSC 9/777 raise notifications.
           if (c === ESC) this.state = "esc";
           break;
         case "esc":

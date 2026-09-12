@@ -34,6 +34,7 @@ const Map<String, List<String>> serviceWireTypes = {
     // status
     'terminal:started',
     'terminal:exited',
+    'terminal:bell',
     // status — frame-mode negotiation and its error surface
     'terminal:subscribed',
     'terminal:display:status',

@@ -100,6 +100,9 @@ void main() {
   test('the opening script routes', () {
     expect(kDemoScript, isNotEmpty);
     for (final beat in kDemoScript) {
+      // Terminal chunks feed the demo's authoritative in-memory screen and are
+      // converted to terminal:frame before they reach the app.
+      if (beat.frame['type'] == 'terminal:output') continue;
       expectRoutable(beat.frame);
     }
   });
@@ -108,7 +111,6 @@ void main() {
     for (final frame in <Map<String, Object?>>[
       ...kDemoDurableFrames,
       kDemoTerminalStarted,
-      kDemoTerminalSnapshot,
       kDemoGitBranches,
       kDemoPortsUpdate,
       kDemoPreviewUrl,
@@ -190,12 +192,14 @@ void main() {
       {'type': 'file:read', 'path': 'not/in/the/sample.ts'},
       {'type': 'file:tree:snapshot:request'},
       {'type': 'preview:snapshot:request'},
-      {'type': 'terminal:snapshot:request'},
+      {
+        'type': 'terminal:subscribe',
+        'terminalId': kDemoTerminalId,
+        'version': 1,
+        'requestId': 'q',
+      },
       {'type': 'terminal:start'},
-      {'type': 'terminal:input', 'terminalId': kDemoTerminalId, 'data': 'ls\r'},
-      {'type': 'terminal:input', 'terminalId': 'demo-terminal-2', 'data': 'ls'},
       {'type': 'terminal:start', 'terminalId': 'demo-terminal-2'},
-      {'type': 'terminal:snapshot:request', 'terminalId': 'demo-terminal-2'},
       {
         'type': 'agent:set-config',
         'sessionId': kDemoSessionCheckoutId,
@@ -281,17 +285,10 @@ void main() {
       }
 
       await expectAnswered('state.snapshot', null, 'frames');
-      await expectAnswered(
-        'session.transcriptSnapshot',
-        {'sessionId': kDemoSessionCheckoutId},
-        'frames',
-      );
+      await expectAnswered('session.transcriptSnapshot', {
+        'sessionId': kDemoSessionCheckoutId,
+      }, 'frames');
       await expectAnswered('sessions.list', null, 'sessions');
-      await expectAnswered(
-        'terminal.snapshot',
-        {'terminalId': kDemoTerminalId},
-        'snapshot',
-      );
     },
   );
 

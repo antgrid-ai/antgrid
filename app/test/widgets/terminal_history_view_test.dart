@@ -172,6 +172,7 @@ TerminalHistoryModel _loadedModel({int count = 200, int nextRowId = 1000}) {
     _page(
       requestId: 'seed',
       rows: _rowsBelow(nextRowId, count: count),
+      history: _boundary(nextRowId: nextRowId),
     ),
   );
   return m;
@@ -372,6 +373,97 @@ void main() {
   // that assert on rendered rows.
   group('TerminalHistoryView', () {
     testWidgets(
+      'reopening fetches newly archived rows even after reaching oldest',
+      (tester) async {
+        GhosttyVt.newTerminal(cols: 8, rows: 2).close();
+        final m = TerminalHistoryModel()
+          ..applyBoundary(_boundary(nextRowId: 20));
+        var requests = 0;
+        void load() {
+          final end = m.cursor!;
+          final request = 'page-${requests++}';
+          m.markRequested(request);
+          m.applyPage(
+            _page(
+              requestId: request,
+              rows: _rowsBelow(end, count: 20),
+              history: m.boundary,
+            ),
+          );
+        }
+
+        await tester.pumpWidget(_wrap(_view(model: m, onLoadMore: load)));
+        await tester.pumpAndSettle();
+        expect(m.atOldest, isTrue);
+        expect(requests, 1);
+        m.applyBoundary(_boundary(nextRowId: 40));
+        await tester.pumpAndSettle();
+        expect(requests, 1);
+        expect(m.rows.last.rowId, 19);
+        await tester.pumpWidget(_wrap(const SizedBox.shrink()));
+        await tester.pumpWidget(_wrap(_view(model: m, onLoadMore: load)));
+        await tester.pumpAndSettle();
+        expect(requests, 2);
+        expect(
+          _mountedTerminal(tester).controller.plainText,
+          contains('row 39'),
+        );
+      },
+    );
+
+    for (final byteLimited in [false, true]) {
+      testWidgets(
+        'paging preserves visible text after ${byteLimited ? 'byte' : 'row'} eviction',
+        (tester) async {
+          GhosttyVt.newTerminal(cols: 8, rows: 2).close();
+          List<TerminalHistoryRow> pageRows(int end) => List.generate(200, (i) {
+            final id = end - 200 + i;
+            return _row(
+              rowId: id,
+              wrapped: byteLimited && id.isOdd,
+              spans: [
+                _span(byteLimited ? 'row $id ${'界e\u0301' * 24}' : 'row $id'),
+              ],
+            );
+          });
+          final m = TerminalHistoryModel(maxRows: 400)
+            ..applyBoundary(_boundary());
+          m.markRequested('seed');
+          m.applyPage(_page(requestId: 'seed', rows: pageRows(1000)));
+          m.markRequested('older');
+          m.applyPage(_page(requestId: 'older', rows: pageRows(800)));
+          final model = byteLimited
+              ? (TerminalHistoryModel(maxBytes: m.cachedBytes)
+                  ..applyBoundary(_boundary()))
+              : m;
+          if (byteLimited) {
+            model.markRequested('seed');
+            model.applyPage(_page(requestId: 'seed', rows: m.rows));
+          }
+          await tester.pumpWidget(_wrap(_view(model: model)));
+          await tester.pumpAndSettle();
+          final controller = _mountedTerminal(tester).controller;
+          String visible() => controller.renderSnapshot!.rowsData
+              .map((row) => row.cells.map((cell) => cell.text).join())
+              .join('\n');
+          for (final end in [600, 400]) {
+            controller.scrollViewportToTop();
+            await tester.pumpAndSettle();
+            final before = visible();
+            model.markRequested('page-$end');
+            model.applyPage(_page(requestId: 'page-$end', rows: pageRows(end)));
+            for (var i = 0; i < 12; i++) {
+              await tester.pump(const Duration(milliseconds: 50));
+            }
+            expect(visible(), before);
+            expect(model.cachedBytes, lessThanOrEqualTo(model.maxBytes));
+            expect(model.rows.length, lessThanOrEqualTo(model.maxRows));
+          }
+        },
+      );
+    }
+
+    testWidgets(
       'an empty model that is still loading shows the loading state',
       (tester) async {
         if (_skipWithoutNative()) return;
@@ -462,7 +554,7 @@ void main() {
         // Asking anyway spends a round trip per reader raised on a question
         // the agent has already refused.
         final m1 = TerminalHistoryModel()
-          ..applyBoundary(_boundary(status: 'disabled'));
+          ..applyBoundary(_boundary(status: 'disabled', nextRowId: 0));
         expect(m1.rows, isEmpty);
         expect(m1.canLoadMore, isFalse);
         var calls = 0;
@@ -475,7 +567,7 @@ void main() {
         expect(calls, 0);
 
         final m2 = TerminalHistoryModel()
-          ..applyBoundary(_boundary(status: 'disabled'));
+          ..applyBoundary(_boundary(status: 'disabled', nextRowId: 0));
         await tester.pumpWidget(
           _wrap(_view(model: m2, onLoadMore: () => calls++)),
         );
@@ -1311,54 +1403,49 @@ void main() {
       },
     );
 
-    testWidgets(
-      'a boundary that stops recording withdraws Retry, without the run ever '
-      'being refused outright',
-      (tester) async {
-        if (_skipWithoutNative()) return;
-        // The shape a bridge actually produces for a run it is not archiving:
-        // `status: "disabled"` restated on the boundary, arriving after a page
-        // request has already failed. `noteHistoryUnavailable` is never
-        // called, so any control gated on that path alone stays live here and
-        // its tap reaches a service that drops it -- the broken reader this
-        // test exists for. `canLoadMore` is the property that is actually
-        // shut, and the property the service checks before it sends.
-        final m = TerminalHistoryModel()
-          ..applyBoundary(_boundary(nextRowId: 1000));
-        m.markRequested('r1');
-        m.noteRequestFailed('The agent did not answer.');
-        m.applyBoundary(_boundary(nextRowId: 1000, status: 'disabled'));
-        expect(m.canLoadMore, isFalse);
-        var calls = 0;
+    testWidgets('a disabled archive with no retained rows withdraws Retry', (
+      tester,
+    ) async {
+      if (_skipWithoutNative()) return;
+      // Disabled recording can still serve retained rows. Only an empty
+      // boundary makes retry pointless without an outright refusal.
+      final m = TerminalHistoryModel()
+        ..applyBoundary(_boundary(nextRowId: 1000));
+      m.markRequested('r1');
+      m.noteRequestFailed('The agent did not answer.');
+      m.applyBoundary(
+        _boundary(firstRowId: 1000, nextRowId: 1000, status: 'disabled'),
+      );
+      expect(m.canLoadMore, isFalse);
+      var calls = 0;
 
-        await tester.pumpWidget(
-          _wrap(_view(model: m, onLoadMore: () => calls++)),
-        );
-        await tester.pump();
+      await tester.pumpWidget(
+        _wrap(_view(model: m, onLoadMore: () => calls++)),
+      );
+      await tester.pump();
 
-        final retry = find.descendant(
-          of: find.byType(AbInlineBanner),
-          matching: find.byType(AbIconButton),
-        );
-        expect(tester.widget<AbIconButton>(retry).onTap, isNull);
-        expect(find.byTooltip('Retry'), findsNothing);
-        expect(
-          find.byTooltip('Scrollback is unavailable for this run'),
-          findsOneWidget,
-        );
-        expect(
-          tester.widget<AbInlineBanner>(find.byType(AbInlineBanner)).color,
-          kDefaultPalette.textMuted,
-          reason:
-              'warning yellow asks the reader to act on something they '
-              'cannot act on',
-        );
+      final retry = find.descendant(
+        of: find.byType(AbInlineBanner),
+        matching: find.byType(AbIconButton),
+      );
+      expect(tester.widget<AbIconButton>(retry).onTap, isNull);
+      expect(find.byTooltip('Retry'), findsNothing);
+      expect(
+        find.byTooltip('Scrollback is unavailable for this run'),
+        findsOneWidget,
+      );
+      expect(
+        tester.widget<AbInlineBanner>(find.byType(AbInlineBanner)).color,
+        kDefaultPalette.textMuted,
+        reason:
+            'warning yellow asks the reader to act on something they '
+            'cannot act on',
+      );
 
-        await tester.tap(retry, warnIfMissed: false);
-        await tester.pump();
-        expect(calls, 0);
-      },
-    );
+      await tester.tap(retry, warnIfMissed: false);
+      await tester.pump();
+      expect(calls, 0);
+    });
 
     testWidgets(
       'a retry already in flight disables the control without calling the run '
@@ -1435,7 +1522,13 @@ void main() {
 
       final m2 = _SpyHistoryModel()..applyBoundary(_boundary(nextRowId: 500));
       m2.markRequested('r1');
-      m2.applyPage(_page(requestId: 'r1', rows: _rowsBelow(500, count: 5)));
+      m2.applyPage(
+        _page(
+          requestId: 'r1',
+          rows: _rowsBelow(500, count: 5),
+          history: _boundary(nextRowId: 500),
+        ),
+      );
 
       await tester.pumpWidget(_wrap(_view(model: m1)));
       await tester.pumpAndSettle();

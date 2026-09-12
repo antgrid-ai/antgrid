@@ -229,6 +229,13 @@ class TerminalNotificationMessage {
   });
 }
 
+class TerminalBellMessage {
+  final String terminalId;
+  final String runId;
+
+  const TerminalBellMessage({required this.terminalId, required this.runId});
+}
+
 class NotificationPushMessage {
   final String id;
   final int timestamp;
@@ -1501,6 +1508,12 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         title: json['title'] as String?,
         body: json['body'] as String?,
       );
+
+    case 'terminal:bell':
+      final terminalId = json['terminalId'];
+      final runId = json['runId'];
+      if (terminalId is! String || runId is! String) return null;
+      return TerminalBellMessage(terminalId: terminalId, runId: runId);
 
     case 'notification:push':
       final notificationType = json['notificationType'];
