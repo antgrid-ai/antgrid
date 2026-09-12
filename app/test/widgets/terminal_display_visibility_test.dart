@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/workspace_view.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -104,12 +105,18 @@ void main() {
     List<Map<String, dynamic>> messages(String type) =>
         transport.sent.where((m) => m['type'] == 'terminal:$type').toList();
     expect(messages('subscribe'), hasLength(1));
+    GhosttyTerminalView liveView() => tester.widget<GhosttyTerminalView>(
+      find.byType(GhosttyTerminalView).first,
+    );
+    expect(liveView().showCursor, isFalse);
+    expect(liveView().cursorColor, kDefaultPalette.accent);
+    expect(liveView().unfocusedCursorColor, kDefaultPalette.textMuted);
     final request = messages('subscribe').single;
     transport.emit('terminal:subscribed', {
       'terminalId': 'a',
       'runId': 'run',
       'attachmentId': 'attachment',
-      'version': 1,
+      'version': 2,
       'requestId': request['requestId'],
     });
     await tester.pump();
@@ -117,7 +124,7 @@ void main() {
       'terminalId': 'a',
       'runId': 'run',
       'attachmentId': 'attachment',
-      'version': 1,
+      'version': 2,
       'sequence': 1,
       'revision': 1,
       'cols': 80,
@@ -133,6 +140,7 @@ void main() {
     });
     await tester.pump();
     expect(service.canSendInput('a'), isTrue);
+    expect(liveView().showCursor, isTrue);
 
     container
         .read(visibleWorkspaceViewProvider.notifier)
@@ -160,6 +168,7 @@ void main() {
       contains('cached screen'),
     );
     expect(service.sendInput('a', 'x'), isFalse);
+    expect(liveView().showCursor, isFalse);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

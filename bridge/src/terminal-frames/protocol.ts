@@ -6,7 +6,7 @@ import { z } from "zod";
 // protocol.ts is pulled in by nearly every module, and a cycle through it is
 // expensive to unpick.
 
-export const TERMINAL_PROTOCOL_VERSION = 1;
+export const TERMINAL_PROTOCOL_VERSION = 2;
 export const TERMINAL_FRAME_INTERVAL_MS = 50;
 export const TERMINAL_VIEWER_MAX_FRAMES = 4;
 

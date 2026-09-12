@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter/foundation.dart';
 
+import '../models/terminal_models.dart' show kTerminalFrameProtocolVersion;
 import 'demo_identity.dart';
 import 'demo_script.dart';
 import 'fixtures/demo_transcript_fixtures.dart';
@@ -296,7 +297,7 @@ class DemoTransport extends BufferedAgentTransport {
       case 'terminal:subscribe':
         final terminalId = message['terminalId'] as String?;
         if (terminalId == null || requestId == null) return const [];
-        if (message['version'] != 1) {
+        if (message['version'] != kTerminalFrameProtocolVersion) {
           return [
             {
               'type': 'terminal:display:status',
@@ -318,7 +319,7 @@ class DemoTransport extends BufferedAgentTransport {
             'requestId': requestId,
             'runId': 'demo-run-$terminalId',
             'attachmentId': attachmentId,
-            'version': 1,
+            'version': kTerminalFrameProtocolVersion,
           },
           _terminalFrame(terminalId),
         ];
@@ -682,7 +683,7 @@ class DemoTransport extends BufferedAgentTransport {
       'terminalId': terminalId,
       'runId': 'demo-run-$terminalId',
       'attachmentId': _attachments[terminalId],
-      'version': 1,
+      'version': kTerminalFrameProtocolVersion,
       'sequence': ++screen.sequence,
       'revision': screen.sequence,
       'cols': screen.cols,

@@ -39,7 +39,7 @@ void main() {
       'terminalId': id,
       'runId': run,
       'attachmentId': 'att-$id',
-      'version': 1,
+      'version': 2,
       'requestId':
           request ??
           messages(
@@ -54,7 +54,7 @@ void main() {
       'terminalId': id,
       'runId': 'run',
       'attachmentId': 'att-$id',
-      'version': 1,
+      'version': 2,
       'sequence': sequence,
       'revision': sequence,
       'cols': 80,

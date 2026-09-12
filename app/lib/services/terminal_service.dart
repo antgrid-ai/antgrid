@@ -1677,11 +1677,34 @@ class TerminalService {
     );
   }
 
+  bool takeControl(String terminalId, int cols, int rows) {
+    if (_disposed ||
+        _clientId == null ||
+        !_visible(terminalId) ||
+        !session.transport.isEstablished ||
+        _state.tabs[terminalId]?.sessionState != TerminalSessionState.running) {
+      return false;
+    }
+    _resizeTimers.remove(terminalId)?.cancel();
+    _resizeBaseDrivers.remove(terminalId);
+    _send(
+      createAbMessage('terminal:resize', {
+        'terminalId': terminalId,
+        'cols': cols,
+        'rows': rows,
+        'clientId': _clientId,
+        'intent': TerminalResizeIntent.takeover.name,
+      }),
+    );
+    return true;
+  }
+
   /// Queues a debounced `terminal:resize`, reporting whether it was QUEUED.
   ///
   /// False means nothing was queued and nothing ever will be for this call —
   /// the per-install client id has not resolved yet (see
-  /// `terminalStateProvider`, which pushes it in), or the service is gone. The
+  /// `terminalStateProvider`, which pushes it in), the transport is offline,
+  /// or the service is gone. The
   /// caller must not record the size as sent: the wrapper gates re-sends on the
   /// last size it believes the PTY has, so a drop booked as a send strands the
   /// PTY at the previous geometry until the panel happens to change size again.
@@ -1698,17 +1721,17 @@ class TerminalService {
   }) {
     final clientId = _clientId;
     if (!_visible(terminalId)) return false;
-    if (_disposed || clientId == null) return false;
+    if (_disposed || clientId == null || !session.transport.isEstablished) {
+      return false;
+    }
     _resizeTimers[terminalId]?.cancel();
     _resizeBaseDrivers[terminalId] = baseDriverClientId;
     _resizeTimers[terminalId] = Timer(const Duration(milliseconds: 100), () {
       _resizeTimers.remove(terminalId);
       _resizeBaseDrivers.remove(terminalId);
       final currentDriver = _state.tabs[terminalId]?.driverClientId;
-      if (baseDriverClientId != null &&
-          currentDriver != null &&
-          currentDriver != baseDriverClientId &&
-          currentDriver != clientId) {
+      if (!session.transport.isEstablished ||
+          (currentDriver != null && currentDriver != clientId)) {
         // Discarded, not sent — and the caller booked this size when the queue
         // accepted it, so hand back the invalidation edge that reopens its gate.
         _invalidateGeometry(terminalId);
@@ -1720,6 +1743,7 @@ class TerminalService {
           'cols': cols,
           'rows': rows,
           'clientId': clientId,
+          'intent': TerminalResizeIntent.resize.name,
           'baseDriverClientId': ?baseDriverClientId,
         }),
       );

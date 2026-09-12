@@ -10,7 +10,7 @@ TerminalFrameMessage frame(String id, int size) =>
           'terminalId': id,
           'runId': 'run',
           'attachmentId': 'attachment',
-          'version': 1,
+          'version': 2,
           'sequence': 1,
           'revision': 1,
           'cols': 80,

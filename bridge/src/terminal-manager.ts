@@ -857,6 +857,7 @@ export class TerminalManager {
     cols: number,
     rows: number,
     baseDriverClientId?: string,
+    intent: "resize" | "takeover" = "resize",
   ): void {
     const session = this.sessions.get(terminalId);
     if (!session) {
@@ -867,15 +868,17 @@ export class TerminalManager {
     const prevRows = session.rows;
     const prevDriver = session.driverClientId;
     if (
-      baseDriverClientId !== undefined &&
+      intent !== "takeover" &&
       prevDriver !== null &&
-      clientId !== prevDriver &&
-      baseDriverClientId !== prevDriver
+      clientId !== prevDriver
     ) {
       log.info(
         `Ignoring stale resize for terminal "${terminalId}" from ${clientId}; ` +
           `based on ${baseDriverClientId}, current driver is ${prevDriver}`,
       );
+      this.sendMessage(createMessage("terminal:size", {
+        terminalId, cols: prevCols, rows: prevRows, driverClientId: prevDriver,
+      }));
       return;
     }
     // Skip the broadcast when nothing observable changed — same size AND same
@@ -886,15 +889,16 @@ export class TerminalManager {
       rows === prevRows &&
       clientId === prevDriver
     ) {
+      if (intent === "takeover") {
+        this.sendMessage(createMessage("terminal:size", {
+          terminalId, cols: prevCols, rows: prevRows, driverClientId: clientId,
+        }));
+      }
       return;
     }
     session.resize(clientId, cols, rows);
-    // A TerminalFrameSource defers this into a parser write callback, so the
-    // new geometry is NOT applied when this call returns — but the
-    // `terminal:size` announcement below is PTY truth (session.cols/rows)
-    // regardless of when the emulator catches up, and `getAttachSnapshot`'s
-    // `settle()` already drains any deferred resize before it ever
-    // serializes, so an attach never observes the gap.
+    // Ownership can be announced before the parser reaches the resize. Viewers
+    // keep painting the dimensions carried by each independent frame.
     this.screens.get(terminalId)?.resize(session.cols, session.rows);
     this.lastDriverGeometry = { cols: session.cols, rows: session.rows };
     this.sendMessage(

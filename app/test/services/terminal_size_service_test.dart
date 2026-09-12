@@ -117,7 +117,7 @@ void main() {
   );
 
   test(
-    'terminal:size from the observed base driver keeps pending claim',
+    'takeover sends immediately even while the old driver remains observed',
     () async {
       final t = FakeAgentTransport();
       final session = await newSession(t);
@@ -141,7 +141,9 @@ void main() {
       });
       await Future<void>.delayed(Duration.zero);
 
-      svc.sendResize('t1', 50, 40, baseDriverClientId: 'desktop');
+      svc.sendResize('t1', 60, 40, baseDriverClientId: 'desktop');
+      expect(svc.takeControl('t1', 50, 40), isTrue);
+      expect(t.sent.where((m) => m['type'] == 'terminal:resize'), hasLength(1));
       t.emit('terminal:size', {
         'terminalId': 't1',
         'cols': 120,
@@ -153,9 +155,10 @@ void main() {
       final resizes = t.sent
           .where((m) => m['type'] == 'terminal:resize')
           .toList();
-      expect(resizes, isNotEmpty);
+      expect(resizes, hasLength(1));
       expect(resizes.last['clientId'], 'mobile');
-      expect(resizes.last['baseDriverClientId'], 'desktop');
+      expect(resizes.last['intent'], 'takeover');
+      expect(resizes.last['cols'], 50);
 
       await svc.dispose();
       await session.close();
@@ -205,6 +208,59 @@ void main() {
     await svc.dispose();
     await session.close();
   });
+
+  for (final disconnectDuringDebounce in [false, true]) {
+    test(
+      'offline resize stays idle (queued: $disconnectDuringDebounce)',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await newSession(t);
+        final svc = TerminalService.fromSession(session);
+        addTearDown(() async {
+          await svc.dispose();
+          await session.close();
+        });
+        svc.setDisplayInterest('pane', 't1');
+        svc.setClientId('desktop');
+        t.emit('agent:status', {
+          'projectId': 'p',
+          'terminals': [
+            {
+              'id': 't1',
+              'terminalId': 't1',
+              'name': 'Terminal 1',
+              'running': true,
+              'cols': 80,
+              'rows': 24,
+              'driverClientId': 'desktop',
+            },
+          ],
+        });
+        await Future<void>.delayed(Duration.zero);
+        final before = svc.currentState.tabs['t1']!.sizeEpoch;
+        if (disconnectDuringDebounce) {
+          expect(svc.sendResize('t1', 100, 30), isTrue);
+        }
+        t.setEstablished(false);
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        final offlineEpoch = svc.currentState.tabs['t1']!.sizeEpoch;
+        expect(offlineEpoch, before + (disconnectDuringDebounce ? 1 : 0));
+        for (var attempt = 0; attempt < 3; attempt++) {
+          expect(svc.sendResize('t1', 100, 30), isFalse);
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+          expect(svc.currentState.tabs['t1']!.sizeEpoch, offlineEpoch);
+        }
+        expect(t.sent.where((m) => m['type'] == 'terminal:resize'), isEmpty);
+        t.setEstablished(true);
+        expect(svc.sendResize('t1', 100, 30), isTrue);
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        final resizes = t.sent.where((m) => m['type'] == 'terminal:resize');
+        expect(resizes, hasLength(1));
+        expect(resizes.single['cols'], 100);
+        expect(resizes.single['rows'], 30);
+      },
+    );
+  }
 
   // The two paths where `sendResize` returns true and the frame it armed is
   // then thrown away. The caller books the size on that `true`, so its gate is

@@ -167,7 +167,7 @@ Future<({TerminalService service, FakeAgentTransport transport})> _makeService(
       'runId': 'run',
       'attachmentId': 'attachment',
       'requestId': request['requestId'],
-      'version': 1,
+      'version': 2,
     });
     for (var i = 0; i < 8; i++) {
       await Future<void>.value();
@@ -176,7 +176,7 @@ Future<({TerminalService service, FakeAgentTransport transport})> _makeService(
       'terminalId': 't1',
       'runId': 'run',
       'attachmentId': 'attachment',
-      'version': 1,
+      'version': 2,
       'sequence': 1,
       'revision': 1,
       'cols': 80,
@@ -2130,12 +2130,9 @@ void main() {
       await _settleWire(tester, h);
       h.transport.sent.clear();
 
-      // The control, so the assertion below cannot pass because the claim
-      // never reached the wire in this harness at all: a press on the live
-      // grid is exactly what booking a claim is for.
       await tester.tapAt(tester.getCenter(find.byType(GhosttyTerminalView)));
       await _settleWire(tester, h);
-      expect(_resizes(h), hasLength(1));
+      expect(_resizes(h), isEmpty);
 
       await tester.tap(_historyScrollbar);
       await _settleWire(tester, h);

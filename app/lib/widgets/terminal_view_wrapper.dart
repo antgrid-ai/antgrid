@@ -16,6 +16,7 @@ import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/ansi_palette.dart';
 import '../design/widgets/ab_button.dart';
+import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../models/terminal_models.dart';
@@ -410,22 +411,50 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// list-and-detail route transition.
   final GlobalKey _viewKey = GlobalKey();
 
-  /// True while this view holds primary focus — mirrors `_focusScope.hasFocus`.
-  /// Drives the optimistic-driver state: while `driverClientId == null` (no
-  /// device has claimed yet) the locally-focused view paints as the driver and
-  /// immediately claims; the `terminal:size` echo then makes the authority
-  /// explicit and corrects every viewer.
-  bool _locallyActive = false;
+  Timer? _takeoverTimer;
+  StreamSubscription<Object?>? _connectionSub;
+  ({int cols, int rows})? _takeoverGrid;
 
-  /// Whether this view has already sent a claim for the *current* focus
-  /// session. Re-armed (false) on every focus-gain so a re-focus re-claims;
-  /// stays true across pure relayouts so we don't re-send on every frame.
-  bool _claimed = false;
+  void _watchConnection() {
+    _connectionSub?.cancel();
+    _connectionSub = widget.terminalService.session.transport.stateChanges
+        .listen((_) {
+          if (!mounted) return;
+          if (!widget.terminalService.session.transport.isEstablished) {
+            _cancelTakeover();
+          }
+          setState(() {});
+        });
+  }
 
-  /// Desktop focus can be restored by rebuild/autofocus without any local user
-  /// action. Require an explicit pointer/key activation before a desktop
-  /// non-driver view can take terminal-width ownership from another device.
-  bool _claimRequestedByUser = false;
+  void _cancelTakeover() {
+    _takeoverTimer?.cancel();
+    _takeoverTimer = null;
+  }
+
+  void _takeControl() {
+    final grid = _takeoverGrid;
+    if (grid == null || _takeoverTimer != null) return;
+    final sent = widget.terminalService.takeControl(
+      widget.tab.terminalId,
+      grid.cols,
+      grid.rows,
+    );
+    if (!sent) {
+      showAbSnackBar(
+        context,
+        'Unable to take control. Try again when connected.',
+      );
+      return;
+    }
+    setState(() {
+      _takeoverTimer = Timer(const Duration(seconds: 5), () {
+        if (!mounted) return;
+        setState(_cancelTakeover);
+        showAbSnackBar(context, 'Taking control timed out. Please try again.');
+      });
+    });
+  }
 
   /// Ctrl/Shift as the USER is holding them, which is not always what
   /// `HardwareKeyboard` believes.
@@ -582,6 +611,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     );
     FocusManager.instance.addEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.addListener(_onFocusChange);
+    _watchConnection();
     widget.tab.replaceEpoch.addListener(_onFrameReplaced);
     widget.tab.history.addListener(_onHistoryChanged);
     _hasArchivedRows = widget.tab.history.hasHistory;
@@ -603,6 +633,22 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   @override
   void didUpdateWidget(TerminalViewWrapper oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.tab.driverClientId != widget.tab.driverClientId) {
+      // A former owner's settled size may predate passive viewport changes.
+      _renderSize = null;
+    }
+    if (oldWidget.terminalService != widget.terminalService) {
+      _cancelTakeover();
+      _watchConnection();
+    }
+    if (oldWidget.tab.terminalId != widget.tab.terminalId ||
+        oldWidget.tab.sizeEpoch != widget.tab.sizeEpoch ||
+        !identical(oldWidget.tab.ghostty, widget.tab.ghostty) ||
+        widget.tab.sessionState != TerminalSessionState.running ||
+        !widget.terminalService.session.transport.isEstablished ||
+        widget.tab.driverClientId == ref.read(clientIdProvider).value) {
+      _cancelTakeover();
+    }
     // Keyed on the notifier's own identity, not on terminalId: an ad-hoc
     // terminal id is reused for a brand-new TerminalTab (a fresh engine, a
     // fresh replaceEpoch) while this unkeyed State can stay mounted at the
@@ -643,17 +689,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     _lastSentCols = null;
     _lastSentRows = null;
     _observedSizeEpoch = null;
-    // A pointer-down authorizes taking width ownership of the terminal the
-    // user pressed, not of whichever one lands in this slot next.
-    _claimRequestedByUser = false;
-    // Both halves of the claim gate, because the swap fires no focus event to
-    // re-arm the other one: `_claimed` is cleared only on a focus GAIN, and
-    // these slots swap while the wrapper keeps focus. On a touch device that is
-    // terminal — `_requestUserClaim` returns immediately without a physical
-    // keyboard, so `autoClaiming` is the only claim path there, and a `true`
-    // carried over from the previous terminal leaves the phone letterboxed at
-    // another device's grid with no gesture that takes it back.
-    _claimed = false;
+    _takeoverGrid = null;
     // `_renderSize` is deliberately kept: it describes the PANEL's settled
     // grid, which this swap does not move, and `_TerminalGridFreeze` survives
     // the slot too — so it would never be re-reported if it were cleared.
@@ -668,6 +704,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
   @override
   void dispose() {
+    _cancelTakeover();
+    _connectionSub?.cancel();
     _displayService?.setDisplayInterest(this, null);
     FocusManager.instance.removeEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.removeListener(_onFocusChange);
@@ -694,17 +732,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     super.dispose();
   }
 
-  /// Tracks focus transitions. On focus-gain, re-arm the claim so the next
-  /// LayoutBuilder pass sends a resize that makes this device the driver.
   void _onFocusChange() {
-    final active = _focusScope.hasFocus;
     _realModifierState.clear();
-    if (active == _locallyActive) return;
-    setState(() {
-      _locallyActive = active;
-      if (active && !_hasPhysicalKeyboard) _claimed = false;
-      if (!active) _claimRequestedByUser = false;
-    });
   }
 
   /// D10: fires whenever [TerminalTab.replaceEpoch] bumps -- an applied frame
@@ -836,20 +865,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     return KeyEventResult.handled;
   }
 
-  void _requestUserClaim() {
-    // The reader covers the pane edge to edge, so any pointer-down the
-    // translucent claim `Listener` sees while it is up landed in the archive.
-    // Booking a claim for one takes terminal-width ownership from whichever
-    // device is driving — and sends it a resize — in return for a scroll.
-    if (_historyOpen) return;
-    if (!_hasPhysicalKeyboard) return;
-    if (_claimRequestedByUser && !_claimed) return;
-    setState(() {
-      _claimRequestedByUser = true;
-      _claimed = false;
-    });
-  }
-
   /// Intercepts the paste chord and Ctrl+C (copy / agent-SIGINT shield)
   /// before Ghostty consumes them as control characters, and encodes the two
   /// things Ghostty's Dart shim drops on the floor: `Alt+<printable>` chords,
@@ -929,7 +944,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       }
       _closeHistory();
     }
-    _requestUserClaim();
 
     final keyboard = HardwareKeyboard.instance;
     final ctrl = _realControl ?? keyboard.isControlPressed;
@@ -1409,15 +1423,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     final myClientId = ref.watch(clientIdProvider).value;
 
     final tab = widget.tab;
-    // Unclaimed (no device has driven this terminal yet) → this view drives and
-    // claims, even without keyboard focus. A single client must track its own
-    // window the moment the terminal mounts, not wait for focus to land inside
-    // it — otherwise resizing the panel before the terminal is focused grows the
-    // letterbox while the content stays pinned at the stale spawn `cols`.
-    // Claiming an unowned terminal can't steal the role from anyone; once some
-    // device owns it (`driverClientId` non-null) only the owner drives, and
-    // another device takes over by focusing (the focus-gated claim below). The
-    // `terminal:size` echo makes the authority explicit for every viewer.
+    // Bootstrap an unowned terminal; once owned, only the explicit control
+    // transfers sizing authority. Focus and input remain independent.
     final amDriver = tab.driverClientId == null
         ? true
         : tab.driverClientId == myClientId;
@@ -1493,7 +1500,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // opencode's #0a0a0a vs Antgrid's #09090B — shows a visible
       // strip on the right/bottom only).
       cellAlignment: Alignment.center,
-      cursorColor: context.antgrid.textPrimary,
+      cursorColor: context.antgrid.accent,
+      unfocusedCursorColor: context.antgrid.textMuted,
+      // Cached frames carry a guest cursor, but cannot yet accept typing.
+      showCursor: widget.terminalService.canSendInput(tab.terminalId),
       backgroundColor: context.antgrid.bgDeepest,
       // Palette + foreground picked for the preset's background (see
       // ansi_palette.dart for the tuning). The view pushes them into the
@@ -1602,21 +1612,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
           );
         }
       },
-      onPointerDown: (event) {
-        final width = context.size?.width;
-        if (_hasArchivedRows &&
-            width != null &&
-            event.localPosition.dx >= width - AbTokens.space24) {
-          return;
-        }
-        _requestUserClaim();
-      },
-      // Below the Listener so `_requestUserClaim` still fires (it is
-      // translucent and joins the hit path regardless of the child), and above
-      // everything else so the whole panel — letterbox margins and sub-cell
-      // padding strip included — is a valid drop target. Both session modes
-      // accept: unlike the paste chord this displaces no native behaviour,
-      // because a drop on the terminal does nothing at all today.
       child: TerminalDropTarget(
         accepting: true,
         attach: _dropAttach,
@@ -1836,6 +1831,33 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       },
                     ),
                   ),
+                if (!_historyOpen &&
+                    !amDriver &&
+                    tab.sessionState == TerminalSessionState.running)
+                  Positioned(
+                    top: AbTokens.space8,
+                    right: AbTokens.space24 + AbTokens.space8,
+                    child: AbTooltip(
+                      message:
+                          'Fit the shared terminal to this device. Other viewers will follow this size.',
+                      child: AbButton(
+                        compact: true,
+                        label: _takeoverTimer == null
+                            ? 'Take control'
+                            : 'Taking control\u2026',
+                        onTap:
+                            _takeoverTimer == null &&
+                                widget
+                                    .terminalService
+                                    .session
+                                    .transport
+                                    .isEstablished &&
+                                myClientId != null
+                            ? _takeControl
+                            : null,
+                      ),
+                    ),
+                  ),
                 if (_historyOpen)
                   Positioned(
                     bottom: AbTokens.space8,
@@ -1929,7 +1951,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   }
 
   /// Sends a `terminal:resize` derived from the local viewport + cell metrics
-  /// when this view just claimed focus, or when it is the driver and its
+  /// when this view is the driver and its
   /// native grid changed. The send is the SOLE resize source (the engine's
   /// auto-`onResize` was removed). Guarded behind a post-frame callback so it
   /// never mutates state or fires network sends during layout/build.
@@ -1943,6 +1965,19 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     required double lineHeightPx,
   }) {
     if (_historyOpen) return;
+    _takeoverGrid =
+        constraints.maxWidth > _hPad && constraints.maxHeight > _hPad
+        ? (
+            cols: math.max(
+              1,
+              ((constraints.maxWidth - _hPad) / charWidth).floor(),
+            ),
+            rows: math.max(
+              1,
+              ((constraints.maxHeight - _hPad) / lineHeightPx).floor(),
+            ),
+          )
+        : null;
     // A bump means the PTY no longer holds what we booked — it respawned, or a
     // send the service accepted never reached the wire (`TerminalTab.sizeEpoch`
     // names every case). Reopening the `changed` gate is the only thing that
@@ -1997,17 +2032,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       ((heightForRows - _hPad) / lineHeightPx).floor(),
     );
 
-    // Claims fire only on becoming locally-active — a view built without focus
-    // must never send a resize that flips `driverClientId` to a device the user
-    // isn't actually driving.
-    final autoClaiming = !_hasPhysicalKeyboard && _locallyActive && !_claimed;
-    final userClaiming = _claimRequestedByUser && !_claimed;
-    final claiming = autoClaiming || userClaiming;
     final changed =
         epochStale ||
         nativeCols != _lastSentCols ||
         nativeRows != _lastSentRows;
-    if (!claiming && !(amDriver && changed)) return;
+    if (!(amDriver && changed)) return;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -2030,10 +2059,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         baseDriverClientId: observedDriverClientId,
       );
       if (!sent) return;
-      if (claiming) {
-        _claimed = true;
-        _claimRequestedByUser = false;
-      }
       _observedSizeEpoch = sizeEpoch;
       _lastSentCols = nativeCols;
       _lastSentRows = nativeRows;

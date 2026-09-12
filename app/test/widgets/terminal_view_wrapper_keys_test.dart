@@ -146,14 +146,14 @@ void main() {
         'runId': 'run',
         'attachmentId': 'attachment',
         'requestId': request['requestId'],
-        'version': 1,
+        'version': 2,
       });
       await tester.pump();
       transport.emit('terminal:frame', {
         'terminalId': tabId,
         'runId': 'run',
         'attachmentId': 'attachment',
-        'version': 1,
+        'version': 2,
         'sequence': 1,
         'revision': 1,
         'cols': 80,

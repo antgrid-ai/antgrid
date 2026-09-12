@@ -161,6 +161,7 @@ const TerminalResizeCommand = BaseMessage.extend({
   cols: z.number().int().positive(),
   rows: z.number().int().positive(),
   clientId: z.string(),
+  intent: z.enum(["resize", "takeover"]),
   baseDriverClientId: z.string().optional(),
   ...CheckoutScoped,
 });
@@ -171,8 +172,7 @@ const TerminalSizeMessage = BaseMessage.extend({
   cols: z.number().int().positive(),
   rows: z.number().int().positive(),
   // The clientId whose resize the PTY currently follows. A client renders
-  // natively when this equals its own id, else it renders this grid letterboxed
-  // or horizontally scrolled.
+  // with this grid; passive viewers center and scale it down when needed.
   driverClientId: z.string(),
   ...CheckoutScoped,
 });

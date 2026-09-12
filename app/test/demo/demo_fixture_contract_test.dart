@@ -195,7 +195,7 @@ void main() {
       {
         'type': 'terminal:subscribe',
         'terminalId': kDemoTerminalId,
-        'version': 1,
+        'version': 2,
         'requestId': 'q',
       },
       {'type': 'terminal:start'},

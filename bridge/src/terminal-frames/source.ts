@@ -3,7 +3,7 @@ import { TerminalScreen } from "../terminal-screen";
 import { TerminalModeTracker } from "../terminal-modes";
 import { XtermFrameAdapter, type TerminalArchiveSink } from "./xterm-adapter";
 import {
-  TERMINAL_FRAME_MAX_ANSI_BYTES, TerminalScreenFrameSchema, encodedJsonBytes,
+  TERMINAL_PROTOCOL_VERSION, TERMINAL_FRAME_MAX_ANSI_BYTES, TerminalScreenFrameSchema, encodedJsonBytes,
   type TerminalHistoryRow, type TerminalScreenFrame,
 } from "./protocol";
 import type { TerminalRunHistory } from "./history";
@@ -321,7 +321,7 @@ export class TerminalFrameSource extends TerminalScreen {
     this._oversize = encodedJsonBytes(ansi) > TERMINAL_FRAME_MAX_ANSI_BYTES;
     if (this._oversize) return null;
     return {
-      version: 1, revision: this._revision, cols: this.term.cols, rows: this.term.rows,
+      version: TERMINAL_PROTOCOL_VERSION, revision: this._revision, cols: this.term.cols, rows: this.term.rows,
       ansi, syncTimedOut,
       history: this.history?.boundary() ?? { epoch: 0, firstRowId: 0, nextRowId: 0, status: "disabled" },
     };

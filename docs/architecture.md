@@ -82,10 +82,23 @@ retain their live attachments; reopening reattaches before paging history.
 
 The bridge owns one authoritative headless VT per PTY run. Output, resize,
 terminal queries, and exit drain in parser order. Apps subscribe using terminal
-protocol version 1 and receive independent screens at a maximum of 20 FPS;
+protocol version 2 and receive independent screens at a maximum of 20 FPS;
 `terminal:output` and attach snapshots are not app delivery paths. Unsupported
 peers require an upgrade. An attachment failure preserves the last valid screen
 and offers recovery through a fresh attachment, never raw-stream fallback.
+
+Terminal size ownership is explicit. Passive live viewers show **Take control**;
+activating it sends an immediate `terminal:resize` with `intent: takeover` using
+the viewer's available viewport. Typing, clicking, paste, focus restoration, and
+history browsing never transfer ownership. An unowned terminal adopts its first
+visible viewer; otherwise only its owner may send debounced `intent: resize`
+updates. The bridge processes takeovers in arrival order and rejects routine
+resizes from other clients, returning its current size and owner. Disconnecting
+an owner preserves the last grid. All viewers continue receiving independent
+frames and painting each frame at its own dimensions, centered and scaled down
+when necessary; ownership is about size, not exclusive input permission.
+The control shows a pending state until ownership is announced, with a five-second
+timeout and retry. It is hidden in history and after exit, and disabled offline.
 
 The authoritative parser emits bare BEL as a separate, ephemeral
 `terminal:bell` event scoped to the checkout, terminal, and run. The bridge

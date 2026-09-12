@@ -198,9 +198,12 @@ fullscreen recordings is outside this implementation.
   quick actions return live before sending input. While browsing
   history or making a selection, maintain a stable viewed revision and bounded
   latest-live state so redraws do not move selected text under the user.
-- Preserve the existing geometry-driver policy. Passive viewers render the PTY's
-  actual grid without resizing it to their own layout; taking control uses the
-  existing resize arbitration. Test mouse coordinate mapping at differing sizes.
+- Use explicit size takeover through the live pane's Take control button.
+  Terminal protocol v2 requires resize/takeover intent: takeover sends immediately,
+  while routine resizing is debounced and restricted to the current owner.
+  Focus and input never claim ownership. Passive viewers render each frame's
+  actual grid; mouse coordinates use the displayed grid during handoff.
+  Keep both viewers interactive, with a five-second takeover timeout and retry.
 - Keep keyboard, paste, mouse, and focus reports on the existing authorized input
   path. Restore all input-affecting modes on every frame. Do not infer that input
   was visibly echoed just because the bridge accepted it; distinguish input

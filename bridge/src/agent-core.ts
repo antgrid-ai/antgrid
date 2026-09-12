@@ -1168,6 +1168,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           msg.cols,
           msg.rows,
           msg.baseDriverClientId,
+          msg.intent,
         );
         break;
       case "file:read": {

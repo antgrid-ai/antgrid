@@ -25,7 +25,7 @@ Future<void> _subscribe(
   await transport.send({
     'type': 'terminal:subscribe',
     'terminalId': kDemoTerminalId,
-    'version': 1,
+    'version': 2,
     'requestId': 'req-1',
   });
   transport.drainScript();

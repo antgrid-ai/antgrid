@@ -134,6 +134,117 @@ void main() {
   // it and turning one real failure into a cascade of platform-dependent ones.
   tearDown(() => debugDefaultTargetPlatformOverride = null);
 
+  for (final physicalKeyboard in [true, false]) {
+    testWidgets(
+      'explicit takeover is immediate and bounded (keyboard: $physicalKeyboard)',
+      (tester) async {
+        debugHasPhysicalKeyboardOverride = physicalKeyboard;
+        addTearDown(() => debugHasPhysicalKeyboardOverride = null);
+        final h = await _makeService(addTearDown);
+        h.service.setClientId(_myClientId);
+        h.transport.emit('agent:status', {
+          'projectId': 'p',
+          'terminals': [
+            {
+              'terminalId': 'takeover',
+              'name': 'Terminal',
+              'running': true,
+              'cols': 200,
+              'rows': 40,
+              'driverClientId': _otherClientId,
+            },
+          ],
+        });
+        await tester.pump();
+        var tab = h.service.currentState.tabs['takeover']!;
+        Widget pane() => _wrap(
+          Center(
+            child: SizedBox(
+              width: 300,
+              height: 400,
+              child: TerminalViewWrapper(tab: tab, terminalService: h.service),
+            ),
+          ),
+        );
+        await tester.pumpWidget(pane());
+        await tester.pumpAndSettle();
+        h.transport.sent.clear();
+        final before = tester.getSize(find.byType(GhosttyTerminalView));
+        await tester.tap(find.text('Take control'));
+        await tester.pump();
+        final messages = h.transport.sent.where(
+          (m) => m['type'] == 'terminal:resize',
+        );
+        expect(messages, hasLength(1));
+        expect(messages.single['intent'], 'takeover');
+        expect(messages.single['cols'], lessThan(200));
+        expect(find.text('Taking control\u2026'), findsOneWidget);
+        expect(tester.getSize(find.byType(GhosttyTerminalView)), before);
+        await tester.tap(find.text('Taking control\u2026'));
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(messages, hasLength(1));
+        h.transport.emit('terminal:size', {
+          'terminalId': 'takeover',
+          'cols': messages.single['cols'],
+          'rows': messages.single['rows'],
+          'driverClientId': _myClientId,
+        });
+        await tester.pump();
+        tab = h.service.currentState.tabs['takeover']!;
+        await tester.pumpWidget(pane());
+        await tester.pump();
+        expect(find.text('Take control'), findsNothing);
+        expect(find.text('Taking control\u2026'), findsNothing);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+
+  testWidgets(
+    'takeover timeout restores retry and disconnect disables control',
+    (tester) async {
+      final h = await _makeService(addTearDown);
+      h.service.setClientId(_myClientId);
+      h.transport.emit('agent:status', {
+        'projectId': 'p',
+        'terminals': [
+          {
+            'terminalId': 'retry',
+            'name': 'Terminal',
+            'running': true,
+            'cols': 200,
+            'rows': 40,
+            'driverClientId': _otherClientId,
+          },
+        ],
+      });
+      await tester.pump();
+      final tab = h.service.currentState.tabs['retry']!;
+      Widget pane() =>
+          _wrap(TerminalViewWrapper(tab: tab, terminalService: h.service));
+      await tester.pumpWidget(pane());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Take control'));
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+      expect(find.text('Take control'), findsOneWidget);
+      expect(
+        find.text('Taking control timed out. Please try again.'),
+        findsOneWidget,
+      );
+      h.transport.setEstablished(false);
+      await tester.pumpWidget(pane());
+      h.transport.sent.clear();
+      await tester.tap(find.text('Take control'));
+      await tester.pump();
+      expect(
+        h.transport.sent.where((m) => m['type'] == 'terminal:resize'),
+        isEmpty,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   testWidgets(
     'non-driver grid larger than the viewport is scaled down, not scrolled',
     (tester) async {
@@ -418,7 +529,7 @@ void main() {
     },
   );
 
-  testWidgets('desktop pointer activation claims by sending terminal:resize', (
+  testWidgets('desktop pointer activation does not take size control', (
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
@@ -446,9 +557,8 @@ void main() {
     final resizes = h.transport.sent
         .where((m) => m['type'] == 'terminal:resize')
         .toList();
-    expect(resizes, isNotEmpty);
-    expect(resizes.last['clientId'], _myClientId);
-    expect(resizes.last['baseDriverClientId'], _otherClientId);
+    expect(resizes, isEmpty);
+    expect(find.text('Take control'), findsOneWidget);
 
     debugDefaultTargetPlatformOverride = null;
   });

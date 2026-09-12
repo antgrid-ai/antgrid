@@ -171,7 +171,7 @@ async function stopTerminal(app: RelayClient, streamId: string, terminalId: stri
 }
 
 function resizeTerminal(app: RelayClient, streamId: string, terminalId: string, cols: number, rows: number): void {
-  app.sendOnStream(streamId, createMessage("terminal:resize", { terminalId, cols, rows, clientId: "eval-viewer" }));
+  app.sendOnStream(streamId, createMessage("terminal:resize", { intent: "takeover", terminalId, cols, rows, clientId: "eval-viewer" }));
 }
 
 async function subscribeFrames(app: RelayClient, streamId: string, terminalId: string, timeoutMs = 10_000): Promise<any> {
@@ -291,6 +291,31 @@ describe("gate: terminal frame mode", () => {
         m.type === "terminal:frame" && m.terminalId === terminalId && String(m.ansi).includes("TICK_"),
       )).toBe(true);
       expect(localSeen.some((m: any) => m.type === "terminal:output" || m.type === "terminal:snapshot")).toBe(false);
+      // Both encrypted transports share one grid, but only explicit takeover
+      // transfers its ownership. A delayed old-owner resize must be harmless.
+      for (const [clientId, cols, rows] of [["local-owner", 96, 28], ["remote-owner", 48, 16]] as const) {
+        const takeover = createMessage("terminal:resize", { terminalId, clientId, cols, rows, intent: "takeover" });
+        if (clientId === "local-owner") local.send(takeover);
+        else env.app.sendOnStream(streamId, takeover);
+        await env.app.waitFor((m: any) => m.type === "terminal:size" && m.terminalId === terminalId &&
+          m.driverClientId === clientId && m.cols === cols && m.rows === rows, 5_000);
+        let matched = false;
+        const until = Date.now() + 5_000;
+        while (!matched && Date.now() < until) {
+          const frame = await nextFrame(env.app, streamId, terminalId);
+          ackFrame(env.app, streamId, frame);
+          matched = frame.cols === cols && frame.rows === rows;
+        }
+        expect(matched).toBe(true);
+      }
+      local.send(createMessage("terminal:resize", {
+        terminalId, clientId: "local-owner", cols: 96, rows: 28,
+        baseDriverClientId: "remote-owner", intent: "resize",
+      }));
+      const retained = await env.app.waitFor((m: any) => m.type === "terminal:size" &&
+        m.terminalId === terminalId && m.driverClientId === "remote-owner", 5_000);
+      expect([retained.cols, retained.rows]).toEqual([48, 16]);
+      expect(localSeen.some((m: any) => m.type === "terminal:frame" && m.cols === 48 && m.rows === 16)).toBe(true);
       env.app.sendOnStream(streamId, createMessage("terminal:unsubscribe", {
         terminalId, runId: relaySubscription.runId, attachmentId: relaySubscription.attachmentId,
       }));

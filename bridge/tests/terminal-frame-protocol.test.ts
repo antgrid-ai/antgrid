@@ -27,7 +27,7 @@ const requestId = "33333333-3333-4333-8333-333333333333";
 const attachment = { terminalId: "t1", runId, attachmentId };
 
 const screen = {
-  version: 1 as const,
+  version: 2 as const,
   revision: 7,
   cols: 80,
   rows: 24,
@@ -58,17 +58,17 @@ const CASES: ReadonlyArray<{
     type: "terminal:subscribe",
     schemaConst: "TerminalSubscribeMessage",
     exportedType: "TerminalSubscribe",
-    payload: { terminalId: "t1", version: 1, requestId },
+    payload: { terminalId: "t1", version: 2, requestId },
     malformed: { requestId: "not-a-uuid" },
   },
   {
     type: "terminal:subscribed",
     schemaConst: "TerminalSubscribedMessage",
     exportedType: "TerminalSubscribed",
-    payload: { ...attachment, version: 1, requestId },
+    payload: { ...attachment, version: 2, requestId },
     // The reply pins the version the bridge actually serves; anything else would
     // let a viewer believe a renderer it does not have was negotiated.
-    malformed: { version: 2 },
+    malformed: { version: 1 },
   },
   {
     type: "terminal:frame",

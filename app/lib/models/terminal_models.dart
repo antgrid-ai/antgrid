@@ -12,10 +12,13 @@ enum TerminalSessionState { starting, running, exited }
 /// version this client can render, sent on every `terminal:subscribe`. Bump
 /// only in lockstep with that constant; a mismatch answers
 /// `terminal:display:status` `UPGRADE_REQUIRED` rather than a screen.
-const int kTerminalFrameProtocolVersion = 1;
+const int kTerminalFrameProtocolVersion = 2;
 
 /// Independent frames are the sole terminal display protocol.
 enum TerminalDisplayMode { frame }
+
+/// Mirrors the bridge terminal:resize intent contract.
+enum TerminalResizeIntent { resize, takeover }
 
 class TerminalTab {
   final String terminalId;
