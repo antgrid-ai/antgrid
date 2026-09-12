@@ -497,7 +497,7 @@ class TerminalDisplayStatusMessage {
   final String? attachmentId;
   final String? requestId;
 
-  /// `UPGRADE_REQUIRED` | `DISPLAY_FAILED` | `ACK_TIMEOUT` |
+  /// `UPGRADE_REQUIRED` | `UNKNOWN_TERMINAL` | `DISPLAY_FAILED` | `ACK_TIMEOUT` |
   /// `HISTORY_DISABLED` | `ENDED`. An unrecognized code is a newer agent and
   /// must be surfaced as a generic failure, never ignored.
   final String code;

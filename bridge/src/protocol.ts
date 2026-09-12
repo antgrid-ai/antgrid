@@ -1893,7 +1893,7 @@ const TerminalDisplayStatusMessage = BaseMessage.extend({
   runId: z.string().uuid().optional(),
   attachmentId: z.string().uuid().optional(),
   requestId: z.string().uuid().optional(),
-  code: z.enum(["UPGRADE_REQUIRED", "DISPLAY_FAILED", "ACK_TIMEOUT", "HISTORY_DISABLED", "ENDED"]),
+  code: z.enum(["UPGRADE_REQUIRED", "UNKNOWN_TERMINAL", "DISPLAY_FAILED", "ACK_TIMEOUT", "HISTORY_DISABLED", "ENDED"]),
   message: z.string().max(1024),
   finalSequence: z.number().int().nonnegative().optional(),
   exitCode: z.number().int().nullable().optional(),

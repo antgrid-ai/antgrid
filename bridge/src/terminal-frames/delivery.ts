@@ -296,7 +296,13 @@ export class TerminalViewerConnection {
       return;
     }
     const run = this.hub.find(address);
-    if (!run) return;
+    if (!run) {
+      await this.transport.send(createMessage("terminal:display:status", {
+        ...wireAddress(address), requestId, code: "UNKNOWN_TERMINAL",
+        message: "Terminal no longer available.",
+      }), new AbortController().signal);
+      return;
+    }
     for (const attachment of this.attachments.values()) {
       if (key(attachment.run.address) === key(address)) this.retire(attachment);
     }

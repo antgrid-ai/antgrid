@@ -1692,6 +1692,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               return;
             }
           }).catch((error) => {
+            if (owner.disposed || sessions?.isCheckoutDeleting(checkoutId) === true ||
+                (clientGenerations.get(client) ?? 0) !== clientGeneration) return;
             log.warn("terminal %s attach failed: %s", internalId, error);
             sendAbToItsChannel(createMessage("terminal:display:status", {
               checkoutId, terminalId: msg.terminalId, requestId: msg.requestId,
@@ -1739,11 +1741,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // mismatched wire id simply misses `hub.find()` — and this makes the
         // history path agree with it.
         if (terminalOwner(internalId).runtime.checkout.id !== checkoutId) break;
-        // The runId a client holds names the subscription it made history part
-        // of; a stale one (the run rotated under it — a respawn) names a run
-        // this terminal no longer runs, so the request is dropped exactly like
-        // `acknowledge`'s own `ack.runId !== attachment.run.runId` guard rather
-        // than answered from a history run the app never subscribed to.
+        // An evicted or foreign run exposes only the caller's cursor, never
+        // another terminal's retained rows or retention boundaries.
         if (!manager.ownsHistoryRun(internalId, msg.runId)) {
           sendAbToItsChannel(createMessage("terminal:history:page", {
             checkoutId, terminalId: msg.terminalId, runId: msg.runId,

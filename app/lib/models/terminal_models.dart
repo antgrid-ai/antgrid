@@ -167,6 +167,9 @@ class TerminalTab {
 /// an outstanding pull over an engine that already holds current bytes is a
 /// routine refresh, not a wait.
 enum TerminalAttachStage {
+  /// The bridge confirmed the terminal is absent; retain readable content.
+  unavailable,
+
   /// No pull has gone out and nothing has painted.
   cold,
 

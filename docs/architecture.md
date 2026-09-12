@@ -52,6 +52,20 @@ protocol version 1 and receive independent screens at a maximum of 20 FPS;
 peers require an upgrade. An attachment failure preserves the last valid screen
 and offers recovery through a fresh attachment, never raw-stream fallback.
 
+An absent terminal is different from a display failure: after attempting archived
+restoration, the bridge answers its subscribe request with a correlated
+`UNKNOWN_TERMINAL` status. The app drops an empty obsolete tab or retains its
+screen/history as unavailable, without live input or automatic retries. Only a
+new authoritative `terminal:started` event revives attachment for that ID.
+
+Session-list replies publish reconciliation events even when the list is
+unchanged. Compatible default-list requests share a reply within the same
+connection establishment; archived-list requests remain exactly correlated.
+The 15-second request bound clears loading, and a late valid reply clears the
+active project's session timeout notice. Deleted checkout bundles are released
+on the second listing excluding them, including identical listings, or on an
+explicit unknown-checkout refusal when the latest list also excludes them.
+
 Subscription identity includes the authenticated connection, project stream,
 checkout, terminal, run, and attachment. A replacement PTY gets a new run ID;
 reconnect gets a new attachment ID. Consumption acknowledgments retire at most

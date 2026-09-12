@@ -60,6 +60,80 @@ import {
   TERMINAL_HISTORY_PAGE_ROWS,
 } from "../../bridge/src/terminal-frames/protocol";
 
+test("session listing and checkout deletion remain responsive beside a slow terminal viewer", async () => {
+  const env = await setupTestEnv({
+    fixtureName: "basic",
+    prepareProject: async (cwd) => {
+      for (const args of [["init"], ["config", "user.email", "eval@antgrid.local"],
+        ["config", "user.name", "Antgrid Eval"], ["add", "."], ["commit", "-m", "initial"]]) {
+        const proc = Bun.spawn(["git", ...args], { cwd, stdout: "ignore", stderr: "pipe" });
+        if (await proc.exited !== 0) throw new Error(await new Response(proc.stderr).text());
+      }
+    },
+  });
+  let consuming = true;
+  let consume: Promise<void> | undefined;
+  try {
+    const streamId = await firstProjectStream(env.app, env.projectId, 10_000);
+    const createId = crypto.randomUUID();
+    env.app.sendOnStream(streamId, createMessage("session:create", {
+      requestId: createId, name: "slow-viewer-checkout", isolation: "worktree",
+    }));
+    const created = await env.app.waitFor((m: any) =>
+      m.type === "session:result" && m._streamId === streamId && m.requestId === createId, 20_000);
+    expect(created.ok).toBe(true);
+    expect(created.session.checkoutKind).toBe("managed-worktree");
+    const terminalId = "slow-control-viewer";
+    await startTerminal(env.app, streamId, terminalId, "node", ["-e",
+      "let i=0;const timer=setInterval(()=>{process.stdout.write('output '+i+++'\\n');if(i===1200){clearInterval(timer);process.stdout.write('FINAL-CONTROL-SCREEN');}},10);"]);
+    await subscribeFrames(env.app, streamId, terminalId);
+    let finalSeen = false;
+    let consumed = 0;
+    let consumeError: unknown;
+    consume = (async () => {
+      while (consuming) {
+        await Bun.sleep(350);
+        const queued = env.app.queuedCount((m: any) =>
+          m.type === "terminal:frame" && m._streamId === streamId && m.terminalId === terminalId);
+        expect(queued).toBeLessThanOrEqual(TERMINAL_VIEWER_MAX_FRAMES);
+        const frame = await nextFrame(env.app, streamId, terminalId, 500).catch(() => null);
+        if (frame) {
+          finalSeen ||= frame.ansi.includes("FINAL-CONTROL-SCREEN");
+          consumed++;
+          ackFrame(env.app, streamId, frame);
+        }
+      }
+    })().catch((error) => { consumeError = error; });
+    const list = async () => {
+      const requestId = crypto.randomUUID();
+      env.app.sendOnStream(streamId, createMessage("session:list", { requestId }));
+      return env.app.waitFor((m: any) => m.type === "session:list:result" &&
+        m._streamId === streamId && m.requestId === requestId, 5_000);
+    };
+    expect((await list()).sessions.some((s: any) => s.id === created.session.id)).toBe(true);
+    const deleteId = crypto.randomUUID();
+    env.app.sendOnStream(streamId, createMessage("session:delete", {
+      requestId: deleteId, sessionId: created.session.id, removeCheckout: true,
+    }));
+    const deleted = await env.app.waitFor((m: any) => m.type === "session:result" &&
+      m._streamId === streamId && m.requestId === deleteId, 15_000);
+    expect(deleted.ok).toBe(true);
+    for (let i = 0; i < 2; i++) {
+      expect((await list()).sessions.some((s: any) => s.id === created.session.id)).toBe(false);
+    }
+    const ended = await env.app.waitFor((m: any) => m.type === "terminal:display:status" &&
+      m._streamId === streamId && m.terminalId === terminalId && m.code === "ENDED", 20_000);
+    expect(ended.exitCode).toBe(0);
+    expect(finalSeen).toBe(true);
+    expect(consumed).toBeGreaterThan(4);
+    expect(consumeError).toBeUndefined();
+  } finally {
+    consuming = false;
+    await consume;
+    await env.teardown();
+  }
+}, 60_000);
+
 async function loopbackControl(abDir: string, body: object): Promise<any> {
   const hf = readHostFile(join(abDir, "host.json"));
   if (!hf) throw new Error("no host.json for loopback control");
@@ -75,7 +149,8 @@ async function startTerminal(
   app: RelayClient, streamId: string, terminalId: string, command: string, args: string[],
 ): Promise<any> {
   app.sendOnStream(streamId, createMessage("terminal:start", { terminalId, name: terminalId, command, args }));
-  const started = await app.waitForStreamAbType(streamId, "terminal:started", 5_000);
+  const started = await app.waitFor((m: any) => m.type === "terminal:started" &&
+    m._streamId === streamId && m.terminalId === terminalId, 5_000);
   expect(started.terminalId).toBe(terminalId);
   return started;
 }
@@ -227,6 +302,19 @@ describe("gate: terminal frame mode", () => {
       await stopTerminal(env.app, streamId, terminalId);
     }
   }, 30_000);
+
+  test("a missing terminal receives a correlated refusal over the encrypted project stream", async () => {
+    const requestId = crypto.randomUUID();
+    env.app.sendOnStream(streamId, createMessage("terminal:subscribe", {
+      terminalId: "frame-never-existed", version: TERMINAL_PROTOCOL_VERSION, requestId,
+    }));
+    const refusal = await env.app.waitFor((m: any) =>
+      m.type === "terminal:display:status" && m._streamId === streamId && m.requestId === requestId,
+      5_000);
+    expect(refusal.code).toBe("UNKNOWN_TERMINAL");
+    expect(refusal.attachmentId).toBeUndefined();
+    expect(refusal.terminalId).toBe("frame-never-existed");
+  });
 
   test("an unsupported terminal version requires an upgrade and never starts raw delivery", async () => {
     const terminalId = "frame-upgrade-required";

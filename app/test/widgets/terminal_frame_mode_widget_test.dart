@@ -338,6 +338,41 @@ void main() {
     _settingsPrefs = await openAppSettingsPrefs();
   });
 
+  testWidgets('missing terminal keeps readable content with no Retry', (
+    tester,
+  ) async {
+    final h = await _makeService(addTearDown);
+    final tab = _tab(id: 't1');
+    await tester.pumpWidget(
+      _wrap(
+        SizedBox(
+          width: 300,
+          height: 400,
+          child: TerminalViewWrapper(tab: tab, terminalService: h.service),
+        ),
+        terminalState: Stream.value(
+          _stateWith(
+            hydration: {
+              't1': const TerminalHydration(
+                stage: TerminalAttachStage.unavailable,
+              ),
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Terminal no longer available'), findsOneWidget);
+    expect(find.text('Retry'), findsNothing);
+    expect(
+      find.ancestor(
+        of: find.byType(GhosttyTerminalView),
+        matching: find.byWidgetPredicate((w) => w is Opacity),
+      ),
+      findsNothing,
+    );
+  });
+
   group('D7: TerminalAttachStage.ended chrome', () {
     testWidgets(
       'renders the protocol\'s own message, undimmed, with no Retry',

@@ -267,6 +267,212 @@ void main() {
     });
   }
 
+  test('missing terminal removes an empty tab without stopping it', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = session.terminalService;
+    svc.activate();
+    await seedRunningTab(t, 'a');
+    t.emit('terminal:display:status', {
+      'terminalId': 'a',
+      'requestId': lastSubscribeRequestId(t, 'a'),
+      'code': 'UNKNOWN_TERMINAL',
+      'message': 'Terminal no longer available',
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.tabs, isEmpty);
+    expect(svc.currentState.activeTerminalId, isNull);
+    expect(t.sent.where((m) => m['type'] == 'terminal:stop'), isEmpty);
+    t.clearSent();
+    await seedRunningTab(t, 'a');
+    t.redriveHydrators();
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.tabs, isEmpty);
+    expect(t.sent.where((m) => m['type'] == 'terminal:subscribe'), isEmpty);
+    t.emit('terminal:started', {
+      'terminalId': 'a',
+      'shell': 'sh',
+      'cols': 80,
+      'rows': 24,
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.tabs.containsKey('a'), isTrue);
+    expect(
+      t.sent.where((m) => m['type'] == 'terminal:subscribe'),
+      hasLength(1),
+    );
+    await svc.dispose();
+    await session.close();
+  });
+
+  test(
+    'missing terminal retains its screen and history through a start timeout',
+    () async {
+      if (_skipWithoutNative()) return;
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = session.terminalService;
+      svc.activate();
+      await seedRunningTab(t, 'a');
+      await acceptSubscribe(t, 'a');
+      await applyHistoryBoundary(
+        t,
+        'a',
+        history: _historyBoundary(nextRowId: 2),
+      );
+      expect(svc.requestTerminalHistoryPage('a'), isTrue);
+      emitHistoryPage(
+        t,
+        terminalId: 'a',
+        requestId: lastHistoryRequestId(t, 'a'),
+        history: _historyBoundary(nextRowId: 2),
+        beforeRowId: 2,
+        rows: [_historyRow(0), _historyRow(1)],
+      );
+      await Future<void>.delayed(Duration.zero);
+      final tab = svc.currentState.tabs['a']!;
+      svc.retryAttach('a');
+      t.emit('terminal:display:status', {
+        'terminalId': 'a',
+        'requestId': lastSubscribeRequestId(t, 'a'),
+        'code': 'UNKNOWN_TERMINAL',
+        'message': 'Terminal no longer available',
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        svc.currentState.hydration['a']!.stage,
+        TerminalAttachStage.unavailable,
+      );
+      expect(tab.ghostty.plainText, contains('HISTORY-SCREEN'));
+      expect(tab.history.rows, hasLength(2));
+      expect(svc.sendInput('a', 'ignored'), isFalse);
+      t.clearSent();
+      svc.retryAttach('a');
+      t.redriveHydrators();
+      t.emit('agent:status', {'projectId': 'p', 'terminals': []});
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.tabs['a']!.history.rows, hasLength(2));
+      await seedRunningTab(t, 'a');
+      expect(
+        svc.currentState.tabs['a']!.sessionState,
+        TerminalSessionState.exited,
+      );
+      expect(t.sent.where((m) => m['type'] == 'terminal:subscribe'), isEmpty);
+      final startBounds = <_ArmedBound>[];
+      _captureBounds(startBounds, () => svc.requestStart('a'));
+      expect(
+        svc.currentState.tabs['a']!.sessionState,
+        TerminalSessionState.starting,
+      );
+      expect(tab.ghostty.isRunning, isFalse);
+      startBounds
+          .singleWhere((bound) => bound.duration == svc.terminalStartTimeout)
+          .fire();
+      expect(
+        svc.currentState.tabs['a']!.sessionState,
+        TerminalSessionState.exited,
+      );
+      expect(svc.currentState.tabs['a']!.ghostty, same(tab.ghostty));
+      expect(tab.ghostty.plainText, contains('HISTORY-SCREEN'));
+      expect(tab.history.rows, hasLength(2));
+      expect(
+        svc.currentState.hydration['a']!.stage,
+        TerminalAttachStage.unavailable,
+      );
+      expect(tab.ghostty.isRunning, isFalse);
+      expect(svc.sendInput('a', 'ignored-after-timeout'), isFalse);
+      t.emit('terminal:started', {
+        'terminalId': 'a',
+        'shell': 'sh',
+        'cols': 80,
+        'rows': 24,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        svc.currentState.tabs['a']!.sessionState,
+        TerminalSessionState.running,
+      );
+      expect(tab.ghostty.isRunning, isTrue);
+      expect(
+        svc.currentState.hydration['a']!.stage,
+        isNot(TerminalAttachStage.unavailable),
+      );
+      expect(
+        t.sent.where((m) => m['type'] == 'terminal:subscribe'),
+        hasLength(1),
+      );
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test(
+    'missing refusal from a superseded request cannot retire a live attachment',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = session.terminalService;
+      await seedRunningTab(t, 'a');
+      final staleRequest = lastSubscribeRequestId(t, 'a');
+      svc.retryAttach('a');
+      await acceptSubscribe(t, 'a');
+      for (final requestId in [
+        staleRequest,
+        lastSubscribeRequestId(t, 'a'),
+        null,
+      ]) {
+        t.emit('terminal:display:status', {
+          'terminalId': 'a',
+          'requestId': ?requestId,
+          'code': 'UNKNOWN_TERMINAL',
+          'message': 'Terminal no longer available',
+        });
+      }
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.tabs.containsKey('a'), isTrue);
+      expect(svc.currentState.hydration['a']!.stage, TerminalAttachStage.cold);
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test('starting a terminal supersedes a pending missing refusal', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = session.terminalService;
+    svc.activate();
+    await seedRunningTab(t, 'a');
+    final staleRequest = lastSubscribeRequestId(t, 'a');
+    svc.requestStart('a');
+    t.emit('terminal:display:status', {
+      'terminalId': 'a',
+      'requestId': staleRequest,
+      'code': 'UNKNOWN_TERMINAL',
+      'message': 'Terminal no longer available',
+    });
+    t.clearSent();
+    t.redriveHydrators();
+    await Future<void>.delayed(Duration.zero);
+    expect(
+      svc.currentState.tabs['a']!.sessionState,
+      TerminalSessionState.starting,
+    );
+    expect(t.sent.where((m) => m['type'] == 'terminal:subscribe'), isEmpty);
+    t.emit('terminal:started', {
+      'terminalId': 'a',
+      'shell': 'sh',
+      'cols': 80,
+      'rows': 24,
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(
+      t.sent.where((m) => m['type'] == 'terminal:subscribe'),
+      hasLength(1),
+    );
+    await svc.dispose();
+    await session.close();
+  });
+
   test('discovering a running terminal sends terminal:subscribe', () async {
     final t = FakeAgentTransport();
     final session = await newSession(t);
@@ -1266,12 +1472,12 @@ void main() {
       },
     );
 
-    test('refuses to send when the tab is not in frame mode', () async {
+    test('refuses to page before a subscription is accepted', () async {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
 
-      await seedRunningTab(t, 'a'); // still legacy -- no acceptSubscribe
+      await seedRunningTab(t, 'a');
 
       expect(svc.requestTerminalHistoryPage('a'), isFalse);
       expect(
@@ -1283,12 +1489,7 @@ void main() {
       await session.close();
     });
 
-    test('refuses to send when the pane has no live frame attachment, even '
-        'while still committed to frame mode', () async {
-      // ENDED is lifecycle, not failure (D7): it drops the attachment but
-      // deliberately leaves `tab.mode` at frame -- see
-      // `_handleFrameDisplayStatus`. That is exactly the state this proves
-      // requestTerminalHistoryPage must still refuse.
+    test('pages retained history through the completed attachment', () async {
       final t = FakeAgentTransport();
       final session = await newSession(t);
       final svc = TerminalService.fromSession(session);
@@ -1312,11 +1513,25 @@ void main() {
       expect(svc.currentState.tabs['a']!.mode, TerminalDisplayMode.frame);
 
       t.clearSent();
-      expect(svc.requestTerminalHistoryPage('a'), isFalse);
-      expect(
-        t.sent.where((m) => m['type'] == 'terminal:history:request'),
-        isEmpty,
+      expect(svc.requestTerminalHistoryPage('a'), isTrue);
+      final request = t.sent.singleWhere(
+        (m) => m['type'] == 'terminal:history:request',
       );
+      expect(request['runId'], 'run-1');
+      expect(request['attachmentId'], 'att-1');
+      expect(request['beforeRowId'], 10);
+      emitHistoryPage(
+        t,
+        terminalId: 'a',
+        requestId: request['requestId'] as String,
+        history: _historyBoundary(nextRowId: 10),
+        beforeRowId: 10,
+        rows: List.generate(10, _historyRow),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.tabs['a']!.history.rows, hasLength(10));
+      expect(svc.currentState.tabs['a']!.history.loading, isFalse);
+      expect(svc.currentState.hydration['a']!.stage, TerminalAttachStage.ended);
 
       await svc.dispose();
       await session.close();
@@ -1343,7 +1558,7 @@ void main() {
     });
 
     test(
-      'refuses to send once the agent reports archiving disabled for this run',
+      'reads committed rows after further history recording is disabled',
       () async {
         final t = FakeAgentTransport();
         final session = await newSession(t);
@@ -1361,11 +1576,25 @@ void main() {
           ),
         );
 
-        expect(svc.requestTerminalHistoryPage('a'), isFalse);
-        expect(
-          t.sent.where((m) => m['type'] == 'terminal:history:request'),
-          isEmpty,
+        expect(svc.requestTerminalHistoryPage('a'), isTrue);
+        final request = t.sent.singleWhere(
+          (m) => m['type'] == 'terminal:history:request',
         );
+        expect(request['beforeRowId'], 50);
+        emitHistoryPage(
+          t,
+          terminalId: 'a',
+          requestId: request['requestId'] as String,
+          history: _historyBoundary(nextRowId: 50, status: 'disabled'),
+          beforeRowId: 50,
+          rows: List.generate(50, _historyRow),
+        );
+        await Future<void>.delayed(Duration.zero);
+        final model = svc.currentState.tabs['a']!.history;
+        expect(model.rows, hasLength(50));
+        expect(model.recording, isFalse);
+        expect(model.loading, isFalse);
+        expect(svc.requestTerminalHistoryPage('a'), isFalse);
 
         await svc.dispose();
         await session.close();
@@ -1840,9 +2069,11 @@ void main() {
       final tab = svc.currentState.tabs['a']!;
       expect(tab.history.failure, 'Scrollback archiving is off for this run.');
       expect(tab.mode, TerminalDisplayMode.frame);
-      // Never painted, so an attachment marked failed would read `failed`
-      // here -- `HISTORY_DISABLED` must leave it at `cold` instead.
-      expect(svc.currentState.hydration['a']!.stage, TerminalAttachStage.cold);
+      expect(
+        svc.currentState.hydration['a']!.stage,
+        TerminalAttachStage.painted,
+      );
+      expect(tab.ghostty.plainText, contains('HISTORY-SCREEN'));
 
       // The refusal is addressed at the RUN, and the reader's every scroll
       // step at the top asks again: a request that goes out here earns the

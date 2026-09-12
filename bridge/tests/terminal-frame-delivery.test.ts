@@ -6,12 +6,12 @@
 // (hub registration off `TerminalManager`'s own run id, the four inbound
 // cases, mode exclusivity, connection teardown) rather than delivery.ts's
 // pre-existing, already-correct internals.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
-import { closeTerminalHistoryStore } from "../src/terminal-manager";
+import { TerminalManager, closeTerminalHistoryStore } from "../src/terminal-manager";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage, type TerminalDisplayStatus, type TerminalFrame } from "../src/protocol";
 import { setLogLevel } from "../src/logger";
@@ -106,6 +106,24 @@ function statuses(t: { sent: (TerminalFrame | TerminalDisplayStatus | AbMessage)
 }
 
 describe("hub", () => {
+  test("missing terminals are refused with request correlation and without an attachment", async () => {
+    const hub = new TerminalFrameHub();
+    const transport = new FakeTransport();
+    const connection = hub.connect(transport);
+    const requestId = crypto.randomUUID();
+    expect(await connection.subscribe(addr(), TERMINAL_PROTOCOL_VERSION, requestId)).toBeUndefined();
+    expect(transport.sent).toHaveLength(1);
+    expect(transport.sent[0]).toMatchObject({
+      type: "terminal:display:status", code: "UNKNOWN_TERMINAL",
+      terminalId: "t1", checkoutId: "main", requestId,
+    });
+    expect(transport.sent[0]).not.toHaveProperty("attachmentId");
+    transport.allowed = false;
+    await connection.subscribe(addr("private"), TERMINAL_PROTOCOL_VERSION, crypto.randomUUID());
+    expect(transport.sent).toHaveLength(1);
+    connection.close();
+  });
+
   test("register passes the caller's run id straight through — no hub-minted default", () => {
     const hub = new TerminalFrameHub(() => 0);
     const runId = crypto.randomUUID();
@@ -572,8 +590,10 @@ describe("wiring", () => {
       "control",
       "loopback",
     );
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(sent.some((m) => m.type === "terminal:history:page" && m.requestId === foreignRequestId)).toBe(false);
+    const expired = await waitFor(sent,
+      (m) => m.type === "terminal:history:page" && m.requestId === foreignRequestId,
+      "expired foreign history boundary");
+    expect(expired).toMatchObject({ expired: true, rows: [], history: { status: "disabled" } });
   });
 
   test("unsubscribing stops frames without enabling raw output", async () => {
@@ -626,16 +646,40 @@ describe("wiring", () => {
     await expectNoStreamAfterInput(bus, sent, "echo back\r");
   });
 
-  test("subscribing to an unknown terminal gets no reply", async () => {
-    const { bus, sent } = await bootWithTerminal();
+  test("subscribing to an unknown terminal returns a refusal only to its requester", async () => {
+    const { bus, sent, relaySent } = await bootWithTerminal();
     sent.length = 0;
+    relaySent.length = 0;
+    const requestId = crypto.randomUUID();
     bus.dispatchInbound(
-      createMessage("terminal:subscribe", { terminalId: "never-existed", version: TERMINAL_PROTOCOL_VERSION, requestId: crypto.randomUUID() }),
+      createMessage("terminal:subscribe", { terminalId: "never-existed", version: TERMINAL_PROTOCOL_VERSION, requestId }),
       "control",
       "loopback",
     );
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    const refusal = await waitFor(sent,
+      (m) => m.type === "terminal:display:status" && m.requestId === requestId,
+      "unknown terminal refusal");
+    expect(refusal).toMatchObject({ code: "UNKNOWN_TERMINAL", terminalId: "never-existed", checkoutId: "main" });
+    expect(relaySent.some((m) => m.type === "terminal:display:status" && m.requestId === requestId)).toBe(false);
     expect(sent.filter((m) => m.type === "terminal:subscribed")).toEqual([]);
+  });
+
+  test("archive restoration errors are display failures, never missing-terminal refusals", async () => {
+    const { bus, sent } = await bootWithTerminal();
+    const restore = spyOn(TerminalManager.prototype, "restoreArchivedTerminal")
+      .mockRejectedValue(new Error("archive unavailable"));
+    try {
+      const requestId = crypto.randomUUID();
+      bus.dispatchInbound(createMessage("terminal:subscribe", {
+        terminalId: "archive", version: TERMINAL_PROTOCOL_VERSION, requestId,
+      }), "control", "loopback");
+      const refusal = await waitFor(sent,
+        (m) => m.type === "terminal:display:status" && m.requestId === requestId,
+        "archive display failure");
+      expect(refusal).toMatchObject({ code: "DISPLAY_FAILED", terminalId: "archive" });
+    } finally {
+      restore.mockRestore();
+    }
   });
 
   test("subscribing from two sources for the same terminal gets two independent attachments", async () => {

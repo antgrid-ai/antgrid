@@ -57,7 +57,7 @@ import '../services/push_background_handler.dart'
     show decodePush, pushDataOf, pushDedupKey, routeOfPush;
 import '../services/push_identity.dart';
 import '../services/sessions_service.dart'
-    show SessionOperationException, SessionsService;
+    show SessionListing, SessionOperationException, SessionsService;
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../utils/notification_routing.dart';
@@ -283,6 +283,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// ([_kMaxNotifiedIds]) via [_markNotified] so a long-lived foreground session
   /// receiving many pushes can't grow it without bound.
   final Set<String> _notifiedIds = <String>{};
+  StreamSubscription<SessionListing>? _sessionListingSub;
+  // The project ID alone cannot distinguish an obsolete run after A → B → A.
+  int _sessionBootstrapGeneration = 0;
 
   /// Cap on [_notifiedIds]. Dedup only needs recent ids; re-seeing one evicted
   /// long ago risks at most one duplicate — fine for best-effort notifications.
@@ -465,6 +468,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   @override
   void dispose() {
+    _sessionBootstrapGeneration++;
+    unawaited(_sessionListingSub?.cancel());
     WidgetsBinding.instance.removeObserver(this);
     _unsubscribeForegroundPush?.call();
     _unsubscribeForegroundPush = null;
@@ -759,8 +764,15 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// Both callers run this detached, so nothing here may reject — see
   /// [detached].
   Future<void> _bootstrapSessions() async {
+    final generation = ++_sessionBootstrapGeneration;
+    unawaited(_sessionListingSub?.cancel());
+    _sessionListingSub = null;
     final triggeredFor = ref.read(selectedRegistrationIdProvider);
     if (triggeredFor == null) return;
+    bool isCurrent() =>
+        mounted &&
+        generation == _sessionBootstrapGeneration &&
+        ref.read(selectedRegistrationIdProvider) == triggeredFor;
 
     // Wait for the per-project ProjectSession (transport + services) to
     // finish constructing before reading any per-project service façade.
@@ -775,17 +787,21 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // `reconcileActiveSession` off a fallback and leaves every surface
       // handover unspendable, since the drains wait on it. Same clear, same
       // guard as the requestList failure below.
-      if (mounted && ref.read(selectedRegistrationIdProvider) == triggeredFor) {
+      if (isCurrent()) {
         ref.read(pendingActiveSessionIdProvider.notifier).set(null);
         ref.read(pendingSessionStartSuppressedIdProvider.notifier).set(null);
       }
       return;
     }
-    if (!mounted || ref.read(selectedRegistrationIdProvider) != triggeredFor) {
-      return;
-    }
+    if (!isCurrent()) return;
 
     final svc = ref.read(sessionsServiceProvider);
+    _sessionListingSub = svc.listings.listen((listing) {
+      if (!listing.isReply || listing.includeArchived || !isCurrent()) return;
+      if (ref.read(relayErrorBannerProvider)?.code == 'SESSIONS') {
+        ref.read(relayErrorBannerProvider.notifier).set(null);
+      }
+    });
     List<SessionEntry> list;
     try {
       list = await svc.requestList();
@@ -794,9 +810,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // a relay stream drop. Nothing is wrong with the project and there is
       // nothing to tell the user: `SessionsService`'s `sessions:list` hydrator
       // re-runs the moment the transport re-establishes and refills the panel.
-      // Latching the banner here would outlive that recovery, because the only
-      // thing that clears it is a user tap (`ab_banner.dart`).
-      if (mounted && ref.read(selectedRegistrationIdProvider) == triggeredFor) {
+      // A session outage is shown by the connection surface itself.
+      if (isCurrent()) {
         ref.read(pendingActiveSessionIdProvider.notifier).set(null);
         ref.read(pendingSessionStartSuppressedIdProvider.notifier).set(null);
       }
@@ -806,7 +821,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // workspace is going to render with an empty sessions list and
       // unresponsive "+ new session" — surface it inline so the user has
       // an actionable next step instead of staring at a blank panel.
-      if (mounted && ref.read(selectedRegistrationIdProvider) == triggeredFor) {
+      if (isCurrent()) {
         // The queued pick was this run's to resolve, and nothing else will:
         // left set, it keeps `reconcileActiveSession` from ever falling back
         // to a default and holds the explorer's checkout unsettled, so the
@@ -825,15 +840,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       }
       return;
     }
-    if (!mounted) return;
-    if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
+    if (!isCurrent()) return;
 
-    // A load that succeeded retires the notice an earlier failed load left
-    // behind. Nothing else retires it — the banner is cleared only by a user
-    // tap — so without this a project that has fully recovered keeps offering
-    // "switch projects and back to retry" over a panel that already reloaded.
-    // Scoped to this screen's own code so a relay notice (license, auth) that
-    // a successful session list says nothing about is left alone.
+    // A successful list cannot retire unrelated relay or license notices.
     if (ref.read(relayErrorBannerProvider)?.code == 'SESSIONS') {
       ref.read(relayErrorBannerProvider.notifier).set(null);
     }
@@ -871,11 +880,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           try {
             await _startBestEffort(svc, desired.id, raiseRefusal: true);
           } on SessionOperationException catch (error) {
-            if (mounted) reportStartRefusal(context, error);
+            if (mounted && isCurrent()) reportStartRefusal(context, error);
             return;
           }
-          if (!mounted) return;
-          if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
+          if (!isCurrent()) return;
         }
         svc.focus(desired.id);
         return;
@@ -897,7 +905,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // session + own the post-start UI state. Without this guard the empty
       // list here races leaveNewSession() and can strand the user on the New
       // Session page or double-start. See the per-session-agent design.
-      if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
+      if (!isCurrent()) return;
       if (ref.read(newSessionStartInFlightProvider)) return;
       ref
           .read(workbenchSurfaceProvider.notifier)
@@ -915,7 +923,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           );
       return;
     } else {
-      if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
+      if (!isCurrent()) return;
       // Keep the session already focused when this project still has it. The
       // bridge orders by `lastUsedAt`, which records ACTIVITY (a keystroke, an
       // agent notification) rather than what the user last opened — and
@@ -940,8 +948,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           !session.running &&
           !sessionStartQueued(session.setup)) {
         await _startBestEffort(svc, session.id);
-        if (!mounted) return;
-        if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
+        if (!isCurrent()) return;
       }
       // Transcript hydration is driven by AgentTranscriptView.initState (the
       // single per-session chokepoint), not here — see hydrateAttachedChatIfNeeded.
@@ -1098,7 +1105,11 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // fireImmediately flag, so we use the initState path instead of
     // ref.listenManual to keep widget lifecycle straightforward.
     ref.listen<String?>(selectedRegistrationIdProvider, (prev, next) {
-      if (next == null || prev == next) return;
+      if (prev == next) return;
+      _sessionBootstrapGeneration++;
+      unawaited(_sessionListingSub?.cancel());
+      _sessionListingSub = null;
+      if (next == null) return;
       detached(
         'WorkspaceShell',
         'session bootstrap failed',

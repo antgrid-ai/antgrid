@@ -53,6 +53,7 @@ const _unset = Object();
 Future<ProviderContainer> pumpWorkspaceShell(
   WidgetTester tester, {
   bool withProject = true,
+  bool followSelectedTarget = false,
   AgentTransport Function(String projectId)? transport,
   Stream<TerminalState>? terminalStates,
   Object? target = _unset,
@@ -74,9 +75,10 @@ Future<ProviderContainer> pumpWorkspaceShell(
         // overridden twice in one container.
         accountAgentsProvider.overrideWith((_) async => const []),
         localDeviceUuidProvider.overrideWith((_) async => 'test-local-device'),
-        selectedRegistrationIdProvider.overrideWith(
-          (ref) => withProject ? testAgentDeviceId : null,
-        ),
+        if (!followSelectedTarget)
+          selectedRegistrationIdProvider.overrideWith(
+            (ref) => withProject ? testAgentDeviceId : null,
+          ),
         // CheckoutReadiness (workspace_shell.dart's boot-overlay gate) reads
         // selectedTargetProvider directly, for the isLocal flag the bare
         // registration-id string above can't carry — so it must stay in sync

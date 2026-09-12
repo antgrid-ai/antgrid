@@ -28,6 +28,7 @@ class TerminalService {
   final Set<String> _deletedTerminalIds = {};
   final Set<String> _pendingTerminalIds = {};
   final Set<String> _canceledPendingTerminalIds = {};
+  final Set<String> _missingTerminalIds = {};
 
   // --- Frame mode (live `terminal:frame` display) ---
 
@@ -40,8 +41,7 @@ class TerminalService {
 
   /// terminalId -> true while a `terminal:subscribe` is outstanding for it.
   /// Consumed by whichever answers first: `terminal:subscribed`, or a
-  /// `terminal:display:status` naming the same request (UPGRADE_REQUIRED is
-  /// the only code reachable before an attachment exists).
+  /// `terminal:display:status` naming the same request.
   final Set<String> _frameSubscribePending = {};
 
   final Map<String, int> _frameSubscribeRequestedAtMs = {};
@@ -290,10 +290,8 @@ class TerminalService {
     }
     if (invalidated) _setState(_state.copyWith(tabs: rehydrated));
     for (final tab in rehydrated.values) {
-      // A pending tab is the app's own optimistic invention — the agent has
-      // never confirmed the id, so it would answer "snapshot requested for
-      // unknown terminal" and send nothing. Its own terminal:started carries
-      // the pull.
+      // The bridge has not admitted an optimistic start yet; its started
+      // event will attach the confirmed run.
       if (_pendingTerminalIds.contains(tab.terminalId)) continue;
       _attachTerminal(tab.terminalId);
     }
@@ -308,6 +306,7 @@ class TerminalService {
   /// drops.
   bool _hasLivePty(TerminalTab tab) =>
       tab.sessionState == TerminalSessionState.running &&
+      !_missingTerminalIds.contains(tab.terminalId) &&
       !_pendingTerminalIds.contains(tab.terminalId);
 
   /// Retires whatever the driver believes [terminalId]'s geometry is, so its
@@ -373,6 +372,9 @@ class TerminalService {
   TerminalAttachStage _stageFor(String id) => _frameStageFor(id);
 
   TerminalAttachStage _frameStageFor(String id) {
+    if (_missingTerminalIds.contains(id)) {
+      return TerminalAttachStage.unavailable;
+    }
     if (_frameEndedIds.contains(id)) return TerminalAttachStage.ended;
     if (_frameFailedIds.contains(id)) return TerminalAttachStage.failed;
     final painted = _framePaintedIds.contains(id);
@@ -540,6 +542,10 @@ class TerminalService {
 
   /// Reattaches the terminal with a fresh viewer attachment.
   void _attachTerminal(String terminalId) {
+    if (_missingTerminalIds.contains(terminalId) ||
+        _pendingTerminalIds.contains(terminalId)) {
+      return;
+    }
     if (!_state.tabs.containsKey(terminalId)) return;
     _unsubscribeFrame(terminalId);
     _resetFrameTracking(terminalId);
@@ -614,9 +620,7 @@ class TerminalService {
     _publishHydration();
   }
 
-  /// The bound in [_frameSubscribeDeadlines] expiring: the bridge is not
-  /// answering this subscribe, so the terminal goes back to the protocol that
-  /// can still hydrate it rather than waiting on a reply that is not coming.
+  /// Bounds an unanswered subscribe without changing the display protocol.
   void _failFrameSubscribe(String terminalId) {
     _clearPendingSubscribe(terminalId);
     _frameFailedIds.add(terminalId);
@@ -831,9 +835,7 @@ class TerminalService {
     _setState(_state.copyWith(tabs: tabs));
   }
 
-  /// Handles `terminal:display:status` for either a still-outstanding
-  /// subscribe (only `UPGRADE_REQUIRED` is reachable there) or a live
-  /// attachment's own ending.
+  /// Handles a subscribe refusal or a live attachment's status.
   void _handleFrameDisplayStatus(TerminalDisplayStatusMessage msg) {
     final terminalId = msg.terminalId;
     final tab = _state.tabs[terminalId];
@@ -841,18 +843,24 @@ class TerminalService {
     final requestId = msg.requestId;
     // A notice naming a request this client still has outstanding is answering
     // the SUBSCRIBE, and by construction carries no attachment to key on --
-    // `UPGRADE_REQUIRED` is sent with only the terminal and the requestId.
+    // Refusals carry only the terminal and requestId.
     // Resolved FIRST and regardless of mode, or a tab already committed to
     // frame mode drops the only word it will ever get that its re-subscribe
     // was refused, and then waits out the bound instead.
     if (requestId != null &&
         _frameSubscribeRequestId[terminalId] == requestId) {
       _clearPendingSubscribe(terminalId);
+      if (msg.code == 'UNKNOWN_TERMINAL') {
+        _handleMissingTerminal(terminalId, tab);
+        return;
+      }
       _frameFailedIds.add(terminalId);
       _frameStatusMessage[terminalId] = msg.message;
       _publishHydration();
       return;
     }
+    // Request replies cannot act on an attachment accepted by a newer attempt.
+    if (requestId != null || msg.code == 'UNKNOWN_TERMINAL') return;
     if (tab.mode != TerminalDisplayMode.frame) return;
     final attachment = _frameAttachment[terminalId];
     // Only the LIVE attachment's own notice may act on it -- a superseded
@@ -893,6 +901,29 @@ class TerminalService {
     _publishHydration();
   }
 
+  void _handleMissingTerminal(String terminalId, TerminalTab tab) {
+    _missingTerminalIds.add(terminalId);
+    _resizeTimers.remove(terminalId)?.cancel();
+    _resizeBaseDrivers.remove(terminalId);
+    tab.ghostty.setSessionRunning(false);
+    final retained =
+        _framePaintedIds.contains(terminalId) ||
+        tab.history.rows.isNotEmpty ||
+        tab.history.boundary != null;
+    if (!retained && !_pendingTerminalIds.contains(terminalId)) {
+      _removeLocalTerminal(terminalId);
+      return;
+    }
+    _frameStatusMessage[terminalId] = 'Terminal no longer available';
+    final tabs = Map<String, TerminalTab>.from(_state.tabs);
+    tabs[terminalId] = tab.copyWith(
+      sessionState: _pendingTerminalIds.contains(terminalId)
+          ? TerminalSessionState.starting
+          : TerminalSessionState.exited,
+    );
+    _setState(_state.copyWith(tabs: tabs));
+  }
+
   Future<void> _send(Map<String, dynamic> message) async {
     await session.sendForCheckout(checkoutId, message);
   }
@@ -900,6 +931,7 @@ class TerminalService {
   // --- Message handlers ---
 
   void _handleTerminalStarted(TerminalStartedMessage msg) {
+    _missingTerminalIds.remove(msg.terminalId);
     _pendingExitCodes.remove(msg.terminalId);
     _discardFrameArchive(msg.terminalId);
     _historyRunId.remove(msg.terminalId);
@@ -949,19 +981,7 @@ class TerminalService {
 
     final activeId = _state.activeTerminalId ?? msg.terminalId;
     _setState(_state.copyWith(tabs: tabs, activeTerminalId: activeId));
-    // A start means a fresh PTY, and the agent's seq counter is per PTY —
-    // deleted on exit, so this one begins again at 1. Any cutoff still held for
-    // this id was taken from the previous generation and now sits above every
-    // seq the new one will ever emit, filtering its whole output: a blank pane
-    // behind a live process. Dropped BEFORE the pull, and unconditionally,
-    // because the reply is not guaranteed and losing a live cutoff costs a few
-    // duplicated lines where keeping a dead one costs the pane. The exit
-    // handler covers the ordinary case; this covers the start whose exit was
-    // never delivered, which is every window where outbound frames were dropped
-    // (a remote-access flip drops status frames too).
-    // Newly-discovered (or respawned) terminal — negotiate a protocol for it.
-    // Legacy fetches its scrollback so stale terminal:output can be dropped
-    // via the per-terminal seq cutoff; frame mode subscribes instead.
+    // A same-id respawn requires a fresh attachment even if its exit was lost.
     _attachTerminal(msg.terminalId);
   }
 
@@ -1034,6 +1054,11 @@ class TerminalService {
     final discovered = <String>[];
 
     for (final info in msg.terminals) {
+      if (_missingTerminalIds.contains(info.terminalId)) {
+        final retained = _state.tabs[info.terminalId];
+        if (retained != null) newTabs[info.terminalId] = retained;
+        continue;
+      }
       if (_canceledPendingTerminalIds.contains(info.terminalId)) {
         if (info.running) {
           requestStop(info.terminalId);
@@ -1132,6 +1157,10 @@ class TerminalService {
     for (final terminalId in _pendingTerminalIds) {
       final pending = _state.tabs[terminalId];
       if (pending != null) newTabs.putIfAbsent(terminalId, () => pending);
+    }
+    for (final terminalId in _missingTerminalIds) {
+      final retained = _state.tabs[terminalId];
+      if (retained != null) newTabs.putIfAbsent(terminalId, () => retained);
     }
 
     var activeId = _state.activeTerminalId;
@@ -1251,6 +1280,7 @@ class TerminalService {
   /// queued, and the pane says so instead. Callers that report success to the
   /// user must honour this.
   bool sendInput(String terminalId, String data) {
+    if (_missingTerminalIds.contains(terminalId)) return false;
     if (!session.transport.isEstablished) {
       _syncInputPaused();
       return false;
@@ -1351,6 +1381,23 @@ class TerminalService {
     String? cwd,
     Map<String, String>? env,
   }) {
+    final tab = _state.tabs[terminalId];
+    if (tab != null) {
+      // A reply to the previous run must not delete a start awaiting admission.
+      _clearPendingSubscribe(terminalId);
+      _pendingTerminalIds.add(terminalId);
+      _pendingTerminalTimers.remove(terminalId)?.cancel();
+      _pendingTerminalTimers[terminalId] = Timer(
+        terminalStartTimeout,
+        () => _expirePendingTerminal(terminalId),
+      );
+      final tabs = Map<String, TerminalTab>.from(_state.tabs);
+      tabs[terminalId] = tab.copyWith(
+        sessionState: TerminalSessionState.starting,
+        clearExitCode: true,
+      );
+      _setState(_state.copyWith(tabs: tabs));
+    }
     _send(
       createAbMessage('terminal:start', {
         'terminalId': terminalId,
@@ -1368,13 +1415,6 @@ class TerminalService {
   void createAdHocTerminal(String terminalId, {required String name}) {
     _deletedTerminalIds.remove(terminalId);
     _canceledPendingTerminalIds.remove(terminalId);
-    _pendingTerminalIds.add(terminalId);
-    _pendingTerminalTimers.remove(terminalId)?.cancel();
-    _pendingTerminalTimers[terminalId] = Timer(
-      terminalStartTimeout,
-      () => _expirePendingTerminal(terminalId),
-    );
-
     final tabs = Map<String, TerminalTab>.from(_state.tabs);
     final existing = tabs[terminalId];
     tabs[terminalId] = existing == null
@@ -1430,6 +1470,11 @@ class TerminalService {
       _canceledPendingTerminalIds.add(terminalId);
     }
     _settlePendingTerminal(terminalId);
+    _missingTerminalIds.remove(terminalId);
+    _removeLocalTerminal(terminalId);
+  }
+
+  void _removeLocalTerminal(String terminalId) {
     final tab = _state.tabs[terminalId];
     if (tab == null) return;
     _resizeTimers.remove(terminalId)?.cancel();
@@ -1618,6 +1663,7 @@ class TerminalService {
     _resizeBaseDrivers.clear();
     _deletedTerminalIds.clear();
     _pendingTerminalIds.clear();
+    _missingTerminalIds.clear();
     _canceledPendingTerminalIds.clear();
     await _stateController.close();
     await _notificationController.close();

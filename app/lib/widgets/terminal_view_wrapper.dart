@@ -1215,6 +1215,13 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// mobile focus resume — training the user to ignore it.
   ({String? label, AbStatusTone tone, int? startedAtMs, bool retry, bool dim})
   _chromeFor(TerminalHydration hydration) => switch (hydration.stage) {
+    TerminalAttachStage.unavailable => (
+      label: 'Terminal no longer available',
+      tone: AbStatusTone.neutral,
+      startedAtMs: null,
+      retry: false,
+      dim: false,
+    ),
     // The frame protocol's own text, when it sent one, beats the generic
     // label -- legacy's `hydration.message` is always null (see its own doc
     // comment), so this is inert there and the pre-existing generic copy is
