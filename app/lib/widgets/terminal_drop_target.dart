@@ -160,11 +160,20 @@ class TerminalDropTarget extends StatefulWidget {
   const TerminalDropTarget({
     super.key,
     required this.child,
+    required this.accepting,
     required this.attach,
     required this.onError,
   });
 
   final Widget child;
+
+  /// False while the pane will refuse a dropped file anyway — the scrollback
+  /// reader is up. The refusal is made at the DROP OPERATION, before the OS
+  /// commits to an offer: a `copy` answered here paints "Drop to attach" over
+  /// the archive and ends in a refusal snackbar, which is the one thing this
+  /// widget's hover state exists not to do.
+  final bool accepting;
+
   final AttachRunner attach;
   final void Function(String message) onError;
 
@@ -209,6 +218,7 @@ class _TerminalDropTargetState extends State<TerminalDropTarget> {
       onDropLeave: (_) => _setHovering(false),
       onDropEnded: (_) => _setHovering(false),
       onDropOver: (event) {
+        if (!widget.accepting) return DropOperation.none;
         if (!event.session.allowedOperations.contains(DropOperation.copy)) {
           return DropOperation.none;
         }
@@ -241,7 +251,11 @@ class _TerminalDropTargetState extends State<TerminalDropTarget> {
       child: Stack(
         children: [
           widget.child,
-          if (_hovering) const Positioned.fill(child: _DropHoverOverlay()),
+          // Held to the same condition as the operation rather than to
+          // `_hovering` alone, so the offer cannot outlive the acceptance
+          // whatever order the platform calls the region's callbacks in.
+          if (_hovering && widget.accepting)
+            const Positioned.fill(child: _DropHoverOverlay()),
         ],
       ),
     );

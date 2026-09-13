@@ -4,7 +4,13 @@ export type Channel = "control" | "preview";
 
 export interface TransportSubscriber {
   /** Bus calls this to deliver an outbound message to the wire. */
-  deliver(msg: AbMessage, channel: Channel): void;
+  deliver(msg: AbMessage, channel: Channel, signal?: AbortSignal): unknown;
+  /** Which wire this subscriber IS, for the audience-targeted publishes below.
+   *  Left undefined by the subscribers that are not a client at all — the
+   *  work-status fold and the push dispatcher — and those receive every emit
+   *  regardless of targeting, because targeting decides what a CLIENT sees, not
+   *  what the core gets to observe. */
+  readonly audience?: InboundSource;
 }
 
 /** Where an inbound frame entered the core. The allowlist gate keys off this:
@@ -117,10 +123,47 @@ export class MessageBus {
     this.emit(msg, channel, { force: true });
   }
 
+  /** Publish to ONE wire only, plus every audience-less subscriber.
+   *
+   *  For a reply that belongs to one client's own request rather than to the
+   *  project: a terminal frame answers the viewer that subscribed, and pushing
+   *  it at every other connected client costs them the bytes and hands them a
+   *  stream they never asked for. Never for a durable/replayed type — the cache
+   *  is keyed per type, not per audience, so a targeted frame would be replayed
+   *  to whoever reconnects next. */
+  publishOnly(msg: AbMessage, channel: Channel, only: InboundSource): void {
+    this.emit(msg, channel, { audience: { only } });
+  }
+
+  async deliverTo(msg: AbMessage, channel: Channel, only: InboundSource, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
+    const pending: Promise<unknown>[] = [];
+    for (const sub of this.subs) {
+      if (sub.audience !== undefined && sub.audience !== only) continue;
+      pending.push(Promise.resolve(sub.deliver(msg, channel, signal)));
+    }
+    await Promise.all(pending);
+  }
+
+  /** Publish to every wire EXCEPT the ones listed, plus every audience-less
+   *  subscriber.
+   *
+   *  For a stream one client has opted out of while the others have not — the
+   *  terminal-frame mode exclusivity gate, where a phone watching frames must
+   *  not silence the desktop's legacy output for the same terminal. Same
+   *  restriction as [publishOnly]: streaming types only. */
+  publishExcept(msg: AbMessage, channel: Channel, except: ReadonlySet<InboundSource>): void {
+    this.emit(msg, channel, { audience: { except } });
+  }
+
   private emit(
     msg: AbMessage,
     channel: Channel,
-    { force = false, deliver = true }: { force?: boolean; deliver?: boolean },
+    { force = false, deliver = true, audience }: {
+      force?: boolean;
+      deliver?: boolean;
+      audience?: { only?: InboundSource; except?: ReadonlySet<InboundSource> };
+    },
   ): void {
     const key = this.replayKey(msg);
     if (key !== null) {
@@ -140,6 +183,13 @@ export class MessageBus {
     // project-core.ts attachRelayStream).
     if (!deliver) return;
     for (const s of this.subs) {
+      // PTY bytes remain observable internally; app displays are frame-only.
+      if (s.audience !== undefined &&
+          (msg.type === "terminal:output" || msg.type === "terminal:snapshot")) continue;
+      if (audience && s.audience !== undefined) {
+        if (audience.only !== undefined && s.audience !== audience.only) continue;
+        if (audience.except?.has(s.audience)) continue;
+      }
       s.deliver(msg, channel);
     }
   }

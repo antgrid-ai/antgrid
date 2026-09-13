@@ -366,7 +366,7 @@ test("a configured terminal in a managed checkout is attributed to that checkout
   )).toBe(true);
 });
 
-test("a terminal snapshot request is answered by the asking checkout alone", async () => {
+test("a retired terminal snapshot request returns one checkout-scoped upgrade error", async () => {
   await initRepo();
   const { bus, sent } = await startWithIsolatedSession();
   // cwd deliberately outside the project: on Windows a live PTY holds its own
@@ -386,12 +386,11 @@ test("a terminal snapshot request is answered by the asking checkout alone", asy
     "control",
     "loopback",
   );
-  await waitFor(sent, (message) => message.type === "terminal:snapshot");
-  // Serializing a screen is real work and every runtime sees the frame, so the
-  // guard has to short-circuit before the isolated runtime does any of it —
-  // otherwise the app applies whichever reply lands last.
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  expect(sent.filter((message) => message.type === "terminal:snapshot").length).toBe(1);
+  const reply = await waitFor(sent, (message) => message.type === "terminal:display:status");
+  expect(reply).toMatchObject({ code: "UPGRADE_REQUIRED", checkoutId: "main" });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(sent.filter((message) => message.type === "terminal:display:status").length).toBe(1);
+  expect(sent.filter((message) => message.type === "terminal:snapshot")).toEqual([]);
 });
 
 test("a terminal.snapshot RPC is answered once, with no broadcast alongside it", async () => {

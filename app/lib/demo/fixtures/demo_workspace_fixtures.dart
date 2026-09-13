@@ -431,53 +431,36 @@ const Map<String, Object?> kDemoTerminalStarted = <String, Object?>{
 /// look like it had swapped shells the moment the user typed into it.
 const String kDemoShellPrompt = 'demo-shop \$ ';
 
-const Map<String, Object?> kDemoTerminalSnapshot = <String, Object?>{
-  'type': 'terminal:snapshot',
-  'checkoutId': 'main',
-  'terminalId': kDemoTerminalId,
-  'seq': 1,
-  // CRLF, not the bare LF a `'''` block carries: this goes straight into the
-  // VTE, where LF without LNM is index-only — it drops a row without returning
-  // the carriage, so the canned output rendered as a staircase. The live
-  // script's `terminal:output` frames spell it out for the same reason.
-  'scrollback':
-      '${kDemoShellPrompt}bun test\r\n'
-      'bun test v1.3.14\r\n'
-      '\r\n'
-      'tests/cart.test.ts:\r\n'
-      '  (pass) sums line totals [1.20ms]\r\n'
-      '\r\n'
-      'tests/checkout.test.ts:\r\n'
-      '  (pass) rejects an empty cart [0.84ms]\r\n'
-      '  (pass) rejects a malformed email [0.61ms]\r\n'
-      '\r\n'
-      ' 3 pass\r\n'
-      ' 0 fail\r\n'
-      'Ran 3 tests across 2 files. [42.00ms]\r\n'
-      '\r\n'
-      '$kDemoShellPrompt',
-};
+const String kDemoTerminalScreenAnsi =
+    '${kDemoShellPrompt}bun test\r\n'
+    'bun test v1.3.14\r\n'
+    '\r\n'
+    'tests/cart.test.ts:\r\n'
+    '  (pass) sums line totals [1.20ms]\r\n'
+    '\r\n'
+    'tests/checkout.test.ts:\r\n'
+    '  (pass) rejects an empty cart [0.84ms]\r\n'
+    '  (pass) rejects a malformed email [0.61ms]\r\n'
+    '\r\n'
+    ' 3 pass\r\n'
+    ' 0 fail\r\n'
+    'Ran 3 tests across 2 files. [42.00ms]\r\n'
+    '\r\n'
+    '$kDemoShellPrompt';
 
 /// Logs behind the `dev` service's "View logs". A service terminal has no
 /// prompt — it is one long-running process — so this ends mid-stream rather
-/// than on [kDemoShellPrompt]. CRLF for the reason [kDemoTerminalSnapshot]
-/// gives.
-const Map<String, Object?> kDemoServiceSnapshot = <String, Object?>{
-  'type': 'terminal:snapshot',
-  'checkoutId': 'main',
-  'terminalId': kDemoServiceTerminalId,
-  'seq': 1,
-  'scrollback':
-      '\$ bun run dev\r\n'
-      '\r\n'
-      '  VITE v5.4.8  ready in 412 ms\r\n'
-      '\r\n'
-      '  ➜  Local:   $kDemoPreviewUrlString/\r\n'
-      '  ➜  press h + enter to show help\r\n'
-      '\r\n'
-      '  8:41:02 AM [vite] hmr update /src/cart.ts\r\n'
-      '  8:41:19 AM [vite] hmr update /src/checkout.ts\r\n',
-};
+/// than on [kDemoShellPrompt].
+const String kDemoServiceScreenAnsi =
+    '\$ bun run dev\r\n'
+    '\r\n'
+    '  VITE v5.4.8  ready in 412 ms\r\n'
+    '\r\n'
+    '  ➜  Local:   $kDemoPreviewUrlString/\r\n'
+    '  ➜  press h + enter to show help\r\n'
+    '\r\n'
+    '  8:41:02 AM [vite] hmr update /src/cart.ts\r\n'
+    '  8:41:19 AM [vite] hmr update /src/checkout.ts\r\n';
 
 const Map<String, Object?> kDemoPortsUpdate = <String, Object?>{
   'type': 'ports:update',
