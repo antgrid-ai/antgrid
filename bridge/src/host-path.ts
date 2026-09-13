@@ -1,5 +1,6 @@
 import { delimiter, join } from "node:path";
 import { homedir } from "node:os";
+import { AGENTS } from "antgrid-agents/builtins";
 
 // Dirs where CLI agents install but a macOS/Linux GUI-launched process won't see
 // on PATH: a Finder/Dock (or systemd user-session) launch gives the app a
@@ -14,7 +15,7 @@ export function wellKnownBinDirs(): string[] {
   const home = homedir();
   return [
     join(home, ".local/bin"),        // native installer default (claude 2.1+)
-    join(home, ".claude/local"),     // legacy claude local install
+    ...Object.values(AGENTS).flatMap((agent) => agent.discoveryPaths?.() ?? []),
     join(home, ".bun/bin"),
     "/opt/homebrew/bin",             // Apple-silicon Homebrew
     "/usr/local/bin",                // Intel Homebrew / manual installs

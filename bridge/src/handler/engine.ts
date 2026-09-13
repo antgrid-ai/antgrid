@@ -5,6 +5,7 @@ import {
   type AbMessage,
   type HandlerEntitlement,
   type HandlerPersonality,
+  type HandlerAvailability,
 } from "../protocol";
 import { classifyDestructive, describeWarning, type FloorWarning } from "./destructive-floor";
 import {
@@ -36,9 +37,9 @@ import {
   type InstructionItem, type ItemStatus, type RejectionCode,
 } from "./backlog";
 import { checkReplyShape, findCommand, oneLine, replyShape } from "./reply-shape";
-import type { CapCommand } from "../structured/chat-session";
+import type { CapCommand } from "antgrid-agents/structured/chat-session";
 import type { SessionAdapter } from "./session-adapter";
-import { handlerObservable, judgeCapable } from "../agents/registry";
+import { handlerObservable, judgeCapable } from "antgrid-agents/builtins";
 import { createEntitlementReader, type EntitlementReader } from "../entitlement";
 import { type HandlerDecision, DEFAULT_PERSONALITY } from "./decision";
 import {
@@ -446,6 +447,7 @@ export function quickChoicesFor(p: {
 }
 
 export interface HandlerEngineDeps {
+  availability?: (terminalId: string) => HandlerAvailability;
   projectId: string;
   // Per terminal, not per project: an isolated session runs in its own managed
   // worktree, and both the judge's cwd and the destructive floor's inside-project
@@ -2567,6 +2569,7 @@ export class HandlerEngine {
       // Re-derived on every emit rather than frozen at arm time: a slot's mode
       // and its judge pick both change under a live arm.
       observability: this.observabilityFor(terminalId),
+      availability: this.deps.availability?.(terminalId),
       // Resolved, never the raw field: the app renders the picker off this, and
       // an absent value would leave it showing nothing while the judge runs
       // under a posture all the same.

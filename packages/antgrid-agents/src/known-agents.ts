@@ -1,0 +1,106 @@
+// Thin accessors over the agent registry (./agents/registry). The data itself
+// lives there; these exist so call sites that only need one field don't have to
+// know about AgentKey widening or the "unknown tool" fallbacks.
+
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { AGENTS, agentSpec } from "./agents/registry";
+import { resolveAbDir } from "./host";
+import type { TerminalObservationAvailability } from "./agents/types";
+
+function expand(p: string | null): string | null {
+  if (!p) return p;
+  if (p.startsWith("~")) return join(homedir(), p.slice(2));
+  return p;
+}
+
+export interface ResolvedAgent {
+  bin: string;
+  hookDir: string | null;
+  /** Default launch argv for this tool (see AgentSpec.args). Never null. */
+  args: string[];
+}
+
+export function resolveAgent(tool: string): ResolvedAgent {
+  const entry = agentSpec(tool);
+  if (!entry) throw new Error(`unknown agent: ${tool}`);
+  return { bin: entry.bin, hookDir: expand(entry.hookDir), args: entry.args ?? [] };
+}
+
+export function listKnownTools(): string[] {
+  return Object.keys(AGENTS);
+}
+
+/**
+ * Per-agent launch environment. Separate from `resolveAgent` (which stays
+ * pure) because some agents need a generated config file on disk before
+ * launch. Only applied on the registry-key launch path (mirrors how
+ * `AgentSpec.args` is applied), not the custom-command / antgrid.yaml paths.
+ *
+ * Some agents won't emit terminal notifications until a config enables them.
+ * We can't edit the user's own config, so we point a per-agent env var at a
+ * bridge-owned file that flips the relevant default. Each injected file merges
+ * BELOW the user's config (opencode/kilo: TUI_CONFIG precedence), so an
+ * explicit user opt-out still wins.
+ * Driving the actual focus/blur state is the app+engine's job (DEC 1004) — see
+ * the per-agent notes in AGENTS for which agents need injection vs. ride
+ * the default-blur alone.
+ *
+ * Two safety rails (see `injectConfig`): if the user already set the env var we
+ * leave it alone (their file wins), and if writing our file fails we omit the
+ * var rather than aborting the launch.
+ */
+export function resolveAgentEnv(
+  tool: string,
+  abDir: string = resolveAbDir(),
+): Record<string, string> {
+  return agentSpec(tool)?.env?.({ abDir }) ?? {};
+}
+
+export function notificationSourceFor(tool: string): "plugin" | "osc" {
+  return agentSpec(tool)?.notificationSource ?? "osc";
+}
+
+export function titleSourceFor(tool: string): "structured" | "osc" {
+  return agentSpec(tool)?.titleSource ?? "osc";
+}
+
+/** True when the agent's OSC-2 title is NOT a usable session name (antigravity's
+ *  `agy` publishes its executable path). Callers must treat the substituted
+ *  display name as a placeholder — never let it overwrite an already-resolved
+ *  session name (see the OSC guard in agent-core). Unknown tools default false. */
+export function isOscTitleUnusable(tool: string | undefined): boolean {
+  return tool ? agentSpec(tool)?.oscTitleUnusable === true : false;
+}
+
+/**
+ * The session name to derive from an agent's OSC-2 terminal title. Most agents
+ * publish a useful name there (claude → "Claude Code", cursor → "Cursor Agent"),
+ * so the raw title flows through. But antigravity's `agy` publishes its own
+ * executable PATH — never a usable name — so we substitute the agent's label;
+ * the plugin hook later upgrades it to the real conversation title.
+ * `tool` is undefined for non-session terminals (service PTYs), whose raw title
+ * passes through unchanged.
+ */
+export function oscTitleForNaming(tool: string | undefined, rawTitle: string): string {
+  const entry = tool ? agentSpec(tool) : undefined;
+  return entry?.oscTitleUnusable ? entry.label : rawTitle;
+}
+
+/** Only a working installed notification channel may suppress OSC fallback. */
+export function suppressesOscNotifications(
+  tool: string,
+  notificationsInjected: boolean | TerminalObservationAvailability | undefined,
+): boolean {
+  const available = typeof notificationsInjected === "object" ? notificationsInjected.notifications : notificationsInjected !== false;
+  return notificationSourceFor(tool) === "plugin" && available;
+}
+
+/** Title correlation can fail independently of notification installation. */
+export function suppressesOscTitle(
+  tool: string,
+  notificationsInjected: boolean | TerminalObservationAvailability | undefined,
+): boolean {
+  const available = typeof notificationsInjected === "object" ? notificationsInjected.titles : notificationsInjected !== false;
+  return titleSourceFor(tool) === "structured" && available;
+}

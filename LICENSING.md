@@ -8,6 +8,7 @@ enclosing directory, and [LICENSE.md](LICENSE.md) at the root where there is non
 |---|---|
 | `packages/antgrid-wire` | [Apache-2.0](packages/antgrid-wire/LICENSE) · [NOTICE](packages/antgrid-wire/NOTICE) |
 | `packages/antgrid_relay_client` | [Apache-2.0](packages/antgrid_relay_client/LICENSE) · [NOTICE](packages/antgrid_relay_client/NOTICE) |
+| `packages/antgrid-agents` | [Elastic License 2.0](packages/antgrid-agents/LICENSE) |
 | `app/assets/fonts/` | SIL Open Font License 1.1 ([OFL.txt](app/assets/fonts/OFL.txt)) |
 | Everything else — `bridge/`, `relay/`, `web/`, `app/`, `site/`, `evals/`, `packages/antgrid_eval_client` | [Elastic License 2.0](LICENSE.md) |
 

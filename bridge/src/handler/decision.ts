@@ -1,11 +1,11 @@
 // bridge/src/handler/decision.ts
 import { z } from "zod";
-import { agentSpec } from "../agents/registry";
-import { pickHeadlessFrom, type HeadlessCommand, type JudgeTier } from "../agents/types";
-import type { CapCommand } from "../structured/chat-session";
+import { agentSpec } from "antgrid-agents/builtins";
+import { pickHeadlessFrom, type HeadlessCommand, type JudgeTier } from "antgrid-agents/contracts";
+import type { CapCommand } from "antgrid-agents/structured/chat-session";
 import { ItemTransitionSchema } from "./backlog";
 import { extractJsonObject } from "./json-extract";
-import { unwrapEnvelope } from "../agents/usage-envelope";
+import { unwrapEnvelope } from "antgrid-agents/usage-envelope";
 import { MAX_REPLY_CHARS } from "./reply-shape";
 import type { HandlerPersonality } from "../protocol";
 
@@ -58,7 +58,7 @@ export type HandlerDecision = z.infer<typeof HandlerDecisionSchema>;
 
 // Re-exported, not redefined: the reaches an agent declares live on
 // AgentSpec.headless, and a second spelling here could drift from them.
-export type { JudgeTier } from "../agents/types";
+export type { JudgeTier } from "antgrid-agents/contracts";
 
 // The judge command for an arbitrary tool string, read off the one place a tool
 // is described. Tier and command come back together because they are one field

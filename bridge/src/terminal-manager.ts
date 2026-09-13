@@ -3,7 +3,7 @@ import {
   buildSpawnEnv,
   WINDOWS_SHUTDOWN_GRACE_MS,
 } from "./terminal-session";
-import type { GracefulExitAsk } from "./agents/types";
+import type { GracefulExitAsk } from "antgrid-agents/contracts";
 import { ScrollbackBuffer } from "./scrollback";
 import { TerminalModeTracker } from "./terminal-modes";
 import { MAX_ATTACH_BLOB, TerminalScreen } from "./terminal-screen";
@@ -24,6 +24,7 @@ export interface TerminalSpawnConfig {
   terminalId?: string;
   name?: string;
   command?: string;
+  invocationKind?: "exec" | "shell";
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
@@ -54,7 +55,7 @@ interface StoppedTerminalInfo {
 
 export interface TerminalManagerCallbacks {
   onTerminalOutput?: (terminalId: string, data: string) => void;
-  onTerminalExited?: (terminalId: string) => void;
+  onTerminalExited?: (terminalId: string, runId?: string) => void;
   onTerminalNotification?: (terminalId: string) => void;
   onTerminalTitle?: (terminalId: string, title: string) => void;
   /** This terminal is gone for good — not exited, FORGOTTEN: nothing will name
@@ -94,7 +95,16 @@ export function gracefulBudget(
 }
 
 export class TerminalManager {
+  enableHookFallback(terminalId: string): void {
+    const session = this.sessions.get(terminalId);
+    session?.enableOscNotifications();
+    session?.enableOscTitle();
+  }
+  confirmHookAlive(terminalId: string): void {
+    this.sessions.get(terminalId)?.confirmHookAlive();
+  }
   private sessions = new Map<string, TerminalSession>();
+  private runIds = new WeakMap<TerminalSession, string>();
   private scrollbacks = new Map<string, ScrollbackBuffer>();
   /** Paired 1:1 with `scrollbacks` — the tail alone cannot carry mode state. */
   private modeTrackers = new Map<string, TerminalModeTracker>();
@@ -156,6 +166,7 @@ export class TerminalManager {
     const terminalId = config.terminalId ?? crypto.randomUUID();
 
     if (this.sessions.has(terminalId)) {
+      const previousRunId = this.runIds.get(this.sessions.get(terminalId)!);
       log.warn(`Terminal "${terminalId}" already exists, killing first`);
       this.kill(terminalId);
       // The replaced run's exit lands later, on a slot this spawn now owns,
@@ -172,7 +183,7 @@ export class TerminalManager {
       // the ask and the exit is now seconds, which is long enough for the user
       // to press Stop and then Start (`SessionManager.stopTerminal` ->
       // `startNow`).
-      this.callbacks.onTerminalExited?.(terminalId);
+      this.callbacks.onTerminalExited?.(terminalId, previousRunId);
     }
 
     // Clear from stopped list since we're re-spawning
@@ -204,6 +215,7 @@ export class TerminalManager {
       terminalId,
       name: config.name,
       command: config.command,
+      invocationKind: config.invocationKind,
       args: config.args,
       cwd: config.cwd,
       env,
@@ -286,7 +298,7 @@ export class TerminalManager {
             this.screens.delete(terminalId);
           }
           this.connState.clearTerminal(terminalId);
-          this.callbacks.onTerminalExited?.(terminalId);
+          this.callbacks.onTerminalExited?.(terminalId, config.env?.ANTGRID_RUN_ID);
           return;
         }
 
@@ -313,6 +325,7 @@ export class TerminalManager {
     for (const fn of this.sessionObservers) {
       try { fn(session); } catch { /* ignore */ }
     }
+    if (config.env?.ANTGRID_RUN_ID) this.runIds.set(session, config.env.ANTGRID_RUN_ID);
     session.spawn();
     log.info(`Terminal "${terminalId}" spawned (${config.name ?? "shell"})`);
     return terminalId;

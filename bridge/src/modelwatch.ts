@@ -1,3 +1,4 @@
+import type { HeadlessUsageTokens } from "antgrid-agents/contracts";
 import { createHash } from "node:crypto";
 
 /** Why the bridge spawned a model. Not derivable inside the spawn itself — the
@@ -92,28 +93,7 @@ export interface ModelCallEvent {
   /** Vendor-tagged and never summed: the three CLIs report dollars, nothing, and
    *  fractional premium requests, so tokens and duration are the only
    *  denominators all of them share. */
-  usage?: {
-    inputTokens?: number;
-    cacheReadTokens?: number;
-    cacheWriteTokens?: number;
-    outputTokens?: number;
-    /** Tokens the model spent thinking. Whether they are ALSO counted in
-     *  `outputTokens` is the vendor's choice and differs between them —
-     *  claude reports thinking as a breakdown of its output, codex and
-     *  opencode as a sibling of theirs — so the two are never added together.
-     *  Each reader states which it is at the path it reads. */
-    reasoningTokens?: number;
-    money?: { unit: string; amount: number };
-    numTurns?: number;
-    permissionDenials?: number;
-    /** How many models the vendor billed for this ONE call, when it billed more
-     *  than one. Present because the counts above are then their SUM while
-     *  `actualModel` can name only one of them: a measured claude call reported
-     *  901 input tokens of which the named model spent 2, the rest going to a
-     *  background model the caller never asked for. Absent means one model, or
-     *  a vendor that does not break its usage down by model at all. */
-    modelsBilled?: number;
-  };
+  usage?: HeadlessUsageTokens;
 
   outcome?: string;
   /** The shape-rejection reason, the parse error — the half of a failed call

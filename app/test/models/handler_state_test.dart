@@ -25,15 +25,40 @@ HandlerEscalation _esc(String id, {required String urgency, required int at}) =>
     );
 
 void main() {
+  test('runtime availability preserves support and older bridge absence', () {
+    final wire = <String, dynamic>{
+      'terminalId': 't1',
+      'state': 'watching',
+      'pendingEscalations': 0,
+      'armedAt': 1,
+      'goal': 'goal',
+      'backlog': [],
+      'observability': 'full',
+    };
+    expect(HandlerSessionState.fromWire(wire)!.availability, isNull);
+    wire['availability'] = {
+      'state': 'unavailable',
+      'reason': 'Waiting for restart',
+    };
+    final session = HandlerSessionState.fromWire(wire)!;
+    expect(session.observability, HandlerObservability.full);
+    expect(session.availability!.state, HandlerAvailabilityState.unavailable);
+    expect(session.availability!.note, 'Waiting for restart');
+    expect(
+      session.copyWith(pendingEscalations: 1).availability,
+      same(session.availability),
+    );
+    wire['availability'] = {'state': 'future-value'};
+    expect(HandlerSessionState.fromWire(wire)!.availability, isNull);
+  });
   group('compareEscalations', () {
     test('urgent first, and oldest first inside each band', () {
-      final ordered =
-          [
-            _esc('normal-old', urgency: 'normal', at: 1),
-            _esc('urgent-new', urgency: 'high', at: 9),
-            _esc('normal-new', urgency: 'normal', at: 7),
-            _esc('urgent-old', urgency: 'high', at: 5),
-          ]..sort(compareEscalations);
+      final ordered = [
+        _esc('normal-old', urgency: 'normal', at: 1),
+        _esc('urgent-new', urgency: 'high', at: 9),
+        _esc('normal-new', urgency: 'normal', at: 7),
+        _esc('urgent-old', urgency: 'high', at: 5),
+      ]..sort(compareEscalations);
       expect(ordered.map((e) => e.escalationId), [
         'urgent-old',
         'urgent-new',
@@ -45,11 +70,10 @@ void main() {
     test('age never crosses the band', () {
       // The oldest row on the list still sorts under a `high` that arrived a
       // moment ago: one has been waiting, the other is holding the agent up.
-      final ordered =
-          [
-            _esc('ancient', urgency: 'normal', at: 1),
-            _esc('fresh', urgency: 'high', at: 9999),
-          ]..sort(compareEscalations);
+      final ordered = [
+        _esc('ancient', urgency: 'normal', at: 1),
+        _esc('fresh', urgency: 'high', at: 9999),
+      ]..sort(compareEscalations);
       expect(ordered.first.escalationId, 'fresh');
     });
 
@@ -57,11 +81,10 @@ void main() {
       // The unknown band is the safe one. Reading an unrecognised word as
       // urgent would let a bridge outrank the one value the app knows means
       // the agent is stopped.
-      final ordered =
-          [
-            _esc('invented', urgency: 'critical', at: 1),
-            _esc('known', urgency: 'high', at: 9),
-          ]..sort(compareEscalations);
+      final ordered = [
+        _esc('invented', urgency: 'critical', at: 1),
+        _esc('known', urgency: 'high', at: 9),
+      ]..sort(compareEscalations);
       expect(ordered.first.escalationId, 'known');
     });
   });
@@ -436,7 +459,10 @@ void main() {
 
     final mixed = HandlerState(
       defaultTool: 'claude',
-      sessions: {'t1': _session('t1', pending: 1), 't2': _session('t2', pending: 2)},
+      sessions: {
+        't1': _session('t1', pending: 1),
+        't2': _session('t2', pending: 2),
+      },
       escalations: [
         _esc('e1', urgency: 'normal', at: 1),
         HandlerEscalation(

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { OpencodeDriver, type OpencodeClientLike, type OpencodeEvent } from "../src/agents/opencode/chat-backend";
-import type { DriverLifecycleEvent } from "../src/agents/types";
+import { OpencodeDriver, type OpencodeClientLike, type OpencodeEvent } from "../../packages/antgrid-agents/src/agents/opencode/chat-backend";
+import type { DriverLifecycleEvent } from "../../packages/antgrid-agents/src/agents/types";
 import type { AbMessage } from "../src/protocol";
 
 // Fake client: a manual event queue + recorded calls. events() yields whatever

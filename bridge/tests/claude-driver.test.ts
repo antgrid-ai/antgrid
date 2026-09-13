@@ -1,6 +1,6 @@
 import { describe, it, expect, setSystemTime } from "bun:test";
-import { ClaudeDriver, prettyModelName } from "../src/agents/claude-code/chat-backend";
-import type { ClaudeQueryLike, PromptStreamController } from "../src/agents/claude-code/spawn";
+import { ClaudeDriver, prettyModelName } from "../../packages/antgrid-agents/src/agents/claude-code/chat-backend";
+import type { ClaudeQueryLike, PromptStreamController } from "../../packages/antgrid-agents/src/agents/claude-code/spawn";
 import type { AbMessage } from "../src/protocol";
 
 describe("prettyModelName", () => {

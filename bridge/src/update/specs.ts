@@ -7,9 +7,9 @@
 // refuse to self-update (exit non-zero, or no-op). We surface that output as a
 // failed result and never try to interpret or repair the install.
 
-import { resolveToolLaunchPath } from "../agents/launch-path";
-import { AGENTS } from "../agents/registry";
-import type { AgentUpdate } from "../agents/types";
+import { resolveToolLaunchPath } from "antgrid-agents/launch-path";
+import { AGENTS } from "antgrid-agents/builtins";
+import type { AgentUpdate } from "antgrid-agents/contracts";
 import { createUpdateChecker, fetchNpmLatest } from "./version";
 
 export { runAgentUpdate, parseAgentVersion, fetchNpmLatest } from "./version";

@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { AGENTS, BY_HOOK_NAME } from "./agents/registry";
-import type { HookInvocation, HookPath, HookPost } from "./agents/hook-posts";
-import type { HookProfile } from "./agents/types";
+import { AGENTS, BY_HOOK_NAME } from "antgrid-agents/builtins";
+import type { HookInvocation, HookPath, HookPost } from "antgrid-agents/hook-posts";
+import type { HookProfile } from "antgrid-agents/contracts";
 
 export type { HookInvocation, HookPath, HookPost };
 
@@ -60,11 +60,13 @@ async function buildPosts(
   if (!hooks?.events.includes(invocation.event)) return [];
   const port = resolvePort(hooks, deps);
   if (port === null) return [];
-  return hooks.toPosts(invocation, {
+  const posts = await hooks.toPosts(invocation, {
     port,
     terminalId: deps.env.ANTGRID_TERMINAL_ID,
     readStdin: deps.readStdin,
   });
+  const runId = deps.env.ANTGRID_RUN_ID;
+  return runId ? posts.map((post) => ({ ...post, body: { ...post.body, runId } })) : posts;
 }
 
 async function defaultPost(post: HookPost): Promise<void> {

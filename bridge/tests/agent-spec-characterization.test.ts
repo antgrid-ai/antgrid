@@ -1,3 +1,5 @@
+import { bundledPluginPath } from "antgrid-agents/assets";
+import { NO_INJECTION, NO_OBSERVATION } from "../../packages/antgrid-agents/src/agents/launch-inject";
 // Bug-for-bug snapshot of every per-agent behavior, one case per (agent x
 // concern), taken at the seams that survive the AgentSpec refactor. Later
 // phases may rewrite this file's IMPORT lines as symbols move into
@@ -19,9 +21,9 @@ import { pathToFileURL } from "node:url";
 import { Database } from "bun:sqlite";
 
 import { agentSessionGone, resumeArgv, sessionResumable } from "../src/agent-resume";
-import { initialPromptArgv } from "../src/initial-prompt";
+import { initialPromptArgv } from "../../packages/antgrid-agents/src/initial-prompt";
 import { updateSpecFor } from "../src/update/specs";
-import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
+import { augmentAgentLaunch } from "../../packages/antgrid-agents/src/agent-launch-augmenter";
 import { runHookInvocation, type HookPost } from "../src/hook-runner";
 import { assembleContext } from "../src/handler/context";
 import { type HookCommand } from "../src/hook-command";
@@ -157,8 +159,7 @@ describe("resume pre-flight", () => {
         agentSessionGone({
           tool: key,
           agentSessionId: RESUME_ID,
-          codexHome: codexStore(["other"]),
-          copilotHome: copilotStore(["other"]),
+          adapterOptions: { "codex": { codexHome: codexStore(["other"]) }, "github-copilot": { copilotHome: copilotStore(["other"]) } },
         }),
       ).toBe(storeMissRefusesResume[key]);
     });
@@ -168,8 +169,7 @@ describe("resume pre-flight", () => {
         agentSessionGone({
           tool: key,
           agentSessionId: RESUME_ID,
-          codexHome: join(tmp("ab-spec-nohome-"), "missing"),
-          copilotHome: join(tmp("ab-spec-nohome-"), "missing"),
+          adapterOptions: { "codex": { codexHome: join(tmp("ab-spec-nohome-"), "missing") }, "github-copilot": { copilotHome: join(tmp("ab-spec-nohome-"), "missing") } },
         }),
       ).toBe(false);
     });
@@ -194,8 +194,7 @@ describe("resume pre-flight", () => {
         sessionResumable({
           tool: key,
           agentSessionId: RESUME_ID,
-          codexHome: codexStore(["other"]),
-          copilotHome: copilotStore(["other"]),
+          adapterOptions: { "codex": { codexHome: codexStore(["other"]) }, "github-copilot": { copilotHome: copilotStore(["other"]) } },
         }),
       ).toBe(storesLackTheId[key]);
     });
@@ -205,8 +204,7 @@ describe("resume pre-flight", () => {
         sessionResumable({
           tool: key,
           agentSessionId: RESUME_ID,
-          codexHome: codexStore([RESUME_ID]),
-          copilotHome: copilotStore([RESUME_ID]),
+          adapterOptions: { "codex": { codexHome: codexStore([RESUME_ID]) }, "github-copilot": { copilotHome: copilotStore([RESUME_ID]) } },
         }),
       ).toBe(true);
     });
@@ -216,8 +214,7 @@ describe("resume pre-flight", () => {
         sessionResumable({
           tool: key,
           agentSessionId: RESUME_ID,
-          codexHome: join(tmp("ab-spec-nohome-"), "missing"),
-          copilotHome: join(tmp("ab-spec-nohome-"), "missing"),
+          adapterOptions: { "codex": { codexHome: join(tmp("ab-spec-nohome-"), "missing") }, "github-copilot": { copilotHome: join(tmp("ab-spec-nohome-"), "missing") } },
         }),
       ).toBe(true);
     });
@@ -235,8 +232,7 @@ describe("resume pre-flight", () => {
           tool: key,
           agentSessionId: RESUME_ID,
           agentTranscriptPath: gonePath(),
-          codexHome: codexStore([RESUME_ID]),
-          copilotHome: copilotStore([RESUME_ID]),
+          adapterOptions: { "codex": { codexHome: codexStore([RESUME_ID]) }, "github-copilot": { copilotHome: copilotStore([RESUME_ID]) } },
         }),
       ).toBe(false);
     });
@@ -247,8 +243,7 @@ describe("resume pre-flight", () => {
           tool: key,
           agentSessionId: RESUME_ID,
           agentTranscriptPath: livePath(),
-          codexHome: codexStore(["other"]),
-          copilotHome: copilotStore(["other"]),
+          adapterOptions: { "codex": { codexHome: codexStore(["other"]) }, "github-copilot": { copilotHome: copilotStore(["other"]) } },
         }),
       ).toBe(true);
     });
@@ -266,7 +261,7 @@ describe("resume pre-flight", () => {
         tool: "codex",
         agentSessionId: RESUME_ID,
         agentTranscriptPath: "",
-        codexHome: codexStore(["other"]),
+        adapterOptions: { "codex": { codexHome: codexStore(["other"]) } },
       }),
     ).toBe(false);
   });
@@ -410,7 +405,7 @@ describe("launch augmentation", () => {
     try {
       expect(
         augmentAgentLaunch("opencode", tmp("ab-spec-"), tmp("ab-cursor-"), HOOK_COMMAND),
-      ).toEqual({ args: [], env: {} });
+      ).toEqual(NO_INJECTION);
     } finally {
       if (prev === undefined) delete process.env.OPENCODE_CONFIG;
       else process.env.OPENCODE_CONFIG = prev;
@@ -432,6 +427,7 @@ describe("launch augmentation", () => {
       args: ["--trust"],
       env: {},
       notificationsInjected: false,
+      observation: NO_OBSERVATION,
     });
   });
 
@@ -445,15 +441,12 @@ describe("launch augmentation", () => {
 
   for (const key of ["kilo", "kimi", "mistral-vibe"] as const) {
     test(`${key} has no launch injection`, () => {
-      expect(augment(key, tmp("ab-spec-"), tmp("ab-cursor-"))).toEqual({ args: [], env: {} });
+      expect(augment(key, tmp("ab-spec-"), tmp("ab-cursor-"))).toEqual(NO_INJECTION);
     });
   }
 
   test("an unregistered tool has no launch injection", () => {
-    expect(augment("some-future-agent", tmp("ab-spec-"), tmp("ab-cursor-"))).toEqual({
-      args: [],
-      env: {},
-    });
+    expect(augment("some-future-agent", tmp("ab-spec-"), tmp("ab-cursor-"))).toEqual(NO_INJECTION);
   });
 
   test("claude-code falls back to OSC when materialization fails", () => {
@@ -463,6 +456,7 @@ describe("launch augmentation", () => {
       args: [],
       env: {},
       notificationsInjected: false,
+      observation: NO_OBSERVATION,
     });
   });
 });
@@ -552,15 +546,13 @@ describe("materialized files", () => {
     );
   });
 
-  test("opencode points its config at the plugin bundled under bridge/plugin", () => {
+  test("opencode points its config at its materialized package asset", () => {
     // Anchored on this test file, NOT on whichever src/ module writes it: the
     // bundled asset lives at bridge/plugin/opencode/plugin.ts and a producer
     // that resolves it relative to a moved source dir writes a config opencode
     // silently never loads.
-    const expectedUrl = pathToFileURL(
-      join(import.meta.dir, "..", "plugin", "opencode", "plugin.ts"),
-    ).href;
     const abDir = tmp("ab-spec-");
+    const expectedUrl = pathToFileURL(bundledPluginPath(abDir, "opencode", "plugin.ts")).href;
     const prev = process.env.OPENCODE_CONFIG;
     delete process.env.OPENCODE_CONFIG;
     try {
@@ -1064,7 +1056,7 @@ describe("handler context", () => {
       agentSessionId: CODEX_THREAD,
       recentPty: "ignored",
       purpose: "decide",
-      codexHome: home,
+      adapterOptions: { "codex": { codexHome: home } },
     });
     expect(c.source).toBe("transcript");
     expect(c.text).toBe("built it");
@@ -1078,7 +1070,7 @@ describe("handler context", () => {
       agentSessionId: CODEX_THREAD,
       recentPty: "tail",
       purpose: "decide",
-      codexHome: home,
+      adapterOptions: { "codex": { codexHome: home } },
     });
     expect(c.source).toBe("pty");
     expect(c.transcriptPath).toBeUndefined();
@@ -1090,7 +1082,7 @@ describe("handler context", () => {
       agentSessionId: "ses_1",
       recentPty: "ignored",
       purpose: "decide",
-      opencodeDbPath: opencodeDb(["question", "answer"]),
+      adapterOptions: { "opencode": { opencodeDbPath: opencodeDb(["question", "answer"]) } },
     });
     expect(c.source).toBe("transcript");
     expect(c.text).toBe("question\n---\nanswer");
@@ -1107,8 +1099,7 @@ describe("handler context", () => {
         agentSessionId: CODEX_THREAD,
         recentPty: "\x1b[32m$ build ok\x1b[0m",
         purpose: "decide",
-        codexHome: codexHome([{ type: "event_msg", payload: { type: "agent_message", message: "built it" } }]),
-        opencodeDbPath: opencodeDb(["question"]),
+        adapterOptions: { "codex": { codexHome: codexHome([{ type: "event_msg", payload: { type: "agent_message", message: "built it" } }]) }, "opencode": { opencodeDbPath: opencodeDb(["question"]) } },
       });
       expect(c.source).toBe("pty");
       expect(c.text).toBe("$ build ok");

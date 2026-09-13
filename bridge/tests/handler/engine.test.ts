@@ -17,7 +17,7 @@ import { MAX_STORED, type StoredSnapshot } from "../../src/handler/snapshot-stor
 import { MAX_STORED_WRAPUPS } from "../../src/handler/wrap-up-store";
 import type { WrapUpRecord } from "../../src/handler/wrap-up";
 import type { InjectCommand } from "../../src/handler/session-adapter";
-import type { CapCommand } from "../../src/structured/chat-session";
+import type { CapCommand } from "../../../packages/antgrid-agents/src/structured/chat-session";
 import { planSnapshots, type SnapshotEntry, type SnapshotOutcome } from "../../src/handler/snapshot";
 
 const GOAL = "Migrate auth";
@@ -127,6 +127,7 @@ interface SessionSnapshot {
   state: string; parkKind?: string; parkedUntil?: number; pendingEscalations: number;
   goal: string; backlog: InstructionItem[];
   observability?: string;
+  availability?: { state: string; reason?: string };
 }
 function statusOf(sent: AbMessage[]): SessionSnapshot {
   const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
@@ -4696,6 +4697,23 @@ describe("undo", () => {
 });
 
 describe("observabilityFor", () => {
+  it("preserves implemented support when runtime monitoring is temporarily unavailable", () => {
+    let availability: import("../../src/protocol").HandlerAvailability = { state: "unavailable", reason: "Agent monitoring was not installed" };
+    const { engine, sent } = makeEngine({ observable: () => true, availability: () => availability });
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(statusOf(sent).observability).toBe("full");
+    expect(statusOf(sent).availability).toEqual(availability);
+    availability = { state: "available" };
+    engine.emitStatus();
+    expect(statusOf(sent).observability).toBe("full");
+    expect(statusOf(sent).availability).toEqual({ state: "available" });
+  });
+
+  it("does not infer runtime availability for a caller predating the field", () => {
+    const { engine, sent } = makeEngine();
+    engine.arm({ terminalId: "t1", goal: GOAL });
+    expect(statusOf(sent).availability).toBeUndefined();
+  });
   it("reports unsupported for a slot the engine cannot see, whatever its judge", () => {
     const { engine } = makeEngine({ observable: () => false });
     expect(engine.observabilityFor("t1")).toBe("unsupported");

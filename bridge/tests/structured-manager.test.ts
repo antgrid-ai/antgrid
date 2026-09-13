@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { StructuredAgentManager, type StructuredDriver } from "../src/structured/structured-manager";
 import { createMessage, type AbMessage } from "../src/protocol";
-import { isChatCapableTool } from "../src/structured/chat-capable";
+import { isChatCapableTool } from "../../packages/antgrid-agents/src/structured/chat-capable";
 
 function makeFakeDriver(overrides: Partial<StructuredDriver> & { onStart?: () => Promise<string>; onDispose?: () => void } = {}): StructuredDriver {
   return {

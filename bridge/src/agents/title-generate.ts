@@ -1,8 +1,8 @@
 import { logger } from "../logger";
 import { capturePrompt } from "../modelwatch";
 import { headlessScratchCwd, logBorrow, resolveHeadless, runHeadless } from "./headless";
-import { unwrapEnvelope } from "./usage-envelope";
-import { agentSpec } from "./registry";
+import { unwrapEnvelope } from "antgrid-agents/usage-envelope";
+import { agentSpec } from "antgrid-agents/builtins";
 
 const log = logger.child({ component: "title-generate" });
 
@@ -82,19 +82,17 @@ export async function buildTitleContext(opts: {
    *  trying to improve on. */
   fallbackContext?: string;
   // Test seams; production callers omit these.
-  codexHome?: string;
-  opencodeDbPath?: string;
+  adapterOptions?: Record<string, Record<string, unknown>>;
 }): Promise<string | null> {
   const spec = agentSpec(opts.tool);
   let context = "";
   if (spec?.transcript) {
     try {
       const t = await spec.transcript({
+        ...opts.adapterOptions?.[opts.tool],
         maxMsgs: MAX_MSGS,
         transcriptPath: opts.transcriptPath,
         agentSessionId: opts.agentSessionId,
-        codexHome: opts.codexHome,
-        opencodeDbPath: opts.opencodeDbPath,
       });
       context = t.msgs.join("\n---\n");
     } catch (err) {

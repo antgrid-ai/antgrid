@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { agentSpec } from "./agents/registry";
-import type { ResumableArgs } from "./agents/types";
+import { agentSpec } from "antgrid-agents/builtins";
+import type { ResumableArgs } from "antgrid-agents/contracts";
 
 /**
  * Argv appended to a tool's base launch args to resume a specific agent-native
@@ -35,14 +35,12 @@ export function sessionResumable(args: {
   tool: string;
   agentSessionId: string;
   agentTranscriptPath?: string;
-  codexHome?: string;
-  copilotHome?: string;
+  adapterOptions?: Record<string, Record<string, unknown>>;
 }): boolean {
   const forSpec: ResumableArgs = {
+    ...args.adapterOptions?.[args.tool],
     agentSessionId: args.agentSessionId,
     transcriptPath: args.agentTranscriptPath,
-    codexHome: args.codexHome,
-    copilotHome: args.copilotHome,
   };
   if (forSpec.transcriptPath) return existsSync(forSpec.transcriptPath);
   return agentSpec(args.tool)?.resumable?.(forSpec) ?? true;
@@ -67,14 +65,12 @@ export function sessionResumable(args: {
 export function agentSessionGone(args: {
   tool: string;
   agentSessionId: string;
-  codexHome?: string;
-  copilotHome?: string;
+  adapterOptions?: Record<string, Record<string, unknown>>;
 }): boolean {
   const spec = agentSpec(args.tool);
   if (!spec?.sessionStoreIsAuthoritative) return false;
   return spec.resumable?.({
+    ...args.adapterOptions?.[args.tool],
     agentSessionId: args.agentSessionId,
-    codexHome: args.codexHome,
-    copilotHome: args.copilotHome,
   }) === false;
 }

@@ -210,6 +210,38 @@ class HandlerInstructionItem {
   };
 }
 
+enum HandlerAvailabilityState { unknown, preparing, available, unavailable }
+
+class HandlerAvailability {
+  final HandlerAvailabilityState state;
+  final String? reason;
+
+  const HandlerAvailability(this.state, {this.reason});
+
+  String? get note => switch (state) {
+    HandlerAvailabilityState.available => null,
+    HandlerAvailabilityState.preparing => reason ?? 'Waiting for agent events',
+    HandlerAvailabilityState.unavailable => reason ?? 'Monitoring unavailable',
+    HandlerAvailabilityState.unknown => reason ?? 'Monitoring not confirmed',
+  };
+
+  static HandlerAvailability? fromWire(dynamic value) {
+    if (value is! Map) return null;
+    final state = switch (value['state']) {
+      'unknown' => HandlerAvailabilityState.unknown,
+      'preparing' => HandlerAvailabilityState.preparing,
+      'available' => HandlerAvailabilityState.available,
+      'unavailable' => HandlerAvailabilityState.unavailable,
+      _ => null,
+    };
+    if (state == null) return null;
+    return HandlerAvailability(
+      state,
+      reason: value['reason'] is String ? value['reason'] as String : null,
+    );
+  }
+}
+
 /// One armed handler session (per terminal). Mirrors the bridge's
 /// `HandlerSessionSnapshot` (`bridge/src/protocol.ts`).
 class HandlerSessionState {
@@ -250,6 +282,7 @@ class HandlerSessionState {
   /// `handlerChat`, and the two are not interchangeable: the catalog describes
   /// an agent, this describes a session (its live mode and its judge pick).
   final HandlerObservability? observability;
+  final HandlerAvailability? availability;
 
   /// The posture this session judges under, as the bridge resolved it. Null
   /// only from a bridge predating the field.
@@ -268,6 +301,7 @@ class HandlerSessionState {
     this.parkKind,
     this.parkedUntil,
     this.observability,
+    this.availability,
     this.personality,
   });
 
@@ -295,6 +329,7 @@ class HandlerSessionState {
     parkKind: parkKind,
     parkedUntil: parkedUntil,
     observability: observability,
+    availability: availability,
     personality: personality,
   );
 
@@ -354,6 +389,7 @@ class HandlerSessionState {
       parkKind: parkKind is String ? parkKind : null,
       parkedUntil: parkedUntil is num ? parkedUntil.toInt() : null,
       observability: handlerObservabilityFromWire(json['observability']),
+      availability: HandlerAvailability.fromWire(json['availability']),
       personality: handlerPersonalityFromWire(json['personality']),
     );
   }
@@ -950,8 +986,7 @@ class HandlerState {
   /// alone badges zero over a tab already rendering a NEEDS YOU card. A badge
   /// and the surface it points at must never be able to answer differently
   /// about what is waiting.
-  int get escalationBadgeCount =>
-      pendingEscalations > escalations.length
+  int get escalationBadgeCount => pendingEscalations > escalations.length
       ? pendingEscalations
       : escalations.length;
 

@@ -1,7 +1,7 @@
 import type { AbConfig, PortConfig, CommandConfig } from "./config";
 import { runDetectors } from "./detector";
 import { NON_PREVIEW_PORTS } from "./detector/ports";
-import { listKnownTools } from "./known-agents";
+import { listKnownTools } from "antgrid-agents/known-agents";
 import { select, input, confirm } from "@inquirer/prompts";
 import { stringify as stringifyYaml } from "yaml";
 import { writeFileSync } from "node:fs";

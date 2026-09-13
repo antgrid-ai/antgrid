@@ -555,7 +555,7 @@ describe("SessionManager start/stop", () => {
         projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
         agentSpec: { command: "claude", name: "claude-code" },
         sendMessage: () => {},
-        copilotHome,
+        adapterOptions: { "github-copilot": { copilotHome } },
       });
       const s = sm.create("copilot", { tool: "github-copilot" });
       sm.setAgentSession(s.id, "cop-1");
@@ -654,7 +654,7 @@ describe("SessionManager start/stop", () => {
         projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
         agentSpec: { command: "claude", name: "claude-code" },
         sendMessage: () => {},
-        copilotHome,
+        adapterOptions: { "github-copilot": { copilotHome } },
       });
       const s = sm.create("copilot", { tool: "github-copilot", args: "-- --raw-user-arg" });
       sm.setAgentSession(s.id, "cop-1");
@@ -682,7 +682,7 @@ describe("SessionManager start/stop", () => {
         projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
         agentSpec: { command: "copilot", name: "github-copilot" },
         sendMessage: () => {},
-        copilotHome,
+        adapterOptions: { "github-copilot": { copilotHome } },
       });
       const s = sm.create("copilot");
       sm.setAgentSession(s.id, "cop-1");
@@ -706,7 +706,7 @@ describe("SessionManager start/stop", () => {
         projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
         agentSpec: { command: "claude", name: "claude-code" },
         sendMessage: () => {},
-        copilotHome,
+        adapterOptions: { "github-copilot": { copilotHome } },
       });
       const s = sm.create("copilot", { tool: "github-copilot" });
       sm.setAgentSession(s.id, "cop-dead", "/tmp/stale.json");
@@ -732,7 +732,7 @@ describe("SessionManager start/stop", () => {
         projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
         agentSpec: { command: "claude", name: "claude-code" },
         sendMessage: () => {},
-        copilotHome,
+        adapterOptions: { "github-copilot": { copilotHome } },
       });
       const s = sm.create("copilot", { tool: "github-copilot" });
       sm.setAgentSession(s.id, "cop-dead", "/tmp/stale.json");
@@ -931,7 +931,7 @@ describe("SessionManager start/stop", () => {
         agentSpec: { command: "claude", name: "claude-code" },
         sendMessage: () => {},
         onStartChat: (o) => calls.push(o),
-        codexHome,
+        adapterOptions: { "codex": { codexHome } },
       });
       const s = sm.create("c", { tool: "codex", mode: "chat" });
       sm.setAgentSession(s.id, "thread-xyz");
@@ -1191,7 +1191,7 @@ describe("SessionManager start/stop", () => {
         agentSpec: { command: "claude", name: "claude-code" },
         sendMessage: () => {},
         onStartChat: (o) => starts.push(o),
-        codexHome,
+        adapterOptions: { "codex": { codexHome } },
       });
       const s = sm.create("t", { tool: "codex" });
       sm.setAgentSession(s.id, "thread-xyz");
@@ -1287,7 +1287,7 @@ describe("SessionManager start/stop", () => {
         projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
         agentSpec: { command: "claude", name: "claude-code" },
         sendMessage: () => {},
-        copilotHome,
+        adapterOptions: { "github-copilot": { copilotHome } },
       });
       const s = sm.create("t", { tool: "github-copilot" });
       sm.setAgentSession(s.id, "cop-1");
@@ -1524,7 +1524,7 @@ describe("SessionManager initial prompt", () => {
         projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
         agentSpec: { command: "claude", name: "claude-code" },
         sendMessage: () => {},
-        codexHome,
+        adapterOptions: { "codex": { codexHome } },
       });
       const s = sm.create(undefined, { tool: "codex" });
       sm.setAgentSession(s.id, "11111111-1111-1111-1111-111111111111");
@@ -1552,7 +1552,7 @@ describe("SessionManager initial prompt", () => {
         projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
         agentSpec: { command: "cursor-agent", name: "cursor-agent" },
         sendMessage: () => {},
-        cursorDir,
+        adapterOptions: { "cursor-agent": { cursorDir } },
       });
       const s = sm.create(undefined, { tool: "cursor-agent" });
       sm.start(s.id, "--fix the enum");
@@ -1581,7 +1581,7 @@ describe("SessionManager initial prompt", () => {
     expect(args[i + 1]).toBe("do the thing");
   });
 
-  it("custom command: prompt is ignored entirely", () => {
+  it("custom command: unsupported opening prompt is reported before spawn", () => {
     const term = makeFakeTerm();
     const sm = new SessionManager({
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
@@ -1589,10 +1589,8 @@ describe("SessionManager initial prompt", () => {
       sendMessage: () => {},
     });
     const s = sm.create(undefined, { command: "my-agent --serve" });
-    sm.start(s.id, "should not appear");
-    const spawn = term.spawns[0];
-    expect(spawn.command).toBe("my-agent --serve");
-    expect(spawn.args ?? []).toEqual([]);
+    expect(() => sm.start(s.id, "retain this prompt")).toThrow("cannot accept an opening prompt");
+    expect(term.spawns).toHaveLength(0);
   });
 
   it("restart WITHOUT a prompt never re-fires the previous one (not persisted)", () => {

@@ -1,4 +1,4 @@
-import { needsKeystrokeTurnStart } from "./agents/registry";
+import { needsKeystrokeTurnStart } from "antgrid-agents/builtins";
 import type { InboundSource } from "./message-bus";
 import type { AbMessage, NotificationType, WorkStatus } from "./protocol";
 

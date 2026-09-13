@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import { platform } from "node:os";
-import { AGENTS } from "./agents/registry";
+import { AGENTS } from "antgrid-agents/builtins";
 
 export interface DetectedTool {
   tool: string;

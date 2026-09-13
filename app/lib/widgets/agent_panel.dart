@@ -117,9 +117,7 @@ class AgentPanel extends ConsumerWidget {
               // Branch pill folded into the overflow menu below: it lives
               // inside the breadcrumb on desktop, but on a phone-width row it
               // competes with the title for the one flexible slot.
-              const Expanded(
-                child: TitleBarBreadcrumb(showBranchPill: false),
-              ),
+              const Expanded(child: TitleBarBreadcrumb(showBranchPill: false)),
               const WorkspaceReadinessChip(),
               const SizedBox(width: AbTokens.space6),
               const _SessionOverflowButton(),
@@ -539,6 +537,15 @@ class HandlerHeaderControl extends ConsumerWidget {
           // quiet" lie observability exists to end.
           if (session.observability == HandlerObservability.unsupported) {
             pillLabel = 'NOT WATCHED';
+            pillColor = p.warning;
+          } else if (session.availability?.state ==
+              HandlerAvailabilityState.unavailable) {
+            pillLabel = 'MONITORING UNAVAILABLE';
+            pillColor = p.warning;
+          } else if (session.availability?.state ==
+                  HandlerAvailabilityState.preparing ||
+              session.availability?.state == HandlerAvailabilityState.unknown) {
+            pillLabel = 'WAITING FOR AGENT';
             pillColor = p.warning;
           }
           break;

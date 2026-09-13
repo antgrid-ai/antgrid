@@ -4,7 +4,7 @@ import { Database } from "bun:sqlite";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AntigravityTitleWatcher } from "../src/agents/antigravity/title-watcher";
+import { AntigravityTitleWatcher } from "../../packages/antgrid-agents/src/agents/antigravity/title-watcher";
 
 const dirs: string[] = [];
 const watchers: AntigravityTitleWatcher[] = [];

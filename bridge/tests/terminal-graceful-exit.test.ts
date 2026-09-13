@@ -15,8 +15,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TerminalManager, gracefulBudget } from "../src/terminal-manager";
 import { TerminalSession, AGENT_GRACE_MS, WINDOWS_SHUTDOWN_GRACE_MS } from "../src/terminal-session";
-import { AGENTS } from "../src/agents/registry";
-import { ETX } from "../src/agents/types";
+import { AGENTS } from "../../packages/antgrid-agents/src/agents/registry";
+import { ETX } from "../../packages/antgrid-agents/src/agents/types";
 import { createConnState } from "../src/conn-state";
 import type { AbMessage } from "../src/protocol";
 
@@ -460,20 +460,21 @@ describe("a restart inside the grace", () => {
     const dir = tempDir("restart");
     const { command, args } = stubbornSleeper(dir);
     const exited: string[] = [];
+    const exitedRuns: (string | undefined)[] = [];
     const messages: AbMessage[] = [];
     const manager = new TerminalManager(
       (m) => messages.push(m),
-      { onTerminalExited: (id) => exited.push(id) },
+      { onTerminalExited: (id, runId) => { exited.push(id); exitedRuns.push(runId); } },
       createConnState(),
     );
     const exitFrames = (): AbMessage[] =>
       messages.filter((m) => m.type === "terminal:exited" && m.terminalId === "t1");
     try {
-      manager.spawn({ terminalId: "t1", type: "agent", command, args });
+      manager.spawn({ terminalId: "t1", type: "agent", command, args, env: { ANTGRID_RUN_ID: "old" } });
       await new Promise((r) => setTimeout(r, 400));
 
       manager.kill("t1", 3000);
-      manager.spawn({ terminalId: "t1", type: "agent", command, args });
+      manager.spawn({ terminalId: "t1", type: "agent", command, args, env: { ANTGRID_RUN_ID: "new" } });
       // Asserted with nothing awaited in between, because "eventually" is the
       // bug: a dispatch that waits for the real exit arrives after the
       // replacement has registered, and `namer.forget` /
@@ -481,6 +482,7 @@ describe("a restart inside the grace", () => {
       // reclaim the live run's title state and arming instead of the dead
       // run's.
       expect(exited).toEqual(["t1"]);
+      expect(exitedRuns).toEqual(["old"]);
 
       // Long enough for the replaced PTY's own exit to land on the new session.
       await new Promise((r) => setTimeout(r, 1500));
@@ -496,6 +498,7 @@ describe("a restart inside the grace", () => {
       manager.killAll();
       await waitFor(() => (exitFrames().length > 0 ? true : undefined), 5000);
       expect(exited).toEqual(["t1", "t1"]);
+      expect(exitedRuns).toEqual(["old", "new"]);
       expect(exitFrames()).toHaveLength(1);
     } finally {
       manager.killAll();
@@ -681,7 +684,7 @@ describe("AgentSpec.gracefulExit", () => {
     // evaluates the spec table while ETX is still in its temporal dead zone.
     // The failure is a ReferenceError at import time across most of the suite,
     // with nothing pointing at the import that caused it.
-    const source = readFileSync(join(import.meta.dir, "../src/agents/types.ts"), "utf8");
+    const source = readFileSync(join(import.meta.dir, "../../packages/antgrid-agents/src/agents/types.ts"), "utf8");
     // Every form that pulls a module in at RUNTIME, not just `import x from`: a
     // bare `import "./m"` and a value `export { X } from "./m"` both do, and a
     // guard that only inspected `^import .*$` passed them straight through.

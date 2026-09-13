@@ -9,6 +9,7 @@
     "uninstall-plugin": "bun run setup.ts uninstall"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "antgrid-agents": "workspace:*"
   }
 }

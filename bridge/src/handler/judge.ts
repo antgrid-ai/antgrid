@@ -6,7 +6,7 @@ import {
   capturePrompt, modelwatch,
   type ModelCallEvent, type ModelCallPurpose,
 } from "../modelwatch";
-import type { CapCommand } from "../structured/chat-session";
+import type { CapCommand } from "antgrid-agents/structured/chat-session";
 import {
   buildDecidePrompt, buildRetryPrompt, buildShapeRetryPrompt, parseDecisionFromOutput, pickJudge,
   type HandlerDecision,

@@ -31,7 +31,7 @@ import { armBodyCapture, armRemoteIngest } from "./netwatch";
 import { armContextCapture, armPromptCapture, isContextCaptureArmed, isPromptCaptureArmed } from "./modelwatch";
 import { mintUiTicket, TICKET_TTL_MS } from "./netwatch-ui-session";
 import { detectInstalledTools, type DetectOptions } from "./tool-detector";
-import { isChatCapableTool } from "./structured/chat-capable";
+import { isChatCapableTool } from "antgrid-agents/structured/chat-capable";
 import { buildAgentCatalog } from "./agent-catalog";
 import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";

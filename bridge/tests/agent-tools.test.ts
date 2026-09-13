@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createMessage, parseMessage, AbMessageSchema } from "../src/protocol";
 import { HostServer } from "../src/host-server";
 import { buildAgentCatalog } from "../src/agent-catalog";
-import { AGENTS } from "../src/agents/registry";
+import { AGENTS } from "../../packages/antgrid-agents/src/agents/registry";
 
 test("agent:tools round-trips through the schema", () => {
   const msg = createMessage("agent:tools", {

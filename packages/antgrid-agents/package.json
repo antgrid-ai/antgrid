@@ -1,0 +1,55 @@
+{
+  "name": "antgrid-agents",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Elastic-2.0",
+  "exports": {
+    "./contracts": "./src/contracts.ts",
+    "./events": "./src/protocol.ts",
+    "./payloads": "./src/payloads.ts",
+    "./builtins": "./src/agents/registry.ts",
+    "./assets": "./src/plugin-root.ts",
+    "./host": "./src/host.ts",
+    "./config-inject": "./src/agents/config-inject.ts",
+    "./defaults": "./src/agents/defaults.ts",
+    "./fork-handoff": "./src/agents/fork-handoff.ts",
+    "./hook-posts": "./src/agents/hook-posts.ts",
+    "./launch-inject": "./src/agents/launch-inject.ts",
+    "./launch-path": "./src/agents/launch-path.ts",
+    "./terminal-platform": "./src/agents/terminal-platform.ts",
+    "./title-attempts": "./src/agents/title-attempts.ts",
+    "./title-dispatch": "./src/agents/title-dispatch.ts",
+    "./title-read": "./src/agents/title-read.ts",
+    "./usage-envelope": "./src/agents/usage-envelope.ts",
+    "./structured/agent-error": "./src/structured/agent-error.ts",
+    "./structured/chat-capable": "./src/structured/chat-capable.ts",
+    "./structured/chat-session": "./src/structured/chat-session.ts",
+    "./structured/normalize": "./src/structured/normalize.ts",
+    "./structured/set-config": "./src/structured/set-config.ts",
+    "./structured/tool-card": "./src/structured/tool-card.ts",
+    "./known-agents": "./src/known-agents.ts",
+    "./initial-prompt": "./src/initial-prompt.ts",
+    "./agent-approval-policy": "./src/agent-approval-policy.ts",
+    "./agent-launch-augmenter": "./src/agent-launch-augmenter.ts",
+    "./hook-command": "./src/hook-command.ts",
+    "./atomic-file": "./src/atomic-file.ts",
+    "./transcript-tail": "./src/transcript-tail.ts",
+    "./terminal-launch": "./src/agents/terminal-launch.ts",
+    "./registry": "./src/agents/create-registry.ts",
+    "./project-integrations": "./src/project-integrations.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.201",
+    "@opencode-ai/sdk": "1.15.10",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.4",
+    "typescript": "^5.7.3"
+  }
+}

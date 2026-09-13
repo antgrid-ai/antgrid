@@ -2,8 +2,8 @@
 // as known-agents.ts / agent-resume.ts: one concern, one file, no per-agent
 // knowledge of its own.
 
-import { AGENTS, handlerObservable, judgeCapable } from "./agents/registry";
-import type { AgentKey, AgentSpec } from "./agents/types";
+import { AGENTS, handlerObservable, judgeCapable } from "antgrid-agents/builtins";
+import type { AgentKey, AgentSpec } from "antgrid-agents/contracts";
 import type { AgentDescriptor } from "./protocol";
 
 /**

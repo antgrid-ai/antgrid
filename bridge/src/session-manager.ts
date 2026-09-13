@@ -1,3 +1,4 @@
+import "./agent-host";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -6,23 +7,23 @@ import { logger } from "./logger";
 const log = logger.child({ component: "session-manager" });
 import {
   resolveAgent,
-  resolveAgentEnv,
   suppressesOscNotifications,
   suppressesOscTitle,
-} from "./known-agents";
-import { augmentAgentLaunch, injectsHookAliveProbe } from "./agent-launch-augmenter";
-import { agentSpec } from "./agents/registry";
-import { resolveApprovalPolicy } from "./agent-approval-policy";
+} from "antgrid-agents/known-agents";
+import { injectsHookAliveProbe } from "antgrid-agents/agent-launch-augmenter";
+import { agentSpec } from "antgrid-agents/builtins";
+import { DEFAULT_CHAT_AGENT } from "antgrid-agents/defaults";
+import { resolveApprovalPolicy } from "antgrid-agents/agent-approval-policy";
 // Aliased: this module declares its own, unrelated `AgentSpec` (the launch
 // triple) right below.
-import type { AgentSpec as RegistryAgentSpec } from "./agents/types";
-import type { ApprovalPolicy } from "./agents/types";
+import type { AgentSpec as RegistryAgentSpec } from "antgrid-agents/contracts";
+import type { ApprovalPolicy, TerminalObservationAvailability } from "antgrid-agents/contracts";
 import { stripAnsi } from "./handler/context";
 import { agentSessionGone, resumeArgv, sessionResumable } from "./agent-resume";
-import { isChatCapableTool } from "./structured/chat-capable";
-import { initialPromptArgv } from "./initial-prompt";
+import { isChatCapableTool } from "antgrid-agents/structured/chat-capable";
+import { prepareTerminalLaunch, type PreparedTerminalLaunch } from "antgrid-agents/terminal-launch";
 import { TITLE_RANKS, titleRankValue, type TitleRank } from "./session-namer";
-import type { WorkStatus } from "./protocol";
+import type { WorkStatus, HandlerAvailability } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
 import { AGENT_GRACE_MS } from "./terminal-session";
 import type { AbMessage, SessionEntry } from "./protocol";
@@ -81,17 +82,6 @@ export interface DeleteSessionOptions {
   deleteBranch?: boolean;
 }
 
-/// Quote a single token (executable path or flag) for the shell that
-/// terminal-session will wrap a whitespace command in (`cmd /c` on Windows,
-/// `sh -c` elsewhere). Tokens without shell-significant characters pass through
-/// unchanged so bare bins like `claude` stay clean.
-function shellQuoteArg(s: string): string {
-  if (s === "" || !/[\s"'\\]/.test(s)) return s;
-  return process.platform === "win32"
-    ? `"${s.replace(/"/g, '""')}"` // cmd.exe: double-quote, escape embedded "
-    : `'${s.replace(/'/g, `'\\''`)}'`; // POSIX sh: single-quote, escape embedded '
-}
-
 export interface SessionManagerOpts {
   projectId: string;
   storeDir: string;                  // ~/.antgrid root
@@ -110,25 +100,12 @@ export interface SessionManagerOpts {
    *  exactly one per-session reduction; absent for a bare core with no owner,
    *  which then advertises no status at all. */
   sessionWorkStatusFor?: (sessionId: string) => WorkStatus | undefined;
-  /** Override for the codex thread store dir. Read for availability hints and —
-   *  codex being the one `sessionStoreIsAuthoritative` agent — for the disown
-   *  verdict setAgentSession and a launch act on, so a test that lets this
-   *  default through changes what the manager DOES, not just what it reports.
-   *  Unset in production → $CODEX_HOME or ~/.codex. */
-  codexHome?: string;
-  /** Override for the Copilot session store dir (availability hints only: its
-   *  store is not authoritative, so a miss there refuses nothing). */
-  copilotHome?: string;
+  /** Locally supplied adapter configuration, keyed by registry identity. */
+  adapterOptions?: Record<string, Record<string, unknown>>;
   /** Override for how long setMode waits on the old runtime's teardown. Unset in
    *  production → TEARDOWN_TIMEOUT_MS; tests inject a short one to exercise the
    *  timeout path without stalling. */
   teardownTimeoutMs?: number;
-  /** Override for the cursor-agent hooks dir (~/.cursor). Unset in production.
-   *  Tests exercising the hooks write MUST inject an isolated dir; one that
-   *  forgets gets a no-op rather than junk in the developer's real config —
-   *  ensureGlobalCursorHooks refuses the homedir default under `bun test`,
-   *  because the baked hook command there is the test file (Bun.main). */
-  cursorDir?: string;
   /** Called by start()/stop() for a mode:'chat' session instead of the PTY path.
    *  Injected by agent-core to drive the StructuredAgentManager. */
   onStartChat?: (opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string; approvalPolicy: ApprovalPolicy }) => void;
@@ -245,10 +222,10 @@ interface PersistedEntry {
   checkoutState: CheckoutState;
   /** A one-shot normalized conversation handoff, deleted after first launch. */
   forkTranscript?: string;
-  /** One-shot provider-native fork argv; never reaches the client. */
-  forkNativeArgs?: string[];
-  /** Whether `forkNativeArgs` has already been spawned once. Bounds the wait
-   *  for a provider identity that a mismatched CLI never reports. */
+  /** Captured provider identity; never resolved again from the mutable source row. */
+  forkSourceSessionId?: string;
+  forkNativeMigrationError?: boolean;
+  /** Committed before dispatch: a restart must not repeat an uncertain native fork. */
   forkNativeAttempted?: boolean;
   conversationStart?: "fresh" | "resume" | "fork";
   /** The session `fork()` copied this one from. Provenance, not a link: the
@@ -292,12 +269,16 @@ const PersistedEntrySchema = z
     checkoutState: z.enum(CHECKOUT_STATES).optional().catch(undefined),
     forkTranscript: z.string().optional().catch(undefined),
     forkNativeArgs: z.array(z.string()).optional().catch(undefined),
+    forkSourceSessionId: z.string().min(1).optional().catch(undefined),
+    forkNativeMigrationError: z.boolean().optional().catch(undefined),
     forkNativeAttempted: z.boolean().optional().catch(undefined),
     conversationStart: z.enum(["fresh", "resume", "fork"]).optional().catch(undefined),
     forkedFromSessionId: z.string().optional().catch(undefined),
   })
   .transform((s): PersistedEntry => {
     const createdAt = s.createdAt ?? Date.now();
+    const legacySource = s.forkNativeArgs?.length && s.tool
+      ? agentSpec(s.tool)?.fork.decodeLegacyArgs?.(s.forkNativeArgs) : undefined;
     return {
       id: s.id,
       name: s.name,
@@ -333,7 +314,8 @@ const PersistedEntrySchema = z
       checkoutBranch: s.checkoutBranch,
       checkoutState: s.checkoutState ?? "ready",
       forkTranscript: s.forkTranscript,
-      forkNativeArgs: s.forkNativeArgs,
+      forkSourceSessionId: s.forkSourceSessionId ?? legacySource,
+      forkNativeMigrationError: s.forkNativeMigrationError || (!!s.forkNativeArgs?.length && !legacySource && !s.forkSourceSessionId) || undefined,
       forkNativeAttempted: s.forkNativeAttempted,
       conversationStart: s.conversationStart ?? (s.agentSessionId ? "resume" : "fresh"),
       forkedFromSessionId: s.forkedFromSessionId,
@@ -497,6 +479,68 @@ export class SessionManager {
   // Set in start()'s chat branch, cleared in stop()'s — the PTY-less analogue of
   // `tm.has(id)`, and best-effort (a crashed driver surfaces via agent:error).
   private runningChat = new Set<string>();
+  private terminalPreparing = new Map<string, Promise<void>>();
+  private terminalRunIds = new Map<string, string>();
+  private hookSessionIds = new Set<string>();
+
+  hookRunId(id: string): string | undefined { return this.terminalRunIds.get(id); }
+
+  acceptsHookRun(id: string, runId?: string): boolean {
+    if (!this.entries.has(id)) return !this.hookSessionIds.has(id);
+    const active = this.terminalRunIds.get(id);
+    return active !== undefined && active === runId;
+  }
+
+  private terminalControllers = new Map<string, AbortController>();
+  private terminalCleanup = new Map<string, Promise<void>>();
+  private terminalDisposers = new Map<string, () => void | Promise<void>>();
+  private terminalObservations = new Map<string, TerminalObservationAvailability>();
+  private handlerAvailabilities = new Map<string, HandlerAvailability>();
+
+  handlerAvailability(id: string): HandlerAvailability {
+    return this.handlerAvailabilities.get(id) ?? (this.entries.has(id)
+      ? { state: "unavailable", reason: "Agent is not running" }
+      : { state: "unknown" });
+  }
+
+  confirmHookRun(id: string, runId: string | undefined): void {
+    if (!this.acceptsHookRun(id, runId) || !this.entries.has(id)) return;
+    if (this.handlerAvailabilities.get(id)?.state === "available") return;
+    this.handlerAvailabilities.set(id, { state: "available" });
+    this.changed();
+  }
+
+  terminalObservation(id: string): TerminalObservationAvailability | undefined {
+    return this.terminalObservations.get(id);
+  }
+
+  invalidateHookObservation(id: string, reason = "Agent integration needs to restart"): void {
+    if (!this.entries.has(id)) return;
+    this.handlerAvailabilities.set(id, { state: "unavailable", reason });
+    this.terminalObservations.set(id, {
+      notifications: false, titles: false, handler: false,
+      turnStart: false, turnEnd: false, hookAlive: false,
+    });
+    this.changed();
+  }
+
+  private releaseTerminalPreparation(id: string): Promise<void> | undefined {
+    this.terminalControllers.get(id)?.abort();
+    this.terminalControllers.delete(id);
+    this.terminalObservations.delete(id);
+    this.terminalRunIds.delete(id);
+    this.handlerAvailabilities.delete(id);
+    const dispose = this.terminalDisposers.get(id);
+    this.terminalDisposers.delete(id);
+    if (!dispose) return this.terminalCleanup.get(id);
+    const cleanup = Promise.resolve().then(dispose).then(() => {
+      if (this.terminalCleanup.get(id) === cleanup) this.terminalCleanup.delete(id);
+    });
+    this.terminalCleanup.set(id, cleanup);
+    void cleanup.catch((error) => log.warn("terminal preparation cleanup failed: %s", error));
+    return cleanup;
+  }
+
   /**
    * Sessions whose PTY has been ASKED to exit and has not gone yet.
    *
@@ -749,6 +793,7 @@ export class SessionManager {
     const source = this.entries.get(sourceSessionId);
     if (!source) throw new Error(`session not found: ${sourceSessionId}`);
     if (source.command) throw new Error("Custom-command sessions cannot be forked.");
+    const capturedSourceId = source.agentSessionId;
     const sourcePath = await this.checkoutPathForFork(source);
     const sourceAgentSpec = source.checkoutId === "main"
       ? this.agentSpec
@@ -756,10 +801,9 @@ export class SessionManager {
     const tool = source.tool ?? sourceAgentSpec.name;
     const adapter = agentSpec(tool);
     if (!adapter) throw new Error("This session's agent does not support transcript forks.");
-    const nativeForkArgs = source.mode === "terminal" && source.agentSessionId
-      ? adapter.fork.nativeForkArgs?.(source.agentSessionId)
-      : undefined;
-    const transcript = nativeForkArgs?.length
+    const nativeSource = source.mode === "terminal" && capturedSourceId && adapter.fork.nativeForkArgs
+      ? capturedSourceId : undefined;
+    const transcript = nativeSource
       ? undefined
       : await this.captureForkTranscript(source, adapter, sourcePath);
     if (transcript && Buffer.byteLength(transcript, "utf8") > MAX_FORK_TRANSCRIPT_BYTES) {
@@ -777,7 +821,7 @@ export class SessionManager {
     entry.forkedFromSessionId = source.id;
     entry.conversationStart = "fork";
     entry.forkTranscript = transcript;
-    entry.forkNativeArgs = nativeForkArgs;
+    entry.forkSourceSessionId = nativeSource;
     if (workspace === "current") {
       return this.withCheckoutMembership(source.checkoutId, async () => {
         // Re-read under the membership lock: a concurrent delete may have
@@ -890,11 +934,11 @@ export class SessionManager {
   private async captureForkTranscript(source: PersistedEntry, adapter: RegistryAgentSpec, projectPath: string): Promise<string> {
     const scrollback = this.tm.getScrollback(source.id)?.text;
     const text = await adapter.fork.handoff({
+      ...this.opts.adapterOptions?.[source.tool ?? this.agentSpec.name],
       maxMsgs: 500,
       projectPath,
       agentSessionId: source.agentSessionId,
       transcriptPath: source.agentTranscriptPath,
-      codexHome: this.opts.codexHome,
       // Stripped here, at the single point every adapter's terminal fallback
       // draws from: `getScrollback` is raw PTY output, and a TUI's tail is
       // mostly CSI/OSC redraw. It becomes an agent's opening prompt — and for
@@ -989,7 +1033,9 @@ export class SessionManager {
       this.entries.delete(entry.id);
       this.setups.delete(entry.id);
       if (runtimePrepared && checkout) {
-        try { await this.opts.teardownCheckoutRuntime?.(checkout.id); } catch { /* rollback continues */ }
+        try { await this.opts.teardownCheckoutRuntime?.(checkout.id); } catch (cleanupError) {
+          throw new AggregateError([error, cleanupError], "Checkout creation failed and its runtime could not be stopped; the checkout was retained.");
+        }
       }
       if (checkout) {
         try { await this.opts.worktreeManager.rollbackPrepared(checkout); } catch { /* preserve original error */ }
@@ -1117,8 +1163,7 @@ export class SessionManager {
     if (reportingTool && agentSessionGone({
       tool: reportingTool,
       agentSessionId,
-      codexHome: this.opts.codexHome,
-      copilotHome: this.opts.copilotHome,
+      adapterOptions: this.opts.adapterOptions,
     })) {
       log.warn(
         `session ${id}: ${reportingTool} disowns reported conversation ${agentSessionId}; keeping ${entry.agentSessionId}`,
@@ -1145,6 +1190,7 @@ export class SessionManager {
     if (entry.agentSessionId === agentSessionId && entry.agentTranscriptPath === nextPath) {
       return true; // unchanged — avoid a redundant flush/emit
     }
+    if (this.awaitingNativeForkIdentity(entry) && agentSessionId === entry.forkSourceSessionId) return false;
     entry.agentSessionId = agentSessionId;
     entry.agentTranscriptPath = nextPath;
     this.resumableCache.delete(id);
@@ -1195,7 +1241,7 @@ export class SessionManager {
   archive(id: string): void {
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`session not found: ${id}`);
-    if (this.tm.has(id)) this.stopTerminal(id);
+    void Promise.resolve(this.stop(id)).catch((error) => log.warn("archived session cleanup failed: %s", error));
     // The kill above cannot reach a start that has not happened yet: a session
     // archived while its checkout is still provisioning would otherwise launch
     // its agent the moment setup settled. The prompt stays in
@@ -1241,7 +1287,7 @@ export class SessionManager {
           : this.deleteManaged(entry, options);
       });
     }
-    if (this.tm.has(id)) this.stopTerminal(id);
+    void Promise.resolve(this.stop(id)).catch((error) => log.warn("deleted session cleanup failed: %s", error));
     this.dropSession(id);
     this.changed();
     return true;
@@ -1258,6 +1304,7 @@ export class SessionManager {
    *  exit lands: `forget` tombstones a still-live terminal so the exit cannot
    *  re-create the rows it just dropped. */
   private dropSession(id: string): void {
+    this.hookSessionIds.add(id);
     this.tm.forget(id);
     this.entries.delete(id);
     this.resumableCache.delete(id);
@@ -1298,9 +1345,9 @@ export class SessionManager {
       // project's store), so there is nothing left to reclaim and the session
       // row is the only trace. Refusing here — which `inspect`'s
       // WORKTREE_MISSING would — makes that row permanently undeletable.
-      if (this.tm.has(entry.id)) this.stopTerminal(entry.id);
       this.markDeleting(entry);
       try {
+        if (!await this.stopAndAwait(entry.id)) throw new Error("The session runtime could not be stopped; deletion was refused.");
         await this.cancelSetupForDelete(entry);
         // Still torn down even though there is no worktree left to unlock: the
         // checkout's `services:` PTYs, watcher and port detector outlive it, and
@@ -1471,14 +1518,8 @@ export class SessionManager {
     return agentSessionGone({
       tool,
       agentSessionId: resumeId,
-      codexHome: this.opts.codexHome,
-      copilotHome: this.opts.copilotHome,
+      adapterOptions: this.opts.adapterOptions,
     }) ? undefined : resumeId;
-  }
-
-  private resumeArgsFor(tool: string, entry: PersistedEntry): string[] {
-    const resumeId = this.launchResumeId(tool, entry);
-    return resumeId ? resumeArgv(tool, resumeId) : [];
   }
 
   start(id: string, initialPrompt?: string): void | Promise<void> {
@@ -1573,7 +1614,7 @@ export class SessionManager {
       throw error;
     }
     this.markCheckoutState(id, "ready");
-    this.startNow(id, initialPrompt, checkout.path, spec);
+    await this.startNow(id, initialPrompt, checkout.path, spec);
   }
 
   /** Re-push a live isolated checkout's runtime state.
@@ -1973,10 +2014,12 @@ export class SessionManager {
     return new CheckoutStore(this.opts.storeDir, this.opts.projectId);
   }
 
-  private startNow(id: string, initialPrompt?: string, checkoutPath = this.projectPath, sessionAgentSpec = this.agentSpec): void {
+  private startNow(id: string, initialPrompt?: string, checkoutPath = this.projectPath, sessionAgentSpec = this.agentSpec): void | Promise<void> {
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`session not found: ${id}`);
     if (entry.archived) throw new Error(`cannot start archived session: ${id}`);
+    const cleanup = this.terminalCleanup.get(id);
+    if (cleanup) return cleanup.then(() => this.startNow(id, initialPrompt, checkoutPath, sessionAgentSpec));
     if (entry.mode === "chat") {
       // Chat sessions have no PTY. Delegate to the structured manager; the
       // persisted agentSessionId (claude session / codex threadId / opencode
@@ -1984,7 +2027,11 @@ export class SessionManager {
       // only for chat-capable tools, gated app-side and re-checked in startChat.
       const chatAlreadyRunning = this.runningChat.has(id);
       this.runningChat.add(id);
-      const chatTool = entry.tool ?? "codex";
+      if (!chatAlreadyRunning) {
+        this.terminalRunIds.set(id, crypto.randomUUID());
+        this.handlerAvailabilities.set(id, { state: "preparing", reason: "Starting agent" });
+      }
+      const chatTool = entry.tool ?? DEFAULT_CHAT_AGENT;
       resolveApprovalPolicy(chatTool, "chat", entry.approvalPolicy);
       const resumeId = entry.conversationStart === "fork" ? undefined : this.launchResumeId(chatTool, entry);
       this.noteConversationStart(entry, resumeId !== undefined);
@@ -2018,193 +2065,139 @@ export class SessionManager {
     // sweep having happened, not this call re-issuing it.
     this.stopping.delete(id);
 
-    // Resolve the launch command for THIS session. Precedence:
-    //   per-session tool (registry -> bin) -> per-session custom command ->
-    //   antgrid.yaml default spec. resolveAgent throws on an unknown key, which
-    //   surfaces as a session:result error rather than spawning a stray shell.
-    //
-    // `baseArgs` carries the antgrid.yaml default flags (`agent.flags`) and applies
-    // ONLY on the fallback path — a per-session tool/command launches a different
-    // binary, so the default's flags don't belong to it.
-    let base: string | undefined;
-    let baseArgs: string[] = [];
-    let launchEnv: Record<string, string> = {};
-    // `isCustomLine` marks a free-form user command (`entry.command`): it may be
-    // a whole shell line (`my-agent --serve`), so we must NOT quote it — the user
-    // owns its quoting. A resolved bin or the antgrid.yaml default command is a
-    // single executable token and IS quoted when folded, so a path with spaces
-    // survives the shell.
-    let isCustomLine = false;
-    // Resume tokens (`--resume <id>`, `--session <id>`, or codex's `resume
-    // <uuid>` subcommand). Captured here, appended LAST in the spawn block.
-    let resumeArgs: string[] = [];
-    // Provider-native fork args are one-shot like the transcript handoff. They
-    // create a fresh provider session and therefore replace, never combine
-    // with, resume args.
-    const nativeForkArgs = entry.forkNativeArgs ?? [];
-    if (nativeForkArgs.length > 0 && initialPrompt?.trim()) {
-      throw new Error("This provider-native fork starts immediately; send a prompt after the fork opens.");
+    if (entry.forkNativeMigrationError) throw new Error("The saved native fork cannot be migrated safely. Create a new fork from its source.");
+    if (this.awaitingNativeForkIdentity(entry) && entry.forkNativeAttempted) {
+      throw new Error("The previous native fork outcome is unknown. Create a new fork or recover its provider conversation before retrying.");
     }
-    // Set only when an augmenter branch actually reports it (currently
-    // cursor-agent's hooks.json write); undefined means "trust the registry's
-    // static notificationSource" for every other tool. See LaunchAugmentation.
-    let notificationsInjected: boolean | undefined;
-    if (entry.tool) {
-      // Tool launch: the registry may supply default flags (e.g. Codex's
-      // notification-forcing `-c` overrides). These belong to the resolved bin,
-      // so they flow through baseArgs exactly like the antgrid.yaml fallback's.
-      const resolved = resolveAgent(entry.tool);
-      base = resolved.bin;
-      baseArgs = resolved.args;
-      launchEnv = resolveAgentEnv(entry.tool, this.opts.storeDir);
-      // Per-spawn integration that lets the agent report its conversation title
-      // for auto-naming. Additive flags/env only; fail-open inside the augmenter.
-      const aug = augmentAgentLaunch(entry.tool, this.opts.storeDir, this.opts.cursorDir);
-      baseArgs = [...baseArgs, ...aug.args];
-      baseArgs = [...baseArgs, ...resolveApprovalPolicy(entry.tool, "terminal", entry.approvalPolicy)];
-      launchEnv = { ...launchEnv, ...aug.env };
-      notificationsInjected = aug.notificationsInjected;
-      // Resume the slot's last-active conversation (held in resumeArgs, appended
-      // LAST in the spawn block so it lands after any per-session args — required
-      // for codex's `resume` subcommand).
-      resumeArgs = entry.conversationStart === "fork" ? [] : this.resumeArgsFor(entry.tool, entry);
-    } else if (entry.command) {
-      if (entry.approvalPolicy === "bypass") throw new Error("Custom-command sessions do not support bypass approval policy");
-      // Custom command lines never resume and get no per-spawn hooks: the user
-      // owns the whole line, so we don't inject title/resume integration and no
-      // agentSessionId is ever captured for them.
-      base = entry.command;
-      isCustomLine = true;
-    } else {
-      base = sessionAgentSpec.command;
-      baseArgs = sessionAgentSpec.args ?? [];
-      // The antgrid.yaml default spec gets per-spawn hooks + resume only for
-      // agents whose augmenter needs it; other default agents launch bare.
-      if (agentSpec(sessionAgentSpec.name)?.augmentsDefaultSpec) {
-        const aug = augmentAgentLaunch(sessionAgentSpec.name, this.opts.storeDir, this.opts.cursorDir);
-        baseArgs = [...baseArgs, ...aug.args];
-        launchEnv = { ...launchEnv, ...aug.env };
-        notificationsInjected = aug.notificationsInjected;
-        resumeArgs = entry.conversationStart === "fork" ? [] : this.resumeArgsFor(sessionAgentSpec.name, entry);
-      }
-      baseArgs = [...baseArgs, ...resolveApprovalPolicy(sessionAgentSpec.name, "terminal", entry.approvalPolicy)];
-    }
-    if (!base) {
-      // No per-session spec and the first-run wizard hasn't supplied an
-      // agent.tool/command yet (placeholder `{command:""}`); refuse rather
-      // than spawning a default shell.
-      throw new Error("agent.tool or agent.command not configured");
-    }
-    // After the throw: a launch that never happened has started no conversation
-    // and must not release the title of the one still recorded here.
-    this.noteConversationStart(entry, resumeArgs.length > 0);
-
-    // One-shot first prompt, appended LAST (after resume tokens — codex's
-    // `resume <uuid>` is a subcommand and the positional prompt must follow it).
-    // Built once: the PTY fallback below hands the same string to the terminal.
+    const tool = entry.tool ?? sessionAgentSpec.name;
     const launchPrompt = this.forkInitialPrompt(entry, initialPrompt) ?? "";
-    const promptArgs = isCustomLine
-      ? []
-      : initialPromptArgv(entry.tool ?? sessionAgentSpec.name, launchPrompt);
-
-    // No per-session args: spawn `base` with its default argv (the antgrid.yaml
-    // flags on the fallback path, empty otherwise) — preserves no-shell direct
-    // exec. With per-session args, fold base + default flags + args into one
-    // shell command line (the documented shell-semantics tradeoff) and let
-    // terminal-session split it. The resolved executable and config-supplied
-    // flags are shell-quoted so spaces in a path/value don't mis-split; the
-    // custom line and the user's raw args string keep full shell semantics.
-    // The initial prompt is a single opaque argument that may carry newlines
-    // (Shift+Enter in the composer). A raw newline folded into a `cmd.exe /c`
-    // command line terminates the command mid-launch, so on win32 the prompt
-    // must travel as a DISCRETE argv element — terminal-session's cmd.exe shell
-    // path appends spawn args after the `/c <line>` intact. POSIX's `sh -c
-    // <line>` ignores trailing argv, so there the prompt folds into the line
-    // instead (single-quoting via shellQuoteArg preserves any newlines).
-    const foldPromptIntoLine = process.platform !== "win32";
-    const argsStr = entry.args?.trim();
-    let command = base;
-    if (argsStr) {
-      const head = isCustomLine
-        ? [base]
-        : [shellQuoteArg(base), ...baseArgs.map(shellQuoteArg)];
-      // Codex's `resume <uuid>` is a subcommand and must follow user/global
-      // flags. Other agents' resume switches go before raw args so a user `--`
-      // boundary cannot swallow them.
-      const resumeAfterRaw =
-        agentSpec(entry.tool ?? sessionAgentSpec.name)?.resumeIsSubcommand === true;
-      // Native fork args obey the same rule for the same reason: codex's `fork`
-      // is a subcommand exactly as its `resume` is, so placing it before the
-      // user's raw args hands the user's global flags to the subcommand.
-      const conversationArgs = [...resumeArgs, ...nativeForkArgs].map(shellQuoteArg);
-      const beforeRaw = resumeAfterRaw ? [] : conversationArgs;
-      const afterRaw = resumeAfterRaw ? conversationArgs : [];
-      const foldedPrompt = foldPromptIntoLine ? promptArgs.map(shellQuoteArg) : [];
-      command = [...head, ...beforeRaw, argsStr, ...afterRaw, ...foldedPrompt].join(" ");
+    const resumeId = entry.conversationStart === "fork" ? undefined : this.launchResumeId(tool, entry);
+    const pending = this.terminalPreparing.get(id);
+    if (pending) {
+      if (!this.terminalControllers.has(id)) return pending.catch(() => {}).then(() => this.startNow(id, initialPrompt, checkoutPath, sessionAgentSpec));
+      return pending;
     }
-    // With per-session args folded into `command`, spawnArgs is normally []; on
-    // win32 the un-foldable prompt rides here as discrete argv (appended LAST,
-    // after the folded line, mirroring the fold order).
-    const spawnArgs = argsStr
-      ? foldPromptIntoLine
-        ? []
-        : [...promptArgs]
-      : [...baseArgs, ...resumeArgs, ...nativeForkArgs, ...promptArgs];
-
-    // Geometry is left to TerminalManager, which spawns at whatever size the
-    // pane's driver last reported (80x24 only for the first terminal of a
-    // fresh host). The app's `terminal:resize` still corrects it once the
-    // viewed terminal's cell metrics settle. Do NOT defer the spawn until that
-    // resize arrives: the tab never mounts without a PTY, so the resize never
-    // fires, so the PTY never spawns — an earlier revision deadlocked exactly
-    // there.
-    this.tm.spawn({
-      terminalId: id,
-      name: entry.name,
-      command,
-      args: spawnArgs, // [] when args were folded into `command`; default flags otherwise
-      cwd: sessionAgentSpec.workingDir ? resolve(checkoutPath, sessionAgentSpec.workingDir) : checkoutPath,
-      type: "agent",
-      env: Object.keys(launchEnv).length ? launchEnv : undefined,
-      // Spec intent AND this spawn's injection outcome, both decided in
-      // known-agents.ts: notificationsInjected===false means the plugin channel
-      // this spawn depends on (e.g. cursor-agent's hooks.json) failed to write,
-      // so the OSC scanner stays live rather than silently muting the session.
-      suppressOscNotifications: suppressesOscNotifications(
-        entry.tool ?? sessionAgentSpec.name,
-        notificationsInjected,
-      ),
-      suppressOscTitle: suppressesOscTitle(
-        entry.tool ?? sessionAgentSpec.name,
-        notificationsInjected,
-      ),
-      hookAliveProbeAgent: injectsHookAliveProbe(entry.tool ?? sessionAgentSpec.name)
-        ? entry.tool ?? sessionAgentSpec.name
-        : undefined,
-      gracefulAsk: agentSpec(entry.tool ?? sessionAgentSpec.name)?.gracefulExit,
-    });
-    // Some registry agents have no verified launch-argv form for an opening
-    // prompt. Their PTY still buffers input during startup, which gives every
-    // registered terminal agent the same transcript-fork capability without
-    // inventing unsupported CLI flags. The submit gap is best-effort on this
-    // path alone: the prompt is buffered before the TUI attaches, so both
-    // writes can still land in the agent's first read — never worse than the
-    // single write it replaces, but not a guarantee either.
-    if (entry.conversationStart === "fork" && entry.forkTranscript && promptArgs.length === 0) {
-      this.tm.submit(id, launchPrompt);
-    }
-    entry.lastUsedAt = Date.now();
-    // Transcript forks have been handed to the spawned process. Native forks
-    // wait for setAgentSession() to receive their newly minted provider id —
-    // but for ONE launch only. A CLI predating the fork flag, or a source
-    // conversation the provider has since pruned, never reports an id, and
-    // holding the argv indefinitely re-forks the source on every start while
-    // the forced-empty resumeArgs stop the session ever holding a conversation
-    // of its own. The second launch drops it and starts fresh instead.
-    if (!this.awaitingNativeForkIdentity(entry)) this.completeForkLaunch(entry);
-    else if (entry.forkNativeAttempted) this.completeForkLaunch(entry);
-    else entry.forkNativeAttempted = true;
+    const launchCheckoutId = entry.checkoutId;
+    const controller = new AbortController();
+    this.terminalControllers.set(id, controller);
+    const runId = crypto.randomUUID();
+    this.terminalRunIds.set(id, runId);
+    this.handlerAvailabilities.set(id, { state: "preparing", reason: "Starting agent" });
     this.changed();
+    const request = {
+      tool: entry.tool,
+      customCommand: entry.command,
+      configured: Object.freeze({ ...sessionAgentSpec, args: sessionAgentSpec.args ? Object.freeze([...sessionAgentSpec.args]) : undefined }),
+      rawArgs: entry.args,
+      conversation: entry.forkSourceSessionId
+        ? { kind: "fork" as const, sourceSessionId: entry.forkSourceSessionId }
+        : resumeId ? { kind: "resume" as const, sessionId: resumeId } : { kind: "fresh" as const },
+      initialPrompt: launchPrompt,
+      promptKind: entry.forkTranscript ? "fork-handoff" as const : "initial" as const,
+      approvalPolicy: entry.approvalPolicy,
+      storeDir: this.opts.storeDir,
+      adapterOptions: this.opts.adapterOptions?.[tool],
+      cwd: sessionAgentSpec.workingDir ? resolve(checkoutPath, sessionAgentSpec.workingDir) : checkoutPath,
+      signal: controller.signal,
+    };
+    Object.freeze(request.conversation);
+    Object.freeze(request);
+    const dispatch = (launch: PreparedTerminalLaunch): void | Promise<void> => {
+      if (controller.signal.aborted || this.entries.get(id) !== entry || entry.archived || entry.mode !== "terminal" || entry.checkoutId !== launchCheckoutId) {
+        if (launch.dispose) this.terminalDisposers.set(id, launch.dispose);
+        const cleanup = this.releaseTerminalPreparation(id);
+        const cancelled = () => { throw new Error("Terminal launch cancelled during preparation."); };
+        if (cleanup) return cleanup.then(cancelled);
+        cancelled();
+      }
+      if (launch.promptDelivery === "unsupported" && launchPrompt.trim()) {
+        if (launch.dispose) this.terminalDisposers.set(id, launch.dispose);
+        const cleanup = this.releaseTerminalPreparation(id);
+        const refused = () => { throw new Error("This agent cannot accept an opening prompt through its terminal invocation. Start without a prompt, then submit it after the terminal opens."); };
+        if (cleanup) return cleanup.then(refused);
+        refused();
+      }
+      if (this.awaitingNativeForkIdentity(entry)) {
+        entry.forkNativeAttempted = true;
+        try {
+          // No await separates the durable marker from dispatch, just as flushNow's publication never suspends.
+          writePersistedAtomic(this.path, Array.from(this.entries.values()));
+        } catch (error) {
+          entry.forkNativeAttempted = undefined;
+          if (launch.dispose) this.terminalDisposers.set(id, launch.dispose);
+          this.releaseTerminalPreparation(id);
+          throw error;
+        }
+      }
+      this.noteConversationStart(entry, launch.resumed);
+      const notificationsInjected = launch.observation ?? launch.notificationsInjected;
+      if (launch.observation) this.terminalObservations.set(id, launch.observation);
+      this.handlerAvailabilities.set(id, launch.observation?.handler === false
+        ? { state: "unavailable", reason: "Agent monitoring was not installed" }
+        : { state: "unknown", reason: "Waiting for agent events" });
+      if (launch.dispose) this.terminalDisposers.set(id, launch.dispose);
+      try {
+        // Geometry is left to TerminalManager, which spawns at whatever size the
+        // pane's driver last reported (80x24 only for the first terminal of a
+        // fresh host). The app's `terminal:resize` still corrects it once the
+        // viewed terminal's cell metrics settle. Do NOT defer the spawn until that
+        // resize arrives: the tab never mounts without a PTY, so the resize never
+        // fires, so the PTY never spawns — an earlier revision deadlocked exactly
+        // there.
+        this.tm.spawn({
+          terminalId: id,
+          name: entry.name,
+          command: launch.command,
+          invocationKind: launch.invocationKind,
+          args: launch.args,
+          cwd: request.cwd,
+          type: "agent",
+          env: { ...launch.env, ANTGRID_RUN_ID: runId },
+          // Spec intent AND this spawn's injection outcome, both decided in
+          // known-agents.ts: notificationsInjected===false means the plugin channel
+          // this spawn depends on (e.g. cursor-agent's hooks.json) failed to write,
+          // so the OSC scanner stays live rather than silently muting the session.
+          suppressOscNotifications: suppressesOscNotifications(
+            entry.tool ?? sessionAgentSpec.name,
+            notificationsInjected,
+          ),
+          suppressOscTitle: suppressesOscTitle(
+            entry.tool ?? sessionAgentSpec.name,
+            notificationsInjected,
+          ),
+          hookAliveProbeAgent: (launch.observation?.hookAlive ?? injectsHookAliveProbe(entry.tool ?? sessionAgentSpec.name))
+            ? entry.tool ?? sessionAgentSpec.name
+            : undefined,
+          gracefulAsk: agentSpec(entry.tool ?? sessionAgentSpec.name)?.gracefulExit,
+        });
+        if (launch.promptDelivery === "buffered") {
+          this.tm.submit(id, launchPrompt);
+        }
+        entry.lastUsedAt = Date.now();
+        if (!this.awaitingNativeForkIdentity(entry)) this.completeForkLaunch(entry);
+        this.changed();
+      } catch (error) {
+        this.releaseTerminalPreparation(id);
+        throw error;
+      }
+    };
+    try {
+      const prepared = prepareTerminalLaunch(request);
+      if (prepared instanceof Promise) {
+        const pending = prepared.then(dispatch).catch(async (error) => {
+          await this.releaseTerminalPreparation(id);
+          throw error;
+        }).finally(() => {
+          if (this.terminalPreparing.get(id) === pending) this.terminalPreparing.delete(id);
+        });
+        this.terminalPreparing.set(id, pending);
+        return pending;
+      }
+      return dispatch(prepared);
+    } catch (error) {
+      this.releaseTerminalPreparation(id);
+      throw error;
+    }
   }
 
   /** Sessions sharing one MANAGED checkout. `main` is not a shared workspace —
@@ -2297,13 +2290,14 @@ export class SessionManager {
     // longer than the first successful spawn. A later stop/start is a normal
     // fresh conversation and must not replay the old transcript.
     entry.forkTranscript = undefined;
-    entry.forkNativeArgs = undefined;
+    entry.forkSourceSessionId = undefined;
+    entry.forkNativeMigrationError = undefined;
     entry.forkNativeAttempted = undefined;
     entry.conversationStart = "fresh";
   }
 
   private awaitingNativeForkIdentity(entry: PersistedEntry): boolean {
-    return entry.conversationStart === "fork" && (entry.forkNativeArgs?.length ?? 0) > 0;
+    return entry.conversationStart === "fork" && entry.forkSourceSessionId !== undefined;
   }
 
   /** Initiates teardown; it is NOT complete when this returns. The chat branch
@@ -2311,6 +2305,10 @@ export class SessionManager {
    *  slot on another runtime can wait it out (see stopAndAwait); every existing
    *  caller ignores it, exactly as before. */
   stop(id: string): void | Promise<void> {
+    const preparationCleanup = this.releaseTerminalPreparation(id);
+    const preparation = this.terminalPreparing.get(id);
+    const preparationStopped = preparation
+      ? preparation.catch(() => {}).then(() => this.terminalCleanup.get(id)) : preparationCleanup;
     const entry = this.entries.get(id);
     // Cleared for the same reason archive() clears it: the kill below cannot
     // reach a start that has not happened yet, so a session stopped while its
@@ -2327,10 +2325,11 @@ export class SessionManager {
     }
     if (!this.tm.has(id)) {
       if (unqueued) this.changed();
-      return;
+      return preparationStopped;
     }
     this.stopTerminal(id);
     this.changed();
+    return preparationStopped;
   }
 
   /**
@@ -2348,12 +2347,15 @@ export class SessionManager {
     if (!entry) throw new Error(`session not found: ${id}`);
     if (entry.archived) throw new Error(`cannot switch archived session: ${id}`);
     if (entry.mode === mode) return;
+    if (this.awaitingNativeForkIdentity(entry) || entry.forkNativeMigrationError) {
+      throw new Error("Complete or recover this native fork before changing its mode.");
+    }
     if (mode === "chat" && !isChatCapableTool(entry.tool)) {
       throw new Error(`tool has no chat driver: ${entry.tool}`);
     }
     resolveApprovalPolicy(entry.tool ?? this.agentSpec.name, mode, entry.approvalPolicy);
     // Read with the OLD mode — the same expression toWire uses.
-    const wasRunning = entry.mode === "chat" ? this.runningChat.has(id) : this.tm.has(id);
+    const wasRunning = entry.mode === "chat" ? this.runningChat.has(id) : this.tm.has(id) || this.terminalPreparing.has(id);
     // Held across the teardown only: the exit-driven handler teardown fires
     // inside the await below, and this is what tells it the session outlives
     // the runtime it is losing.
@@ -2425,6 +2427,7 @@ export class SessionManager {
       const treeKilled = this.tm.treeKilled(id);
       return this.awaitTerminalExit(id, timeoutMs).then(async (exited) => {
         await treeKilled;
+        await torndown;
         return exited;
       });
     }
@@ -2479,7 +2482,11 @@ export class SessionManager {
   }
 
   /** Called when the underlying PTY exits (regardless of stop() vs crash). */
-  noteExited(id: string): void {
+  noteExited(id: string, runId?: string): void {
+    // A same-slot spawn reports the old exit after replacement preparation.
+    if (runId === undefined || this.terminalRunIds.get(id) === runId) {
+      this.releaseTerminalPreparation(id);
+    }
     const waiters = this.terminalExitWaiters.get(id);
     if (waiters) {
       // Drop the set before firing so a waiter's own cleanup can't mutate what
@@ -2629,6 +2636,7 @@ export class SessionManager {
    *  goes through here so the budget is stated once, and so the row stops
    *  claiming to be running the moment the ask goes out. */
   private stopTerminal(id: string): void {
+    this.releaseTerminalPreparation(id);
     this.tm.kill(id, AGENT_GRACE_MS);
     // Read here and nowhere later: the exit handler drops the session from the
     // manager's map, so an `await` between these two lines would hand back the
@@ -2680,8 +2688,7 @@ export class SessionManager {
       tool,
       agentSessionId: e.agentSessionId,
       agentTranscriptPath: e.agentTranscriptPath,
-      codexHome: this.opts.codexHome,
-      copilotHome: this.opts.copilotHome,
+      adapterOptions: this.opts.adapterOptions,
     });
     this.resumableCache.set(e.id, { agentSessionId: e.agentSessionId, resumable });
     return resumable;

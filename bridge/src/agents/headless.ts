@@ -15,12 +15,12 @@ import {
 import "../modelwatch-log";
 import { killChildTree, stripInheritedCertOverrides } from "../terminal-session";
 import { detectInstalledTools } from "../tool-detector";
-import { AGENTS, agentSpec } from "./registry";
+import { AGENTS, agentSpec } from "antgrid-agents/builtins";
 import {
   pickHeadlessFrom,
   type HeadlessCommand, type HeadlessNeed, type HeadlessReach,
   type HeadlessUsageCapture, type HeadlessUsageReading, type HeadlessUsageTokens,
-} from "./types";
+} from "antgrid-agents/contracts";
 
 const log = logger.child({ component: "headless" });
 

@@ -13,7 +13,7 @@
 // update" (null), never an exception — proactive detection must not perturb
 // chat-session start.
 
-import type { AgentUpdateState } from "../agents/types";
+import type { AgentUpdateState } from "antgrid-agents/contracts";
 
 // npm dist-tags.latest is the authority for "latest". We pin to /latest so
 // prerelease tags (alpha/beta) can never be surfaced as an upgrade.
@@ -208,23 +208,26 @@ export interface AgentUpdateOutcome {
 }
 
 // Orchestrate an in-app self-update: quiesce the live sessions (freeing the
-// binary), run the update once, then ALWAYS restart what we stopped — even when
+// binary), run the update once, then restart what we stopped — even when
 // the update fails — so a user's chat is never left dead. Never throws; a
 // failure surfaces as ok:false with the captured output.
 export async function runAgentUpdate(deps: AgentUpdateRunDeps): Promise<AgentUpdateOutcome> {
-  // Wait every process fully out before touching the binary. A failed stop is
-  // swallowed: a stuck session must not block the update, and its restart below
-  // still runs.
-  await Promise.all(
-    deps.sessionIds.map((id) => Promise.resolve(deps.stop(id)).catch(() => {})),
+  const stops = await Promise.allSettled(
+    deps.sessionIds.map(async (id) => { await deps.stop(id); }),
   );
+  const stoppedIds = deps.sessionIds.filter((_, index) => stops[index].status === "fulfilled");
+  const failures = stops.filter((stop): stop is PromiseRejectedResult => stop.status === "rejected");
 
   let exitCode = 1;
   let output = "";
   try {
-    const r = await deps.execUpdate();
-    exitCode = r.exitCode;
-    output = r.output;
+    if (failures.length) {
+      output = `Update cancelled because agent teardown failed: ${failures.map(({ reason }) => reason instanceof Error ? reason.message : String(reason)).join("; ")}`;
+    } else {
+      const r = await deps.execUpdate();
+      exitCode = r.exitCode;
+      output = r.output;
+    }
   } catch (err) {
     output = err instanceof Error ? err.message : String(err);
   } finally {
@@ -235,7 +238,7 @@ export async function runAgentUpdate(deps: AgentUpdateRunDeps): Promise<AgentUpd
     // can't be fully ordered here; in practice an agent that holds such a lock
     // allows one server per home dir, so there's ≤1 to restart. Each is
     // fail-soft on its own.
-    for (const id of deps.sessionIds) {
+    for (const id of stoppedIds) {
       try { await deps.start(id); } catch { /* one dead restart must not sink the rest */ }
     }
   }

@@ -1,14 +1,20 @@
 import { test, expect } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   antigravityScriptPath,
   antigravityHookCommand,
   mergeAntigravityHookEntries,
   ANTIGRAVITY_HOOK_GROUP,
-} from "../src/agents/antigravity/global-hooks";
+} from "../../packages/antgrid-agents/src/agents/antigravity/global-hooks";
 
 test("antigravityScriptPath resolves under the bundled antigravity plugin dir", () => {
-  const p = antigravityScriptPath();
-  expect(p.replace(/\\/g, "/")).toMatch(/\/plugin\/antigravity\/post-title\.js$/);
+  const directory = mkdtempSync(join(tmpdir(), "agent-assets-test-"));
+  try {
+    const p = antigravityScriptPath(directory);
+    expect(p.replace(/\\/g, "/")).toMatch(/\/agent-assets\/[^/]+\/antigravity\/post-title\.js$/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("antigravityHookCommand composes a single UNQUOTED command string (no args array)", () => {
@@ -57,4 +63,20 @@ test("mergeAntigravityHookEntries is idempotent and preserves other top-level gr
 
   const second = mergeAntigravityHookEntries(first, specs);
   expect(second).toBeNull(); // both entries already present, no-op
+});
+
+test("asset upgrades replace accumulated managed hooks without mutating other groups", () => {
+  const specs = (hash: string) => (["PreInvocation", "Stop"] as const).map((event) => ({
+    event, command: antigravityHookCommand(`C:/agent-assets/${hash}/antigravity/post-title.js`, event),
+  }));
+  const original = mergeAntigravityHookEntries({ personal: { Stop: [{ command: "echo mine" }] } }, specs("old"));
+  original[ANTIGRAVITY_HOOK_GROUP].Stop.push({ type: "command", command: "node legacy/post-title.js Stop", timeout: 5 });
+  const before = structuredClone(original);
+  const upgraded = mergeAntigravityHookEntries(original, specs("new"));
+  expect(original).toEqual(before);
+  expect(upgraded.personal).toEqual(original.personal);
+  for (const { event, command } of specs("new")) {
+    expect(upgraded[ANTIGRAVITY_HOOK_GROUP][event]).toEqual([{ type: "command", command, timeout: 5 }]);
+  }
+  expect(mergeAntigravityHookEntries(upgraded, specs("new"))).toBeNull();
 });

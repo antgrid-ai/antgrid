@@ -13,12 +13,11 @@
       "name": "antgrid-bridge",
       "version": "0.1.0",
       "dependencies": {
-        "@anthropic-ai/claude-agent-sdk": "0.3.201",
         "@inquirer/prompts": "^8.4.2",
-        "@opencode-ai/sdk": "1.15.10",
         "@sentry/bun": "^10.70.0",
         "@xterm/addon-serialize": "^0.14.0",
         "@xterm/headless": "^6.0.0",
+        "antgrid-agents": "workspace:*",
         "antgrid-wire": "workspace:*",
         "bun-pty": "^0.4.8",
         "chokidar": "^5.0.0",
@@ -39,12 +38,26 @@
       "version": "0.1.0",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.12.1",
+        "antgrid-agents": "workspace:*",
       },
     },
     "evals": {
       "name": "antgrid-evals",
       "dependencies": {
         "antgrid-wire": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.2.4",
+        "typescript": "^5.7.3",
+      },
+    },
+    "packages/antgrid-agents": {
+      "name": "antgrid-agents",
+      "version": "0.1.0",
+      "dependencies": {
+        "@anthropic-ai/claude-agent-sdk": "0.3.201",
+        "@opencode-ai/sdk": "1.15.10",
+        "zod": "^4.3.6",
       },
       "devDependencies": {
         "@types/bun": "^1.2.4",
@@ -577,6 +590,8 @@
     "ansi-regex": ["ansi-regex@5.0.1", "", {}, "sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ=="],
 
     "ansi-styles": ["ansi-styles@4.3.0", "", { "dependencies": { "color-convert": "^2.0.1" } }, "sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg=="],
+
+    "antgrid-agents": ["antgrid-agents@workspace:packages/antgrid-agents"],
 
     "antgrid-bridge": ["antgrid-bridge@workspace:bridge"],
 
