@@ -341,6 +341,7 @@ void main() {
       );
       await tester.pump();
       final withoutStrip = tester.getSize(find.byType(GhosttyTerminalView));
+      final viewportWithoutStrip = tester.getRect(find.byType(FittedBox));
 
       // A distinct scope key so the second pump builds a fresh container and
       // a fresh grid freeze, rather than reconciling onto the first one and
@@ -379,6 +380,7 @@ void main() {
 
       expect(withStrip.width, withoutStrip.width);
       expect(withStrip.height, withoutStrip.height);
+      expect(tester.getRect(find.byType(FittedBox)), viewportWithoutStrip);
       expect(stripHeight, greaterThan(0));
     },
   );

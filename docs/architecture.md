@@ -166,8 +166,7 @@ attachment expiry, and the app keeps the completed viewport available.
 
 The terminal protocol uses the existing authenticated transports: relay traffic
 is E2E encrypted; the current loopback listener uses a local bearer token.
-Qualification commands, measurement scope, and remaining real-agent checks are
-in [the terminal frame implementation plan](terminal-frame-implementation-plan.md).
+Terminal qualification commands live in `bridge/package.json` and `evals/package.json`.
 
 ## Shared packages (`packages/`)
 

@@ -142,6 +142,25 @@ void main() {
     expect(service.canSendInput('a'), isTrue);
     expect(liveView().showCursor, isTrue);
 
+    final liveElement = tester.element(find.byType(GhosttyTerminalView).first);
+    container
+        .read(appLifecycleStateProvider.notifier)
+        .set(AppLifecycleState.inactive);
+    await tester.pump();
+    await tester.pump();
+    expect(
+      tester.element(find.byType(GhosttyTerminalView).first),
+      same(liveElement),
+    );
+    expect(liveView().controller.plainText, contains('cached screen'));
+    expect(messages('unsubscribe'), isEmpty);
+    container
+        .read(appLifecycleStateProvider.notifier)
+        .set(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump();
+    expect(messages('subscribe'), hasLength(1));
+
     container
         .read(visibleWorkspaceViewProvider.notifier)
         .set(WorkspaceView.terminals);

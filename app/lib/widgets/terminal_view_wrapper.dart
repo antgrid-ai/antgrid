@@ -1251,9 +1251,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
   @override
   Widget build(BuildContext context) {
+    final lifecycle = ref.watch(appLifecycleStateProvider);
+    // An inactive desktop window is still visible beside the focused app.
     final visible =
         DisplayVisibilityScope.of(context) &&
-        ref.watch(appLifecycleStateProvider) == AppLifecycleState.resumed;
+        (lifecycle == AppLifecycleState.resumed ||
+            lifecycle == AppLifecycleState.inactive);
     _syncDisplay(visible);
     if (!visible) return const SizedBox.shrink();
     final isExited = widget.tab.sessionState == TerminalSessionState.exited;
@@ -1276,11 +1279,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
     return Column(
       children: [
-        // Above the grid, not a Positioned overlay: a bottom-left overlay
-        // would sit over the guest's own prompt/status line, and outside the
-        // Stack this changes the box the terminal's LayoutBuilder measures by
-        // a fixed height instead of being invisible to it.
-        if (!showStoppedView) _buildHydrationStrip(hydration, inputPaused),
         if (!showStoppedView && !widget.tab.isAgent && isExited)
           AbButton(
             label: 'Start',
@@ -1291,7 +1289,19 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         Expanded(
           child: showStoppedView
               ? _buildStoppedView(context)
-              : _buildTerminal(context, dim: chrome?.dim ?? false),
+              : Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    _buildTerminal(context, dim: chrome?.dim ?? false),
+                    // Attachment transitions must not resize the guest's grid.
+                    Positioned(
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      child: _buildHydrationStrip(hydration, inputPaused),
+                    ),
+                  ],
+                ),
         ),
 
         // Keeping this row mounted preserves terminal geometry while browsing.

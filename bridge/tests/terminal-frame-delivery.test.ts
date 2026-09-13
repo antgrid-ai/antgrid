@@ -106,6 +106,37 @@ function statuses(t: { sent: (TerminalFrame | TerminalDisplayStatus | AbMessage)
 }
 
 describe("hub", () => {
+  test("a final synchronized erase is delivered after the throttle without more output", async () => {
+    let now = 0;
+    const hub = new TerminalFrameHub(() => now);
+    const screen = source();
+    const runId = crypto.randomUUID();
+    hub.register(addr(), screen, runId);
+    const transport = new FakeTransport();
+    const connection = hub.connect(transport);
+    try {
+      const attachmentId = (await connection.subscribe(addr(), TERMINAL_PROTOCOL_VERSION, crypto.randomUUID()))!;
+      const initial = frames(transport).at(-1)!;
+      connection.acknowledge(addr(), { runId, attachmentId, sequence: initial.sequence });
+      await paint(screen, "\x1b[?2026h\x1b[48;2;55;55;55m\x1b[2J\x1b[5;1H> old");
+      now += TERMINAL_FRAME_INTERVAL_MS;
+      hub.tick();
+      const count = frames(transport).length;
+      await paint(screen, "\x1b[0m\r\x1b[2K> \x1b[?2026l");
+      expect(frames(transport)).toHaveLength(count);
+      now += TERMINAL_FRAME_INTERVAL_MS;
+      hub.tick();
+      const final = frames(transport).at(-1)!;
+      expect(frames(transport)).toHaveLength(count + 1);
+      expect(final.revision).toBe(screen.revision);
+      expect(final.syncTimedOut).toBe(false);
+      connection.acknowledge(addr(), { runId, attachmentId, sequence: final.sequence });
+      now += TERMINAL_FRAME_INTERVAL_MS * 10;
+      hub.tick();
+      expect(frames(transport)).toHaveLength(count + 1);
+    } finally { hub.dispose(); }
+  });
+
   test("missing terminals are refused with request correlation and without an attachment", async () => {
     const hub = new TerminalFrameHub();
     const transport = new FakeTransport();

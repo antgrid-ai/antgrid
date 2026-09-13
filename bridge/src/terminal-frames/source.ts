@@ -310,8 +310,12 @@ export class TerminalFrameSource extends TerminalScreen {
     // cells. Display frames end at an absolute grid coordinate and full margins;
     // the next frame is independent, so no guest-relative cursor state is needed.
     const cursor = `\x1b[?6l\x1b[r\x1b[${buffer.cursorY + 1};${Math.min(buffer.cursorX, this.term.cols - 1) + 1}H`;
+    // Ghostty can retain blank-cell backgrounds when reusing the alternate
+    // buffer. The serializer assumes entry clears it; make that clear explicit
+    // under default attributes before replaying the alternate buffer's cells.
+    const screen = this.serializeNow().replace("\x1b[?1049h\x1b[H", "\x1b[?1049h\x1b[0m\x1b[2J\x1b[H");
     // A source's unfinished OSC 8 span must not leak across independent frames.
-    const ansi = "\x1b[?2026h\x1b[?1049l\x1b[3J" + OSC_CLOSE + this.serializeNow()
+    const ansi = "\x1b[?2026h\x1b[?1049l\x1b[3J" + OSC_CLOSE + screen
       + this.linkOverlay() + this.modes.supplementalPrelude()
       + cursor + `\x1b[=${this.keyboard[buffer.type].at(-1)};1u\x1b[?2026l`;
     // Measured as the transport will carry it, against the cap derived from the
