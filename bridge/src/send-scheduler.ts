@@ -27,6 +27,8 @@ export interface QueuedAppFrame {
   plaintextBytes: number;
   /** Diagnostic message type, carried through to netwatch. */
   type: string;
+  signal?: AbortSignal;
+  authorized?: () => boolean;
   /** Fires exactly once when the frame LEAVES the queue: right after the sink
    *  wrote it ("sent") or when clear()/dropStream()/the sink dropped it. Runs
    *  inside drain(): it may only resolve a promise, never call back into the
@@ -104,6 +106,7 @@ export class SendScheduler {
    *  the channel past `maxQueuedBytes` is refused whole and the caller drops
    *  the message with one visible record. */
   enqueue(frames: QueuedAppFrame[]): boolean {
+    if (frames.some((frame) => frame.signal?.aborted)) return false;
     if (frames.length === 0) return true;
     const adding: Record<Channel, number> = { control: 0, preview: 0 };
     for (const f of frames) adding[f.channel] += f.plaintextBytes;
@@ -113,6 +116,19 @@ export class SendScheduler {
     for (const f of frames) this.queues[f.channel].push(f);
     for (const ch of ["control", "preview"] as const) this.queuedBytes[ch] += adding[ch];
     return true;
+  }
+
+  dropAborted(): void {
+    for (const channel of ["control", "preview"] as const) {
+      const kept: QueuedAppFrame[] = [];
+      for (const frame of this.queues[channel]) {
+        if (frame.signal?.aborted) {
+          this.queuedBytes[channel] -= frame.plaintextBytes;
+          frame.settle?.("dropped");
+        } else kept.push(frame);
+      }
+      this.queues[channel] = kept;
+    }
   }
 
   drain(): DrainResult {
@@ -139,6 +155,10 @@ export class SendScheduler {
         delete this.blockedSince[next];
         const frame = this.queues[next].shift()!;
         this.queuedBytes[next] -= frame.plaintextBytes;
+        if (frame.signal?.aborted || frame.authorized?.() === false) {
+          frame.settle?.("dropped");
+          continue;
+        }
         const n = this.sink.send(frame);
         // A frame the sink dropped never reached the peer, so crediting it back
         // would be impossible: leave it out of the accounting entirely.

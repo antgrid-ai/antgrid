@@ -110,6 +110,12 @@ jobs:
 
       - uses: ./.github/actions/setup-android
 
+      # The native terminal qualification test runs the bridge's authoritative
+      # frame serializer and reapplies its output through Ghostty. Flutter's pub
+      # resolution does not install the serializer's Bun workspace dependencies.
+      - name: Install terminal qualification dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
       # FCM client config, when the run can see secrets. Writing it here is what
       # puts the google-services plugin — resource generation and its manifest
       # merge, which ONLY a Firebase-enabled build exercises — under PR-time

@@ -276,7 +276,7 @@ test("non-promotion messages are not consumed", () => {
   const ctrl = createRelayPromotion({ bus, ...makeDeps(makeMachineSession()) });
   expect(
     ctrl.handleInbound(
-      createMessage("terminal:resize", { terminalId: "t", cols: 80, rows: 24, clientId: "test" }) as any,
+      createMessage("terminal:resize", { intent: "takeover", terminalId: "t", cols: 80, rows: 24, clientId: "test" }) as any,
     ),
   ).toBe(false);
   ctrl.stop();

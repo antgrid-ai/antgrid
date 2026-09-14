@@ -7,6 +7,7 @@ import 'git_panel.dart';
 import 'handler/handler_screen.dart';
 import 'terminal_list_view.dart';
 import 'workspace_tab_bar.dart';
+import 'display_visibility.dart';
 
 /// Renders the workspace area. The horizontal [WorkspaceTabBar] sits at the
 /// top on desktop; on mobile the caller hides it and uses [MobileBottomNav]
@@ -50,10 +51,19 @@ class WorkspacePanel extends StatelessWidget {
             child: IndexedStack(
               index: selectedView.index,
               children: const [
-                PreviewScreen(),
-                FileExplorerScreen(),
+                DisplayVisibility(
+                  workspaceView: WorkspaceView.preview,
+                  child: PreviewScreen(),
+                ),
+                DisplayVisibility(
+                  workspaceView: WorkspaceView.files,
+                  child: FileExplorerScreen(),
+                ),
                 GitPanel(),
-                TerminalListView(),
+                DisplayVisibility(
+                  workspaceView: WorkspaceView.terminals,
+                  child: TerminalListView(),
+                ),
                 HandlerScreen(),
               ],
             ),

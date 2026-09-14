@@ -128,6 +128,47 @@ void main() {
       mode: mode,
       onTransport: onTransport,
     );
+    if (mode == ProjectSessionMode.relay) {
+      final transport = service.session.transport as FakeAgentTransport;
+      service.setDisplayInterest('input-fixture', tabId);
+      transport.emit('agent:status', {
+        'projectId': 'p',
+        'terminals': [
+          {'terminalId': tabId, 'name': tabId, 'running': true},
+        ],
+      });
+      await tester.pump();
+      final request = transport.sent.lastWhere(
+        (m) => m['type'] == 'terminal:subscribe',
+      );
+      transport.emit('terminal:subscribed', {
+        'terminalId': tabId,
+        'runId': 'run',
+        'attachmentId': 'attachment',
+        'requestId': request['requestId'],
+        'version': 2,
+      });
+      await tester.pump();
+      transport.emit('terminal:frame', {
+        'terminalId': tabId,
+        'runId': 'run',
+        'attachmentId': 'attachment',
+        'version': 2,
+        'sequence': 1,
+        'revision': 1,
+        'cols': 80,
+        'rows': 24,
+        'ansi': '',
+        'syncTimedOut': false,
+        'history': {
+          'epoch': 1,
+          'firstRowId': 0,
+          'nextRowId': 0,
+          'status': 'recording',
+        },
+      });
+      await tester.pump();
+    }
     final tab = TerminalTab(
       terminalId: tabId,
       name: tabId,
@@ -481,10 +522,7 @@ void main() {
 
       await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
       _synthesizedControl(ui.KeyEventType.up);
-      await tester.sendKeyDownEvent(
-        LogicalKeyboardKey.keyV,
-        character: 'v',
-      );
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV, character: 'v');
       await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
       _synthesizedControl(ui.KeyEventType.down);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
@@ -543,11 +581,9 @@ void main() {
       await tester.sendKeyUpEvent(LogicalKeyboardKey.keyC);
       _synthesizedControl(ui.KeyEventType.down);
       await tester.pumpAndSettle();
-      expect(
-        written,
-        [0x63],
-        reason: 'a bare c must reach the PTY, not be swallowed as Ctrl+C',
-      );
+      expect(written, [
+        0x63,
+      ], reason: 'a bare c must reach the PTY, not be swallowed as Ctrl+C');
 
       written.clear();
       _synthesizedControl(ui.KeyEventType.up);
@@ -555,11 +591,9 @@ void main() {
       await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
       _synthesizedControl(ui.KeyEventType.down);
       await tester.pumpAndSettle();
-      expect(
-        written,
-        [0x76],
-        reason: 'a bare v must type, not re-paste the clipboard',
-      );
+      expect(written, [
+        0x76,
+      ], reason: 'a bare v must type, not re-paste the clipboard');
     },
   );
 
