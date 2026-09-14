@@ -15,7 +15,8 @@ Bridge imports public package exports only. Provider invocation, storage knowled
 hooks, and SDK behavior belong in the package; bridge owns authorization, checkout
 selection, process containment, transport, and session persistence.
 
-Initialize host services through `src/agent-host.ts` before launching adapters.
+Compose the registry and host services in `src/agent-host.ts`; bridge consumers
+use `src/agent-runtime.ts` for the resulting runtime.
 Hook command resolution stays in bridge because development and compiled entrypoints
 differ. Provider assets are embedded and materialized by `antgrid-agents/assets`;
 external agent runtimes require real files, not paths inside Bun's executable.

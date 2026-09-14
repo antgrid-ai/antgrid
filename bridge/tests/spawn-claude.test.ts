@@ -1,5 +1,8 @@
 import { describe, it, expect, mock } from "bun:test";
-import { buildClaudeEnv, createPersistentPromptStream, resolveClaudeBinary } from "../../packages/antgrid-agents/src/agents/claude-code/spawn";
+import { buildClaudeEnv as buildEnv, createPersistentPromptStream, resolveClaudeBinary } from "../../packages/antgrid-agents/src/agents/claude-code/spawn";
+import { withAgentHost } from "antgrid-agents/host";
+import { agentHostServices } from "../src/agent-host";
+const buildClaudeEnv: typeof buildEnv = (base) => withAgentHost(agentHostServices, () => buildEnv(base));
 
 describe("buildClaudeEnv", () => {
   it("strips API keys and sets the required env", () => {
@@ -68,14 +71,14 @@ describe("spawnClaude forwarding", () => {
     // Re-import so the module binds against the mocked query.
     const { spawnClaude } = await import("../../packages/antgrid-agents/src/agents/claude-code/spawn");
 
-    spawnClaude({
+    withAgentHost(agentHostServices, () => spawnClaude({
       cwd: "/tmp/proj",
       canUseTool: (async () => ({ behavior: "allow", updatedInput: {} })) as any,
       onStderr: () => {},
       abortController: new AbortController(),
       extraArgs: { "plugin-dir": "/plugins/claude" },
       extraEnv: { ANTGRID_TERMINAL_ID: "slot-1", ANTGRID_API_PORT: "8790" },
-    });
+    }));
 
     expect(captured.extraArgs).toEqual({ "plugin-dir": "/plugins/claude" });
     expect(captured.env.ANTGRID_TERMINAL_ID).toBe("slot-1");

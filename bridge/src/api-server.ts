@@ -6,7 +6,7 @@ import { logger } from "./logger";
 import { resolveAbDir } from "./antgrid-dir";
 const log = logger.child({ component: "api-server" });
 import { createMessage, type AbMessage } from "./protocol";
-import { AGENTS, BY_HOOK_NAME } from "antgrid-agents/builtins";
+import { AGENTS, BY_HOOK_NAME } from "./agent-runtime";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";

@@ -102,6 +102,7 @@ export interface SelectionSnapshot {
 export interface ChatSessionOpts {
   sessionId: string;
   sendMessage: (m: AbMessage) => void;
+  onAgentSession?: (id: string) => void;
 }
 
 /** A permission prompt as a backend describes it. `permissionId` is supplied
@@ -125,6 +126,7 @@ export interface QuestionRequest {
 }
 
 export abstract class ChatSession implements StructuredDriver {
+  private readonly onAgentSession?: (id: string) => void;
   protected readonly sessionId: string;
   protected readonly send: (m: AbMessage) => void;
   protected abstract readonly profile: ChatSessionProfile;
@@ -176,6 +178,7 @@ export abstract class ChatSession implements StructuredDriver {
   private pickSeq = new Map<string, number>();
 
   constructor(opts: ChatSessionOpts) {
+    this.onAgentSession = opts.onAgentSession;
     this.sessionId = opts.sessionId;
     this.send = (message) => {
       if (!this.disposed) opts.sendMessage(message);
@@ -229,13 +232,14 @@ export abstract class ChatSession implements StructuredDriver {
   // StructuredDriver
   // ==========================================================================
 
-  async start(resumeId?: string): Promise<string> {
+  async start(resumeId?: string): Promise<void> {
     if (this.disposed) throw new Error("Agent session is disposed");
     // Advertise an empty, not-ready catalog immediately so the app renders a
     // loading state for this session before the backend has booted at all —
     // claude's SDK does not even spawn its subprocess until the first prompt.
     this.emitCapabilities();
-    return this.startBackend(resumeId);
+    const id = await this.startBackend(resumeId);
+    if (id && !this.disposed) this.onAgentSession?.(id);
   }
 
   async prompt(text: string, commandId?: string): Promise<void> {
@@ -334,15 +338,18 @@ export abstract class ChatSession implements StructuredDriver {
 
   dispose(): Promise<void> {
     if (this.disposal) return this.disposal;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    this.disposal = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
     // Withdraw anything still on screen BEFORE the disposed flag goes up, so a
     // prompt torn down mid-turn (LRU eviction, focus disposal) doesn't wedge.
-    this.retractAllPending();
-    if (this.hasBackgroundTasks) this.emitBackgroundTasks([]);
+    try { this.retractAllPending(); } catch { /* Delivery cannot prevent backend cleanup. */ }
+    try { if (this.hasBackgroundTasks) this.emitBackgroundTasks([]); } catch { /* Delivery cannot prevent backend cleanup. */ }
     this.disposed = true;
     try {
-      this.disposal = Promise.resolve(this.disposeBackend());
+      Promise.resolve(this.disposeBackend()).then(resolve, reject);
     } catch (error) {
-      this.disposal = Promise.reject(error);
+      reject(error);
     }
     return this.disposal;
   }
@@ -574,17 +581,20 @@ export abstract class ChatSession implements StructuredDriver {
     // always seen them withdrawn in.
     const approvals = [...this.pendingApprovals];
     this.pendingApprovals.clear();
-    for (const [permissionId, p] of approvals) {
-      this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, permissionId }));
-      this.settleGroup(permissionId, p.group);
-      p.answer(null);
-    }
     const questions = [...this.pendingQuestions];
     this.pendingQuestions.clear();
+    const attempt = (callback: () => void) => {
+      try { callback(); } catch (error) { log.warn({ error }, "Failed to withdraw pending request"); }
+    };
+    for (const [permissionId, p] of approvals) {
+      attempt(() => this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, permissionId })));
+      this.settleGroup(permissionId, p.group);
+      attempt(() => p.answer(null));
+    }
     for (const [questionId, p] of questions) {
-      this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, questionId }));
+      attempt(() => this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, questionId })));
       this.settleGroup(questionId, p.group);
-      p.answer(null);
+      attempt(() => p.answer(null));
     }
   }
 

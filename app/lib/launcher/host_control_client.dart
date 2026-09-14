@@ -212,12 +212,12 @@ class PhonesList {
 /// predates each field; callers fall back to the persisted agent catalog then.
 class ToolSummary {
   final String tool;
-  final String path;
+  final String? path;
   final bool? chatCapable;
   final String? label;
   const ToolSummary({
     required this.tool,
-    required this.path,
+    this.path,
     this.chatCapable,
     this.label,
   });
@@ -445,7 +445,7 @@ class HostControlClient {
           }
           final tool = e['tool'];
           final path = e['path'];
-          if (tool is! String || path is! String) {
+          if (tool is! String || (path != null && path is! String)) {
             throw HostControlException(
               'BAD_RESPONSE',
               'malformed tool fields: $e',
@@ -453,7 +453,7 @@ class HostControlClient {
           }
           return ToolSummary(
             tool: tool,
-            path: path,
+            path: path as String?,
             chatCapable: e['chatCapable'] as bool?,
             label: e['label'] as String?,
           );

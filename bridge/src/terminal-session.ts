@@ -1,5 +1,6 @@
 import { resolveTerminalInvocation } from "./terminal-invocation";
 import { needsShellForAgentBinary, prepareAgentBinary } from "antgrid-agents/terminal-platform";
+import { agentRuntime } from "./agent-host";
 import { spawn as ptySpawn } from "bun-pty";
 import type { IPty, IDisposable } from "bun-pty";
 import { execFile } from "node:child_process";
@@ -9,7 +10,7 @@ import { logger } from "./logger";
 import { ETX, type GracefulExitAsk } from "antgrid-agents/contracts";
 const log = logger.child({ component: "terminal-session" });
 import { createMessage, type AbMessage } from "./protocol";
-import { findOnPath } from "./tool-detector";
+import { findOnPath } from "./path-probe";
 import { TerminalNotificationScanner, type NotificationEvent } from "./notification-scanner";
 import { VtCapabilityResponder } from "./vt-capability-responder";
 import { padBareVerb, PtySubmitQueue } from "./pty-submit";
@@ -641,7 +642,7 @@ export class TerminalSession {
         platform: process.platform,
         shell: process.platform === "win32" ? process.env.ComSpec ?? "cmd.exe" : process.env.SHELL ?? "/bin/sh",
         resolveWindowsExecutable: resolveWinExecutable,
-        requiresWindowsShell: needsShellForAgentBinary,
+        requiresWindowsShell: (command) => needsShellForAgentBinary(command, agentRuntime.agents),
       });
       cmd = invocation.command;
       args = invocation.args;
@@ -662,7 +663,7 @@ export class TerminalSession {
       ...this.extraEnv,
     } as Record<string, string>);
 
-    prepareAgentBinary(this.command ?? "", env);
+    prepareAgentBinary(this.command ?? "", env, agentRuntime.agents);
 
     this.pty = ptySpawn(cmd, args, {
       cols: this._cols,

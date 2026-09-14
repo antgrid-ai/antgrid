@@ -7,11 +7,11 @@ import 'pending_reply.dart';
 
 class DetectedTool {
   final String tool;
-  final String path;
-  const DetectedTool({required this.tool, required this.path});
+  final String? path;
+  const DetectedTool({required this.tool, this.path});
 
   factory DetectedTool.fromJson(Map<String, dynamic> j) =>
-      DetectedTool(tool: j['tool'] as String, path: j['path'] as String);
+      DetectedTool(tool: j['tool'] as String, path: j['path'] as String?);
 }
 
 class ConfigState {

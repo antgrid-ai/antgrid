@@ -24,7 +24,8 @@ export interface ResolvedAgent {
 export function resolveAgent(tool: string): ResolvedAgent {
   const entry = agentSpec(tool);
   if (!entry) throw new Error(`unknown agent: ${tool}`);
-  return { bin: entry.bin, hookDir: expand(entry.hookDir), args: entry.args ?? [] };
+  if (!entry?.cli?.bin) throw new Error(`Agent has no CLI executable: ${tool}`);
+  return { bin: entry.cli!.bin, hookDir: expand(entry.hookDir), args: entry.cli!.args ?? [] };
 }
 
 export function listKnownTools(): string[] {
@@ -54,7 +55,7 @@ export function resolveAgentEnv(
   tool: string,
   abDir: string = resolveAbDir(),
 ): Record<string, string> {
-  return agentSpec(tool)?.env?.({ abDir }) ?? {};
+  return agentSpec(tool)?.cli?.env?.({ abDir }) ?? {};
 }
 
 export function notificationSourceFor(tool: string): "plugin" | "osc" {

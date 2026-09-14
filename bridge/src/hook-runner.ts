@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { AGENTS, BY_HOOK_NAME } from "antgrid-agents/builtins";
+import { AGENTS, BY_HOOK_NAME } from "./agent-runtime";
 import type { HookInvocation, HookPath, HookPost } from "antgrid-agents/hook-posts";
 import type { HookProfile } from "antgrid-agents/contracts";
 

@@ -904,7 +904,7 @@ describe("SessionManager start/stop", () => {
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
       agentSpec: { command: "claude", name: "claude-code" },
       sendMessage: () => {},
-      onStartChat: (o) => calls.push(o),
+      onStartChat: (o) => { calls.push(o); },
     });
     const s = sm.create("c", { tool: "codex", mode: "chat" });
     sm.start(s.id);
@@ -921,6 +921,26 @@ describe("SessionManager start/stop", () => {
     sm.flushNow();
   });
 
+  it("clears failed chat startup and gives a retry a new hook identity", async () => {
+    let fail = true;
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
+      agentSpec: { command: "claude", name: "claude-code" }, sendMessage: () => {},
+      onStartChat: async () => { if (fail) throw new Error("startup failed"); },
+    });
+    const s = sm.create("c", { tool: "codex", mode: "chat" });
+    const first = sm.start(s.id);
+    const token = sm.hookRunId(s.id);
+    await expect(Promise.resolve(first)).rejects.toThrow("startup failed");
+    expect(sm.get(s.id)?.running).toBe(false);
+    expect(sm.acceptsHookRun(s.id, token)).toBe(false);
+    fail = false;
+    await sm.start(s.id);
+    expect(sm.get(s.id)?.running).toBe(true);
+    expect(sm.hookRunId(s.id)).not.toBe(token);
+    sm.flushNow();
+  });
+
   it("start() passes a persisted agentSessionId as resumeId for chat", () => {
     // Empty codexHome → resume pre-flight is optimistic → resumes.
     const codexHome = tempDir();
@@ -930,7 +950,7 @@ describe("SessionManager start/stop", () => {
         projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
         agentSpec: { command: "claude", name: "claude-code" },
         sendMessage: () => {},
-        onStartChat: (o) => calls.push(o),
+        onStartChat: (o) => { calls.push(o); },
         adapterOptions: { "codex": { codexHome } },
       });
       const s = sm.create("c", { tool: "codex", mode: "chat" });
@@ -949,7 +969,7 @@ describe("SessionManager start/stop", () => {
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
       agentSpec: { command: "claude", name: "claude-code" },
       sendMessage: () => {},
-      onStartChat: (o) => calls.push(o),
+      onStartChat: (o) => { calls.push(o); },
     });
     const s = sm.create("c", { tool: "claude-code", mode: "chat" });
     sm.setAgentSession(s.id, "gone-1", join(dir, "no-such-transcript.jsonl"));
@@ -1080,7 +1100,7 @@ describe("SessionManager start/stop", () => {
     expect(term.has(s.id)).toBe(true);
     expect(sm.get(s.id)?.running).toBe(false);
 
-    sm.start(s.id);
+    await sm.start(s.id);
     expect(term.spawns).toEqual([s.id, s.id]);
     expect(sm.get(s.id)?.running).toBe(true);
 
@@ -1101,7 +1121,7 @@ describe("SessionManager start/stop", () => {
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
       agentSpec: { command: "claude", name: "claude-code" },
       sendMessage: () => {},
-      onStartChat: (o) => starts.push(o),
+      onStartChat: (o) => { starts.push(o); },
     });
     const s = sm.create("t", { tool: "codex" });
     await sm.setMode(s.id, "chat");
@@ -1118,7 +1138,7 @@ describe("SessionManager start/stop", () => {
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
       agentSpec: { command: "claude", name: "claude-code" },
       sendMessage: () => {},
-      onStartChat: () => order.push("chat-start"),
+      onStartChat: () => { order.push("chat-start"); },
     });
     const s = sm.create("t", { tool: "codex" });
     sm.start(s.id);
@@ -1170,7 +1190,7 @@ describe("SessionManager start/stop", () => {
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
       agentSpec: { command: "claude", name: "claude-code" },
       sendMessage: () => {},
-      onStartChat: (o) => starts.push(o),
+      onStartChat: (o) => { starts.push(o); },
       teardownTimeoutMs: 10,
     });
     const s = sm.create("t", { tool: "codex" });
@@ -1190,7 +1210,7 @@ describe("SessionManager start/stop", () => {
         projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
         agentSpec: { command: "claude", name: "claude-code" },
         sendMessage: () => {},
-        onStartChat: (o) => starts.push(o),
+        onStartChat: (o) => { starts.push(o); },
         adapterOptions: { "codex": { codexHome } },
       });
       const s = sm.create("t", { tool: "codex" });
@@ -1314,7 +1334,7 @@ describe("SessionManager start/stop", () => {
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
       agentSpec: { command: "claude", name: "claude-code" },
       sendMessage: () => {},
-      onStartChat: (o) => calls.push(o),
+      onStartChat: (o) => { calls.push(o); },
     });
     const s = sm.create("c", { mode: "chat" });
     sm.start(s.id);
@@ -1593,7 +1613,7 @@ describe("SessionManager initial prompt", () => {
     expect(term.spawns).toHaveLength(0);
   });
 
-  it("restart WITHOUT a prompt never re-fires the previous one (not persisted)", () => {
+  it("restart WITHOUT a prompt never re-fires the previous one (not persisted)", async () => {
     const term = makeFakeTerm();
     const sm = new SessionManager({
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
@@ -1603,7 +1623,7 @@ describe("SessionManager initial prompt", () => {
     const s = sm.create(undefined, { tool: "claude-code" });
     sm.start(s.id, "first launch prompt");
     sm.stop(s.id);
-    sm.start(s.id);
+    await sm.start(s.id);
     const second = term.spawns[1];
     expect(JSON.stringify(second)).not.toContain("first launch prompt");
   });

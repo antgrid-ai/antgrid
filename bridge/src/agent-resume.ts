@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { agentSpec } from "antgrid-agents/builtins";
-import type { ResumableArgs } from "antgrid-agents/contracts";
+import { agentSpec } from "./agent-runtime";
+import type { ResumableArgs, AgentSpec } from "antgrid-agents/contracts";
 
 /**
  * Argv appended to a tool's base launch args to resume a specific agent-native
@@ -13,7 +13,7 @@ import type { ResumableArgs } from "antgrid-agents/contracts";
  * ordering (globals → subcommand) is preserved.
  */
 export function resumeArgv(tool: string, agentSessionId: string): string[] {
-  return agentSpec(tool)?.resume(agentSessionId) ?? [];
+  return agentSpec(tool)?.cli?.resume?.(agentSessionId) ?? [];
 }
 
 /**
@@ -36,14 +36,14 @@ export function sessionResumable(args: {
   agentSessionId: string;
   agentTranscriptPath?: string;
   adapterOptions?: Record<string, Record<string, unknown>>;
-}): boolean {
+}, get: (id: string) => AgentSpec | undefined = agentSpec): boolean {
   const forSpec: ResumableArgs = {
     ...args.adapterOptions?.[args.tool],
     agentSessionId: args.agentSessionId,
     transcriptPath: args.agentTranscriptPath,
   };
   if (forSpec.transcriptPath) return existsSync(forSpec.transcriptPath);
-  return agentSpec(args.tool)?.resumable?.(forSpec) ?? true;
+  return get(args.tool)?.resumable?.(forSpec) ?? true;
 }
 
 /**
@@ -66,8 +66,8 @@ export function agentSessionGone(args: {
   tool: string;
   agentSessionId: string;
   adapterOptions?: Record<string, Record<string, unknown>>;
-}): boolean {
-  const spec = agentSpec(args.tool);
+}, get: (id: string) => AgentSpec | undefined = agentSpec): boolean {
+  const spec = get(args.tool);
   if (!spec?.sessionStoreIsAuthoritative) return false;
   return spec.resumable?.({
     ...args.adapterOptions?.[args.tool],

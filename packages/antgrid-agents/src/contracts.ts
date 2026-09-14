@@ -1,5 +1,10 @@
 export * from "./agents/types";
 export type { StructuredDriver, DriverRunContext } from "./structured/structured-driver";
-export type { AgentMessage } from "./protocol";
+export type { AgentMessage, AgentOutputEvent } from "./protocol";
+export { AgentOutputEventSchema } from "./protocol";
 export type { TerminalConversation, TerminalLaunchRequest, PreparedTerminalLaunch } from "./agents/terminal-launch";
 export type { HookCommand } from "./hook-command";
+export { createAgentRunScope } from "./run-scope";
+export type { AgentRunScope, OwnedAgentRunScope } from "./run-scope";
+export { TerminalAgentEventSchema } from "./terminal-events";
+export type { TerminalAgentEvent } from "./terminal-events";

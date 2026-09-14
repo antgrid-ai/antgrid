@@ -1,13 +1,16 @@
-import { configureAgentHost } from "antgrid-agents/host";
+import { createAgentRuntime } from "antgrid-agents/runtime";
+import { builtinRegistry } from "antgrid-agents/builtins";
 import { logger } from "./logger";
 import { resolveAbDir } from "./antgrid-dir";
 import { resolveHookCommand } from "./hook-command";
 import { killChildTree, stripInheritedCertOverrides } from "./terminal-session";
 
-configureAgentHost({
+export const agentHostServices = {
   logger,
   stateDirectory: resolveAbDir,
   hookCommand: resolveHookCommand,
-  killChildTree: (child) => killChildTree(child),
-  stripInheritedCertOverrides: (env) => stripInheritedCertOverrides(env),
-});
+  killChildTree: (child: Parameters<typeof killChildTree>[0]) => killChildTree(child),
+  stripInheritedCertOverrides: (env: Record<string, string>) => stripInheritedCertOverrides(env),
+};
+
+export const agentRuntime = createAgentRuntime({ registry: builtinRegistry, host: agentHostServices });

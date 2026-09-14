@@ -1,4 +1,5 @@
 import type { HookCommand } from "./hook-command";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 export interface AgentLogger {
   child(bindings: Record<string, unknown>): AgentLogger;
@@ -16,21 +17,22 @@ export interface AgentHostServices {
   stripInheritedCertOverrides(env: Record<string, string>): Record<string, string>;
 }
 
-let services: AgentHostServices | undefined;
+const hostContext = new AsyncLocalStorage<AgentHostServices>();
 
-/** Bind host policy once at application startup, before starting any adapters. */
-export function configureAgentHost(host: AgentHostServices): void {
-  services = host;
+/** Bind synchronous entry and asynchronous continuations to one runtime's services. */
+export function withAgentHost<T>(host: AgentHostServices, operation: () => T): T {
+  return hostContext.run(host, operation);
 }
 
 export function agentHost(): AgentHostServices {
+  const services = hostContext.getStore();
   if (!services) throw new Error("Agent host services must be configured before launching an adapter");
   return services;
 }
 
 function scopedLogger(bindings: Record<string, unknown>): AgentLogger {
   const write = (level: "debug" | "info" | "warn" | "error", args: any[]) => {
-    services?.logger.child(bindings)[level](...args);
+    hostContext.getStore()?.logger.child(bindings)[level](...args);
   };
   return {
     child: (extra) => scopedLogger({ ...bindings, ...extra }),
@@ -47,3 +49,26 @@ export const resolveHookCommand = () => agentHost().hookCommand();
 export const killChildTree: AgentHostServices["killChildTree"] = (child) => agentHost().killChildTree(child);
 export const stripInheritedCertOverrides: AgentHostServices["stripInheritedCertOverrides"] = (env) => agentHost().stripInheritedCertOverrides(env);
 export const processGroupSpawn = (platform: NodeJS.Platform = process.platform) => ({ detached: platform !== "win32" });
+
+/** Callback-based SDKs may re-enter a driver outside the context of its startup. */
+export function bindAgentHost<T extends object>(host: AgentHostServices, value: T): T {
+  const cache = new Map<PropertyKey, unknown>();
+  return new Proxy(value, {
+    get(target, key) {
+      const member = Reflect.get(target, key, target);
+      if (typeof member !== "function") return member;
+      if (!cache.has(key)) cache.set(key, (...args: unknown[]) => withAgentHost(host, () => member.apply(target, args)));
+      return cache.get(key);
+    },
+  });
+}
+
+export function bindAgentOperations<T>(host: AgentHostServices, value: T): T {
+  if (Array.isArray(value)) return value.map((item) => bindAgentOperations(host, item)) as T;
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, member]) => [key,
+    typeof member === "function"
+      ? (...args: unknown[]) => withAgentHost(host, () => member.apply(value, args))
+      : bindAgentOperations(host, member),
+  ])) as T;
+}

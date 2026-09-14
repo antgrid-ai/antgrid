@@ -29,11 +29,11 @@ test("agent:tools accepts entries without chatCapable (back-compat)", () => {
   expect((parsed as any).tools[0].chatCapable).toBeUndefined();
 });
 
-test("buildToolsAdvertisement returns detected tools stamped with chatCapable", () => {
+test("buildToolsAdvertisement returns detected tools stamped with chatCapable", async () => {
   // PATH override is the seam detectInstalledTools already exposes; here we just
   // assert the host wraps detectInstalledTools() output with the chatCapable flag.
   const host = Object.create(HostServer.prototype) as HostServer;
-  const payload = (host as any).buildToolsAdvertisement({
+  const payload = await (host as any).buildToolsAdvertisement({
     pathOverride: "", // empty PATH → no tools found → []
   });
   expect(Array.isArray(payload)).toBe(true);

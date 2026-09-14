@@ -45,6 +45,7 @@ export function createDriver(
     dispose: () => { closed = true; spawned?.endpoint.dispose(); },
   };
   const driver = new CodexDriver({
+    onAgentSession: ctx.onAgentSession,
     sessionId: ctx.sessionId,
     endpoint,
     sendMessage: ctx.send,
@@ -66,7 +67,7 @@ export function createDriver(
     finally { closed = true; await spawned?.kill(); }
   })();
   const start = driver.start.bind(driver);
-  let starting: Promise<string> | undefined;
+  let starting: Promise<void> | undefined;
   const owned: StructuredDriver = driver;
   owned.start = (resumeId, signal) => {
     if (closed || disposal) return Promise.reject(new Error("Codex backend is disposed"));

@@ -725,7 +725,7 @@ const AgentToolsMessage = BaseMessage.extend({
   tools: z.array(
     z.object({
       tool: z.string(),
-      path: z.string(),
+      path: z.string().optional(),
       chatCapable: z.boolean().optional(),
       label: z.string().optional(),
     }),
@@ -1566,7 +1566,7 @@ const ConfigDetectToolsResultMessage = BaseMessage.extend({
   type: z.literal("config:detect-tools-result"),
   tools: z.array(z.object({
     tool: z.string(),
-    path: z.string(),
+    path: z.string().optional(),
   })),
   ...CheckoutScoped,
 });

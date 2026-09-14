@@ -45,6 +45,7 @@ export function createDriver(ctx: DriverCtx, spawn = spawnOpencode): StructuredD
     dispose: async () => { closed = true; await spawned?.then((s) => s.client.dispose()); },
   };
   return new OpencodeDriver({
+    onAgentSession: ctx.onAgentSession,
     sessionId: ctx.sessionId, client: lazy, sendMessage: ctx.send,
     onLifecycle: ctx.onLifecycle,
   });

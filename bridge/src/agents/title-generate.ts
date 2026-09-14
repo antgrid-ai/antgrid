@@ -1,8 +1,9 @@
 import { logger } from "../logger";
 import { capturePrompt } from "../modelwatch";
-import { headlessScratchCwd, logBorrow, resolveHeadless, runHeadless } from "./headless";
+import { headlessScratchCwd, logBorrow, resolveHeadless, executeHeadless } from "./headless";
+import { detectAvailableTools } from "../tool-detector";
 import { unwrapEnvelope } from "antgrid-agents/usage-envelope";
-import { agentSpec } from "antgrid-agents/builtins";
+import { agentSpec } from "../agent-runtime";
 
 const log = logger.child({ component: "title-generate" });
 
@@ -219,7 +220,7 @@ export async function generateTitleFromContext(context: string, opts: {
   const callId = crypto.randomUUID();
   // `need: "none"` — the conversation is inlined into the prompt, so this asks
   // for the tightest argv the agent has rather than one that can reach the repo.
-  const picked = resolveHeadless(opts.tool, "none", opts.installedTools);
+  const picked = resolveHeadless(opts.tool, "none", opts.installedTools ?? (await detectAvailableTools()).map((tool) => tool.tool));
   if (!picked) {
     return { ok: false, reason: "unavailable", callId, actualTool: opts.tool, reach: "none" };
   }
@@ -241,13 +242,10 @@ export async function generateTitleFromContext(context: string, opts: {
   const prompt = PROMPT_HEAD + excerpt;
   const budgetMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const ref: TitleCallRef = { callId, actualTool: picked.tool, reach: picked.reach };
-  const result = await runHeadless(picked.command.cmd(prompt, model), {
+  const result = await executeHeadless(picked.command, prompt, model, {
     cwd: headlessScratchCwd(),
     timeoutMs: budgetMs,
     spawn: opts.spawn,
-    env: picked.command.env,
-    scratchEnv: picked.command.scratchEnv,
-    usage: picked.command.usage,
     // Requested and actual are both recorded because they routinely differ
     // here: `need: "none"` takes whichever installed agent can serve it and
     // registry order puts Claude first, so on a machine with Claude installed

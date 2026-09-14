@@ -5,6 +5,10 @@ import { resolveApprovalPolicy } from "../agent-approval-policy";
 import { initialPromptArgv } from "../initial-prompt";
 import { agentSpec } from "./registry";
 import type { ApprovalPolicy, LaunchAugmentation } from "./types";
+import type { AgentRunScope } from "../run-scope";
+import type { AgentHostServices } from "../host";
+import type { AgentSpec } from "./types";
+import type { TerminalAgentEvent } from "../terminal-events";
 
 export type TerminalConversation =
   | { kind: "fresh" }
@@ -24,6 +28,7 @@ export interface TerminalLaunchRequest {
   readonly adapterOptions?: Record<string, unknown>;
   readonly cwd: string;
   readonly signal: AbortSignal;
+  readonly scope: AgentRunScope<TerminalAgentEvent>;
 }
 
 export interface PreparedTerminalLaunch {
@@ -32,11 +37,13 @@ export interface PreparedTerminalLaunch {
   args: string[];
   env: Record<string, string>;
   resumed: boolean;
-  promptDelivery: "none" | "included" | "buffered" | "unsupported";
+  promptDelivery: "none" | "included" | "buffered" | "adapter" | "unsupported";
   notificationsInjected?: boolean;
   observation?: LaunchAugmentation["observation"];
   /** Resources allocated before dispatch remain owned until terminal teardown. */
   dispose?: () => void | Promise<void>;
+  attach?: (terminal: { write(data: string): void; submit(text: string): void }, scope: AgentRunScope<TerminalAgentEvent>) => Promise<void>;
+  deliverPrompt?: (text: string, scope: AgentRunScope<TerminalAgentEvent>) => Promise<void>;
 }
 
 export function prepareTerminalLaunch(request: TerminalLaunchRequest): PreparedTerminalLaunch | Promise<PreparedTerminalLaunch> {
@@ -46,9 +53,12 @@ export function prepareTerminalLaunch(request: TerminalLaunchRequest): PreparedT
 }
 
 /** Declarative helper for adapters whose terminal is a CLI with additive integration flags. */
-export function prepareCliTerminalLaunch(request: TerminalLaunchRequest): PreparedTerminalLaunch {
+export function prepareCliTerminalLaunch(request: TerminalLaunchRequest, runtime?: { get(tool: string): AgentSpec | undefined; host: AgentHostServices }): PreparedTerminalLaunch {
   const { tool, configured, approvalPolicy, conversation } = request;
-  const spec = agentSpec(tool ?? configured.name);
+  const spec = runtime ? runtime.get(tool ?? configured.name) : agentSpec(tool ?? configured.name);
+  const augment = (id: string) => augmentAgentLaunch(id, request.storeDir,
+    typeof request.adapterOptions?.cursorDir === "string" ? request.adapterOptions.cursorDir : undefined,
+    runtime?.host.hookCommand(), undefined, runtime?.get);
   let command: string;
   let args: string[] = [];
   let env: Record<string, string> = {};
@@ -56,11 +66,11 @@ export function prepareCliTerminalLaunch(request: TerminalLaunchRequest): Prepar
   const custom = !tool && !!request.customCommand;
   let supportsResume = false;
   if (tool) {
-    const resolved = resolveAgent(tool);
+    const resolved = runtime ? { bin: spec?.cli?.bin ?? "", args: spec?.cli?.args ?? [] } : resolveAgent(tool);
     command = resolved.bin;
     args = [...resolved.args];
-    env = resolveAgentEnv(tool, request.storeDir);
-    augmentation = augmentAgentLaunch(tool, request.storeDir, typeof request.adapterOptions?.cursorDir === "string" ? request.adapterOptions.cursorDir : undefined);
+    env = runtime ? spec?.cli?.env?.({ abDir: request.storeDir }) ?? {} : resolveAgentEnv(tool, request.storeDir);
+    augmentation = augment(tool);
     supportsResume = true;
   } else if (custom) {
     if (approvalPolicy === "bypass") throw new Error("Custom-command sessions do not support bypass approval policy");
@@ -69,7 +79,7 @@ export function prepareCliTerminalLaunch(request: TerminalLaunchRequest): Prepar
     command = configured.command;
     args = [...configured.args ?? []];
     if (spec?.augmentsDefaultSpec) {
-      augmentation = augmentAgentLaunch(configured.name, request.storeDir, typeof request.adapterOptions?.cursorDir === "string" ? request.adapterOptions.cursorDir : undefined);
+      augmentation = augment(configured.name);
       supportsResume = true;
     }
   }
@@ -78,21 +88,22 @@ export function prepareCliTerminalLaunch(request: TerminalLaunchRequest): Prepar
     args.push(...augmentation.args);
     env = { ...env, ...augmentation.env };
   }
-  if (!custom) args.push(...resolveApprovalPolicy(tool ?? configured.name, "terminal", approvalPolicy));
+  if (!custom) args.push(...resolveApprovalPolicy(tool ?? configured.name, "terminal", approvalPolicy, runtime?.get));
   let conversationArgs: string[] = [];
-  if (conversation.kind === "resume" && supportsResume) conversationArgs = spec?.resume(conversation.sessionId) ?? [];
+  if (conversation.kind === "resume" && supportsResume) conversationArgs = spec?.cli?.resume?.(conversation.sessionId) ?? [];
   if (conversation.kind === "fork") {
     if (request.initialPrompt?.trim()) throw new Error("This provider-native fork starts immediately; send a prompt after the fork opens.");
-    conversationArgs = spec?.fork.nativeForkArgs?.(conversation.sourceSessionId) ?? [];
+    conversationArgs = spec?.cli?.nativeForkArgs?.(conversation.sourceSessionId) ?? [];
     if (!conversationArgs.length) throw new Error("This agent cannot launch the captured native fork.");
   }
-  const promptArgs = custom ? [] : initialPromptArgv(tool ?? configured.name, request.initialPrompt ?? "");
+  const prompt = request.initialPrompt?.trim();
+  const promptArgs = custom || !prompt ? [] : runtime ? spec?.cli?.initialPrompt?.(prompt) ?? [] : initialPromptArgv(tool ?? configured.name, prompt);
   const raw = request.rawArgs?.trim();
   const legacyConfiguredShell = !tool && !custom && args.length === 0 && /\s/.test(command) && !existsSync(command);
   if (raw) {
     const head = custom ? [command] : [shellQuoteArg(command), ...args.map(shellQuoteArg)];
     const tail = conversationArgs.map(shellQuoteArg);
-    const after = spec?.resumeIsSubcommand === true;
+    const after = spec?.cli?.resumeIsSubcommand === true;
     command = [...head, ...(after ? [] : tail), raw, ...(after ? tail : []),
       ...(process.platform === "win32" ? [] : promptArgs.map(shellQuoteArg))].join(" ");
     args = process.platform === "win32" ? promptArgs : [];

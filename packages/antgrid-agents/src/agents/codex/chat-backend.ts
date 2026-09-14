@@ -33,6 +33,7 @@ export interface CodexEndpoint {
 }
 
 export interface CodexDriverOpts {
+  onAgentSession?: (id: string) => void;
   sessionId: string;
   endpoint: CodexEndpoint;
   sendMessage: (msg: AbMessage) => void;
@@ -105,7 +106,7 @@ export class CodexDriver extends ChatSession {
   private readonly diagnoseStartFailure?: () => Promise<string | null>;
 
   constructor(opts: CodexDriverOpts) {
-    super({ sessionId: opts.sessionId, sendMessage: opts.sendMessage });
+    super({ sessionId: opts.sessionId, sendMessage: opts.sendMessage, onAgentSession: opts.onAgentSession });
     this.ep = opts.endpoint;
     this.cwd = opts.cwd;
     this.selModel = opts.model;

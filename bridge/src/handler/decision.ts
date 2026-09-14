@@ -1,7 +1,7 @@
 // bridge/src/handler/decision.ts
 import { z } from "zod";
-import { agentSpec } from "antgrid-agents/builtins";
-import { pickHeadlessFrom, type HeadlessCommand, type JudgeTier } from "antgrid-agents/contracts";
+import { agentSpec } from "../agent-runtime";
+import { pickHeadlessFrom, type HeadlessImplementation as HeadlessCommand, type JudgeTier } from "antgrid-agents/contracts";
 import type { CapCommand } from "antgrid-agents/structured/chat-session";
 import { ItemTransitionSchema } from "./backlog";
 import { extractJsonObject } from "./json-extract";
@@ -80,7 +80,7 @@ export function pickJudge(
 // reading a transcript the agent itself wrote, where `claude` appears and
 // `claude-code` (our routing key) never does.
 function supervisedName(tool: string): string {
-  return agentSpec(tool)?.bin ?? tool;
+  return agentSpec(tool)?.cli?.bin ?? tool;
 }
 
 // Command names and descriptions come verbatim from filesystem frontmatter and

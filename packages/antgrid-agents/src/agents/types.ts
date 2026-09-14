@@ -25,15 +25,7 @@ export interface DriverLifecycleEvent {
   selfResuming?: boolean;
 }
 
-/**
- * Every coding agent the bridge can launch by registry key.
- *
- * Compile-time only, deliberately: a remote phone can drive session starts, so
- * the set of launchable binaries must be fixed at build time and can never be
- * data. `Record<AgentKey, AgentSpec>` in registry.ts is what turns "you forgot
- * to wire the new agent into resume/update/notifications" from a silent runtime
- * degradation into a type error at the point you add the key.
- */
+/** Built-in IDs only; extension registries accept trusted, host-registered string IDs. */
 export type AgentKey =
   | "claude-code"
   | "codex"
@@ -65,7 +57,7 @@ export interface AgentUpdateState {
 
 /** How an agent updates itself in place — the whole per-agent surface of the
  *  update path, which is otherwise agent-agnostic (see src/update/). */
-export interface AgentUpdate {
+export interface CliAgentUpdate {
   /** npm package whose dist-tags.latest is the "latest" authority. */
   npmPackage: string;
   /** PATH binary name to resolve (realpath) for --version and the updater.
@@ -78,6 +70,12 @@ export interface AgentUpdate {
    *  runs npm-only with app-side dismissal. */
   readState?: () => AgentUpdateState | null;
 }
+
+export interface AgentUpdateOperation {
+  check(scope: import("../run-scope").AgentRunScope): Promise<{ installed: string; latest: string } | null>;
+  apply(scope: import("../run-scope").AgentRunScope): Promise<{ exitCode: number; output: string }>;
+}
+export type AgentUpdate = CliAgentUpdate | AgentUpdateOperation;
 
 /** Inputs a hook profile needs to turn one invocation into loopback API posts.
  *  `terminalId` is absent whenever the agent's plugin host dropped our env.
@@ -132,6 +130,7 @@ export interface HookInjectCtx {
  * files on disk — a driver that needs no title injection must not pay for one.
  */
 export interface DriverCtx {
+  scope: import("../run-scope").AgentRunScope<import("../protocol").AgentOutputEvent>;
   sessionId: string;
   send: (m: AbMessage) => void;
   projectPath: string;
@@ -151,7 +150,7 @@ export interface DriverCtx {
 export type ApprovalPolicy = "default" | "bypass";
 
 export interface AgentApprovalPolicy {
-  terminalArgs?: readonly string[];
+  terminal?: true;
   chat?: true;
   risk: "bypasses-approvals" | "bypasses-approvals-and-sandbox";
 }
@@ -189,9 +188,6 @@ export interface AgentForkSupport {
    * native id was never observed. */
   kind: "native-fork" | "native-transcript" | "terminal-transcript";
   handoff: (opts: ForkHandoffOpts) => Promise<string>;
-  /** Provider-verified CLI fork invocation. It creates a new native identity,
-   * unlike resume, and is used only for terminal launches. */
-  nativeForkArgs?: (agentSessionId: string) => string[];
 }
 
 /** Inputs to a spec's `resolveTitle`. The `*Home` fields are test seams. */
@@ -320,6 +316,18 @@ export interface HeadlessCommand {
    */
   usage?: HeadlessUsageCapture;
 }
+
+export interface HeadlessOperation {
+  noHistory: "ephemeral-store" | "stateless";
+  run(request: { prompt: string; model?: string; cwd: string; scope: import("../run-scope").AgentRunScope }): Promise<{
+    text: string;
+    failed?: boolean;
+    usage?: HeadlessUsageTokens;
+    actualModel?: string;
+  }>;
+}
+
+export type HeadlessImplementation = HeadlessCommand | HeadlessOperation;
 
 /** The vendor-tagged numbers, as the recorder holds them. Aliased off the event
  *  rather than restated so a field added there cannot go unread here. */
@@ -450,7 +458,7 @@ const REACHES_FOR: Record<HeadlessNeed, readonly HeadlessReach[]> = {
  */
 export function pickHeadlessFrom(
   declared: AgentSpec["headless"], need: HeadlessNeed,
-): { reach: HeadlessReach; command: HeadlessCommand } | null {
+): { reach: HeadlessReach; command: HeadlessImplementation } | null {
   if (!declared) return null;
   for (const reach of REACHES_FOR[need]) {
     const command = declared[reach];
@@ -523,19 +531,59 @@ export interface HookProfile {
   portFileFallback?: true;
 }
 
-/**
- * One agent, one record. Required fields are the ones whose absence would
- * silently degrade a session; the behavior layers (`hooks`, `driver`, `judge`,
- * `transcript`, `resolveTitle`) are optional because an agent genuinely may not
- * have them, and their absence is the honest answer rather than a default.
- */
+/** Optional helpers for adapters implemented by a command-line executable. */
+export interface AgentCliSpec {
+  approvalBypassArgs?: readonly string[];
+  nativeForkArgs?: (agentSessionId: string) => string[];
+  /** PATH binary name. Detection resolves this per PATH entry. */
+  bin: string;
+  /**
+   * Default argv prepended whenever we launch this tool by registry key (not on
+   * the custom-command or antgrid.yaml fallback paths). Used to coerce an agent
+   * into emitting terminal notifications our scanner can see, without asking the
+   * user to edit their own config.
+   */
+  args?: string[];
+  /** Argv appended to the base launch args to resume a specific agent-native
+   *  conversation. `[]` = no verified resume-by-id support (fresh start). */
+  resume?: (agentSessionId: string) => string[];
+  /**
+   * True when this agent's resume argv is a SUBCOMMAND (`codex resume <uuid>`)
+   * rather than a switch, so it must be appended AFTER the user's raw `args`
+   * string. Absent = a switch, which goes ahead of raw args so a user-supplied
+   * `--` boundary cannot swallow it.
+   *
+   * Deliberately separate from `resume` rather than folded into it: `resume`
+   * returns the tokens, this says where in the folded shell line they land, and
+   * only ONE call site (the args-folding branch of SessionManager.start) is
+   * positional at all.
+   */
+  resumeIsSubcommand?: true;
+  /** Argv appended LAST so the interactive TUI opens with a prompt already
+   *  submitted. `[]` = no VERIFIED interactive form; see initial-prompt.ts for
+   *  why an unverified `--` separator is worse than the misparse it guards. */
+  initialPrompt?: (prompt: string) => string[];
+  /** Extra launch environment, applied only on the registry-key launch path.
+   *  Either a generated config file the agent needs in order to notify, or a
+   *  behaviour switch the bridge must pin for every spawn. Absent = neither. */
+  env?: (ctx: LaunchEnvCtx) => Record<string, string>;
+}
+
 export interface AgentSpec {
+  cli?: AgentCliSpec;
+  conversations?: { terminal?: readonly ("fresh" | "resume" | "fork")[]; chat?: readonly ("fresh" | "resume")[] };
+  platformIntegration?: {
+    matches(command: string): boolean;
+    windowsShell?: boolean;
+    prepare(env: Record<string, string>): void;
+  };
+  discover?: (context: { path?: string; signal?: AbortSignal }) => Promise<import("../runtime").AgentDiscovery>;
+  observation?: Readonly<TerminalObservationAvailability>;
+  inferTurnStart?: boolean;
   prepareTerminal?: (request: TerminalLaunchRequest) => PreparedTerminalLaunch | Promise<PreparedTerminalLaunch>;
   discoveryPaths?: () => string[];
   normalizeTerminalNotification?: (notice: { title?: string; body?: string }) => { type: "permission_request"; message: string };
   observeTitles?: (onTitle: (nativeId: string, title: string, kind: ResolvedTitle["kind"]) => void) => { stop(): void };
-  /** PATH binary name. Detection resolves this per PATH entry. */
-  bin: string;
   /** Display name for agent pickers. Travels to the app on the tools
    *  advertisement so a newly-added agent shows with a proper name without
    *  needing an app release. */
@@ -556,13 +604,6 @@ export interface AgentSpec {
    */
   hookName: string | null;
   hookDir: string | null;
-  /**
-   * Default argv prepended whenever we launch this tool by registry key (not on
-   * the custom-command or antgrid.yaml fallback paths). Used to coerce an agent
-   * into emitting terminal notifications our scanner can see, without asking the
-   * user to edit their own config.
-   */
-  args?: string[];
   /** Where this agent's notifications come from. "plugin" = injected hook/plugin
    *  POSTs to /notify (richer, intent-aware) and the OSC scanner is suppressed
    *  for its terminals; "osc" = rely on the terminal OSC scanner. */
@@ -586,21 +627,6 @@ export interface AgentSpec {
    *  Most agents (claude → "Claude Code", cursor → "Cursor Agent") publish a good
    *  name here and leave this unset. */
   oscTitleUnusable?: boolean;
-  /** Argv appended to the base launch args to resume a specific agent-native
-   *  conversation. `[]` = no verified resume-by-id support (fresh start). */
-  resume: (agentSessionId: string) => string[];
-  /**
-   * True when this agent's resume argv is a SUBCOMMAND (`codex resume <uuid>`)
-   * rather than a switch, so it must be appended AFTER the user's raw `args`
-   * string. Absent = a switch, which goes ahead of raw args so a user-supplied
-   * `--` boundary cannot swallow it.
-   *
-   * Deliberately separate from `resume` rather than folded into it: `resume`
-   * returns the tokens, this says where in the folded shell line they land, and
-   * only ONE call site (the args-folding branch of SessionManager.start) is
-   * positional at all.
-   */
-  resumeIsSubcommand?: true;
   /**
    * True when a launch through the antgrid.yaml DEFAULT spec (`agent.command`,
    * no per-session `tool`) still gets this agent's hook injection AND resume
@@ -615,16 +641,8 @@ export interface AgentSpec {
    * names.
    */
   augmentsDefaultSpec?: true;
-  /** Argv appended LAST so the interactive TUI opens with a prompt already
-   *  submitted. `[]` = no VERIFIED interactive form; see initial-prompt.ts for
-   *  why an unverified `--` separator is worse than the misparse it guards. */
-  initialPrompt: (prompt: string) => string[];
   /** Every registered agent must explicitly say how it supplies fork context. */
   fork: AgentForkSupport;
-  /** Extra launch environment, applied only on the registry-key launch path.
-   *  Either a generated config file the agent needs in order to notify, or a
-   *  behaviour switch the bridge must pin for every spawn. Absent = neither. */
-  env?: (ctx: LaunchEnvCtx) => Record<string, string>;
   /** How this agent updates itself in place. The registry key is the `tool` id
    *  the update path keys by, so it is not restated here.
    *  Absent = the agent ships no self-updater (github-copilot is IDE-bound). */
@@ -685,7 +703,7 @@ export interface AgentSpec {
    * context, so ./headless.ts borrows another installed agent's command rather
    * than guessing this one's flags. Add an entry only after running it.
    */
-  headless?: Partial<Record<HeadlessReach, HeadlessCommand>>;
+  headless?: Partial<Record<HeadlessReach, HeadlessImplementation>>;
   /**
    * The cheap model a NAMING call should ask this vendor's CLI for, when the
    * caller supplies none of its own.

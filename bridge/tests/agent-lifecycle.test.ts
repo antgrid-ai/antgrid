@@ -13,7 +13,7 @@ function deferred<T>() {
 
 function driver(overrides: Partial<StructuredDriver> = {}): StructuredDriver {
   return {
-    start: async () => "native", prompt: async () => {}, cancel: async () => false,
+    start: async () => {}, prompt: async () => {}, cancel: async () => false,
     compact: async () => {}, revert: async () => {}, setConfig: () => {},
     resolvePermission: () => {}, resolveQuestion: () => {}, dispose: () => {},
     ...overrides,
@@ -66,7 +66,7 @@ describe("agent run lifecycle", () => {
     const identities: string[] = [];
     const manager = new StructuredAgentManager({
       driverFactory: () => driver({
-        start: async (_, cancellation) => { signal = cancellation; return startup.promise; },
+        start: async (_, cancellation) => { signal = cancellation; await startup.promise; },
         dispose: () => { disposed++; }, prompt: async () => { prompted++; },
       }),
       sendMessage: () => {}, onAgentSession: (_, id) => identities.push(id),
@@ -159,7 +159,7 @@ describe("agent run lifecycle", () => {
       driverFactory: (_, __, send) => {
         factories++;
         return driver({
-          start: async () => { send(createMessage("agent:capabilities", { sessionId: "s", ready: true })); return "native"; },
+          start: async () => { send(createMessage("agent:capabilities", { sessionId: "s", ready: true })); return; },
           dispose: factories === 1 ? () => disposal.promise : () => {},
         });
       },
@@ -176,7 +176,7 @@ describe("agent run lifecycle", () => {
     await manager.disposeAll();
   });
 
-  it("keeps the teardown gate closed when final replay cleanup fails", async () => {
+  it("permits replacement after resources release even when replay cleanup fails", async () => {
     let drops = 0;
     let factories = 0;
     const manager = new StructuredAgentManager({
@@ -185,9 +185,10 @@ describe("agent run lifecycle", () => {
       dropSessionReplay: () => { if (++drops === 2) throw new Error("replay cleanup failed"); },
     });
     await manager.startChat({ sessionId: "s", tool: "opencode" });
-    await expect(manager.stopChat("s")).rejects.toThrow("replay cleanup failed");
-    await expect(manager.startChat({ sessionId: "s", tool: "opencode" })).rejects.toThrow("replay cleanup failed");
-    expect(factories).toBe(1);
+    await manager.stopChat("s");
+    await manager.startChat({ sessionId: "s", tool: "opencode" });
+    expect(factories).toBe(2);
+    await manager.stopChat("s");
   });
 
   it("suppresses OpenCode capability discovery after disposal completes", async () => {

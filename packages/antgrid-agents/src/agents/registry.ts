@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readCodexVersionJson, codexHomeDir } from "./codex/home";
 import { observeAntigravityTitles } from "./antigravity/title-watcher";
+import { isAntigravityBinary, primeAntigravityCertCache } from "./antigravity/startup";
 import { antigravityCliHome, resolveAntigravityTitle } from "./antigravity/title";
 import { resolveClaudeTranscriptTitle } from "./claude-code/title";
 import { codexThreadExistsSync, resolveCodexThreadTitle } from "./codex/title";
@@ -39,13 +40,23 @@ import {
 
 import { pickHeadlessFrom, type AgentKey, type AgentSpec } from "./types";
 import { createAgentRegistry } from "./create-registry";
+import type { AgentDefinition } from "../runtime";
 
-const BUILTIN_AGENTS: Record<AgentKey, AgentSpec> = {
+type BuiltinAgentSpec = Omit<AgentSpec, "fork" | "approvalPolicies"> & import("./types").AgentCliSpec & {
+  fork: import("./types").AgentForkSupport & { nativeForkArgs?: (id: string) => string[] };
+  approvalPolicies: { bypass?: import("./types").AgentApprovalPolicy & { terminalArgs?: readonly string[] } };
+  bin: string;
+  resume: (id: string) => string[];
+  initialPrompt: (prompt: string) => string[];
+  headless?: Partial<Record<import("./types").HeadlessReach, import("./types").HeadlessCommand>>;
+  update?: import("./types").CliAgentUpdate;
+};
+const BUILTIN_AGENTS: Record<AgentKey, BuiltinAgentSpec> = {
   "claude-code": {
     bin: "claude",
     discoveryPaths: () => [join(homedir(), ".claude/local")],
     label: "Claude Code",
-    approvalPolicies: { bypass: { terminalArgs: ["--dangerously-skip-permissions"], chat: true, risk: "bypasses-approvals" } },
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-skip-permissions"], chat: true, risk: "bypasses-approvals" } },
     hookName: "claude",
     hookDir: "~/.claude/hooks",
     notificationSource: "plugin",
@@ -144,7 +155,7 @@ const BUILTIN_AGENTS: Record<AgentKey, AgentSpec> = {
     bin: "codex",
     normalizeTerminalNotification: (notice) => ({ type: "permission_request", message: notice.body ?? notice.title ?? "Codex needs approval" }),
     label: "Codex",
-    approvalPolicies: { bypass: { terminalArgs: ["--dangerously-bypass-approvals-and-sandbox"], chat: true, risk: "bypasses-approvals-and-sandbox" } },
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-bypass-approvals-and-sandbox"], chat: true, risk: "bypasses-approvals-and-sandbox" } },
     hookName: "codex",
     hookDir: "~/.codex/hooks",
     // Approval prompts use OSC; the Stop hook supplies completion messages.
@@ -302,7 +313,7 @@ const BUILTIN_AGENTS: Record<AgentKey, AgentSpec> = {
   "cursor-agent": {
     bin: "cursor-agent",
     label: "Cursor",
-    approvalPolicies: { bypass: { terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
     hookName: "cursor",
     hookDir: null,
     notificationSource: "plugin",
@@ -323,7 +334,7 @@ const BUILTIN_AGENTS: Record<AgentKey, AgentSpec> = {
   "github-copilot": {
     bin: "copilot",
     label: "Copilot",
-    approvalPolicies: { bypass: { terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--yolo"], risk: "bypasses-approvals" } },
     hookName: "github-copilot",
     hookDir: null,
     notificationSource: "osc",
@@ -405,10 +416,11 @@ const BUILTIN_AGENTS: Record<AgentKey, AgentSpec> = {
   // its exe path as the OSC-2 title, handled by oscTitleUnusable rather than by
   // suppressing the scanner.
   antigravity: {
+    platformIntegration: { matches: isAntigravityBinary, windowsShell: true, prepare: primeAntigravityCertCache },
     bin: "agy",
     observeTitles: observeAntigravityTitles,
     label: "Antigravity",
-    approvalPolicies: { bypass: { terminalArgs: ["--dangerously-skip-permissions"], risk: "bypasses-approvals" } },
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--dangerously-skip-permissions"], risk: "bypasses-approvals" } },
     hookName: "antigravity",
     hookDir: null,
     notificationSource: "plugin",
@@ -434,7 +446,7 @@ const BUILTIN_AGENTS: Record<AgentKey, AgentSpec> = {
   kilo: {
     bin: "kilo",
     label: "Kilo",
-    approvalPolicies: { bypass: { terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
     hookName: null,
     hookDir: null,
     notificationSource: "osc",
@@ -477,7 +489,7 @@ const BUILTIN_AGENTS: Record<AgentKey, AgentSpec> = {
   kimi: {
     bin: "kimi",
     label: "Kimi",
-    approvalPolicies: { bypass: { terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
+    approvalPolicies: { bypass: { terminal: true, terminalArgs: ["--auto"], risk: "bypasses-approvals" } },
     hookName: null,
     hookDir: null,
     notificationSource: "osc",
@@ -523,9 +535,29 @@ const BUILTIN_AGENTS: Record<AgentKey, AgentSpec> = {
  * hand-maintained: the two vocabularies diverge (`cursor` vs `cursor-agent`) and
  * a stale hand-written map is exactly the silent drop this refactor removes.
  */
-const registry = createAgentRegistry(Object.entries(BUILTIN_AGENTS) as [AgentKey, AgentSpec][]);
+for (const spec of Object.values(BUILTIN_AGENTS)) {
+  spec.conversations = {
+    terminal: ["fresh", ...(spec.resume?.("probe").length ? ["resume" as const] : []), ...(spec.fork.kind === "native-fork" ? ["fork" as const] : [])],
+    chat: spec.driver ? ["fresh", "resume"] : undefined,
+  };
+  spec.observation = spec.hooks?.observation;
+  const boundaries = spec.hooks?.turnBoundaryEvents;
+  spec.inferTurnStart = !!boundaries && boundaries.start.length === 0 && boundaries.end.length > 0;
+}
+const registry = createAgentRegistry(Object.entries(BUILTIN_AGENTS).map(([id, source]) => {
+  const { bin, args, resume, initialPrompt, resumeIsSubcommand, env, fork: sourceFork, approvalPolicies: sourcePolicies, ...adapter } = source;
+  const { nativeForkArgs, ...fork } = sourceFork;
+  const { terminalArgs: approvalBypassArgs, ...bypass } = sourcePolicies.bypass ?? {};
+  const approvalPolicies = sourcePolicies.bypass ? { bypass: bypass as import("./types").AgentApprovalPolicy } : {};
+  return [id as AgentKey, { ...adapter, fork, approvalPolicies, cli: { bin, args, resume, initialPrompt, resumeIsSubcommand, env, nativeForkArgs, approvalBypassArgs } }] as const;
+}));
 export const AGENTS = registry.agents;
 export const BY_HOOK_NAME = registry.byHookName;
+export const builtinRegistry = createAgentRegistry(Object.entries(AGENTS).map(([id, spec]) => [id, {
+  apiVersion: 1,
+  hookName: spec.hookName,
+  create: () => spec,
+} satisfies AgentDefinition] as const));
 
 /**
  * Widening lookup for the many call sites that carry an arbitrary tool string
@@ -592,5 +624,5 @@ export function handlerObservable(tool: string | undefined, mode: "terminal" | "
   if (!spec) return false;
   return mode === "chat"
     ? spec.driver !== undefined
-    : spec.hooks?.observation.handler === true;
+    : spec.observation?.handler === true;
 }

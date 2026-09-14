@@ -5,7 +5,9 @@ describe("trusted agent registry", () => {
   it("registers definitions and keeps hook aliases in their own namespace", () => {
     const spec = { hookName: "hook-name", label: "Example" };
     const registry = createAgentRegistry([["agent-id", spec]]);
-    expect(registry.get("agent-id")).toBe(spec);
+    expect(registry.get("agent-id")).toEqual(spec);
+    spec.hookName = "changed";
+    expect(registry.get("agent-id")?.hookName).toBe("hook-name");
     expect(registry.byHookName["hook-name"]).toBe("agent-id");
     expect(registry.get("hook-name")).toBeUndefined();
     expect(Object.isFrozen(registry.agents)).toBe(true);

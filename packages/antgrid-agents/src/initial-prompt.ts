@@ -40,5 +40,5 @@ export function initialPromptArgv(tool: string, prompt: string): string[] {
   // blank" for every tool, and no spec should have to re-derive that.
   const p = prompt.trim();
   if (!p) return [];
-  return agentSpec(tool)?.initialPrompt(p) ?? [];
+  return agentSpec(tool)?.cli?.initialPrompt?.(p) ?? [];
 }

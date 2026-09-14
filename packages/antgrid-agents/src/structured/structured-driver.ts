@@ -3,13 +3,8 @@ import type { CapCommand } from "./chat-session";
 
 // Structural type the manager needs from a driver (CodexDriver satisfies it).
 export interface StructuredDriver {
-  // Resolves with the backend-native session id, or "" when the backend only
-  // reports its id asynchronously (e.g. ClaudeDriver: the SDK emits it on
-  // system:init, after start() must already have returned — see agents/claude-code/chat-backend.ts).
-  // In the "" case the factory wires persistence out-of-band (an onSessionId
-  // callback), and the manager must skip persistence for falsy ids — see the
-  // `if (agentId)` guard in startChat.
-  start(resumeId?: string, signal?: AbortSignal): Promise<string>;
+  // Readiness and native identity can arrive independently; identity uses DriverCtx.onAgentSession.
+  start(resumeId?: string, signal?: AbortSignal): Promise<void>;
   // commandId present => slash-command invocation; text carries only the args.
   prompt(text: string, commandId?: string): Promise<void>;
   // Returns whether a live turn was actually interrupted. False means there was
@@ -46,6 +41,7 @@ export interface StructuredDriver {
 }
 
 export interface DriverRunContext {
+  scope: import("../run-scope").AgentRunScope<import("../protocol").AgentOutputEvent>;
   signal: AbortSignal;
   isCurrent: () => boolean;
   onAgentSession: (agentSessionId: string) => void;

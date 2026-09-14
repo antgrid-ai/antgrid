@@ -6,6 +6,7 @@ import { resolveHookCommand } from "./host";
 import { agentSpec } from "./agents/registry";
 import { NO_INJECTION, NO_OBSERVATION } from "./agents/launch-inject";
 import type { LaunchAugmentation } from "./agents/types";
+import type { AgentSpec } from "./agents/types";
 
 export type { LaunchAugmentation };
 
@@ -33,8 +34,9 @@ export function augmentAgentLaunch(
   cursorDir?: string,
   hookCommand: HookCommand = resolveHookCommand(),
   geminiConfigDir?: string,
+  get: (tool: string) => AgentSpec | undefined = agentSpec,
 ): LaunchAugmentation {
-  const hooks = agentSpec(tool)?.hooks;
+  const hooks = get(tool)?.hooks;
   if (!hooks) return NO_INJECTION;
   try {
     const result = hooks.inject({ abDir, cursorDir, geminiConfigDir, hookCommand });

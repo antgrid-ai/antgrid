@@ -8,7 +8,7 @@ import {
 import type { ConfigPick } from "../../packages/antgrid-agents/src/structured/set-config";
 import { StructuredAgentManager } from "../src/structured/structured-manager";
 import { createMessage, type AbMessage } from "../src/protocol";
-import type { AgentMessage } from "antgrid-agents/events";
+import type { AgentOutputEvent as AgentMessage } from "antgrid-agents/events";
 import { ClaudeDriver } from "../../packages/antgrid-agents/src/agents/claude-code/chat-backend";
 import { CodexDriver, type CodexEndpoint } from "../../packages/antgrid-agents/src/agents/codex/chat-backend";
 import { OpencodeDriver, type OpencodeClientLike, type OpencodeEvent } from "../../packages/antgrid-agents/src/agents/opencode/chat-backend";
@@ -123,7 +123,7 @@ describe("ChatSession turn lifecycle", () => {
   it("start() advertises an empty not-ready catalog before the backend boots", async () => {
     const { s, sent } = make();
     const id = await s.start("resume-1");
-    expect(id).toBe("native-id");
+    expect(id).toBeUndefined();
     const first = sent[0];
     expect(first?.type).toBe("agent:capabilities");
     if (first?.type === "agent:capabilities") {
@@ -265,6 +265,17 @@ describe("ChatSession items", () => {
 });
 
 describe("ChatSession prompt retraction", () => {
+  it("shares disposal completion when a withdrawn request reenters dispose", async () => {
+    const { s } = make();
+    await s.start();
+    let reentered: Promise<void> | undefined;
+    s.permission("Run?", () => { reentered = s.dispose(); });
+    const done = s.dispose();
+    expect(reentered).toBe(done);
+    await done;
+    expect(s.calls.filter((call) => call === "dispose")).toHaveLength(1);
+  });
+
   it("retracts pending permissions before questions at a turn boundary and answers each with null", async () => {
     const { s, sent } = make();
     await s.start();
@@ -303,6 +314,18 @@ describe("ChatSession prompt retraction", () => {
     s.resolvePermission(id, "ok");
     s.close({ stopReason: "end_turn" });
     expect(sent.some((m) => m.type === "agent:request-retracted")).toBe(false);
+  });
+
+  it("disposes the backend and withdraws other requests when an answer callback throws", async () => {
+    const { s } = make();
+    await s.start();
+    const answers: unknown[] = [];
+    s.permission("Run?", () => { throw new Error("callback failed"); });
+    s.question((answer) => answers.push(answer));
+    await s.dispose();
+    await s.dispose();
+    expect(answers).toEqual([null]);
+    expect(s.calls.filter((call) => call === "dispose")).toHaveLength(1);
   });
 
   it("a prompt group withdraws its whole batch once, and only what is still open", async () => {

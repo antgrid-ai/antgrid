@@ -292,6 +292,9 @@ jobs:
       - name: Smoke test compiled bridge hook
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge
 
+      - name: Smoke test compiled adapter assets
+        run: bun run --filter antgrid-agents smoke:assets
+
       - name: Build macOS app
         id: build
         working-directory: app
@@ -658,6 +661,9 @@ jobs:
         shell: pwsh
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge.exe
 
+      - name: Smoke test compiled adapter assets
+        run: bun run --filter antgrid-agents smoke:assets
+
       - name: Build Windows app
         id: build
         working-directory: app
@@ -861,6 +867,9 @@ jobs:
 
       - name: Smoke test compiled bridge hook
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge
+
+      - name: Smoke test compiled adapter assets
+        run: bun run --filter antgrid-agents smoke:assets
 
       - name: Build Linux app
         id: build

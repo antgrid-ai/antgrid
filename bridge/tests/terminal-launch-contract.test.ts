@@ -5,11 +5,16 @@ import { join } from "node:path";
 import { SessionManager } from "../src/session-manager";
 import { AGENTS } from "../../packages/antgrid-agents/src/agents/registry";
 import { prepareTerminalLaunch, type PreparedTerminalLaunch } from "../../packages/antgrid-agents/src/agents/terminal-launch";
+import { createAgentRuntime } from "antgrid-agents/runtime";
+import { createAgentRegistry } from "antgrid-agents/registry";
+import { agentHostServices, agentRuntime } from "../src/agent-host";
+import type { AgentSpec } from "antgrid-agents/contracts";
+import { createAgentRunScope } from "antgrid-agents/contracts";
 
 const dirs: string[] = [];
-const original = AGENTS["claude-code"].prepareTerminal;
+let prepare: AgentSpec["prepareTerminal"];
 afterEach(() => {
-  AGENTS["claude-code"].prepareTerminal = original;
+  prepare = undefined;
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -28,6 +33,9 @@ function fixture() {
     getScrollback: () => null,
   };
   const createManager = () => new SessionManager({
+    agentRuntime: createAgentRuntime({ host: agentHostServices, registry: createAgentRegistry([["claude-code", {
+      apiVersion: 1, hookName: "claude", create: () => ({ ...AGENTS["claude-code"], prepareTerminal: (request) => prepare ? prepare(request) : agentRuntime.prepareTerminal(request) }),
+    }]]) }),
     projectId: "p", storeDir: dir, projectPath: dir, terminalManager: tm as any,
     agentSpec: { command: "claude", name: "claude-code" }, sendMessage: () => {},
   });
@@ -42,7 +50,7 @@ describe("terminal adapter launch contract", () => {
     let generation = 0;
     let signal!: AbortSignal;
     const observation = { notifications: true, titles: true, handler: true, turnStart: false, turnEnd: true, hookAlive: true };
-    AGENTS["claude-code"].prepareTerminal = (request) => {
+    prepare = (request) => {
       const current = ++generation;
       signal = request.signal;
       return { command: "owned-runtime", invocationKind: "exec", args: [], env: {}, resumed: false,
@@ -72,7 +80,7 @@ describe("terminal adapter launch contract", () => {
   it("reports unsupported prompt delivery and disposes preparation without dispatch", async () => {
     const f = fixture();
     let disposed = 0;
-    AGENTS["claude-code"].prepareTerminal = () => ({
+    prepare = () => ({
       command: "unused", invocationKind: "exec", args: [], env: {}, resumed: false,
       promptDelivery: "unsupported", dispose: async () => { disposed++; },
     });
@@ -87,13 +95,14 @@ describe("terminal adapter launch contract", () => {
       tool: "missing-adapter", configured: { name: "claude-code", command: "claude" },
       conversation: { kind: "fresh" }, approvalPolicy: "default", storeDir: "unused", cwd: "unused",
       signal: new AbortController().signal,
+      scope: createAgentRunScope({ runId: "test", isCurrent: () => true, emit: () => {} }),
     })).toThrow("unknown agent");
   });
 
   it("archive followed by unarchive cannot revive a cancelled preparation", async () => {
     const f = fixture();
     let release!: (launch: PreparedTerminalLaunch) => void;
-    AGENTS["claude-code"].prepareTerminal = () => new Promise((resolve) => { release = resolve; });
+    prepare = () => new Promise((resolve) => { release = resolve; });
     const entry = f.sm.create("archive", { tool: "claude-code" });
     const started = (f.sm.start(entry.id) as Promise<void>).catch((error) => error);
     f.sm.archive(entry.id);
@@ -107,7 +116,7 @@ describe("terminal adapter launch contract", () => {
   it("mode switching waits for an in-flight terminal preparation before assigning its new run", async () => {
     const f = fixture();
     let release!: (launch: PreparedTerminalLaunch) => void;
-    AGENTS["claude-code"].prepareTerminal = () => new Promise((resolve) => { release = resolve; });
+    prepare = () => new Promise((resolve) => { release = resolve; });
     const entry = f.sm.create("mode", { tool: "claude-code" });
     const started = (f.sm.start(entry.id) as Promise<void>).catch((error) => error);
     const oldRun = f.sm.hookRunId(entry.id);
@@ -124,7 +133,7 @@ describe("terminal adapter launch contract", () => {
   it("reports installation separately from confirmed monitoring and ignores stale confirmations", async () => {
     const f = fixture();
     const observation = { notifications: true, titles: true, handler: true, turnStart: false, turnEnd: true, hookAlive: true };
-    AGENTS["claude-code"].prepareTerminal = () => ({ command: "owned-runtime", invocationKind: "exec", args: [], env: {}, resumed: false, promptDelivery: "none", observation });
+    prepare = () => ({ command: "owned-runtime", invocationKind: "exec", args: [], env: {}, resumed: false, promptDelivery: "none", observation });
     const entry = f.sm.create("availability", { tool: "claude-code" });
     await f.sm.start(entry.id);
     const run = f.sm.hookRunId(entry.id)!;
@@ -144,7 +153,7 @@ describe("terminal adapter launch contract", () => {
     const f = fixture();
     let release!: () => void;
     let prepared = 0;
-    AGENTS["claude-code"].prepareTerminal = () => {
+    prepare = () => {
       prepared++;
       return {
         command: "owned-runtime", invocationKind: "exec", args: [], env: {}, resumed: false, promptDelivery: "none",
@@ -173,7 +182,7 @@ describe("terminal adapter launch contract", () => {
   it("awaits an entirely different invocation and keeps cwd host-owned", async () => {
     const f = fixture();
     let release!: (launch: PreparedTerminalLaunch) => void;
-    AGENTS["claude-code"].prepareTerminal = (request) => {
+    prepare = (request) => {
       expect(Object.isFrozen(request)).toBe(true);
       expect(request.cwd).toBe(f.dir);
       return new Promise((resolve) => { release = resolve; });
@@ -194,7 +203,7 @@ describe("terminal adapter launch contract", () => {
     let release!: (launch: PreparedTerminalLaunch) => void;
     let signal!: AbortSignal;
     let disposed = 0;
-    AGENTS["claude-code"].prepareTerminal = (request) => {
+    prepare = (request) => {
       signal = request.signal;
       return new Promise((resolve) => { release = resolve; });
     };

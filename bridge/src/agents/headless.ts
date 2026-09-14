@@ -15,14 +15,33 @@ import {
 import "../modelwatch-log";
 import { killChildTree, stripInheritedCertOverrides } from "../terminal-session";
 import { detectInstalledTools } from "../tool-detector";
-import { AGENTS, agentSpec } from "antgrid-agents/builtins";
+import { AGENTS, agentSpec } from "../agent-runtime";
 import {
   pickHeadlessFrom,
-  type HeadlessCommand, type HeadlessNeed, type HeadlessReach,
+  type HeadlessImplementation as HeadlessCommand, type HeadlessNeed, type HeadlessReach,
   type HeadlessUsageCapture, type HeadlessUsageReading, type HeadlessUsageTokens,
 } from "antgrid-agents/contracts";
+import { createAgentRunScope } from "antgrid-agents/contracts";
 
 const log = logger.child({ component: "headless" });
+
+export async function executeHeadless(command: HeadlessCommand, prompt: string, model: string | undefined, opts: Parameters<typeof runHeadless>[1]): Promise<HeadlessResult | null> {
+  if ("cmd" in command) return runHeadless(command.cmd(prompt, model), { ...opts, env: command.env, scratchEnv: command.scratchEnv, usage: command.usage });
+  const scope = createAgentRunScope({ runId: crypto.randomUUID(), isCurrent: () => true, emit: () => {} });
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; scope.cancel(new Error("Headless operation timed out")); }, opts.timeoutMs);
+  try {
+    const result = await scope.track(command.run({ prompt, model, cwd: opts.cwd, scope }));
+    if (opts.call) noteCall(() => ({ ...opts.call!, phase: "end", usage: result.usage, actualModel: result.actualModel }));
+    return { stdout: result.text, code: timedOut ? null : result.failed ? 1 : 0, timedOut, usage: result.usage, actualModel: result.actualModel, vendorFailed: result.failed };
+  } catch (error) {
+    log.warn({ error }, "Headless operation failed");
+    return null;
+  } finally {
+    clearTimeout(timer);
+    await scope.dispose();
+  }
+}
 
 /** The tightest entry this agent declares that still satisfies `need`. */
 export function pickHeadless(

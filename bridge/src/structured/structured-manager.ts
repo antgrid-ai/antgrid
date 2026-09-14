@@ -1,10 +1,13 @@
 import { createMessage, type AbMessage } from "../protocol";
-import { isChatCapableTool } from "antgrid-agents/structured/chat-capable";
+import { isChatCapableTool } from "../agent-runtime";
+import type { AgentRuntime } from "antgrid-agents/runtime";
+import { createAgentRunScope, AgentOutputEventSchema, type OwnedAgentRunScope, type AgentOutputEvent } from "antgrid-agents/contracts";
 import type { CapCommand } from "antgrid-agents/structured/chat-session";
 import type { ApprovalPolicy } from "antgrid-agents/contracts";
 
 import type { StructuredDriver, DriverRunContext } from "antgrid-agents/contracts";
 export type { StructuredDriver, DriverRunContext } from "antgrid-agents/contracts";
+export type ChatStartOutcome = "ready" | "cancelled";
 
 export type DriverFactory = (
   sessionId: string,
@@ -16,6 +19,7 @@ export type DriverFactory = (
 ) => StructuredDriver;
 
 export interface StructuredAgentManagerOpts {
+  agentRuntime?: AgentRuntime;
   driverFactory: DriverFactory;
   sendMessage: (msg: AbMessage) => void;
   // Called after a driver reports its agent-native session id, so the bridge can
@@ -38,12 +42,13 @@ export interface StructuredAgentManagerOpts {
 }
 
 export class StructuredAgentManager {
+  private readonly supportsChat: (tool: string) => boolean;
   private drivers = new Map<string, StructuredDriver>();
   // Race-guard: concurrent startChat calls for one session must not spawn two
   // drivers. Holds the in-flight start so late callers join it rather than
   // racing a second spawn.
   private starting = new Map<string, Promise<void>>();
-  private runs = new Map<string, { abort: AbortController; driver?: StructuredDriver; acceptsEvents: boolean }>();
+  private runs = new Map<string, { abort: AbortController; driver?: StructuredDriver; acceptsEvents: boolean; scope?: OwnedAgentRunScope<AgentOutputEvent> }>();
   private teardowns = new WeakMap<StructuredDriver, Promise<void>>();
   // In-flight teardowns, keyed by session. A restart (startChat) awaits its
   // session's pending stop before spawning so it can't race the dying process
@@ -63,6 +68,7 @@ export class StructuredAgentManager {
   private readonly onUserPrompt?: (sessionId: string, text: string) => void;
 
   constructor(opts: StructuredAgentManagerOpts) {
+    this.supportsChat = opts.agentRuntime?.isChatCapable ?? isChatCapableTool;
     this.factory = opts.driverFactory;
     this.send = opts.sendMessage;
     this.onAgentSession = opts.onAgentSession;
@@ -71,26 +77,38 @@ export class StructuredAgentManager {
     this.onUserPrompt = opts.onUserPrompt;
   }
 
-  async startChat(opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string; approvalPolicy?: ApprovalPolicy }): Promise<void> {
+  async startChat(opts: { sessionId: string; tool: string; runId?: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string; approvalPolicy?: ApprovalPolicy }): Promise<ChatStartOutcome> {
     const { sessionId, tool, resumeId, config, initialPrompt, approvalPolicy = "default" } = opts;
-    if (!isChatCapableTool(tool)) {
+    if (!this.supportsChat(tool)) {
       throw new Error(`tool "${tool}" does not support chat mode`);
     }
     if (this.drivers.has(sessionId)) {
       // already running — idempotent, but a racing duplicate start still
       // carries the caller's own initialPrompt and must deliver it once.
       await this.deliverInitialPrompt(sessionId, initialPrompt, resumeId);
-      return;
+      return this.drivers.has(sessionId) ? "ready" : "cancelled";
     }
     const inflight = this.starting.get(sessionId);
     if (inflight) {
+      if (this.runs.get(sessionId)?.abort.signal.aborted) {
+        await inflight.catch(() => {});
+        if (this.starting.get(sessionId) === inflight) this.starting.delete(sessionId);
+        await this.stopping.get(sessionId);
+        return this.startChat(opts);
+      }
       await inflight;
       await this.deliverInitialPrompt(sessionId, initialPrompt, resumeId);
-      return;
+      return this.drivers.has(sessionId) ? "ready" : "cancelled";
     }
 
-    const run = { abort: new AbortController(), driver: undefined as StructuredDriver | undefined, acceptsEvents: true };
+    const run = { abort: new AbortController(), driver: undefined as StructuredDriver | undefined, acceptsEvents: true, scope: undefined as OwnedAgentRunScope<AgentOutputEvent> | undefined };
     this.runs.set(sessionId, run);
+    run.scope = createAgentRunScope({
+      runId: opts.runId ?? crypto.randomUUID(),
+      isCurrent: () => this.runs.get(sessionId) === run && run.acceptsEvents,
+      emit: (event) => this.send(AgentOutputEventSchema.parse({ ...event, sessionId })),
+    });
+    run.abort.signal.addEventListener("abort", () => run.scope!.cancel(run.abort.signal.reason), { once: true });
     const startPromise = (async () => {
       // A just-issued session:stop may still be tearing down the prior driver.
       // Wait it out so the new codex process spawns only after the old one has
@@ -99,6 +117,7 @@ export class StructuredAgentManager {
       if (pendingStop) await pendingStop;
       if (run.abort.signal.aborted) return;
       const context: DriverRunContext = {
+        scope: run.scope!,
         signal: run.abort.signal,
         isCurrent: () => this.runs.get(sessionId) === run && !run.abort.signal.aborted && run.acceptsEvents,
         onAgentSession: (agentSessionId) => {
@@ -113,13 +132,19 @@ export class StructuredAgentManager {
       } catch (error) {
         run.acceptsEvents = false;
         run.abort.abort(error);
+        const cleanup = run.scope!.dispose().then(() => {
+          if (this.stopping.get(sessionId) === cleanup) this.stopping.delete(sessionId);
+          if (this.runs.get(sessionId) === run) this.runs.delete(sessionId);
+        });
+        this.stopping.set(sessionId, cleanup);
+        void cleanup.catch(() => {});
         throw error;
       }
       run.driver = driver;
-      let agentId: string;
+      run.scope!.registerCleanup(() => driver.dispose());
       let abortStart: (() => void) | undefined;
       try {
-        agentId = await Promise.race([
+        await Promise.race([
           driver.start(resumeId, run.abort.signal),
           new Promise<never>((_, reject) => {
             abortStart = () => reject(run.abort.signal.reason);
@@ -172,9 +197,6 @@ export class StructuredAgentManager {
         }
       }
       this.drivers.set(sessionId, driver);
-      // Persist the agent-native id for the next resume. A resume that fell back
-      // to a fresh session returns the NEW id, so the stale one is replaced.
-      if (agentId) context.onAgentSession(agentId);
     })();
     this.starting.set(sessionId, startPromise);
     try { await startPromise; }
@@ -187,6 +209,7 @@ export class StructuredAgentManager {
     // agent:prompt. After start, so the config replay above (model/effort)
     // applies to this first turn.
     if (!run.abort.signal.aborted) await this.deliverInitialPrompt(sessionId, initialPrompt, resumeId);
+    return run.abort.signal.aborted ? "cancelled" : "ready";
   }
 
   // A prompt failure is surfaced as agent:error but must NOT tear down the
@@ -235,6 +258,7 @@ export class StructuredAgentManager {
   // first await — so an immediately-following startChat sees and joins it.
   stopChat(sessionId: string): Promise<void> {
     const run = this.runs.get(sessionId);
+    if (run) run.acceptsEvents = false;
     run?.abort.abort(new Error("Agent startup cancelled"));
     const driver = run?.driver ?? this.drivers.get(sessionId);
     if (!driver) return this.stopping.get(sessionId) ?? Promise.resolve();
@@ -252,28 +276,36 @@ export class StructuredAgentManager {
     // selectors are gone, then the replay-cache entry is dropped so a stopped
     // session neither replays stale selectors on app attach nor leaves a
     // tombstone in the cache forever.
-    this.send(createMessage("agent:capabilities", { sessionId }));
-    this.dropSessionReplay?.(sessionId);
     // End of this session's lifetime — allow a later relaunch to deliver its own
     // one-shot prompt (this teardown is the only driver-removal path).
     this.initialPromptDelivered.delete(sessionId);
-    let disposed: Promise<void>;
-    try { disposed = Promise.resolve(driver.dispose()); }
-    catch (error) { disposed = Promise.reject(error); }
     const run = this.runs.get(sessionId);
     if (run?.driver === driver) run.acceptsEvents = false;
-    const teardown = disposed.finally(() => {
+    const notify = (callback: () => void) => {
+      try { callback(); } catch { /* Delivery failure cannot retain provider resources. */ }
+    };
+    let resolveDisposal!: () => void;
+    let rejectDisposal!: (error: unknown) => void;
+    const disposal = new Promise<void>((resolve, reject) => {
+      resolveDisposal = resolve;
+      rejectDisposal = reject;
+    });
+    const teardown = disposal.finally(() => {
       // Again, because dispose() itself emits session-scoped frames (a driver
       // clearing its background-task list), which would otherwise re-cache a
       // tombstone the earlier drop had just removed. A restart for this id waits
       // out `stopping`, so nothing live can be dropped here.
-      this.dropSessionReplay?.(sessionId);
+      notify(() => this.dropSessionReplay?.(sessionId));
     }).then(() => {
       if (this.stopping.get(sessionId) === teardown) this.stopping.delete(sessionId);
       if (this.runs.get(sessionId) === run) this.runs.delete(sessionId);
     });
     this.teardowns.set(driver, teardown);
     this.stopping.set(sessionId, teardown);
+    notify(() => this.send(createMessage("agent:capabilities", { sessionId })));
+    notify(() => this.dropSessionReplay?.(sessionId));
+    try { Promise.resolve(run?.scope ? run.scope.dispose() : driver.dispose()).then(resolveDisposal, rejectDisposal); }
+    catch (error) { rejectDisposal(error); }
     // Failure stays in `stopping`: a replacement must not infer resource release.
     void teardown.catch(() => {});
     return teardown;

@@ -9,19 +9,22 @@ import {
   resolveAgent,
   suppressesOscNotifications,
   suppressesOscTitle,
-} from "antgrid-agents/known-agents";
-import { injectsHookAliveProbe } from "antgrid-agents/agent-launch-augmenter";
-import { agentSpec } from "antgrid-agents/builtins";
+} from "./agent-runtime";
+import { injectsHookAliveProbe } from "./agent-runtime";
+import { agentSpec } from "./agent-runtime";
 import { DEFAULT_CHAT_AGENT } from "antgrid-agents/defaults";
-import { resolveApprovalPolicy } from "antgrid-agents/agent-approval-policy";
+import { resolveApprovalPolicy } from "./agent-runtime";
 // Aliased: this module declares its own, unrelated `AgentSpec` (the launch
 // triple) right below.
 import type { AgentSpec as RegistryAgentSpec } from "antgrid-agents/contracts";
 import type { ApprovalPolicy, TerminalObservationAvailability } from "antgrid-agents/contracts";
 import { stripAnsi } from "./handler/context";
 import { agentSessionGone, resumeArgv, sessionResumable } from "./agent-resume";
-import { isChatCapableTool } from "antgrid-agents/structured/chat-capable";
-import { prepareTerminalLaunch, type PreparedTerminalLaunch } from "antgrid-agents/terminal-launch";
+import { isChatCapableTool } from "./agent-runtime";
+import type { PreparedTerminalLaunch } from "antgrid-agents/terminal-launch";
+import { agentRuntime, prepareTerminalLaunch } from "./agent-runtime";
+import type { AgentRuntime } from "antgrid-agents/runtime";
+import { createAgentRunScope, TerminalAgentEventSchema, type TerminalAgentEvent } from "antgrid-agents/contracts";
 import { TITLE_RANKS, titleRankValue, type TitleRank } from "./session-namer";
 import type { WorkStatus, HandlerAvailability } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
@@ -83,6 +86,8 @@ export interface DeleteSessionOptions {
 }
 
 export interface SessionManagerOpts {
+  agentRuntime?: AgentRuntime;
+  onAgentEvent?: (sessionId: string, event: TerminalAgentEvent) => void;
   projectId: string;
   storeDir: string;                  // ~/.antgrid root
   /**
@@ -108,7 +113,7 @@ export interface SessionManagerOpts {
   teardownTimeoutMs?: number;
   /** Called by start()/stop() for a mode:'chat' session instead of the PTY path.
    *  Injected by agent-core to drive the StructuredAgentManager. */
-  onStartChat?: (opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string; approvalPolicy: ApprovalPolicy }) => void;
+  onStartChat?: (opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string; approvalPolicy: ApprovalPolicy }) => void | Promise<void>;
   /** May return the teardown promise. The structured driver's dispose is what
    *  releases the agent's own process lock (codex's ~/.codex sqlite), so a
    *  caller that restarts this slot on another runtime must be able to await
@@ -799,9 +804,9 @@ export class SessionManager {
       ? this.agentSpec
       : await this.opts.resolveAgentSpec?.(source.checkoutId) ?? this.agentSpec;
     const tool = source.tool ?? sourceAgentSpec.name;
-    const adapter = agentSpec(tool);
+    const adapter = (this.opts.agentRuntime ?? agentRuntime).get(tool);
     if (!adapter) throw new Error("This session's agent does not support transcript forks.");
-    const nativeSource = source.mode === "terminal" && capturedSourceId && adapter.fork.nativeForkArgs
+    const nativeSource = source.mode === "terminal" && capturedSourceId && adapter.fork.kind === "native-fork"
       ? capturedSourceId : undefined;
     const transcript = nativeSource
       ? undefined
@@ -870,12 +875,12 @@ export class SessionManager {
     // sending a key an older agent doesn't know) is rejected at the source as a
     // session:result error, rather than persisting an entry that fails every
     // start() forever (and re-fails on each reconnect once it's on disk).
-    if (spec?.tool) resolveAgent(spec.tool);
+    if (spec?.tool && !(this.opts.agentRuntime ?? agentRuntime).get(spec.tool)) throw new Error(`unknown agent: ${spec.tool}`);
     const mode = spec?.mode ?? "terminal";
     const approvalPolicy = spec?.approvalPolicy ?? "default";
     if (approvalPolicy === "bypass") {
       if (spec?.command) throw new Error("Custom-command sessions do not support bypass approval policy");
-      resolveApprovalPolicy(spec?.tool ?? this.agentSpec.name, mode, approvalPolicy);
+      (this.opts.agentRuntime ?? agentRuntime).resolveApprovalPolicy(spec?.tool ?? this.agentSpec.name, mode, approvalPolicy);
     }
     const id = crypto.randomUUID();
     const now = Date.now();
@@ -1164,7 +1169,7 @@ export class SessionManager {
       tool: reportingTool,
       agentSessionId,
       adapterOptions: this.opts.adapterOptions,
-    })) {
+    }, (this.opts.agentRuntime ?? agentRuntime).get)) {
       log.warn(
         `session ${id}: ${reportingTool} disowns reported conversation ${agentSessionId}; keeping ${entry.agentSessionId}`,
       );
@@ -1519,7 +1524,7 @@ export class SessionManager {
       tool,
       agentSessionId: resumeId,
       adapterOptions: this.opts.adapterOptions,
-    }) ? undefined : resumeId;
+    }, (this.opts.agentRuntime ?? agentRuntime).get) ? undefined : resumeId;
   }
 
   start(id: string, initialPrompt?: string): void | Promise<void> {
@@ -2026,28 +2031,38 @@ export class SessionManager {
       // sessionID) resumes the prior conversation. Tool defaults to codex — chat is offered
       // only for chat-capable tools, gated app-side and re-checked in startChat.
       const chatAlreadyRunning = this.runningChat.has(id);
+      const chatTool = entry.tool ?? DEFAULT_CHAT_AGENT;
+      (this.opts.agentRuntime ?? agentRuntime).resolveApprovalPolicy(chatTool, "chat", entry.approvalPolicy);
       this.runningChat.add(id);
       if (!chatAlreadyRunning) {
         this.terminalRunIds.set(id, crypto.randomUUID());
         this.handlerAvailabilities.set(id, { state: "preparing", reason: "Starting agent" });
       }
-      const chatTool = entry.tool ?? DEFAULT_CHAT_AGENT;
-      resolveApprovalPolicy(chatTool, "chat", entry.approvalPolicy);
+      const runId = this.terminalRunIds.get(id);
       const resumeId = entry.conversationStart === "fork" ? undefined : this.launchResumeId(chatTool, entry);
       this.noteConversationStart(entry, resumeId !== undefined);
-      this.opts.onStartChat?.({
+      const startup = (async () => { await this.opts.onStartChat?.({
         sessionId: id,
         tool: chatTool,
         resumeId,
         config: entry.config,
         initialPrompt: this.forkInitialPrompt(entry, initialPrompt),
         approvalPolicy: entry.approvalPolicy,
+      }); })().then(() => {
+        if (!this.acceptsHookRun(id, runId)) return;
+        this.confirmHookRun(id, runId);
+        this.completeForkLaunch(entry);
+      }).catch((error) => {
+        if (!this.acceptsHookRun(id, runId)) return;
+        this.runningChat.delete(id);
+        this.terminalRunIds.delete(id);
+        this.invalidateHookObservation(id, "Agent failed to start");
+        throw error;
       });
       entry.lastUsedAt = Date.now();
-      this.completeForkLaunch(entry);
       this.changed();
       if (chatAlreadyRunning) this.reannounceCheckout(entry.checkoutId);
-      return;
+      return startup;
     }
     if (this.tm.has(id) && !this.stopping.has(id)) {
       log.warn(`session ${id} already running`);
@@ -2082,6 +2097,18 @@ export class SessionManager {
     this.terminalControllers.set(id, controller);
     const runId = crypto.randomUUID();
     this.terminalRunIds.set(id, runId);
+    const scope = createAgentRunScope<TerminalAgentEvent>({
+      runId,
+      isCurrent: () => this.terminalRunIds.get(id) === runId,
+      emit: (event) => {
+        const parsed = TerminalAgentEventSchema.parse(event);
+        if (parsed.type === "session-identity") this.setAgentSession(id, parsed.nativeId, parsed.transcriptPath);
+        if (parsed.type === "ready") this.confirmHookRun(id, runId);
+        this.opts.onAgentEvent?.(id, parsed);
+      },
+    });
+    controller.signal.addEventListener("abort", () => scope.cancel(), { once: true });
+    this.terminalDisposers.set(id, () => scope.dispose());
     this.handlerAvailabilities.set(id, { state: "preparing", reason: "Starting agent" });
     this.changed();
     const request = {
@@ -2099,19 +2126,23 @@ export class SessionManager {
       adapterOptions: this.opts.adapterOptions?.[tool],
       cwd: sessionAgentSpec.workingDir ? resolve(checkoutPath, sessionAgentSpec.workingDir) : checkoutPath,
       signal: controller.signal,
+      scope,
     };
     Object.freeze(request.conversation);
     Object.freeze(request);
+    const ownLaunch = (launch: PreparedTerminalLaunch) => {
+      if (launch.dispose) scope.registerCleanup(launch.dispose);
+      return launch;
+    };
     const dispatch = (launch: PreparedTerminalLaunch): void | Promise<void> => {
+      if (launch.promptDelivery === "adapter" && !launch.deliverPrompt) throw new Error("Adapter prompt delivery requires a delivery operation");
       if (controller.signal.aborted || this.entries.get(id) !== entry || entry.archived || entry.mode !== "terminal" || entry.checkoutId !== launchCheckoutId) {
-        if (launch.dispose) this.terminalDisposers.set(id, launch.dispose);
         const cleanup = this.releaseTerminalPreparation(id);
         const cancelled = () => { throw new Error("Terminal launch cancelled during preparation."); };
         if (cleanup) return cleanup.then(cancelled);
         cancelled();
       }
       if (launch.promptDelivery === "unsupported" && launchPrompt.trim()) {
-        if (launch.dispose) this.terminalDisposers.set(id, launch.dispose);
         const cleanup = this.releaseTerminalPreparation(id);
         const refused = () => { throw new Error("This agent cannot accept an opening prompt through its terminal invocation. Start without a prompt, then submit it after the terminal opens."); };
         if (cleanup) return cleanup.then(refused);
@@ -2124,7 +2155,6 @@ export class SessionManager {
           writePersistedAtomic(this.path, Array.from(this.entries.values()));
         } catch (error) {
           entry.forkNativeAttempted = undefined;
-          if (launch.dispose) this.terminalDisposers.set(id, launch.dispose);
           this.releaseTerminalPreparation(id);
           throw error;
         }
@@ -2135,7 +2165,6 @@ export class SessionManager {
       this.handlerAvailabilities.set(id, launch.observation?.handler === false
         ? { state: "unavailable", reason: "Agent monitoring was not installed" }
         : { state: "unknown", reason: "Waiting for agent events" });
-      if (launch.dispose) this.terminalDisposers.set(id, launch.dispose);
       try {
         // Geometry is left to TerminalManager, which spawns at whatever size the
         // pane's driver last reported (80x24 only for the first terminal of a
@@ -2168,23 +2197,41 @@ export class SessionManager {
           hookAliveProbeAgent: (launch.observation?.hookAlive ?? injectsHookAliveProbe(entry.tool ?? sessionAgentSpec.name))
             ? entry.tool ?? sessionAgentSpec.name
             : undefined,
-          gracefulAsk: agentSpec(entry.tool ?? sessionAgentSpec.name)?.gracefulExit,
+          gracefulAsk: (this.opts.agentRuntime ?? agentRuntime).get(entry.tool ?? sessionAgentSpec.name)?.gracefulExit,
         });
-        if (launch.promptDelivery === "buffered") {
-          this.tm.submit(id, launchPrompt);
-        }
+        const deliver = async () => {
+          const terminal = {
+            write: (data: string) => { if (!scope.signal.aborted && this.acceptsHookRun(id, runId)) this.tm.write(id, data); },
+            submit: (text: string) => { if (!scope.signal.aborted && this.acceptsHookRun(id, runId)) this.tm.submit(id, text); },
+          };
+          await launch.attach?.(terminal, scope);
+          if (scope.signal.aborted || !this.acceptsHookRun(id, runId)) return;
+          if (launch.promptDelivery === "adapter" && launchPrompt.trim()) await launch.deliverPrompt!(launchPrompt, scope);
+          else if (launch.promptDelivery === "buffered") terminal.submit(launchPrompt);
+        };
+        const readiness = launch.attach || launch.deliverPrompt ? scope.track(deliver()) : undefined;
+        if (!readiness && launch.promptDelivery === "buffered") this.tm.submit(id, launchPrompt);
         entry.lastUsedAt = Date.now();
-        if (!this.awaitingNativeForkIdentity(entry)) this.completeForkLaunch(entry);
+        if (!readiness && !this.awaitingNativeForkIdentity(entry)) this.completeForkLaunch(entry);
         this.changed();
+        if (readiness) return readiness.then(() => {
+          if (scope.signal.aborted || !this.acceptsHookRun(id, runId)) return;
+          if (!this.awaitingNativeForkIdentity(entry)) this.completeForkLaunch(entry);
+          this.changed();
+        }).catch(async (error) => {
+          this.stopTerminal(id);
+          await this.releaseTerminalPreparation(id);
+          throw error;
+        });
       } catch (error) {
         this.releaseTerminalPreparation(id);
         throw error;
       }
     };
     try {
-      const prepared = prepareTerminalLaunch(request);
+      const prepared = (this.opts.agentRuntime ?? agentRuntime).prepareTerminal(request);
       if (prepared instanceof Promise) {
-        const pending = prepared.then(dispatch).catch(async (error) => {
+        const pending = scope.track(prepared.then(ownLaunch)).then(dispatch).catch(async (error) => {
           await this.releaseTerminalPreparation(id);
           throw error;
         }).finally(() => {
@@ -2193,7 +2240,7 @@ export class SessionManager {
         this.terminalPreparing.set(id, pending);
         return pending;
       }
-      return dispatch(prepared);
+      return dispatch(ownLaunch(prepared));
     } catch (error) {
       this.releaseTerminalPreparation(id);
       throw error;
@@ -2350,10 +2397,10 @@ export class SessionManager {
     if (this.awaitingNativeForkIdentity(entry) || entry.forkNativeMigrationError) {
       throw new Error("Complete or recover this native fork before changing its mode.");
     }
-    if (mode === "chat" && !isChatCapableTool(entry.tool)) {
+    if (mode === "chat" && !(this.opts.agentRuntime ?? agentRuntime).isChatCapable(entry.tool ?? this.agentSpec.name)) {
       throw new Error(`tool has no chat driver: ${entry.tool}`);
     }
-    resolveApprovalPolicy(entry.tool ?? this.agentSpec.name, mode, entry.approvalPolicy);
+    (this.opts.agentRuntime ?? agentRuntime).resolveApprovalPolicy(entry.tool ?? this.agentSpec.name, mode, entry.approvalPolicy);
     // Read with the OLD mode — the same expression toWire uses.
     const wasRunning = entry.mode === "chat" ? this.runningChat.has(id) : this.tm.has(id) || this.terminalPreparing.has(id);
     // Held across the teardown only: the exit-driven handler teardown fires
@@ -2576,7 +2623,7 @@ export class SessionManager {
       deleting: this.deleting.has(e.id),
       tool: e.tool,
       command: e.command,
-      forkSupported: !e.command && !!agentSpec(e.tool ?? this.agentSpec.name),
+      forkSupported: !e.command && !!(this.opts.agentRuntime ?? agentRuntime).get(e.tool ?? this.agentSpec.name),
       forkedFromSessionId: e.forkedFromSessionId,
       args: e.args,
       mode: e.mode,
@@ -2664,7 +2711,7 @@ export class SessionManager {
     if (e.tool) return e.tool;
     if (e.command) return undefined;
     const name = this.agentSpec.name;
-    return agentSpec(name)?.augmentsDefaultSpec ? name : undefined;
+    return (this.opts.agentRuntime ?? agentRuntime).get(name)?.augmentsDefaultSpec ? name : undefined;
   }
 
   /**
@@ -2680,7 +2727,7 @@ export class SessionManager {
    */
   private agentSessionResumable(e: PersistedEntry): boolean {
     const tool = this.resumeToolFor(e);
-    if (!tool || resumeArgv(tool, "x").length === 0) return false;
+    if (!tool || !(this.opts.agentRuntime ?? agentRuntime).get(tool)?.conversations?.[e.mode]?.includes("resume")) return false;
     if (e.agentSessionId === undefined) return true;
     const cached = this.resumableCache.get(e.id);
     if (cached && cached.agentSessionId === e.agentSessionId) return cached.resumable;
@@ -2689,7 +2736,7 @@ export class SessionManager {
       agentSessionId: e.agentSessionId,
       agentTranscriptPath: e.agentTranscriptPath,
       adapterOptions: this.opts.adapterOptions,
-    });
+    }, (this.opts.agentRuntime ?? agentRuntime).get);
     this.resumableCache.set(e.id, { agentSessionId: e.agentSessionId, resumable });
     return resumable;
   }

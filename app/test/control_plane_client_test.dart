@@ -9,6 +9,12 @@ import 'package:antgrid/services/session_delete_policy.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 
 void main() {
+  test('service-backed agents do not need an executable path', () {
+    final tool = AdvertisedTool.fromJson({'tool': 'service', 'label': 'Service'});
+    expect(tool?.tool, 'service');
+    expect(tool?.path, isNull);
+    expect(AdvertisedTool.fromJson({'tool': 'service', 'path': 12}), isNull);
+  });
   test('agent:projects populates the projects list', () async {
     final t = FakeAgentTransport();
     final client = ControlPlaneClient(transport: t);

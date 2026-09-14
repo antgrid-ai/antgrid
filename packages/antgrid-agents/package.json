@@ -5,6 +5,7 @@
   "type": "module",
   "license": "Elastic-2.0",
   "exports": {
+    "./runtime": "./src/runtime.ts",
     "./contracts": "./src/contracts.ts",
     "./events": "./src/protocol.ts",
     "./payloads": "./src/payloads.ts",
@@ -40,6 +41,7 @@
     "./project-integrations": "./src/project-integrations.ts"
   },
   "scripts": {
+    "smoke:assets": "bun scripts/check-assets.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

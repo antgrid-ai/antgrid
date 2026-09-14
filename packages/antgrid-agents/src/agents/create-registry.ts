@@ -2,6 +2,14 @@ import { z } from "zod";
 
 const RegistryName = z.string().min(1).refine((name) => name.trim() === name, "Registry names cannot contain surrounding whitespace");
 
+export function snapshotDefinition<T>(value: T): T {
+  if (Array.isArray(value)) return Object.freeze(value.map(snapshotDefinition)) as T;
+  if (value && typeof value === "object") {
+    return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, member]) => [key, snapshotDefinition(member)]))) as T;
+  }
+  return value;
+}
+
 export interface AgentRegistry<Key extends string, Spec> {
   readonly agents: Readonly<Record<Key, Spec>>;
   readonly byHookName: Readonly<Record<string, Key>>;
@@ -22,7 +30,7 @@ export function createAgentRegistry<const Key extends string, Spec extends { hoo
       if (Object.hasOwn(byHookName, spec.hookName)) throw new Error(`Duplicate agent hook alias: ${spec.hookName}`);
       byHookName[spec.hookName] = id;
     }
-    agents[id] = spec;
+    agents[id] = snapshotDefinition(spec);
   }
   Object.freeze(agents);
   Object.freeze(byHookName);

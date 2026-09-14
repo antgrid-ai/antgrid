@@ -59,7 +59,15 @@ export const AgentMessageSchema = z.discriminatedUnion("type", [
   AgentQuestionResolveMessage,
 ]);
 export type AgentMessage = z.infer<typeof AgentMessageSchema>;
-export type AbMessage = AgentMessage;
+export const AgentOutputEventSchema = z.discriminatedUnion("type", [
+  AgentTurnStartMessage, AgentSessionResetMessage, AgentTurnEndMessage,
+  AgentTranscriptReplayMessage, AgentItemAddedMessage, AgentItemDeltaMessage,
+  AgentItemUpdatedMessage, AgentSnapshotMessage, AgentCapabilitiesMessage,
+  AgentPermissionRequestMessage, AgentQuestionMessage, AgentRequestRetractedMessage,
+  AgentErrorMessage, AgentUsageMessage, AgentBackgroundTasksMessage,
+]);
+export type AgentOutputEvent = z.infer<typeof AgentOutputEventSchema>;
+export type AbMessage = AgentOutputEvent;
 export type AgentItem = z.infer<typeof AgentItemSchema>;
 export type AgentError = z.infer<typeof AgentErrorSchema>;
 export type ToolContent = z.infer<typeof ToolContentSchema>;
@@ -75,7 +83,7 @@ export function createMessage<T extends AgentMessage["type"]>(
   } as Extract<AgentMessage, { type: T }>;
 }
 
-export function createTranscriptReplay(sessionId: string, frames: AgentMessage[]): AgentMessage | null {
+export function createTranscriptReplay(sessionId: string, frames: AgentMessage[]): Extract<AgentOutputEvent, { type: "agent:transcript-replay" }> | null {
   if (!frames.length) return null;
   return createMessage("agent:transcript-replay", {
     sessionId, frames: frames as unknown as Record<string, unknown>[],

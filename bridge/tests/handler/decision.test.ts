@@ -1,13 +1,19 @@
 import { describe, it, expect } from "bun:test";
 import {
   HandlerDecisionSchema,
-  pickJudge,
+  pickJudge as selectJudge,
   buildDecidePrompt,
   buildRetryPrompt,
   buildShapeRetryPrompt,
   parseDecisionFromOutput,
   PERSONALITY_RULES,
 } from "../../src/handler/decision";
+function pickJudge(tool: string) {
+  const picked = selectJudge(tool);
+  if (!picked) return null;
+  if (!("cmd" in picked.command)) throw new Error("Expected a built-in CLI judge");
+  return { ...picked, command: picked.command };
+}
 
 const GOAL = "Migrating auth";
 const BACKLOG_TEXT = "- id=i1 [queued] run the tests\n- id=i2 [done] update the docs";

@@ -4,9 +4,11 @@ import { createDriver as createOpencodeDriver } from "../src/agents/opencode/dri
 import type { CodexEndpoint } from "../src/agents/codex/chat-backend";
 import type { OpencodeClientLike } from "../src/agents/opencode/chat-backend";
 import type { DriverCtx } from "../src/agents/types";
+import { createAgentRunScope } from "../src/run-scope";
 
 function context(): DriverCtx {
   return {
+    scope: createAgentRunScope({ runId: "test", isCurrent: () => true, emit: () => {} }),
     sessionId: "s", projectId: "p", projectPath: "/checkout", approvalPolicy: "default",
     chatAugment: () => ({ args: [], env: {} }), send: () => {},
     onAgentSession: () => {}, emitUpdateCheck: () => {},
@@ -35,8 +37,8 @@ describe("owned provider startup", () => {
     expect(spawns).toBe(0);
     expect(augments).toBe(0);
     expect(typeof driver.stopTask).toBe("function");
-    expect(await driver.start()).toBe("native");
-    expect(await driver.start()).toBe("native");
+    expect(await driver.start()).toBeUndefined();
+    expect(await driver.start()).toBeUndefined();
     expect(spawns).toBe(1);
     expect(augments).toBe(1);
     await driver.dispose();

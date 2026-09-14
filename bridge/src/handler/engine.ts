@@ -39,7 +39,7 @@ import {
 import { checkReplyShape, findCommand, oneLine, replyShape } from "./reply-shape";
 import type { CapCommand } from "antgrid-agents/structured/chat-session";
 import type { SessionAdapter } from "./session-adapter";
-import { handlerObservable, judgeCapable } from "antgrid-agents/builtins";
+import { handlerObservable, judgeCapable } from "../agent-runtime";
 import { createEntitlementReader, type EntitlementReader } from "../entitlement";
 import { type HandlerDecision, DEFAULT_PERSONALITY } from "./decision";
 import {

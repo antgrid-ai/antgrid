@@ -2,7 +2,10 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { diagnoseCodexStderr, spawnCodex } from "../../packages/antgrid-agents/src/agents/codex/spawn";
+import { diagnoseCodexStderr, spawnCodex as spawn } from "../../packages/antgrid-agents/src/agents/codex/spawn";
+import { withAgentHost } from "antgrid-agents/host";
+import { agentHostServices } from "../src/agent-host";
+const spawnCodex: typeof spawn = (opts) => withAgentHost(agentHostServices, () => spawn(opts));
 
 const LOCK_LINE =
   "Error: failed to initialize sqlite state runtime under C:\\Users\\u\\.codex: " +

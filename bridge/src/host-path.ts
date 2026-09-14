@@ -1,6 +1,6 @@
 import { delimiter, join } from "node:path";
 import { homedir } from "node:os";
-import { AGENTS } from "antgrid-agents/builtins";
+import { AGENTS } from "./agent-runtime";
 
 // Dirs where CLI agents install but a macOS/Linux GUI-launched process won't see
 // on PATH: a Finder/Dock (or systemd user-session) launch gives the app a

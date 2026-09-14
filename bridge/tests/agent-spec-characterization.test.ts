@@ -1136,6 +1136,7 @@ describe("update specs", () => {
       // The tool id must round-trip: the SAME string flows detection →
       // agent:updateAvailable → app echo → agent:update → session filter.
       expect(spec?.tool).toBe(key);
+      if (spec && "check" in spec) throw new Error("Expected a CLI updater");
       expect(spec?.npmPackage).toBe(want.npmPackage);
       expect(spec?.command).toBe(want.command);
       expect(spec?.updateArgs).toEqual(want.updateArgs);

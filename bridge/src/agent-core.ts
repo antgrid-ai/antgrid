@@ -1,4 +1,5 @@
 import "./agent-host";
+import { agentRuntime } from "./agent-runtime";
 import { z } from "zod";
 import { VERSION } from "./version";
 import { join } from "node:path";
@@ -28,8 +29,8 @@ import { displayStartupBanner } from "./banner";
 import { generateEphemeralKeypair, type EphemeralKeypair } from "./key-exchange";
 import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config";
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
-import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "antgrid-agents/known-agents";
-import { augmentAgentLaunch } from "antgrid-agents/agent-launch-augmenter";
+import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./agent-runtime";
+import { augmentAgentLaunch } from "./agent-runtime";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
@@ -38,7 +39,7 @@ import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
-import { detectInstalledTools } from "./tool-detector";
+import { detectAvailableTools } from "./tool-detector";
 import { modelwatch } from "./modelwatch";
 import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
@@ -49,10 +50,10 @@ import { CheckoutRuntimeRegistry } from "./worktrees/checkout-runtime-registry";
 import type { CheckoutRecord, CheckoutSetupProgress } from "./worktrees/checkout-types";
 import { CheckoutSetupRunner, setupTerminalId } from "./worktrees/checkout-setup";
 import { SessionNamer } from "./session-namer";
-import { resolveStructuredTitle } from "antgrid-agents/title-dispatch";
+import { resolveStructuredTitle } from "./agent-runtime";
 import { buildTitleContext, generateTitleFromContext, type TitleGeneration } from "./agents/title-generate";
 import { TitleAttempts, type TitleOutcome } from "antgrid-agents/title-attempts";
-import { AGENTS, agentSpec, BY_HOOK_NAME, handlerObservable } from "antgrid-agents/builtins";
+import { AGENTS, agentSpec, BY_HOOK_NAME, handlerObservable } from "./agent-runtime";
 import { DEFAULT_AGENT } from "antgrid-agents/defaults";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
 import { createEntitlementReader, type TierClaimSource } from "./entitlement";
@@ -504,7 +505,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     const knownTools = new Set(listKnownTools());
     let command: string | undefined;
     if (tool && knownTools.has(tool)) {
-      command = resolveAgent(tool).bin;
+      command = agentSpec(tool)?.cli?.bin ?? "";
     } else if (config.agent?.command) {
       command = config.agent.command;
     } else if (tool) {
@@ -533,7 +534,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function agentSpecForConfig(source: AbConfig): { command: string; name: string; args?: string[]; workingDir?: string } {
     const tool = source.agent?.tool;
     let command = source.agent?.command;
-    if (tool && new Set(listKnownTools()).has(tool)) command = resolveAgent(tool).bin;
+    if (tool && new Set(listKnownTools()).has(tool)) command = agentSpec(tool)?.cli?.bin ?? "";
     if (!command && tool) command = tool;
     return {
       command: command ?? "",
@@ -1354,9 +1355,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "config:detect-tools": {
-        sendFromRuntime(runtime, createMessage("config:detect-tools-result", {
-          tools: detectInstalledTools(),
-        }));
+        void detectAvailableTools({ refresh: true }).then((tools) => {
+          sendFromRuntime(runtime, createMessage("config:detect-tools-result", { tools }));
+        }).catch((error) => log.error("Agent discovery failed: %s", error));
         break;
       }
       case "session:list": {
@@ -3186,7 +3187,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const sessionCheckoutId = sessions?.get(sessionId)?.checkoutId ?? "main";
         const sessionRuntime = checkoutRuntimes.runtime(sessionCheckoutId) ?? mainRuntime;
         const hookRunId = sessions?.hookRunId(sessionId);
-        return driver({
+        return agentRuntime.createDriver(tool, {
+          scope: run!.scope,
           sessionId,
           send,
           projectPath: sessionRuntime.checkout.path,
@@ -3211,6 +3213,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     mainRuntime.started = true;
     await checkoutRuntimes.prepare(mainCheckout, config, agentSpecFromConfig(), mainRuntime);
     sessions = new SessionManager({
+      agentRuntime,
+      onAgentEvent: (sessionId, event) => {
+        switch (event.type) {
+          case "title": namer?.onStructuredTitle(sessionId, event.title, event.kind); break;
+          case "turn-start": opts.onTurnStart?.(sessionId); break;
+          case "notification":
+            sendNotifying(createMessage("notification:push", { sessionId, projectId: project.id, notificationType: event.notificationType, message: event.message }));
+            break;
+          case "handler":
+            handlerEngine.handleEvent({ terminalId: sessionId, event: event.event, resetsAt: event.resetsAt, errorClass: event.errorClass })
+              .catch((error) => log.error("Agent lifecycle event failed: %s", error));
+            break;
+        }
+      },
       projectId: project.id,
       storeDir: abDir,
       projectPath: project.path,
@@ -3284,16 +3300,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       },
       sendMessage: (msg) => sendAb(msg as AbMessage),
       sessionWorkStatusFor: opts.sessionWorkStatusFor,
-      onStartChat: (opts) => {
+      onStartChat: async (opts) => {
         // startChat rejects on a non-chat-capable tool or a driver spawn/start
         // failure. Catch it — otherwise it's a silent unhandled rejection and the
         // app sees a chat session that never comes alive with no reason. Surface
         // it as agent:error so the transcript can show the failure.
         const runId = sessions?.hookRunId(opts.sessionId);
-        structured?.startChat(opts).then(() => {
-          sessions?.confirmHookRun(opts.sessionId, runId);
-        }).catch((err) => {
-          if (sessions?.acceptsHookRun(opts.sessionId, runId)) sessions.invalidateHookObservation(opts.sessionId, "Agent failed to start");
+        try {
+          if (!structured) throw new Error("Chat runtime is unavailable");
+          const outcome = await structured.startChat({ ...opts, runId });
+          if (outcome === "cancelled") throw new Error("Agent startup cancelled");
+        } catch (err) {
+          if (!sessions?.acceptsHookRun(opts.sessionId, runId)) return;
           sendAb(createMessage("agent:error", {
             sessionId: opts.sessionId,
             error: {
@@ -3302,7 +3320,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               retryable: false,
             },
           }));
-        });
+          throw err;
+        }
       },
       onStopChat: (id) => {
         // Mirrors onTerminalExited for PTYs: reclaim guard + pending state and

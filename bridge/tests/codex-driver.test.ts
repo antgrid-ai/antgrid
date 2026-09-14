@@ -538,7 +538,7 @@ describe("CodexDriver", () => {
     });
     const driver = new CodexDriver({ sessionId: "s1", endpoint: ep, sendMessage: (m) => sent.push(m), cwd: "/x" });
     const id = await driver.start("th-resumed");
-    expect(id).toBe("th-resumed");
+    expect(id).toBeUndefined();
     expect(requests.some((r) => r.method === "thread/resume" && r.params.threadId === "th-resumed")).toBe(true);
     expect(requests.some((r) => r.method === "thread/start")).toBe(false);
     // Replayed history reaches the app as ONE batched frame: per-frame replay

@@ -1,5 +1,5 @@
 // bridge/src/handler/context.ts
-import { agentSpec } from "antgrid-agents/builtins";
+import { agentSpec } from "../agent-runtime";
 
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;

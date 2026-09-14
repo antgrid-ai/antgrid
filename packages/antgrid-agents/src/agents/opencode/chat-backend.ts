@@ -49,6 +49,7 @@ export interface OpencodeClientLike {
 }
 
 export interface OpencodeDriverOpts {
+  onAgentSession?: (id: string) => void;
   sessionId: string;
   client: OpencodeClientLike;
   sendMessage: (msg: AbMessage) => void;
@@ -97,7 +98,7 @@ export class OpencodeDriver extends ChatSession {
   private lastTokens: ReturnType<typeof mapTokens> | null = null;
 
   constructor(opts: OpencodeDriverOpts) {
-    super({ sessionId: opts.sessionId, sendMessage: opts.sendMessage });
+    super({ sessionId: opts.sessionId, sendMessage: opts.sendMessage, onAgentSession: opts.onAgentSession });
     this.client = opts.client;
     this.onLifecycle = opts.onLifecycle;
   }

@@ -456,7 +456,7 @@ describe("OpencodeDriver", () => {
     });
     const driver = new OpencodeDriver({ sessionId: "s1", client, sendMessage: (m) => sent.push(m) });
     const id = await driver.start("sess-abc");
-    expect(id).toBe("sess-abc");
+    expect(id).toBeUndefined();
     expect(created).toBe(0); // resume must NOT create a new session
     expect(messagesFor).toBe("sess-abc");
     // One batched frame, not a frame per item — see createTranscriptReplay.
