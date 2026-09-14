@@ -11,7 +11,7 @@ const exports = new Set(Object.keys(JSON.parse(readFileSync(join(packageRoot, "p
 test("agent package and bridge respect the public dependency boundary", () => {
   const errors: string[] = [];
   const identities = new Set(Object.entries(AGENTS).flatMap(([id, spec]) => [id, spec.hookName].filter((v): v is string => !!v)));
-  for (const [root, adapter] of [[join(repo, "bridge/src"), false], [join(repo, "bridge/plugin"), false], [join(packageRoot, "src"), true]] as const) {
+  for (const [root, adapter] of [[join(repo, "bridge/src"), false], [join(repo, "bridge/integrations"), false], [join(packageRoot, "src"), true]] as const) {
     for (const file of new Bun.Glob("**/*.ts").scanSync(root)) {
       const path = join(root, file);
       const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true);

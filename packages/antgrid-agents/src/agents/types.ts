@@ -489,7 +489,7 @@ export interface HookProfile {
    *
    * Over-declaring a path only claims a capability nothing exercises; omitting
    * one silently gates a feature off. Keep it in step with `toPosts` and with
-   * `bridge/plugin/<agent>/`.
+   * the corresponding files under `packages/antgrid-agents/assets/`.
    */
   posts: readonly HookPath[];
   /**

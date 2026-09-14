@@ -7,6 +7,7 @@ import {
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { DEFAULT_AGENT } from "antgrid-agents/defaults";
 // Stub: the interactive 'antgrid init' bootstrap lives in the CLI (see Task 22).
 // For the MCP antgrid_init action we emit a minimal starter config.
 // TODO: headless bootstrap for MCP (no TTY)
@@ -18,7 +19,7 @@ function generateDefaultConfig(_targetPath: string): string {
     "relayUrl: wss://relay.antgrid.ai",
     "",
     "agent:",
-    "  tool: claude-code",
+    `  tool: ${DEFAULT_AGENT}`,
     "",
     "services: []",
     "commands: []",

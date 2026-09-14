@@ -126,7 +126,7 @@ function textResponse(data: string, status = 200) {
 }
 
 // Cursor merges hook tiers, so a machine with both the project-tier entries
-// (plugin installer) and the user-tier entries (spawn augmenter) runs two
+// (integration installer) and the user-tier entries (spawn augmenter) runs two
 // identical hook processes per event, and both POST /notify. Collapse exact
 // duplicates inside a short window so the phone gets one notification.
 const NOTIFY_DEDUP_WINDOW_MS = 5_000;

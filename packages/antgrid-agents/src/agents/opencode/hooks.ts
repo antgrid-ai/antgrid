@@ -51,7 +51,7 @@ export const turnBoundaryEvents = {
   end: [],
 } as const;
 
-// Posted by bridge/plugin/opencode/plugin.ts from inside opencode's own Bun
+// Posted by assets/opencode/plugin.ts from inside opencode's own Bun
 // runtime, not by `toPosts` — which is why this list is not derivable from
 // `events`.
 export const posts = ["/session-title", "/notify", "/handler-event"] as const;

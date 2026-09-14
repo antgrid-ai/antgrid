@@ -548,7 +548,7 @@ describe("materialized files", () => {
 
   test("opencode points its config at its materialized package asset", () => {
     // Anchored on this test file, NOT on whichever src/ module writes it: the
-    // bundled asset lives at bridge/plugin/opencode/plugin.ts and a producer
+    // bundled asset lives at packages/antgrid-agents/assets/opencode/plugin.ts and a producer
     // that resolves it relative to a moved source dir writes a config opencode
     // silently never loads.
     const abDir = tmp("ab-spec-");

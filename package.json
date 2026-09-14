@@ -5,7 +5,7 @@
   "workspaces": [
     "packages/antgrid-wire",
     "bridge",
-    "bridge/plugin",
+    "bridge/integrations",
     "relay",
     "web",
     "evals",

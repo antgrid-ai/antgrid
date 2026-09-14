@@ -13,7 +13,7 @@ import { firstMessage, manualTitle, readOrNull } from "../title-read";
  * sqlite reader for agy's global conversation_summaries.db (confirmed NOT
  * populated during a live CLI session, even after a clean exit), so
  * transcriptPath — handed to us directly on every hook payload — is the only
- * reliable source. See plugin/antigravity/post-title.js and ./hooks.ts.
+ * reliable source. See assets/antigravity/post-title.js and ./hooks.ts.
  */
 function extractAntigravityTitle(content: unknown): string | null {
   if (typeof content !== "string") return null;

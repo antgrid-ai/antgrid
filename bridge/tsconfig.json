@@ -17,6 +17,6 @@
     "src/**/*.ts",
     "scripts/**/*.ts",
     "tests/**/*.ts",
-    "plugin/**/*.ts"
+    "integrations/**/*.ts"
   ]
 }

@@ -429,11 +429,11 @@ function makeScratchHome(vars?: string[]):
  *     opencode install their Antgrid hooks GLOBALLY, so this spawn fires them
  *     too; both no-op without that variable, which is the only thing keeping a
  *     one-shot call from posting /session-title and /notify for a conversation
- *     that does not exist (bridge/plugin/antigravity/post-title.js). It does
- *     NOT silence the project-tier hooks `antgrid plugin install` writes —
+ *     that does not exist (`antgrid-agents/assets/antigravity/post-title.js`).
+ *     It does NOT silence the project-tier hooks the integration installer writes —
  *     those resolve the port from `$ANTGRID_DIR/api.port` when the env is
  *     absent, so a call made inside a project that has them still fires one
- *     (bridge/plugin/hooks/on-stop).
+ *     (`antgrid-agents/assets/hooks/on-stop`).
  */
 function headlessEnv(overrides?: Record<string, string>): Record<string, string> {
   const { ANTGRID_TERMINAL_ID: _drop, ...inherited } = process.env;

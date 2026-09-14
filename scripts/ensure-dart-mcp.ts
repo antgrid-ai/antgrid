@@ -16,7 +16,7 @@ const DART_ENTRY = {
 
 /**
  * Idempotent. Merges into `.mcp.json` rather than rewriting it: this file is
- * also owned by `bridge/plugin/setup.ts`, which adds/removes its own `antgrid`
+ * also owned by `bridge/integrations/setup.ts`, which adds/removes its own `antgrid`
  * key, and it is gitignored, so a clone never carries one.
  *
  * Why register it at all: a session's server stays warm for that session, so

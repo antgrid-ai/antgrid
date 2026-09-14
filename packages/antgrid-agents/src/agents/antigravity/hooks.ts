@@ -103,7 +103,7 @@ export function inject({ geminiConfigDir, abDir }: HookInjectCtx): LaunchAugment
 }
 
 // Empty on purpose: the injected hook runs under bare `node` and POSTs to the
-// loopback API itself (see plugin/antigravity/post-title.js), so agy never
+// loopback API itself (see assets/antigravity/post-title.js), so agy never
 // shells out to `bridge hook` and has no event for the runner to allowlist.
 export const events = [] as const;
 
@@ -115,7 +115,7 @@ export const turnBoundaryEvents = {
   end: [],
 } as const;
 
-// Posted by bridge/plugin/antigravity/post-title.js under bare `node`, not by
+// Posted by assets/antigravity/post-title.js under bare `node`, not by
 // `toPosts` — which is why this list is not derivable from `events`. No
 // /handler-event: the script posts none, so an armed Handler cannot observe an
 // antigravity TERMINAL session (handlerObservable answers false).

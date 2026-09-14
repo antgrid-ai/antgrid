@@ -7,13 +7,13 @@ import { bundledPluginPath } from "./plugin-root";
 
 /** Project-tier integration commands used by the optional MCP installer. */
 export function runProjectIntegrationSetup(ctx: {
-  pluginDir: string;
+  integrationDir: string;
   assetDirectory: string;
   mcpEntry: { command: string; args: string[] };
   hookCommand: HookCommand;
   args: string[];
 }): void {
-  const PLUGIN_DIR = ctx.pluginDir;
+  const INTEGRATION_DIR = ctx.integrationDir;
   const MCP_ENTRY = ctx.mcpEntry;
   const HOOK_COMMAND = ctx.hookCommand;
   function readJson(path: string): any {
@@ -216,10 +216,10 @@ export function runProjectIntegrationSetup(ctx: {
   const projectDir = ctx.args[1] ? resolve(ctx.args[1]) : process.cwd();
 
   if (command === "install") {
-    console.log("Antgrid Plugin Installer");
-    console.log("=====================");
+    console.log("Antgrid Agent Integration Installer");
+    console.log("====================================");
     console.log(`Project: ${projectDir}`);
-    console.log(`Plugin:  ${PLUGIN_DIR}\n`);
+    console.log(`Integration: ${INTEGRATION_DIR}\n`);
 
     const detected = makeCLIs().filter((c) => c.detected);
     if (detected.length === 0) {
@@ -239,8 +239,8 @@ export function runProjectIntegrationSetup(ctx: {
     console.log("Done! Restart your AI CLI to activate Antgrid tools.");
 
   } else if (command === "uninstall") {
-    console.log("Antgrid Plugin Uninstaller");
-    console.log("=======================");
+    console.log("Antgrid Agent Integration Uninstaller");
+    console.log("======================================");
     console.log(`Project: ${projectDir}\n`);
 
     for (const cli of makeCLIs().filter((c) => c.detected)) {
@@ -253,7 +253,7 @@ export function runProjectIntegrationSetup(ctx: {
     if (existsSync(portFile)) {
       try { unlinkSync(portFile); console.log("Removed ~/.antgrid/api.port"); } catch {}
     }
-    console.log("Done! Antgrid plugin has been removed.");
+    console.log("Done! Antgrid agent integrations have been removed.");
 
   } else {
     console.log("Usage: bun run setup.ts <install|uninstall> [project-dir]");
