@@ -1,6 +1,6 @@
 import { AgentEnableRelayMessage, createMessage, type AbMessage } from "./protocol";
 import { MessageBus } from "./message-bus";
-import type { AttachStreamOpts, StreamHandle } from "./stream-mux";
+import type { AttachStreamOpts, PeerSessionView, StreamHandle } from "./stream-mux";
 import type { ProjectCoreRemoteDeps } from "./project-core";
 
 type EnableMsg = Extract<AbMessage, { type: "agent:enableRelay" }>;
@@ -14,15 +14,8 @@ type EnableMsg = Extract<AbMessage, { type: "agent:enableRelay" }>;
  */
 export interface MachineRelaySession {
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle;
-  currentPeerPubkey(): string | null;
-  /** Absent reads as false (push) — the same fail-safe direction as an unwired
-   *  `ProjectCoreRemoteDeps.currentPeerPullsTree`. */
-  peerPullsTree?(): boolean;
-  /** Whether the established app renders terminals from `terminal:frame`.
-   *  Absent reads as false, which selects the legacy `terminal:output` path — an
-   *  app put into a display mode it cannot render shows nothing at all, so this
-   *  must never be assumed the way `peerPullsTree`'s absence can be. */
-  peerTerminalFramesV1?(): boolean;
+  establishedPeers(): PeerSessionView[];
+  peerSession(peerId: string): PeerSessionView | null;
   sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
   /** Bare machine deviceUuid (no `.projectId`). */
   agentDeviceId: string;
@@ -131,9 +124,8 @@ export function createRelayPromotion(deps: RelayPromotionDeps): RelayPromotionCo
 
       const remote: ProjectCoreRemoteDeps = {
         attachStream: (b, opts) => ensured.attachStream(b, opts),
-        currentPeerPubkey: () => ensured.currentPeerPubkey(),
-        currentPeerPullsTree: () => ensured.peerPullsTree?.() === true,
-        currentPeerTerminalFramesV1: () => ensured.peerTerminalFramesV1?.() === true,
+        establishedPeers: () => ensured.establishedPeers(),
+        peerSession: (peerId) => ensured.peerSession(peerId),
         machineDeviceId: () => ensured.agentDeviceId,
         sendPushDeliver: (m) => ensured.sendPushDeliver(m),
       };

@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
 import { RelayClient } from "../src/relay-client";
 import { createMessage } from "../src/protocol";
 import { __setRootForTest } from "../src/logger";
+import { installFakeSession } from "./fake-session";
 
 const RELAY_RATE_ERROR = JSON.stringify({
   type: "error",
@@ -33,12 +34,7 @@ describe("RelayClient rate-limit diagnostics", () => {
       getLicenseToken: () => "token",
       onError: (code, message) => surfaced.push({ code, message }),
     });
-    (c as any)._peerId = "phone-1";
-    (c as any).established = {
-      attemptId: "a1",
-      transport: { seal: (plaintext: string) => Buffer.from(plaintext, "utf8") },
-      sessionKeys: { a2p: Buffer.alloc(32), p2a: Buffer.alloc(32), confirm: Buffer.alloc(32) },
-    };
+    installFakeSession(c, "phone-1");
     (c as any).ws = {
       readyState: WebSocket.OPEN,
       send: () => {},
@@ -104,7 +100,7 @@ describe("RelayClient rate-limit diagnostics", () => {
 
     const log = logLines()[0];
     expect(log).toContain("device=dev-1");
-    expect(log).toContain("peer=phone-1");
+    expect(log).toContain("peers=phone-1");
     expect(log).toContain("total=4 frame(s)");
     expect(log).toContain("agent:item-added/control=3 frame(s)");
     expect(log).toContain("agent:turn-start/control=1 frame(s)");

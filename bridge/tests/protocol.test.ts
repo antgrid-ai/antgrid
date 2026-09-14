@@ -482,3 +482,39 @@ describe("terminal:output carries optional seq", () => {
     expect(parsed.checkoutId).toBe("main");
   });
 });
+
+describe("the session object is unchanged and unextended", () => {
+  const envelope = { id: "3f2a0f5e-1c3b-4c2b-9f2e-2b7c1d4e5a60", timestamp: 1_700_000_000_000 };
+  const address = { machineId: "m1", projectId: "p1", sessionId: "s1" };
+
+  // `docs/session-messaging.md` §4.1: the bus addresses a session by its id and
+  // adds nothing to it. Asserted on the wire rather than left to review, because
+  // re-growing a field here costs nothing at the schema and is invisible
+  // afterwards — a wave that wants one has to delete this test to get it.
+  it("carries no membership half on a session entry", () => {
+    const msg = {
+      ...envelope, type: "session:updated",
+      sessions: [{
+        id: "s1", name: "Solo", createdAt: 1, lastUsedAt: 1, archived: false, running: false,
+        members: [{ ...address, joinedAt: 2 }],
+        memberOf: { ...address, joinedAt: 2 },
+      }],
+    };
+    const parsed = parseMessage(JSON.stringify(msg));
+    expect(parsed?.type).toBe("session:updated");
+    if (parsed?.type !== "session:updated") throw new Error("unreachable");
+    expect(parsed.sessions[0]!).not.toHaveProperty("members");
+    expect(parsed.sessions[0]!).not.toHaveProperty("memberOf");
+  });
+
+  it("takes no membership fields on session:create", () => {
+    const msg = {
+      ...envelope, type: "session:create", requestId: "r1",
+      memberOf: address, brief: "Own the backend.",
+    };
+    const parsed = parseMessage(JSON.stringify(msg));
+    expect(parsed?.type).toBe("session:create");
+    expect(parsed).not.toHaveProperty("memberOf");
+    expect(parsed).not.toHaveProperty("brief");
+  });
+});

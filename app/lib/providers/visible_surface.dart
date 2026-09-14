@@ -4,12 +4,14 @@ import '../models/ab_message.dart' show GitFileStatusEntry;
 import '../models/pending_nav.dart';
 import '../models/workspace_view.dart';
 import 'providers.dart';
+import 'session_bus_inbox.dart';
+import 'sessions.dart' show activeSessionIdProvider;
 import 'value_controller.dart';
 
 /// Which workspace tab is actually ON SCREEN, or null when none is.
 ///
-/// [WorkspacePanel] renders all five tabs inside an `IndexedStack`, so every
-/// tab's widgets stay mounted and their state (an open file, a diff, a pushed
+/// [WorkspacePanel] renders every tab inside an `IndexedStack`, so every tab's
+/// widgets stay mounted and their state (an open file, a diff, a pushed
 /// terminal) survives a tab switch. A back handler registered by an offscreen
 /// tab would otherwise silently mutate it. Handlers gate on this.
 ///
@@ -35,9 +37,9 @@ final visibleWorkspaceViewProvider =
 /// change, and clears it on consumption.
 ///
 /// Also the only safe way to reveal a view in the same turn as a SESSION
-/// switch, which is why the agent bar's NEEDS YOU pill writes here rather than
-/// calling `revealHandlerTab`: a focus change arms the shell's per-session UI
-/// restore, and that restore re-applies the target session's own saved tab
+/// switch, which is why the session kebab's attention row writes here rather
+/// than calling `revealHandlerTab`: a focus change arms the shell's per-session
+/// UI restore, and that restore re-applies the target session's own saved tab
 /// after any tab the caller selected first. The drain runs after it.
 ///
 /// Null is a written value, not just an absence: a location naming no view
@@ -85,13 +87,86 @@ final pendingFilePathProvider =
       () => ValueController(null),
     );
 
+/// The focused session's mailbox, or an empty one while no session is focused.
+///
+/// One narrowing rule for everything that speaks for the focused session's bus
+/// state. Two lookups of their own could answer differently about the same
+/// mailbox, which is the failure [workspaceBadgesProvider] already narrows the
+/// handler count to avoid.
+final focusedSessionInboxProvider = Provider<SessionInboxState>((ref) {
+  final sessionId = ref.watch(activeSessionIdProvider);
+  if (sessionId == null) return const SessionInboxState();
+  return ref.watch(sessionInboxProvider(sessionId));
+}, name: 'focusedSessionInbox');
+
+/// Whether the focused session has bus traffic to show — the ONE rule behind
+/// the session kebab's Messages row, which is the only door to the mailbox
+/// sheet. Nothing else announces a peer's mail.
+///
+/// A session that has only ever sent still fails it. The app's two reads are
+/// the mailbox and one thread by id, and a thread id is reachable only from an
+/// inbound post, so there is nothing to open; `session-bus:threads` is the read
+/// that would fix it, and until it exists a row here would promise a sheet with
+/// nothing in it.
+///
+/// LATCHING, and this is the whole reason it is a notifier rather than a
+/// derived value: the mailbox empties when the AGENT reads its mail, which can
+/// land while the menu is open and the user is reaching for the row. A row that
+/// vanished under the pointer would take the sheet with it. The latch is
+/// dropped when focus moves to another session, and again whenever this
+/// provider itself is rebuilt.
+class SessionBusActivity extends Notifier<bool> {
+  String? _sessionId;
+  bool _seen = false;
+
+  @override
+  bool build() {
+    final sessionId = ref.watch(activeSessionIdProvider);
+    if (sessionId != _sessionId) {
+      _sessionId = sessionId;
+      _seen = false;
+    }
+    if (sessionId == null) return false;
+    // `dropped` is a lifetime total on the store, so the two together answer
+    // "has this session ever been on the bus" rather than "does it have mail
+    // right now" — which is the question the row is for, since a sheet is worth
+    // opening for a receipt on something already read.
+    final active = ref.watch(
+      focusedSessionInboxProvider.select(
+        (s) => s.dropped > 0 || s.posts.isNotEmpty,
+      ),
+    );
+    if (active) _seen = true;
+    return _seen;
+  }
+}
+
+final sessionHasBusActivityProvider =
+    NotifierProvider<SessionBusActivity, bool>(
+      SessionBusActivity.new,
+      name: 'sessionHasBusActivity',
+    );
+
+/// The workspace tabs on offer right now, in tab order.
+///
+/// Every value, since the Inbox tab became a sheet — and kept rather than
+/// inlined back to [WorkspaceView.values] at three call sites, because it is
+/// the SEAM a conditional view needs. [WorkspaceView.values] is rendered by
+/// three surfaces that must never disagree (the desktop tab strip, the phone's
+/// bottom nav, the agent bar's workspace rail), and a condition written into
+/// each of them is the bug: an item that appeared on the phone and nowhere else
+/// would ship green, because nothing iterating that enum is under test.
+final visibleWorkspaceViewsProvider = Provider<List<WorkspaceView>>((ref) {
+  return WorkspaceView.values;
+}, name: 'visibleWorkspaceViews');
+
 /// Counts the workspace views advertise on their tab: unstaged git files, and
 /// escalations the handler is waiting on.
 ///
 /// Both are scoped to what their tab actually shows — the focused checkout for
 /// git, the focused session for the handler. A handler badge counting the whole
 /// project would send the user to a tab narrowed past the escalation it
-/// promised; the agent bar's NEEDS YOU pill is what carries the project-wide
+/// promised; the session kebab's attention row is what carries the project-wide
 /// count, and it moves focus to the session it counted on the way in.
 ///
 /// A provider rather than a WorkspaceShell method because the agent bar's
@@ -189,7 +264,7 @@ final workspaceMenuControlProvider =
 /// renders nothing there; see [workspaceMenuControlProvider].)
 ///
 /// Defaults to OPEN, but the shell holds it down for as long as the context
-/// pane is on screen — the pane's own [WorkspaceTabBar] lists the same five
+/// pane is on screen — the pane's own [WorkspaceTabBar] lists the same
 /// views, so the rail would be a second switcher floating over the transcript
 /// (`WorkspaceShellState._syncMenuToContextPane`). On a mouse desktop, whose
 /// pane starts open, that means the rail's first appearance is the first time

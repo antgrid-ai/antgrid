@@ -110,6 +110,232 @@ List<AgentDescriptor> parseAgentDescriptors(Object? raw) {
   return out;
 }
 
+/// What a machine can host, as it describes itself — the OS it runs and one
+/// repo entry per project in its catalog.
+///
+/// Read over the `machine.capability-card` RPC rather than off the
+/// `agent:projects` advert: the repo half costs two git spawns per project, and
+/// the advert is a broadcast rebuilt on every catalog change for every attached
+/// app. One request answers for the whole catalog, which is what matching a
+/// repo across machines needs — a per-project verb would be N round trips to
+/// fill one dropdown.
+///
+/// A bridge predating the verb answers `E_UNKNOWN_METHOD` — the generic
+/// unrecognised-RPC-method reply (`bridge/src/rpc/methods.ts`), not
+/// `UNKNOWN_VERB`, which only the loopback phone/mobile-access
+/// sub-dispatchers produce — so every caller must render "no card" rather
+/// than refusing to continue without one.
+class CapabilityCard {
+  final OsCard os;
+
+  /// Keyed by `projectId`. A project the machine does not advertise is omitted
+  /// rather than reported empty, so one stale id cannot blank the rest.
+  final Map<String, RepoCard> projects;
+
+  /// Session half of the directory (`docs/session-messaging.md` §5.5), read
+  /// only when `capabilityCard(includeSessions: true)` asked for it.
+  ///
+  /// `null` means the key was ABSENT — a bridge predating the field, or a call
+  /// that never asked for it. `const []` means the answering bridge honoured
+  /// the ask and this machine currently has no addressable session. That
+  /// distinction is the whole degradation signal a caller has for "no
+  /// sessions" vs. "can't say" — collapsing it with `?? []` erases it.
+  final List<MachineSessionRow>? sessions;
+
+  /// Rows the answering machine's own row cap dropped. Meaningless (always 0)
+  /// when [sessions] is null.
+  final int sessionsTruncated;
+
+  const CapabilityCard({
+    required this.os,
+    this.projects = const {},
+    this.sessions,
+    this.sessionsTruncated = 0,
+  });
+
+  static CapabilityCard? fromJson(Map<String, dynamic> json) {
+    final os = json['os'];
+    if (os is! Map) return null;
+    final card = OsCard.fromJson(os.cast<String, dynamic>());
+    if (card == null) return null;
+    final projects = <String, RepoCard>{};
+    final raw = json['projects'];
+    if (raw is Map) {
+      for (final e in raw.entries) {
+        final id = e.key;
+        final value = e.value;
+        if (id is! String || value is! Map) continue;
+        projects[id] = RepoCard.fromJson(value.cast<String, dynamic>());
+      }
+    }
+    // Absent key stays null (older bridge / unasked); present-but-List is the
+    // positive "honoured" marker even when every row in it gets skipped.
+    List<MachineSessionRow>? sessions;
+    final sessionsRaw = json['sessions'];
+    if (sessionsRaw is List) {
+      final rows = <MachineSessionRow>[];
+      for (final e in sessionsRaw) {
+        if (e is! Map) continue;
+        final row = MachineSessionRow.fromJson(e.cast<String, dynamic>());
+        if (row != null) rows.add(row);
+      }
+      sessions = rows;
+    }
+    final truncated = json['sessionsTruncated'];
+    return CapabilityCard(
+      os: card,
+      projects: projects,
+      sessions: sessions,
+      sessionsTruncated: truncated is num ? truncated.toInt() : 0,
+    );
+  }
+}
+
+/// One live session on a peer machine's capability card. Mirrors the bridge
+/// `MachineDirectoryRow` (`bridge/src/session-bus/directory.ts`) field for
+/// field, parsed with the same per-field tolerance [RepoCard.fromJson] uses —
+/// EXCEPT that [repoKey], [sessionId], [projectId], [title] or [lastActiveAt]
+/// missing SKIPS the whole row rather than defaulting it: those five are the
+/// address and the render, and a row with no address is not a row —
+/// defaulting one invents a peer that cannot be messaged.
+class MachineSessionRow {
+  /// Normalised repo remote — a matching key across machines, never a URL.
+  final String repoKey;
+  final String projectId;
+
+  /// Omitted on the wire (never null) when the answering machine has no label
+  /// for the project, so a missing value here is that, not "unknown".
+  final String? projectLabel;
+  final String sessionId;
+  final String title;
+
+  /// Null on a detached HEAD or a non-repo, same as [RepoCard.branch].
+  final String? branch;
+
+  /// Null on an unrecognised value — forward-compat degrade, same as
+  /// [AgentWorkStatus]; never inferred from [workStatus].
+  final MachineSessionActivity? activity;
+
+  /// Optional on the wire; absent means the answering machine didn't report
+  /// one (a cold or non-agent session), never "no work".
+  final AgentWorkStatus? workStatus;
+  final int lastActiveAt;
+
+  /// The ANSWERING machine's own read of whether it can accept a reply into
+  /// this session — never re-derived from a tool string on this side, which
+  /// would be wrong the moment the two bridges run different versions.
+  final bool canReply;
+
+  const MachineSessionRow({
+    required this.repoKey,
+    required this.projectId,
+    this.projectLabel,
+    required this.sessionId,
+    required this.title,
+    this.branch,
+    this.activity,
+    this.workStatus,
+    required this.lastActiveAt,
+    required this.canReply,
+  });
+
+  static MachineSessionRow? fromJson(Map<String, dynamic> json) {
+    final repoKey = json['repoKey'];
+    final projectId = json['projectId'];
+    final sessionId = json['sessionId'];
+    final title = json['title'];
+    final lastActiveAt = json['lastActiveAt'];
+    if (repoKey is! String ||
+        projectId is! String ||
+        sessionId is! String ||
+        title is! String ||
+        lastActiveAt is! num) {
+      return null;
+    }
+    String? str(Object? v) => v is String ? v : null;
+    return MachineSessionRow(
+      repoKey: repoKey,
+      projectId: projectId,
+      projectLabel: str(json['projectLabel']),
+      sessionId: sessionId,
+      title: title,
+      branch: str(json['branch']),
+      activity: MachineSessionActivity.fromWire(json['activity']),
+      workStatus: AgentWorkStatus.fromWire(json['workStatus']),
+      lastActiveAt: lastActiveAt.toInt(),
+      // Malformed degrades to "cannot reply", the safe direction for a
+      // capability flag — never grant on a value this build can't read.
+      canReply: json['canReply'] == true,
+    );
+  }
+}
+
+/// Wire activity for a [MachineSessionRow] — coarser than [AgentWorkStatus]
+/// because a directory row is scanned, not diagnosed. Mirrors the bridge's
+/// `DirectoryActivity`. Null on a value this build doesn't recognise.
+enum MachineSessionActivity {
+  running,
+  idle,
+  stopped;
+
+  static MachineSessionActivity? fromWire(Object? raw) => switch (raw) {
+    'running' => MachineSessionActivity.running,
+    'idle' => MachineSessionActivity.idle,
+    'stopped' => MachineSessionActivity.stopped,
+    _ => null,
+  };
+}
+
+/// The machine's operating system, as `node:os` reports it on the bridge.
+/// [version] is the OS build where the platform exposes one and the kernel
+/// release otherwise, so it is a string to show, never one to compare across
+/// platforms.
+class OsCard {
+  final String name;
+  final String version;
+  final String arch;
+
+  const OsCard({required this.name, required this.version, required this.arch});
+
+  static OsCard? fromJson(Map<String, dynamic> json) {
+    final name = json['name'];
+    final version = json['version'];
+    final arch = json['arch'];
+    if (name is! String || version is! String || arch is! String) return null;
+    return OsCard(name: name, version: version, arch: arch);
+  }
+}
+
+/// One project's repository, as the card reports it.
+///
+/// [remote] is the bridge's NORMALISED `origin` — scheme-less, credential-free
+/// `host/path`. It is a matching key for "the same repo on another machine" and
+/// nothing else: never an authorization input, and never a URL to dial. Null
+/// when the project has no `origin`, is not a repo, or has only a filesystem
+/// remote, which cannot identify a repo on a different machine.
+///
+/// [branch] is read fresh on every card, so it is current as of the answer;
+/// null on a detached HEAD or a non-repo.
+class RepoCard {
+  final String? label;
+  final String? remote;
+  final String? branch;
+
+  const RepoCard({this.label, this.remote, this.branch});
+
+  /// Every field is optional and every non-string degrades to null: a card is
+  /// display metadata, so a field this build cannot read costs that field and
+  /// never the project entry.
+  static RepoCard fromJson(Map<String, dynamic> json) {
+    String? str(Object? v) => v is String ? v : null;
+    return RepoCard(
+      label: str(json['label']),
+      remote: str(json['remote']),
+      branch: str(json['branch']),
+    );
+  }
+}
+
 /// An installed tool advertised by the agent over the control plane. Mirrors the
 /// bridge `agent:tools` entry (`{ tool, path, chatCapable?, label? }`). Both
 /// optional fields are null when talking to an older bridge that predates them —
@@ -513,6 +739,50 @@ class ControlPlaneClient {
       timeout: kSessionDeleteAckTimeout,
     );
     return res['deleted'] == true;
+  }
+
+  /// Read the machine's Capability Card — its OS plus one repo entry per
+  /// project. Omitting [projectIds] asks about every project the machine has
+  /// seen; ids it does not know are left out of the answer rather than
+  /// refused.
+  ///
+  /// Answers for COLD projects, which is the whole point: the card has to exist
+  /// before any agent runs on the machine. Lets an [RpcException] propagate —
+  /// `E_UNKNOWN_METHOD` from a bridge predating the card (the generic
+  /// unrecognised-RPC-method reply, not `UNKNOWN_VERB`) is the case a caller
+  /// must degrade around rather than treat as a failure.
+  ///
+  /// [repoKeys] narrows the answer to projects whose `RepoCard.remote`
+  /// matches one of these — a key from a prior card, never re-derived here.
+  /// [includeSessions] widens the answer with [CapabilityCard.sessions] (the
+  /// session half of `docs/session-messaging.md` §5.5) and narrows the target
+  /// set further, to projects holding an addressable session. Omitting both
+  /// sends a request BYTE-IDENTICAL to a plain card ask, so an older bridge
+  /// sees no change at all — widening an existing method produces no error on
+  /// its own.
+  Future<CapabilityCard> capabilityCard({
+    List<String>? projectIds,
+    List<String>? repoKeys,
+    bool includeSessions = false,
+    Duration? timeout,
+  }) async {
+    final res = await transport.request(
+      'machine.capability-card',
+      params: {
+        'projectIds': ?projectIds,
+        'repoKeys': ?repoKeys,
+        'includeSessions': ?(includeSessions ? true : null),
+      },
+      timeout: timeout ?? const Duration(seconds: 10),
+    );
+    final card = CapabilityCard.fromJson(res);
+    if (card == null) {
+      throw RpcException(
+        'BAD_RESPONSE',
+        'malformed machine.capability-card response',
+      );
+    }
+    return card;
   }
 
   Future<GitBranchCatalog> gitBranches({required String projectId}) async {

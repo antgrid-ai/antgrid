@@ -16,6 +16,7 @@ import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/remote_host_chip.dart';
+import 'package:antgrid/widgets/session_mode_control.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -403,4 +404,23 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     }
   });
+
+  // The mode switch and the Handler control moved off the bar and into its
+  // kebab, which now mounts on both breakpoints: both rows are always present,
+  // so every session gets one.
+  testWidgets(
+    'AgentBar folds the mode switch and Handler into an always-present kebab',
+    (tester) async {
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        await pumpWide(tester);
+
+        expect(find.byType(SessionModeControl), findsNothing);
+        expect(find.byType(HandlerHeaderControl), findsNothing);
+        expect(find.byTooltip('Session options'), findsOneWidget);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
 }

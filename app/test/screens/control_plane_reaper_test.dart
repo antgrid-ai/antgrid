@@ -96,6 +96,9 @@ void main() {
 
       final container = ProviderContainer(
         overrides: [
+          // These two tests drive no drawer/session graph, so the derived link
+          // set is stated rather than computed — a membership is what the third
+          // test below exercises.
           projectSessionRegistryProvider.overrideWith(
             () => ProjectSessionRegistryController(registry),
           ),
@@ -211,6 +214,9 @@ void main() {
 
       final container = ProviderContainer(
         overrides: [
+          // These two tests drive no drawer/session graph, so the derived link
+          // set is stated rather than computed — a membership is what the third
+          // test below exercises.
           projectSessionRegistryProvider.overrideWith(
             () => ProjectSessionRegistryController(registry),
           ),

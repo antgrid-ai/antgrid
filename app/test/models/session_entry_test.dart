@@ -389,4 +389,109 @@ void main() {
     expect(e.forkedFromSessionId, isNull);
     expect(e.toJson().containsKey('forkedFromSessionId'), isFalse);
   });
+
+  group('the address and its Capability Card', () {
+    Map<String, dynamic> ref() => {
+      'machineId': 'machine-1',
+      'projectId': 'proj-1',
+      'sessionId': 'sess-1',
+      'machineLabel': 'Studio',
+      'projectLabel': 'antgrid',
+      'sessionName': 'Trace the leak',
+    };
+
+    // An address that cannot be addressed is not an address, and the caller
+    // drops that element rather than the row containing it.
+    test('a ref missing any of the three ids decodes as no ref', () {
+      expect(SessionMemberRef.fromJson({...ref(), 'machineId': ''}), isNull);
+      expect(SessionMemberRef.fromJson({...ref()}..remove('projectId')), isNull);
+      expect(SessionMemberRef.fromJson({...ref(), 'sessionId': 7}), isNull);
+    });
+
+    test('a Capability Card round-trips the wire shape', () {
+      final r = SessionMemberRef.fromJson({
+        ...ref(),
+        'card': {
+          'os': {'name': 'linux', 'version': '6.8', 'arch': 'x64'},
+          'repo': {
+            'label': 'app',
+            'remote': 'github.com/acme/app',
+            'branch': 'feature/leak',
+          },
+        },
+      })!;
+      final card = r.card!;
+      expect(card.osName, 'linux');
+      expect(card.osVersion, '6.8');
+      expect(card.osArch, 'x64');
+      expect(card.repoLabel, 'app');
+      expect(card.repoRemote, 'github.com/acme/app');
+      expect(card.repoBranch, 'feature/leak');
+
+      final again = SessionMemberRef.fromJson(r.toJson())!;
+      expect(again.card, card);
+      expect(again, r);
+    });
+
+    // A machine that answered nothing must still be addressable: refusing one
+    // over a blank field would cost the human the machine rather than the field.
+    test('no card decodes as no card and serialises none', () {
+      for (final raw in [
+        <String, dynamic>{...ref()},
+        <String, dynamic>{...ref(), 'card': <String, dynamic>{}},
+        <String, dynamic>{
+          ...ref(),
+          'card': {'os': null, 'repo': null},
+        },
+      ]) {
+        final r = SessionMemberRef.fromJson(raw)!;
+        expect(r.card, isNull);
+        expect(r.toJson().containsKey('card'), isFalse);
+      }
+    });
+
+    // The least load-bearing thing on an address must never take the machine
+    // down with it.
+    test('a malformed card costs itself and not the address', () {
+      expect(SessionMemberRef.fromJson({...ref(), 'card': 'linux'})!.card,
+          isNull);
+      final partial = SessionMemberRef.fromJson({
+        ...ref(),
+        'card': {
+          'os': 7,
+          'repo': {'branch': 12, 'remote': 'a/b'},
+        },
+      })!;
+      expect(partial.card!.repoBranch, isNull);
+      expect(partial.card!.repoRemote, 'a/b');
+    });
+
+    // The bridge refuses the whole record above its bounds, so a branch name
+    // longer than one loses its tail here rather than the address.
+    test('an over-long card value is clamped, not refused', () {
+      final long = 'b' * 400;
+      final r = SessionMemberRef.fromJson({
+        ...ref(),
+        'card': {
+          'repo': {'branch': long},
+        },
+      })!;
+      expect(r.card!.repoBranch, long.substring(0, 250));
+    });
+
+    // Equality is what makes a card change observable through SessionsState.
+    test('two addresses differing only in their card are not equal', () {
+      SessionMemberRef withBranch(String branch) => SessionMemberRef.fromJson({
+        ...ref(),
+        'card': {
+          'repo': {'branch': branch},
+        },
+      })!;
+      expect(withBranch('main'), isNot(withBranch('feature/leak')));
+      expect(
+        withBranch('main').hashCode,
+        isNot(withBranch('feature/leak').hashCode),
+      );
+    });
+  });
 }

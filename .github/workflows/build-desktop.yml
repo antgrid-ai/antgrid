@@ -296,6 +296,9 @@ jobs:
       - name: Smoke test compiled bridge hook
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge
 
+      - name: Smoke test compiled bridge mcp
+        run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge
+
       - name: Build macOS app
         id: build
         working-directory: app
@@ -666,6 +669,10 @@ jobs:
         shell: pwsh
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge.exe
 
+      - name: Smoke test compiled bridge mcp
+        shell: pwsh
+        run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge.exe
+
       - name: Build Windows app
         id: build
         working-directory: app
@@ -873,6 +880,9 @@ jobs:
 
       - name: Smoke test compiled bridge hook
         run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge
+
+      - name: Smoke test compiled bridge mcp
+        run: bun run bridge/scripts/smoke-mcp-binary.ts bridge/dist/antgrid-bridge
 
       - name: Build Linux app
         id: build

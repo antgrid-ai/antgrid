@@ -140,3 +140,33 @@ class RemoteAccessPolicyNotifier extends AsyncNotifier<RemoteAccessPolicy> {
   Future<void> setEnabled(bool enabled) =>
       _mutate((c) => c.remoteAccessSet(enabled));
 }
+
+/// The subordinate bit beside [remoteAccessPolicyProvider]: whether an agent on
+/// another of this account's machines may read what runs here and post into it.
+///
+/// Deliberately NOT derived from the switch above. It holds the machine's own
+/// answer whatever remote access currently says, so turning remote access off
+/// and back on restores what the user chose here rather than silently
+/// re-granting it. What subordination means is that the answer has no effect
+/// while remote access is off — enforced on the bridge, and only reported here.
+final agentReachPolicyProvider =
+    AsyncNotifierProvider<AgentReachPolicyNotifier, AgentReachPolicy>(
+      AgentReachPolicyNotifier.new,
+    );
+
+class AgentReachPolicyNotifier extends AsyncNotifier<AgentReachPolicy> {
+  @override
+  Future<AgentReachPolicy> build() async =>
+      _viaHost(ref, (c) => c.agentReachGet());
+
+  Future<void> setEnabled(bool enabled) async {
+    // ignore: invalid_use_of_internal_member — retain prior AsyncValue during imperative mutation; v3 auto-retention only covers build() reloads, not manual state sets. Rewrite deferred (final-review triage).
+    state = const AsyncLoading<AgentReachPolicy>().copyWithPrevious(state);
+    try {
+      state = AsyncData(await _viaHost(ref, (c) => c.agentReachSet(enabled)));
+    } catch (e, st) {
+      // ignore: invalid_use_of_internal_member — retain prior AsyncValue during imperative mutation; v3 auto-retention only covers build() reloads, not manual state sets. Rewrite deferred (final-review triage).
+      state = AsyncError<AgentReachPolicy>(e, st).copyWithPrevious(state);
+    }
+  }
+}

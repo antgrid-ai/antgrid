@@ -83,14 +83,24 @@ function writeScript(dir: string, name: string, body: string): string {
   return path;
 }
 
-/** A terminal that answers nothing this suite sends it: on POSIX it ignores
- *  SIGTERM and loops, on Windows it is a plain sleeper in cooked mode, which is
- *  precisely the reader a ConPTY keystroke cannot reach. */
+/** Cooked-mode Ctrl-C can terminate a Windows process through the console
+ *  handler. A stubborn agent must consume it in raw mode to exercise timeout
+ *  escalation rather than the answered-ask path. */
 function stubbornSleeper(dir: string): { command: string; args: string[] } {
   if (isWin) {
+    const script = writeScript(dir, "stubborn.ts", `
+import { writeFileSync, appendFileSync } from "node:fs";
+process.stdin.setRawMode(true);
+process.stdin.on("data", (chunk) => {
+  if (chunk.includes(3)) appendFileSync(${JSON.stringify(join(dir, "asks"))}, "etx\\n");
+});
+process.stdin.resume();
+writeFileSync(${JSON.stringify(join(dir, "leader.pid"))}, String(process.pid));
+setInterval(() => {}, 1e6);
+`);
     return {
-      command: "powershell.exe",
-      args: ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 120"],
+      command: process.execPath,
+      args: [script],
     };
   }
   const script = writeScript(dir, "stubborn.sh", "trap '' TERM\nprintf '%s' \"$$\" > \"$1\"\nwhile true; do sleep 1; done\n");
@@ -313,7 +323,7 @@ describe("the graceful phase", () => {
     const manager = new TerminalManager(() => {}, undefined, createConnState());
     try {
       manager.spawn({ terminalId: "t1", type: "agent", command, args });
-      await new Promise((r) => setTimeout(r, 500));
+      expect(await waitFor(() => readWhenWritten(join(dir, "leader.pid")), 15_000)).toBeDefined();
 
       manager.kill("t1", 2000);
       const tree = manager.treeKilled("t1");
@@ -335,7 +345,7 @@ describe("the graceful phase", () => {
     const manager = new TerminalManager(() => {}, undefined, createConnState());
     try {
       manager.spawn({ terminalId: "t1", type: "agent", command, args });
-      await new Promise((r) => setTimeout(r, 500));
+      expect(await waitFor(() => readWhenWritten(join(dir, "leader.pid")), 15_000)).toBeDefined();
 
       const started = Date.now();
       const first = manager.killAndAwaitTree("t1", 1200);
@@ -348,6 +358,7 @@ describe("the graceful phase", () => {
       // re-ask pushing the teardown out is what would blow the delete's own
       // 15s ceiling.
       expect(Date.now() - started).toBeLessThan(4500);
+      if (isWin) expect(readWhenWritten(join(dir, "asks"))).toBe("etx");
     } finally {
       manager.killAll();
       rmSync(dir, { recursive: true, force: true });
@@ -615,17 +626,23 @@ setInterval(() => {}, 1e6);
 
   windowsOnly("escalates on an agent that ignores the keystroke", async () => {
     const dir = tempDir("win-ignore");
-    const script = writeScript(dir, "agent.ts", "\nprocess.stdin.resume();\nsetInterval(() => {}, 1e6);\n");
+    const { command, args } = stubbornSleeper(dir);
     const messages: AbMessage[] = [];
     const manager = new TerminalManager((m) => messages.push(m), undefined, createConnState());
     try {
-      manager.spawn({ terminalId: "t1", type: "agent", command: process.execPath, args: [script] });
-      await new Promise((r) => setTimeout(r, 1500));
+      manager.spawn({ terminalId: "t1", type: "agent", command, args });
+      const raw = await waitFor(() => readWhenWritten(join(dir, "leader.pid")), 15_000);
+      expect(raw).toBeDefined();
+      const leader = Number(raw);
+      expect(alive(leader)).toBe(true);
 
       const started = Date.now();
       await manager.killAndAwaitTree("t1", 1200);
 
       expect(Date.now() - started).toBeGreaterThanOrEqual(1100);
+      expect(Date.now() - started).toBeLessThan(6000);
+      expect(readWhenWritten(join(dir, "asks"))).toBe("etx");
+      expect(await waitFor(() => alive(leader) ? undefined : true, 5000)).toBe(true);
       expect(await waitFor(
         () => (messages.some((m) => m.type === "terminal:exited" && m.terminalId === "t1") ? true : undefined),
         10_000,

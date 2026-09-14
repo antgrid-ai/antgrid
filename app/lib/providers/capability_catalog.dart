@@ -92,11 +92,26 @@ final capabilityCatalogProvider =
 /// Empty is a real answer, not a loading state: a machine that has only ever
 /// run this agent in a terminal has no catalog, which is why every caller owes
 /// a free-text way to name a model.
-List<AgentCapabilityModel> cachedModelsFor(WidgetRef ref, String tool) {
-  final key = capabilityCacheKey(
-    capabilitySourceKey(ref.watch(selectedTargetProvider)),
-    tool,
-  );
+List<AgentCapabilityModel> cachedModelsFor(WidgetRef ref, String tool) =>
+    cachedModelsForSource(
+      ref,
+      capabilitySourceKey(ref.watch(selectedTargetProvider)),
+      tool,
+    );
+
+/// The models [tool] is known to offer on the machine [sourceKey] names.
+///
+/// Split out from [cachedModelsFor] so a surface can read ANOTHER machine's
+/// catalog without focusing it — naming a model for a machine the app is not
+/// looking at is a directory-shaped question, and the key is already
+/// per-machine ([capabilitySourceKey]), so the cache has the answer without a
+/// round trip.
+List<AgentCapabilityModel> cachedModelsForSource(
+  WidgetRef ref,
+  String sourceKey,
+  String tool,
+) {
+  final key = capabilityCacheKey(sourceKey, tool);
   ref.read(capabilityCatalogProvider.notifier).ensureHydrated(key);
   return ref.watch(capabilityCatalogProvider)[key]?.models ??
       const <AgentCapabilityModel>[];

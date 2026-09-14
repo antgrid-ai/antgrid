@@ -6,8 +6,14 @@ import { join } from "node:path";
 let proc: ReturnType<typeof Bun.spawn> | null = null;
 let abDir: string | null = null;
 
-afterEach(() => {
+afterEach(async () => {
+  // Awaited, not fired and forgotten: on Windows a directory cannot be removed
+  // while a live process holds a handle inside it, and `kill` returns long
+  // before the kernel has torn this one down. The bridge opens several files
+  // under ANTGRID_DIR during boot, so racing it here fails the rm with EBUSY —
+  // in an afterEach, which reports it against whichever test ran last.
   try { proc?.kill(); } catch {}
+  try { await proc?.exited; } catch {}
   proc = null;
   if (abDir) { rmSync(abDir, { recursive: true, force: true }); abDir = null; }
 });
