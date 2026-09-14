@@ -14,10 +14,9 @@ import {
   removeManagedCursorHookEntries,
   replaceManagedCursorHookEntries,
 } from "../src/agents/cursor-agent/global-hooks";
-import { resolveHookCommand } from "../src/hook-command";
+import { resolveHookCommand, resolveMcpCommand } from "../src/hook-command";
 
 const PLUGIN_DIR = resolve(import.meta.dirname);
-const MCP_SERVER_PATH = join(PLUGIN_DIR, "mcp-server.ts");
 const HOOKS_DIR = join(PLUGIN_DIR, "hooks");
 const HOOK_COMMAND = resolveHookCommand({
   compiled: false,
@@ -25,9 +24,29 @@ const HOOK_COMMAND = resolveHookCommand({
   entrypoint: resolve(PLUGIN_DIR, "..", "src", "index.ts"),
 });
 
+// The MCP server is a bridge subcommand, so both the installed entry and the
+// per-spawn injected one come from the same resolver — a change to the
+// subcommand's shape cannot desync them, and a user holding both configs gets
+// two entries with an identical signature.
+const MCP_COMMAND = resolveMcpCommand({
+  compiled: false,
+  binary: process.execPath,
+  entrypoint: resolve(PLUGIN_DIR, "..", "src", "index.ts"),
+});
+
+// Same `env` block the injected entry carries, for the same reason: the server
+// names its core and its checkout from these two variables alone and has no
+// port-file fallback to reach for. An agent the bridge launched has them in its
+// own environment and expands them here; one started by hand does not, and the
+// tools then report that no Antgrid session is running rather than answering
+// out of whichever core happened to start last.
 const MCP_ENTRY = {
-  command: "bun",
-  args: ["run", MCP_SERVER_PATH],
+  command: MCP_COMMAND.binary,
+  args: MCP_COMMAND.preargs,
+  env: {
+    ANTGRID_API_PORT: "${ANTGRID_API_PORT}",
+    ANTGRID_TERMINAL_ID: "${ANTGRID_TERMINAL_ID}",
+  },
 };
 
 
@@ -252,6 +271,8 @@ if (command === "install") {
     console.log();
   }
   console.log("Done! Restart your AI CLI to activate Antgrid tools.");
+  console.log("The tools answer for the Antgrid session they run in, so start the CLI from");
+  console.log("Antgrid — sessions Antgrid starts get this server injected with no setup at all.");
 
 } else if (command === "uninstall") {
   console.log("Antgrid Plugin Uninstaller");

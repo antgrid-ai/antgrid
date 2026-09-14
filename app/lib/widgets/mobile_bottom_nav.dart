@@ -1,12 +1,19 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
+import '../providers/visible_surface.dart';
 import 'workspace_tab_bar.dart';
 
 const _navIconSize = 18.0;
 
-class MobileBottomNav extends StatelessWidget {
+/// The phone's workspace switcher.
+///
+/// Lists [visibleWorkspaceViewsProvider], the same list the desktop strip and
+/// the agent bar's rail read — a permanently present Inbox item here, with the
+/// tab absent everywhere else, is precisely what one shared rule prevents.
+class MobileBottomNav extends ConsumerWidget {
   const MobileBottomNav({
     super.key,
     required this.selected,
@@ -18,10 +25,10 @@ class MobileBottomNav extends StatelessWidget {
   final ValueChanged<WorkspaceView> onSelected;
 
   /// Same map the desktop [WorkspaceTabBar] renders. Mobile is the surface
-  /// Handler exists for, and its `NEEDS YOU` pill lives in the agent header —
-  /// the OTHER swipe page — so without a count here the focused session's
-  /// unanswered escalation has nothing standing for it on the page the user is
-  /// looking at.
+  /// Handler exists for, and the kebab's attention row lives in the agent
+  /// header — the OTHER swipe page — so without a count here the focused
+  /// session's unanswered escalation has nothing standing for it on the page
+  /// the user is looking at.
   ///
   /// The focused session's, not the project's: the Handler tab renders one
   /// session, so a badge counting the rest would name a number that tab cannot
@@ -30,7 +37,7 @@ class MobileBottomNav extends StatelessWidget {
   final Map<WorkspaceView, int> badges;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return Container(
       height: AbTokens.bottomNavHeight,
       decoration: BoxDecoration(
@@ -39,7 +46,7 @@ class MobileBottomNav extends StatelessWidget {
       ),
       child: Row(
         children: [
-          for (final view in WorkspaceView.values)
+          for (final view in ref.watch(visibleWorkspaceViewsProvider))
             Expanded(
               child: _NavItem(
                 icon: view.icon,
@@ -92,9 +99,9 @@ class _NavItem extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Overlaid rather than laid out beside the glyph: the five items
-            // split the bar evenly, so an inline count would shift this item's
-            // icon out of line with its four neighbours.
+            // Overlaid rather than laid out beside the glyph: the items split
+            // the bar evenly, so an inline count would shift this item's icon
+            // out of line with its neighbours.
             Stack(
               clipBehavior: Clip.none,
               children: [
@@ -108,7 +115,7 @@ class _NavItem extends StatelessWidget {
               ],
             ),
             const SizedBox(height: AbTokens.space2),
-            // Five items share the bar's width, so "Terminals" already runs
+            // The items share the bar's width, so "Terminals" already runs
             // close to its slot at the default text scale and past it at any
             // larger one. Ellipsized, it shortens; unbounded, it overflows.
             Text(

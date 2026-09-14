@@ -11,10 +11,11 @@ import '../providers/providers.dart';
 /// How many answers Handler is waiting on in one session.
 ///
 /// The row where the user picks a session is the only place a session that is
-/// NOT in focus can speak. The Handler tab narrows to the focused session, its
-/// tab badge counts that same session, and the agent header's pill yields to
-/// the focused session's own count whenever that session is itself waiting — so
-/// without this a sibling's unanswered question has nothing standing for it
+/// NOT in focus can name ITSELF. The Handler tab narrows to the focused
+/// session and its tab badge counts that same session; the session kebab's
+/// attention row does carry the siblings, but as one total for all of them and
+/// with a tap that lands on whichever escalated most urgently — so without this
+/// a particular sibling's unanswered question has nothing standing for it
 /// anywhere in the app.
 ///
 /// Rendered for the focused PROJECT only. [handlerStateProvider] follows

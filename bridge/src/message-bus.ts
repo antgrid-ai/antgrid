@@ -4,7 +4,7 @@ export type Channel = "control" | "preview";
 
 export interface TransportSubscriber {
   /** Bus calls this to deliver an outbound message to the wire. */
-  deliver(msg: AbMessage, channel: Channel, signal?: AbortSignal): unknown;
+  deliver(msg: AbMessage, channel: Channel, signal?: AbortSignal, peerId?: string): unknown;
   /** Which wire this subscriber IS, for the audience-targeted publishes below.
    *  Left undefined by the subscribers that are not a client at all — the
    *  work-status fold and the push dispatcher — and those receive every emit
@@ -24,7 +24,26 @@ export type InboundHandler = (
   msg: AbMessage,
   channel: Channel,
   source: InboundSource,
+  peerId?: string,
 ) => void;
+
+/** Which CLIENT a frame came from, for read-state that must not be shared:
+ *  focus, unread marks, the foreground/background pause. The loopback owner is
+ *  one client; each relay app session is another, named by its route peerId.
+ *
+ *  A peerId travels BESIDE {@link InboundSource} rather than widening it — the
+ *  source decides gating (loopback is never gated) and is compared against the
+ *  bare `"relay"` literal in a dozen places, so a discriminated union there
+ *  would churn every one of them for nothing. */
+export type ClientKey = string;
+
+/** `"relay"` is the fallback key for a caller that threads no peerId (the bare
+ *  agent, unit tests): one anonymous relay client, which is what the whole
+ *  bridge assumed before per-device sessions existed. */
+export function clientKeyOf(source: InboundSource, peerId?: string): ClientKey {
+  if (source === "loopback") return "loopback";
+  return peerId ?? "relay";
+}
 
 /**
  * Message types that carry durable snapshot state (vs. streaming events).
@@ -131,16 +150,16 @@ export class MessageBus {
    *  stream they never asked for. Never for a durable/replayed type — the cache
    *  is keyed per type, not per audience, so a targeted frame would be replayed
    *  to whoever reconnects next. */
-  publishOnly(msg: AbMessage, channel: Channel, only: InboundSource): void {
-    this.emit(msg, channel, { audience: { only } });
+  publishOnly(msg: AbMessage, channel: Channel, only: InboundSource, peerId?: string): void {
+    this.emit(msg, channel, { audience: { only }, peerId });
   }
 
-  async deliverTo(msg: AbMessage, channel: Channel, only: InboundSource, signal: AbortSignal): Promise<void> {
+  async deliverTo(msg: AbMessage, channel: Channel, only: InboundSource, signal: AbortSignal, peerId?: string): Promise<void> {
     if (signal.aborted) return;
     const pending: Promise<unknown>[] = [];
     for (const sub of this.subs) {
       if (sub.audience !== undefined && sub.audience !== only) continue;
-      pending.push(Promise.resolve(sub.deliver(msg, channel, signal)));
+      pending.push(Promise.resolve(sub.deliver(msg, channel, signal, peerId)));
     }
     await Promise.all(pending);
   }
@@ -159,7 +178,8 @@ export class MessageBus {
   private emit(
     msg: AbMessage,
     channel: Channel,
-    { force = false, deliver = true, audience }: {
+    { force = false, deliver = true, audience, peerId }: {
+      peerId?: string;
       force?: boolean;
       deliver?: boolean;
       audience?: { only?: InboundSource; except?: ReadonlySet<InboundSource> };
@@ -190,7 +210,7 @@ export class MessageBus {
         if (audience.only !== undefined && s.audience !== audience.only) continue;
         if (audience.except?.has(s.audience)) continue;
       }
-      s.deliver(msg, channel);
+      s.deliver(msg, channel, undefined, peerId);
     }
   }
 
@@ -232,8 +252,13 @@ export class MessageBus {
   /** `source` defaults to `relay` so any caller that omits it is gated by
    *  default (fail-closed); only an explicit `loopback` frame bypasses the
    *  allowlist gate. */
-  dispatchInbound(msg: AbMessage, channel: Channel, source: InboundSource = "relay"): void {
-    this.handler?.(msg, channel, source);
+  dispatchInbound(
+    msg: AbMessage,
+    channel: Channel,
+    source: InboundSource = "relay",
+    peerId?: string,
+  ): void {
+    this.handler?.(msg, channel, source, peerId);
   }
 
   /** Drop a session's session-scoped replay entries. Called at session

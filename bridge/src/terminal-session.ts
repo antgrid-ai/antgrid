@@ -960,6 +960,15 @@ export class TerminalSession {
   }
 
   /**
+   * Send a multi-line block as one prompt. Callable only where the guest is
+   * known to honour bracketed paste — `TerminalManager.submit` owns that
+   * decision, because the mode tracker lives with the scrollback, not here.
+   */
+  submitPaste(text: string): void {
+    this.submitQueue.submitPaste(text);
+  }
+
+  /**
    * Answer the VT capability queries the spawned process emits at startup.
    * The responder is stateful (it carries a query split across PTY chunks and
    * follows the guest's own mode changes), so it must live for the whole
@@ -1216,9 +1225,10 @@ export class TerminalSession {
    * (CTRL_BREAK to its pid answers ERROR_INVALID_PARAMETER), and the
    * AttachConsole + group-0 route reported success and delivered nothing, twice,
    * including against a non-ConPTY control child. What DOES arrive is a
-   * KEYSTROKE: a raw-mode reader receives 0x03 verbatim, a cooked-mode one
-   * receives nothing at all. That asymmetry is why only agent PTYs are asked —
-   * a build tool in a service or setup PTY could not see this if we sent it.
+   * KEYSTROKE: a raw-mode reader receives 0x03 verbatim. In cooked mode the
+   * console may handle Ctrl-C itself and terminate the process instead of
+   * delivering input, so the ask is reserved for agent PTYs whose TUI can
+   * interpret it as a request to leave.
    */
   private askToExit(pty: IPty): void {
     if (process.platform !== "win32") {

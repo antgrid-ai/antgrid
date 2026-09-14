@@ -15,6 +15,19 @@ proof-of-possession) but cannot decrypt payloads. Two WS channels: `control`
 (terminal, files, status) and `preview` (HTTP tunnel, streamed as start/chunk/end
 frames under the credit window).
 
+### The session bus
+
+Agent-to-agent frames (`session-bus:*`) never cross machines by themselves. The
+sending bridge hands every outbound bus frame to its loopback owner socket and
+nowhere else (`ProjectCore.sendToOwner`), and only to an owner that declared
+`capabilities.sessionBusCarrier` on its hello: the initiating machine's desktop
+app is the only carrier, and it forwards the frame verbatim onto the target
+machine's own relay connection. The receiving bridge answers on the one app
+session that carried the exchange in (`ProjectCore.sendToAppSession`), never by
+broadcast, so the traffic is invisible to the human's phone by design. The spec
+is `docs/session-messaging.md`; the host-side invariants are in
+`bridge/CLAUDE.md`.
+
 ## Checkout-scoped routing
 
 A session can run in a managed git worktree instead of the project root, so everything
@@ -86,6 +99,13 @@ protocol version 2 and receive independent screens at a maximum of 20 FPS;
 `terminal:output` and attach snapshots are not app delivery paths. Unsupported
 peers require an upgrade. An attachment failure preserves the last valid screen
 and offers recovery through a fresh attachment, never raw-stream fallback.
+
+Each authenticated app connection owns its terminal attachments, acknowledgments,
+pause state, and delivery budget. Relay replies name the subscribing peer before
+encryption; another connected app receives neither its frames nor its history
+pages. Project streams on the same connection share the terminal byte budget.
+A disconnect or rekey retires that peer's attachments while other viewers stay
+attached. Cancellation removes unsent fragments from that peer's send queue.
 
 Terminal size ownership is explicit. Passive live viewers show **Take control**;
 activating it sends an immediate `terminal:resize` with `intent: takeover` using

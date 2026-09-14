@@ -100,6 +100,10 @@ abstract final class AbIcons {
   static const warning = Codicon.warning;
   static const info = Codicon.info;
   static const bell = Codicon.bell;
+  // Mail that another session sent, distinct from [bell]: the bell is this
+  // session's own agent waiting on its user, and one glyph for both would make
+  // "someone wrote to you" and "answer me" a single state on the same row.
+  static const inbox = Codicon.inbox;
   static const gitCommit = Codicon.git_commit;
   static const gitBranch = Codicon.source_control;
   static const gitPush = Codicon.repo_push;

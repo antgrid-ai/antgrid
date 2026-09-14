@@ -72,8 +72,8 @@ test("targeted bus delivery preserves cancellation and rechecks authorization at
   let received: AbortSignal | undefined;
   let gate: (() => boolean) | undefined;
   const mux = new StreamMux({
-    openStream: () => {}, closeStream: () => {},
-    sendEnvelope: async (_id, _msg, _channel, signal, authorized) => { received = signal; gate = authorized; return "sent"; },
+    openStream: () => {}, closeStream: () => {}, peerSession: () => null,
+    sendEnvelope: async (_id, _msg, _channel, _target, signal, authorized) => { received = signal; gate = authorized; return "sent"; },
   });
   const handle = mux.attach(bus, { mayDeliver: () => allowed });
   await bus.deliverTo(createMessage("terminal:display:status", { terminalId: "t", code: "ACK_TIMEOUT", message: "Reconnect" }), "control", "relay", controller.signal);
@@ -91,7 +91,7 @@ test("muted terminal delivery fails without leaking loopback frames and resumes 
   const bus = new MessageBus();
   let sent = 0;
   const mux = new StreamMux({
-    openStream: () => {}, closeStream: () => {},
+    openStream: () => {}, closeStream: () => {}, peerSession: () => null,
     sendEnvelope: async () => { sent++; return "sent"; },
   });
   const handle = mux.attach(bus, {});

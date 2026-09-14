@@ -48,7 +48,7 @@ function openPush(blob: { epk: string; box: string }, privateKey: Buffer): any {
 }
 
 /** A relay slot whose phone has NEVER connected during this agent lifetime —
- *  `currentPeerPubkey()` is null exactly as after a host restart. */
+ *  it holds no established session, exactly as after a host restart. */
 async function startRestartedAgent(opts: { mobileAccess: boolean }) {
   const folder = mkdtempSync(join(tmpdir(), "antgrid-push-proj-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
@@ -83,9 +83,15 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
       // exactly the post-restart state the regression below is about.
       attachStream: (b) => {
         bus = b;
-        return { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const };
+        return {
+          streamId: "s1",
+          detach: () => {},
+          sendTunnel: async () => "sent" as const,
+          sendTo: async () => "sent" as const,
+        };
       },
-      currentPeerPubkey: () => null,
+      establishedPeers: () => [],
+      peerSession: () => null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
     },
@@ -105,8 +111,8 @@ test("push targets the persisted phone when no peer has connected this agent lif
   // Regression: after a host restart the phone may never reconnect (machine
   // rebooted, long task, phone in pocket). Targeting used to bind to LIVE peer
   // state — `connState.peerOnline` defaults TRUE, so the fallback gate read
-  // "phone can receive in-band" with no phone at all, and `currentPeerPubkey()`
-  // was null so no target resolved. Result: zero pushes, forever.
+  // "phone can receive in-band" with no phone at all, and no session named a
+  // device so no target resolved. Result: zero pushes, forever.
   const { notify, delivered } = await startRestartedAgent({ mobileAccess: true });
 
   notify();
@@ -141,10 +147,9 @@ test("persisted-store fallback still refuses to push from a machine with mobile 
   expect(delivered).toHaveLength(0);
 });
 
-/** A slot a DESKTOP app held and then left. `currentPeerPubkey()` keeps naming
- *  it after the disconnect — peer-offline deliberately retains `_peerId` for
- *  push fallback and a quick reconnect (relay-client.ts) — and a desktop app
- *  never registers a push token of its own. */
+/** A slot a DESKTOP app held and then left. The session inventory is empty after
+ *  the disconnect, while the persistent device registry still contains both the
+ *  tokenless desktop identity and the phone that should receive fallback push. */
 async function startAfterDesktopLeft() {
   const folder = mkdtempSync(join(tmpdir(), "antgrid-push-proj-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
@@ -187,10 +192,15 @@ async function startAfterDesktopLeft() {
       attachStream: (b, o) => {
         bus = b;
         streamOpts = o;
-        return { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const };
+        return {
+          streamId: "s1",
+          detach: () => {},
+          sendTunnel: async () => "sent" as const,
+          sendTo: async () => "sent" as const,
+        };
       },
-      // Sticky across the disconnect below, exactly as the real client is.
-      currentPeerPubkey: () => "DESKTOP_PK",
+      establishedPeers: () => [],
+      peerSession: () => null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
     },
@@ -210,12 +220,8 @@ async function startAfterDesktopLeft() {
 }
 
 test("push reaches the phone after a tokenless desktop peer disconnects", async () => {
-  // Regression: targeting narrowed on `currentPeerPubkey()` being SET rather
-  // than on a peer being CONNECTED. peer-offline keeps `_peerId` on purpose, so
-  // a desktop app being closed left its own pubkey naming the sole candidate for
-  // the rest of the host's lifetime — and a desktop carries no push token, so
-  // every notification for every project on the machine was dropped until the
-  // host restarted. Measured in the field as a six-hour silence.
+  // A desktop carries no push token, so its former session must not suppress the
+  // registered phone once no device can receive this notification in band.
   const { notify, delivered } = await startAfterDesktopLeft();
 
   notify();
@@ -224,9 +230,8 @@ test("push reaches the phone after a tokenless desktop peer disconnects", async 
   expect(delivered[0].pushToken).toBe("TOKEN");
 });
 
-/** Two phones, BOTH push-capable, on a slot the first of them has left. Isolates
- *  the connected-gate from the widen-if-empty fallback: the stale pubkey names a
- *  device that IS reachable, so widening alone would never fire. */
+/** Two push-capable phones with no reachable sessions. Both persistent devices
+ *  are away targets; the bridge has no live session from which to choose one. */
 async function startAfterPhoneLeft() {
   const folder = mkdtempSync(join(tmpdir(), "antgrid-push-proj-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
@@ -262,9 +267,15 @@ async function startAfterPhoneLeft() {
       attachStream: (b, o) => {
         bus = b;
         streamOpts = o;
-        return { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const };
+        return {
+          streamId: "s1",
+          detach: () => {},
+          sendTunnel: async () => "sent" as const,
+          sendTo: async () => "sent" as const,
+        };
       },
-      currentPeerPubkey: () => "PHONE_A_PK",
+      establishedPeers: () => [],
+      peerSession: () => null,
       machineDeviceId: () => "machine-uuid",
       sendPushDeliver: (p) => delivered.push(p),
     },
@@ -283,12 +294,9 @@ async function startAfterPhoneLeft() {
   return { notify, delivered };
 }
 
-test("a departed peer stops naming the sole push target", async () => {
-  // The narrow is a delivery OPTIMISATION for a device in session, so it must
-  // last exactly as long as the session does. Binding it to `currentPeerPubkey()`
-  // instead — which peer-offline retains on purpose — pins every later push to
-  // whichever device happened to disconnect last, and the user's other phone
-  // never hears from this machine again.
+test("a departed peer leaves every away phone as a push target", async () => {
+  // With no reachable session, choosing whichever device disconnected last
+  // would silently drop the notification on every other registered phone.
   const { notify, delivered } = await startAfterPhoneLeft();
 
   notify();

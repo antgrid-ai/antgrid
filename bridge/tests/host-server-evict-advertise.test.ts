@@ -65,7 +65,7 @@ test("re-advertises agent:projects when a project is opened without a phone aski
   bus.subscribe({ deliver: (msg, channel) => published.push({ msg, channel }) });
   // Seed the control-plane wiring with the pre-open catalog — the empty advert
   // a just-restarted host sends at handshake time.
-  host.readvertiseForTest(bus, "pk1");
+  host.readvertiseForTest(bus);
   const seed = published.filter((p) => p.msg.type === "agent:projects").pop()!.msg as AbMessage & {
     projects: { projectId: string }[];
   };
@@ -103,7 +103,7 @@ test("re-advertises agent:projects on core eviction (evicted flips to running:fa
   const bus = new MessageBus();
   const published: { msg: AbMessage; channel: Channel }[] = [];
   bus.subscribe({ deliver: (msg, channel) => published.push({ msg, channel }) });
-  host.readvertiseForTest(bus, "pk1");
+  host.readvertiseForTest(bus);
   published.length = 0; // ignore the seed advert; only the eviction one matters
 
   await host.open(idB, fB, "local"); // cores.size = 2 > cap 1 → evicts idA

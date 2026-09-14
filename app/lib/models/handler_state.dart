@@ -1403,8 +1403,8 @@ class HandlerState {
   /// Only those narrow. The service and the bridge engine stay project-wide
   /// — one HandlerService per project, one engine keyed by terminalId — because
   /// escalations, undo offers and wrap-ups all have to keep arriving for
-  /// sessions nobody is looking at, and the agent bar's NEEDS YOU pill reads
-  /// the unnarrowed state to say so.
+  /// sessions nobody is looking at, and the session kebab's attention row
+  /// reads the unnarrowed state to say so.
   ///
   /// [defaultTool] rides through unfiltered: it is the project's judge
   /// fallback, and the session card resolves its judge label against it.

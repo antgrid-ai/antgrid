@@ -24,6 +24,7 @@ import 'package:antgrid/widgets/command_output_overlay.dart';
 import 'package:antgrid/widgets/handler/handler_escalation_overlay.dart';
 import 'package:antgrid/widgets/handler/handler_layout.dart';
 import 'package:antgrid/widgets/remote_host_chip.dart';
+import 'package:antgrid/widgets/session_mode_control.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -410,17 +411,16 @@ void main() {
     await tester.pump();
   }
 
-  HandlerEscalation escalation({bool nonBlocking = false}) =>
-      HandlerEscalation(
-        escalationId: 'e1',
-        terminalId: 't1',
-        question: 'bun or vitest?',
-        reasoning: 'Affects CI wiring.',
-        draftReply: 'use bun',
-        urgency: nonBlocking ? 'normal' : 'high',
-        at: 1,
-        nonBlocking: nonBlocking,
-      );
+  HandlerEscalation escalation({bool nonBlocking = false}) => HandlerEscalation(
+    escalationId: 'e1',
+    terminalId: 't1',
+    question: 'bun or vitest?',
+    reasoning: 'Affects CI wiring.',
+    draftReply: 'use bun',
+    urgency: nonBlocking ? 'normal' : 'high',
+    at: 1,
+    nonBlocking: nonBlocking,
+  );
 
   /// The Stack the panel builds for a terminal session — the one whose child
   /// ORDER is the stacking contract between the two bottom-pinned overlays.
@@ -535,10 +535,7 @@ void main() {
     // the one moment the user is reading.
     try {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-      await pumpWide(
-        tester,
-        escalations: [escalation(nonBlocking: true)],
-      );
+      await pumpWide(tester, escalations: [escalation(nonBlocking: true)]);
 
       expect(
         tester.getRect(find.byType(TerminalScreen)).bottom,
@@ -570,4 +567,23 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     }
   });
+
+  // The mode switch and the Handler control moved off the bar and into its
+  // kebab, which now mounts on both breakpoints: both rows are always present,
+  // so every session gets one.
+  testWidgets(
+    'AgentBar folds the mode switch and Handler into an always-present kebab',
+    (tester) async {
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        await pumpWide(tester);
+
+        expect(find.byType(SessionModeControl), findsNothing);
+        expect(find.byType(HandlerHeaderControl), findsNothing);
+        expect(find.byTooltip('Session options'), findsOneWidget);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
 }

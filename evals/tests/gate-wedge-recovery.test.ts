@@ -30,12 +30,12 @@ describe("gate: wedge recovery", () => {
    * Fresh, account-trusted connection: reuses `env.appIdentity` (already
    * registered with the fake account inventory — a never-registered identity
    * cannot be admitted), on its OWN per-machine relay slot so the relay
-   * doesn't SUPERSEDED-close `env.app`'s socket — but the bridge's
-   * single-active-phone takeover still tears down `env.app`'s own E2E session
-   * once this fresh phone's client-hello is admitted (see `TestApp.connect`'s
-   * docstring in `helpers/test-app.ts`); only the relay-level collision is
-   * avoided here, not the bridge-level one. No pairing ceremony at all —
-   * admission is relay same-account routing + bridge inventory trust, and by
+   * doesn't SUPERSEDED-close `env.app`'s socket. The bridge admits this one
+   * ALONGSIDE `env.app`'s session rather than displacing it (one established
+   * session per app device — see `TestApp.connect`'s docstring in
+   * `helpers/test-app.ts`), so neither collision is in play any more. No
+   * pairing ceremony at all — admission is relay same-account routing plus
+   * bridge inventory trust, and by
    * this point the trusted-peers cache is already warm from `setupTestEnv`'s
    * own handshake.
    */

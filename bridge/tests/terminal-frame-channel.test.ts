@@ -101,6 +101,34 @@ function contractChannel(type: string): Channel {
 }
 
 describe("terminal viewer replies ride the channel the contract names", () => {
+  test("two relay viewers keep independent attachments, replies and disconnects", async () => {
+    const { bus } = await bootWithTerminal();
+    const deliveries: Array<Delivery & { peerId?: string }> = [];
+    bus.subscribe({ audience: "relay", deliver: (message, channel, _signal, peerId) => {
+      deliveries.push({ message, channel, peerId });
+    } });
+    for (const peerId of ["phone-1", "phone-2"]) {
+      bus.dispatchInbound(createMessage("terminal:subscribe", {
+        terminalId: "adhoc", version: TERMINAL_PROTOCOL_VERSION, requestId: peerId,
+      }), "control", "relay", peerId);
+    }
+    const one = await waitFor(deliveries, m => m.type === "terminal:subscribed" && m.requestId === "phone-1", "first subscription");
+    const two = await waitFor(deliveries, m => m.type === "terminal:subscribed" && m.requestId === "phone-2", "second subscription");
+    if (one.message.type !== "terminal:subscribed" || two.message.type !== "terminal:subscribed") throw new Error("unreachable");
+    expect(one.message.attachmentId).not.toBe(two.message.attachmentId);
+    for (const [peerId, subscription] of [["phone-1", one.message], ["phone-2", two.message]] as const) {
+      const frame = await waitFor(deliveries, m => m.type === "terminal:frame" && m.attachmentId === subscription.attachmentId, peerId);
+      expect(deliveries.find(d => d.message === frame.message)?.peerId).toBe(peerId);
+    }
+    core!.noteClientGone("phone-1");
+    const { runId, attachmentId } = two.message;
+    bus.dispatchInbound(createMessage("terminal:history:request", {
+      terminalId: "adhoc", runId, attachmentId, requestId: "page-two", epoch: 0, beforeRowId: 0,
+    }), "control", "relay", "phone-2");
+    const page = await waitFor(deliveries, m => m.type === "terminal:history:page" && m.requestId === "page-two", "second viewer history");
+    expect(deliveries.find(d => d.message === page.message)?.peerId).toBe("phone-2");
+  }, 30_000);
+
   test("subscribe, its frames and its history page each leave on their contract channel", async () => {
     const { bus, sent, relaySent } = await bootWithTerminal();
     sent.length = 0;

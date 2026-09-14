@@ -90,6 +90,23 @@ program
     process.exit(await runWorktreeSetupCli({ plan: opts.plan }));
   });
 
+// The Antgrid MCP server, spawned by whichever agent this bridge launched: the
+// same self-invocation `worktree-setup` uses, and for the same reason — the
+// shipped bridge is a compiled single-file executable, so a subcommand is the
+// only entry an injected config can name. Hidden: nothing about it is
+// user-facing; agents reach it through the entry `resolveMcpCommand` renders.
+//
+// The import is lazy so the MCP SDK never loads on an ordinary bridge start.
+// Nothing here initialises Sentry or the relay: this process is a tool surface
+// over stdio, and stdout carries JSON-RPC frames alone.
+program
+  .command("mcp", { hidden: true })
+  .description("Run the Antgrid MCP server over stdio")
+  .action(async () => {
+    const { runMcpCli } = await import("./cli/mcp");
+    await runMcpCli();
+  });
+
 // Single default action — reads bootstrap payload from stdin, branches on mode.
 program
   .option("--verbose", "Alias for --log-level debug")

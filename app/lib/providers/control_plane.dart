@@ -8,6 +8,8 @@ import '../launcher/local_agent_launcher.dart';
 import '../launcher/project_resolve.dart';
 import '../project/project_session_registry.dart';
 import '../services/control_plane_client.dart';
+import '../session_bus/directory_warm_targets.dart';
+import '../session_bus/session_bus_links.dart';
 import '../util/device_id.dart';
 import '../util/netwatch.dart';
 import 'account_agents.dart';
@@ -417,5 +419,19 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   // or expansion exists to claim them. Without this union the reaper would
   // close each eager socket moments after the kick opened it.
   alive.addAll(ref.watch(eagerControlPlaneTargetsProvider));
+  // Every machine on the far side of a leg this app carries. The session bus
+  // routes through this app, so its socket is not a nicety: closing it strands
+  // an agent mid-exchange with no way to say so. Derived purely from the links,
+  // so nothing has to remember to unpin — a leg going idle drops its machine
+  // out of this set on the next pass. The link set only changes when a peer is
+  // actually addressed or expires (`SessionBusLinkDemand` suppresses an
+  // unchanged emission), which is what keeps this fan-in — whose rebuilds have
+  // crashed the frame before — off the path of ordinary bus traffic.
+  alive.addAll(ref.watch(sessionBusLinksProvider).peerMachineIds);
+  // Machines a directory read MISSED, warm until their own deadline (E13). The
+  // link set above covers a peer this app is already carrying an exchange for;
+  // this covers the peer nobody has reached yet, which is the case the
+  // peek-only directory otherwise answers "none asked" forever.
+  alive.addAll(ref.watch(directoryWarmTargetsProvider));
   return alive;
 });

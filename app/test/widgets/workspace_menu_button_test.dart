@@ -138,10 +138,10 @@ void main() {
     // Open from the first frame a workspace exists — no click to get here.
     testWidgets('lists every workspace view, unprompted', (tester) async {
       await runDesktop(tester, () async {
-        await _pump(tester, control: _control());
+        final container = await _pump(tester, control: _control());
 
         expect(_button(tester).selected, isTrue);
-        for (final view in WorkspaceView.values) {
+        for (final view in container.read(visibleWorkspaceViewsProvider)) {
           expect(find.text(view.label), findsOneWidget, reason: view.label);
         }
       });
@@ -175,10 +175,10 @@ void main() {
       tester,
     ) async {
       await runDesktop(tester, () async {
-        await _pump(tester, control: _control());
+        final container = await _pump(tester, control: _control());
 
         expect(_quiet(tester), 1);
-        for (final view in WorkspaceView.values) {
+        for (final view in container.read(visibleWorkspaceViewsProvider)) {
           expect(find.text(view.label), findsOneWidget, reason: view.label);
         }
 
@@ -192,18 +192,16 @@ void main() {
     // pointer and hid the labels until one was asked for.
     testWidgets('coming forward moves nothing', (tester) async {
       await runDesktop(tester, () async {
-        await _pump(tester, control: _control());
+        final container = await _pump(tester, control: _control());
 
         final resting = tester.getRect(find.byType(WorkspaceMenuPanel));
-        final rows = {
-          for (final view in WorkspaceView.values)
-            view: _iconRect(tester, view),
-        };
+        final views = container.read(visibleWorkspaceViewsProvider);
+        final rows = {for (final view in views) view: _iconRect(tester, view)};
 
         await _hoverRail(tester);
 
         expect(tester.getRect(find.byType(WorkspaceMenuPanel)), resting);
-        for (final view in WorkspaceView.values) {
+        for (final view in views) {
           expect(_iconRect(tester, view), rows[view], reason: view.label);
         }
       });

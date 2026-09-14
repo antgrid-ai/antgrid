@@ -1445,8 +1445,22 @@ export class HandlerEngine {
    * from their own words — "clear out the build dir" reads as a chore and is also
    * a session-long permission — so it is recorded here rather than left implicit.
    */
+  /** Whether this terminal has an armed Handler. `instruct` answers `null` both
+   *  for "no armed session" and for "nothing was granted", so a caller that must
+   *  know its instruction actually landed asks first. */
+  isArmed(terminalId: string): boolean {
+    return this.sessions.has(terminalId);
+  }
+
   instruct(
-    p: { terminalId: string; text: string; escalationId?: string; delivered?: true; choiceId?: string },
+    p: {
+      terminalId: string;
+      text: string;
+      fallbackText?: string;
+      escalationId?: string;
+      delivered?: true;
+      choiceId?: string;
+    },
   ): GrantSummary | null {
     const s = this.sessions.get(p.terminalId);
     // Free text ANSWERING a standing ask, per the answer transport: the frame names
@@ -1597,7 +1611,7 @@ export class HandlerEngine {
       s.promptGen = (s.promptGen ?? 0) + 1;
     }
     this.persist(p.terminalId, s, true);
-    this.queueExtraction(p.terminalId, text);
+    this.queueExtraction(p.terminalId, text, { fallbackText: p.fallbackText?.trim() || undefined });
     if (superseded > 0 && first) {
       this.record(p.terminalId, "answered",
         superseded === 1
@@ -1761,12 +1775,16 @@ export class HandlerEngine {
   // `onlyIfEmpty` is for the arm-time pass: the goal is extracted once,
   // and the check has to happen at DEQUEUE time, or a goal edited twice while the
   // first spawn was still running would append the sentence in both forms.
-  private queueExtraction(terminalId: string, text: string, opts: { onlyIfEmpty?: boolean } = {}): void {
+  private queueExtraction(
+    terminalId: string,
+    text: string,
+    opts: { onlyIfEmpty?: boolean; fallbackText?: string } = {},
+  ): void {
     void this.enqueue(terminalId, () => this.extractAndAppend(terminalId, text, opts));
   }
 
   private async extractAndAppend(
-    terminalId: string, text: string, opts: { onlyIfEmpty?: boolean },
+    terminalId: string, text: string, opts: { onlyIfEmpty?: boolean; fallbackText?: string },
   ): Promise<void> {
     // Resolved here rather than where the work was queued: the session may have
     // been disarmed, or its judge re-picked, while this waited its turn.
@@ -1781,7 +1799,20 @@ export class HandlerEngine {
     // Held to the bound the extractor's own items are held to. The fallback is
     // the EXPECTED path on a rate-limited account, so an unbounded one would put
     // a whole pasted instruction into every decide prompt from here on.
-    const raw: ExtractedItem[] = [{ ref: "raw", text: text.slice(0, MAX_ITEM_CHARS) }];
+    //
+    // `fallbackText` exists because that slice is a PREFIX: a caller whose text
+    // is a bridge-authored wrapper around the human's words (session-bus
+    // deliveries) would file 400 characters of preamble and none of the mandate.
+    // It names what the item should carry when the judge produced nothing; the
+    // extractor and the authorizer still see the full text.
+    //
+    // No caller passes it today — the wrapped delivery that did was withdrawn
+    // with the task verbs — and it is kept deliberately: the delivery this hook
+    // exists for is being rebuilt, and re-deriving the prefix problem after a
+    // cleanup removed the fix is how it ships broken the second time.
+    const raw: ExtractedItem[] = [
+      { ref: "raw", text: (opts.fallbackText ?? text).slice(0, MAX_ITEM_CHARS) },
+    ];
 
     let result: ExtractionResult | null = null;
     if (judgeCapable(tool)) {
