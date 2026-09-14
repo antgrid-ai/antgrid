@@ -67,10 +67,22 @@ describe("no ordering word, no dependency", () => {
 
   it("states the ordering-word rule in the prompt, with both worked examples", () => {
     const prompt = buildExtractPrompt("whatever the user typed");
-    expect(prompt).toContain('"and" is NOT an ordering word');
+    expect(prompt).toContain("the default is NONE");
+    expect(prompt).toContain('Narrating the order of work is NOT a dependency');
+    expect(prompt).toContain("Add a pricing page. Then add an FAQ section. Finally run the production build.");
     expect(prompt).toContain("update the docs and run the tests");
     expect(prompt).toContain("run the tests after you update the docs");
-    expect(prompt).toContain("the default is NONE");
+  });
+
+  // The extractor is a model, not a mechanism — no behavioural test can prove it
+  // stops emitting `dependsOn` for "then". This pins the WORDING instead: "then"
+  // is the most common English discourse connective and carries no ordering
+  // claim at all, so naming it as an ordering-word trigger mints a dependency
+  // out of ordinary narration.
+  it("does not name a narrated order as a dependency trigger", () => {
+    const prompt = buildExtractPrompt("whatever the user typed");
+    expect(prompt).not.toContain('"after", "then", "once X is done"');
+    expect(prompt).toContain('"then", "next", "after that", "finally"');
   });
 
   it("tells the extractor to split the instruction, never to plan the steps", () => {

@@ -35,7 +35,7 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerAnswerWire, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, PREVIEW_CHANNEL_MESSAGE_TYPES, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, type InboundSource } from "./message-bus";
@@ -60,6 +60,7 @@ import { resolveStructuredTitle } from "./agents/title-dispatch";
 import { buildTitleContext, generateTitleFromContext, type TitleGeneration } from "./agents/title-generate";
 import { TitleAttempts, type TitleOutcome } from "./agents/title-attempts";
 import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
+import { OpenAgentPrompts } from "./agents/open-prompts";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
 import { createEntitlementReader, type TierClaimSource } from "./entitlement";
 import { classifyTurnEndError } from "./handler/lifecycle-classify";
@@ -282,6 +283,14 @@ export interface AgentCore {
   /** True when any of this project's sessions runs somewhere other than main's
    *  working tree, and therefore needs checkout-scoped routing. */
   hasIsolatedSessions(): boolean;
+  /** True when the Handler is ARMED on [terminalId]. A blocking prompt on an
+   *  armed slot is escalated unconditionally and that escalation is pushed, so
+   *  the agent's own question notification would buzz the phone a second time
+   *  with the same sentence. Read by the push dispatcher, which is where "one
+   *  block, one push" belongs — the notification itself must still be emitted,
+   *  because it is what puts the session's dot on "needs you" and what the
+   *  attached app renders in band. */
+  isHandlerArmed(terminalId: string): boolean;
   /** True when a work-status key is bound to the main checkout (or is not a
    *  session at all). Pre-handshake this answers true — nothing is isolated
    *  yet, so no guard should be narrowed away. */
@@ -1052,8 +1061,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // never wrap up.
         const parsed = HandlerConfigureWire.safeParse(msg);
         if (parsed.success && parsed.data.armed) {
-          const { terminalId, goal, backlog, judgeTool, judgeModel, personality } = parsed.data;
-          handlerEngine.arm({ terminalId, goal, backlog, judgeTool, judgeModel, personality });
+          const { terminalId, goal, backlog, judgeTool, judgeModel, role, brief, personality } = parsed.data;
+          handlerEngine.arm({ terminalId, goal, backlog, judgeTool, judgeModel, role, brief, personality });
         } else if (parsed.success) {
           handlerEngine.disarm(parsed.data.terminalId);
         } else {
@@ -1071,7 +1080,24 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // the extraction prompt.
         const parsed = HandlerInstructWire.safeParse(msg);
         if (parsed.success) {
-          handlerEngine.instruct({ terminalId: parsed.data.terminalId, text: parsed.data.text });
+          handlerEngine.instruct({
+            terminalId: parsed.data.terminalId, text: parsed.data.text,
+            // Forwarded rather than dropped: present, it turns this frame into the
+            // ANSWER to a standing ask, which the engine resolves and fails closed
+            // on. An older bridge's non-strict schema strips it, which is why the
+            // app sends it only to a session that advertised `askAnswer`.
+            escalationId: parsed.data.escalationId,
+            // Forwarded rather than dropped, same as above: present, this marks
+            // the frame as a NOTE beside an answer already in the session rather
+            // than the answer itself. An older bridge's non-strict schema strips
+            // it, which is why the app gates both fields on `escalationAnswer`,
+            // not on `askAnswer`.
+            delivered: parsed.data.delivered,
+            // Identity of the tapped option, resolved bridge-side against the row
+            // it names. Dropping it here would silently downgrade a tap into a
+            // sentence the user is recorded as having composed.
+            choiceId: parsed.data.choiceId,
+          });
         } else {
           // Rejected WITHOUT disarming, for the same reason a malformed arm is: a
           // bad instruct must not tear down the live armed session it was meant to
@@ -1112,6 +1138,28 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // bad dismiss must not tear down the live armed session it names a row on.
           // Re-emit status so the sender's UI resyncs.
           logger.warn("handler:dismiss rejected: malformed payload");
+          handlerEngine.emitStatus();
+        }
+        break;
+      }
+      case "handler:answer": {
+        // Same re-parse discipline as the four above: parseMessageFast validated
+        // the type and nothing else, and these two ids select which option on
+        // which standing ask is recorded as the user's own answer.
+        const parsed = HandlerAnswerWire.safeParse(msg);
+        if (parsed.success) {
+          handlerEngine.answerAsk({
+            terminalId: parsed.data.terminalId,
+            escalationId: parsed.data.escalationId,
+            choiceId: parsed.data.choiceId,
+          });
+        } else {
+          // Rejected WITHOUT disarming, for the same reason a malformed arm is: a
+          // bad answer must not tear down the live armed session whose question it
+          // was aimed at. Re-emit status so the sender's UI resyncs — a tap whose
+          // field names drifted across the two languages then shows up as a row
+          // that stayed put, rather than as an instruction nobody meant to send.
+          logger.warn("handler:answer rejected: malformed payload");
           handlerEngine.emitStatus();
         }
         break;
@@ -2022,7 +2070,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         commandCatalog: (id) => structured?.commandCatalog(id),
       }),
     }),
-    sendAb: (msg) => sendAb(msg),
+    sendAb: (msg) => {
+      // Every arm, disarm and suspend ends in an emitStatus, and the frame lists
+      // the engine's whole session map — so mirroring it here is a copy that
+      // cannot fall behind, unlike one kept by watching the verbs that reach us.
+      if (msg.type === "handler:status") {
+        handlerArmedSlots.clear();
+        for (const s of msg.sessions) handlerArmedSlots.add(s.terminalId);
+      }
+      sendAb(msg);
+    },
     sendPush: (message, terminalId) => sendNotifying(createMessage("notification:push", {
       notificationType: "task_complete", message, sessionId: terminalId, projectId: project.id,
     })),
@@ -2062,6 +2119,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  the terminal was. Emptied with the rest of the checkout in
    *  `sweepCheckoutRuntime`. */
   const setupTerminalIds = new Set<string>();
+
+  /** What each slot's agent is displaying, feeding the api-server's suppression
+   *  of the CLI's second announcement of one block. See {@link OpenAgentPrompts}
+   *  for why it is keyed by prompt and tool rather than by slot. */
+  const openAgentPrompts = new OpenAgentPrompts();
+
+  /** Slots with an ARMED Handler session, mirrored off the engine's own
+   *  `handler:status` — a full replacement snapshot that every arm, disarm and
+   *  suspend emits, so this cannot drift from the map it reflects. The engine
+   *  exposes no predicate of its own, and reading its private state from here
+   *  would be the drift.
+   *
+   *  Mirrored at the engine's sender rather than off the bus, which is where a
+   *  reader would naturally put it: `handler:status` is a REPLAY_TYPE and the
+   *  bus drops a re-publish whose payload is unchanged, so a subscriber that
+   *  attaches after the arm can wait indefinitely for a frame that never comes.
+   *
+   *  Read by {@link AgentCore.isHandlerArmed}; see it for what depends on it. */
+  const handlerArmedSlots = new Set<string>();
 
   function registerSetupTerminal(checkoutId: string, terminalId: string): void {
     checkoutRuntimes.runtime(checkoutId)?.configuredTerminalIds.set(terminalId, terminalId);
@@ -3242,6 +3318,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // banner's "View setup log" reads, exactly when the run has failed.
         // Released with the rest of the checkout in `teardownCheckoutRuntime`.
         if (setupRunner.handleExit(id) || setupTerminalIds.has(id)) return;
+        // Whatever the agent was displaying died with its terminal, and a slot
+        // is reused by a same-id restart — a stale entry would silence the new
+        // run's every block.
+        openAgentPrompts.clear(id);
         sessions?.noteExited(id);
         // Drop buffered title state so a stale title from this run can't leak
         // into a restarted same-id session (start() reuses the entry id). A
@@ -3990,12 +4070,50 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb: (msg) => sendNotifying(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
     onHandlerEvent: (body) => {
+      // What the agent is DISPLAYING is settled ahead of the chat guard, because
+      // it is a fact about the agent's own screen rather than about supervision:
+      // a chat spawn runs the very same hooks (buildChatSpawnAugment reuses the
+      // terminal injection) and the api-server reads this latch for every slot,
+      // so leaving it unpopulated there costs exactly the duplicate "Permission
+      // needed" it exists to drop.
+      if (body.event === "question") {
+        openAgentPrompts.open(body.terminalId, body.promptId, body.promptTool);
+      } else if (body.event === "prompt_answered") {
+        openAgentPrompts.close(body.terminalId, body.promptId);
+      } else if (body.event === "turn_end" || body.event === "turn_failed") {
+        // A prompt cannot outlive its turn, which is the same rule work-status's
+        // closeTurn already applies. This is the last resort, not the interrupt
+        // path: a question the user escaped out of reports its own failure hook,
+        // which arrives as `prompt_answered` and is closed by the branch above —
+        // Claude fires neither Stop nor StopFailure on a user interrupt, so
+        // nothing here would ever run for it.
+        openAgentPrompts.clear(body.terminalId);
+      }
       // Chat slots are fed by the in-process driver tap (observeChatFrameForHandler);
       // the reused title plugin's hooks still POST here for claude/codex chat
       // spawns — drop those or every turn_end fires twice.
       if (sessions?.get(body.terminalId)?.mode === "chat") return;
+      // A prompt that is over is not a pause to judge, and the engine's event
+      // union carries no member for it: it retires the row the `question`
+      // raised, by the id the agent gave that one tool call.
+      if (body.event === "prompt_answered") {
+        // The block the `question` notification recorded is gone, and this is the
+        // only thing that ever says so: a terminal-mode session's next signal is
+        // its Stop hook, minutes of real work later, so without this the dot
+        // reads "needs you" for the rest of the turn. Reported as a reply rather
+        // than through `onAnswer`, which would also OPEN a turn — and an
+        // interrupted question fires no Stop hook to close one again.
+        opts.onUserReply?.(body.terminalId, { submitted: false, typed: false });
+        // Only ever BY ID. An id-less retraction means "every prompt on this
+        // session is gone", which is true of a driver's synchronous turn-end
+        // sweep and never of one tool call reporting its own completion — it
+        // would take an outstanding ask the user has not answered with it.
+        if (body.promptId) handlerEngine.onPromptRetracted(body.terminalId, body.promptId);
+        return;
+      }
       handlerEngine.handleEvent({
         terminalId: body.terminalId, event: body.event,
+        detail: body.detail, promptId: body.promptId,
         transcriptPath: body.transcriptPath, sessionId: body.sessionId,
         resetsAt: body.resetsAt, errorClass: body.errorClass,
       }).catch((err) => log.error("Handler event failed: %s", err));
@@ -4074,8 +4192,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       if (!resolved || resolved.kind === "first-message") nameFromHook(resolved?.title);
     },
     onHookAlive: (terminalId) => { hookAlivePinged.add(terminalId); },
-    onTurnStart: (terminalId) => opts.onTurnStart?.(terminalId),
+    onTurnStart: (terminalId) => {
+      if (terminalId) openAgentPrompts.clear(terminalId);
+      opts.onTurnStart?.(terminalId);
+    },
     isStaleIdleNudge: (terminalId) => opts.isStaleIdleNudge?.(terminalId) ?? false,
+    hasOpenAgentPrompt: (terminalId, promptTool) => openAgentPrompts.has(terminalId, promptTool),
   });
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });
@@ -4339,6 +4461,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     hasIsolatedSessions(): boolean {
       return sessions?.hasIsolatedSessions() ?? false;
+    },
+    isHandlerArmed(terminalId: string): boolean {
+      return handlerArmedSlots.has(terminalId);
     },
     isMainCheckoutSession(id: string): boolean {
       return sessions?.isMainCheckoutSession(id) ?? true;

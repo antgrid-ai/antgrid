@@ -833,7 +833,7 @@ describe("the production call sites ask for the numbers", () => {
     const decision = { decision: "continue", confidence: 0.9, reason: "the agent is working" };
     const { spawn, calls } = replay([JSON.stringify(decision)], COPILOT_OK);
     const d = await runDecision({
-      tool: "github-copilot", goal: "migrate the auth module", backlogText: "",
+      tool: "github-copilot", instructions: ["migrate the auth module"], backlogText: "",
       context: "C", cwd: ".", spawn,
     });
     expect(d?.decision).toBe("continue");
@@ -849,7 +849,7 @@ describe("the production call sites ask for the numbers", () => {
       claudeEnvelope(JSON.stringify(decision), 22),
     ]);
     const d = await runDecision({
-      tool: "claude-code", goal: "migrate the auth module", backlogText: "",
+      tool: "claude-code", instructions: ["migrate the auth module"], backlogText: "",
       context: "C", cwd: ".", spawn,
     });
     expect(d?.decision).toBe("continue");

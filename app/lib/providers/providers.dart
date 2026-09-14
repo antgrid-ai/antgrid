@@ -316,7 +316,8 @@ final handlerStateProvider = StreamProvider<HandlerState>((ref) {
 });
 
 /// [handlerStateProvider] narrowed to the focused session — what the Handler
-/// tab renders.
+/// tab renders, and what the agent panel floats over the terminal
+/// (`HandlerEscalationOverlay`).
 ///
 /// Session-scoped for the reason the files, git and terminals tabs are
 /// checkout-scoped: the workspace panel answers for the session in focus, and a

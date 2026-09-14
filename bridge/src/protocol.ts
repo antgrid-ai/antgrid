@@ -985,7 +985,7 @@ const CommandDoneMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
-export const NotificationTypeSchema = z.enum(["task_complete", "permission_request", "awaiting_input", "idle", "error"]);
+export const NotificationTypeSchema = z.enum(["task_complete", "permission_request", "awaiting_input", "question", "idle", "error"]);
 export type NotificationType = z.infer<typeof NotificationTypeSchema>;
 
 const NotificationPushMessage = BaseMessage.extend({
@@ -1075,16 +1075,24 @@ const BacklogWire = z.array(InstructionItemWire).refine(
 // stay in lockstep, or the hot path admits what the union rejects. Field-level
 // rules (BacklogWire) ride along through `.shape`; a whole-payload `.refine`
 // would have to be written on both.
-// How far Handler leans toward answering on the user's behalf: it moves where
-// the line between `handle` and `escalate` sits, and the tone of `notify`.
-// Nothing else — the evidence a transition must cite is the anti-inflation
-// guard, and a posture able to relax it would let a confident preset report
-// progress that never happened.
+
+// The judge's lens: what it LOOKS FOR and ASKS ABOUT, added on top of the rules.
+// A lens only adds questions — autonomy is derived from the rules, so no value
+// here moves where the line between handling and escalating sits, changes what a
+// transition must cite, or withholds a transition the evidence supports.
 //
-// A bounded preset, deliberately not a free-text guidance field: the value is
-// interpolated into the judge prompt, and a fixed set carries no injection.
-export const HandlerPersonalitySchema = z.enum(["watchdog", "closer", "autopilot"]);
-export type HandlerPersonality = z.infer<typeof HandlerPersonalitySchema>;
+// A bounded enum rather than free text because the value selects BRIDGE-AUTHORED
+// prompt text: nothing a sender types is interpolated by choosing one. The user's
+// own words travel separately as `brief`, fenced as user text.
+//
+// `brief` is therefore the ONE free-text field of this schema that reaches the
+// judge prompt, and it is defended in depth: the sanity cap below, a clip to the
+// prompt budget in the engine, a collapse to one line so it cannot forge a header,
+// a bullet naming it as the user's words, a standing sentence saying it authorises
+// nothing, and — mechanically, not by wording — no path from it to
+// authorizeInstruction (see the invariants on HandlerEngine.instruct).
+export const HandlerLensSchema = z.enum(["pm", "qa", "critic", "release"]);
+export type HandlerLens = z.infer<typeof HandlerLensSchema>;
 
 export const HandlerConfigureWire = z.object({
   terminalId: z.string(),
@@ -1101,11 +1109,30 @@ export const HandlerConfigureWire = z.object({
   // tool / CLI default model); absent = leave the stored choice untouched.
   judgeTool: z.string().optional(),
   judgeModel: z.string().optional(),
-  // Absent = leave the session's stored posture untouched, the same
-  // absent-keeps rule judgeTool follows. There is no "clear to default": every
-  // preset is a real choice, and the default is only what a session that has
-  // never been given one judges as.
-  personality: HandlerPersonalitySchema.optional(),
+  // The retired posture key, still shipped by an app that predates the lens.
+  // Declared as a plain unbounded string, and read only to say once that it
+  // selected nothing: agent-core re-parses this whole payload before arming, so
+  // a value refused here — an unrecognised preset, or a length — would drop the
+  // goal, the backlog, the judge picks and the arm itself. It aliases to the
+  // unnamed default and never to a lens; a posture was an autonomy dial, and
+  // autonomy is derived from the rules.
+  personality: z.string().optional(),
+  // The lens this session judges under. Absent = leave the stored lens
+  // untouched, the same absent-keeps rule judgeTool follows; "" = back to the
+  // unnamed default, which is the rules alone. An empty string rather than a
+  // JSON null because a sender that omits null-valued keys from its payload
+  // could not then say "clear" at all — only "keep".
+  role: z.union([HandlerLensSchema, z.literal("")]).optional(),
+  // The user's own words for what else to look for, added beneath the lens.
+  // Absent = keep, "" = clear.
+  //
+  // The bound is HandlerInstructWire.text's refuse-only-the-absurd one, NOT the
+  // prompt budget (MAX_BRIEF_CHARS, handler/decision.ts), which the engine applies
+  // by CLIPPING. agent-core re-parses the whole configure payload with this schema
+  // before arming, so a length refused here would drop the goal, the backlog, the
+  // judge picks and the arm itself — a user who tapped Arm Handler over a long
+  // sentence and walked away unwatched.
+  brief: z.string().max(10_000).optional(),
 });
 
 const HandlerConfigureMessage = BaseMessage.extend({
@@ -1127,12 +1154,68 @@ export const HandlerInstructWire = z.object({
   // Extraction truncates for prompt budget; the cap is here so an absurd payload
   // is refused at the wire instead of being carried that far.
   text: z.string().max(10_000),
+  // Present = this frame ANSWERS the standing ask with this id and is NOT a new
+  // instruction. Optional because the schema is a plain non-strict z.object and
+  // an older bridge strips it — which is only safe because the app never sends
+  // it to a session whose snapshot did not advertise the capability the frame
+  // relies on: `askAnswer` for an ask answered here alone, `escalationAnswer` for
+  // the `delivered` note below. When it IS present and names nothing, instruct
+  // fails CLOSED rather than falling through to today's path: an answer silently
+  // promoted to an authorizing, extracting instruction is exactly the laundering
+  // the ask shape exists to prevent.
+  escalationId: z.string().max(64).optional(),
+  // Present = the sender ALREADY typed this text into the session, and this frame
+  // is a note so the judge learns its question was answered. Absent = the words
+  // reached nobody but this bridge, which is what an ask's answer is.
+  //
+  // A property of the CHANNEL, never derived from the row it names: reconcileAsks
+  // clears `nonBlocking` on any agent event while the app holds a cached row, so a
+  // row-derived reading would tell the judge an ask's answer had reached the agent
+  // when it reached nobody — and then forbid it from ever asking again.
+  delivered: z.literal(true).optional(),
+  // Which one-tap option on that row the user pressed. Only meaningful beside
+  // `delivered`, and it names the option rather than carrying its words: those are
+  // resolved from THIS bridge's own persisted row, exactly the way handler:answer
+  // resolves an ask's option, so what is banked is the string the card actually
+  // offered and never a string the frame supplied. `text` still carries what the
+  // app put into the session — the frame stays self-describing — but on a tapped
+  // note it is not what is banked.
+  //
+  // Absent = the sender typed the answer, which is what every frame written before
+  // this field means. Present without `delivered`, instruct fails CLOSED rather
+  // than guessing: the cross-field rule lives there and not in a `.refine()` here,
+  // because whole-payload rules on this schema put a form in front of one line
+  // typed on a phone (see the header above).
+  choiceId: z.string().min(1).max(40).optional(),
 });
 
 const HandlerInstructMessage = BaseMessage.extend({
   type: z.literal("handler:instruct"),
   projectId: z.string(),
 }).extend(HandlerInstructWire.shape);
+
+// One tap on an ask's option. `escalationId` is REQUIRED and `choiceId` is
+// REQUIRED: a dedicated verb whose id resolution fails CLOSED is what keeps a
+// cross-language field-name typo, and a row retired between the render and the
+// tap, from degrading into an authorizing handler:instruct. No `text` field, ever
+// — the option's words are judge-authored, so they are resolved bridge-side from
+// the persisted row and never travel back through the one channel that mints
+// lifts (see quickChoicesFor in handler/engine.ts).
+//
+// Payload-only schema for the same reason as HandlerInstructWire: parseMessageFast
+// admits it on the discriminator alone, so agent-core re-parses with this before
+// the engine retires a row, and the envelope below rides on `.shape` so the two
+// cannot drift apart.
+export const HandlerAnswerWire = z.object({
+  terminalId: z.string(),
+  escalationId: z.string().max(64),
+  choiceId: z.string().min(1).max(40),
+});
+
+const HandlerAnswerMessage = BaseMessage.extend({
+  type: z.literal("handler:answer"),
+  projectId: z.string(),
+}).extend(HandlerAnswerWire.shape);
 
 // One tap-to-answer option on a quick-choice escalation. `text` is sent as
 // the USER's own reply through the ordinary reply transport, so it must be
@@ -1151,8 +1234,15 @@ const HandlerInstructMessage = BaseMessage.extend({
 // here rather than on the enclosing object.
 const EscalationChoiceWire = z.object({
   choiceId: z.string().min(1).max(40),
-  label: z.string().min(1).max(40),
+  // Non-empty refined on top of `.min(1)`: a whitespace-only label is truthy but
+  // draws a blank button on the card that stops the session.
+  label: z.string().min(1).max(40).regex(/^[^\x00-\x1f\x7f]+$/).refine((t) => t.trim().length > 0),
   text: z.string().min(1).max(400).regex(/^[^\x00-\x1f\x7f]+$/).refine((t) => t.trim().length > 0),
+  // What taking this chip commits to, one clause, shown under the button. New and
+  // optional, so no bound any row already on disk was written under moves and an app
+  // that predates it renders exactly what it renders today.
+  cost: z.string().min(1).max(160).regex(/^[^\x00-\x1f\x7f]+$/)
+    .refine((t) => t.trim().length > 0).optional(),
 });
 
 const uniqueChoiceIds = (cs: { choiceId: string }[]): boolean =>
@@ -1195,6 +1285,50 @@ const OpenEscalationWire = z.object({
   choices: z.array(EscalationChoiceWire).min(2).max(3)
     .refine(uniqueChoiceIds, "choiceId must be unique").optional(),
   at: z.number(),
+  // The session did NOT stop for this one: it was raised on a pass that had
+  // already replied to the agent, so the work went on and the user answers when
+  // they can. Absent means what every row before this field meant — the session
+  // stopped and is waiting.
+  //
+  // Spelled `nonBlocking` and not `blocking` on purpose: the naive truthiness
+  // test (`if (e.nonBlocking)`) is then the SAFE reading on a row that predates
+  // the field AND on one an older bridge stripped it from and re-persisted.
+  // `blocking?: boolean` inverts that, and the failure is one character wide,
+  // silent, and repeated at every reader in two languages.
+  //
+  // An app may only act on this when the session's own snapshot also advertised
+  // `askAnswer`: a bridge can read this field off a record a newer bridge wrote
+  // and re-emit it faithfully while having no verb that answers one, so the row
+  // cannot be its own capability signal.
+  nonBlocking: z.boolean().optional(),
+  // Backlog ids the answer does not gate. The app re-derives the count from its
+  // own copy of the backlog rather than trusting a number, so a stale id costs a
+  // smaller count and never a wrong claim.
+  unblocked: z.array(z.string().max(64)).max(10).optional(),
+  // The tap-to-answer options on an ASK. A separate field from `choices` and
+  // never a second producer into it: a `choices` entry carries `text` that the
+  // ordinary reply transport types into the PTY, and an ask must send the agent
+  // nothing. There is deliberately no `text` here — `label` IS the whole payload,
+  // resolved bridge-side from the persisted row, so what the user reads on the
+  // button is exactly what the judge is told they chose. See quickChoicesFor's
+  // comment in handler/engine.ts for the authorization argument this shape rests
+  // on.
+  //
+  // `label` is bounded at 80 rather than the 40 EscalationChoiceWire allows
+  // because there a label only names a reply that travels separately, while here
+  // it has to carry the whole answer as a sentence.
+  //
+  // The uniqueness refinement rides the ARRAY for the reason `choices`' does:
+  // `.shape` below carries it into HandlerEscalationMessage, and a repeated
+  // choiceId resolves a tap to an option the user did not read.
+  askOptions: z.array(z.object({
+    choiceId: z.string().min(1).max(40),
+    label: z.string().min(1).max(80),
+    cost: z.string().min(1).max(160),
+    // z.literal(true), not z.boolean(): absent and `false` must mean one thing,
+    // and a literal makes the second spelling unsayable.
+    recommended: z.literal(true).optional(),
+  })).min(2).max(4).refine(uniqueChoiceIds, "choiceId must be unique").optional(),
 });
 
 // One snapshot, as the app sees it. Shared by the one-shot advert and the
@@ -1306,12 +1440,23 @@ const HandlerSessionSnapshot = z.object({
   state: z.enum(["watching", "handling", "needs_you", "parked"]),
   pendingEscalations: z.number().int().nonnegative(),
   armedAt: z.number(),
+  // Mirrors instructions[0], so it moves if the store ever trims past
+  // MAX_INSTRUCTIONS (session-store.ts) — a live drift, documented rather than
+  // fixed here.
   goal: z.string(),
   backlog: BacklogWire,
   escalations: z.array(OpenEscalationWire),
-  // Why the session is parked and when it wakes (epoch ms), for the countdown
-  // chip. Present only while state is "parked".
+  // The BACKOFF POLICY the engine picked — how long to wait and on what curve —
+  // never a reason; `parkCause` below carries that. With `parkedUntil` (epoch ms)
+  // it drives the countdown chip. Present only while state is "parked".
   parkKind: z.enum(["limit", "outage"]).optional(),
+  // Who the pause is ATTRIBUTABLE to, which `parkKind` cannot say: that field is
+  // the backoff policy, and the two diverge on the case that named this one — a
+  // judge call of ours timing out parks as `outage` and read on the bar as the
+  // AGENT's provider being down. Optional because a park predating it, on disk or
+  // from an older bridge, is honestly unattributed; an app with no cause falls
+  // back to the policy's own copy.
+  parkCause: z.enum(["agent_limit", "agent_failure", "judge_failure"]).optional(),
   parkedUntil: z.number().optional(),
   // Per-session judge choice (absent = session default tool / CLI default model).
   judgeTool: z.string().optional(),
@@ -1321,11 +1466,62 @@ const HandlerSessionSnapshot = z.object({
   // handler/engine.ts). Optional and appended LAST: an older app still parses
   // the snapshot, and every key it reads keeps its position.
   observability: z.enum(["full", "escalate_only", "unsupported"]).optional(),
-  // The posture this session actually judges under, resolved by the bridge and
-  // so always present on a status frame — an app reading it never has to know
-  // what an absent value would have meant. Optional and appended LAST for the
-  // same reason `observability` is: an older app still parses the snapshot.
-  personality: HandlerPersonalitySchema.optional(),
+  // Presence IS the capability signal, the way `observability`'s is and unlike
+  // `wrapUps`, where absent and empty mean the same thing: this bridge accepts
+  // handler:answer and an escalationId-bearing handler:instruct for this
+  // session's asks. ABSENT means an app must treat every `nonBlocking` row as an
+  // ordinary blocking escalation, because it has no way to answer one that would
+  // not land in the PTY. This exists because the ask ROW cannot advertise
+  // itself: a bridge that can READ the record field but not answer it (a Store
+  // rollback onto a record a newer bridge wrote) re-emits `nonBlocking`
+  // faithfully.
+  askAnswer: z.literal(true).optional(),
+  // An answer is parked and has not been relayed to the agent yet. State, not
+  // capability — a bridge with nothing parked simply omits it.
+  askAnswerPending: z.boolean().optional(),
+  // The lens this session judges under, and the user's brief beneath it. Both
+  // optional and appended LAST for the reason `observability` is: an older app
+  // still parses the snapshot and every key it already reads keeps its position.
+  //
+  // STATE, not a capability signal, unlike `askAnswer`: an absent `role` is the
+  // unnamed default rather than a bridge that cannot do lenses, and `brief` is
+  // present only when non-empty. What this bridge ACCEPTS rides the status frame's
+  // top-level `lenses` instead.
+  role: HandlerLensSchema.optional(),
+  brief: z.string().optional(),
+  // A window onto the full instruction list the store keeps (session-store.ts),
+  // not the list itself: `goal` above is the only other string this snapshot
+  // spends on it, and the app has nowhere durable to put more than a few — this
+  // is a REPLAY_TYPE and handler:activity, where a stacked sentence would
+  // otherwise show up, is not. Entry #1 stays pinned rather than dropped even
+  // when it falls out of the newest four: it is what names the session on the
+  // card headline, the wrap-up card, and the wrap-up push (see firstInstruction,
+  // engine.ts), and a window that could drop it would open a fresh divergence
+  // from those surfaces one tap wide. `total - items.length` is exactly what got
+  // elided BETWEEN position 0 and position 1 — always, since nothing between
+  // position 1 and the end is ever missing — which is what makes a
+  // non-contiguous window legible without a second count that could disagree
+  // with it. `total` is the RETAINED count — the entries `items` was windowed
+  // out of, so the two can never disagree — not a lifetime one: pushInstruction
+  // splices the oldest away past MAX_INSTRUCTIONS and nothing counts what it
+  // has already dropped. Optional
+  // and appended LAST for the reason `observability` is: an older app still
+  // parses the snapshot and every key it already reads keeps its position. A
+  // bridge that HAS this field always sends it, including `{ total: 0, items:
+  // [] }` for an armed session nobody has instructed — absence means "this
+  // bridge predates the list", never "no instructions".
+  instructions: z.object({
+    total: z.number().int().nonnegative(),
+    items: z.array(z.string().max(120)).max(5),
+  }).optional(),
+  // Presence IS the capability signal, the way `askAnswer`'s is: this bridge reads
+  // a `delivered` note on handler:instruct that names a BLOCKING row and banks the
+  // sentence for the judge instead of authorizing and extracting it as a new
+  // instruction. An app that sends the note to a bridge without this gets the old
+  // behaviour on the wrong verb — a session-long grant nobody read, plus a backlog
+  // item no terminal status can resolve — which is why the app must never send it
+  // uninvited. Absent means: send the reply and nothing else.
+  escalationAnswer: z.literal(true).optional(),
 });
 
 // Why this machine will not run the Handler, in the words the app has to answer
@@ -1357,6 +1553,14 @@ const HandlerStatusMessage = BaseMessage.extend({
   // project agent tool) — chat slots resolve from their own SessionEntry.tool
   // app-side. Judge overrides themselves are per-session (see snapshot).
   defaultTool: z.string().optional(),
+  // The lens ids this bridge accepts. PRESENCE is the capability advert, the way a
+  // snapshot's `observability` is; the contents say which ids, so a newer app can
+  // offer the intersection and never send one this bridge would refuse.
+  //
+  // Top-level rather than per session because `sessions` holds ARMED sessions only,
+  // and the surface that needs this most is the arm sheet — a slot with no snapshot
+  // to read.
+  lenses: z.array(HandlerLensSchema).optional(),
   sessions: z.array(HandlerSessionSnapshot),
   // Every snapshot this project still knows about, replayed for the same reason
   // escalations are: an app that restarted between the advert and the tap would
@@ -1405,6 +1609,7 @@ const HandlerActivityMessage = BaseMessage.extend({
     "instruction_dropped", "instruction_authorized", "instruction_amended",
     "floor_warning", "evidence_rejected",
     "wrapped_up", "parked", "resumed",
+    "asked", "ask_rejected", "answered",
   ]),
   reason: z.string(),
   detail: z.string().optional(),
@@ -2424,6 +2629,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   HandlerSnapshotMessage,
   HandlerUndoMessage,
   HandlerDismissMessage,
+  HandlerAnswerMessage,
   GitStatusMessage,
   GitDiffRequestMessage,
   GitDiffContentMessage,
@@ -2584,6 +2790,7 @@ export type HandlerActivityMsg = z.infer<typeof HandlerActivityMessage>;
 export type HandlerSnapshotMsg = z.infer<typeof HandlerSnapshotMessage>;
 export type HandlerUndoMsg = z.infer<typeof HandlerUndoMessage>;
 export type HandlerDismissMsg = z.infer<typeof HandlerDismissMessage>;
+export type HandlerAnswerMsg = z.infer<typeof HandlerAnswerMessage>;
 export type GitStatus = z.infer<typeof GitStatusMessage>;
 export type GitDiffRequest = z.infer<typeof GitDiffRequestMessage>;
 export type GitDiffContent = z.infer<typeof GitDiffContentMessage>;
@@ -2876,7 +3083,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "stream-unbound", "control:result", "app:ready",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
-  "handler:snapshot", "handler:undo", "handler:dismiss",
+  "handler:snapshot", "handler:undo", "handler:dismiss", "handler:answer",
   "git:status", "git:diff", "git:diff-content",
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",

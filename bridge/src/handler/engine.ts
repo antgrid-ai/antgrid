@@ -2,9 +2,10 @@
 import { createHash } from "node:crypto";
 import {
   createMessage,
+  HandlerLensSchema,
   type AbMessage,
   type HandlerEntitlement,
-  type HandlerPersonality,
+  type HandlerLens,
 } from "../protocol";
 import { classifyDestructive, describeWarning, type FloorWarning } from "./destructive-floor";
 import {
@@ -28,8 +29,10 @@ import {
 } from "./extract";
 import { appendActivity, type ActivityRecord } from "./config";
 import {
-  loadHandlerSession, saveHandlerSession, EscalationChoiceSchema,
-  type EscalationChoice, type EscalationKind, type HandlerSessionRecord, type OpenEscalation,
+  loadHandlerSession, saveHandlerSession, normalizeInstruction, pushInstruction,
+  seedInstructionsFromGoal, EscalationChoiceSchema, OpenEscalationSchema,
+  type EscalationChoice, type EscalationKind, type HandlerSessionRecord,
+  type InstructionEntry, type OpenEscalation,
 } from "./session-store";
 import {
   allTerminal, applyTransitions, clip, isTerminalStatus, previewForUser, propagateBlocked, renderBacklog,
@@ -40,7 +43,7 @@ import type { CapCommand } from "../structured/chat-session";
 import type { SessionAdapter } from "./session-adapter";
 import { handlerObservable, judgeCapable } from "../agents/registry";
 import { createEntitlementReader, type EntitlementReader } from "../entitlement";
-import { type HandlerDecision, DEFAULT_PERSONALITY } from "./decision";
+import { normalizeBrief, type DecisionAsk, type HandlerDecision } from "./decision";
 import {
   LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS, TRANSIENT_CEILING, transientBackoffMs,
   defaultSchedule, TimerRegistry, type LifecycleDeps,
@@ -69,10 +72,12 @@ export interface HandlerEvent {
   // text) — carried into the escalation body so the notification says WHAT
   // the agent is asking, not just that it asked.
   detail?: string;
-  // The driver's own id for a blocking prompt (permissionId / questionId). The
-  // resolve RPC names the same id, which is what lets a resolve retire the one
-  // escalation it answered while a second prompt on the same terminal — drivers
-  // hold a MAP of pending ones — keeps its row.
+  // The producer's own id for a blocking prompt: a driver's permissionId /
+  // questionId, or Claude's `tool_use_id` off the PreToolUse hook. Whatever
+  // reports the prompt is over names the same id — the chat resolve RPC for a
+  // driver, the matching PostToolUse/PostToolUseFailure post for a PTY question —
+  // which is what retires the one escalation it answered while a second prompt on
+  // the same terminal (both producers hold a MAP of pending ones) keeps its row.
   promptId?: string;
   // When the provider's limit window ends (epoch ms). Detectors capture it from
   // a side channel; absent means fall back to a fixed wait.
@@ -83,9 +88,12 @@ export interface HandlerEvent {
   selfResuming?: boolean;
 }
 
-// The two events a structured driver raises by BLOCKING on the user: the agent
-// cannot proceed until the prompt is resolved or retracted. Everything else is
-// a pause the judge may handle on its own.
+// The two events a PRODUCER raises by BLOCKING on the user: the agent cannot
+// proceed until the prompt is resolved or retracted. Everything else is a pause
+// the judge may handle on its own. Two producers reach here and a guard narrowed
+// to either one silently loses the other's prompts: a structured driver in
+// process (agent-core's `observeChatFrameForHandler`), and Claude's PTY hooks,
+// whose PreToolUse matcher reports an AskUserQuestion as `question`.
 function isBlockingPrompt(evt: HandlerEvent | undefined): boolean {
   return evt?.event === "permission_request" || evt?.event === "question";
 }
@@ -105,9 +113,59 @@ function isLifecycle(evt: HandlerEvent): boolean {
  */
 export type HandlerObservability = "full" | "escalate_only" | "unsupported";
 
+/**
+ * Who the wait is attributable to, which the backoff policy cannot say: an
+ * "outage" park covers the agent's provider failing AND Handler's own judge
+ * failing, and a user whose agent is serving fine must not be told their
+ * provider is down because our judge call timed out.
+ */
+export type ParkCause = "agent_limit" | "agent_failure" | "judge_failure";
+
 // One tap arms with no payload at all, so an activity row can legitimately be
 // written before anything has stated what the session is for.
-const NO_GOAL = "(no goal set)";
+const NOTHING_ASKED = "(nothing asked yet)";
+
+// What every one-string surface shows for a session: the wire's `goal`, the
+// persisted record's, the wrap-up headline. The FIRST entry rather than the
+// newest, because those surfaces name the session — and a session is named by
+// what it was opened to do, not by whatever was stacked onto it last.
+function firstInstruction(instructions: InstructionEntry[]): string {
+  return instructions[0]?.text ?? "";
+}
+
+// How many of the newest instructions ride beside the pinned first one — see
+// HandlerSessionSnapshot's `instructions` field (protocol.ts) for the pin and
+// the elision arithmetic this window exists to keep unambiguous.
+const MAX_RECENT_INSTRUCTIONS = 4;
+
+// The wire's `instructions` window: entry #1, then the newest
+// MAX_RECENT_INSTRUCTIONS, in chronological order — the whole list whenever it
+// holds five or fewer. `total` comes off the same filtered list the window does,
+// so the caller need not (and must not) pass anything else.
+//
+// Filters empty text out first for the same defensive reason decision.ts's
+// instructionLines does: InstructionEntrySchema.text has no .min(1). The window
+// is taken BEFORE the escape-and-clip pass below, so a session sitting at
+// MAX_INSTRUCTIONS walks five entries per emitStatus rather than fifty — each
+// of them up to MAX_INSTRUCTION_CHARS long, and emitStatus runs on every judged
+// event.
+function instructionsWindow(instructions: InstructionEntry[]): { total: number; items: string[] } {
+  const kept = instructions.filter((e) => e.text !== "");
+  const window = [...kept.slice(0, 1), ...kept.slice(1).slice(-MAX_RECENT_INSTRUCTIONS)];
+  return {
+    // The KEPT count, not the raw array length: an entry the filter above
+    // dropped is one no item can point at, so counting it would print the app's
+    // "N more in between" line over nothing — and shift which entry it pins
+    // as #1.
+    total: kept.length,
+    // previewForUser escapes control characters, so it must run BEFORE the
+    // clip (see mintAskOptions) — and clipWithin, not clip, because this is a
+    // wire bound (.max(120)) rather than a reading budget: clip alone can
+    // return 121 chars and blank the whole handler:status frame at the app's
+    // parser.
+    items: window.map((e) => clipWithin(previewForUser(oneLine(e.text)), 120)),
+  };
+}
 
 // A ceiling on the WHOLE stack, where extract.ts's MAX_ITEMS bounds only one
 // response: renderBacklog(backlog) is interpolated into every subsequent decide
@@ -122,6 +180,37 @@ const MAX_BACKLOG_ITEMS = 100;
 // every report is preserved verbatim in the activity feed either way: the row is
 // only the reminder that one is there.
 const MAX_BLOCKED_REPORTS = 5;
+
+// One unanswered question per terminal, and not a queue depth. The answer
+// transports name the escalation they answer, so a second standing ask would no
+// longer make the user's own answer ambiguous — that reason is spent. What the
+// bound still buys is the notification volume a session that is supposed to be
+// getting on with the work may spend, and keeping a stranded ask from becoming a
+// stranded queue: an ask is retired by the user, by a dismiss, or by
+// reconcileAsks finding its claim expired, and none of those scales with depth.
+const MAX_OPEN_ASKS = 1;
+// How much of a question and its reasoning ANY row may carry — an ask's and a
+// stop's alike. The row replays on every handler:status frame, so it is bounded
+// the way every other replayed string is. The one card that STOPS the session
+// was the one with no length discipline at all.
+const MAX_ROW_QUESTION_CHARS = 400;
+// How many refused asks ride along in the next decide prompt, on the same
+// bargain as MAX_REMEMBERED_REJECTIONS: enough that a judge learns why its
+// question vanished, short enough that it never becomes the prompt.
+const MAX_ASK_REJECTIONS = 2;
+// The tap options' bounds, kept in lockstep with OpenEscalationSchema's copy and
+// enforced by mintAskOptions rather than by a safeParse over the finished array:
+// a parse rejects EVERY option at once, so one over-long label would cost the
+// user a card the judge sized for four.
+const MAX_ASK_OPTION_LABEL = 80;
+const MAX_ASK_OPTION_COST = 160;
+// The same lockstep for `unblocked`, and this one is the sharp end. A row that
+// fails its own schema makes the WHOLE session record unreadable on the next
+// start — loadHandlerSession returns null and arm() rebuilds an empty session —
+// and a backlog id is `item-<projectId>-<ms>-<n>`, so a long projectId is enough
+// to breach it. A dropped id costs one line of the still-working list, which
+// reconcileAsks re-derives from the backlog anyway.
+const MAX_UNBLOCKED_ID_CHARS = 64;
 
 // How much of those reports the wrap-up push may name. The note shares one OS
 // notification with `wrapUpSummary` and `undoNote`, and OS surfaces truncate;
@@ -150,12 +239,30 @@ const MAX_REMEMBERED_REJECTIONS = 3;
 // command, and a token-shaped route or path in the user's wording ("fix the
 // /login redirect") names a command nothing will ever run — so its demand is not
 // merely unmet, it is unmeetable, and a permanent refusal costs the session its
-// wrap-up and eventually a runaway report the user has to dismiss by hand.
-// Grounding is untouched by the waiver: what is dropped is the demand for a
-// token, never the demand for a real quote. Three, so a judge that could satisfy
+// wrap-up and, once the budget below is spent, an escalation the user has to
+// answer. Grounding is untouched by the waiver: what is dropped is the demand for
+// a token, never the demand for a real quote. Three, so a judge that could satisfy
 // the anchor is asked for it twice more after the first miss — the refusal is fed
 // back into the prompt each time — before the harness concludes it cannot be met.
 const MAX_ANCHOR_REFUSALS = 3;
+
+// How many times one refusal episode may put the same pause back to the judge,
+// its own rejection in hand, before the user is asked instead. Every event that
+// reaches a decide pass means the agent has STOPPED, and a `continue` injects
+// nothing — so a citation-refused completion that simply rested left the session
+// waiting on an event nobody was going to produce. Three, for three reasons that
+// agree: one miss is not evidence the judge cannot cite — a chain that escalated
+// on the first would page the user about a quote the next pass usually supplies;
+// three judge budgets is the most extra wall clock worth spending on a session
+// that would otherwise never move again; and it is the same bargain the anchor
+// already strikes — asked twice more after the first miss, with the refusal in
+// the prompt each time.
+//
+// It is NOT the anchor waiver's fourth check. `absorbTransitions` counts an
+// anchor refusal only on a pass that has not been re-asked, deliberately, so
+// MAX_ANCHOR_REFUSALS cannot be spent inside one chain — which means an anchor
+// refusal is escalated after one judged pause rather than waived by the harness.
+export const MAX_EVIDENCE_REASKS = 3;
 
 // How many literals ride along in the detail of a feed row whose reason is a
 // count, and how much of the line they may spend. The reason carries the true
@@ -163,6 +270,24 @@ const MAX_ANCHOR_REFUSALS = 3;
 // makes the totals concrete, and a feed row is read at a glance either way.
 const MAX_ROW_SAMPLE_ENTRIES = 8;
 const MAX_ROW_SAMPLE_CHARS = 200;
+
+/**
+ * What "still running" means for an ask, read by BOTH the raise and the reconcile.
+ *
+ * `blocked` counts as NOT running. TERMINAL is {done, skipped, failed}, so a blocked
+ * item is formally still open — but it is work that has not moved, and the whole
+ * claim the still-working list makes is one the user can check rather than one the
+ * row merely asserts. The app's footer draws the same line.
+ *
+ * One function because the two sides disagreeing is silent and user-visible: a raise
+ * that counted a blocked item as live would mint the row, fire "Handler has a
+ * question", and be promoted away by the reconcile on the very next event — leaving
+ * a push, a card whose own footer contradicts it, and a feed row about work that
+ * never started.
+ */
+function isRunningItem(status: ItemStatus): boolean {
+  return !isTerminalStatus(status) && status !== "blocked";
+}
 
 // The item outcomes the activity feed carries a kind for. A skip is as
 // consequential as a completion, so they stay distinguishable without parsing
@@ -368,6 +493,15 @@ function clipQuote(text: string): string {
   return previewForUser(oneLine(text), MAX_AMENDMENT_QUOTE_CHARS);
 }
 
+// `clip` appends its ellipsis PAST the cap it is given, so clip(s, 80) can be 81
+// characters long. That is harmless where the cap is a reading budget, and fatal
+// where it is a wire bound the result is then validated against — one character
+// over and the whole array is refused. Clip to one short of the bound so the
+// ellipsis lands inside it, and leave a string already within the bound alone.
+function clipWithin(text: string, max: number): string {
+  return text.length <= max ? text : clip(text, max - 1);
+}
+
 function wakeClock(at: number): string {
   const d = new Date(at);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -381,17 +515,35 @@ const REJECT_CHOICE_TEXT = "Do not proceed. Wait for my instructions.";
 /**
  * The quick-choice card for an escalation the engine has already built.
  *
- * Minted here rather than asked of the judge: the judge could propose a richer set,
- * but its labels are Assistant output reaching a one-tap control, and nothing
- * about authorization may derive from Assistant output (authorization.ts). The
- * one thing the judge does contribute is the draft it already composed, which the
- * [Approve] choice sends VERBATIM — so the app must render `text`, not only `label`.
+ * Minted here rather than fully asked of the judge: the fixed two-choice shape
+ * and the reject chip's text stay engine-authored, and nothing about
+ * authorization may ever derive from Assistant output (authorization.ts). The
+ * judge contributes only the approve label and its cost (`notify.approve`),
+ * and the widening survives on three things, stated here so a later change
+ * can check them:
  *
- * A tap carries NO authorization lift. It answers through the ordinary reply
- * transport (terminal:input / agent:prompt), never through handler:instruct:
- * - `instruct` is the single feed point for authorization and it also queues an
- *   extraction, so a tap would mint a backlog item no terminal status can ever
- *   resolve and the session could never wrap up.
+ * - Authorization is untouched. `authorizeInstruction` has exactly one call
+ *   site (HandlerEngine.instruct); a `choices` tap answers through
+ *   `answerWithChoice -> reply -> terminal:input`, takes no lift, and every
+ *   numbered clause below still holds verbatim.
+ * - The judge already authors `text` — the draft it composed, which the
+ *   [Approve] choice sends VERBATIM, so the app must render `text`, not only
+ *   `label`. A label adds no capability, only a new way to MISDESCRIBE text
+ *   that is rendered verbatim, in mono, deliberately unelided, directly beside
+ *   the button — that rendering is the existing design's own answer to
+ *   divergence and is non-negotiable: the label names the draft, it never
+ *   replaces it.
+ * - No `recommended` emphasis on a quick choice, ever. `HandlerDecisionCard`'s
+ *   class doc refuses it on purpose ("the wire states an order, not a
+ *   preference"): an ask's tap sends the agent nothing, so a wrong emphasis
+ *   there costs a sentence in a prompt; a quick choice's tap reaches a shell.
+ *
+ * A tap carries NO authorization lift. Its instruction still answers through the
+ * ordinary reply transport (terminal:input / agent:prompt), exactly as before:
+ * - `instruct`'s GRANT arm (no `delivered`) is the single feed point for
+ *   authorization and it also queues an extraction, so a tap reaching THAT arm
+ *   would mint a backlog item no terminal status can ever resolve and the
+ *   session could never wrap up.
  * - A lift minted by tapping a label the judge wrote is the laundering path that
  *   instruction-scoped authorization closes: a compromised agent composes an
  *   escalation whose [Approve] chip silences every later advisory row.
@@ -399,6 +551,89 @@ const REJECT_CHOICE_TEXT = "Do not proceed. Wait for my instructions.";
  * repeat (post-Phase-5 the advisory floor records rather than escalates), while
  * over-lifting costs a session-wide grant the user never read. The real lift stays
  * one control away, in the user's own words, through the PA bar.
+ *
+ * What DID change: this bridge now ALSO accepts a second, note-only frame beside
+ * a tap's ordinary reply — `handler:instruct{delivered:true, choiceId}` — so it
+ * can bank which option was tapped for the judge's next pass, the same way a
+ * typed blocking answer already banks its text (see instruct). That frame reaches
+ * instruct's DELIVERED arm, never its grant arm: it takes no authorizeInstruction
+ * call, queues no extraction, and starts no pass of its own. What it banks is
+ * never the frame's own `text` — it is resolved against THIS bridge's own
+ * persisted `choices` row, so what reaches the judge is the option the card
+ * actually offered, framed as a choice the judge itself authored ("- they
+ * chose:"), never as a sentence the user composed.
+ *
+ * WHY AN `ask` OPTION IS OUTSIDE ALL OF THE ABOVE, mechanically rather than by
+ * assertion. An `ask` (see raiseAsk) carries `askOptions`, a DIFFERENT field on a
+ * different code path; it never carries `choices` and never calls this function.
+ * Nothing here is loosened for it, and nothing here may be loosened for it later.
+ *
+ * 1. `authorizeInstruction` (authorization.ts) is the only writer of `s.auth`,
+ *    and it has exactly ONE call site in bridge/src: HandlerEngine.instruct.
+ *    An ask TAP arrives as `handler:answer` and reaches answerAsk, which calls
+ *    neither instruct nor authorizeInstruction nor queueExtraction nor
+ *    injectReply nor guard.reset. `s.auth.patterns`, `s.auth.paths` and
+ *    `s.auth.hosts` are therefore byte-identical across a tap. That is pinned as
+ *    a test (engine.test.ts, "a tap grants nothing"), not left as prose here.
+ *
+ * 2. The label the judge writes IS the entire payload of a tap. An askOption has
+ *    no `text`: the app sends `choiceId` alone, the bridge resolves it against
+ *    its OWN persisted row, and what is parked for the judge is the engine-
+ *    clipped label — the exact string the user read on the button. A label that
+ *    misrepresents what a tap sends is unspellable, because the label is what a
+ *    tap sends. This is why askOptions is a separate field rather than a second
+ *    producer into `choices`, where `text` and `label` can diverge and where
+ *    every existing consumer would type `text` into a PTY.
+ *
+ * 3. What a tap actually moves is text the agent could already put in front of
+ *    the judge. assembleContext feeds the transcript into ctx.text on every
+ *    pass, so a compromised agent can already steer the judge's prompt. A tap
+ *    moves agent-influenced text from one prompt section to another and moves
+ *    nothing into s.auth. No privilege is gained. What IS new is that the user's
+ *    tap ENDORSES one option — and an endorsement buys no floor exemption
+ *    anywhere: the judge's relay is an ordinary `handle`, screened by
+ *    checkReplyShape, the HARD floor (which nothing lifts), partitionWarnings
+ *    against an untouched s.auth, guard.check and the snapshot pass, exactly as
+ *    every other handle is.
+ *
+ * 4. Free text on an ask is the one path that DOES lift, and it lifts the same
+ *    way it always has: through this same single feed point, on the raw payload,
+ *    before extraction (see instruct). The lift stays in what the user typed.
+ *    Two things keep that true rather than aspirational — an ask row is minted
+ *    with `draftReply: ""` and the judge's `ask` object has no draftReply field
+ *    at all, so there is no judge-authored artifact for a composer to prefill;
+ *    and the ask sheet is its own widget with no prefill parameter, rather than
+ *    a branch inside the sheet that mints the lift.
+ *
+ * 5. The honest residue, stated so nobody mistakes it for a hole that was
+ *    missed. The judge writes the question rendered above that composer, so it
+ *    can ELICIT a string the user then types in their own words. That is a
+ *    human keystroke in the middle, not a lift derived from Assistant output, so
+ *    the invariant above is intact — but it raises the rate at which short,
+ *    late-night answers enter the funnel. Which is why the ask-answer branch of
+ *    instruct records an `instruction_authorized` row whenever ANYTHING was
+ *    granted, including the bare hosts describeGrant deliberately omits from its
+ *    ordinary feed row: at most one row per answered question, and the silent
+ *    session-long egress grant becomes visible exactly where this feature made
+ *    it more likely.
+ *
+ * WHAT CHANGED, AND WHAT DID NOT. `choices`' TRANSPORT is not edited by any of
+ * the ask feature, the tap-answer feature, or the approve label/cost widening:
+ * a tap still answers through answerWithChoice -> reply -> terminal:input /
+ * agent:prompt, still takes no lift, and `text` is still what actually lands in
+ * the session. What DID move is who writes the [Approve] chip's `label` and
+ * `cost` — the judge now supplies both (`notify.approve`), clipped per-field
+ * here rather than engine-literal — which is the widening the three points
+ * above exist to defend; `choiceId`, the reject chip and the two-choice shape
+ * stay engine-authored. Beside that, this bridge now ALSO accepts one
+ * additional, note-only frame beside a tap: instruct's DELIVERED arm and the
+ * decision prompt's tapped-blocking section, covered separately below. If a
+ * future change ever routes askOptions through
+ * `choices`, or gives an askOption a `text`, or gives an ask tap a path into
+ * instruct, or lets a `choiceId` reach instruct's grant arm, or lets the note
+ * bank text the FRAME carried rather than text this row holds, every numbered
+ * clause above stops holding at once and this comment is the record of what was
+ * being relied on.
  */
 export function quickChoicesFor(p: {
   kind?: EscalationKind;
@@ -406,6 +641,7 @@ export function quickChoicesFor(p: {
   draftReply: string;
   projectPath: string;
   open?: readonly OpenEscalation[];
+  approve?: { label?: string; cost?: string };
 }): EscalationChoice[] | undefined {
   // An option-based agent prompt is answered by the chat resolve RPC alone, and a
   // chip's only transport is injected text (terminal:input / agent:prompt), which
@@ -437,11 +673,25 @@ export function quickChoicesFor(p: {
   // they are about to send.
   const floor = classifyDestructive(draft, p.projectPath);
   if (floor.hard.length > 0 || floor.warnings.length > 0) return undefined;
+  // Per-field and clipped, never a safeParse over the finished object: a label the
+  // judge over-ran must cost its own words, not the whole card. Trimmed before the
+  // fallback, because " " is truthy and would draw a blank button on the card that
+  // stops the session. Falls back to the engine's own literal, so a judge that says
+  // nothing gets exactly today's chip.
+  const label = clipWithin(previewForUser(oneLine(p.approve?.label ?? "")), 40).trim() || "Approve";
+  const cost = clipWithin(previewForUser(oneLine(p.approve?.cost ?? "")), 160).trim();
   // Validated against the wire rule itself rather than a second copy of its bounds:
   // an over-long or control-char draft is one the app could not offer as a chip, and
   // it falls back to the free-text sheet instead.
-  const approve = EscalationChoiceSchema.safeParse({ choiceId: "approve", label: "Approve", text: draft });
+  const approve = EscalationChoiceSchema.safeParse({
+    choiceId: "approve", label, text: draft, ...(cost ? { cost } : {}),
+  });
   if (!approve.success) return undefined;
+  // No `cost` on reject: its one clause and REJECT_CHOICE_TEXT would say the same
+  // thing twice on the card whose reported defect was repeated text. Approve
+  // needs both — the label alone cannot carry a judge-authored draft's actual
+  // content — reject does not, because there is nothing for a second sentence
+  // to add to "do not proceed".
   return [approve.data, { choiceId: "reject", label: "Reject", text: REJECT_CHOICE_TEXT }];
 }
 
@@ -500,7 +750,10 @@ export interface HandlerEngineDeps {
 }
 
 interface ArmedSession {
-  goal: string;
+  // Everything the user has asked for on this session, verbatim and in order.
+  // The judge prompt prints the whole list; every other surface names the session
+  // with the FIRST entry alone (see firstInstruction).
+  instructions: InstructionEntry[];
   // The live instruction stack, and the only record of progress: an item's own
   // status is what it has reached, so nothing accumulates alongside it.
   backlog: InstructionItem[];
@@ -511,12 +764,18 @@ interface ArmedSession {
   escalations: OpenEscalation[];
   judgeTool?: string;
   judgeModel?: string;
-  // Absent until the user picks one. Resolved to DEFAULT_PERSONALITY at the two
-  // points that consume it — the status emit and the decide prompt — rather than
-  // defaulted here, so "never chosen" stays distinguishable on disk from a
-  // session the user deliberately set back to the default preset.
-  personality?: HandlerPersonality;
+  // Absent = the unnamed default: the judge's rules alone, with no lens section
+  // in its prompt. Never resolved to a named lens anywhere, so "never chosen"
+  // stays distinguishable on disk from a lens the user picked.
+  role?: HandlerLens;
+  // The user's own words for what else to look for, stored already collapsed and
+  // clipped so persist, snapshot and prompt all hold the one shape.
+  brief?: string;
+  // The BACKOFF POLICY the engine picked — how long to wait and on what curve —
+  // never a reason. Two unrelated failures share "outage" because they share the
+  // curve, which is why attribution needs its own field beside it.
   parkKind?: "limit" | "outage";
+  parkCause?: ParkCause;
   parkedUntil?: number;
   selfResuming?: boolean;
   // Consecutive terminal transient failures. A judged decision clears it.
@@ -525,13 +784,30 @@ interface ArmedSession {
   // into the next decide prompt. Deliberately not persisted: the activity log is
   // the durable audit trail, and this copy exists only to shape the next call.
   floorWarnings: string[];
-  // Terminal transitions the citation gate refused last pass, fed back the way
-  // floorWarnings are. Not persisted for the same reason limitParks is not: a
-  // restart is itself a break in continuity, and the activity feed already holds
-  // the durable trail. Carries the item id, not just the rendered line: the
-  // prompt section states the refused items are STILL OPEN, so an entry has to be
-  // dropped when its item closes or it contradicts the backlog beside it.
+  // Terminal transitions the citation gate refused, fed back the way floorWarnings
+  // are and persisted — UNLIKE floorWarnings — because `evidenceReasks` below is,
+  // and a budget restored without the refusals it was spent on escalates to a card
+  // that can name neither item nor reason. Carries the item id, not just the
+  // rendered line: the prompt section states the refused items are STILL OPEN, so
+  // an entry has to be dropped when its item closes or it contradicts the backlog
+  // beside it. Ordered by recency, which the exhaustion escalation's `at(-1)`
+  // depends on — a repeat moves to the end rather than being skipped.
   evidenceRejections: { id: string; line: string }[];
+  // Asks the harness refused to raise, fed back the way the lists above are and
+  // not persisted — for `floorWarnings`' reason, not `evidenceRejections`': there
+  // is no budget on disk for one of these to be restored beside, because the pass
+  // that raised it had already replied to the agent. Fed to the JUDGE, not the user:
+  // the reply was sent and the work went on, so nothing is waiting — but a judge
+  // that never learns why its question vanished asks the same one every pass.
+  askRejections: string[];
+  // Whether raiseAsk's last raised ask named an `unblocked` set with nothing
+  // still open in it. The row is raised anyway (see raiseAsk) rather than
+  // discarded, so this is the only place the judge learns its ids were stale.
+  // Persisted, UNLIKE askRejections above: the ask itself outlives a restart
+  // (it is a real row on `s.escalations`, not a rejection note), so the
+  // feedback about it must survive one too. Cleared the next time raiseAsk
+  // succeeds naming ids that ARE still open.
+  staleAskIds?: boolean;
   // Per item, how many times the command anchor ALONE has refused a completion.
   // The waiver it feeds is the only exit from an item whose text carries a
   // command-shaped token that is not a command (see MAX_ANCHOR_REFUSALS). Not
@@ -542,6 +818,15 @@ interface ArmedSession {
   // ITEM — not per attempt — is what keeps the feed a record of what happened to
   // the backlog rather than a transcript of the judge's retries.
   evidenceRejected: Set<string>;
+  // How far into THIS chain the session is — see MAX_EVIDENCE_REASKS. Sticky only
+  // across consecutive `continue` passes, which are the only ones that can freeze:
+  // anything that replies to the agent or asks the user has scheduled the very
+  // event the chain was standing in for, so the budget it held is no longer about
+  // anything. Persisted, and always together with `evidenceRejections` above: a
+  // session that stopped moving is diagnosed by reading
+  // `handler-session-<id>.json` off disk, and the pair is what makes that reading
+  // say which item and why rather than only how many tries were spent.
+  evidenceReasks: number;
   // What the user's own instructions authorized for this session. Not
   // persisted, unlike the backlog those instructions also produced: rebuilding it
   // after a restart could only come from the stored item text, which extraction
@@ -581,6 +866,32 @@ interface ArmedSession {
   // is not — without it the rehydrated park would wake and nudge, letting the
   // agent carry on from a pause nobody ever assessed.
   parkAwaitingJudge?: boolean;
+  // The user's answer to a standing ask, waiting for a judge pass to relay it to
+  // the agent in the judge's own words. Set is unrelayed: the handle branch is
+  // what clears it, and it is the only place text provably reached the agent.
+  // Persisted, for the reason the record's own field states — answering an ask
+  // retires the row, so an answer lost to a restart leaves the user with no
+  // surface that could tell them it went missing.
+  askAnswer?: NonNullable<HandlerSessionRecord["askAnswer"]>;
+  // Bumped by every mutation that invalidates a decide prompt already in
+  // flight. The answer transports run straight off agent-core's switch rather
+  // than on `chains`, so they mutate this session while handleEventInner is
+  // suspended in its judge call; a pass that returns has to be able to tell
+  // whether the state it reasoned over is still the state it is writing back to.
+  // Deliberately not persisted: a generation only has meaning within one
+  // process's in-flight passes, and a restored one would compare against passes
+  // that no longer exist.
+  promptGen?: number;
+  // An injected reply is outstanding, so the agent is working and its own
+  // turn_end is already in flight. maybeRelayNow reads it to decide whether an
+  // answer waits for that event or re-enters immediately: with a reply
+  // outstanding, re-entering would land the relay mid-turn, which is the
+  // delivery a framed answer exists to avoid.
+  //
+  // Deliberately not persisted. A restart leaves nothing outstanding, and that
+  // default is the conservative one: the first answer after it re-enters rather
+  // than waiting on an event no process is going to raise.
+  awaitingAgent?: boolean;
 }
 
 // The rejections a REFUSED CITATION produces, as opposed to the harness
@@ -607,6 +918,18 @@ function waivedAnchors(s: ArmedSession): ReadonlySet<string> {
 // wrap-up — for the rest of its life.
 function pendingQuestions(s: ArmedSession): number {
   return s.escalations.filter((e) => e.kind !== "guard_blocked").length;
+}
+
+// Questions the session has actually STOPPED for, as opposed to every question
+// it has put to the user. An ask rides a pass that already replied to the agent,
+// so the work went on and nothing is waiting on it — which is a different fact
+// from "somebody is being waited on", and only the park nudge wants this one.
+//
+// `!e.nonBlocking` rather than `e.nonBlocking === false`: a row written before
+// the field, and one an older bridge stripped it from and re-persisted, both mean
+// the session stopped.
+function blockingQuestions(s: ArmedSession): number {
+  return s.escalations.filter((e) => e.kind !== "guard_blocked" && !e.nonBlocking).length;
 }
 
 // Where a session lands once whatever it was doing is over — a judged decision,
@@ -659,6 +982,13 @@ export class HandlerEngine {
   // Undos in flight, by snapshot id. Two taps on one row must not run two undos:
   // the second would be acting on a tree the first already moved.
   private undoing = new Set<string>();
+  // Lens spellings off disk that this build cannot name, so the warn is one line
+  // per vocabulary gap rather than one per arm.
+  private unknownLenses = new Set<string>();
+  // Whether this engine has already said that a retired posture selected nothing.
+  // One engine is one project, and a fleet of records written under the old
+  // vocabulary would otherwise log a line per slot on every arm.
+  private legacyPostureNoted = false;
   private entitlement: EntitlementReader;
 
   constructor(private deps: HandlerEngineDeps) {
@@ -727,14 +1057,52 @@ export class HandlerEngine {
     if (p.judgeModel !== undefined) s.judgeModel = p.judgeModel.trim() || undefined;
   }
 
-  // Absent leaves the stored posture alone, the same rule applyJudgeChoice
-  // follows. Zod has already bounded the value to the three presets, so unlike
-  // judgeTool there is nothing further to validate here.
-  private applyPersonality(
-    s: { personality?: HandlerPersonality },
-    p: { personality?: HandlerPersonality },
+  // A brief is looked-for material, never a grant: `s.auth` is written only by
+  // authorizeInstruction, whose sole callers are the two instruct paths, and a
+  // brief arrives through arm(), which touches none of them. So a brief naming a
+  // command an instruction WOULD lift moves no floor — pinned as "a brief grants
+  // nothing" rather than left as prose here — and its one consumer stays the
+  // decide prompt.
+  //
+  // Absent leaves the stored value alone, the same rule applyJudgeChoice follows.
+  // A role arrives already bounded to the lens table, so unlike judgeTool there is
+  // nothing to validate; "" is the clear back to the unnamed default, which is why
+  // it is a separate value from absent. A brief is normalized on the way in so the
+  // clipped, single-line form is what gets persisted and re-read.
+  private applyLens(
+    s: { role?: HandlerLens; brief?: string },
+    p: { role?: HandlerLens | ""; brief?: string },
   ): void {
-    if (p.personality !== undefined) s.personality = p.personality;
+    if (p.role !== undefined) s.role = p.role || undefined;
+    if (p.brief !== undefined) s.brief = normalizeBrief(p.brief);
+  }
+
+  // The record stores a lens as a lenient string so a vocabulary this build does
+  // not share cannot null the whole record and take the backlog with it — which
+  // makes this the one place an unrecognised spelling is answered. It resolves to
+  // the unnamed default, and says so once: a session judging under the rules alone
+  // when the user picked a lens is invisible from anywhere else.
+  private resolveLens(raw: string | undefined): HandlerLens | undefined {
+    if (raw === undefined) return undefined;
+    const parsed = HandlerLensSchema.safeParse(raw);
+    if (parsed.success) return parsed.data;
+    if (!this.unknownLenses.has(raw)) {
+      this.unknownLenses.add(raw);
+      log.warn("handler session names an unknown lens %s; judging under the default", JSON.stringify(raw));
+    }
+    return undefined;
+  }
+
+  // A posture was an autonomy dial; autonomy now comes from the rules, so no
+  // value here names a lens — not even the one whose blurb sounded closest,
+  // which would be the dial coming back under another name. Said out loud
+  // because the effect is otherwise invisible: a user who picked "autopilot"
+  // and a user who picked nothing get byte-identical prompts.
+  private noteLegacyPosture(value: string, source: "handler:configure" | "session record"): void {
+    if (this.legacyPostureNoted) return;
+    this.legacyPostureNoted = true;
+    log.warn("handler posture %s from %s reads as the default lens; postures were replaced by lenses",
+      JSON.stringify(value), source);
   }
 
   // The session's stored judge: the live armed session if one exists, else the
@@ -750,10 +1118,15 @@ export class HandlerEngine {
 
   private now(): number { return this.deps.now ? this.deps.now() : Date.now(); }
   private id(prefix: string): string { return `${prefix}-${this.deps.projectId}-${this.now()}-${this.seq++}`; }
+  // Seeded here and not only in the store: an injected loader supplies records
+  // this engine must read the same way as the ones it wrote itself, and a record
+  // reaching arm() with an empty instruction list is a session the judge is told
+  // nobody asked anything of.
   private loadSession(terminalId: string): HandlerSessionRecord | null {
-    return this.deps.loadSessionFn
+    const rec = this.deps.loadSessionFn
       ? this.deps.loadSessionFn(terminalId)
       : loadHandlerSession(this.deps.abDir, this.deps.projectId, terminalId);
+    return rec && seedInstructionsFromGoal(rec);
   }
   private saveSession(rec: HandlerSessionRecord): void {
     (this.deps.saveSessionFn ?? ((r: HandlerSessionRecord) =>
@@ -813,17 +1186,25 @@ export class HandlerEngine {
 
   private persist(terminalId: string, s: ArmedSession, armed: boolean, suspended?: boolean): void {
     this.saveSession({
-      version: 2, terminalId, armed, suspended, goal: s.goal, backlog: s.backlog,
+      version: 2, terminalId, armed, suspended,
+      goal: firstInstruction(s.instructions), instructions: s.instructions, backlog: s.backlog,
       armedAt: s.armedAt, escalations: s.escalations,
-      judgeTool: s.judgeTool, judgeModel: s.judgeModel, personality: s.personality,
-      parkKind: s.parkKind, parkedUntil: s.parkedUntil, transientFailures: s.transientFailures,
-      parkAwaitingJudge: s.parkAwaitingJudge,
+      judgeTool: s.judgeTool, judgeModel: s.judgeModel, role: s.role, brief: s.brief,
+      parkKind: s.parkKind, parkCause: s.parkCause, parkedUntil: s.parkedUntil,
+      transientFailures: s.transientFailures,
+      parkAwaitingJudge: s.parkAwaitingJudge, askAnswer: s.askAnswer, staleAskIds: s.staleAskIds,
+      evidenceReasks: s.evidenceReasks, evidenceRejections: s.evidenceRejections,
     });
   }
 
   arm(p: {
     terminalId: string; goal?: string; backlog?: InstructionItem[];
-    judgeTool?: string; judgeModel?: string; personality?: HandlerPersonality;
+    judgeTool?: string; judgeModel?: string; role?: HandlerLens | ""; brief?: string;
+    // The retired posture key an older app still sends. Accepted so its whole
+    // frame — goal, backlog, judge picks and the arm itself — is never refused at
+    // agent-core.ts's re-parse over a key this bridge no longer honours, and read
+    // only for the one line noteLegacyPosture writes.
+    personality?: string;
   }): void {
     // Entitlement first, ahead of every side effect below — the backlog clamp
     // records an activity row, and a refused arm must leave nothing behind.
@@ -870,29 +1251,41 @@ export class HandlerEngine {
       // Absent means "leave it alone", never "clear it" (an empty backlog is sent
       // as []): a re-arm or a goal edit carries no backlog, and the bridge's
       // copy is the one holding the statuses this session has banked.
-      const goalChanged = p.goal !== undefined && p.goal.trim() !== existing.goal.trim();
-      if (p.goal !== undefined) existing.goal = p.goal;
+      //
+      // The wire's `goal` mirrors the FIRST entry, and a later configure can
+      // carry it back unchanged after typed instructions have stacked behind it,
+      // so a sentence already anywhere in the list is a restatement, not a new
+      // thing asked for. The list is append-only: an edit is the user restating
+      // the objective, and the sentence they restated it FROM is what the agent
+      // has been working under.
+      const stated = normalizeInstruction(p.goal ?? "");
+      const stacked = stated !== "" && !existing.instructions.some((e) => e.text === stated);
+      if (stacked) pushInstruction(existing.instructions, stated, this.now());
       if (backlog !== undefined) existing.backlog = backlog;
       // A configure is the user restating what this session is for, so the last
       // pass's verdict no longer covers the same question — the next event is
       // judged even if the agent has not moved.
       existing.lastJudgedContextHash = undefined;
       this.applyJudgeChoice(existing, p);
-      this.applyPersonality(existing, p);
+      if (p.personality !== undefined) this.noteLegacyPosture(p.personality, "handler:configure");
+      this.applyLens(existing, p);
       this.persist(p.terminalId, existing, true);
       // Only when the goal actually moved: `handler:configure` is also the
       // backlog-edit and judge-pick path (see updateBacklog in the app), and a
       // "Goal edited" row over an unchanged goal is a feed that misreports what
       // happened on every reorder and every judge change.
-      if (goalChanged) this.record(p.terminalId, "goal_edited", existing.goal || NO_GOAL);
+      // Escaped and capped like every other activity row that quotes the user's
+      // own text back at them (see clipQuote). Without it the row carries up to
+      // MAX_INSTRUCTION_CHARS of unescaped user text onto the activity wire.
+      if (stacked) this.record(p.terminalId, "goal_edited", clipQuote(stated));
       this.emitStatus();
       // A goal landing on a session whose backlog is still empty is the user's
       // first statement of what this session is for — the 1-tap arm before it had
       // nothing to extract. Once items exist, a new goal is a rename: stacking
       // more work goes through handler:instruct, and re-extracting here would
       // append a second copy of the sentence on every edit.
-      if (goalChanged && backlog === undefined && existing.goal.trim()) {
-        this.queueExtraction(p.terminalId, existing.goal.trim(), { onlyIfEmpty: true });
+      if (stacked && backlog === undefined) {
+        this.queueExtraction(p.terminalId, stated, { onlyIfEmpty: true });
       }
       return;
     }
@@ -906,6 +1299,7 @@ export class HandlerEngine {
     // anyone re-armed. `armed` still counts on its own — a hard kill leaves the
     // record as it stood, with no exit handler to run.
     const rec = this.loadSession(p.terminalId);
+    if (rec?.personality !== undefined) this.noteLegacyPosture(rec.personality, "session record");
     const resumed = rec && (rec.armed || rec.suspended) ? rec : null;
     // A genuinely new session on this slot is the moment the previous one's undo
     // offers stop meaning anything — and the only such moment. Disarm is NOT one:
@@ -920,9 +1314,26 @@ export class HandlerEngine {
     // Carrying one across would wedge the slot: no typed line clears it, wrap-up
     // never fires, and the park nudge stops.
     const carried = (resumed?.escalations ?? []).filter((e) => e.kind !== "resolve_in_session");
+    // Copied, never the record's own array: the record is the loader's to keep,
+    // and the session mutates this list in place from here on.
+    const instructions = [...(resumed?.instructions ?? [])];
+    const stated = normalizeInstruction(p.goal ?? "");
+    // Same rule as the live branch above: a restart's re-arm restates the goal
+    // it resumed, and stacking it again would double it on every host launch.
+    if (stated !== "" && !instructions.some((e) => e.text === stated)) {
+      pushInstruction(instructions, stated, this.now());
+    }
+    const items = backlog ?? resumed?.backlog ?? [];
+    // Scoped to the items this arm is actually running, on the same rule
+    // absorbTransitions prunes by: a line about an item that has since closed —
+    // or that an explicitly supplied backlog never held — contradicts the BACKLOG
+    // block rendered beside it and names nothing the escalation card could send
+    // the user to look at.
+    const openRejections = (resumed?.evidenceRejections ?? [])
+      .filter((r) => items.some((i) => i.id === r.id && !isTerminalStatus(i.status)));
     const s: ArmedSession = {
-      goal: p.goal ?? resumed?.goal ?? "",
-      backlog: backlog ?? resumed?.backlog ?? [],
+      instructions,
+      backlog: items,
       armedAt: resumed?.armedAt ?? this.now(),
       state: carried.length > 0 ? "needs_you" : "watching",
       escalations: carried,
@@ -932,17 +1343,32 @@ export class HandlerEngine {
       judgeModel: stored.model,
       // Off the RECORD, not off `resumed`: a deliberate disarm keeps the pick
       // for the next arm, exactly as the judge fields above do.
-      personality: rec?.personality,
+      role: this.resolveLens(rec?.role),
+      brief: rec?.brief ? normalizeBrief(rec.brief) : undefined,
+      // Carried across the restart the way the escalations above it are, and for
+      // the sharper version of the same reason: the row this answers is already
+      // retired, so dropping the answer here would leave the user believing they
+      // had answered with nothing on any surface saying otherwise.
+      askAnswer: resumed?.askAnswer,
       transientFailures: resumed?.transientFailures ?? 0,
       limitParks: 0,
       floorWarnings: [],
-      evidenceRejections: [],
+      evidenceRejections: openRejections,
+      askRejections: [],
+      staleAskIds: resumed?.staleAskIds,
       evidenceRejected: new Set(),
+      // Off `resumed` like transientFailures, and for the same reason the field's
+      // own comment gives: a spend the previous process already made must not be
+      // handed back by a restart. Restored only alongside the lines above, never
+      // on its own — a budget with no surviving refusal to spend it on escalates
+      // to a card that can name neither the item nor the reason.
+      evidenceReasks: openRejections.length > 0 ? resumed?.evidenceReasks ?? 0 : 0,
       anchorRefusals: new Map(),
       auth: createAuthorization(),
     };
     this.applyJudgeChoice(s, p);
-    this.applyPersonality(s, p);
+    if (p.personality !== undefined) this.noteLegacyPosture(p.personality, "handler:configure");
+    this.applyLens(s, p);
     this.sessions.set(p.terminalId, s);
     this.persist(p.terminalId, s, true);
     // "armed" either way: nothing is edited on this path — the goal is whatever the
@@ -950,29 +1376,38 @@ export class HandlerEngine {
     // is recorded above. Deliberately NOT "resumed", which belongs to the park
     // lifecycle; spending it here would make "did the park end?" unanswerable from
     // the feed. The rehydrated rows above this one are what mark it as a resume.
-    this.record(p.terminalId, "armed", s.goal || NO_GOAL);
+    this.record(p.terminalId, "armed", firstInstruction(s.instructions) || NOTHING_ASKED);
     this.emitStatus();
     // Rehydrated last, so the arm record still reads as the session's opening
     // line and a deadline already past can resume straight into the new process.
     if (resumed?.parkKind && resumed.parkedUntil !== undefined) {
-      this.rehydratePark(p.terminalId, s, resumed.parkKind, resumed.parkedUntil, resumed.parkAwaitingJudge);
+      this.rehydratePark(
+        p.terminalId, s, resumed.parkKind, resumed.parkCause, resumed.parkedUntil, resumed.parkAwaitingJudge,
+      );
     }
     // The user types one sentence and the session arms immediately, with
     // extraction resolving behind the handoff. Skipped once a backlog exists — a
     // rehydrated or app-supplied one is already the user's list, and extracting
     // the goal alongside it would double every item.
-    if (s.goal.trim() && backlog === undefined) {
-      this.queueExtraction(p.terminalId, s.goal.trim(), { onlyIfEmpty: true });
+    // The NEWEST entry, which on this path is whatever this arm stated — or, for a
+    // rehydration that stated nothing, the last thing the previous process heard.
+    const seed = s.instructions.at(-1)?.text;
+    if (seed && backlog === undefined) {
+      this.queueExtraction(p.terminalId, seed, { onlyIfEmpty: true });
     }
   }
 
   // selfResuming and retryEvent are deliberately not persisted: a restart drops
   // the stale pause event, and a driver that parks itself re-announces.
   private rehydratePark(
-    terminalId: string, s: ArmedSession, kind: "limit" | "outage", until: number, awaitingJudge?: boolean,
+    terminalId: string, s: ArmedSession, kind: "limit" | "outage", cause: ParkCause | undefined,
+    until: number, awaitingJudge?: boolean,
   ): void {
     s.state = "parked";
     s.parkKind = kind;
+    // Absent on a record a bridge predating the field wrote: the app falls back to
+    // the policy's own copy, which is the same thing it renders for that bridge.
+    s.parkCause = cause;
     s.parkedUntil = until;
     s.parkAwaitingJudge = awaitingJudge;
     // A deadline that expired while we were down wakes into a runtime this
@@ -1010,8 +1445,99 @@ export class HandlerEngine {
    * from their own words — "clear out the build dir" reads as a chore and is also
    * a session-long permission — so it is recorded here rather than left implicit.
    */
-  instruct(p: { terminalId: string; text: string }): GrantSummary | null {
+  instruct(
+    p: { terminalId: string; text: string; escalationId?: string; delivered?: true; choiceId?: string },
+  ): GrantSummary | null {
     const s = this.sessions.get(p.terminalId);
+    // Free text ANSWERING a standing ask, per the answer transport: the frame names
+    // the row it answers, and everything below this branch is left byte for byte as
+    // it was for an ordinary instruction.
+    if (p.escalationId !== undefined) {
+      const esc = s?.escalations.find((e) => e.escalationId === p.escalationId);
+      // Both directions fail CLOSED, and the two must not be collapsed. A frame
+      // claiming delivery against a nonBlocking row is an app that raced
+      // reconcileAsks the other way; a frame claiming none against a blocking row
+      // would authorize and extract a sentence the user sent as an ANSWER. A
+      // choiceId on a channel that put nothing into the session is an app that
+      // got the shape wrong. The resync is what takes the row off the sender's
+      // list either way.
+      const answerable = esc !== undefined
+        && (p.choiceId === undefined || p.delivered === true)
+        && (p.delivered === true
+          ? (!esc.nonBlocking && (esc.kind === undefined || esc.kind === "reply"))
+          : esc.nonBlocking === true);
+      if (!s || !esc || !answerable) {
+        log.warn("handler instruct ignored: %s is not an answerable question on %s",
+          p.escalationId, p.terminalId);
+        this.emitStatus();
+        return null;
+      }
+      const text = p.text.trim();
+      if (!text) return null;
+      if (p.delivered) {
+        // Tapped when the frame names a choice; typed-but-delivered when it names
+        // none. A choiceId that matches nothing on this row fails closed below
+        // rather than falling back to `text` — the refusal three lines down is
+        // the only outcome for a mismatch. When it IS tapped, the words never
+        // come from `p.text`: a `choices` entry is judge-authored (the draft) or
+        // engine-authored (REJECT_CHOICE_TEXT), and handler:instruct is the single
+        // channel that mints lifts, so nothing a tapped frame carries may become
+        // the record of what the user chose. Same rule handler:answer states,
+        // reached from the other verb.
+        const choice = p.choiceId === undefined
+          ? undefined
+          : esc.choices?.find((c) => c.choiceId === p.choiceId);
+        if (p.choiceId !== undefined && choice === undefined) {
+          log.warn("handler instruct ignored: %s names no choice on %s", p.choiceId, p.escalationId);
+          this.emitStatus();
+          return null;
+        }
+        const answer = choice?.text ?? text;
+        // The user answered the question that STOPPED this session. Their words
+        // already reached the agent — the app sends this note beside the ordinary
+        // reply, never instead of it — so nothing here relays anything and nothing
+        // here starts a pass: the agent's own turn_end is the pass that reads it.
+        //
+        // Deliberately no authorizeInstruction. The lift belongs to the channel
+        // that carries the words, and the reply transport has never taken one;
+        // minting one here would widen authorization on the strength of a routing
+        // note, which is a separate decision with its own argument to make.
+        //
+        // Deliberately no queueExtraction, for the reason the ask arm states: an
+        // answer routed through the extractor becomes a backlog item the judge then
+        // drives at an agent that already acted on it.
+        this.parkAskAnswer(p.terminalId, s, esc, answer, choice !== undefined, true);
+        this.record(p.terminalId, "answered", "You answered Handler's question", previewForUser(answer));
+        return null;
+      }
+      // UNMOVED, and this ordering is the whole security property: the lift is
+      // taken on the raw payload, before extraction, at the single feed point.
+      const granted = authorizeInstruction(s.auth, text, this.deps.projectPath(p.terminalId));
+      const described = describeGrant(granted);
+      if (described) this.record(p.terminalId, "instruction_authorized", described.reason, described.detail);
+      // Its OWN row, never describeGrant's fallback. describeGrant reports
+      // g.destinations and NOT g.hosts, on purpose (see its comment) — the harvest
+      // reads any dotted token as a host, so echoing the superset back would call
+      // every source file a network permission. That is right for an instruction the
+      // user composed unprompted; it is wrong here, because Handler's own question is
+      // what elicited this sentence. Written as a fallback it fired only when the
+      // answer granted nothing else at all, so "fetch it from mirror.example.net and
+      // unpack into ./vendor" reported "1 path" and the egress permission stayed
+      // exactly as invisible as before. At most one ask is answered at a time, so a
+      // second row costs nothing and closes the grant the user could never see.
+      if (granted.hosts.length > 0) {
+        this.record(p.terminalId, "instruction_authorized",
+          countPhrase(granted.hosts.length, ["host", "hosts"]), rowSample(granted.hosts));
+      }
+      // NO queueExtraction. The extractor is told to split a sentence into work
+      // (extract.ts) and has no third result arm, so an answer routed through it
+      // becomes a backlog item the judge DRIVES at the agent — where the judge is
+      // supposed to relay it in its own words on the next pass.
+      this.parkAskAnswer(p.terminalId, s, esc, text, false);
+      this.record(p.terminalId, "answered", "You answered Handler's question", previewForUser(text));
+      this.maybeRelayNow(p.terminalId, s);
+      return granted;
+    }
     if (!s) {
       log.warn("handler instruct ignored: no armed session for %s", p.terminalId);
       return null;
@@ -1026,8 +1552,210 @@ export class HandlerEngine {
     if (described) {
       this.record(p.terminalId, "instruction_authorized", described.reason, described.detail);
     }
+    // Kept verbatim beside the items it becomes: extraction splits the sentence
+    // into work and keeps none of the wording, so this list is the only place the
+    // judge can read what the user actually said. Persisted here rather than left
+    // to the extraction behind it — an extraction that yields nothing still leaves
+    // a sentence the user typed, and a restart must not lose it.
+    pushInstruction(s.instructions, normalizeInstruction(text), this.now());
+    // A sentence the user typed while a question of Handler's was standing IS the
+    // answer to it, by the rule onUserReply already applies to a submitted line:
+    // each pause supersedes the last, and the user has moved on. The three kinds a
+    // typed line does not answer are excluded exactly as they are there — an ask is
+    // a question aimed at the user, a resolve_in_session needs the chat RPC, and a
+    // guard_blocked report was never a pause to supersede.
+    // `s.promptGen` below is what tells a pass ALREADY suspended in its judge call
+    // that its prompt is stale — but only the hash write-back at the far end of
+    // that call checks it. A pass suspended past that check acts on its verdict
+    // unconditionally, so it can re-mint the very row this supersede retires,
+    // between the feed row above and the user reading it. Same shape as
+    // `onUserReply`'s equivalent gap, already shipped there; accepted here for the
+    // same reason — closing it means gating escalate/injectReply/raiseAsk on a
+    // generation check with no producer telling the judge why its verdict was
+    // dropped, which is a wider change than this wave's own tests exercise.
+    const keptRows = s.escalations.filter((e) => e.nonBlocking
+      || e.kind === "guard_blocked" || e.kind === "resolve_in_session");
+    const gone = s.escalations.filter((e) => !keptRows.includes(e));
+    const superseded = gone.length;
+    const first = gone[0];
+    if (superseded > 0) {
+      s.escalations = keptRows;
+      // Same retirement parkAskAnswer and onUserReply already clear this flag on,
+      // by a third door: the promoted row the last stale-ids report was about is
+      // gone, so the report has nothing left to describe.
+      if (gone.some((e) => e.kind === "reply")) s.staleAskIds = false;
+      // A park is not over because a question was superseded — the parkAskAnswer and
+      // dismissEscalation precedent: the timer is still armed and parkKind/
+      // parkedUntil still describe the wait, and instruct calls unparkIfParked on no
+      // path. Overwriting the state here would flip the pill off "PARKED · UNTIL
+      // 14:05" while the countdown chip still renders that deadline.
+      if (s.state !== "parked") s.state = restingState(s);
+      // The list the last verdict was reached against is not the list any more.
+      s.lastJudgedContextHash = undefined;
+      // Mandatory: instruct runs off agent-core's switch, so a pass suspended in its
+      // judge call would re-bank its own stale hash and undo the clear above.
+      s.promptGen = (s.promptGen ?? 0) + 1;
+    }
+    this.persist(p.terminalId, s, true);
     this.queueExtraction(p.terminalId, text);
+    if (superseded > 0 && first) {
+      this.record(p.terminalId, "answered",
+        superseded === 1
+          ? "Your instruction took the place of Handler's question"
+          : `Your instruction took the place of ${superseded} of Handler's questions`,
+        previewForUser(first.question));
+      this.emitStatus();
+      // Retiring the row alone is INERT and leaves the session worse than it was: an
+      // escalate injected nothing, so the agent is idle at a prompt and no event is
+      // coming to carry this instruction to a judge. The user would go from
+      // "stopped, with a question" to "watching, with nothing happening".
+      //
+      // Not on a parked session: the park's own wake (the timer's retryEvent, or
+      // limit_cleared for a self-resuming park) is a producer that is already coming,
+      // and firing here would burn a judge call on the very provider account the
+      // park exists to back off from — whose failure re-enters registerTransientFailure.
+      if (s.state !== "parked") this.maybeRelayNow(p.terminalId, s, "to pick up your instruction");
+    }
     return granted;
+  }
+
+  /**
+   * One tap on an ask's option, recorded as the user's own answer.
+   *
+   * What it deliberately does NOT do, because every one of these is a path the
+   * ask shape exists to keep judge-authored text off (see quickChoicesFor):
+   * `authorizeInstruction`, `queueExtraction`, `injectReply`, `guard.reset`,
+   * `arm`, `disarm`, `enterPark`, and minting a snapshot. `s.auth` is
+   * byte-identical across a tap, and nothing here reaches the agent — the judge
+   * relays the answer in its own words on the pass that follows.
+   *
+   * The option's words never travel back on the wire: the app sends a
+   * `choiceId` and the label is resolved from this bridge's OWN persisted row,
+   * so what is parked for the judge is exactly the string the user read.
+   *
+   * Fails CLOSED in every direction the app can get wrong, and unlike
+   * `answerWithChoice` app-side there is no fallback to a caller-supplied row: an
+   * id this session does not hold as a standing ask (a tap racing the frame that
+   * already retired it) resyncs the sender rather than answering something else.
+   */
+  answerAsk(p: { terminalId: string; escalationId: string; choiceId: string }): void {
+    const s = this.sessions.get(p.terminalId);
+    if (!s) {
+      log.warn("handler answer ignored: no armed session for %s", p.terminalId);
+      return;
+    }
+    const esc = s.escalations.find((e) => e.escalationId === p.escalationId && e.nonBlocking);
+    if (!esc) {
+      log.warn("handler answer ignored: %s is not a standing ask on %s", p.escalationId, p.terminalId);
+      this.emitStatus();
+      return;
+    }
+    // Resolved against this row's own options, never against anything the frame
+    // carried: a `choiceId` is identity, and the label it names is what the user
+    // read on the button they pressed.
+    const option = esc.askOptions?.find((o) => o.choiceId === p.choiceId);
+    if (!option) {
+      log.warn("handler answer ignored: %s names no option on %s", p.choiceId, p.escalationId);
+      this.emitStatus();
+      return;
+    }
+    this.parkAskAnswer(p.terminalId, s, esc, option.label, true);
+    // `answered` rows carry a whole sentence: the app prints the reason as the
+    // title with no "Escalated:" in front, because this row is the user's own
+    // act and the feed must not file it beside a stop.
+    this.record(p.terminalId, "answered", "You answered Handler's question", previewForUser(option.label));
+    this.maybeRelayNow(p.terminalId, s);
+  }
+
+  /**
+   * Bank the user's answer and retire the question it answers. Shared by the tap
+   * and the free-text arms, so the two cannot come to differ about what
+   * answering an ask means.
+   */
+  private parkAskAnswer(
+    terminalId: string, s: ArmedSession, esc: OpenEscalation, answer: string, tapped: boolean,
+    delivered = false,
+  ): void {
+    // A parked answer is by definition unrelayed — the handle branch clears it the
+    // moment one reaches the agent — so this is a real answer about to be lost.
+    // At most one ask stands at a time, and a silent replace would drop the first
+    // one with nothing anywhere saying so.
+    if (s.askAnswer) {
+      this.record(terminalId, "answered", "Your earlier answer was replaced",
+        previewForUser(s.askAnswer.answer));
+    }
+    s.askAnswer = {
+      escalationId: esc.escalationId, question: esc.question, answer, tapped, at: this.now(),
+      // From the caller's channel, never from `esc`: see HandlerInstructWire.delivered.
+      ...(delivered ? { blocking: true as const } : {}),
+    };
+    s.escalations = s.escalations.filter((e) => e !== esc);
+    // The row this flag describes is gone, answered or declined either way, so a
+    // report about ITS `unblocked` ids has nothing left to be about. Scoped to
+    // `"reply"`: an ordinary escalate answered here (a blocking row's `delivered`
+    // note) never raised an ask and must not clear a report about a different one.
+    if (esc.kind === "reply") s.staleAskIds = false;
+    // Without this the answer is discarded with no row, no log and no push.
+    // `contextHash` is computed over `ctx.text` alone and `assembleContext` builds
+    // that from the transcript plus recent PTY, so an answer that lives only in a
+    // prompt option moves nothing in it — and the next pass would return at the
+    // unmoved-context check having judged nothing at all.
+    s.lastJudgedContextHash = undefined;
+    // Paired with the clear above and load-bearing for the same reason. A pass
+    // already awaiting its verdict re-banks the hash it computed when it returns,
+    // which would undo that clear and leave the re-entry maybeRelayNow is about to
+    // queue returning at the unmoved-context check — with nothing else coming, on a
+    // `continue`, to ever carry this answer. The bump is what tells that pass its
+    // prompt went stale mid-flight.
+    s.promptGen = (s.promptGen ?? 0) + 1;
+    // A park is not over because a question was answered — the dismissEscalation
+    // precedent: the timer is still armed and parkKind/parkedUntil still describe
+    // the wait.
+    if (s.state !== "parked") s.state = restingState(s);
+    this.persist(terminalId, s, true);
+    this.emitStatus();
+  }
+
+  /**
+   * Relay the parked answer now, or leave it for the pass that is already coming.
+   *
+   * The ask rides a handle that already injected a reply, so when a reply is
+   * still outstanding the agent's own turn_end is in flight and IS the pass that
+   * relays. Re-entering here would race it and land the relay mid-turn — the
+   * moment a framed delivery exists to avoid — so we do nothing and handleEvent's
+   * agent-originated producers stay the only sources of a pass.
+   *
+   * With nothing outstanding, no event is coming: the reply that carried the ask
+   * was answered hours ago and the agent is idle at a prompt. Then re-entering IS
+   * the delivery, and on an event `latest` already holds it is the same
+   * handleEvent call the two retryEvent sites already make (limit_cleared, park
+   * wake) — `latest.set` on the value already there is a no-op, and handleEvent's
+   * own liveness re-check still drops this pass if a fresher event overtakes it.
+   *
+   * An empty `latest` is the case that makes this a genuinely NEW producer, and
+   * it is the answered-after-a-restart one: `latest` is in-memory, so a bridge
+   * that came back between the ask and the answer has nothing to re-enter on and
+   * no agent event is guaranteed ever again. Guaranteed delivery was chosen over
+   * the smaller producer set, so one event is synthesised — at most one per
+   * answered ask, since answering retires the row and the synthesised event then
+   * becomes the `latest` any later answer re-enters on. It deliberately carries no
+   * transcriptPath: the one a pre-restart event held names a file for a PTY that
+   * is gone, and handleEventInner resolves the live adapter's path instead, which
+   * degrades to the PTY tail (and to no context at all) rather than throwing.
+   */
+  private maybeRelayNow(terminalId: string, s: ArmedSession, why = "to relay your answer"): void {
+    if (s.awaitingAgent) return;
+    const evt = this.latest.get(terminalId);
+    // Nothing awaits either call: they carry their own sink the way the two
+    // retryEvent sites do, and a judge that fails re-parks through the same path.
+    if (evt) {
+      void this.handleEvent(evt).catch(() => {});
+      return;
+    }
+    // A pass nothing on the machine asked for is exactly the kind of thing a
+    // future reader has to be able to find in the feed.
+    this.record(terminalId, "answered", `Handler started a pass ${why}, since no agent event was due`);
+    void this.handleEvent({ terminalId, event: "turn_end" }).catch(() => {});
   }
 
   // `onlyIfEmpty` is for the arm-time pass: the goal is extracted once,
@@ -1425,11 +2153,13 @@ export class HandlerEngine {
     // earlier free-text pause-question for this terminal is stale (each pause
     // supersedes the last).
     //
-    // A `resolve_in_session` row is not one of those. It names an option-based
-    // prompt that only the chat resolve RPC can answer (see OpenEscalationWire.kind),
-    // so a typed line retires nothing: clearing it would drop the session to
-    // "watching" while the agent stays blocked, and nothing would re-raise it —
-    // escalation needs a NEW event, and a blocked agent emits none.
+    // A `resolve_in_session` row is not one of those. It names a prompt whose
+    // answer is reported by its own signal — the chat resolve RPC for a driver,
+    // the `prompt_answered` hook post for a PTY question (see
+    // OpenEscalationWire.kind) — so a typed line retires nothing: clearing it
+    // would drop the session to "watching" while the agent stays blocked, and
+    // nothing would re-raise it — escalation needs a NEW event, and a blocked
+    // agent emits none.
     //
     // A `guard_blocked` row is not one either, for the opposite reason: it reports
     // an action Handler could NOT take, so there is no pause for a later one to
@@ -1437,6 +2167,14 @@ export class HandlerEngine {
     // exactly how a report reached disk and then vanished on an unrelated line,
     // leaving the user never knowing Handler had wanted to act. `handler:dismiss`
     // is the only thing that retires one.
+    //
+    // A `nonBlocking` row is not one either, and for a third reason. It is a
+    // question Handler put to the USER, raised on a pass that had already replied
+    // to the agent — so it is not a stale pause waiting to be superseded, and the
+    // line the user types is aimed at the AGENT, not at it. Retiring it here would
+    // consume an answer to a different question. What DOES retire one: an
+    // escalationId-bearing handler:answer or handler:instruct (the answer itself),
+    // a dismiss, or reconcileAsks finding nothing left that it did not gate.
     //
     // A resolve retires the row for the prompt it names, plus any row too old to
     // carry an id at all. Never every row: drivers hold a MAP of pending prompts
@@ -1449,19 +2187,98 @@ export class HandlerEngine {
     // already answered — one nothing can ever retire, since the resolve that would name
     // it has been and gone.
     if (resolved !== undefined) this.dropQueuedPrompts(terminalId, resolved);
-    const kept = s.escalations.filter((e) => e.kind === "guard_blocked"
+    // The ask clause is FIRST and outside the kind tests on purpose: an ask is
+    // minted kind `reply` and carries no `promptId`, so a future restructuring of
+    // the resolve arm around `promptId` rather than `kind` would swallow it.
+    // Spelled truthily to match the field's polarity — a row an older
+    // bridge stripped the flag from and re-persisted falls into the drop arm,
+    // which is the conservative reading.
+    const kept = s.escalations.filter((e) => e.nonBlocking
+      || e.kind === "guard_blocked"
       || (e.kind === "resolve_in_session"
         && (resolved === undefined || (e.promptId !== undefined && e.promptId !== resolved))));
     const cleared = kept.length < s.escalations.length;
-    if (!unparked && !cleared) return;
-    s.escalations = kept;
+    // Identity, matching `kept`'s own filter over the same array — two rows
+    // sharing an escalationId (an older bridge's collision, say) must not vanish
+    // from this count the way a Set of ids would let them.
+    //
+    // `resolve_in_session` excluded on purpose: that row is retired by a RESOLVE
+    // on the agent's own permission/question prompt, not by a line typed into
+    // this session, and its `question` is a notify body ("Agent requests
+    // permission: ...") rather than prose a "Your reply answered" sentence reads
+    // naturally against. Excluding the whole kind also keeps an id-less legacy
+    // sibling — dropped by the SAME resolve for a prompt it does not name, per
+    // the kept-filter above — from inflating this count for an answer the user
+    // gave to only one of them.
+    const dropped = s.escalations.filter((e) => !kept.includes(e) && e.kind !== "resolve_in_session");
     // A human line is a fresh attempt, so the failure series that led here is
     // over. Without this the counters stay at their ceiling — only a judged turn
     // clears transientFailures — and the very next failure would page again
     // instead of backing off.
+    //
+    // Above the early return, because that reason was always about the human line
+    // and never about which rows it happened to clear — the coupling was
+    // incidental, which is why `guard.reset` and the hash clear already sit here.
+    // It therefore now also fires on a session standing only on an ask, and on
+    // one with no rows at all. The persist and the broadcast stay behind the
+    // gate, so the per-keystroke disk write and encrypted fan-out are unchanged;
+    // what a restart loses is a counter a fresh process starts at zero anyway.
     s.transientFailures = 0;
     s.limitParks = 0;
+    // The re-ask budget on the same terms, and for the sharper version of the same
+    // reason: a typed line is itself the wake source the chain was standing in for,
+    // so whatever the judge could not settle on its own is now the human's to
+    // settle. Carrying the spend past it would spend a fresh episode's budget on
+    // the last one.
+    s.evidenceReasks = 0;
+    if (!unparked && !cleared) return;
+    // Paired with the hash clear above, and scoped to the case that needs it. This
+    // method runs straight off agent-core's switch, not on the engine's chain, so a
+    // pass suspended in its judge call re-banks the hash it computed on return and
+    // undoes that clear — leaving a human's own submitted line unjudged with no
+    // further event coming to raise it.
+    //
+    // Below the early return on purpose: `guard.reset` above has already dropped
+    // the circular-reply hashes, so bumping on EVERY submitted keystroke would let
+    // a re-judged unmoved context resend a reply the guard would otherwise have
+    // refused. Confined to the pass that just retired a question or ended a park,
+    // re-judging is exactly what is wanted.
+    s.promptGen = (s.promptGen ?? 0) + 1;
+    s.escalations = kept;
     s.state = restingState(s);
+    // A promoted ask (kind "reply") superseded by a typed line is the same
+    // retirement parkAskAnswer clears this flag on, by a different door: the row
+    // the last stale-ids report was about is gone, so the report has nothing left
+    // to describe.
+    if (dropped.some((e) => e.kind === "reply")) s.staleAskIds = false;
+    // The park lifecycle owns "resumed", and every other end of one says so: the
+    // timer, a cancel, the limit clearing, a rehydrated expiry. A keystroke ending
+    // one said nothing at all, so a session that left `parked` with its failure
+    // counters back at zero read as a persistence bug rather than as the user
+    // taking the wheel.
+    //
+    // Ungated by `resolved`, unlike the `answered` row below: the app's bare "\r"
+    // resolve ends the wait exactly as a typed line does, and this row names the
+    // reply, not the question it did or did not answer.
+    if (unparked) this.record(terminalId, "resumed", "you replied to the agent");
+    // The ask path was given `asked`/`answered`/`ask_rejected` precisely so a
+    // question and its resolution both read as themselves. This path retired a
+    // question and said nothing at all: the feed jumped from "Escalated:" to the
+    // next verdict, with no row anywhere saying the user had answered.
+    //
+    // Gated on `resolved === undefined`: a chat resolve names the permission or
+    // question prompt it answers, and that answer has nothing to do with any
+    // OTHER blocking row this same submit happens to clear underneath it — the
+    // bare "\r" sentinel is a resolve, never a line the user typed at a question,
+    // and a feed row here would tell them their tap answered something they never
+    // saw an answer box for.
+    if (resolved === undefined && dropped.length > 0) {
+      this.record(terminalId, "answered",
+        dropped.length === 1
+          ? "Your reply answered Handler's question"
+          : `Your reply answered ${dropped.length} of Handler's questions`,
+        previewForUser(dropped[0]!.question));
+    }
     this.persist(terminalId, s, true);
     this.emitStatus();
   }
@@ -1483,19 +2300,28 @@ export class HandlerEngine {
   }
 
   /**
-   * A driver withdrew a pending permission/question (agent:request-retracted):
-   * the forced escalation now points at a prompt that no longer exists. Retires
-   * that row — unlike a typed line, a retraction means the prompt is genuinely
-   * gone, so nothing can still be waiting on it — but WITHOUT resetting the
-   * runaway guard: retraction is the agent moving on, not a human answering.
+   * A pending permission/question stopped pending, so the forced escalation now
+   * points at a prompt that no longer exists. Retires that row — unlike a typed
+   * line, this means the prompt is genuinely gone, so nothing can still be
+   * waiting on it — but WITHOUT resetting the runaway guard, which only a
+   * judged turn or a human line at the keyboard may clear.
    *
-   * Scoped to `promptId` because drivers withdraw one at a time: codex keys its
+   * Two callers, and the engine cannot tell them apart: a driver withdrawing one
+   * (`agent:request-retracted`), and a PTY question reporting its own completion
+   * through the PostToolUse/PostToolUseFailure hook (`prompt_answered`, routed
+   * here by agent-core). The first is the agent moving on; the second is usually
+   * the user answering in the terminal — which is why the feed row below names
+   * neither.
+   *
+   * Scoped to `promptId` because both withdraw one at a time: codex keys its
    * retractors per JSON-RPC request, so cancelling one elicitation leaves every
-   * other prompt on that session live. Clearing the list wholesale took their
-   * rows with it and rested the session at "watching" over a blocked agent.
+   * other prompt on that session live, and one tool call completing says nothing
+   * about the rest. Clearing the list wholesale took their rows with it and
+   * rested the session at "watching" over a blocked agent.
    *
    * No id means the whole set is gone — both wire fields are optional, and
    * work-status.ts's `closeRequest` reads an id-less retraction the same way.
+   * Only a driver's sweep ever spells it that way; the hook path always has one.
    */
   onPromptRetracted(terminalId: string, promptId?: string): void {
     // Before the session lookup, and never against `latest`: a prompt can still
@@ -1514,24 +2340,34 @@ export class HandlerEngine {
     const unparked = this.unparkIfParked(terminalId, s);
     // An id-less retraction means every PROMPT is gone. A `guard_blocked` row is
     // not a prompt — it carries no promptId, so the id-ed arm already keeps it,
-    // and no driver ever had anything to withdraw.
+    // and no driver ever had anything to withdraw. Neither is an ask: it is a
+    // question Handler put to the USER, held by nothing in the agent's runtime,
+    // so there is nothing here for a driver to take back.
     const kept = promptId === undefined
-      ? s.escalations.filter((e) => e.kind === "guard_blocked")
+      ? s.escalations.filter((e) => e.kind === "guard_blocked" || e.nonBlocking)
       : s.escalations.filter((e) => e.promptId !== promptId);
     if (!unparked && kept.length === s.escalations.length) return;
     s.escalations = kept;
     s.state = restingState(s);
     this.persist(terminalId, s, true);
+    // The wait really did end, but the two callers above end it for opposite
+    // reasons — the agent withdrew, or the user answered in the terminal — and
+    // naming either one is wrong half the time.
+    if (unparked) this.record(terminalId, "resumed", "the prompt is no longer waiting");
     this.emitStatus();
   }
 
-  // Ends a park without recording anything: the caller (human input, a blocking
-  // prompt, disarm) is itself the reason the wait is over.
+  // Ends a park; the feed row belongs to the CALLER, because only the caller knows
+  // what ended the wait. Three end one silently on purpose: disarm has no
+  // supervised session left to resume, a blocking prompt mid-park is recorded by
+  // the escalation it raises, and a limit past its ceiling stops waiting without
+  // resuming anything.
   private unparkIfParked(terminalId: string, s: ArmedSession): boolean {
     if (s.state !== "parked") return false;
     this.timers.cancel(terminalId);
     s.state = restingState(s);
     s.parkKind = undefined;
+    s.parkCause = undefined;
     s.parkedUntil = undefined;
     s.selfResuming = undefined;
     s.parkPushSent = undefined;
@@ -1599,6 +2435,18 @@ export class HandlerEngine {
     });
   }
 
+  // Whether a pass that will judge this session again is already waiting behind
+  // the one asking. `latest` answers it exactly for every event that can reach a
+  // judge: handleEvent registers those synchronously, at call time, and only a
+  // NEWER one replaces the entry — a blocking prompt escalates without judging and
+  // a lifecycle event is handled elsewhere, so neither is ever the subject here. A
+  // queued prompt counts as well: it raises its own row the moment it runs, and it
+  // is the pass least able to afford waiting.
+  private wakeSourcePending(evt: HandlerEvent): boolean {
+    return this.latest.get(evt.terminalId) !== evt
+      || (this.queuedPrompts.get(evt.terminalId)?.size ?? 0) > 0;
+  }
+
   private trackQueuedPrompt(evt: HandlerEvent): void {
     const queued = this.queuedPrompts.get(evt.terminalId) ?? new Set<HandlerEvent>();
     queued.add(evt);
@@ -1626,6 +2474,28 @@ export class HandlerEngine {
   private async handleEventInner(evt: HandlerEvent): Promise<void> {
     const s = this.sessions.get(evt.terminalId);
     if (!s) return; // unarmed session: Handler is per-session now
+
+    // Captured BEFORE the clear below, and threaded to this pass's own prompt as
+    // `agentWorking`. The flag reads false unconditionally from the moment the
+    // clear runs, so a live re-read anywhere later in this same call — including
+    // the standing-question section built further down — would always be false
+    // and could never tell a mid-turn pass apart from an idle one. A reply was
+    // outstanding as THIS event arrived precisely when this event is evidence of
+    // it (its turn_end, an awaiting_input mid-run), which is the case the section
+    // means by "that is why you are seeing this pass at all".
+    const wasAwaitingAgent = s.awaitingAgent === true;
+
+    // The agent produced an event, so whatever was injected into it is no longer
+    // outstanding. Cleared here rather than on any one decision branch, and before
+    // any judge work: every event answers the question this flag asks, including
+    // the ones that return early below, and a flag nothing clears would leave every
+    // later answer waiting on a turn_end that has already been and gone.
+    s.awaitingAgent = undefined;
+
+    // Before every early return below, for the same reason the clear above is: a
+    // standing ask's claim about what the work is getting on with is re-checked
+    // against the backlog on every event, not only on the ones that reach a judge.
+    this.reconcileAsks(evt.terminalId, s);
 
     // The second read of the same predicate, and what actually bounds the
     // revocation lag to the token's 3600s TTL — gating only at arm() would make
@@ -1655,10 +2525,16 @@ export class HandlerEngine {
       }
     }
 
-    // Structured blocking prompts (permission / AskUserQuestion) are option-
-    // based: the judge only emits free text, and auto-approving a tool call
-    // would bypass the destructive floor (it inspects reply text, not the
+    // Blocking prompts (permission / AskUserQuestion) are answered by choosing,
+    // not by typing: the judge only emits free text, and auto-approving a tool
+    // call would bypass the destructive floor (it inspects reply text, not the
     // pending call). Forced escalation, no judge — wake-rules trump handling.
+    //
+    // A structured driver's prompt is answered by the chat resolve RPC off an
+    // option card. A PTY question has neither — Claude draws its own dialog and
+    // the user answers it in the terminal — and the row is retired by the
+    // PostToolUse hook rather than by anything the app sends. Both are the same
+    // fact here: the agent is stopped on the user and no judge call can move it.
     if (isBlockingPrompt(evt)) {
       const subject = evt.detail?.trim();
       const body = evt.event === "permission_request"
@@ -1697,6 +2573,12 @@ export class HandlerEngine {
     // "timed out" versus "never ran" is the one distinction that would let the
     // budget in judge.ts be set from data rather than guessed at.
     let judgeTimedOut = false;
+    // What this pass actually put in front of its judge, captured so the write-back
+    // below can tell it apart from anything parked while the judge was thinking.
+    // The reference itself is the token: parkAskAnswer always assigns a fresh
+    // object, so identity answers "is the answer still the one I showed?" exactly.
+    let judgedAnswer: ArmedSession["askAnswer"];
+    const promptGen = s.promptGen ?? 0;
     try {
       const tool = this.deps.tool(evt.terminalId);
       catalog = this.deps.adapter.commandCatalog(evt.terminalId);
@@ -1733,15 +2615,56 @@ export class HandlerEngine {
         const r = checkReplyShape(replyShape(d), catalog);
         return r?.retryable ? r.reason : null;
       };
+      // Read once, here, and never through `s` again below: everything after the
+      // await has to compare against what the prompt was built from.
+      judgedAnswer = s.askAnswer;
       const runDecisionFn = this.deps.runDecisionFn ?? defaultRunDecision;
       decision = await runDecisionFn({
-        tool: s.judgeTool ?? tool, model: s.judgeModel, goal: s.goal,
-        personality: s.personality ?? DEFAULT_PERSONALITY,
+        tool: s.judgeTool ?? tool, model: s.judgeModel,
+        instructions: s.instructions.map((i) => i.text),
+        role: s.role, brief: s.brief,
         backlogText: renderBacklog(s.backlog),
         context: ctx.text, transcriptPath: ctx.transcriptPath ?? transcriptPath,
         cwd: this.deps.projectPath(evt.terminalId),
         floorWarnings: s.floorWarnings,
         evidenceRejections: s.evidenceRejections.map((r) => r.line),
+        // Read off the live guard, so it is never stored on the session and never
+        // persisted. It is honest only in one direction: it is taken BEFORE the
+        // judge runs, while absorbTransitions calls guard.recordProgress after it
+        // on any `done`, so a prompt that said "1 left" can be followed by a fully
+        // restored cap in the same pass. That direction only ever makes the judge
+        // under-spend, which is why the prompt states a floor and never a promise.
+        replyBudget: this.guard.remaining(evt.terminalId),
+        // Derived per pass and never cached on the session: each section asserts
+        // something the very next event can end — reconcileAsks retires a standing
+        // ask above, and the write-back below drops a parked answer the moment this
+        // pass has read it. This is the discipline evidenceRejections earns by pruning.
+        openAsks: s.escalations.filter((e) => e.nonBlocking).map((e) => e.question),
+        askRejections: s.askRejections,
+        // The other half of "a question of yours is standing". reconcileAsks promotes
+        // an ask by clearing `nonBlocking`, and openAsks above filters on exactly
+        // that — so a question the harness has just made blocking becomes invisible
+        // to the judge that asked it. `kind === undefined` covers an ORDINARY
+        // escalate() call, which is every call site but raiseAsk's mint and the
+        // guard_blocked/resolve_in_session ones excluded below: without it, the
+        // commonest blocking row on the session is in neither this list nor
+        // openAsks, and the judge escalates the same thing again on the next event.
+        standingQuestions: s.escalations
+          .filter((e) => !e.nonBlocking && (e.kind === undefined || e.kind === "reply"))
+          .map((e) => e.question),
+        // Captured at the top of this call, before the unconditional clear — see
+        // the comment there for why a live read here would always be false.
+        agentWorking: wasAwaitingAgent,
+        staleAskIds: s.staleAskIds === true,
+        // Projected rather than passed whole: `escalationId` is how the answer was
+        // routed here and `at` is bookkeeping, and neither is something the judge
+        // can act on.
+        askAnswer: judgedAnswer && {
+          question: judgedAnswer.question,
+          answer: judgedAnswer.answer,
+          tapped: judgedAnswer.tapped,
+          blocking: judgedAnswer.blocking,
+        },
         // The SUPERVISED agent, not the judge: `tool:` above is `s.judgeTool ?? tool`,
         // and a per-session judge pick can name a different CLI entirely.
         agentTool: tool,
@@ -1764,12 +2687,37 @@ export class HandlerEngine {
     // A judge that answered proves the provider is serving us again.
     s.transientFailures = 0;
     s.limitParks = 0;
-    s.lastJudgedContextHash = judgedHash;
+    // Banked only if nothing invalidated this prompt while it was in flight.
+    // parkAskAnswer clears the hash precisely so the re-entry it queues judges
+    // rather than returning early; re-banking unconditionally would undo that and
+    // strand the answer behind ANSWER QUEUED with no producer left to release it.
+    if ((s.promptGen ?? 0) === promptGen) s.lastJudgedContextHash = judgedHash;
+
+    // The answer is addressed to the JUDGE, not the agent, so a judge that reached
+    // a verdict has consumed it — on `continue` too, which decision.ts explicitly
+    // tells it to return when the answer changes nothing. Clearing only on `handle`
+    // left exactly that case re-injecting the same answer into every later prompt
+    // and pinning ANSWER QUEUED for the life of the session.
+    //
+    // Identity-checked, and that is the whole point: an answer parked while this
+    // pass was suspended in its judge call was never in this prompt, and clearing
+    // it here would destroy it unseen while every surface reported it delivered.
+    if (judgedAnswer !== undefined && s.askAnswer === judgedAnswer) s.askAnswer = undefined;
 
     // A rejection must not strand state in "handling" — reset before rethrowing so
     // the next event isn't ignored and the app's status pill reflects reality.
     try {
-      this.absorbTransitions(evt.terminalId, s, decision, judgedContext, catalog);
+      const refusedCompletion = this.absorbTransitions(evt.terminalId, s, decision, judgedContext, catalog);
+      // The chain below exists to stand in for a pass nobody is going to raise, so
+      // it is over the moment a pass raises one: `handle` replies to the agent and
+      // `escalate` puts the question to the user, and either way the next event is
+      // already scheduled. Only a `continue` can freeze, so only consecutive
+      // `continue` passes may keep the counter armed. Left armed past its episode
+      // it hijacks a later ordinary `continue` — three judge spawns on an unmoved
+      // prompt and then a question about a refusal that was resolved events ago —
+      // and, because absorbTransitions gates the anchor counter on it being zero,
+      // it also stops MAX_ANCHOR_REFUSALS ever reaching its waiver.
+      if (decision.decision !== "continue") s.evidenceReasks = 0;
       // Wrap-up is checked AFTER acting on the decision (see each branch below):
       // a final `handle` reply must reach the agent before disarm, and an
       // escalation never wraps up — wake-rules trump completion.
@@ -1852,6 +2800,12 @@ export class HandlerEngine {
         const command = findCommand(catalog, shape.verb);
         this.deps.adapter.injectReply(evt.terminalId, shape.written,
           command ? { id: command.id, args: shape.args } : undefined);
+        // AFTER the inject and never before it: this claims a reply is genuinely
+        // outstanding, and an answer that arrives while it is set waits for the
+        // agent's turn_end instead of re-entering (see maybeRelayNow). Setting it
+        // ahead of a reply that then failed to go out would strand every answer on
+        // this session until some other event happened to arrive.
+        s.awaitingAgent = true;
         this.guard.recordAutoReply(evt.terminalId, probe);
         // Both recorded after the inject and before the handle row, so the feed reads
         // as "what was saved, what was flagged, then what was sent". Auditability is
@@ -1860,6 +2814,20 @@ export class HandlerEngine {
         this.recordSnapshots(evt.terminalId, s, snapshots, [...warn, ...authorized]);
         this.noteFloorWarnings(evt.terminalId, s, warn);
         this.record(evt.terminalId, "handle", decision.reason, shape.written);
+        // Raised only here. Every guard above returns before this line — the shape
+        // rejection, the HARD floor, the runaway cap — so a row that says the work
+        // went on is one written after the reply provably reached the agent. That
+        // injected reply is also what schedules the pass which follows: the agent's
+        // own turn_end arrives on the paths agent-core already owns, the transcript
+        // has moved so contextHash differs, and nothing here arms a timer or clears
+        // the hash.
+        //
+        // The position is load-bearing in both directions and a later edit must
+        // keep it: after the concurrent-disarm recheck above (a session the user
+        // stopped mid-pass must gain no row), and before maybeWrapUp (which must
+        // see the row, so a pass that both finishes the backlog and asks cannot
+        // disarm out from under the question).
+        if (decision.ask) this.raiseAsk(evt.terminalId, s, decision.ask);
         if (this.maybeWrapUp(evt.terminalId, s)) return;
         s.state = restingState(s);
         this.persist(evt.terminalId, s, true);
@@ -1868,6 +2836,85 @@ export class HandlerEngine {
       }
 
       if (decision.decision === "continue") {
+        // Neither this branch nor the escalate below sends the agent anything, so a
+        // question marked "the work goes on" would sit over a session with no
+        // further event to raise it again — the exact state the ask shape exists to
+        // make unspellable.
+        if (decision.ask) {
+          log.warn("handler ask ignored on %s decision for %s", decision.decision, evt.terminalId);
+        }
+        // The one decision that cannot rest on a refused completion. Every event
+        // able to reach a judge means the agent has STOPPED, and this branch sends
+        // it nothing — so the pass that refused the citation is the pass that has
+        // to resolve it, because no later pass is coming. The judge is asked again
+        // with its own rejection already in the prompt, and the user is asked once
+        // that budget is spent. The agent is never nudged: it did nothing wrong,
+        // and an unsupervised "continue" would answer whatever it stopped on.
+        //
+        // `evidenceReasks > 0` and not `refusedCompletion` alone: the likeliest way
+        // a re-asked judge fails is by returning no transition at all, which
+        // refuses nothing — a predicate reading only this pass's refusal would rest
+        // on exactly that.
+        //
+        // One unanswered question is enough: a second copy asks the user to
+        // answer twice, and it is what keeps the escalation from re-firing on
+        // every later event. `blockingQuestions` and not `pendingQuestions`,
+        // because the exit this looks for is a session that has STOPPED for
+        // somebody. An ask rode a pass that already replied to the agent, so it
+        // stopped nothing and answers nothing — counting it would exempt every
+        // session with a standing ask from the whole gate and rest it on the
+        // refusal, which is the freeze. The exhaustion escalation below is minted
+        // blocking, so the re-fire suppression this relies on still holds.
+        //
+        // `wakeSourcePending` is the chain's own premise, re-checked: handleEvent
+        // registers a newer event SYNCHRONOUSLY while this pass is still running,
+        // so by now the session may be anything but frozen — and the chain would
+        // then hold that event, blocking prompts included, for up to three more
+        // judge budgets before it ever runs. Resting is safe in exactly that case,
+        // and it is not the re-enqueue the re-entry below rejects: the queued event
+        // IS the later pass this block exists because there usually is not one.
+        //
+        // Above the `continue` row on purpose. Below it, the feed grows an
+        // identical row per retry — the transcript of the judge's own attempts
+        // that the one-row-per-item rule in absorbTransitions already refuses.
+        if ((refusedCompletion || s.evidenceReasks > 0) && blockingQuestions(s) === 0
+          && !this.wakeSourcePending(evt)) {
+          if (s.evidenceReasks < MAX_EVIDENCE_REASKS) {
+            s.evidenceReasks += 1;
+            // Or the re-entry returns at the unmoved-context check having judged
+            // nothing. `promptGen` is deliberately not bumped alongside it: that
+            // bump means "a pass suspended in its judge call is holding a stale
+            // prompt", and this call site IS that pass, already past its own
+            // write-back.
+            s.lastJudgedContextHash = undefined;
+            this.persist(evt.terminalId, s, true);
+            // Re-entered directly rather than re-enqueued through handleEvent:
+            // this call already IS the chain entry, so a queued event could only
+            // run after it and would be dropped by the liveness check the moment
+            // a fresher one arrived — the same freeze, one door along. Awaiting it
+            // also keeps the whole episode inside the caller's promise.
+            await this.handleEventInner(evt);
+            return;
+          }
+          // Zeroed before escalate persists, so the record on disk agrees with the
+          // row it wrote, and a refusal after the user answers reads as a new
+          // question rather than the same one asked twice.
+          s.evidenceReasks = 0;
+          this.escalate(evt.terminalId, s, {
+            decision: "escalate", confidence: 0,
+            reason: s.evidenceRejections.at(-1)?.line
+              ?? "a completed item could not be verified against the record",
+            notify: {
+              title: "Handler",
+              body: "Agent needs you (Handler cannot verify the work is finished)",
+              draftReply: "", urgency: "normal",
+            },
+          });
+          // escalate() has already set needs_you, persisted and emitted; falling
+          // through to restingState below would be harmless today and wrong the
+          // moment escalate grows a branch that does not set state.
+          return;
+        }
         this.record(evt.terminalId, "continue", decision.reason);
         if (this.maybeWrapUp(evt.terminalId, s)) return;
         s.state = restingState(s);
@@ -1879,6 +2926,12 @@ export class HandlerEngine {
       // escalate: deliberately no wrap-up check — an escalation raised on the
       // same pass that completed the backlog stays pending for the human;
       // auto-disarming would bury the question.
+      //
+      // An `ask` here is ignored for the reason the continue branch states: this
+      // pass replies to nobody, so the row would have no event to raise it again.
+      if (decision.ask) {
+        log.warn("handler ask ignored on %s decision for %s", decision.decision, evt.terminalId);
+      }
       this.escalate(evt.terminalId, s, decision);
     } catch (err) {
       // A wrap-up (or a concurrent disarm) may already have dropped this
@@ -1942,7 +2995,8 @@ export class HandlerEngine {
         return;
       }
       this.enterPark(evt.terminalId, s, {
-        kind: "limit", until, selfResuming: evt.selfResuming, retryEvent: s.retryEvent,
+        kind: "limit", cause: "agent_limit", until,
+        selfResuming: evt.selfResuming, retryEvent: s.retryEvent,
       });
       if (!refresh) {
         this.record(evt.terminalId, "parked", evt.errorClass ?? "usage limit", new Date(until).toISOString());
@@ -1994,7 +3048,13 @@ export class HandlerEngine {
       return;
     }
     const until = this.now() + transientBackoffMs(s.transientFailures);
-    this.enterPark(evt.terminalId, s, { kind: "outage", until, retryEvent });
+    // `retryEvent` is handed in by `onJudgeUnavailable` alone — it is the stashed
+    // pause a judge could not decide — so it is also the only thing that separates
+    // OUR judge failing from the agent's own provider failing. Both back off on the
+    // same curve, which is exactly why `parkKind` cannot carry the difference.
+    this.enterPark(evt.terminalId, s, {
+      kind: "outage", cause: retryEvent ? "judge_failure" : "agent_failure", until, retryEvent,
+    });
     this.record(evt.terminalId, "parked", evt.errorClass ?? "transient failure", new Date(until).toISOString());
     this.emitStatus();
   }
@@ -2007,10 +3067,12 @@ export class HandlerEngine {
   }
 
   private enterPark(terminalId: string, s: ArmedSession, p: {
-    kind: "limit" | "outage"; until: number; selfResuming?: boolean; retryEvent?: HandlerEvent;
+    kind: "limit" | "outage"; cause: ParkCause; until: number;
+    selfResuming?: boolean; retryEvent?: HandlerEvent;
   }): void {
     s.state = "parked";
     s.parkKind = p.kind;
+    s.parkCause = p.cause;
     s.parkedUntil = p.until;
     s.selfResuming = p.selfResuming;
     s.retryEvent = p.retryEvent;
@@ -2060,8 +3122,12 @@ export class HandlerEngine {
     // answer a pending permission prompt on their behalf. The park is over
     // either way — the human is the resume path now. A report answers nothing,
     // so it is not one of those: leaving it in the count would strand every
-    // parked session that happened to be holding one.
-    if (pendingQuestions(s) > 0) return;
+    // parked session that happened to be holding one. An ask is not one either,
+    // and for the sharper version of the same reason — the agent was already
+    // working PAST it when the park began, so it holds no prompt for a nudge to
+    // answer, and counting it here would strand the session on a question the
+    // user was told did not stop the work.
+    if (blockingQuestions(s) > 0) return;
     // Straight to the adapter, never through the auto-reply path: the nudge is
     // the supervisor's own recovery action, so it must neither advance the
     // runaway counter nor enter the circular-exchange window — a second park
@@ -2072,10 +3138,15 @@ export class HandlerEngine {
   // Move backlog items on the evaluator's word — inside the bounds
   // applyTransitions enforces — and count real progress toward the runaway guard:
   // progress is evidence of non-looping.
+  //
+  // Returns whether the citation gate refused a TERMINAL move on an item that is
+  // still open: `done`, `skipped` and `failed` alike, since checkCitation gates
+  // all three. That is the one rejection the resting branch cannot rest on — see
+  // the continue branch — so it is the caller's answer rather than a log line.
   private absorbTransitions(
     terminalId: string, s: ArmedSession, decision: HandlerDecision, evidenceCorpus: string,
     catalog?: CapCommand[],
-  ): void {
+  ): boolean {
     // The catalog the judge was actually shown, so the anchor asks about the same
     // commands the prompt listed and checkReplyShape would accept.
     const result = applyTransitions(s.backlog, decision.transitions ?? [], this.now(), {
@@ -2088,28 +3159,48 @@ export class HandlerEngine {
     // only place it can surface: the item simply does not move, so no downstream
     // state ever looks wrong. Dropping these silently is how a judge quietly
     // fishing for progress stays invisible.
+    let refusedTerminal = false;
     for (const r of result.rejected) {
       log.warn("handler transition rejected for %s: %s (id=%s status=%s)",
         terminalId, r.reason, r.transition.id, r.transition.status);
       if (!EVIDENCE_CODES.has(r.code)) continue;
       const item = result.backlog.find((i) => i.id === r.transition.id);
+      // A rejection naming an item the backlog no longer holds is nothing the
+      // session can still resolve, so it is not one of the refusals the caller
+      // re-asks over.
       if (!item) continue;
+      refusedTerminal = true;
       // Counted per item, not per session: the waiver answers "this item's token
-      // cannot be quoted", which says nothing about the next item's.
-      if (r.code === "missing_command_anchor") {
+      // cannot be quoted", which says nothing about the next item's. Counted once
+      // per JUDGED PAUSE too, and a re-ask is the same pause asked again — without
+      // that gate all three refusals MAX_ANCHOR_REFUSALS wants land inside one
+      // chain, the waiver fires on the fourth check of the same prompt, and the
+      // grounded-but-wrong-subject quote the anchor exists to catch closes the
+      // item.
+      if (r.code === "missing_command_anchor" && s.evidenceReasks === 0) {
         s.anchorRefusals.set(item.id, (s.anchorRefusals.get(item.id) ?? 0) + 1);
       }
       // A refused completion is the one rejection the user has to be able to see:
       // the item does not move, so the next status snapshot is identical to the
-      // last, and a session that will now never wrap up looks exactly like one
-      // still working. The log line above reaches nobody who is not tailing it.
+      // last, and without the row the pass that refused leaves no trace on any
+      // surface. The log line above reaches nobody who is not tailing it.
+      // The row is the RECORD and never the exit — the exit is the bounded re-ask
+      // the resting branch makes, and the escalation that follows it.
       if (!s.evidenceRejected.has(item.id)) {
         s.evidenceRejected.add(item.id);
         this.record(terminalId, "evidence_rejected", item.text, r.reason);
       }
-      s.evidenceRejections.push({
-        id: item.id, line: `"${oneLine(item.text).slice(0, 80)}" — ${r.reason}`,
-      });
+      const line = `"${oneLine(item.text).slice(0, 80)}" — ${r.reason}`;
+      // A judge refused the same way twice teaches the same lesson twice, and the
+      // window is three entries wide: a second copy of one sentence evicts the
+      // other items' lessons from the very section meant to carry them. Moved to
+      // the end rather than left where it was, so the list stays ordered by
+      // recency — the exhaustion escalation names its item with `at(-1)`, and a
+      // repeat kept in place has it page the user about whichever item happened to
+      // be appended last instead of the one the refusal is about.
+      s.evidenceRejections = s.evidenceRejections
+        .filter((e) => !(e.id === item.id && e.line === line))
+        .concat({ id: item.id, line });
       if (s.evidenceRejections.length > MAX_REMEMBERED_REJECTIONS) {
         s.evidenceRejections = s.evidenceRejections.slice(-MAX_REMEMBERED_REJECTIONS);
       }
@@ -2149,7 +3240,25 @@ export class HandlerEngine {
     }
 
     if (result.progressed) this.guard.recordProgress(terminalId);
+    // Progress gives the re-ask budget back, and deliberately NOT keyed on
+    // `progressed`, which is `done` alone: an applied `skipped` or `failed` is the
+    // citation gate satisfied just as much, and it closes the item the episode was
+    // about. Every reset site is a place a wrong one silently disables the exit, so
+    // the others are exactly the three that end an episode by some other door — a
+    // decision that replied to somebody, a typed line, and the escalation the chain
+    // itself ends in.
+    //
+    // Withheld from a pass that is ALSO being refused, and that is what bounds the
+    // chain: a judge closing one item per pass while refusing the next would
+    // otherwise refill the budget from inside the chain on every level, so the
+    // depth — nested passes, each holding a live judge spawn inside one turn_end —
+    // would be bounded by MAX_BACKLOG_ITEMS rather than by the constant whose whole
+    // job is to say how much extra wall clock a refusal is worth.
+    if (!refusedTerminal && result.applied.some((a) => isTerminalStatus(a.item.status))) {
+      s.evidenceReasks = 0;
+    }
     if (result.applied.length > 0 || derived.length > 0) this.persist(terminalId, s, true);
+    return refusedTerminal;
   }
 
   // Auto-disarm once every item has reached a terminal state. A `blocked`
@@ -2159,16 +3268,29 @@ export class HandlerEngine {
   // longer holds the session open forever.
   // Called only from the handle/continue branches — never on escalate.
   private maybeWrapUp(terminalId: string, s: ArmedSession): boolean {
+    // The backlog gate leads, so the question gate below reads a session whose
+    // asks have been reconciled against a FINISHED backlog. Ordering the two the
+    // other way is observationally identical on its own — both return false — and
+    // leaves nowhere to make that claim true.
+    if (!allTerminal(s.backlog)) return false;
+    // A question is non-blocking because there was other work its answer did not
+    // gate. With every item terminal there is none, so the claim has expired and
+    // the row goes back to meaning what an unanswered question has always meant.
+    // This is the site the per-event one cannot reach: a session whose backlog is
+    // finished has no further event coming to re-check it.
+    this.reconcileAsks(terminalId, s);
     // A wrap-up disarms the session. Never do that while a human question is
     // outstanding: an earlier escalate may already have banked the transitions
     // that completed the backlog (absorbTransitions runs on every decision,
     // including escalate), so a later handle/continue could otherwise auto-disarm
-    // and silently bury the unanswered escalation. A `guard_blocked` report is
-    // not such a question — nothing is waiting on it — and holding the wrap-up
-    // open for one would leave a finished session armed until somebody tapped
-    // Dismiss; the record and the push below carry the reports out instead.
+    // and silently bury the unanswered escalation. An ask needs no re-scope here
+    // — it is `kind: "reply"`, so it already counts, and that is the behaviour
+    // wanted: a finished backlog must not disarm over a question the user has
+    // been asked and has not answered. A `guard_blocked` report is not such a
+    // question — nothing is waiting on it — and holding the wrap-up open for one
+    // would leave a finished session armed until somebody tapped Dismiss; the
+    // record and the push below carry the reports out instead.
     if (pendingQuestions(s) > 0) return false;
-    if (!allTerminal(s.backlog)) return false;
     // Reports, not questions — pendingQuestions above is their complement. They
     // are frozen into the record because they die here: `disarm` drops the session
     // and takes `s.escalations` with it, and nothing can re-derive them afterwards.
@@ -2176,7 +3298,7 @@ export class HandlerEngine {
       wrapUpId: this.id("wrap"),
       terminalId,
       at: this.now(),
-      goal: s.goal,
+      goal: firstInstruction(s.instructions),
       backlog: s.backlog,
       blockedReports: s.escalations.filter((e) => e.kind === "guard_blocked"),
     });
@@ -2205,6 +3327,212 @@ export class HandlerEngine {
   // makes a frozen count a lie on a card whose whole job is to be read later.
   private openUndoCount(terminalId: string): number {
     return this.snapshots().filter((e) => e.terminalId === terminalId && e.undoneAt === undefined).length;
+  }
+
+  /**
+   * Raise a question for the USER on a pass that has ALREADY replied to the
+   * agent. The work goes on and the row waits; nothing here stops the session.
+   *
+   * Deliberately NOT routed through `escalate()`. That path derives its
+   * `draftReply` from `firstFilled(decision.notify?.draftReply, decision.reply,
+   * refused)`, so an ask would arrive carrying the line just typed at the agent
+   * as the user's own answer to offer back — and it would inherit
+   * `quickChoicesFor`, which an ask must not reach (see below).
+   *
+   * THE LIMIT, stated here because everything else about this feature reads as
+   * universal. What decides it is how the prompt was REPORTED, not what kind of
+   * driver the session runs: an agent pause that arrives as `permission_request`
+   * or `question` hits `isBlockingPrompt` in `handleEventInner` and takes the
+   * forced `resolve_in_session` escalate with no judge call at all, so no decide
+   * pass runs and nothing here is reachable for it. That branch is right to be
+   * terminal: the AGENT is stopped on the USER, so there is no work going on for
+   * an ask to claim, and it must stay so.
+   *
+   * For a TERMINAL session that is Claude's AskUserQuestion alone, reported by
+   * the PreToolUse matcher in `agents/claude-code/hooks.ts`. Its permission
+   * prompts carry no `tool_use_id` and so arrive as `awaiting_input`, which does
+   * reach a decide pass — so a PTY permission block, unlike a PTY question, can
+   * still take an ask.
+   */
+  private raiseAsk(terminalId: string, s: ArmedSession, ask: DecisionAsk): void {
+    // Keyed the same way the dup guard below is, and for the same reason:
+    // reconcileAsks promotes a row by clearing `nonBlocking` on exactly the row
+    // this cap exists to limit, so counting on that flag lets a promoted ask stop
+    // occupying the single slot while it still stands, unanswered, on the user's
+    // screen — two Handler questions stacked on a session the prompt tells the
+    // judge can hold only one.
+    if (s.escalations.filter((e) => e.kind === "reply").length >= MAX_OPEN_ASKS) {
+      return this.noteAskRejected(terminalId, s, ask, "a question of yours is still unanswered");
+    }
+    // The only checkable half of "non-blocking". renderBacklog prints every id, so
+    // the judge holds them; an ask that names none still open has described an
+    // escalation, whatever it claimed. It is still RAISED, because discarding it is
+    // what turned a question the judge chose to ask cheaply into the escalation it
+    // was avoiding, one pass later and in worse words. Raised as an ask, not as a
+    // stop: this runs after injectReply, so the agent IS working past it right now
+    // and the card's latency note is true. `unblocked` goes out empty, which is what
+    // reconcileAsks promotes on — at the top of the next pass, with the agent quiet,
+    // through the one promotion path that clears nonBlocking and askOptions together.
+    const live = new Set(s.backlog.filter((i) => isRunningItem(i.status)).map((i) => i.id));
+    const stillRunning = ask.unblocked.some((id) => live.has(id));
+    const question = clip(ask.question, MAX_ROW_QUESTION_CHARS);
+    // Matched on `kind === "reply"` rather than `nonBlocking`: promotion clears
+    // `nonBlocking` on the very row this guard exists to catch, so a question
+    // reconcileAsks has already promoted was otherwise free to be raised again,
+    // standing twice under byte-identical text.
+    if (s.escalations.some((e) => e.kind === "reply" && e.question === question)) {
+      return this.noteAskRejected(terminalId, s, ask, "the same question is already standing");
+    }
+    // Set only on the path that actually raises the row below — a duplicate
+    // returned above was never raised, so it must not also claim its ids were
+    // stale. Not noteAskRejected either: that feeds a section headed "your
+    // reply was sent, the question was not", and this question WAS raised.
+    if (!stillRunning) s.staleAskIds = true;
+    const esc: OpenEscalation = {
+      escalationId: this.id("esc"),
+      question,
+      reasoning: clip(ask.reasoning, MAX_ROW_QUESTION_CHARS),
+      // Empty by construction and never derived from the decision. A composer
+      // seeded from a judge-authored draft is the one path that reaches
+      // authorizeInstruction with text the user did not write, and the ask shape
+      // closes it here rather than at each of the sheets that read this field.
+      draftReply: "",
+      // Never the `high` band: that band is for a row that unblocks a stopped
+      // session in one tap, and this row stops nothing.
+      urgency: "normal",
+      kind: "reply",
+      nonBlocking: true,
+      unblocked: ask.unblocked.filter((id) => live.has(id) && id.length <= MAX_UNBLOCKED_ID_CHARS),
+      // NOT `quickChoicesFor`, and this is a reversal a reader will look for. All
+      // three of its gates screen text that is about to be typed into the agent's
+      // terminal, and an ask sends the agent nothing: the `resolve_in_session`
+      // clause withholds every chip on the premise that injected text cannot reach
+      // a stalled agent, the draft clause derives the whole card from a
+      // `draftReply` an ask does not have, and the destructive screen is a
+      // per-card `classifyDestructive` whose absolute-path sweep would warn on
+      // prose that never reaches a shell. Each of them returns undefined for the
+      // WHOLE card, silently, so reusing it here would withhold the options on
+      // exactly the sessions most likely to be holding a prompt.
+      askOptions: this.mintAskOptions(ask),
+      at: this.now(),
+    };
+    this.deps.sendAb(createMessage("handler:escalation", {
+      projectId: this.deps.projectId, terminalId, ...escalationWire(esc),
+    }));
+    s.escalations.push(esc);
+    // Its own kind, though the row is stored as an escalation: the feed prefixes
+    // every `escalate` row "Escalated:", and a question whose whole point is that
+    // the agent kept working must not read as the stop it was designed not to be.
+    this.record(terminalId, "asked", ask.reasoning, previewForUser(question));
+    s.askRejections = [];
+    // Only when THIS raise named live ids: the `if (!stillRunning)` branch above
+    // just set the flag for the case this call is reporting, and clearing it here
+    // unconditionally would erase that report before the judge ever saw it.
+    if (stillRunning) s.staleAskIds = false;
+  }
+
+  private noteAskRejected(terminalId: string, s: ArmedSession, ask: DecisionAsk, why: string): void {
+    s.askRejections = [...s.askRejections, `"${clip(ask.question, 80)}" — ${why}`].slice(-MAX_ASK_REJECTIONS);
+    this.record(terminalId, "ask_rejected", why, previewForUser(ask.question));
+  }
+
+  /**
+   * The tap options for an ask, minted from the judge's labels.
+   *
+   * Every bound is enforced here rather than by handing the finished array to a
+   * safeParse, because that failure mode is dropping EVERY option: one over-long
+   * label would leave the user a question whose card the judge sized for four.
+   * Clipping keeps the option and costs a few characters instead, and the schema
+   * check at the end is the backstop for whatever clipping cannot fix — even that
+   * costs the options and never the question.
+   */
+  private mintAskOptions(ask: DecisionAsk): OpenEscalation["askOptions"] {
+    if (!ask.options) return undefined;
+    const minted: NonNullable<OpenEscalation["askOptions"]> = [];
+    for (const o of ask.options) {
+      // previewForUser ESCAPES control characters rather than stripping them, so it
+      // runs BEFORE the clip — escaping afterwards expands the string back over the
+      // bound it was just brought under.
+      const label = clipWithin(previewForUser(oneLine(o.label)), MAX_ASK_OPTION_LABEL);
+      const cost = clipWithin(previewForUser(oneLine(o.cost)), MAX_ASK_OPTION_COST);
+      // A label IS the whole payload of a tap and a cost is what the user checks a
+      // recommendation against, so an option missing either is not a choice anybody
+      // could make. Dropped rather than defaulted: the engine has nothing truthful
+      // to put there.
+      if (label.trim() === "" || cost.trim() === "") continue;
+      minted.push({
+        // Engine-authored by position. An id round-trips through the wire and
+        // resolves against this persisted row, so it is identity and never
+        // authority — nothing the judge writes may become one.
+        choiceId: `opt${minted.length + 1}`,
+        label,
+        cost,
+        // First `true` wins and the rest are cleared: two emphasised rows leave
+        // every app arbitrating between them, and none of them can.
+        ...(o.recommended && !minted.some((m) => m.recommended) ? { recommended: true as const } : {}),
+      });
+    }
+    // Never a one-chip card: a single option is a button that can only say yes.
+    // The ask still raises as a free-text question, which is a complete ask rather
+    // than a degraded one.
+    if (minted.length < 2) return undefined;
+    const parsed = OpenEscalationSchema.shape.askOptions.safeParse(minted);
+    return parsed.success ? parsed.data : undefined;
+  }
+
+  /**
+   * Re-check what every standing ask claimed the work was getting on with.
+   *
+   * `unblocked` is validated once at raise time, so on its own it is a promise
+   * about a moment that has passed: the items it named finish, and what is left
+   * is an ordinary question the session is waiting on. Run at the top of every
+   * pass AND again inside maybeWrapUp, because the second reaches the session the
+   * first cannot — one whose backlog is finished has no further event coming.
+   */
+  private reconcileAsks(terminalId: string, s: ArmedSession): void {
+    let changed = false;
+    for (const e of s.escalations) {
+      if (!e.nonBlocking) continue;
+      const before = e.unblocked ?? [];
+      const still = before.filter((id) => {
+        const item = s.backlog.find((i) => i.id === id);
+        return item !== undefined && isRunningItem(item.status);
+      });
+      if (still.length > 0) {
+        if (still.length !== before.length) {
+          // Assigned, never spliced: escalationWire hands out `{...e}` shallow
+          // copies, so every frame already published shares this array by
+          // reference and editing it in place would rewrite history.
+          e.unblocked = still;
+          changed = true;
+        }
+        continue;
+      }
+      if (before.length > 0) e.unblocked = [];
+      // Cleared TOGETHER and never one without the other. A promoted row that kept
+      // its options renders a card with live buttons that answerAsk then refuses,
+      // returning before the app can latch anything — no "Sending…", no error,
+      // nothing at all, on exactly the overnight path this feature exists to serve.
+      e.nonBlocking = undefined;
+      e.askOptions = undefined;
+      changed = true;
+      // No second push. The user was already woken when the question was raised,
+      // and a notification saying the same question now matters more is a second
+      // interruption for a fact the row itself carries.
+      // `before` empty is raiseAsk's stale-ids case: the row went out with nothing
+      // it claimed to unblock, so no work ever ran alongside it, and "has finished"
+      // would tell the user about a completion that never happened.
+      this.record(terminalId, "escalate", before.length > 0
+        ? "your question now holds the agent; the work it did not gate has finished"
+        : "your question was raised over work that had already stopped, and now holds the agent");
+    }
+    // Emitted here rather than left to the caller: this runs before the branches
+    // that return early on a stale or parked event, and a promotion the app never
+    // sees leaves live buttons on a row this bridge would now refuse.
+    if (changed) {
+      this.persist(terminalId, s, true);
+      this.emitStatus();
+    }
   }
 
   private escalate(
@@ -2237,12 +3565,17 @@ export class HandlerEngine {
     // the judge filled or what the guard actually turned down.
     const rowText = blocked ? refused : draftReply;
     const detail = rowText === "" ? undefined : previewForUser(rowText);
+    // Clipped HERE, above the dedup, and not at the mint: the dedup compares
+    // against the value that was STORED, so clipping only on the way in would
+    // stop a long repeat ever matching its own standing row — a new card and a
+    // new push per pass for the situation that row already describes.
+    const reasoning = clip(reason, MAX_ROW_QUESTION_CHARS);
     // Nothing retires a report but the user, so an identical repeat would cost
     // them a second Dismiss for a situation the standing row already describes in
     // the same words. The feed still gets its row: that Handler was refused AGAIN
     // is the fact worth keeping, and the feed is where it is durable.
     if (blocked && s.escalations.some((e) => e.kind === "guard_blocked"
-      && e.reasoning === reason && e.draftReply === draftReply)) {
+      && e.reasoning === reasoning && e.draftReply === draftReply)) {
       this.record(terminalId, "escalate", reason, detail);
       // The three lines the normal path ends with, minus the push and the row.
       // Every guard_blocked call site is a `return this.escalate(...)` out of the
@@ -2256,8 +3589,14 @@ export class HandlerEngine {
     }
     const esc: OpenEscalation = {
       escalationId: this.id("esc"),
-      question: blocked ? BLOCKED_QUESTION : firstFilled(decision.notify?.body) ?? "Agent needs you",
-      reasoning: reason,
+      // Clipped exactly the way raiseAsk clips an ask's, and for the same reason.
+      // Clipped at MINT and deliberately NOT bounded in OpenEscalationSchema or
+      // OpenEscalationWire: a `.max()` there makes a longer row already on disk
+      // fail HandlerSessionRecordSchema, and loadHandlerSession answers a failed
+      // parse with null — the session comes back disarmed with an empty backlog.
+      question: blocked ? BLOCKED_QUESTION
+        : clip(firstFilled(decision.notify?.body) ?? "Agent needs you", MAX_ROW_QUESTION_CHARS),
+      reasoning,
       draftReply,
       urgency: decision.notify?.urgency ?? "normal",
       floorRule,
@@ -2265,6 +3604,7 @@ export class HandlerEngine {
       promptId,
       choices: quickChoicesFor({
         kind, floorRule, draftReply, projectPath: this.deps.projectPath(terminalId), open: s.escalations,
+        approve: decision.notify?.approve,
       }),
       at: this.now(),
     };
@@ -2426,15 +3766,22 @@ export class HandlerEngine {
   }
 
   /**
-   * Retire one `guard_blocked` report — the user saying they have read it. It is
-   * the ONLY thing that takes such a row away: it reports an action Handler never
-   * took, so no agent event and no typed line can be an answer to it.
+   * Retire one row the user is done with: a `guard_blocked` report they have
+   * read, or an ask they are declining to answer. Both are rows nothing else can
+   * take away — a report describes an action Handler never took, so no agent
+   * event and no typed line answers it, and an ask survives a submitted line by
+   * the clearing rule in onUserReply.
    *
-   * Refuses every other kind, deliberately. A `reply` row is already retired by
-   * the user's own submitted line, and dismissing one would drop a live question
-   * more silently than any path that exists today; a `resolve_in_session` row is
-   * refused for the reason onUserReply refuses to clear one — the agent stays
-   * blocked and no further event re-raises it.
+   * Declining is a real move, not the absence of one. Without it the only way out
+   * of an ask is answering it, which forces every non-answer through the judge —
+   * and a question the user has decided not to engage with would stand until the
+   * work it named finished.
+   *
+   * Still refuses the other two kinds, deliberately. A blocking `reply` row IS
+   * retired by the user's own submitted line, so dismissing one would drop a live
+   * question more silently than any path that exists today; a `resolve_in_session`
+   * row is refused for the reason onUserReply refuses to clear one — the agent
+   * stays blocked and no further event re-raises it.
    *
    * Idempotent in every direction the app can get wrong: an id this session no
    * longer holds (a second tap racing the status frame that already dropped the
@@ -2443,11 +3790,21 @@ export class HandlerEngine {
   dismissEscalation(terminalId: string, escalationId: string): void {
     const s = this.sessions.get(terminalId);
     const esc = s?.escalations.find((e) => e.escalationId === escalationId);
-    if (!s || !esc || esc.kind !== "guard_blocked") {
+    if (!s || !esc || (esc.kind !== "guard_blocked" && !esc.nonBlocking)) {
       // The sender is holding a row this session no longer has, or one it may not
       // retire this way. A status resync is what removes it from their list.
       log.warn("handler dismiss ignored: %s on %s", escalationId, terminalId);
       this.emitStatus();
+      return;
+    }
+    if (esc.nonBlocking) {
+      // Parked as an answer because the judge has to LEARN this, or its next pass
+      // re-asks a question the user has already refused — and the refusal is the
+      // one outcome no agent event can imply. Deliberately not relayed: the two
+      // answer transports start a pass because they carry something the agent may
+      // need, and a decline carries nothing the agent could act on.
+      this.parkAskAnswer(terminalId, s, esc, "(the user declined to answer)", false);
+      this.record(terminalId, "answered", "You declined Handler's question", previewForUser(esc.question));
       return;
     }
     // No new activity kind: the `escalate` row is the durable trace of the
@@ -2553,7 +3910,12 @@ export class HandlerEngine {
       state: s.state,
       pendingEscalations: s.escalations.length,
       armedAt: s.armedAt,
-      goal: s.goal,
+      // The first instruction, on its own field and unclipped: it names the
+      // session on the card headline, the wrap-up and the wrap-up push. The
+      // rest of the list travels beside it as `instructions` below, which is a
+      // clipped WINDOW rather than the list — so this stays the only entry any
+      // surface can render in full.
+      goal: firstInstruction(s.instructions),
       // Copied, never the live arrays: handler:status is a REPLAY_TYPE, so the bus
       // holds this frame by reference until the next one — and escalate() pushes onto
       // s.escalations in place, which rewrote a frame already published and left the
@@ -2563,14 +3925,43 @@ export class HandlerEngine {
       judgeTool: s.judgeTool,
       judgeModel: s.judgeModel,
       parkKind: s.parkKind,
+      parkCause: s.parkCause,
       parkedUntil: s.parkedUntil,
       // Re-derived on every emit rather than frozen at arm time: a slot's mode
       // and its judge pick both change under a live arm.
       observability: this.observabilityFor(terminalId),
-      // Resolved, never the raw field: the app renders the picker off this, and
-      // an absent value would leave it showing nothing while the judge runs
-      // under a posture all the same.
-      personality: s.personality ?? DEFAULT_PERSONALITY,
+      // Omitted when unset, the way every optional field on this snapshot is: an
+      // absent lens is the unnamed default, and a bridge that filled one in would
+      // leave the app unable to tell a picked lens from no pick at all.
+      ...(s.role ? { role: s.role } : {}),
+      ...(s.brief ? { brief: s.brief } : {}),
+      // Always sent, never conditioned on s.instructions being non-empty: an
+      // armed session nobody has instructed still owes `{ total: 0, items: [] }`
+      // — see HandlerSessionSnapshot's comment for why absence has to mean
+      // something else entirely.
+      instructions: instructionsWindow(s.instructions),
+      // A constant, because it is a fact about THIS BRIDGE rather than about the
+      // session: answerAsk exists here and instruct reads an escalationId, so an
+      // app may act on a `nonBlocking` row. It has to be said on the wire because
+      // the row cannot say it — a bridge that reads the field off a record a newer
+      // one wrote re-emits it faithfully with no verb that answers it — and an app
+      // reading only the row would answer through the reply transport, into a PTY
+      // the session never stopped.
+      askAnswer: true as const,
+      // A constant, for the same reason askAnswer is one: a fact about THIS BRIDGE,
+      // not about the session.
+      escalationAnswer: true as const,
+      // Derived from the parked answer rather than stored beside it: a second flag
+      // could say a relay is still owed after the handle branch dropped the answer
+      // it named. Omitted when nothing is parked, the way every optional field on
+      // this snapshot is — absent and false mean one thing here.
+      //
+      // A blocking answer went into the session through the reply transport, so
+      // nothing is queued for relay and the judge is told NOT to relay it. Raising
+      // the chip on one would promise the user a delivery that is neither pending
+      // nor owed — and in the cases where no agent event follows, it would never
+      // clear.
+      ...(s.askAnswer && !s.askAnswer.blocking ? { askAnswerPending: true } : {}),
     }));
     const wrapUps = this.wrapUps();
     const entitlement = this.entitlementForApp();
@@ -2579,6 +3970,12 @@ export class HandlerEngine {
       // What an absent per-session judge resolves to for PTY slots — lets the
       // app label its picker "Default (claude-code)" instead of a bare Default.
       defaultTool: this.deps.tool(),
+      // A constant, for the reason `askAnswer` on a session snapshot is one: it is
+      // a fact about THIS BRIDGE — which lens ids it can print — and no session can
+      // say it, least of all the arm sheet, which has no session yet. Every frame
+      // carries it, including the one agent-core emits on a handshake with nothing
+      // armed, because that is the frame the sheet reads.
+      lenses: HandlerLensSchema.options,
       sessions,
       // Project-scoped, not per session: an undo offer outlives the session that
       // took it, and an app that restarted between the advert and the tap has no
