@@ -76,8 +76,30 @@ void main() {
         readImage: () async => null,
         onImagePasted: (_) => fail('nothing to attach'),
         readText: () async => null,
+        retryDelay: Duration.zero,
       );
       expect(result, isNull);
+    });
+
+    test('a first pass finding nothing is retried once', () async {
+      var imageReads = 0;
+      var textReads = 0;
+      final result = await resolveComposerPaste(
+        readImage: () async {
+          imageReads++;
+          return null;
+        },
+        onImagePasted: (_) => fail('nothing to attach'),
+        readText: () async {
+          textReads++;
+          // Only the retry finds anything — the race this guards against.
+          return textReads == 1 ? null : text('hello');
+        },
+        retryDelay: Duration.zero,
+      );
+      expect(result?.plainText, 'hello');
+      expect(imageReads, 2);
+      expect(textReads, 2);
     });
   });
 

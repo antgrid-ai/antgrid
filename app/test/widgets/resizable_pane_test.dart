@@ -69,12 +69,72 @@ void main() {
     // Long enough to retire the handle's double-tap timer.
     await tester.pump(const Duration(milliseconds: 400));
     // The recognizer eats kDragSlopDefault before it reports anything, and the
-    // split is carried as an int flex weight, so it quantises to 1/10000 of the
-    // pane — hence closeTo rather than equals, at under a tenth of a pixel.
+    // split can involve floating-point rounding, hence closeTo.
     expect(
       tester.getSize(find.byKey(_leftKey)).width,
       closeTo(_available * 0.5 + 60 - kDragSlopDefault, 0.1),
     );
+  });
+
+  for (final ratio in [0.2, 0.8]) {
+    testWidgets('honors both pixel floors on first layout at ratio $ratio', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: ResizablePane(
+            initialRatio: ratio,
+            minLeftWidth: 420,
+            minRightWidth: 320,
+            left: const SizedBox.expand(key: _leftKey),
+            right: const SizedBox.expand(key: _rightKey),
+          ),
+        ),
+      );
+      expect(
+        tester.getSize(find.byKey(_leftKey)).width,
+        greaterThanOrEqualTo(420 - 1e-9),
+      );
+      expect(
+        tester.getSize(find.byKey(_rightKey)).width,
+        greaterThanOrEqualTo(320 - 1e-9),
+      );
+    });
+  }
+
+  testWidgets('resizing honors floors without rebuilding the pane', (
+    tester,
+  ) async {
+    final width = ValueNotifier(1200.0);
+    addTearDown(width.dispose);
+    await tester.binding.setSurfaceSize(const Size(1400, 600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Center(
+          child: ValueListenableBuilder<double>(
+            valueListenable: width,
+            builder: (context, width, child) =>
+                SizedBox(width: width, height: 400, child: child),
+            child: const ResizablePane(
+              minLeftWidth: 420,
+              minRightWidth: 320,
+              left: SizedBox.expand(key: _leftKey),
+              right: SizedBox.expand(key: _rightKey),
+            ),
+          ),
+        ),
+      ),
+    );
+    width.value = 800;
+    await tester.pump();
+    expect(tester.getSize(find.byKey(_leftKey)).width, closeTo(420, 1e-9));
+    expect(tester.getSize(find.byKey(_rightKey)).width, closeTo(376, 1e-9));
+    width.value = 1200;
+    await tester.pump();
+    expect(tester.getSize(find.byKey(_leftKey)).width, 598);
   });
 
   // The invariant in this file's header: no layout-time inflation of the panes.

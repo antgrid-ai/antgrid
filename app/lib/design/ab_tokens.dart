@@ -143,6 +143,12 @@ abstract final class AbTokens {
   static const double focusRingWidth = 1.0;
   static const double focusRingOffset = 2.0;
 
+  // ── Opacity ──
+  /// The system's disabled/de-emphasised opacity. Defined once here because it
+  /// is applied outside `design/` (a de-emphasised terminal screen), where a
+  /// copied literal would drift from the design-system widgets that use it.
+  static const double opacityDisabled = 0.4;
+
   // ── Radius ──
   static const radius = 2.0;
   static const radiusLg = 4.0;

@@ -63,6 +63,7 @@ const LEGACY_ACCOUNT_ME_KEYS = [
 ] as const;
 
 const ADDED_KEYS = ["role", "seats", "seats_used", "capabilities"] as const;
+const ACCOUNT_ME_ADDED_KEYS = [...ADDED_KEYS, "name"] as const;
 
 function keysOf(value: unknown): string[] {
   return Object.keys(value as object).sort();
@@ -92,6 +93,7 @@ type SubscriptionsMeBody = {
 type AccountMeBody = {
   userId: string;
   email: string;
+  name: string | null;
   tier: string;
   worker_limit: number;
   session_limit: number;
@@ -187,7 +189,7 @@ describe("GET /subscriptions/me", () => {
 });
 
 describe("GET /account/me", () => {
-  test("returns every field it returned before, unchanged, plus role/seats/seats_used/capabilities", async () => {
+  test("returns every legacy field unchanged plus additive account fields", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db);
     await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 3, seats: 4 });
@@ -195,9 +197,9 @@ describe("GET /account/me", () => {
 
     const body = await read<AccountMeBody>(app, "/account/me", cookie);
 
-    expect(keysOf(body)).toEqual(sorted([...LEGACY_ACCOUNT_ME_KEYS, ...ADDED_KEYS]));
+    expect(keysOf(body)).toEqual(sorted([...LEGACY_ACCOUNT_ME_KEYS, ...ACCOUNT_ME_ADDED_KEYS]));
 
-    const { role, seats, seats_used: seatsUsed, capabilities, ...legacy } = body;
+    const { role, seats, seats_used: seatsUsed, capabilities, name, ...legacy } = body;
     expect(legacy).toEqual({
       userId: user.id,
       email: user.email,
@@ -209,6 +211,7 @@ describe("GET /account/me", () => {
     });
 
     expect(role).toBe("owner");
+    expect(name).toBe(user.email);
     expect(seats).toBe(4);
     expect(seatsUsed).toBe(1);
     expect(capabilities).toEqual({});

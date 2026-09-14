@@ -7,6 +7,7 @@ import '../services/control_plane_client.dart'
 import '../models/agent_descriptor.dart';
 import '../models/branch_remote_status.dart';
 import '../models/git_branch.dart';
+import '../models/session_entry.dart';
 
 /// Loopback data-plane connect info from a `project:open` response.
 /// Non-null for all modes — every core binds a loopback listener. Mirror of
@@ -33,12 +34,22 @@ class ResolvedLocalProject {
   final String selectedPath;
   final String label;
   final bool isGitRepository;
+
+  /// `primary` | `managed-checkout` | `linked-worktree` | `plain`, or null for
+  /// a bridge predating this field (or the app's own local fallback).
+  final String? kind;
+
+  /// Set only for `kind == 'managed-checkout'` with a `checkouts.json` record.
+  final String? checkoutId;
+
   const ResolvedLocalProject({
     required this.projectId,
     required this.repoPath,
     required this.selectedPath,
     required this.label,
     required this.isGitRepository,
+    this.kind,
+    this.checkoutId,
   });
 
   factory ResolvedLocalProject.fromJson(Map<String, dynamic> json) {
@@ -61,6 +72,10 @@ class ResolvedLocalProject {
       selectedPath: selectedPath,
       label: label,
       isGitRepository: json['isGitRepository'] == true,
+      kind: json['kind'] is String ? json['kind'] as String : null,
+      checkoutId: json['checkoutId'] is String
+          ? json['checkoutId'] as String
+          : null,
     );
   }
 }
@@ -132,11 +147,13 @@ class KnownProject {
   final String? label;
   final String? path;
   final bool running;
+  final String? lastActiveAt;
   const KnownProject({
     required this.projectId,
     this.label,
     this.path,
     required this.running,
+    this.lastActiveAt,
   });
 
   factory KnownProject.fromJson(Map<String, dynamic> json) {
@@ -152,6 +169,7 @@ class KnownProject {
       label: json['label'] as String?,
       path: json['path'] as String?,
       running: json['running'] == true,
+      lastActiveAt: json['lastActiveAt'] as String?,
     );
   }
 }
@@ -391,6 +409,25 @@ class HostControlClient {
           );
         })
         .toList(growable: false);
+  }
+
+  /// Session list for a LOCAL project, warm or cold, over the loopback plane —
+  /// the local-poll counterpart of [ControlPlaneClient.listSessions], which
+  /// only reaches a project over an already-open RELAY control-plane socket.
+  /// Used to refresh a background local project's cached Recent/drawer rows
+  /// when its work status changes while the app hasn't opened it this run
+  /// (see `_peekLocalProjectSessions` in app_shell.dart).
+  Future<List<SessionEntry>> projectSessions(
+    String projectId, {
+    bool includeArchived = false,
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    final m = await _post({
+      'type': 'project:sessions',
+      'projectId': projectId,
+      'includeArchived': includeArchived,
+    }, timeout: timeout);
+    return SessionEntry.listFromJson(m['sessions'] as List?);
   }
 
   Future<ToolsList> toolsList({

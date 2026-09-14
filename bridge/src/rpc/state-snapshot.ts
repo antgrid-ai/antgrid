@@ -4,12 +4,16 @@ import type { AbMessage } from "../protocol";
 
 export const StateSnapshotParams = z.object({
   types: z.array(z.string()).min(1),
-  // Left out of the answer even when `types` is `["*"]`. Lets the app take the
-  // one unbounded durable frame — a checkout's whole file tree — in a pull of
-  // its own, so a slow or lost tree reply can no longer cost it the
-  // few-hundred-byte `agent:status` its terminal is waiting on. A bridge that
-  // predates this field strips it and answers the heavy way, which is the
-  // old behaviour, not a break.
+  // Left out of the answer even when `types` is `["*"]`. Keeps the one
+  // unbounded durable frame — a checkout's whole file tree — off a reply the
+  // app needs promptly, so a slow or lost tree can no longer cost it the
+  // few-hundred-byte `agent:status` its terminal is waiting on. The app does
+  // not re-ask for the tree here either: its per-checkout
+  // `file:tree:snapshot:request` hydrator is the sole carrier, because sending
+  // those megabytes twice on every connect starved the bridge's own relay
+  // pongs until the relay closed the socket. A bridge that predates this field
+  // strips it and answers the heavy way, which is the old behaviour, not a
+  // break.
   exclude: z.array(z.string()).optional(),
 });
 

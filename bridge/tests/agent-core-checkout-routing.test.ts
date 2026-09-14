@@ -366,7 +366,7 @@ test("a configured terminal in a managed checkout is attributed to that checkout
   )).toBe(true);
 });
 
-test("a terminal snapshot request is answered by the asking checkout alone", async () => {
+test("a retired terminal snapshot request returns one checkout-scoped upgrade error", async () => {
   await initRepo();
   const { bus, sent } = await startWithIsolatedSession();
   // cwd deliberately outside the project: on Windows a live PTY holds its own
@@ -386,12 +386,47 @@ test("a terminal snapshot request is answered by the asking checkout alone", asy
     "control",
     "loopback",
   );
-  await waitFor(sent, (message) => message.type === "terminal:snapshot");
-  // Serializing a screen is real work and every runtime sees the frame, so the
-  // guard has to short-circuit before the isolated runtime does any of it —
-  // otherwise the app applies whichever reply lands last.
+  const reply = await waitFor(sent, (message) => message.type === "terminal:display:status");
+  expect(reply).toMatchObject({ code: "UPGRADE_REQUIRED", checkoutId: "main" });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(sent.filter((message) => message.type === "terminal:display:status").length).toBe(1);
+  expect(sent.filter((message) => message.type === "terminal:snapshot")).toEqual([]);
+});
+
+test("a terminal.snapshot RPC is answered once, with no broadcast alongside it", async () => {
+  await initRepo();
+  const { bus, sent } = await startWithIsolatedSession();
+  // cwd deliberately outside the project: on Windows a live PTY holds its own
+  // cwd open and the fixture's teardown rm would hit EBUSY.
+  bus.dispatchInbound(
+    createMessage("terminal:start", { terminalId: "adhoc", cwd: tmpdir() }),
+    "control",
+    "loopback",
+  );
+  await waitFor(sent, (message) =>
+    message.type === "terminal:started" && message.terminalId === "adhoc",
+  );
+  sent.length = 0;
+
+  const requestId = crypto.randomUUID();
+  bus.dispatchInbound(
+    createMessage("request", { requestId, method: "terminal.snapshot", params: { terminalId: "adhoc" } }),
+    "control",
+    "loopback",
+  );
+  await waitFor(sent, (message) =>
+    message.type === "response" && (message as { requestId?: string }).requestId === requestId,
+  );
+  // Same isolation concern as the message-path test above: every runtime sees
+  // the inbound frame, so the guard has to short-circuit before the isolated
+  // runtime serializes anything, and the reply must never fan out a second
+  // `terminal:snapshot` broadcast that an old app on the same bus would apply
+  // over its own history claim.
   await new Promise((resolve) => setTimeout(resolve, 400));
-  expect(sent.filter((message) => message.type === "terminal:snapshot").length).toBe(1);
+  expect(sent.filter((message) =>
+    message.type === "response" && (message as { requestId?: string }).requestId === requestId,
+  ).length).toBe(1);
+  expect(sent.filter((message) => message.type === "terminal:snapshot")).toEqual([]);
 });
 
 /** Dispatch `fire` from inside the very delivery of the first `session:updated`

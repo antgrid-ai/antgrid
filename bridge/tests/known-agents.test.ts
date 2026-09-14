@@ -71,14 +71,8 @@ describe("known-agents registry", () => {
     expect(isOscTitleUnusable("not-a-real-agent")).toBe(false);
   });
 
-  it("codex uses plugin hooks for notifications, not OSC9 terminal overrides", () => {
-    // Notifications now arrive via injected codex hooks (buildCodexNotifyInjection),
-    // so no OSC9-forcing -c flags are baked into the registry entry. The hook
-    // injection happens at per-spawn time in agent-launch-augmenter.ts.
-    const r = resolveAgent("codex");
-    expect(r.args).toEqual([]);
-    expect(r.args).not.toContain("tui.notification_method=osc9");
-    expect(AGENTS["codex"].notificationSource).toBe("plugin");
+  it("codex keeps OSC approval notifications enabled alongside its hooks", () => {
+    expect(AGENTS["codex"].notificationSource).toBe("osc");
   });
 
   it("agents without default flags resolve to empty args", () => {

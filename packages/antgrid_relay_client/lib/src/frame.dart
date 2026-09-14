@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
+
 const int _frameVersion = 0x02;
 const int _fixedPrefix = 4; // version byte + kind byte + u16 header length
 const int _maxHeaderLen = 1024;
@@ -40,6 +42,36 @@ class FrameException implements Exception {
 
   @override
   String toString() => 'FrameException(${reason.name}): $message';
+}
+
+/// Sealed framing is `nonce(12) || ciphertext || tag(16)` — see e2e/transport.dart.
+const int _nonceLength = 12;
+
+/// A frame's cross-endpoint identity.
+///
+/// A sealed payload opens with a per-seal RANDOM nonce, and the relay forwards
+/// the payload byte-for-byte, so that nonce is already a unique id for this
+/// exact frame that BOTH endpoints can compute — no wire change, no header
+/// space, no key material. It is what lets a capture taken here be joined
+/// against one taken on the agent, closing the gap `AgentTransport.droppedFrames`
+/// documents: the route header carries no message id, so a dropped frame is
+/// otherwise unidentifiable.
+///
+/// Plaintext frames (kind-1 handshake) carry no nonce and are rare enough that
+/// hashing them costs nothing.
+///
+/// MUST stay byte-identical to `frameIdFor` in `bridge/src/netwatch.ts` —
+/// lowercase hex either way, and a 24-char hash prefix. Drift is silent: the
+/// join simply matches nothing.
+String frameIdOf(Uint8List payload, FrameKind kind) {
+  if (kind == FrameKind.sealed && payload.length >= _nonceLength) {
+    final buf = StringBuffer();
+    for (var i = 0; i < _nonceLength; i++) {
+      buf.write(payload[i].toRadixString(16).padLeft(2, '0'));
+    }
+    return buf.toString();
+  }
+  return sha256.convert(payload).toString().substring(0, 24);
 }
 
 // `kind` is deliberately required (no default): every call site must state

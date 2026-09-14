@@ -30,8 +30,40 @@ class FileService {
   StreamSubscription<Map<String, dynamic>>? _statusSub;
   StreamSubscription<void>? _resumeSub;
   int _snapshotSeq = -1;
+
+  /// The establishment [_snapshotSeq] was issued under — see [_claimableSeq].
+  int _snapshotEpoch = -1;
   int _gitOpSeq = 0;
   bool _disposed = false;
+  bool _treeRecoveryPending = false;
+  final Set<Object> _treeOwners = {};
+  bool get hasTreeInterest => _treeOwners.isNotEmpty;
+
+  void setTreeInterest(Object owner, bool interested) {
+    if (_disposed) return;
+    final hadInterest = hasTreeInterest;
+    if (interested) {
+      _treeOwners.add(owner);
+    } else {
+      _treeOwners.remove(owner);
+    }
+    if (hadInterest == hasTreeInterest) return;
+    if (hasTreeInterest) {
+      session.hydrateCheckout(checkoutId, _treeHydratorKey, _pullTree);
+      // Background suppression drops deltas, so a visible tree must validate its
+      // revision even when resuming did not establish a new transport.
+      _resumeSub ??= session.focusResumed.listen(
+        (_) =>
+            detached('FileService', 'tree re-pull on focus resume', () async {
+              if (hasTreeInterest) await _pullTree();
+            }),
+      );
+    } else {
+      session.unhydrateCheckout(checkoutId, _treeHydratorKey);
+      unawaited(_resumeSub?.cancel());
+      _resumeSub = null;
+    }
+  }
 
   final _stateController = StreamController<FileTreeState>.broadcast();
   FileTreeState _state;
@@ -93,45 +125,90 @@ class FileService {
   }) : _state = FileTreeState(projectId: session.projectId) {
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
-    // Pull the tree rather than wait for the bridge's push. A managed
-    // checkout's `tree:full` goes out while its runtime is being prepared —
-    // which is BEFORE the session list that makes the app build this bundle —
-    // so a bundle created for an isolated session would never see one and its
-    // file tree stayed empty for the life of the session. As a hydrator it also
-    // re-pulls on every reconnect.
-    session.hydrateCheckout(checkoutId, _treeHydratorKey, _hydrateTree);
     // The bridge caches `git:sync-state` for replay, but only a checkout whose
     // bundle existed at connect time receives that replay — an isolated
-    // session's does not, exactly as [_hydrateTree] above documents. Asking
-    // also re-fires on every reconnect, which is what keeps the indicator from
-    // sitting on counts from before a drop.
+    // session's does not. Asking also re-fires on every reconnect, which is
+    // what keeps the indicator from sitting on counts from before a drop. Kept
+    // eager (not gated behind [activate]) because it feeds drawer/status
+    // chrome for every checkout, not just the one on screen — see
+    // [ProjectSession.setActiveCheckouts].
     session.hydrateCheckout(checkoutId, _syncHydratorKey, _hydrateSyncState);
-    // History is deliberately NOT hydrated here the way the tree and sync
-    // state are: it has no consumer besides the Git panel (every FileService
-    // exists whether or not that panel is ever opened), so eager-on-construct
-    // hydration would cost every project session a `git:log` round trip for a
-    // view most never visit. `GitPanel` triggers the first load itself once
-    // it is actually built with an empty history — see its `_maybeLoadHistory`.
-    // A hydrator covers re-ESTABLISHMENT; this covers the other window the
-    // agent suppresses in, which re-establishes nothing. While the app is
-    // backgrounded the agent DROPS every `tree:update` and keeps bumping its
-    // file seq, so what resumes is a delta stream whose base is missing every
-    // add and remove from that window: a file the agent created stays invisible
-    // and a directory it deleted stays listed, for the life of the connection.
-    // Nothing self-corrects it — `_snapshotSeq` only ever advances on a full
-    // snapshot, which only this pull asks for.
-    _resumeSub = session.focusResumed.listen(
-      (_) =>
-          detached('FileService', 'tree re-pull on focus resume', _hydrateTree),
-    );
+    // History is deliberately NOT hydrated here the way sync state is: it has
+    // no consumer besides the Git panel (every FileService exists whether or
+    // not that panel is ever opened), so eager-on-construct hydration would
+    // cost every project session a `git:log` round trip for a view most never
+    // visit. `GitPanel` triggers the first load itself once it is actually
+    // built with an empty history — see its `_maybeLoadHistory`.
   }
 
   static const _treeHydratorKey = 'file:tree';
   static const _syncHydratorKey = 'git:sync-state';
 
-  Future<void> _hydrateTree() => session.sendForCheckout(
+  /// Restores selected-file and preview pulls independently of full-tree demand.
+  void activate() {
+    if (_disposed) return;
+    if (_stashesRequested) {
+      session.hydrateCheckout(checkoutId, _stashHydratorKey, _hydrateStashes);
+    }
+    if (_state.files.selectedFilePath != null) {
+      session.hydrateCheckout(
+        checkoutId,
+        'file:selected',
+        _hydrateSelectedFile,
+      );
+    }
+    if (_state.preview.isOpen) {
+      session.hydrateCheckout(checkoutId, 'file:preview', _hydratePreview);
+    }
+  }
+
+  /// Leaves cached content and feature-owned tree demand intact.
+  void deactivate() {
+    if (_disposed) return;
+    session.unhydrateCheckout(checkoutId, _stashHydratorKey);
+    session.unhydrateCheckout(checkoutId, 'file:selected');
+    session.unhydrateCheckout(checkoutId, 'file:preview');
+  }
+
+  /// The tree pull behind both the hydrator and the focus-resume re-drive.
+  /// Names the revision this checkout holds where that revision can still be
+  /// believed, so an unchanged tree is answered `file:tree:unchanged` rather
+  /// than in full.
+  ///
+  /// Claiming is worth the care because the unchanged answer is the common one:
+  /// every open project's every active checkout re-pulls on the same resume
+  /// edge, and activation is per-focused-checkout, so switching away from a
+  /// checkout and back re-runs this too — on an idle tree each of those answers
+  /// was a byte-identical few hundred KB.
+  Future<void> _pullTree() => _requestTree(sinceSeq: _claimableSeq());
+
+  /// The held revision, or null when it cannot be believed.
+  ///
+  /// A seq is only comparable against the establishment that issued it. A
+  /// hydrator run means the transport re-established, and the agent behind it
+  /// may be a NEW PROCESS whose revision counter restarted at zero — a claim
+  /// carried across could then match by coincidence and have a stale tree
+  /// confirmed. The epoch is what separates that from the cases where the agent
+  /// is demonstrably the same one that issued the seq: a focus resume, which
+  /// re-establishes nothing (see [MessageRouter.focusResumed]), and a checkout
+  /// returning to screen on a transport that never dropped.
+  int? _claimableSeq() {
+    if (_snapshotSeq < 0) return null;
+    if (_snapshotEpoch != session.establishmentEpoch) return null;
+    return _snapshotSeq;
+  }
+
+  /// Records [seq] together with the establishment that issued it. Every write
+  /// to [_snapshotSeq] goes through here — a seq stored without its epoch would
+  /// be claimed against the wrong agent.
+  void _rememberSeq(int seq) {
+    _snapshotSeq = seq;
+    _snapshotEpoch = session.establishmentEpoch;
+  }
+
+  Future<void> _requestTree({int? sinceSeq}) => session.sendForCheckout(
     checkoutId,
-    createAbMessage('file:tree:snapshot:request', {}),
+    createAbMessage('file:tree:snapshot:request', {'sinceSeq': ?sinceSeq}),
   );
 
   void _setState(FileTreeState state) {
@@ -144,8 +221,18 @@ class FileService {
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
     if (parsed is FileTreeSnapshotMessage) {
-      _snapshotSeq = parsed.seq;
+      _treeRecoveryPending = false;
+      _rememberSeq(parsed.seq);
       _setState(_state.copyWith(root: parsed.tree));
+      return;
+    }
+    if (parsed is FileTreeUnchangedMessage) {
+      // Nothing to apply — the agent is confirming the revision we claimed.
+      // Guarded anyway so a confirmation that raced an applied delta cannot
+      // walk the base backwards and re-admit an update already merged.
+      if (_snapshotSeq >= 0 && parsed.seq == _snapshotSeq) {
+        _treeRecoveryPending = false;
+      }
       return;
     }
     if (parsed is TreeUpdateMessage) {
@@ -154,9 +241,25 @@ class FileService {
         return; // stale — drop
       }
       _mergeTreeUpdate(parsed);
+      // Only a CONTIGUOUS delta may advance the base. A gap means the agent
+      // suppressed updates while this app was backgrounded and dropped them
+      // (it keeps counting through a suppression window), so the tree here is
+      // missing whatever those carried. Leaving the base behind is exactly what
+      // makes the next resume ask for a full tree rather than have a stale one
+      // confirmed.
+      if (seq != null && _snapshotSeq >= 0 && seq == _snapshotSeq + 1) {
+        _rememberSeq(seq);
+      } else {
+        _snapshotSeq = -1;
+        if (hasTreeInterest && !_treeRecoveryPending) {
+          _treeRecoveryPending = true;
+          detached('FileService', 'recover tree sequence gap', _pullTree);
+        }
+      }
       return;
     }
     if (parsed is TreeFullMessage) {
+      _treeRecoveryPending = false;
       final seq = parsed.seq;
       if (seq != null && _snapshotSeq >= 0 && seq <= _snapshotSeq) {
         return;
@@ -215,9 +318,7 @@ class FileService {
     if (parsed is GitStashListResultMessage) {
       if (parsed.error == null) {
         _setState(
-          _state.copyWith(
-            git: _state.git.copyWith(stashes: parsed.stashes),
-          ),
+          _state.copyWith(git: _state.git.copyWith(stashes: parsed.stashes)),
         );
       }
       return;
@@ -301,6 +402,11 @@ class FileService {
 
   void _handleTreeFull(TreeFullMessage msg) {
     final preserveExpanded = msg.projectId == _state.projectId;
+    // A re-sync push carries the revision it was built at, so the base moves
+    // with the tree it replaces. An agent too old to stamp one leaves the base
+    // where it was, which costs a full pull on the next resume and nothing else.
+    final seq = msg.seq;
+    if (seq != null && seq > _snapshotSeq) _rememberSeq(seq);
     _setState(
       _state.copyWith(
         root: msg.root,
@@ -471,8 +577,9 @@ class FileService {
     final loading = Set<String>.from(_state.git.history.filesLoadingShas)
       ..remove(msg.sha);
     if (msg.error != null) {
-      final errors = Map<String, String>.from(_state.git.history.filesErrorBySha)
-        ..[msg.sha] = msg.error!;
+      final errors = Map<String, String>.from(
+        _state.git.history.filesErrorBySha,
+      )..[msg.sha] = msg.error!;
       _setState(
         _state.copyWith(
           git: _state.git.copyWith(
@@ -502,7 +609,8 @@ class FileService {
 
   void _handleGitCommitDiffContent(GitCommitDiffContentMessage msg) {
     onFragmentSuccess?.call(FragHint('git:commit-diff-content', msg.path));
-    if (msg.path != _state.git.diffPath || msg.sha != _state.git.diffCommitSha) {
+    if (msg.path != _state.git.diffPath ||
+        msg.sha != _state.git.diffCommitSha) {
       return;
     }
     _diffLatch?.settle();
@@ -573,6 +681,7 @@ class FileService {
       size: node.size,
       extension: node.extension,
       children: node.children.map(_cloneNode).toList(),
+      truncated: node.truncated,
     );
   }
 
@@ -590,6 +699,7 @@ class FileService {
       size: root.size,
       extension: root.extension,
       children: newChildren,
+      truncated: root.truncated,
     );
   }
 
@@ -617,6 +727,7 @@ class FileService {
       size: current.size,
       extension: current.extension,
       children: newChildren,
+      truncated: current.truncated,
     );
   }
 
@@ -652,6 +763,7 @@ class FileService {
       size: parent.size,
       extension: parent.extension,
       children: newChildren,
+      truncated: parent.truncated,
     );
   }
 
@@ -709,9 +821,9 @@ class FileService {
   /// `docs/architecture.md`), so it cannot relativize the path itself.
   Future<FileResolvePathResultMessage> resolveTerminalPath(String rawPath) {
     final requestId = const Uuid().v4();
-    final pending = PendingReply<FileResolvePathResultMessage>(
+    final pending = session.newPending<FileResolvePathResultMessage>(
       timeout: const Duration(seconds: 8),
-      onTimeout: () => _pendingResolves.remove(requestId),
+      onAbandon: () => _pendingResolves.remove(requestId),
     );
     _pendingResolves[requestId] = pending;
     session.sendForCheckout(
@@ -741,12 +853,31 @@ class FileService {
           clearSearchLine: searchLine == null,
           clearSearchQuery: searchQuery == null,
         ),
+        expandedPaths: _expandedWithAncestorsOf(path),
       ),
     );
     // Register (fires now if established) rather than sending inline — see
     // [_hydrateSelectedFile]. Re-registering under the same key supersedes, so
     // opening a new file replaces the prior file's hydrator.
     session.hydrateCheckout(checkoutId, 'file:selected', _hydrateSelectedFile);
+  }
+
+  /// Ancestor directories of [path], folded into the current expanded set —
+  /// mirrors [revealDirectory] but for a FILE selection (a terminal link, a
+  /// search result, git's "view file", …), none of which otherwise touches
+  /// [FileTreeState.expandedPaths]. Without this the tree can select a file
+  /// deep inside collapsed folders and show nothing, since [FileTreeView]
+  /// only walks into a directory that is in the expanded set.
+  Set<String> _expandedWithAncestorsOf(String path) {
+    final segments = path.split('/').where((s) => s.isNotEmpty).toList();
+    if (segments.length <= 1) return _state.expandedPaths;
+    final expanded = Set<String>.from(_state.expandedPaths);
+    var acc = '';
+    for (final segment in segments.sublist(0, segments.length - 1)) {
+      acc = acc.isEmpty ? segment : '$acc/$segment';
+      expanded.add(acc);
+    }
+    return expanded;
   }
 
   void requestFileContent(String path) {
@@ -798,7 +929,7 @@ class FileService {
 
   /// Tier-3 hydrator for the preview overlay. Reads the path from `_state` so a
   /// re-register always pulls whatever is CURRENTLY open, and no-ops once the
-  /// overlay is closed — which is what retires it without an unregister.
+  /// overlay is closed — unregistered on [deactivate] and [dispose].
   Future<void> _hydratePreview() async {
     if (_disposed) return;
     final path = _state.preview.path;
@@ -808,7 +939,10 @@ class FileService {
 
   void requestFullTree() {
     _setState(_state.copyWith(expandedPaths: {}));
-    unawaited(_hydrateTree());
+    // Deliberately claims nothing, unlike [_pullTree]: this is the user asking
+    // for the tree to be rebuilt from disk, and `file:tree:unchanged` would
+    // answer that refresh by doing visibly nothing.
+    unawaited(_requestTree());
   }
 
   void setFilterQuery(String? query) {
@@ -915,7 +1049,9 @@ class FileService {
       session.action(() => latch.done, timeout: gitSyncTimeout).catchError((_) {
         if (_disposed || _syncLatch != latch) return;
         _syncLatch = null;
-        _setState(_state.copyWith(git: _state.git.copyWith(clearSyncing: true)));
+        _setState(
+          _state.copyWith(git: _state.git.copyWith(clearSyncing: true)),
+        );
         _emitOpFeedback('${op.label} timed out');
       }),
     );
@@ -1148,7 +1284,9 @@ class FileService {
     if (expanding) expanded.add(sha);
     _setState(
       _state.copyWith(
-        git: _state.git.copyWith(history: history.copyWith(expandedShas: expanded)),
+        git: _state.git.copyWith(
+          history: history.copyWith(expandedShas: expanded),
+        ),
       ),
     );
     if (expanding &&
@@ -1219,7 +1357,21 @@ class FileService {
     if (history.expandedShas.isEmpty) return;
     _setState(
       _state.copyWith(
-        git: _state.git.copyWith(history: history.copyWith(expandedShas: const {})),
+        git: _state.git.copyWith(
+          history: history.copyWith(expandedShas: const {}),
+        ),
+      ),
+    );
+  }
+
+  /// Fold the whole History section shut in the side-by-side layout, or
+  /// reopen it — see [GitPaneState.historyCollapsed].
+  void toggleHistoryCollapsed() {
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(
+          historyCollapsed: !_state.git.historyCollapsed,
+        ),
       ),
     );
   }
@@ -1333,11 +1485,13 @@ class FileService {
       latch.settle();
     }
     _commitFilesLatches.clear();
-    for (final pending in _pendingResolves.values) {
+    final resolves = _pendingResolves.values.toList();
+    _pendingResolves.clear();
+    for (final pending in resolves) {
       pending.fail(StateError('FileService disposed'));
     }
-    _pendingResolves.clear();
     session.unhydrateCheckout(checkoutId, 'file:selected');
+    session.unhydrateCheckout(checkoutId, 'file:preview');
     session.unhydrateCheckout(checkoutId, _treeHydratorKey);
     session.unhydrateCheckout(checkoutId, _syncHydratorKey);
     session.unhydrateCheckout(checkoutId, _stashHydratorKey);

@@ -83,7 +83,7 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
       // exactly the post-restart state the regression below is about.
       attachStream: (b) => {
         bus = b;
-        return { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
+        return { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const };
       },
       currentPeerPubkey: () => null,
       machineDeviceId: () => "machine-uuid",
@@ -187,7 +187,7 @@ async function startAfterDesktopLeft() {
       attachStream: (b, o) => {
         bus = b;
         streamOpts = o;
-        return { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
+        return { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const };
       },
       // Sticky across the disconnect below, exactly as the real client is.
       currentPeerPubkey: () => "DESKTOP_PK",
@@ -262,7 +262,7 @@ async function startAfterPhoneLeft() {
       attachStream: (b, o) => {
         bus = b;
         streamOpts = o;
-        return { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
+        return { streamId: "s1", detach: () => {}, sendTunnel: async () => "sent" as const };
       },
       currentPeerPubkey: () => "PHONE_A_PK",
       machineDeviceId: () => "machine-uuid",

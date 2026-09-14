@@ -113,7 +113,7 @@ interface Handshaked {
 /** Drive a full acked handshake (client-hello → agent-hello → agent-ready →
  *  app:ready → established) on a fresh forTest client and return the pieces a
  *  test needs to keep driving the session. */
-function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phoneEd: ReturnType<typeof ed25519Pair>; attemptId: string; onHandshakeComplete?: () => void }): Handshaked {
+function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phoneEd: ReturnType<typeof ed25519Pair>; attemptId: string; onHandshakeComplete?: () => void; capabilities?: object }): Handshaked {
   const sent: Array<string | Buffer> = [];
   const client = RelayClient.forTest({
     generateKeypair: generateEphemeralKeypair,
@@ -149,7 +149,11 @@ function establishSession(opts: { agentEd: ReturnType<typeof ed25519Pair>; phone
   expect(readyMsg.type).toBe("handshake:agent-ready");
   expect(verifyConfirmTag(agentConfirmTag(phoneKeys.confirm), Buffer.from(readyMsg.confirm, "base64"))).toBe(true);
 
-  const appReadyJson = JSON.stringify({ type: "app:ready", attemptId: opts.attemptId, confirm: phoneConfirmTag(phoneKeys.confirm).toString("base64") });
+  const appReadyJson = JSON.stringify({
+    type: "app:ready", attemptId: opts.attemptId,
+    confirm: phoneConfirmTag(phoneKeys.confirm).toString("base64"),
+    ...(opts.capabilities ? { capabilities: opts.capabilities } : {}),
+  });
   injectFrame(client, FrameKind.sealed, phoneTransport.seal(appReadyJson));
   expect(client._handshakeComplete()).toBe(true);
 
@@ -189,6 +193,90 @@ test("duplicate app:ready for the live attemptId is idempotent: single establish
   expect(sent.length).toBe(sentBefore + 1);
   const dup = phoneTransport.open(sent[sent.length - 1] as Buffer);
   expect(JSON.parse(dup!)).toEqual({ type: "established", attemptId });
+});
+
+test("peerPullsTree is true once the app advertises pullsTree", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, pullsTree: true },
+  });
+  expect(client.peerPullsTree).toBe(true);
+});
+
+test("peerPullsTree is false when the app omits pullsTree", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true },
+  });
+  expect(client.peerPullsTree).toBe(false);
+});
+
+test("peerPullsTree is false for a wrong-typed capability", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { pullsTree: 1 },
+  });
+  expect(client.peerPullsTree).toBe(false);
+});
+
+test("peerPullsTree reads true again once the session is torn down — no app, not a surviving capability", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, pullsTree: true },
+  });
+  (client as any).tearDownEstablished();
+  expect((client as any).peerAdvertisedPullsTree).toBe(false);
+  // The getter's "true" here means "no app to push to", not "the capability survived".
+  expect(client.peerPullsTree).toBe(true);
+});
+
+// terminalFramesV1 fail-CLOSES where pullsTree fails open: it selects a display
+// mode, so an app that never named it must keep getting legacy terminal:output.
+test("peerSupportsTerminalFramesV1 is true once the app advertises terminalFramesV1", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, terminalFramesV1: true },
+  });
+  expect(client.peerSupportsTerminalFramesV1).toBe(true);
+});
+
+test("peerSupportsTerminalFramesV1 is false when the app omits terminalFramesV1", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, pullsTree: true },
+  });
+  expect(client.peerSupportsTerminalFramesV1).toBe(false);
+});
+
+test("peerSupportsTerminalFramesV1 is false for a wrong-typed capability", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { terminalFramesV1: 1 },
+  });
+  expect(client.peerSupportsTerminalFramesV1).toBe(false);
+});
+
+test("peerSupportsTerminalFramesV1 reads false once the session is torn down — no app cannot render frames", () => {
+  const { client } = establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, terminalFramesV1: true },
+  });
+  (client as any).tearDownEstablished();
+  expect((client as any).peerAdvertisedTerminalFramesV1).toBe(false);
+  expect(client.peerSupportsTerminalFramesV1).toBe(false);
+});
+
+test("onHandshakeComplete carries terminalFramesV1 alongside the other capabilities", () => {
+  // Collected into an array rather than a nullable let: TS narrows a `let x = null`
+  // to `null` at the assertion because it cannot see the callback run, and the
+  // length also pins that promotion fires the callback exactly once.
+  const seen: Array<{ checkoutRouting: boolean; pullsTree: boolean; terminalFramesV1: boolean }> = [];
+  establishSession({
+    agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a",
+    capabilities: { checkoutRouting: true, terminalFramesV1: true },
+    onHandshakeComplete: ((caps: any) => { seen.push(caps); }) as () => void,
+  });
+  expect(seen).toEqual([{ checkoutRouting: true, pullsTree: false, terminalFramesV1: true }]);
 });
 
 test("agent rejects a client-hello with an invalid transcript signature", () => {

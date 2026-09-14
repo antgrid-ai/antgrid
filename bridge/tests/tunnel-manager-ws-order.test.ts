@@ -1,33 +1,51 @@
 import { expect, test } from "bun:test";
 import { createConnState } from "../src/conn-state";
 import { TunnelManager } from "../src/tunnel-manager";
+import type { SendOutcome } from "../src/send-scheduler";
 
+/** Echoes what it is sent, and counts the sockets it currently holds open —
+ *  the only way to tell a tunnel the bridge tore down from one it merely
+ *  stopped forwarding on. */
 function startEchoServer() {
-  return Bun.serve({
+  const state = { open: 0 };
+  const server = Bun.serve({
     port: 0,
     fetch(req, server) {
       if (server.upgrade(req)) return;
       return new Response("upgrade required", { status: 426 });
     },
     websocket: {
+      open() { state.open += 1; },
+      close() { state.open -= 1; },
       message(ws, data) {
         ws.send(data);
       },
     },
   });
+  return Object.assign(server, { upstream: state });
 }
 
-function makeManager(opts: { wsPreopenTtlMs?: number } = {}) {
+function makeManager(
+  opts: {
+    wsPreopenTtlMs?: number;
+    outcomeFor?: (frame: Record<string, unknown>) => SendOutcome;
+  } = {},
+) {
+  const { outcomeFor, ...ctorOpts } = opts;
   const sent: Record<string, unknown>[] = [];
   const manager = new TunnelManager({
     projectId: "project",
     portLabels: new Map(),
     previewPorts: new Set(),
-    sendTunnel: (data) => sent.push(data as Record<string, unknown>),
+    sendTunnel: async (data) => {
+      const frame = data as Record<string, unknown>;
+      sent.push(frame);
+      return outcomeFor?.(frame) ?? "sent";
+    },
     sendEncrypted: () => {},
     relayHost: "relay.test",
     connState: createConnState(),
-    ...opts,
+    ...ctorOpts,
   });
   return { manager, sent };
 }
@@ -226,6 +244,102 @@ test("stop() closes tunnels the app still believes are live", async () => {
       { tunnelId: "live" },
     ]);
   } finally {
+    server.stop(true);
+  }
+});
+
+function openTunnel(
+  manager: TunnelManager,
+  tunnelId: string,
+  port: number,
+): void {
+  manager.onWsOpen({
+    type: "tunnel:ws-open",
+    tunnelId,
+    port,
+    scheme: "http",
+    path: "/",
+    checkoutId: "main",
+  });
+}
+
+// A WS carries a byte stream, so a frame the transport could not deliver leaves
+// a hole no later frame can fill — the page's own reconnect is the only repair,
+// and it needs a close event to start.
+test("an upstream frame the transport reports too large closes the tunnel with 1009", async () => {
+  const server = startEchoServer();
+  const { manager, sent } = makeManager({
+    outcomeFor: (frame) => (frame.type === "tunnel:ws-data" ? "too-large" : "sent"),
+  });
+  try {
+    openTunnel(manager, "big", server.port!);
+    await waitUntil(() => server.upstream.open === 1);
+    manager.onWsData({ type: "tunnel:ws-data", tunnelId: "big", data: "echo-me", checkoutId: "main" });
+
+    await waitUntil(() => sent.some((m) => m.type === "tunnel:ws-close"));
+    const close = sent.find((m) => m.type === "tunnel:ws-close")!;
+    expect(close.tunnelId).toBe("big");
+    expect(close.code).toBe(1009);
+    expect(String(close.reason)).toContain("too large");
+    await waitUntil(() => server.upstream.open === 0);
+
+    // The id is poisoned by the teardown, so a frame still in flight behind the
+    // close cannot start a second, tail-only tunnel on it.
+    manager.onWsData({ type: "tunnel:ws-data", tunnelId: "big", data: "late", checkoutId: "main" });
+    openTunnel(manager, "big", server.port!);
+    await Bun.sleep(50);
+    expect(server.upstream.open).toBe(0);
+    expect(sent.filter((m) => m.type === "tunnel:ws-close")).toHaveLength(2);
+  } finally {
+    manager.stop();
+    server.stop(true);
+  }
+});
+
+test("a dropped upstream frame closes the tunnel with 1001", async () => {
+  const server = startEchoServer();
+  const { manager, sent } = makeManager({
+    outcomeFor: (frame) => (frame.type === "tunnel:ws-data" ? "dropped" : "sent"),
+  });
+  try {
+    openTunnel(manager, "gone", server.port!);
+    await waitUntil(() => server.upstream.open === 1);
+    manager.onWsData({ type: "tunnel:ws-data", tunnelId: "gone", data: "echo-me", checkoutId: "main" });
+
+    await waitUntil(() => sent.some((m) => m.type === "tunnel:ws-close"));
+    const close = sent.find((m) => m.type === "tunnel:ws-close")!;
+    expect(close.code).toBe(1001);
+    await waitUntil(() => server.upstream.open === 0);
+  } finally {
+    manager.stop();
+    server.stop(true);
+  }
+});
+
+// The switch being off is not a delivery failure: the close would be gated too,
+// so tearing down leaves the app holding a mute socket for the life of the page.
+test("a gated upstream frame is dropped and the tunnel kept", async () => {
+  const server = startEchoServer();
+  let gate = true;
+  const { manager, sent } = makeManager({
+    outcomeFor: (frame) => (gate && frame.type === "tunnel:ws-data" ? "gated" : "sent"),
+  });
+  try {
+    openTunnel(manager, "quiet", server.port!);
+    await waitUntil(() => server.upstream.open === 1);
+    manager.onWsData({ type: "tunnel:ws-data", tunnelId: "quiet", data: "while-gated", checkoutId: "main" });
+    await waitUntil(() => sent.some((m) => m.data === "while-gated" && m.type === "tunnel:ws-data"));
+
+    await Bun.sleep(50);
+    expect(sent.filter((m) => m.type === "tunnel:ws-close")).toHaveLength(0);
+    expect(server.upstream.open).toBe(1);
+
+    gate = false;
+    manager.onWsData({ type: "tunnel:ws-data", tunnelId: "quiet", data: "after-gate", checkoutId: "main" });
+    await waitUntil(() => sent.some((m) => m.data === "after-gate" && m.type === "tunnel:ws-data"));
+    expect(sent.filter((m) => m.type === "tunnel:ws-close")).toHaveLength(0);
+  } finally {
+    manager.stop();
     server.stop(true);
   }
 });

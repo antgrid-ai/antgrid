@@ -219,7 +219,7 @@ Query params (all optional, order-independent):
 | `view` | `terminals`, `files`, `git`, `preview`, `handler` | project targets — the workspace tab to open |
 | `session` | a session id | project targets — which session to activate |
 | `file` | a path **relative to the session's checkout** | project targets — opens it in the explorer |
-| `section` | `billing`, `connection`, `appearance`, `uiSize`, `accessibility`, `design`, `privacy`, `help`, `account` | `settings`, or any target with `surface=appSettings` |
+| `section` | `billing`, `appearance`, `uiSize`, `accessibility`, `privacy`, `help`, `account` | `settings`, or any target with `surface=appSettings` |
 
 `antgrid://nav/agent/<agentDeviceId>` is the legacy registration-id form; prefer
 `remote/<machineUuid>/<projectId>` for a machine you reached over the relay.

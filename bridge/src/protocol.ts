@@ -1,6 +1,16 @@
 import { z } from "zod";
 import { AbConfigSchema } from "./config";
 import { KNOWN_TIERS } from "./entitlement";
+// The frame-display payload sub-schemas and their byte/row budgets live with the
+// implementation that has to honour them; only the eight wire ENVELOPES are
+// declared here (see the block below TerminalSnapshotMessage for why).
+import {
+  TERMINAL_HISTORY_PAGE_ROWS,
+  TERMINAL_PROTOCOL_VERSION,
+  TerminalHistoryBoundarySchema,
+  TerminalHistoryRowSchema,
+  TerminalScreenFrameSchema,
+} from "./terminal-frames/protocol";
 
 const BaseMessage = z.object({
   id: z.string().uuid(),
@@ -19,6 +29,7 @@ const FileTreeNodeSchema: z.ZodType<{
   size?: number;
   extension?: string;
   children?: any[];
+  truncated?: true;
 }> = z.lazy(() =>
   z.object({
     name: z.string(),
@@ -27,6 +38,9 @@ const FileTreeNodeSchema: z.ZodType<{
     size: z.number().optional(),
     extension: z.string().optional(),
     children: z.array(FileTreeNodeSchema).optional(),
+    // The directory's listing was cut at the tree's node budget — see
+    // MAX_TREE_NODES in file-tree.ts.
+    truncated: z.literal(true).optional(),
   }),
 );
 
@@ -74,6 +88,13 @@ const TerminalNotificationMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+const TerminalBellMessage = BaseMessage.extend({
+  type: z.literal("terminal:bell"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  ...CheckoutScoped,
+});
+
 const PingMessage = BaseMessage.extend({
   type: z.literal("ping"),
 });
@@ -103,7 +124,18 @@ const HandshakeAgentReadyMessage = BaseMessage.extend({
 const AppReadyMessage = BaseMessage.extend({
   type: z.literal("app:ready"),
   confirm: z.string(),
-  capabilities: z.object({ checkoutRouting: z.literal(true).optional() }).optional(),
+  // Neither live reader parses `app:ready` through Zod — relay-client.ts and
+  // local-listener.ts both read the raw JSON — so this object is union typing
+  // and documentation, not the runtime gate. Adding a key here does not make
+  // the bridge honour it; the reads are hand-written on both transports.
+  capabilities: z.object({
+    checkoutRouting: z.literal(true).optional(),
+    pullsTree: z.literal(true).optional(),
+    // The app can render `terminal:frame` display mode. Absent means it cannot,
+    // and the read of it MUST fail closed (unknown peer reads false) or an old
+    // app is switched into a mode it has no renderer for.
+    terminalFramesV1: z.literal(true).optional(),
+  }).optional(),
 });
 
 const TerminalStartCommand = BaseMessage.extend({
@@ -129,6 +161,7 @@ const TerminalResizeCommand = BaseMessage.extend({
   cols: z.number().int().positive(),
   rows: z.number().int().positive(),
   clientId: z.string(),
+  intent: z.enum(["resize", "takeover"]),
   baseDriverClientId: z.string().optional(),
   ...CheckoutScoped,
 });
@@ -139,8 +172,7 @@ const TerminalSizeMessage = BaseMessage.extend({
   cols: z.number().int().positive(),
   rows: z.number().int().positive(),
   // The clientId whose resize the PTY currently follows. A client renders
-  // natively when this equals its own id, else it renders this grid letterboxed
-  // or horizontally scrolled.
+  // with this grid; passive viewers center and scale it down when needed.
   driverClientId: z.string(),
   ...CheckoutScoped,
 });
@@ -722,6 +754,20 @@ const StreamInvalidMessage = BaseMessage.extend({
   streamId: z.string(),
 });
 
+// Inbound app→agent, control plane only: the MIRROR of stream-invalid. The app
+// received a frame on a streamId it holds no transport for, so everything this
+// host pushes onto that stream is being discarded. Without it the loss is
+// unobservable from here and unbounded — stream ids outlive the app process that
+// bound them (a core keeps its stream across the peer's restart, and a re-open
+// reuses the same id), so a live PTY on a stream the new app never bound drops
+// one frame per frame for as long as the terminal runs.
+// Advisory, never authorization: it only mutes a stream this host already
+// chose to open, and delivery resumes the moment the app proves it is bound.
+const StreamUnboundMessage = BaseMessage.extend({
+  type: z.literal("stream-unbound"),
+  streamId: z.string(),
+});
+
 // Outbound result for a control-plane verb (e.g. project:start). Success is
 // usually conveyed by a fresh agent:projects re-advertisement; this carries the
 // FAILURE feedback (NOT_ALLOWED / UNKNOWN_PROJECT / OPEN_FAILED) back to the
@@ -741,6 +787,11 @@ const TreeFullMessage = BaseMessage.extend({
   type: z.literal("tree:full"),
   projectId: z.string(),
   root: FileTreeNodeSchema,
+  // Which revision of the watcher's tree this is. A resync push is the only
+  // full tree that still reaches an app unasked, and an app that cannot name
+  // the revision it holds cannot ask "still this one?" on the next resume —
+  // see `sinceSeq` below. Optional so a pre-seq bridge still parses.
+  seq: z.number().int().nonnegative().optional(),
   ...CheckoutScoped,
 });
 
@@ -792,6 +843,13 @@ const FileResolvePathResultMessage = BaseMessage.extend({
   // path from elsewhere, a symlink escape, or unparsable garbage).
   relPath: z.string().nullable(),
   isDirectory: z.boolean(),
+  // Absolute path, set only when relPath is null AND the path is a
+  // recognized image outside the checkout (see file-tree.ts's
+  // EXTERNAL_SAFE_IMAGE_MIME) — an image-generation tool's own output
+  // directory, typically. Lets the app preview it read-only via `file:read`
+  // (which applies the same extension gate again) instead of refusing the
+  // link outright.
+  externalImagePath: z.string().nullable(),
   ...CheckoutScoped,
 });
 
@@ -1957,14 +2015,142 @@ const TerminalSnapshotMessage = BaseMessage.extend({
   ...CheckoutScoped,
 });
 
+// The frame display protocol (advertised as `terminalFramesV1`). These eight
+// envelopes are declared HERE, as literal source text, rather than imported from
+// terminal-frames/protocol.ts: checkout-protocol-contract.test.ts scrapes this
+// file for `BaseMessage.extend({ ... ...CheckoutScoped ... })` blocks and
+// asserts that set equals CHECKOUT_VARIABLE_MESSAGE_TYPES, and an import is
+// invisible to a textual scraper. The payload sub-schemas and every byte/row
+// budget stay in terminal-frames/protocol.ts, which owns them.
+//
+// All eight name a terminal INSIDE a checkout: PTY slots are namespaced
+// `<checkoutId>:<terminalId>`, so two isolated checkouts legitimately hold
+// same-named terminals. Hence `...CheckoutScoped` on every one, and hence all
+// eight in CHECKOUT_VARIABLE_MESSAGE_TYPES.
+//
+// `sequence`, `revision`, `epoch`, `rowId` and `beforeRowId` are deliberately
+// NOT bounded by the viewer/history budgets. Those budgets bound what may be in
+// flight (TERMINAL_VIEWER_MAX_FRAMES) or how large one payload may be
+// (TERMINAL_VIEWER_MAX_BYTES and TERMINAL_HISTORY_PAGE_ROWS, both enforced by
+// the imported sub-schemas); the counters are monotonic for the life of an
+// attachment or a run, so clamping them to a budget would reject a long-lived
+// terminal's legitimate frames.
+
+const TerminalSubscribeMessage = BaseMessage.extend({
+  type: z.literal("terminal:subscribe"),
+  terminalId: z.string(),
+  // The highest frame protocol version the app can render. Deliberately a plain
+  // int and not a literal: a version this bridge cannot serve is answered with
+  // `terminal:display:status` UPGRADE_REQUIRED, which is only reachable if the
+  // frame parses at all.
+  version: z.number().int().nonnegative(),
+  requestId: z.string().uuid(),
+  ...CheckoutScoped,
+});
+
+const TerminalSubscribedMessage = BaseMessage.extend({
+  type: z.literal("terminal:subscribed"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  version: z.literal(TERMINAL_PROTOCOL_VERSION),
+  requestId: z.string().uuid(),
+  ...CheckoutScoped,
+});
+
+const TerminalFrameMessage = BaseMessage.extend({
+  type: z.literal("terminal:frame"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  sequence: z.number().int().nonnegative(),
+  ...TerminalScreenFrameSchema.shape,
+  ...CheckoutScoped,
+});
+
+const TerminalAckMessage = BaseMessage.extend({
+  type: z.literal("terminal:ack"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  sequence: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+const TerminalUnsubscribeMessage = BaseMessage.extend({
+  type: z.literal("terminal:unsubscribe"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  ...CheckoutScoped,
+});
+
+const TerminalHistoryRequestMessage = BaseMessage.extend({
+  type: z.literal("terminal:history:request"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  requestId: z.string().uuid(),
+  epoch: z.number().int().nonnegative(),
+  beforeRowId: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+const TerminalHistoryPageMessage = BaseMessage.extend({
+  type: z.literal("terminal:history:page"),
+  terminalId: z.string(),
+  runId: z.string().uuid(),
+  attachmentId: z.string().uuid(),
+  requestId: z.string().uuid(),
+  history: TerminalHistoryBoundarySchema,
+  expired: z.boolean(),
+  beforeRowId: z.number().int().nonnegative(),
+  rows: z.array(TerminalHistoryRowSchema).max(TERMINAL_HISTORY_PAGE_ROWS),
+  ...CheckoutScoped,
+});
+
+const TerminalDisplayStatusMessage = BaseMessage.extend({
+  type: z.literal("terminal:display:status"),
+  terminalId: z.string(),
+  // Optional, and it must stay optional: UPGRADE_REQUIRED answers a subscribe
+  // that never produced an attachment, so there is no run or attachment to
+  // name. Requiring either would leave the one failure an old app can trigger
+  // unreportable.
+  runId: z.string().uuid().optional(),
+  attachmentId: z.string().uuid().optional(),
+  requestId: z.string().uuid().optional(),
+  code: z.enum(["UPGRADE_REQUIRED", "UNKNOWN_TERMINAL", "DISPLAY_FAILED", "ACK_TIMEOUT", "HISTORY_DISABLED", "ENDED"]),
+  message: z.string().max(1024),
+  finalSequence: z.number().int().nonnegative().optional(),
+  exitCode: z.number().int().nullable().optional(),
+  ...CheckoutScoped,
+});
+
 const FileTreeSnapshotRequestMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot:request"),
+  /** The revision the caller's tree is already at. Matched against the
+   *  watcher's current seq: still equal means the caller is current and is
+   *  answered `file:tree:unchanged` instead of the whole tree. Only a caller
+   *  that can vouch the seq came from THIS agent process may send it — a
+   *  restarted agent counts from zero again, so a stale claim would be
+   *  confirmed rather than corrected (see file_service.dart). */
+  sinceSeq: z.number().int().nonnegative().optional(),
   ...CheckoutScoped,
 });
 
 const FileTreeSnapshotMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot"),
   tree: FileTreeNodeSchema,
+  seq: z.number().int().nonnegative(),
+  ...CheckoutScoped,
+});
+
+/** The cheap answer to a `sinceSeq` request the watcher has not moved past.
+ *  Its own type rather than a tree-less `file:tree:snapshot`: a snapshot whose
+ *  tree is sometimes absent puts a "when is this null?" question on every
+ *  future reader of the frame that normally carries the tree. */
+const FileTreeUnchangedMessage = BaseMessage.extend({
+  type: z.literal("file:tree:unchanged"),
   seq: z.number().int().nonnegative(),
   ...CheckoutScoped,
 });
@@ -2351,6 +2537,40 @@ const AgentQuestionResolveMessage = BaseMessage.extend({
   answer: z.union([z.string(), z.array(z.string())]),
 });
 
+// ── Netwatch: shipping a remote app's half of the frame capture ───────────────
+// Both ride the machine CONTROL plane and are consumed by relay-client.ts before
+// anything project-scoped sees them. Deliberately absent from
+// CHECKOUT_VARIABLE_MESSAGE_TYPES: neither reads nor writes a working tree.
+
+// Agent -> app: arm or disarm the app's own frame capture. A phone has no env
+// var and no UI for this, so `antgrid watch --remote` is the only control
+// surface. `ttlMs` is a DEAD-MAN SWITCH, not a preference: a CLI killed with
+// SIGKILL sends no disarm, and a phone left capturing forever costs battery and
+// bandwidth with nothing on the device able to stop it. The watcher re-arms
+// well inside the window while it runs.
+const NetwatchConfigureMessage = BaseMessage.extend({
+  type: z.literal("netwatch:configure"),
+  enabled: z.boolean(),
+  ttlMs: z.number().int().positive().optional(),
+});
+
+// App -> agent: a batch of the app's own capture events. The element shape is
+// `NetwatchEvent` (netwatch.ts) minus the fields this side stamps itself, and is
+// passthrough on purpose — a bridge must forward an event from a NEWER app
+// without understanding every field, since the whole point is reading what that
+// app saw. `dropped` counts what the app's own budget discarded, so a gap in
+// `seq` is never mistaken for a frame that went missing on the wire.
+const NetwatchEventsMessage = BaseMessage.extend({
+  type: z.literal("netwatch:events"),
+  events: z.array(z.record(z.string(), z.unknown())).max(1000),
+  dropped: z.number().int().nonnegative().optional(),
+  /** The app's own clock when it sent this batch. The bridge subtracts it from
+   *  its own receive time to shift every `at` in the batch onto ONE clock — see
+   *  `Netwatch.ingestRemote`. Absent means no correction, which is right for an
+   *  app on this same machine. */
+  sentAt: z.number().optional(),
+});
+
 export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentHelloMessage,
   PortDetectedMessage,
@@ -2359,6 +2579,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   TerminalStartedMessage,
   TerminalExitedMessage,
   TerminalNotificationMessage,
+  TerminalBellMessage,
   TerminalStartCommand,
   TerminalStopCommand,
   TerminalResizeCommand,
@@ -2392,6 +2613,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentToolsMessage,
   StreamReadyMessage,
   StreamInvalidMessage,
+  StreamUnboundMessage,
   ControlResultMessage,
   AppReadyMessage,
   CommandRunMessage,
@@ -2470,8 +2692,17 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   ClientFocusStateMessage,
   TerminalSnapshotRequestMessage,
   TerminalSnapshotMessage,
+  TerminalSubscribeMessage,
+  TerminalSubscribedMessage,
+  TerminalFrameMessage,
+  TerminalAckMessage,
+  TerminalUnsubscribeMessage,
+  TerminalHistoryRequestMessage,
+  TerminalHistoryPageMessage,
+  TerminalDisplayStatusMessage,
   FileTreeSnapshotRequestMessage,
   FileTreeSnapshotMessage,
+  FileTreeUnchangedMessage,
   PreviewSnapshotRequestMessage,
   PreviewSnapshotMessage,
   RequestMessage,
@@ -2501,11 +2732,17 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentPermissionResolveMessage,
   AgentQuestionResolveMessage,
   AgentTaskStopMessage,
+  NetwatchConfigureMessage,
+  NetwatchEventsMessage,
 ]);
 
 export type AbMessage = z.infer<typeof AbMessageSchema>;
 
+export type NetwatchConfigure = z.infer<typeof NetwatchConfigureMessage>;
+export type NetwatchEvents = z.infer<typeof NetwatchEventsMessage>;
+
 export type TerminalNotificationMessage = z.infer<typeof TerminalNotificationMessage>;
+export type TerminalBellMessage = z.infer<typeof TerminalBellMessage>;
 
 export type TerminalOutput = z.infer<typeof TerminalOutputMessage>;
 export type TerminalInput = z.infer<typeof TerminalInputMessage>;
@@ -2534,6 +2771,7 @@ export type ProjectAdvertEntry = AgentProjects["projects"][number];
 export type AgentTools = z.infer<typeof AgentToolsMessage>;
 export type StreamReady = z.infer<typeof StreamReadyMessage>;
 export type StreamInvalid = z.infer<typeof StreamInvalidMessage>;
+export type StreamUnbound = z.infer<typeof StreamUnboundMessage>;
 export type ControlResult = z.infer<typeof ControlResultMessage>;
 export type AppReady = z.infer<typeof AppReadyMessage>;
 export type CommandRun = z.infer<typeof CommandRunMessage>;
@@ -2633,8 +2871,23 @@ export type SessionUpdated = z.infer<typeof SessionUpdatedMessage>;
 export type ClientFocusState = z.infer<typeof ClientFocusStateMessage>;
 export type TerminalSnapshotRequest = z.infer<typeof TerminalSnapshotRequestMessage>;
 export type TerminalSnapshot = z.infer<typeof TerminalSnapshotMessage>;
+// The wire types for the frame display protocol. This file is their single
+// home — the same eight names are also exported from terminal-frames/protocol.ts
+// (whose envelopes predate registration and lack CheckoutScoped's `main`
+// default), and `TerminalFrame` is a third name in terminal-frames/source.ts,
+// where it means the CAPTURE payload rather than a wire message. Import the
+// wire types from here; anything created by `createMessage` has these shapes.
+export type TerminalSubscribe = z.infer<typeof TerminalSubscribeMessage>;
+export type TerminalSubscribed = z.infer<typeof TerminalSubscribedMessage>;
+export type TerminalFrame = z.infer<typeof TerminalFrameMessage>;
+export type TerminalAck = z.infer<typeof TerminalAckMessage>;
+export type TerminalUnsubscribe = z.infer<typeof TerminalUnsubscribeMessage>;
+export type TerminalHistoryRequest = z.infer<typeof TerminalHistoryRequestMessage>;
+export type TerminalHistoryPage = z.infer<typeof TerminalHistoryPageMessage>;
+export type TerminalDisplayStatus = z.infer<typeof TerminalDisplayStatusMessage>;
 export type FileTreeSnapshotRequest = z.infer<typeof FileTreeSnapshotRequestMessage>;
 export type FileTreeSnapshot = z.infer<typeof FileTreeSnapshotMessage>;
+export type FileTreeUnchanged = z.infer<typeof FileTreeUnchangedMessage>;
 export type PreviewSnapshotRequest = z.infer<typeof PreviewSnapshotRequestMessage>;
 export type PreviewSnapshot = z.infer<typeof PreviewSnapshotMessage>;
 export type PreviewUrlEntry = z.infer<typeof PreviewUrlEntrySchema>;
@@ -2671,11 +2924,53 @@ export type AgentSessionAction = z.infer<typeof AgentSessionActionMessage>;
 export type AgentPermissionResolve = z.infer<typeof AgentPermissionResolveMessage>;
 export type AgentQuestionResolve = z.infer<typeof AgentQuestionResolveMessage>;
 
+/**
+ * Types whose wire text must never be recorded verbatim, however loudly an
+ * operator asks for bodies.
+ *
+ * `antgrid watch --bodies` exists to show what crossed a socket, and its output
+ * is printed to a terminal, streamed over `/netwatch`, and appended to an
+ * `--export` file that ends up pasted into bug reports. That is fine for a
+ * `tree:full` and catastrophic for these three: `agent:enableRelay` carries the
+ * account device's Ed25519 PRIVATE key plus `clientSecret` and `licenseToken`;
+ * `agent:question-resolve` is the answer to a question the agent may have
+ * flagged `isSecret`, which the UI masks on the way in; `terminal:input` is
+ * literally the user's keystrokes, password prompts inside the PTY included.
+ * The `tunnel:*` set is the preview proxy's own wire (tunnel-protocol.ts) and
+ * carries the proxied site's request and response headers verbatim — `Cookie`,
+ * `Authorization`, `Set-Cookie`. They are named here rather than there because
+ * one list is the only way this stays checkable; they are also the case that
+ * proves the check must key off the CLAIMED type, since `parseMessageFast`
+ * refuses them and they reach the ring down the `unparseable` path.
+ *
+ * Metadata (type, id, byte count) is still recorded — only the payload is
+ * withheld, so a capture still shows that the frame crossed and when.
+ *
+ * Add a type here in the same commit that gives it a secret-bearing field.
+ */
+export const BODY_REDACTED_MESSAGE_TYPES = new Set<string>([
+  "agent:enableRelay",
+  "agent:question-resolve",
+  "terminal:input",
+  // Rendered screen content, which is the same secret class `terminal:input` is
+  // redacted for: whatever the user typed is echoed back into these two, so a
+  // capture would otherwise hold the pasted token that the keystroke frames
+  // withheld. `terminal:snapshot` predates this rule and is knowingly not here.
+  "terminal:frame",
+  "terminal:history:page",
+  "tunnel:http-request",
+  "tunnel:http-start",
+  "tunnel:http-chunk",
+  "tunnel:ws-open",
+]);
+
 /** The exhaustive checkout-variable protocol set. Any new filesystem-facing
  * type belongs here (and gets an explicit schema decision + contract test). */
 export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
-  "terminal:start", "terminal:stop", "terminal:input", "terminal:resize", "terminal:output", "terminal:started", "terminal:exited", "terminal:notification", "terminal:size",
+  "terminal:start", "terminal:stop", "terminal:input", "terminal:resize", "terminal:output", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell", "terminal:size",
   "terminal:snapshot:request", "terminal:snapshot",
+  "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
+  "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
   "agent:status",
   "tree:full", "tree:update", "file:read", "file:content",
   "file:resolve-path", "file:resolve-path-result",
@@ -2691,8 +2986,37 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "command:run", "command:output", "command:done",
   "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
-  "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "preview:snapshot:request", "preview:snapshot",
+  "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged", "preview:snapshot:request", "preview:snapshot",
   "session:result", "control:result",
+]);
+
+/** The subset of CHECKOUT_VARIABLE_MESSAGE_TYPES carried on the "preview"
+ * channel rather than "control" (see MessageBus.publish's channel argument
+ * and send-scheduler.ts's control>preview priority): the two BULK per-frame
+ * terminal payloads, `terminal:frame` (a viewer's live screen) and
+ * `terminal:history:page` (a requested scrollback page). The frame
+ * protocol's other six wire types — `terminal:subscribe`/`subscribed`,
+ * `ack`, `unsubscribe`, `history:request`, `display:status` — are small,
+ * latched, one-shot exchanges the requester is actively waiting on, so they
+ * stay on "control" and are drained ahead of preview's bulk traffic rather
+ * than queuing behind it; see the comment on `TerminalViewerTransport.send`
+ * in agent-core.ts. Priority is not isolation: `SendScheduler.fits` also gates
+ * on `SOCKET_INFLIGHT_BYTES`, which is shared by both channels and sits only
+ * one channel-window above one, so a saturated preview channel leaves control
+ * a bounded headroom and then it too waits for a credit.
+ *
+ * Mirrored BY HAND as `kPreviewChannelInboundTypes` in
+ * app/lib/project/project_message_classification.dart, gated against this set
+ * in checkout-mirror-contract.test.ts. Drift here is silent on the wire in
+ * the worst way: a type added here with no Dart counterpart simply stops
+ * arriving at the app, with no error on either side. The bridge side is safe
+ * from the reverse drift only because every targeted terminal reply derives
+ * its channel from this set (`sendAbToItsChannel` in agent-core.ts) — a call
+ * site that hard-codes "preview" would keep sending a removed type onto a
+ * channel the app no longer admits it on. */
+export const PREVIEW_CHANNEL_MESSAGE_TYPES = new Set<string>([
+  "terminal:frame",
+  "terminal:history:page",
 ]);
 
 type MessagePayload<T extends AbMessage["type"]> = Omit<
@@ -2750,13 +3074,13 @@ export function parseMessage(raw: string): AbMessage | null {
  * Use this on the hot path (terminal:output) after the handshake is complete.
  */
 const KNOWN_TYPES = new Set<string>([
-  "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification",
+  "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification", "terminal:bell",
   "terminal:start", "terminal:stop", "terminal:resize", "terminal:size", "agent:status",
   "ping", "pong", "handshake:client-hello", "handshake:agent-hello", "handshake:agent-ready",
   "tree:full", "tree:update", "file:read", "file:content",
   "file:resolve-path", "file:resolve-path-result",
   "ports:update", "preview:url",
-  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "control:result", "app:ready",
+  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "stream-unbound", "control:result", "app:ready",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
   "handler:snapshot", "handler:undo", "handler:dismiss", "handler:answer",
@@ -2785,7 +3109,9 @@ const KNOWN_TYPES = new Set<string>([
   "session:result", "session:updated",
   "client:focus-state",
   "terminal:snapshot:request", "terminal:snapshot",
-  "file:tree:snapshot:request", "file:tree:snapshot",
+  "terminal:subscribe", "terminal:subscribed", "terminal:frame", "terminal:ack",
+  "terminal:unsubscribe", "terminal:history:request", "terminal:history:page", "terminal:display:status",
+  "file:tree:snapshot:request", "file:tree:snapshot", "file:tree:unchanged",
   "preview:snapshot:request", "preview:snapshot",
   "request", "response",
   "agent:turn-start", "agent:session-reset", "agent:turn-end",
@@ -2797,6 +3123,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
   "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
+  "netwatch:configure", "netwatch:events",
 ]);
 
 export function parseMessageFast(raw: string): AbMessage | null {

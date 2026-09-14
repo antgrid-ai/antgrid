@@ -1,9 +1,13 @@
+import 'dart:async';
+
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/services/session_delete_policy.dart';
 
 import 'package:antgrid/project/project_session.dart';
+import 'package:antgrid/services/pending_reply.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
@@ -52,6 +56,41 @@ void main() {
   );
 
   test(
+    'a list request in flight fails with SessionDownException when the '
+    'session goes down, and leaves no entry for a late reply to double-hit',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      final future = svc.requestList();
+      await Future<void>.delayed(Duration.zero);
+      final listMsg = t.sent.firstWhere((m) => m['type'] == 'session:list');
+      final requestId = listMsg['requestId'] as String;
+
+      final expectation = expectLater(
+        future,
+        throwsA(isA<SessionDownException>()),
+      );
+      t.emitState(TransportState.disconnected);
+      await expectation;
+
+      // A late reply naming the same requestId must be a no-op: the registry's
+      // fail already de-registered the coalescing map entry (see
+      // `_newPending`'s onAbandon), so nothing is left for this to complete.
+      t.emit('session:list:result', {
+        'requestId': requestId,
+        'sessions': const <Map<String, dynamic>>[],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test(
     'session:result routes through MessageRouter and completes mutation future',
     () async {
       final t = FakeAgentTransport();
@@ -86,6 +125,250 @@ void main() {
       expect(entry!.id, 'sess-1');
 
       await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test(
+    'a hydration reply satisfies concurrent default list requests only',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final svc = session.sessionsService;
+      final hydration = t.sent.lastWhere((m) => m['type'] == 'session:list');
+      final first = svc.requestList();
+      final second = svc.requestList();
+      var archivedCompleted = false;
+      final archived = svc.requestList(includeArchived: true).then((value) {
+        archivedCompleted = true;
+        return value;
+      });
+      final archivedId = t.sent.lastWhere(
+        (m) => m['type'] == 'session:list',
+      )['requestId'];
+      t.emit('session:list:result', {
+        'requestId': hydration['requestId'],
+        'sessions': const [],
+      });
+      expect(await first, isEmpty);
+      expect(await second, isEmpty);
+      expect(archivedCompleted, isFalse);
+      expect(svc.currentState.loading, isTrue);
+      t.emit('session:list:result', {
+        'requestId': archivedId,
+        'sessions': const [],
+      });
+      expect(await archived, isEmpty);
+      expect(svc.currentState.loading, isFalse);
+      await session.close();
+    },
+  );
+
+  test(
+    'archived replies require exact correlation and do not satisfy default lists',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final svc = session.sessionsService;
+      var defaultCompleted = false;
+      final ordinary = svc.requestList().then((value) {
+        defaultCompleted = true;
+        return value;
+      });
+      final defaultId = t.sent.lastWhere(
+        (m) => m['type'] == 'session:list',
+      )['requestId'];
+      final archived = svc.requestList(includeArchived: true);
+      final archivedId = t.sent.lastWhere(
+        (m) => m['type'] == 'session:list',
+      )['requestId'];
+      var otherCompleted = false;
+      final other = svc.requestList(includeArchived: true).then((value) {
+        otherCompleted = true;
+        return value;
+      });
+      final otherId = t.sent.lastWhere(
+        (m) => m['type'] == 'session:list',
+      )['requestId'];
+      t.emit('session:list:result', {
+        'requestId': archivedId,
+        'sessions': const [],
+      });
+      await archived;
+      expect(defaultCompleted, isFalse);
+      expect(otherCompleted, isFalse);
+      t.emit('session:list:result', {
+        'requestId': defaultId,
+        'sessions': const [],
+      });
+      await ordinary;
+      t.emit('session:list:result', {
+        'requestId': otherId,
+        'sessions': const [],
+      });
+      await other;
+      await session.close();
+    },
+  );
+
+  test(
+    'identical listings emit events without duplicate state changes',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final svc = session.sessionsService;
+      final listings = <SessionListing>[];
+      final states = <SessionsState>[];
+      final listingSub = svc.listings.listen(listings.add);
+      final stateSub = svc.stateStream.listen(states.add);
+      t.emit('session:list:result', {'sessions': const []});
+      t.emit('session:list:result', {'sessions': const []});
+      t.emit('session:updated', {'sessions': const []});
+      await Future<void>.delayed(Duration.zero);
+      expect(listings.map((listing) => listing.isReply), [true, true, false]);
+      expect(states, isEmpty);
+      await listingSub.cancel();
+      await stateSub.cancel();
+      await session.close();
+    },
+  );
+
+  test(
+    'last list timeout clears loading and a late reply remains observable',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final svc = session.sessionsService;
+      fakeAsync((async) {
+        Object? failure;
+        svc.requestList().then<void>(
+          (_) {},
+          onError: (Object error) => failure = error,
+        );
+        expect(svc.currentState.loading, isTrue);
+        async.elapse(const Duration(seconds: 15));
+        async.flushMicrotasks();
+        expect(failure, isA<TimeoutException>());
+        expect(svc.currentState.loading, isFalse);
+      });
+      final lateListing = svc.listings.first;
+      t.emit('session:list:result', {
+        'requestId': t.sent.lastWhere(
+          (m) => m['type'] == 'session:list',
+        )['requestId'],
+        'sessions': const [],
+      });
+      expect((await lateListing).isReply, isTrue);
+      await session.close();
+    },
+  );
+
+  test(
+    'a prior establishment reply cannot complete a current list request',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final svc = session.sessionsService;
+      final staleId = t.sent.lastWhere(
+        (m) => m['type'] == 'session:list',
+      )['requestId'];
+      t.redriveHydrators();
+      var completed = false;
+      final current = svc.requestList().then((value) {
+        completed = true;
+        return value;
+      });
+      final currentId = t.sent.lastWhere(
+        (m) => m['type'] == 'session:list',
+      )['requestId'];
+      t.emit('session:list:result', {
+        'requestId': staleId,
+        'sessions': const [],
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(completed, isFalse);
+      t.emit('session:list:result', {
+        'requestId': currentId,
+        'sessions': const [],
+      });
+      await current;
+      await session.close();
+    },
+  );
+
+  test('loading remains true until the last unanswered list expires', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final svc = session.sessionsService;
+    fakeAsync((async) {
+      svc.requestList().ignore();
+      async.elapse(const Duration(seconds: 5));
+      svc.requestList().ignore();
+      async.elapse(const Duration(seconds: 10));
+      expect(svc.currentState.loading, isTrue);
+      async.elapse(const Duration(seconds: 5));
+      expect(svc.currentState.loading, isFalse);
+      async.flushMicrotasks();
+    });
+    await session.close();
+  });
+
+  test(
+    'a reply containing archived rows cannot satisfy sibling default requests',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final svc = session.sessionsService;
+      final first = svc.requestList();
+      final firstId = t.sent.lastWhere(
+        (m) => m['type'] == 'session:list',
+      )['requestId'];
+      var siblingCompleted = false;
+      final sibling = svc.requestList().then((value) {
+        siblingCompleted = true;
+        return value;
+      });
+      final siblingId = t.sent.lastWhere(
+        (m) => m['type'] == 'session:list',
+      )['requestId'];
+      final listing = svc.listings.first;
+      t.emit('session:list:result', {
+        'requestId': firstId,
+        'sessions': [
+          {
+            'id': 'archived-session',
+            'name': 'Archived session',
+            'createdAt': 0,
+            'lastUsedAt': 0,
+            'archived': true,
+            'running': false,
+          },
+        ],
+      });
+      expect((await first).single.archived, isTrue);
+      expect((await listing).includeArchived, isTrue);
+      expect(siblingCompleted, isFalse);
+      final unsolicited = svc.listings.first;
+      t.emit('session:list:result', {
+        'requestId': 'untracked-list',
+        'sessions': [
+          {
+            'id': 'archived-session',
+            'name': 'Archived session',
+            'createdAt': 0,
+            'lastUsedAt': 0,
+            'archived': true,
+            'running': false,
+          },
+        ],
+      });
+      expect((await unsolicited).includeArchived, isTrue);
+      expect(siblingCompleted, isFalse);
+      t.emit('session:list:result', {
+        'requestId': siblingId,
+        'sessions': const [],
+      });
+      await sibling;
       await session.close();
     },
   );
@@ -440,6 +723,22 @@ void main() {
       async.flushMicrotasks();
       expect(outcome, SessionDeleteAck.accepted);
     });
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a reconnect landing inside the delete window is accepted, not a '
+      'thrown SessionDownException', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    final future = svc.delete('sess-1');
+    t.emitState(TransportState.disconnected);
+
+    expect(await future, SessionDeleteAck.accepted);
 
     await svc.dispose();
     await session.close();

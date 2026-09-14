@@ -69,6 +69,20 @@ Offset _inBody(WidgetTester tester) {
   return Offset(rect.left + 20, rect.bottom - 20);
 }
 
+/// Same idea as [_inBody], but clear of the horizontal scrollbar's own
+/// interactive hit area hugging the bottom edge (RawScrollbar pads a touch
+/// target to kMinInteractiveDimension around the thumb, well past its 8px
+/// paint thickness) — for a gesture that starts with a PointerDownEvent and
+/// drags, which is what the scrollbar's own thumb-drag recognizer competes
+/// for. Mouse wheel/trackpad scroll events bypass that recognizer entirely
+/// (Scrollable handles PointerScrollEvent directly), so [_inBody] itself
+/// stays correct for every hover+scroll test — only a touch/click-drag
+/// starting on the now-always-shown scrollbar needs to avoid it.
+Offset _inBodyOffScrollbar(WidgetTester tester) {
+  final rect = tester.getRect(find.byType(DiffViewer));
+  return Offset(rect.left + 20, rect.bottom - 60);
+}
+
 Finder _codeText(String startsWith) => find.byWidgetPredicate(
   (w) => w is Text && (w.textSpan?.toPlainText() ?? '').startsWith(startsWith),
 );
@@ -111,7 +125,7 @@ void main() {
       // Touch drag — the phone/tablet case, where the pane is narrowest and a
       // viewer that only reflowed would have nothing left to show.
       final gesture = await tester.startGesture(
-        _inBody(tester),
+        _inBodyOffScrollbar(tester),
         kind: PointerDeviceKind.touch,
       );
       for (var i = 0; i < 10; i++) {

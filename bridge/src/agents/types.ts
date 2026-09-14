@@ -6,6 +6,7 @@
 import type { HookCommand } from "../hook-command";
 import type { HookInvocation, HookPath, HookPost } from "./hook-posts";
 import type { AbMessage } from "../protocol";
+import type { ModelCallEvent } from "../modelwatch";
 import type { StructuredDriver } from "../structured/structured-manager";
 import type { HandlerEvent } from "../handler/engine";
 
@@ -292,7 +293,105 @@ export interface HeadlessCommand {
    * absence costs a borrowed spawn, a wrong claim costs the user's history.
    */
   noHistory: "flag" | "ephemeral-store" | "stateless";
+  /**
+   * How this argv is asked for what the call actually cost, and how to read the
+   * answer. Absent = nobody has run this CLI's usage flag and captured what it
+   * emits, so the call is spawned exactly as it is today and its record carries
+   * timings and no numbers.
+   *
+   * Absence is the default and costs nothing, which is the same rule the rest of
+   * this record is under: a usage descriptor written from a vendor's docs rather
+   * than from a capture would put invented numbers on the machine's own spend
+   * ledger, and there is nothing downstream that could tell them from measured
+   * ones. Add an entry only from a real run of the installed binary — see
+   * ./usage-envelope.ts, where each reader's paths are annotated with what they
+   * were measured at.
+   */
+  usage?: HeadlessUsageCapture;
 }
+
+/** The vendor-tagged numbers, as the recorder holds them. Aliased off the event
+ *  rather than restated so a field added there cannot go unread here. */
+export type HeadlessUsageTokens = NonNullable<ModelCallEvent["usage"]>;
+
+/**
+ * What one vendor's envelope yielded.
+ *
+ * Every field is optional and independently so. The vendors report different
+ * subsets — codex has no cost and no model name anywhere in its stream, opencode
+ * suppresses the model outright under its json flag — and each one's FAILED run
+ * drops fields its successful run carries rather than zeroing them: claude's
+ * error envelope has no timing fields, copilot's has no `tokenDetails` and no
+ * `currentModel` key at all.
+ */
+export interface HeadlessUsageReading {
+  /**
+   * The assistant's own answer, lifted out of the envelope — set only where the
+   * flag REWROTE stdout, and unset when the envelope carried no answer at all,
+   * which hands the caller back the raw output it already had.
+   *
+   * It is what the existing parsers must be given in place of that raw output,
+   * and neither of them degrades gracefully without it. A title comes off the
+   * LAST non-empty line, which under an envelope is the wrapper: too long for
+   * the length check, so every title silently becomes null. A judge's decision
+   * is found by scanning for the first parseable `{…}`, which is now the
+   * envelope itself — it parses, fails the schema, and the real answer inside a
+   * JSON string is never reached, so the judge burns its retry and fail-closed
+   * escalates on a run whose answer was correct and present.
+   */
+  text?: string;
+  usage?: HeadlessUsageTokens;
+  /** What the VENDOR says ran, which is the only way to know: a claude envelope
+   *  has no scalar model field, and the requested one is what the caller already
+   *  knew. Absent where the CLI never reports one. */
+  actualModel?: string;
+  /** Vendor-reported model time, which separates the API call from process
+   *  startup — see `ModelCallEvent.apiMs`. */
+  apiMs?: number;
+  /**
+   * The run failed by the envelope's own account, whatever it exited with.
+   *
+   * The field the length heuristics were standing in for: a refusal short enough
+   * to pass for a title ("Invalid API key · Please run /login") is six words and
+   * clears every check `parseTitleFromOutput` makes. Where a vendor states its
+   * own verdict, that guess becomes a check.
+   */
+  failed?: boolean;
+}
+
+/**
+ * Where a vendor's usage envelope arrives, and what it costs to ask for it.
+ *
+ * Two shapes rather than one because the difference is not cosmetic. A
+ * "side-file" flag is free: stdout was byte-identical to a run without it, so
+ * nothing downstream changes. A "stdout" flag REWRITES the channel every caller
+ * parses, so declaring one without the unwrapper in the same change silently
+ * breaks session naming and the handler's judge — measured on all three of the
+ * CLIs that have one.
+ */
+export type HeadlessUsageCapture =
+  | {
+    from: "stdout";
+    /**
+     * The argv with this vendor's flag placed where the run that measured the
+     * envelope put it. A function rather than a list to append, because the
+     * position is part of what was verified: claude's prompt must stay ahead of
+     * its variadic `--allowedTools` while the flag goes after it, and codex and
+     * opencode take their prompt as the LAST element, so a flag appended past
+     * it has never been run.
+     */
+    argv: (cmd: readonly string[]) => string[];
+    read: (stdout: string) => HeadlessUsageReading | null;
+  }
+  | {
+    from: "side-file";
+    /** As above, plus the path the runner picked for the file. It need not be
+     *  inside `scratchEnv`'s directory — measured: copilot writes wherever it is
+     *  pointed — so the runner owns the file's lifetime rather than racing the
+     *  scratch home's disposal. */
+    argv: (cmd: readonly string[], path: string) => string[];
+    read: (contents: string) => HeadlessUsageReading | null;
+  };
 
 /**
  * What the CALLER needs from a headless spawn, which is not the same question
@@ -550,16 +649,82 @@ export interface AgentSpec {
    * than guessing this one's flags. Add an entry only after running it.
    */
   headless?: Partial<Record<HeadlessReach, HeadlessCommand>>;
+  /**
+   * The cheap model a NAMING call should ask this vendor's CLI for, when the
+   * caller supplies none of its own.
+   *
+   * A property of the VENDOR, not of a reach: unlike `headless`, which is keyed
+   * per {@link HeadlessReach} because an argv's shape differs by how far it may
+   * reach, the set of models an account can name is one fact about the CLI
+   * regardless of which entry serves the call. Keying it under `headless` would
+   * duplicate the same string across every reach an agent declares, and drift
+   * the moment only one of them was re-verified.
+   *
+   * Absence is the honest answer, never a default, exactly as `headless` itself
+   * documents: the set of models an ACCOUNT can reach is account-specific, not a
+   * vendor constant, and a wrong string is not a no-op — it 404s or exits 1
+   * before any API call, turning every title for that vendor into a permanent
+   * failure. Add an entry only from a real run of `picked.command.cmd(prompt,
+   * model)` against the installed CLI, on this exact argv shape, with the VENDOR
+   * ITSELF naming the model that served the call — the usage envelope where one
+   * carries the name, and otherwise the CLI's own banner or run log (neither
+   * codex's nor opencode's JSON stream names a model, so theirs must be read out
+   * of band; see `readCodexUsage` and `readOpencodeUsage` in
+   * ./usage-envelope.ts). Exit 0 is not that evidence: a
+   * vendor that silently falls back to its default on an unrecognised string
+   * would pass it. Pair the run with a negative control — a nonsense model on
+   * the same argv — proving the CLI rejects what it cannot serve.
+   *
+   * Escape hatch, for the account this was never measured on:
+   * `ANTGRID_NAMING_MODEL=0` (./title-generate.ts) drops the flag machine-wide
+   * without a new build.
+   *
+   * Read by `generateTitleFromContext` (./title-generate.ts) off `picked.tool` —
+   * the agent that ACTUALLY SERVES a borrowed naming call — never off the
+   * session's own `tool`: naming borrows across vendors, and a Claude model name
+   * handed to codex fails the call outright.
+   */
+  cheapNamingModel?: string;
+  /**
+   * This vendor charges a whole billing unit per headless call, however small
+   * the call is.
+   *
+   * Declared so a session name is not bought at that price. Naming is one spawn
+   * per conversation asking for six words, and where the unit is a REQUEST
+   * rather than a token it costs exactly what the largest call of the day
+   * costs; `generateTitleFromContext` (./title-generate.ts) refuses the spawn
+   * and the session keeps its first-message name instead.
+   *
+   * Read off `picked.tool` — the agent that ACTUALLY SERVES the call — never
+   * off the session's own `tool`, for the same reason `cheapNamingModel` is:
+   * naming borrows across vendors, so the account billed is the serving one.
+   *
+   * Absence is the honest answer rather than a default, and the bar is a real
+   * run whose usage envelope reports a per-call unit. A token-billed vendor
+   * must NOT be listed: a title there costs a fraction of a cent, and refusing
+   * it would trade a good name for nothing.
+   */
+  billsPerCall?: true;
   /** Returns messages AND, only when the source is a followable file, its path.
    *  Never synthesize a path: a "transcript"-tier judge has no verified
    *  read-only restriction, so it gets no file hint it could not follow. */
   transcript?: (opts: TranscriptOpts) => Promise<{ msgs: string[]; transcriptPath?: string }>;
-  /** Can this stored id still be resumed? False ONLY when the agent can
-   *  POSITIVELY confirm the conversation is gone — a false negative silently
-   *  starts a fresh session, so uncertainty must answer true. Absent = this
-   *  agent has no store-existence check (the honest answer, not a default);
-   *  callers treat absence as resumable. */
-  resumable?: (args: ResumableArgs) => boolean;
+  /** Can this stored id still be resumed? Three answers, and `false` vs `null`
+   *  is load-bearing: `false` ONLY when the agent POSITIVELY confirms it does
+   *  not hold this conversation, `null` when its store could not be read at all
+   *  (missing/locked/schema drift). Collapsing the two costs a real
+   *  conversation on every locked DB, and callers that refuse a resume act on
+   *  `false` alone. Absent = this agent has no store-existence check (the honest
+   *  answer, not a default); callers treat absence as resumable. */
+  resumable?: (args: ResumableArgs) => boolean | null;
+  /** Does a POSITIVE `resumable: false` predict that the CLI will refuse this
+   *  id too? Set it only where the store `resumable` reads is the SAME one the
+   *  resume flag consults. Codex qualifies: `codex resume <id-its-thread-store-
+   *  lacks>` prints "Resuming session…" and exits 1 (measured on 0.153.4).
+   *  Copilot does not — its sessions outlive the local index, so a miss there is
+   *  a stale index rather than a refusal, and acting on one would throw away a
+   *  resume the CLI would have honored. Absent = a miss is never acted on. */
+  sessionStoreIsAuthoritative?: true;
   /** Reads the name for this agent's session that is NOT one the agent chose
    *  for itself, tagged `manual` vs `first-message` (see ResolvedTitle — the tag
    *  drives whether we spend a model call). Absent = the agent has neither on

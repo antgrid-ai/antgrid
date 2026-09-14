@@ -8,6 +8,12 @@ export type TitleOutcome =
   /** Nothing installed can serve the call at all. Not this attempt's failure,
    *  so it does not count against the budget — it ends it. */
   | "unavailable"
+  /** An installed agent could have served it and was deliberately not asked: it
+   *  bills a whole unit per call, which a session name is not worth (see
+   *  AgentSpec.billsPerCall). Ends the budget exactly as "unavailable" does,
+   *  and is kept apart from it so a reader is not sent hunting for a missing
+   *  install to explain a decision we made. */
+  | "skipped"
   /** The generated title was thrown away for a reason unrelated to generating
    *  it: the user renamed the session mid-spawn, or the conversation moved on.
    *  Releases the claim and records nothing. */
@@ -84,8 +90,11 @@ export class TitleAttempts {
     const state = this.byTerminal.get(terminalId)?.get(conversationId);
     if (!state) return;
     state.inFlight = false;
-    if (outcome === "named" || outcome === "unavailable") state.done = true;
-    else if (outcome === "failed") state.failures += 1;
+    // Enumerated rather than "anything but failed and abandoned": a new outcome
+    // should have to say that it ends the budget, not inherit it by omission.
+    if (outcome === "named" || outcome === "unavailable" || outcome === "skipped") {
+      state.done = true;
+    } else if (outcome === "failed") state.failures += 1;
   }
 
   /**

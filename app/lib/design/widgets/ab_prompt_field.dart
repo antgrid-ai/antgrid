@@ -73,7 +73,9 @@ class AbPromptField extends StatelessWidget {
     );
     // Disabled-state contract: opacity 0.4, no interaction.
     if (!enabled) {
-      return IgnorePointer(child: Opacity(opacity: 0.4, child: field));
+      return IgnorePointer(
+        child: Opacity(opacity: AbTokens.opacityDisabled, child: field),
+      );
     }
     return field;
   }

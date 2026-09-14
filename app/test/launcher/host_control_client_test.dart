@@ -97,6 +97,65 @@ void main() {
     },
   );
 
+  test(
+    'projectResolve parses kind/checkoutId, and tolerates an older bridge '
+    'that omits them or sends the wrong type',
+    () async {
+      final stub = _StubControlServer();
+      await stub.start(
+        handler: (req) => {
+          'id': req['id'],
+          'ok': true,
+          'type': 'project:resolve',
+          'projectId': 'primary-id',
+          'repoPath': '/repo',
+          'selectedPath': '/repo/wt/checkout',
+          'label': 'repo',
+          'isGitRepository': true,
+          'kind': 'managed-checkout',
+          'checkoutId': 'ck-1',
+        },
+      );
+      addTearDown(stub.close);
+
+      final result = await HostControlClient(
+        port: stub.port,
+        token: 't',
+      ).projectResolve('/repo/wt/checkout');
+      expect(result.kind, 'managed-checkout');
+      expect(result.checkoutId, 'ck-1');
+    },
+  );
+
+  test(
+    'projectResolve treats a missing or mistyped kind/checkoutId as null, '
+    'never BAD_RESPONSE',
+    () async {
+      final stub = _StubControlServer();
+      await stub.start(
+        handler: (req) => {
+          'id': req['id'],
+          'ok': true,
+          'type': 'project:resolve',
+          'projectId': 'primary-id',
+          'repoPath': '/repo',
+          'selectedPath': '/repo',
+          'label': 'repo',
+          'isGitRepository': true,
+          'checkoutId': 42, // wrong type — an older/newer bridge quirk
+        },
+      );
+      addTearDown(stub.close);
+
+      final result = await HostControlClient(
+        port: stub.port,
+        token: 't',
+      ).projectResolve('/repo');
+      expect(result.kind, isNull);
+      expect(result.checkoutId, isNull);
+    },
+  );
+
   test('projectResolve rejects malformed responses', () async {
     final stub = _StubControlServer();
     await stub.start(
@@ -143,6 +202,36 @@ void main() {
     expect(list, hasLength(1));
     expect(list.first.projectId, 'a');
     expect(list.first.mode, 'local');
+  });
+
+  test('projectSessions parses the session list', () async {
+    final stub = _StubControlServer();
+    await stub.start(
+      handler: (req) => {
+        'id': req['id'],
+        'ok': true,
+        'type': 'project:sessions',
+        'sessions': [
+          {
+            'id': 's1',
+            'name': 'hello',
+            'createdAt': 0,
+            'lastUsedAt': 0,
+            'archived': false,
+          },
+        ],
+      },
+    );
+    addTearDown(stub.close);
+
+    final client = HostControlClient(port: stub.port, token: 't');
+    final sessions = await client.projectSessions('proj-1');
+    expect(stub.lastBody!['type'], 'project:sessions');
+    expect(stub.lastBody!['projectId'], 'proj-1');
+    expect(stub.lastBody!['includeArchived'], isFalse);
+    expect(sessions, hasLength(1));
+    expect(sessions.single.id, 's1');
+    expect(sessions.single.name, 'hello');
   });
 
   test('toolsList parses the tool catalog and the agent descriptors', () async {

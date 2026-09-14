@@ -697,7 +697,7 @@ describe("SessionManager start/stop", () => {
     }
   });
 
-  it("github-copilot clears a stale native session id and starts fresh", () => {
+  it("github-copilot attempts native resume even when its local store lacks the id", () => {
     const copilotHome = tempDir();
     seedCopilotSessions(copilotHome, ["cop-live"]);
     try {
@@ -715,9 +715,9 @@ describe("SessionManager start/stop", () => {
 
       const spawn = term.spawns[0];
       expect(spawn.command).not.toContain("--resume=cop-dead");
-      expect(spawn.args ?? []).not.toContain("--resume=cop-dead");
-      expect(sm.get(s.id)?.agentSessionId).toBeUndefined();
-      expect(sm.get(s.id)?.agentTranscriptPath).toBeUndefined();
+      expect(spawn.args ?? []).toContain("--resume=cop-dead");
+      expect(sm.get(s.id)?.agentSessionId).toBe("cop-dead");
+      expect(sm.getAgentTranscriptPath(s.id)).toBe("/tmp/stale.json");
     } finally {
       rmSync(copilotHome, { recursive: true, force: true });
     }
@@ -943,11 +943,7 @@ describe("SessionManager start/stop", () => {
     }
   });
 
-  it("start() drops and clears a chat resume id whose conversation is gone", () => {
-    // A dead id is unrecoverable for chat: the driver would resume it on every
-    // start, the backend answers "no conversation found", and the session never
-    // comes alive again. Claude's pre-flight is the posted transcript path, so a
-    // path that does not exist is the positive "it's gone" this asserts on.
+  it("start() preserves a chat resume id when its transcript is missing", () => {
     const calls: any[] = [];
     const sm = new SessionManager({
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
@@ -958,9 +954,8 @@ describe("SessionManager start/stop", () => {
     const s = sm.create("c", { tool: "claude-code", mode: "chat" });
     sm.setAgentSession(s.id, "gone-1", join(dir, "no-such-transcript.jsonl"));
     sm.start(s.id);
-    expect(calls[0].resumeId).toBeUndefined();
-    // Cleared in place, so the next start doesn't re-run the same dead resume.
-    expect(sm.get(s.id)?.agentSessionId).toBeUndefined();
+    expect(calls[0].resumeId).toBe("gone-1");
+    expect(sm.get(s.id)?.agentSessionId).toBe("gone-1");
     sm.flushNow();
   });
 

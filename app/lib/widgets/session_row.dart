@@ -32,6 +32,7 @@ import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
+import '../services/pending_reply.dart' show SessionDownException;
 import '../services/sessions_service.dart';
 import '../util/detached.dart';
 import '../util/external_open_target.dart';
@@ -481,6 +482,12 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           if (refusalHost.mounted) {
             showAbSnackBar(refusalHost, _startNoAnswerMessage);
           }
+        } on SessionDownException {
+          // Same "may still be coming up" shape as the timeout above — the
+          // machine went away, not the bridge refusing.
+          if (refusalHost.mounted) {
+            showAbSnackBar(refusalHost, _startNoAnswerMessage);
+          }
         }
         // A different project can be activated while start() is in flight. The
         // writes below (focus, surface, nav entry) all belong to THIS project,
@@ -855,6 +862,10 @@ class _SessionMenu extends ConsumerWidget {
               if (anchor.mounted) {
                 reportSessionNotice(anchor, _startNoAnswerMessage);
               }
+            } on SessionDownException {
+              if (anchor.mounted) {
+                reportSessionNotice(anchor, _startNoAnswerMessage);
+              }
             }
             if (anchor.mounted) await _focusSession(anchor, ref, svc, fork.id);
           } on SessionOperationException catch (error) {
@@ -887,6 +898,8 @@ class _SessionMenu extends ConsumerWidget {
           "The agent didn't answer. Check the connection and try again.",
         );
       }
+    } on SessionDownException catch (e) {
+      if (anchor.mounted) showAbSnackBar(anchor, e.toString());
     }
   }
 

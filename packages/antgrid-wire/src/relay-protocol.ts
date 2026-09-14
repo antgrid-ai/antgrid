@@ -131,6 +131,12 @@ export const ErrorMessage = z.object({
   retryable: z.boolean(),
   ref: z.string().optional(), // echoes the rejected streamId
   serverTime: z.string().datetime().optional(), // clock-skew AUTH_FAILED only
+  // Routed-frame drops only (PEER_OFFLINE, MESSAGE_RATE_LIMITED, ROUTE_FAILED):
+  // the discarded frame's channel and payload length. A sender charges its
+  // flow-control window at write time and can only un-charge what it is told
+  // about; without these a relay drop shrinks that window for the session.
+  channel: z.enum(["control", "preview"]).optional(),
+  bytes: z.number().int().nonnegative().optional(),
 });
 
 export const PeerOfflineMessage = z.object({

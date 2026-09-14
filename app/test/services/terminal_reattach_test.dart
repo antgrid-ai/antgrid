@@ -1,43 +1,104 @@
-// Re-attach behaviour of TerminalService: the seq cutoff around a re-drive,
-// and the bytes a snapshot is allowed to put on the engine.
-//
-// The agent DROPS terminal output while it is suppressed (peer gone, app
-// backgrounded, remote access off) but keeps bumping its per-terminal seq, so a
-// tab that was already on screen when the stream went away has no other way to
-// learn what it missed. The pull's own bookkeeping is what these cases pin: a
-// cutoff kept across a re-drive filters the live output of a PTY that respawned
-// unwitnessed, and a snapshot that erases more than it can restore takes the
-// user's own history with it.
-//
-// The engine cases are gated on native availability: a host without the
-// prebuilt libghostty-vt reports them SKIPPED rather than failing — and never
-// passing, which is what a bare early return would have made it.
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
+import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
 
-/// True when the native VT is missing, having marked the current test skipped.
-///
-/// Skipped rather than quietly returned from: a bare early return makes a host
-/// with no prebuilt libghostty-vt report a green suite that asserted nothing.
-bool _skipWithoutNative() {
-  if (_hasNative()) return false;
-  markTestSkipped('native VT unavailable');
-  return true;
+Future<void> _flush() => Future<void>.delayed(Duration.zero);
+
+Map<String, dynamic> _lastSubscribe(
+  FakeAgentTransport transport, {
+  String checkoutId = 'main',
+}) => transport.sent.lastWhere(
+  (message) =>
+      message['type'] == 'terminal:subscribe' &&
+      message['terminalId'] == 'a' &&
+      message['checkoutId'] == checkoutId,
+);
+
+Future<void> _seed(
+  FakeAgentTransport transport, {
+  String checkoutId = 'main',
+}) async {
+  transport.emit('agent:status', {
+    'projectId': 'p',
+    'checkoutId': checkoutId,
+    'terminals': [
+      {'terminalId': 'a', 'name': 'a', 'running': true},
+    ],
+  });
+  await _flush();
 }
 
-bool _hasNative() {
-  try {
-    GhosttyVt.newTerminal(cols: 8, rows: 2).close();
-    return true;
-  } catch (_) {
-    return false;
-  }
+Future<void> _accept(
+  FakeAgentTransport transport, {
+  String checkoutId = 'main',
+  String runId = 'run-1',
+  String attachmentId = 'att-1',
+  String? requestId,
+}) async {
+  transport.emit('terminal:subscribed', {
+    'terminalId': 'a',
+    'checkoutId': checkoutId,
+    'runId': runId,
+    'attachmentId': attachmentId,
+    'version': kTerminalFrameProtocolVersion,
+    'requestId':
+        requestId ??
+        _lastSubscribe(transport, checkoutId: checkoutId)['requestId'],
+  });
+  await _flush();
+}
+
+Future<void> _frame(
+  FakeAgentTransport transport,
+  String screen, {
+  int sequence = 1,
+  String checkoutId = 'main',
+  String runId = 'run-1',
+  String attachmentId = 'att-1',
+  bool alternate = false,
+}) async {
+  transport.emit('terminal:frame', {
+    'terminalId': 'a',
+    'checkoutId': checkoutId,
+    'runId': runId,
+    'attachmentId': attachmentId,
+    'version': kTerminalFrameProtocolVersion,
+    'sequence': sequence,
+    'revision': sequence,
+    'cols': 20,
+    'rows': 3,
+    'ansi':
+        '\x1b[?1049l\x1b[r\x1b[0m\x1b[3J\x1b[2J\x1b[H'
+        '${alternate ? '\x1b[?1049h\x1b[2J\x1b[H' : ''}$screen',
+    'syncTimedOut': false,
+    'history': {
+      'epoch': 1,
+      'firstRowId': 0,
+      'nextRowId': 0,
+      'status': 'recording',
+    },
+  });
+  await _flush();
+}
+
+void _expectNoLegacyRequests(FakeAgentTransport transport) {
+  expect(
+    transport.requests.where(
+      (request) => request.method == 'terminal.snapshot',
+    ),
+    isEmpty,
+  );
+  expect(
+    transport.sent.where(
+      (message) => message['type'] == 'terminal:snapshot:request',
+    ),
+    isEmpty,
+  );
 }
 
 void main() {
@@ -45,418 +106,254 @@ void main() {
 
   setUp(() {
     useInMemoryPrefs();
+    // Missing native assets must fail the frame reapplication release gate.
+    GhosttyVt.newTerminal(cols: 8, rows: 2).close();
   });
 
-  Future<ProjectSession> makeSession(FakeAgentTransport t) async {
-    final cache = await CachedSessionsStore.open();
-    return ProjectSession(
+  Future<ProjectSession> makeSession(FakeAgentTransport transport) async {
+    final session = ProjectSession(
       projectId: 'p',
-      transport: t,
+      transport: transport,
       mode: ProjectSessionMode.local,
-      cachedSessionsStore: cache,
-      onClose: () async => t.dispose(),
-    );
-  }
-
-  /// Seeds one running tab named `a` and settles the discovery pull.
-  Future<void> seedTabA(FakeAgentTransport t) async {
-    t.emit('agent:status', {
-      'projectId': 'p',
-      'terminals': [
-        {'id': 'a', 'terminalId': 'a', 'name': 'a', 'running': true},
-      ],
-    });
-    await Future<void>.delayed(Duration.zero);
+      cachedSessionsStore: await CachedSessionsStore.open(),
+      onClose: transport.dispose,
+    )..setActiveCheckouts({'main'});
+    session.terminalService.setDisplayInterest('pane', 'a');
+    addTearDown(session.close);
+    return session;
   }
 
   test(
-    'the seq cutoff is dropped before the re-attach requests go out',
+    'reconnect replaces its request and releases the old attachment',
     () async {
-      if (_skipWithoutNative()) return;
       final t = FakeAgentTransport();
-      final session = await makeSession(t);
-      await seedTabA(t);
-      final tab = session.terminalService.currentState.tabs['a']!;
-
-      t.emit('terminal:snapshot', {
-        'terminalId': 'a',
-        'scrollback': '',
-        'seq': 50,
-      });
-      await Future<void>.delayed(Duration.zero);
-
-      // Baseline: the cutoff is armed and filtering.
-      t.emit('terminal:output', {
-        'terminalId': 'a',
-        'data': 'STALE',
-        'seq': 10,
-      });
-      await Future<void>.delayed(Duration.zero);
-      expect(tab.ghostty.plainText, isNot(contains('STALE')));
-
+      await makeSession(t);
+      await _seed(t);
+      final firstRequest = _lastSubscribe(t)['requestId'];
+      await _accept(t);
+      await _frame(t, 'FIRST');
       t.redriveHydrators();
-      await Future<void>.delayed(Duration.zero);
-
-      // The respawned PTY restarts its counter at 1, so its first frames sit
-      // below the old cutoff and must not wait on the reply to be rendered.
-      t.emit('terminal:output', {'terminalId': 'a', 'data': 'LIVE', 'seq': 11});
-      await Future<void>.delayed(Duration.zero);
-      expect(tab.ghostty.plainText, contains('LIVE'));
-
-      await session.close();
+      await _flush();
+      expect(_lastSubscribe(t)['requestId'], isNot(firstRequest));
+      final released = t.sent.singleWhere(
+        (message) => message['type'] == 'terminal:unsubscribe',
+      );
+      expect(released['runId'], 'run-1');
+      expect(released['attachmentId'], 'att-1');
+      _expectNoLegacyRequests(t);
     },
   );
 
   test(
-    'a snapshot pull asks for history only while the engine is empty',
+    'a fresh attachment accepts sequence one after a high old sequence',
     () async {
-      if (_skipWithoutNative()) return;
-      // The agent's history blob ERASES before it paints, so this flag decides
-      // between two losses. Asked for against an engine that already holds the
-      // user's scrollback, it destroys thousands of lines to put back the few
-      // hundred the agent keeps. Not asked for against an empty one, a scrolling
-      // build log — the worktree setup transcript above all — comes back as its
-      // last few rows with nothing above them.
       final t = FakeAgentTransport();
       final session = await makeSession(t);
-      t.clearSent();
-      await seedTabA(t);
-
-      // Discovery: the tab's engine was built moments ago and holds nothing.
-      final discovery = t.sent.firstWhere(
-        (m) => m['type'] == 'terminal:snapshot:request',
-      );
-      expect(discovery['history'], isTrue);
-
-      t.emit('terminal:output', {
-        'terminalId': 'a',
-        'data': 'painted',
-        'seq': 1,
-      });
-      await Future<void>.delayed(Duration.zero);
-
-      t.clearSent();
+      await _seed(t);
+      await _accept(t);
+      await _frame(t, 'OLD', sequence: 900);
       t.redriveHydrators();
-      await Future<void>.delayed(Duration.zero);
-
-      final reattach = t.sent.firstWhere(
-        (m) => m['type'] == 'terminal:snapshot:request',
-      );
-      expect(reattach['history'], isFalse);
-
-      await session.close();
-    },
-  );
-
-  test(
-    'a snapshot request that is never answered leaves no cutoff behind',
-    () async {
-      if (_skipWithoutNative()) return;
-      // The fake transport records the request and never replies, which is what
-      // an unknown terminal id or a send in a keyless window looks like from
-      // here. The clear has to be unconditional for this case to render at all.
-      final t = FakeAgentTransport();
-      final session = await makeSession(t);
-      await seedTabA(t);
+      await _flush();
+      await _accept(t, attachmentId: 'att-2');
+      await _frame(t, 'CURRENT', attachmentId: 'att-2');
       final tab = session.terminalService.currentState.tabs['a']!;
-
-      t.emit('terminal:snapshot', {
-        'terminalId': 'a',
-        'scrollback': '',
-        'seq': 900,
-      });
-      await Future<void>.delayed(Duration.zero);
-
-      t.clearSent();
-      t.redriveHydrators();
-      await Future<void>.delayed(Duration.zero);
+      expect(tab.ghostty.plainText, contains('CURRENT'));
+      expect(tab.ghostty.plainText, isNot(contains('OLD')));
       expect(
-        t.sent.where((m) => m['type'] == 'terminal:snapshot:request'),
-        hasLength(1),
+        t.sent.lastWhere((m) => m['type'] == 'terminal:ack')['sequence'],
+        1,
       );
-
-      t.emit('terminal:output', {
-        'terminalId': 'a',
-        'data': 'REBORN',
-        'seq': 1,
-      });
-      await Future<void>.delayed(Duration.zero);
-      expect(tab.ghostty.plainText, contains('REBORN'));
-
-      await session.close();
     },
   );
 
-  test('a legacy snapshot does not stack a copy per attach', () async {
-    if (_skipWithoutNative()) return;
-    final t = FakeAgentTransport();
-    final session = await makeSession(t);
-    await seedTabA(t);
-    final tab = session.terminalService.currentState.tabs['a']!;
+  test(
+    'an unanswered reconnect retains its screen and rejects old frames',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      await _seed(t);
+      await _accept(t);
+      await _frame(t, 'RETAINED');
+      t.redriveHydrators();
+      await _flush();
+      t.clearSent();
+      await _frame(t, 'STALE', sequence: 2);
+      expect(
+        session.terminalService.currentState.tabs['a']!.ghostty.plainText,
+        contains('RETAINED'),
+      );
+      expect(t.sent.where((m) => m['type'] == 'terminal:ack'), isEmpty);
+      _expectNoLegacyRequests(t);
+    },
+  );
 
-    for (var i = 0; i < 60; i++) {
-      t.emit('terminal:output', {'terminalId': 'a', 'data': 'HIST-$i\r\n'});
-    }
-    await Future<void>.delayed(Duration.zero);
+  test(
+    'late subscribed replies cannot replace the current reconnect',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      await _seed(t);
+      final oldRequest = _lastSubscribe(t)['requestId'] as String;
+      t.redriveHydrators();
+      await _flush();
+      await _accept(t, requestId: oldRequest);
+      await _frame(t, 'STALE');
+      expect(
+        session.terminalService.currentState.tabs['a']!.ghostty.plainText,
+        isNot(contains('STALE')),
+      );
+      await _accept(t, attachmentId: 'att-2');
+      await _frame(t, 'CURRENT', attachmentId: 'att-2');
+      expect(
+        session.terminalService.currentState.tabs['a']!.ghostty.plainText,
+        contains('CURRENT'),
+      );
+    },
+  );
 
-    // An older agent answers with a RAW BYTE TAIL, capped at ten thousand
-    // characters — several screens. Drawn past the bottom row it scrolls its
-    // own opening lines into the buffer above, so an erase that stops at the
-    // screen leaves one copy behind on every attach. The re-attach fires on
-    // every focus resume, so "one copy per attach" is unbounded.
-    final tail = List.generate(40, (i) => 'TAIL-$i').join('\r\n');
-    for (var attach = 0; attach < 3; attach++) {
-      t.emit('terminal:snapshot', {
+  test(
+    'same-id respawn retires geometry and rejects the previous run',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      await _seed(t);
+      await _accept(t);
+      await _frame(t, 'PREVIOUS');
+      final before = session.terminalService.currentState.tabs['a']!.sizeEpoch;
+      t.emit('terminal:started', {
         'terminalId': 'a',
-        'scrollback': tail,
-        'seq': 5 + attach,
+        'shell': 'bash',
+        'cols': 80,
+        'rows': 24,
       });
-      await Future<void>.delayed(Duration.zero);
+      await _flush();
+      final tab = session.terminalService.currentState.tabs['a']!;
+      expect(tab.cols, 80);
+      expect(tab.sizeEpoch, greaterThan(before));
+      await _accept(t, runId: 'run-2', attachmentId: 'att-2');
+      await _frame(t, 'REBORN', runId: 'run-2', attachmentId: 'att-2');
+      await _frame(t, 'STALE', sequence: 999);
+      expect(tab.ghostty.plainText, contains('REBORN'));
+      expect(tab.ghostty.plainText, isNot(contains('STALE')));
+    },
+  );
+
+  test('repeated screens and attachments never accumulate copies', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    await _seed(t);
+    await _accept(t);
+    final tab = session.terminalService.currentState.tabs['a']!;
+    await _frame(t, 'TOP\r\nMIDDLE\r\nBOTTOM');
+    final initial = tab.ghostty.plainText;
+    for (var sequence = 2; sequence <= 20; sequence++) {
+      await _frame(t, 'TOP\r\nMIDDLE\r\nBOTTOM', sequence: sequence);
     }
-
-    expect(tab.ghostty.plainText, contains('TAIL-39'));
-    expect('TAIL-0\n'.allMatches(tab.ghostty.plainText).length, 1);
-
-    await session.close();
-  });
-
-  test('a composed snapshot is applied verbatim onto the screen its preamble '
-      'selects', () async {
-    if (_skipWithoutNative()) return;
-    final t = FakeAgentTransport();
-    final session = await makeSession(t);
-    await seedTabA(t);
-    final tab = session.terminalService.currentState.tabs['a']!;
-
-    t.emit('terminal:output', {'terminalId': 'a', 'data': 'HISTORY-LINE\r\n'});
-    await Future<void>.delayed(Duration.zero);
-
-    t.emit('terminal:snapshot', {
-      'terminalId': 'a',
-      'scrollback': '\x1b[?1049l\x1b[r\x1b[2J\x1b[H\x1b[0m\x1b[?1049hTAIL-ROWS',
-      'seq': 7,
-      'composed': true,
-    });
-    await Future<void>.delayed(Duration.zero);
-
-    expect(tab.ghostty.plainText, contains('TAIL-ROWS'));
-    expect(tab.ghostty.plainText, isNot(contains('HISTORY-LINE')));
-
-    // Back on the primary buffer, the blob's own erase is what the user sees —
-    // not the pre-departure content the app would otherwise have kept.
-    t.emit('terminal:output', {'terminalId': 'a', 'data': '\x1b[?1049l'});
-    await Future<void>.delayed(Duration.zero);
-    expect(tab.ghostty.plainText, isNot(contains('HISTORY-LINE')));
-
-    await session.close();
-  });
-
-  test("a composed snapshot never erases the app's scrollback", () async {
-    if (_skipWithoutNative()) return;
-    // The blob repaints one screen and carries no history, so an erase that
-    // reached past the screen would destroy the user's own — ten thousand lines
-    // of it — with nothing on this path able to put it back.
-    final t = FakeAgentTransport();
-    final session = await makeSession(t);
-    await seedTabA(t);
-    final tab = session.terminalService.currentState.tabs['a']!;
-
-    for (var i = 0; i < 60; i++) {
-      t.emit('terminal:output', {'terminalId': 'a', 'data': 'HIST-$i\r\n'});
+    for (var index = 2; index <= 4; index++) {
+      t.redriveHydrators();
+      await _flush();
+      await _accept(t, attachmentId: 'att-$index');
+      await _frame(t, 'TOP\r\nMIDDLE\r\nBOTTOM', attachmentId: 'att-$index');
     }
-    await Future<void>.delayed(Duration.zero);
-
-    t.emit('terminal:snapshot', {
-      'terminalId': 'a',
-      'scrollback': '\x1b[?1049l\x1b[r\x1b[2J\x1b[H\x1b[0mSCREEN-ROW',
-      'seq': 5,
-      'composed': true,
-    });
-    await Future<void>.delayed(Duration.zero);
-
-    expect(tab.ghostty.plainText, contains('HIST-0'));
-    expect(tab.ghostty.plainText, contains('SCREEN-ROW'));
-
-    await session.close();
+    expect(tab.ghostty.plainText, initial);
+    expect('TOP'.allMatches(tab.ghostty.plainText), hasLength(1));
   });
 
-  test("a warm engine refuses another device's cold history blob", () async {
-    if (_skipWithoutNative()) return;
-    // A snapshot reply is published on the project bus, so a phone's FIRST
-    // attach is answered to every client on that project. The cold blob leads
-    // with `3J`, which would erase the desktop's own scrollback -- the exact
-    // loss the warm preamble omits `3J` to avoid. The frame is labelled, and a
-    // client whose engine is already painted drops it.
-    final t = FakeAgentTransport();
-    final session = await makeSession(t);
-    await seedTabA(t);
-    final tab = session.terminalService.currentState.tabs['a']!;
+  test(
+    'normal and alternate screens remain independent after reattach',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      await _seed(t);
+      await _accept(t);
+      await _frame(t, 'NORMAL');
+      await _frame(t, 'FULLSCREEN', sequence: 2, alternate: true);
+      final tab = session.terminalService.currentState.tabs['a']!;
+      expect(tab.ghostty.plainText, contains('FULLSCREEN'));
+      t.redriveHydrators();
+      await _flush();
+      await _accept(t, attachmentId: 'att-2');
+      await _frame(t, 'AFTER', attachmentId: 'att-2');
+      expect(tab.ghostty.plainText, contains('AFTER'));
+      expect(tab.ghostty.plainText, isNot(contains('FULLSCREEN')));
+      expect(tab.ghostty.plainText, isNot(contains('NORMAL')));
+    },
+  );
 
-    // This client's OWN cold request is answered first, which is what
-    // makes it warm: the claim is spent, so a later history blob can only
-    // be someone else's. Without this the tab is still awaiting its own
-    // answer and would rightly accept the next history blob it sees.
-    t.emit('terminal:snapshot', {
-      'terminalId': 'a',
-      'scrollback': '\x1b[?1049l\x1b[r\x1b[0m\x1b[2J\x1b[HREADY',
-      'seq': 1,
-      'composed': true,
-    });
-    await Future<void>.delayed(Duration.zero);
+  test(
+    'same-id terminals subscribe and paint only in their own checkout',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      await _seed(t);
+      final isolated = session.servicesForCheckout('wt-1').terminalService;
+      isolated.setDisplayInterest('pane', 'a');
+      await _seed(t, checkoutId: 'wt-1');
+      expect(_lastSubscribe(t)['checkoutId'], 'main');
+      expect(_lastSubscribe(t, checkoutId: 'wt-1')['checkoutId'], 'wt-1');
+      await _accept(t);
+      await _accept(t, checkoutId: 'wt-1', attachmentId: 'isolated');
+      await _frame(t, 'MAIN');
+      await _frame(t, 'ISOLATED', checkoutId: 'wt-1', attachmentId: 'isolated');
+      expect(
+        session.terminalService.currentState.tabs['a']!.ghostty.plainText,
+        contains('MAIN'),
+      );
+      expect(
+        isolated.currentState.tabs['a']!.ghostty.plainText,
+        contains('ISOLATED'),
+      );
+      expect(
+        isolated.currentState.tabs['a']!.ghostty.plainText,
+        isNot(contains('MAIN')),
+      );
+    },
+  );
 
-    for (var i = 0; i < 60; i++) {
-      t.emit('terminal:output', {'terminalId': 'a', 'data': 'MINE-$i\r\n'});
-    }
-    await Future<void>.delayed(Duration.zero);
+  test(
+    'unsupported peers never enable legacy fallback and can recover after upgrade',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      await _seed(t);
+      t.emit('terminal:display:status', {
+        'terminalId': 'a',
+        'requestId': _lastSubscribe(t)['requestId'],
+        'code': 'UPGRADE_REQUIRED',
+        'message': 'Upgrade the bridge',
+      });
+      await _flush();
+      final service = session.terminalService;
+      expect(
+        service.currentState.hydration['a']!.stage,
+        TerminalAttachStage.failed,
+      );
+      service.retryAttach('a');
+      await _flush();
+      expect(_lastSubscribe(t)['version'], kTerminalFrameProtocolVersion);
+      _expectNoLegacyRequests(t);
+      t.redriveHydrators();
+      await _flush();
+      await _accept(t, attachmentId: 'upgraded');
+      await _frame(t, 'UPGRADED', attachmentId: 'upgraded');
+      expect(
+        service.currentState.tabs['a']!.ghostty.plainText,
+        contains('UPGRADED'),
+      );
+      _expectNoLegacyRequests(t);
+    },
+  );
 
-    t.emit('terminal:snapshot', {
-      'terminalId': 'a',
-      'scrollback':
-          '\x1b[?1049l\x1b[r\x1b[0m\x1b[3J\x1b[2J\x1b[HTHEIR-COLD-SCREEN',
-      'seq': 9,
-      'composed': true,
-      'history': true,
-    });
-    await Future<void>.delayed(Duration.zero);
-
-    // Untouched: history intact, and the other device's screen never painted.
-    expect(tab.ghostty.plainText, contains('MINE-0'));
-    expect(tab.ghostty.plainText, isNot(contains('THEIR-COLD-SCREEN')));
-
-    await session.close();
-  });
-
-  test('a cold client still gets the history it asked for', () async {
-    if (_skipWithoutNative()) return;
-    // The refusal above must not swallow this client's OWN answer. A snapshot
-    // request goes out while the engine is empty, live output paints it during
-    // the round trip -- routine on a busy terminal -- and the reply then finds
-    // a painted engine. It is still the answer to OUR request, and dropping it
-    // would leave the cold attach with a screen and no history.
-    final t = FakeAgentTransport();
-    final session = await makeSession(t);
-    await seedTabA(t);
-    final tab = session.terminalService.currentState.tabs['a']!;
-
-    // A fresh tab is cold, so the discovery request claimed history.
-    final request = t.sent.lastWhere(
-      (m) => m['type'] == 'terminal:snapshot:request',
-    );
-    expect(request['history'], isTrue);
-
-    // Output lands before the reply does.
-    t.emit('terminal:output', {'terminalId': 'a', 'data': 'LIVE-BYTE\r\n'});
-    await Future<void>.delayed(Duration.zero);
-
-    t.emit('terminal:snapshot', {
-      'terminalId': 'a',
-      'scrollback':
-          '\x1b[?1049l\x1b[r\x1b[0m\x1b[3J\x1b[2J\x1b[HMY-COLD-SCREEN',
-      'seq': 9,
-      'composed': true,
-      'history': true,
-    });
-    await Future<void>.delayed(Duration.zero);
-
-    expect(tab.ghostty.plainText, contains('MY-COLD-SCREEN'));
-
-    // The claim is spent: a SECOND history blob (another device's) now finds a
-    // painted engine with nothing outstanding, and is refused.
-    t.emit('terminal:snapshot', {
-      'terminalId': 'a',
-      'scrollback':
-          '\x1b[?1049l\x1b[r\x1b[0m\x1b[3J\x1b[2J\x1b[HTHEIR-COLD-SCREEN',
-      'seq': 10,
-      'composed': true,
-      'history': true,
-    });
-    await Future<void>.delayed(Duration.zero);
-
-    expect(tab.ghostty.plainText, contains('MY-COLD-SCREEN'));
-    expect(tab.ghostty.plainText, isNot(contains('THEIR-COLD-SCREEN')));
-
-    await session.close();
-  });
-
-  test('applying a composed snapshot twice is idempotent', () async {
-    if (_skipWithoutNative()) return;
-    final t = FakeAgentTransport();
-    final session = await makeSession(t);
-    await seedTabA(t);
-    final tab = session.terminalService.currentState.tabs['a']!;
-
-    Map<String, dynamic> composed(int seq) => {
-      'terminalId': 'a',
-      'scrollback': '\x1b[?1049l\x1b[r\x1b[2J\x1b[H\x1b[0m\x1b[?1049hPANE-ROW',
-      'seq': seq,
-      'composed': true,
-    };
-
-    t.emit('terminal:snapshot', composed(7));
-    await Future<void>.delayed(Duration.zero);
-    final once = tab.ghostty.plainText;
-
-    t.emit('terminal:snapshot', composed(8));
-    await Future<void>.delayed(Duration.zero);
-    expect(tab.ghostty.plainText, once);
-
-    // The primary buffer must not accumulate a second copy either — that is
-    // what would turn a repeated re-pull into a stack of screens.
-    t.emit('terminal:output', {'terminalId': 'a', 'data': '\x1b[?1049l'});
-    await Future<void>.delayed(Duration.zero);
-    expect('PANE-ROW'.allMatches(tab.ghostty.plainText), isEmpty);
-
-    await session.close();
-  });
-
-  // The PTY's geometry is invalidated by exactly the two events the seq cutoff
-  // is: a re-drive and a same-id respawn. The driver re-sends `terminal:resize`
-  // only when its computed grid differs from the last size it believes the PTY
-  // received, so neither event has any other way to reach it — the panel is
-  // not moving, so the wrapper keeps computing the same grid and the gate stays
-  // shut for as long as the terminal is on screen.
   test('a re-drive retires the geometry the driver booked', () async {
-    if (_skipWithoutNative()) return;
     final t = FakeAgentTransport();
     final session = await makeSession(t);
-    await seedTabA(t);
+    await _seed(t);
     final before = session.terminalService.currentState.tabs['a']!.sizeEpoch;
-
     t.redriveHydrators();
-    await Future<void>.delayed(Duration.zero);
-
+    await _flush();
     expect(
       session.terminalService.currentState.tabs['a']!.sizeEpoch,
       greaterThan(before),
-      reason: 'a resize sent while the stream was away vanished unreported',
     );
-
-    await session.close();
-  });
-
-  test('a same-id respawn retires the geometry the driver booked', () async {
-    if (_skipWithoutNative()) return;
-    final t = FakeAgentTransport();
-    final session = await makeSession(t);
-    await seedTabA(t);
-    final before = session.terminalService.currentState.tabs['a']!.sizeEpoch;
-
-    // A fresh PTY on a known id. Its geometry is the bridge's, not whatever
-    // the driver had sent the process that just died — `lastDriverGeometry` if
-    // any terminal has resized in that bridge process, 80x24 (used here) if
-    // none has.
-    t.emit('terminal:started', {
-      'terminalId': 'a',
-      'shell': 'bash',
-      'cols': 80,
-      'rows': 24,
-    });
-    await Future<void>.delayed(Duration.zero);
-
-    final tab = session.terminalService.currentState.tabs['a']!;
-    expect(tab.cols, 80);
-    expect(tab.sizeEpoch, greaterThan(before));
-
-    await session.close();
   });
 }

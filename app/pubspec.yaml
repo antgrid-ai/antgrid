@@ -73,6 +73,9 @@ dependencies:
   flutter_svg: ^2.2.4
   file_selector: ^1.1.0
   shared_preferences: ^2.5.5
+  shared_preferences_windows: ^2.4.1
+  shared_preferences_linux: ^2.4.1
+  shared_preferences_foundation: ^2.5.6
   collection: ^1.18.0
   path: ^1.9.0
   flutter_colorpicker: ^1.1.0
@@ -191,17 +194,17 @@ dependency_overrides:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/vte/ghostty_vte_flutter
-      ref: 6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee
+      ref: 97c8ae5c1caa856f96f7bc3d772c3f3042c85ae8
   ghostty_vte:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/vte/ghostty_vte
-      ref: 6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee
+      ref: 97c8ae5c1caa856f96f7bc3d772c3f3042c85ae8
   portable_pty:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/pty/portable_pty
-      ref: 6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee
+      ref: 97c8ae5c1caa856f96f7bc3d772c3f3042c85ae8
 
 # Microsoft Store packaging (MSIX). The Store signs the package itself, so no
 # code-signing cert is used on this path (unlike the Inno Setup installer in

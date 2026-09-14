@@ -189,8 +189,8 @@ void main() {
       view: WorkspaceView.files,
       settingsSection: SettingsSection.help,
     );
-    final b = a.copyWith(settingsSection: SettingsSection.design);
-    expect(b.settingsSection, SettingsSection.design);
+    final b = a.copyWith(settingsSection: SettingsSection.privacy);
+    expect(b.settingsSection, SettingsSection.privacy);
     expect(b.target, const LocalProject('p1'));
     expect(b.surface, WorkbenchSurface.appSettings);
     expect(b.sessionId, 's1');

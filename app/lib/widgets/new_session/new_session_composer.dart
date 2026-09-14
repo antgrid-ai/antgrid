@@ -106,6 +106,9 @@ String _abortReasonCopy(NewSessionStartAbortReason reason) => switch (reason) {
   NewSessionStartAbortReason.replyTimedOut =>
     "The machine didn't answer in time. Check that project's sessions before "
         'starting another one.',
+  NewSessionStartAbortReason.sessionDown =>
+    'The connection to the machine dropped while starting. Check that '
+        "project's sessions before starting another one.",
 };
 
 /// Minimum row slack (hint intrinsic width + trailing gap, with margin)

@@ -33,7 +33,7 @@ function makeManager(opts: { wsAbandonedMax?: number } = {}) {
     projectId: "project",
     portLabels: new Map(),
     previewPorts: new Set(),
-    sendTunnel: (data) => sent.push(data as Record<string, unknown>),
+    sendTunnel: async (data) => { sent.push(data as Record<string, unknown>); return "sent"; },
     sendEncrypted: () => {},
     relayHost: "relay.test",
     connState: createConnState(),

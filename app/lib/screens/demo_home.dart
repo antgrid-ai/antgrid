@@ -9,6 +9,7 @@ import '../navigation/nav_controller.dart';
 import '../providers/agent_transport.dart';
 import '../providers/demo_mode.dart';
 import '../providers/providers.dart';
+import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import 'new_session_screen.dart';
 import 'workspace_shell.dart';
@@ -73,6 +74,7 @@ class _DemoHomeState extends ConsumerState<DemoHome> {
     // unwatched binder goes stale and then flushes from inside the next
     // mount's build(), which throws. See the comment at AppShell's watch site.
     ref.watch(agentFocusBinderProvider);
+    ref.watch(checkoutActivationBinderProvider);
     // `resolveBackIntent` runs the handler registry BEFORE its project/session
     // history step, so an always-active handler here would leave the demo on
     // the first press instead of stepping back through it — the opposite of

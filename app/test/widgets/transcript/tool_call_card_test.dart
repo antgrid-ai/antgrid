@@ -36,6 +36,7 @@ Future<void> _pump(
   bool expanded = false,
   bool isBackground = false,
   VoidCallback? onToggle,
+  void Function(String path)? onOpenPath,
 }) {
   return tester.pumpWidget(
     MaterialApp(
@@ -50,6 +51,7 @@ Future<void> _pump(
                 expanded: expanded,
                 isBackground: isBackground,
                 onToggle: onToggle ?? () {},
+                onOpenPath: onOpenPath,
               ),
             ),
           ),
@@ -261,6 +263,61 @@ void main() {
         find.byWidgetPredicate((w) => w.runtimeType.toString() == 'DiffView'),
         findsOneWidget,
       );
+    });
+
+    testWidgets('tapping the path calls onOpenPath with it', (tester) async {
+      final item = _item(
+        status: 'completed',
+        toolKind: 'edit',
+        title: 'edit file.txt',
+        content: const [
+          ToolContent(
+            type: 'diff',
+            path: 'src/file.txt',
+            oldText: 'old line',
+            newText: 'new line',
+          ),
+        ],
+      );
+
+      String? opened;
+      await _pump(
+        tester,
+        item: item,
+        expanded: true,
+        onOpenPath: (path) => opened = path,
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('src/file.txt'));
+      await tester.pumpAndSettle();
+
+      expect(opened, 'src/file.txt');
+    });
+
+    testWidgets('with no onOpenPath, tapping the path does nothing', (
+      tester,
+    ) async {
+      final item = _item(
+        status: 'completed',
+        toolKind: 'edit',
+        title: 'edit file.txt',
+        content: const [
+          ToolContent(
+            type: 'diff',
+            path: 'src/file.txt',
+            oldText: 'old line',
+            newText: 'new line',
+          ),
+        ],
+      );
+
+      await _pump(tester, item: item, expanded: true);
+      await tester.pumpAndSettle();
+
+      // Should not throw with no handler wired up.
+      await tester.tap(find.text('src/file.txt'), warnIfMissed: false);
+      await tester.pumpAndSettle();
     });
   });
 

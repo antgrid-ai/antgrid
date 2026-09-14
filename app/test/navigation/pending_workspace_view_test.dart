@@ -98,15 +98,18 @@ Future<void> _withTabletShell(
   body: body,
 );
 
-/// The harness leaves the selected target at its default, so a value the shell
+/// The harness focuses [testAgentDeviceId] by default, so a value the shell
 /// should honour carries that same stamp; anything else names a project this
 /// route is not.
 PendingNav<WorkspaceView> _pending(WorkspaceView view) =>
-    (target: null, value: view);
+    (target: const LocalProject(testAgentDeviceId), value: view);
 
 /// The agent page carries no value of its own — the request IS the value — so
 /// the stamp is the whole of it.
-const PendingNav<bool> _pendingAgentPage = (target: null, value: true);
+const PendingNav<bool> _pendingAgentPage = (
+  target: LocalProject(testAgentDeviceId),
+  value: true,
+);
 
 void main() {
   testWidgets('a view pending on desktop docks it beside the agent', (

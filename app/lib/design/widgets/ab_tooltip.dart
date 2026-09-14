@@ -24,11 +24,20 @@ class AbTooltip extends StatelessWidget {
   /// be that glyph's only explanation on touch.
   final TooltipTriggerMode? triggerMode;
 
+  // Cap long messages without hiding their text inside a WidgetSpan, whose
+  // plain-text representation loses the tooltip's accessibility label.
+  static const double _kMaxWidth = 280;
+
   @override
   Widget build(BuildContext context) {
     final c = context.antgrid;
     return Tooltip(
       message: message,
+      constraints: const BoxConstraints(maxWidth: _kMaxWidth),
+      textStyle: AbTokens.sansStyle(
+        fontSize: AbTokens.fontSm,
+        color: c.textPrimary,
+      ),
       triggerMode: triggerMode,
       decoration: BoxDecoration(
         color: c.bgElevated,
@@ -38,10 +47,6 @@ class AbTooltip extends StatelessWidget {
       padding: const EdgeInsets.symmetric(
         horizontal: AbTokens.space8,
         vertical: AbTokens.space4,
-      ),
-      textStyle: AbTokens.sansStyle(
-        fontSize: AbTokens.fontSm,
-        color: c.textPrimary,
       ),
       child: child,
     );

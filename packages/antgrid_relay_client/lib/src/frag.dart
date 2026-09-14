@@ -158,7 +158,11 @@ List<String> buildFragments(
 class FragReassembler {
   final int timeoutMs;
   final int globalBudgetBytes;
-  final void Function(String json, String channel) onComplete;
+  /// Handed the completed message plus the identity of the fragment that
+  /// COMPLETED it — see [accept] for why that one and not the one that opened
+  /// the transfer.
+  final void Function(String json, String channel, String frameId, int epoch)
+  onComplete;
   final void Function(FragHint? hint) onAbort;
   final int Function() _now;
 
@@ -173,7 +177,19 @@ class FragReassembler {
     int Function()? now,
   }) : _now = now ?? (() => DateTime.now().millisecondsSinceEpoch);
 
-  bool accept(String plaintext, {String channel = 'control'}) {
+  /// [frameId] and [epoch] describe the sealed frame this one fragment rode in.
+  /// A completed message carries the values of the fragment that completed it,
+  /// so the pair always names ONE real wire frame — mixing the opening
+  /// fragment's id with the closing one's epoch would name a frame that never
+  /// held that epoch. It is also the tighter reading of lateness: a transfer
+  /// whose first fragment predates a rekey is not a late drain if its last one
+  /// arrived under the live session.
+  bool accept(
+    String plaintext, {
+    String channel = 'control',
+    required String frameId,
+    required int epoch,
+  }) {
     // Fast pre-parse filter: buildFragments emits `__frag` first so every
     // fragment frame starts with this prefix (kept in lockstep in frag.ts).
     if (!plaintext.startsWith('{"__frag"')) return false;
@@ -230,7 +246,7 @@ class FragReassembler {
       final joinedJson = t.parts.join();
       final ch = t.channel;
       _remove(id, t);
-      onComplete(joinedJson, ch);
+      onComplete(joinedJson, ch, frameId, epoch);
     }
     return true;
   }

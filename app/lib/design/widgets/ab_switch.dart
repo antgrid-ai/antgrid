@@ -113,7 +113,7 @@ class _AbSwitchState extends State<AbSwitch> {
         toggled: on,
         enabled: false,
         label: widget.semanticLabel,
-        child: Opacity(opacity: 0.4, child: track),
+        child: Opacity(opacity: AbTokens.opacityDisabled, child: track),
       );
     }
 

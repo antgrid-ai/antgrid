@@ -92,7 +92,7 @@ one is not caught by the `AbMessageSchema` union.
 | | `confirm` | base64 string | `tag_a` = HMAC-SHA256(k_confirm, "agent-finished") |
 | `app:ready` | `attemptId` | string | |
 | | `confirm` | base64 string | `tag_p` = HMAC-SHA256(k_confirm, "phone-finished") |
-| | `capabilities` | object, optional | `{ checkoutRouting?: true }` — see below |
+| | `capabilities` | object, optional | `{ checkoutRouting?: true, pullsTree?: true }` — see below |
 | `established` | `attemptId` | string | Agent's ack; the phone's terminal event |
 
 `app:ready.capabilities` is load-bearing, not decorative: it reaches the agent
@@ -100,7 +100,12 @@ as `onHandshakeComplete(capabilities)` and sets `peerCheckoutRouting`, which
 decides whether this app may be routed checkout-scoped frames at all. An app
 that does not advertise `checkoutRouting` is refused a project holding a managed
 session rather than shown main's workspace beside an isolated agent (root
-`CLAUDE.md`, "Checkout-scoped routing").
+`CLAUDE.md`, "Checkout-scoped routing"). `pullsTree` is the opposite kind of
+flag — a bandwidth hint, never a gate: an app that advertises it pulls each
+checkout's file tree itself (`file:tree:snapshot:request`), so the agent skips
+the `tree:full` push in its re-sync and falls back to pushing for any client
+that stays silent. Both flags are `=== true` checks on the agent side; a wrong
+type reads as absent.
 
 Messages 3–5 are sealed with the session transport keys (§7). Messages 3 and 4
 are sealed under **candidate** keys — the session is not confirmed yet. The
@@ -249,8 +254,9 @@ feature multiplexes bulk transfer over one session key.
 **Cipher swap (Dart only).** `E2eTransportDart.useAlgorithm` accepts any
 `AesGcm` so Flutter hosts can install a native-backed implementation — the
 default pure-Dart cipher runs at single-digit MB/s on the calling isolate, and a
-tunneled preview response is megabytes of it. Anything installed there MUST stay
-byte-compatible with node:crypto's `aes-256-gcm` and the framing above. The
+tunneled preview response is megabytes of it, decrypted a slice at a time.
+Anything installed there MUST stay byte-compatible with node:crypto's
+`aes-256-gcm` and the framing above. The
 handshake primitives are deliberately **not** swappable: they produce the
 transcript bytes the bridge verifies.
 
@@ -278,7 +284,7 @@ forwards route frames opaquely.
 Within `kind=0`, sealed plaintext is one of two shapes and the split is
 unambiguous: **session frames are bare `{ type, … }` objects**
 (`handshake:agent-ready`, `app:ready`, `established`, `ping`, `pong`,
-`session-takeover`), while app traffic is **always** wrapped in a stream
+`session-takeover`, `credit`), while app traffic is **always** wrapped in a stream
 envelope `{ s?, m }`. A top-level `type` is therefore never app traffic, and
 `s` absent or `"0"` is the machine control plane.
 
@@ -351,7 +357,12 @@ re-drive would have nothing to send.
 Any structurally valid route frame counts as liveness, even if its sealed
 payload later fails to decrypt: the socket demonstrably delivered real bytes,
 and sealed binary traffic (terminal output, file data) must count the same as an
-explicit `pong`.
+explicit `pong`. The phone diverges here: it advances `_lastRecv` only for
+frames it actually decrypted, so a run of undecryptable frames looks like
+silence to it and to nothing else — `TODO(app)`: count undecryptable frames
+toward `_lastRecv` too. The `credit` frames of §8.8 refresh liveness on both sides like any
+other sealed frame, which is what keeps a session alive while bulk drains on a
+slow uplink.
 
 ### 8.6 Key lifetime and zeroization
 
@@ -392,9 +403,67 @@ Values live in code and move; these are the names to look up. Agent side is
 | `appReadyRetransmit` | phone | Sealed `app:ready` retransmit interval |
 | `_kMaxInitialHandshakeAttempts` | phone (supervisor) | Attempts before the initial connect is surfaced as failed |
 | `backoffBaseMs` / `backoffCapMs` | phone (supervisor) | Per-rung exponential retry backoff |
+| `CHANNEL_WINDOW_BYTES` / `kChannelWindowBytes` | both | Sealed bytes in flight per channel before a credit is required |
+| `SOCKET_INFLIGHT_BYTES` / `kSocketInflightBytes` | both | Sealed bytes in flight per socket, both channels together |
+| `CREDIT_BATCH_BYTES` / `kCreditBatchBytes` | both | Consumed bytes between byte-triggered credits (every liveness tick otherwise) |
+| `WINDOW_RESYNC_AGE_MS` / `kWindowResyncAgeMs` | both | Age of a credit-time anchor past which bytes it saw written, still uncredited, are presumed lost |
+| `MAX_SEND_QUEUE_BYTES` / `kMaxSendQueueBytes` | both | Per-channel cap on plaintext waiting to be sealed and sent |
+| `WINDOW_STALL_WARN_MS` / `kWindowStallWarnMs` | both | Gate-blocked time on a channel before it is logged once |
 
 The two sides' liveness constants must stay in lockstep — the Dart copies are
-declared as a hand-mirror of the bridge's.
+declared as a hand-mirror of the bridge's. The flow-control constants live in
+`packages/antgrid-wire/src/flow.ts` and are hand-mirrored in
+`packages/antgrid_relay_client/lib/src/flow.dart`.
+
+### 8.8 Per-channel flow control
+
+Each direction of a session carries a **cumulative credit window per channel**
+(`control`, `preview`) and one in-flight cap per socket. A sender may have at
+most `CHANNEL_WINDOW_BYTES` of sealed payload in flight on a channel beyond what
+the peer has credited, and at most `SOCKET_INFLIGHT_BYTES` across both channels;
+neither side can read its socket buffer, so this self-accounting is the only
+bound on what a liveness frame is written behind. App frames queue per channel
+in FIFO order and are sealed only when dequeued (a frame queued across a rekey
+goes out under the keys live at that moment); a channel whose window is full
+does not block the other.
+
+The receiver counts the sealed payload bytes of every kind-0 frame the
+established keys opened or nothing opened — decrypt failures included, so a bad
+frame can never leak the sender's window — and returns a sealed
+`credit { channel, consumed }` session frame once `CREDIT_BATCH_BYTES` have
+arrived since the last credit, and unconditionally for both channels on every
+liveness tick. `consumed` is the cumulative total since establishment: a credit
+that does not exceed the last accepted one does not advance, so a duplicated,
+reordered or lost credit is harmless and the next tick heals it. Because a
+credit is a sealed frame under the established keys it also refreshes the peer's
+liveness — on a slow uplink that is what keeps the session alive while bulk
+drains.
+
+Session frames (`ping`, `pong`, `credit`, the handshake set) are never queued
+and never gated, which is what keeps liveness working while a channel is
+stalled; those sealed under the established keys are charged and counted like
+any other frame, so a relay drop report is exact for them too. The relay reports
+every routed frame it discards to the sender with the frame's `channel` and
+`bytes`, and the sender un-charges them. As a backstop for anything that path
+misses, a sender remembers how much it had written on a channel each time a
+credit arrived; when a credit `WINDOW_RESYNC_AGE_MS` (two liveness ticks) later
+still leaves some of that earlier total uncredited, those bytes had every chance
+to be counted (the relay delivers a channel in order and the peer credits every
+tick), so it treats exactly that shortfall as lost and un-charges it. Advancing
+credits alone prove nothing here: session frames keep both counts moving on any
+channel that carries them. Both sides reset their counters at establishment (the agent when it
+sends `established`, the phone when it receives it) and forget them at teardown.
+A channel gate-blocked for `WINDOW_STALL_WARN_MS` is logged once; a queue past
+`MAX_SEND_QUEUE_BYTES` drops whole messages.
+
+A tunneled HTTP response rides the preview window as `tunnel:http-start` (head
+plus the first body slice, `last` when that slice is the whole body),
+`tunnel:http-chunk` (1-based `seq`) and `tunnel:http-end` (`chunks`, optional
+`error`); the bridge reads the next slice only after the previous frame has left
+its queue, so the credit window is the only pacing and each stream holds at most
+one queued frame. `tunnel:http-cancel` (app→bridge) stops a stream. The shapes
+and `TUNNEL_CHUNK_BYTES` live in `bridge/src/tunnel-protocol.ts`, mirrored by
+hand in `app/lib/models/preview_models.dart`.
 
 ---
 

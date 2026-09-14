@@ -33,6 +33,7 @@ class _RecordingRelay extends RelayService {
   final _messages = StreamController<IncomingRouteMessage>.broadcast();
   final _states = StreamController<AppState>.broadcast();
   final _presence = StreamController<bool>.broadcast();
+  final _errors = StreamController<ErrorMessage>.broadcast();
   final sent = <({Uint8List payload, FrameKind kind})>[];
   AppState _cur = const AppState();
 
@@ -48,7 +49,9 @@ class _RecordingRelay extends RelayService {
   @override
   Stream<bool> get peerPresenceStream => _presence.stream;
   @override
-  Stream<ErrorMessage> get errorStream => const Stream.empty();
+  Stream<ErrorMessage> get errorStream => _errors.stream;
+
+  void injectError(ErrorMessage e) => _errors.add(e);
 
   int connectCalls = 0;
 
@@ -105,6 +108,7 @@ class _RecordingRelay extends RelayService {
     if (!_messages.isClosed) await _messages.close();
     if (!_states.isClosed) await _states.close();
     if (!_presence.isClosed) await _presence.close();
+    if (!_errors.isClosed) await _errors.close();
   }
 }
 
@@ -499,4 +503,45 @@ void main() {
           'machine session — no new socket/handshake',
     );
   });
+
+  // The relay discards a routed frame for two different reasons and names a
+  // different code for each: the rate limiter's, and a recipient whose socket
+  // refused the write. Both are the sender losing an outbound frame nobody will
+  // ever resend on its own, so both have to reach the streams — a service
+  // holding re-issuable work recovers on this signal instead of waiting out its
+  // timeout.
+  for (final code in ['MESSAGE_RATE_LIMITED', 'ROUTE_FAILED']) {
+    test('a relay $code report reaches the project streams as a dropped '
+        'frame', () async {
+      final conn = RelayConnection(
+        machineDeviceId: _machineId,
+        crypto: CryptoService(),
+        relayOverride: relay,
+      );
+      addTearDown(conn.dispose);
+
+      final session = await _openConnection(
+        conn,
+        agentSeed: agentSeed,
+        agentPub: agentPub,
+      );
+      final drops = <void>[];
+      session.streamFor('stream-a').droppedFrames.listen(drops.add);
+
+      relay.injectError(
+        ErrorMessage(
+          code: code,
+          message: 'discarded',
+          retryable: true,
+          channel: 'control',
+          bytes: 4096,
+        ),
+      );
+
+      for (var i = 0; i < 100 && drops.isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      expect(drops, hasLength(1));
+    });
+  }
 }

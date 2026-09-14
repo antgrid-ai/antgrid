@@ -15,8 +15,10 @@ import '../services/search_service.dart';
 import '../services/sessions_service.dart';
 import '../services/terminal_service.dart';
 import '../services/upload_service.dart';
+import '../services/pending_reply.dart';
 import '../storage/cached_sessions_store.dart';
 import '../util/device_id.dart';
+import '../util/detached.dart';
 import 'fragment_recovery.dart';
 import 'message_router.dart';
 import 'project_message_classification.dart';
@@ -56,6 +58,13 @@ class ProjectSession {
   late final CheckoutServices _mainCheckoutServices;
   final Map<String, CheckoutServices> _checkoutServices = {};
   Set<String> _pendingCheckoutSweep = const {};
+  Set<String>? _lastLiveCheckouts;
+  final Set<Future<void>> _checkoutDisposals = {};
+
+  /// Checkouts whose bundles carry the heavy hydrators. Remembered rather than
+  /// derived from [_checkoutServices]: the session list can build a bundle for
+  /// an id already named here, and it has to come up active.
+  Set<String> _activeCheckouts = const {};
   final StreamController<CheckoutServices> _checkoutBundlesController =
       StreamController<CheckoutServices>.broadcast();
   FileService get fileService => _mainCheckoutServices.fileService;
@@ -71,8 +80,22 @@ class ProjectSession {
   StreamSubscription? _fragAbortSub;
   StreamSubscription? _fragSendErrSub;
   StreamSubscription? _streamReadySub;
+  StreamSubscription? _sessionDownSub;
+  StreamSubscription<TransportState>? _transportStateSub;
   StreamSubscription? _checkoutSessionSub;
+  StreamSubscription? _checkoutRefusalSub;
   bool _closed = false;
+
+  /// Tracked replies registered via [newPending]. Untyped so one registry can
+  /// hold every service's `PendingReply<T>` regardless of `T` — Dart's
+  /// generics are covariant, so each still narrows correctly for its owner.
+  final _pendingReplies = <PendingReply<dynamic>>{};
+
+  /// Whether the transport carrying this project is currently unusable — a
+  /// local socket teardown, or (relay) a dropped machine session between
+  /// `sessionDownEvents` and the next `streamReadyEvents` for this project.
+  /// Drives [newPending]'s immediate-fail path; see [_markDown]/[_markUp].
+  bool _down;
 
   ProjectSession({
     required this.projectId,
@@ -84,7 +107,15 @@ class ProjectSession {
   }) : _onClose = onClose,
        wireProjectId = mode == ProjectSessionMode.relay
            ? baseProjectId(projectId)
-           : projectId {
+           : projectId,
+       // Derived, not assumed false: production always builds a session over
+       // an already-established transport (see `defaultProjectSessionFactory`
+       // and `LocalTransport.connect`), but every test harness constructs one
+       // directly, sometimes over a transport that starts down.
+       _down = transport is StreamTransport
+           ? !transport.isEstablished
+           : (transport.currentState == TransportState.disconnected ||
+                 transport.currentState == TransportState.error) {
     _router = MessageRouter(transport: transport);
     // Main's SLICE, not the whole tier. This notifier is the PROJECT's
     // status, and an isolated session's worktree runs its own copy of
@@ -103,17 +134,24 @@ class ProjectSession {
       this,
       cache: cachedSessionsStore,
     );
-    // Eager, not lazy-on-focus: the notification aggregators in providers.dart
-    // fan in over [checkoutServiceBundles], so an isolated session that has
-    // never been focused would produce no notifications at all.
-    _checkoutSessionSub = sessionsService.stateStream.listen((state) {
+    // Eager construction, not lazy-on-focus: the notification aggregators in
+    // providers.dart fan in over [checkoutServiceBundles], so an isolated
+    // session that has never been focused would produce no notifications at
+    // all. Only the per-checkout PULLS are focus-gated — see
+    // [CheckoutServices.activate].
+    _checkoutSessionSub = sessionsService.listings.listen((listing) {
+      if (_closed) return;
       final live = <String>{'main'};
-      for (final entry in state.sessions) {
+      for (final entry in listing.sessions) {
         live.add(entry.checkoutId);
+      }
+      _lastLiveCheckouts = live;
+      for (final entry in listing.sessions) {
         if (entry.checkoutId != 'main') servicesForCheckout(entry.checkoutId);
       }
       _sweepCheckouts(live);
     });
+    _checkoutRefusalSub = statusStream.listen(_onCheckoutRefusal);
     handlerService = HandlerService.fromSession(this);
     agentSessionService = AgentSessionService.fromSession(this);
     if (transport is StreamTransport) {
@@ -150,7 +188,82 @@ class ProjectSession {
           .listen((_) {
             _router.resyncFocusState();
             sessionsService.resyncFocus();
+            _markUp();
           });
+      // The machine session dropping is the relay-side "down": a stream that
+      // loses its session cannot answer anything until the next handshake
+      // rebinds this project, which is exactly what the streamReadyEvents
+      // listener above reports back as "up".
+      _sessionDownSub = session.sessionDownEvents.listen((_) => _markDown());
+    } else {
+      // Local transport (and every test double that is neither this nor a
+      // StreamTransport, e.g. FakeAgentTransport/DemoTransport): the socket's
+      // own lifecycle IS the down/up signal, with no separate session layer.
+      _transportStateSub = transport.stateChanges.listen((s) {
+        switch (s) {
+          case TransportState.disconnected:
+          case TransportState.error:
+            _markDown();
+          case TransportState.connected:
+            _markUp();
+          case TransportState.connecting:
+            break;
+        }
+      });
+    }
+  }
+
+  /// Constructs a [PendingReply] tracked in this session's down/up registry.
+  /// Every service that awaits a wire reply should register through here
+  /// rather than building a bare [PendingReply] directly: when the transport
+  /// carrying this project goes down, every tracked reply is failed with
+  /// [SessionDownException] immediately instead of quietly waiting out its own
+  /// timer against a channel nothing will ever answer on.
+  ///
+  /// If the session is ALREADY down when this is called, the reply is still
+  /// registered and returned — the caller's own map/field insertion (which
+  /// normally follows right after this returns) is what a synchronous fail
+  /// here would race ahead of, leaving a dead entry the owner never recorded.
+  /// The fail is deferred to a microtask instead, so it reaches the reply only
+  /// once the caller has finished registering it — see [_pendingReplies].
+  PendingReply<T> newPending<T>({
+    required Duration timeout,
+    void Function()? onTimeout,
+    void Function()? onAbandon,
+    Object Function()? timeoutError,
+  }) {
+    final pending = PendingReply<T>(
+      timeout: timeout,
+      onTimeout: onTimeout,
+      onAbandon: onAbandon,
+      timeoutError: timeoutError,
+    );
+    _pendingReplies.add(pending);
+    pending.future.whenComplete(() => _pendingReplies.remove(pending)).ignore();
+    if (_down) {
+      scheduleMicrotask(() => pending.fail(const SessionDownException()));
+    }
+    return pending;
+  }
+
+  void _markDown() {
+    if (_down) return;
+    _down = true;
+    for (final bundle in checkoutServiceBundles) {
+      bundle.terminalService.suspendDisplay();
+    }
+    _failAllPending(const SessionDownException());
+  }
+
+  void _markUp() {
+    _down = false;
+  }
+
+  void _failAllPending(SessionDownException error) {
+    final replies = _pendingReplies.toList();
+    _pendingReplies.clear();
+    for (final p in replies) {
+      p.fail(error);
     }
   }
 
@@ -175,7 +288,14 @@ class ProjectSession {
 
   /// Declares app-level background state to the agent, gating both the heavy
   /// stream and the fallback push. See [MessageRouter.setLifecyclePaused].
-  void setLifecyclePaused(bool paused) => _router.setLifecyclePaused(paused);
+  void setLifecyclePaused(bool paused) {
+    if (paused) {
+      for (final bundle in checkoutServiceBundles) {
+        bundle.terminalService.suspendDisplay();
+      }
+    }
+    _router.setLifecyclePaused(paused);
+  }
 
   /// Fires once the app has declared it can render again — with the
   /// declaration already on the wire — so a surface that rebuilds from
@@ -240,6 +360,11 @@ class ProjectSession {
     if (existing != null) return existing;
     final bundle = CheckoutServices(this, checkoutId);
     _checkoutServices[checkoutId] = bundle;
+    final live = _lastLiveCheckouts;
+    if (live != null && !live.contains(checkoutId)) {
+      _pendingCheckoutSweep = {..._pendingCheckoutSweep, checkoutId};
+    }
+    if (_activeCheckouts.contains(checkoutId)) bundle.activate();
     _checkoutBundlesController.add(bundle);
     return bundle;
   }
@@ -247,20 +372,37 @@ class ProjectSession {
   CheckoutServices? existingServicesForCheckout(String checkoutId) =>
       _checkoutServices[checkoutId];
 
-  /// Releases bundles whose session is gone. Deferred by one emission: the
+  Set<String> get activeCheckouts => Set.unmodifiable(_activeCheckouts);
+
+  /// Activates the bundle for every id in [ids] (building it through
+  /// [servicesForCheckout] if it doesn't exist yet) and deactivates every
+  /// other bundle this session holds. A project switched away from keeps its
+  /// last active set — nothing here reacts to focus leaving the project.
+  void setActiveCheckouts(Set<String> ids) {
+    _activeCheckouts = Set<String>.from(ids);
+    for (final id in _activeCheckouts) {
+      servicesForCheckout(id).activate();
+    }
+    // Snapshot first: `servicesForCheckout` above inserts into the map this
+    // iterates.
+    for (final entry in _checkoutServices.entries.toList()) {
+      if (_activeCheckouts.contains(entry.key)) continue;
+      entry.value.deactivate();
+    }
+  }
+
+  /// Releases bundles whose session is gone. Deferred by one listing: the
   /// providers that read a bundle are driven by the SAME session list, so
   /// disposing on the emission that drops the session would tear it down under
-  /// a focus that has not moved off it yet. A bundle absent from two successive
-  /// listings has no reader left. Every service holds transport hydrators, so
+  /// a focus that has not moved off it yet. Unchanged listings still advance
+  /// cleanup; state equality says nothing about whether readers moved on.
+  /// Every service holds transport hydrators, so
   /// leaving them registered replays requests for a deleted checkout on every
   /// reconnect.
   void _sweepCheckouts(Set<String> live) {
     for (final id in _pendingCheckoutSweep) {
       if (live.contains(id)) continue;
-      unawaited(_checkoutServices.remove(id)?.dispose() ?? Future.value());
-      // Symmetric with the bridge's own dropCheckoutReplay: a removed worktree
-      // must not keep seeding a bundle that a stale id could still recreate.
-      _router.dropCheckoutReplay(id);
+      _releaseCheckout(id);
     }
     // Union, not just the bundle map: a checkout can leave durable frames the
     // router retains without ever getting a bundle (an archived session still
@@ -269,6 +411,38 @@ class ProjectSession {
       ..._checkoutServices.keys,
       ..._router.replayCheckoutIds,
     }.where((id) => !live.contains(id)).toSet();
+  }
+
+  void _onCheckoutRefusal(Map<String, dynamic> json) {
+    if (_closed || json['type'] != 'control:result' || json['ok'] != false) {
+      return;
+    }
+    final error = json['error'];
+    if (error is! Map || error['code'] != 'UNKNOWN_CHECKOUT') return;
+    final id = json['checkoutId'];
+    final live = _lastLiveCheckouts;
+    if (id is! String || live == null || live.contains(id)) return;
+    if (!_pendingCheckoutSweep.contains(id)) return;
+    _releaseCheckout(id);
+    _pendingCheckoutSweep = {..._pendingCheckoutSweep}..remove(id);
+  }
+
+  void _releaseCheckout(String id) {
+    if (id == 'main') return;
+    final bundle = _checkoutServices.remove(id);
+    _router.dropCheckoutReplay(id);
+    _activeCheckouts = {..._activeCheckouts}..remove(id);
+    if (bundle == null) return;
+    bundle.deactivate();
+    final disposal = bundle.dispose();
+    _checkoutDisposals.add(disposal);
+    detached('project_session', 'dispose deleted checkout', () async {
+      try {
+        await disposal;
+      } finally {
+        _checkoutDisposals.remove(disposal);
+      }
+    });
   }
 
   Iterable<CheckoutServices> get checkoutServiceBundles =>
@@ -297,6 +471,10 @@ class ProjectSession {
   Future<void> hydrate(String key, Future<void> Function() run) =>
       transport.hydrate(key, run);
 
+  /// See [AgentTransport.establishmentEpoch] — a service caching a
+  /// server-issued revision records this beside it.
+  int get establishmentEpoch => transport.establishmentEpoch;
+
   Future<void> hydrateCheckout(
     String checkoutId,
     String key,
@@ -320,18 +498,35 @@ class ProjectSession {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    // A `newPending` issued after close (a stray late call from a service
+    // mid-teardown) must fail immediately through the down path rather than
+    // arming a live timer against a session nothing will ever reconnect.
+    _down = true;
     // Services own disjoint state; dispose them concurrently so focus-switch
-    // teardown latency is bounded by the slowest, not the sum.
+    // teardown latency is bounded by the slowest, not the sum. Each already
+    // fails its own in-flight replies with its own dispose-specific message
+    // (e.g. "FileService disposed") — the registry's own fail below runs
+    // AFTER, so it only ever catches a reply none of them cleaned up, rather
+    // than racing ahead of a more specific message with a generic one.
     await Future.wait([
       if (_fragAbortSub != null) _fragAbortSub!.cancel(),
       if (_fragSendErrSub != null) _fragSendErrSub!.cancel(),
       if (_streamReadySub != null) _streamReadySub!.cancel(),
+      if (_sessionDownSub != null) _sessionDownSub!.cancel(),
+      if (_transportStateSub != null) _transportStateSub!.cancel(),
       if (_checkoutSessionSub != null) _checkoutSessionSub!.cancel(),
+      if (_checkoutRefusalSub != null) _checkoutRefusalSub!.cancel(),
       sessionsService.dispose(),
       handlerService.dispose(),
       agentSessionService.dispose(),
       for (final bundle in _checkoutServices.values) bundle.dispose(),
+      ..._checkoutDisposals,
     ]);
+    // A session torn down with a reply in flight that outlives every
+    // service's own cleanup (a future PendingReply site that forgets to
+    // implement dispose) fails it now rather than leaving it to time out
+    // against a transport nobody will reconnect.
+    _failAllPending(const SessionDownException());
     status.dispose();
     await _checkoutBundlesController.close();
     await _router.dispose();
@@ -348,6 +543,12 @@ class CheckoutServices {
   late final CommandService commandService;
   late final PreviewService previewService;
   late final UploadService uploadService;
+
+  // Plain field, NOT `late final`: checkout_scoped_service_reads_test.dart
+  // scrapes every `late final <Type> <name>;` in this class as a
+  // checkout-variable SERVICE.
+  bool _active = false;
+  bool get isActive => _active;
 
   CheckoutServices(ProjectSession session, this.checkoutId) {
     fileService = FileService.fromSession(session, checkoutId: checkoutId);
@@ -366,6 +567,33 @@ class CheckoutServices {
       checkoutId: checkoutId,
     );
     uploadService = UploadService.fromSession(session, checkoutId: checkoutId);
+  }
+
+  /// Registers the pulls that cost a round trip per checkout — the tree, the
+  /// config, the preview and terminal snapshots — and subscribes the
+  /// focus-resume re-pulls that drive the same set again on every foreground.
+  /// A hydrator fires the moment it is registered on an established transport,
+  /// so this is the pull as well as the re-drive. Only the checkout on screen
+  /// carries them: a project with nine managed checkouts put nine trees on the
+  /// wire at once at every bind, which stalled the relay's window.
+  void activate() {
+    if (_active) return;
+    _active = true;
+    fileService.activate();
+    terminalService.activate();
+    configService.activate();
+    previewService.activate();
+  }
+
+  /// Leaves every service's state intact — switching back renders the last
+  /// tree while [activate]'s re-pull refreshes it.
+  void deactivate() {
+    if (!_active) return;
+    _active = false;
+    fileService.deactivate();
+    terminalService.deactivate();
+    configService.deactivate();
+    previewService.deactivate();
   }
 
   Future<void> dispose() => Future.wait([

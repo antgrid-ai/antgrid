@@ -13,6 +13,7 @@ import 'package:antgrid/providers/projects.dart';
 import 'package:antgrid/services/auth_service.dart';
 import 'package:antgrid/services/device_provisioning.dart';
 import 'package:antgrid/services/devices_api.dart';
+import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -67,8 +68,12 @@ void main() {
     await store.upsert(_project('p1', 'anon-A'));
     await store.upsert(_project('p2', 'other-B'));
     await store.upsert(_project('p3', null));
+    final pendingForgets = await PendingForgetsStore.open();
     final container = ProviderContainer(
-      overrides: [projectStoreProvider.overrideWithValue(store)],
+      overrides: [
+        projectStoreProvider.overrideWithValue(store),
+        pendingForgetsStoreProvider.overrideWithValue(pendingForgets),
+      ],
     );
     addTearDown(container.dispose);
 
@@ -94,6 +99,7 @@ void main() {
       // one — the exact ordering that lets the self-heal slip in behind it.
       useInMemoryPrefs();
       final projectStore = await ProjectStore.open();
+      final pendingForgets = await PendingForgetsStore.open();
       final keychain = inMemoryDeviceStore();
       final gate = Completer<void>();
       final api = _GatedDevicesApi(gate);
@@ -101,6 +107,7 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           projectStoreProvider.overrideWithValue(projectStore),
+          pendingForgetsStoreProvider.overrideWithValue(pendingForgets),
           keychainDeviceStoreProvider.overrideWithValue(keychain),
           licenseApiUrlProvider.overrideWithValue('https://api.antgrid.test'),
           deviceProvisioningProvider.overrideWithValue(
@@ -137,6 +144,7 @@ void main() {
     useInMemoryPrefs({'antgrid.local_host_uuid': 'anon-A'});
     final projectStore = await ProjectStore.open();
     await projectStore.upsert(_project('p1', 'anon-A'));
+    final pendingForgets = await PendingForgetsStore.open();
     final keychain = inMemoryDeviceStore();
     final gate = Completer<void>()..complete();
     final api = _GatedDevicesApi(gate);
@@ -144,6 +152,7 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         projectStoreProvider.overrideWithValue(projectStore),
+        pendingForgetsStoreProvider.overrideWithValue(pendingForgets),
         keychainDeviceStoreProvider.overrideWithValue(keychain),
         licenseApiUrlProvider.overrideWithValue('https://api.antgrid.test'),
         deviceProvisioningProvider.overrideWithValue(

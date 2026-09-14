@@ -10,13 +10,15 @@ import 'package:antgrid/project/project_status_cache.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/entry_cleanup.dart';
-import 'package:antgrid/providers/projects.dart' show projectStoreProvider;
+import 'package:antgrid/providers/projects.dart'
+    show projectStoreProvider, pendingForgetsStoreProvider;
 import 'package:antgrid/providers/providers.dart'
     show preferencesServiceProvider, storageServiceProvider;
 import 'package:antgrid/services/preferences_service.dart';
 import 'package:antgrid/services/storage_service.dart';
 import 'package:antgrid/storage/agent_catalog_store.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/test/test_flutter_secure_storage_platform.dart';
@@ -107,6 +109,7 @@ void main() {
   group('purgeAccountCaches', () {
     late Map<String, String> secureBacking;
     late ProjectStore projectStore;
+    late PendingForgetsStore pendingForgetsStore;
 
     setUp(() async {
       secureBacking = <String, String>{};
@@ -116,6 +119,7 @@ void main() {
       // The purge asks which projects are LOCAL before it touches a store —
       // preferences for those survive sign-out (see clearAccountScoped).
       projectStore = await ProjectStore.open();
+      pendingForgetsStore = await PendingForgetsStore.open();
     });
 
     test('wipes every account-derived cache', () async {
@@ -165,6 +169,7 @@ void main() {
           storageServiceProvider.overrideWithValue(pairedStore),
           preferencesServiceProvider.overrideWithValue(prefsService),
           projectStoreProvider.overrideWithValue(projectStore),
+          pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
         ],
       );
       addTearDown(container.dispose);
@@ -212,6 +217,7 @@ void main() {
           storageServiceProvider.overrideWithValue(pairedStore),
           preferencesServiceProvider.overrideWithValue(PreferencesService()),
           projectStoreProvider.overrideWithValue(projectStore),
+          pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
         ],
       );
       addTearDown(container.dispose);

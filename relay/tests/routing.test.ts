@@ -216,7 +216,13 @@ test("peer offline -> PEER_OFFLINE retryable; nothing is queued, a reconnect del
 
   const err = waitForMessage(agent.ws);
   agent.ws.send(frame(appId, "gone"));
-  expect(await err).toMatchObject({ type: "error", code: "PEER_OFFLINE", retryable: true });
+  expect(await err).toMatchObject({
+    type: "error",
+    code: "PEER_OFFLINE",
+    retryable: true,
+    channel: "control",
+    bytes: "gone".length,
+  });
 
   // Reconnect under the SAME identity — if anything had been queued, this is
   // the moment it would be flushed. A `peer-online` fan-out is expected on
@@ -316,9 +322,18 @@ test("routed-frame flood -> MESSAGE_RATE_LIMITED (retryable); bucket refills and
     expect((await received).payload).toBe(`burst-${i}`);
   }
 
+  // channel + bytes are the whole of what a sender can learn about a frame the
+  // relay threw away: enough to un-charge the flow-control window it committed
+  // to those bytes, and the only thing standing between a drop and a window
+  // that shrinks for the rest of the session.
   const limited = waitForType(app.ws, "error");
   app.ws.send(frame(agentId, "over-budget"));
-  expect(await limited).toMatchObject({ code: "MESSAGE_RATE_LIMITED", retryable: true });
+  expect(await limited).toMatchObject({
+    code: "MESSAGE_RATE_LIMITED",
+    retryable: true,
+    channel: "control",
+    bytes: "over-budget".length,
+  });
   expect(app.ws.readyState).toBe(WebSocket.OPEN);
 
   // Refilling at 2/s, so a full second restores the whole burst allowance.

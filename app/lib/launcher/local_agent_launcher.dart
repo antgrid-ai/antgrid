@@ -7,9 +7,10 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import 'host_control_client.dart';
 import 'host_controller.dart';
-import 'project_id.dart';
+import 'project_resolve.dart';
 import '../config/build_info.dart';
 import '../util/ab_log.dart';
+import '../util/netwatch.dart';
 
 // ---------------------------------------------------------------------------
 // BootstrapPayload
@@ -192,19 +193,14 @@ class LocalAgentLauncher {
       port: host.controlPort,
       token: host.token,
     );
-    String projectId;
-    String repoPath;
+    final ResolvedLocalProject resolved;
     try {
-      final resolved = await resolveClient.projectResolve(folder);
-      projectId = resolved.projectId;
-      repoPath = resolved.repoPath;
-    } on HostControlException catch (e) {
-      if (e.code != 'BAD_REQUEST' && e.code != 'UNKNOWN_VERB') rethrow;
-      projectId = await computeProjectId(folder);
-      repoPath = folder;
+      resolved = await resolveLocalProject(resolveClient, folder);
     } finally {
       resolveClient.close();
     }
+    final projectId = resolved.projectId;
+    final repoPath = resolved.repoPath;
     final existing = _inFlight[projectId];
     if (existing != null) {
       _log('openProject: projectId=$projectId — coalescing with in-flight');
@@ -313,6 +309,7 @@ class LocalAgentLauncher {
         port: connect.port,
         token: connect.token,
         appPid: pid,
+        netTap: localNetTapFor(projectId),
       );
       await t.connect();
       _log('opened project $projectId (port ${connect.port})');

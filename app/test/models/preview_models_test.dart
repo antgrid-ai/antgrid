@@ -180,34 +180,149 @@ void main() {
       ).toJson();
       expect(json.containsKey('acceptEncodings'), false);
     });
+
+    // A lost-head recovery re-sends under a fresh id; anything else changing
+    // would ask the dev server a different question than the browser asked.
+    test('copyWith(requestId:) changes only the id', () {
+      final source = TunnelHttpRequest(
+        requestId: 'req-old',
+        port: 3000,
+        scheme: 'https',
+        method: 'GET',
+        path: '/app.js',
+        headers: const {'accept': '*/*'},
+        body: null,
+        acceptEncodings: const [kTunnelGzipEncoding],
+      );
+      final copy = source.copyWith(requestId: 'req-new');
+
+      expect(copy.requestId, 'req-new');
+      expect(copy.port, source.port);
+      expect(copy.scheme, source.scheme);
+      expect(copy.method, source.method);
+      expect(copy.path, source.path);
+      expect(copy.headers, source.headers);
+      expect(copy.body, source.body);
+      expect(copy.acceptEncodings, source.acceptEncodings);
+    });
   });
 
-  group('TunnelHttpResponse', () {
-    test('fromJson parses all fields', () {
-      final response = TunnelHttpResponse.fromJson({
+  group('tunnel response frames', () {
+    test('start parses head, slice 0 and last', () {
+      final msg = TunnelHttpStartMessage.fromJson({
         'requestId': 'req-1',
         'status': 200,
         'headers': {'content-type': 'text/html'},
-        'body': '<html></html>',
-        'bodyEncoding': 'utf8',
+        'setCookies': ['a=1', 'b=2'],
+        'data': 'aGk=',
+        'bodyEncoding': 'base64',
+        'last': true,
       });
-      expect(response, isNotNull);
-      expect(response!.requestId, 'req-1');
-      expect(response.status, 200);
-      expect(response.headers['content-type'], 'text/html');
-      expect(response.body, '<html></html>');
-      expect(response.bodyEncoding, 'utf8');
+      expect(msg, isNotNull);
+      expect(msg!.requestId, 'req-1');
+      expect(msg.status, 200);
+      expect(msg.headers['content-type'], 'text/html');
+      expect(msg.setCookies, ['a=1', 'b=2']);
+      expect(msg.data, 'aGk=');
+      expect(msg.bodyEncoding, 'base64');
+      expect(msg.last, isTrue);
     });
 
-    test('fromJson returns null for missing required fields', () {
-      final response = TunnelHttpResponse.fromJson({
+    test('start without last defaults it false and tolerates no cookies', () {
+      final msg = TunnelHttpStartMessage.fromJson({
         'requestId': 'req-1',
-        // missing status
-        'headers': {},
-        'body': '',
+        'status': 204,
+        'headers': <String, dynamic>{},
+        'data': '',
+        'bodyEncoding': 'base64',
+      });
+      expect(msg!.last, isFalse);
+      expect(msg.setCookies, isEmpty);
+    });
+
+    test('start without status returns null', () {
+      expect(
+        TunnelHttpStartMessage.fromJson({
+          'requestId': 'req-1',
+          'headers': <String, dynamic>{},
+          'data': '',
+          'bodyEncoding': 'base64',
+        }),
+        isNull,
+      );
+    });
+
+    test('chunk parses seq, data and per-slice encoding', () {
+      final msg = TunnelHttpChunkMessage.fromJson({
+        'requestId': 'req-1',
+        'seq': 3,
+        'data': 'aGk=',
+        'bodyEncoding': kTunnelGzipEncoding,
+      });
+      expect(msg!.seq, 3);
+      expect(msg.bodyEncoding, kTunnelGzipEncoding);
+    });
+
+    // An unknown encoding must PARSE: rejected here it is indistinguishable
+    // from a lost frame, where the handler fails the body naming the value.
+    test('chunk with an unknown bodyEncoding still parses', () {
+      final msg = TunnelHttpChunkMessage.fromJson({
+        'requestId': 'req-1',
+        'seq': 1,
+        'data': 'aGk=',
         'bodyEncoding': 'utf8',
       });
-      expect(response, isNull);
+      expect(msg, isNotNull);
+      expect(msg!.bodyEncoding, 'utf8');
+    });
+
+    test('chunk with a non-int seq returns null', () {
+      expect(
+        TunnelHttpChunkMessage.fromJson({
+          'requestId': 'req-1',
+          'seq': '1',
+          'data': 'aGk=',
+          'bodyEncoding': 'base64',
+        }),
+        isNull,
+      );
+    });
+
+    test('end parses the chunk count and an optional error', () {
+      final clean = TunnelHttpEndMessage.fromJson({
+        'requestId': 'req-1',
+        'chunks': 4,
+      });
+      expect(clean!.chunks, 4);
+      expect(clean.error, isNull);
+
+      final failed = TunnelHttpEndMessage.fromJson({
+        'requestId': 'req-1',
+        'chunks': 2,
+        'error': 'upstream body stalled',
+      });
+      expect(failed!.error, 'upstream body stalled');
+    });
+
+    test('end without chunks returns null', () {
+      expect(
+        TunnelHttpEndMessage.fromJson({'requestId': 'req-1'}),
+        isNull,
+      );
+    });
+
+    test('ws-close carries a code and reason, and tolerates neither', () {
+      final withCode = TunnelWsCloseMessage.fromJson({
+        'tunnelId': 't-1',
+        'code': 1009,
+        'reason': 'too big',
+      });
+      expect(withCode!.code, 1009);
+      expect(withCode.reason, 'too big');
+
+      final bare = TunnelWsCloseMessage.fromJson({'tunnelId': 't-1'});
+      expect(bare!.code, isNull);
+      expect(bare.reason, isNull);
     });
   });
 
@@ -238,19 +353,49 @@ void main() {
       expect(portsMsg.ports[1].port, 8080);
     });
 
-    test('tunnel:http-response returns TunnelHttpResponse', () {
-      final msg = parseAbMessage({
-        'type': 'tunnel:http-response',
+    test('the three streamed tunnel frames parse to their own types', () {
+      final start = parseAbMessage({
+        'type': 'tunnel:http-start',
         'requestId': 'req-1',
         'status': 200,
         'headers': {'content-type': 'text/html'},
-        'body': '<html></html>',
-        'bodyEncoding': 'utf8',
+        'data': '',
+        'bodyEncoding': 'base64',
       });
-      expect(msg, isA<TunnelHttpResponse>());
-      final resp = msg as TunnelHttpResponse;
-      expect(resp.requestId, 'req-1');
-      expect(resp.status, 200);
+      expect(start, isA<TunnelHttpStartMessage>());
+      expect((start as TunnelHttpStartMessage).status, 200);
+
+      final chunk = parseAbMessage({
+        'type': 'tunnel:http-chunk',
+        'requestId': 'req-1',
+        'seq': 1,
+        'data': 'aGk=',
+        'bodyEncoding': 'base64',
+      });
+      expect(chunk, isA<TunnelHttpChunkMessage>());
+
+      final end = parseAbMessage({
+        'type': 'tunnel:http-end',
+        'requestId': 'req-1',
+        'chunks': 1,
+      });
+      expect(end, isA<TunnelHttpEndMessage>());
+    });
+
+    // The retired whole-body type must not resolve to anything: a stale bridge
+    // speaking it should surface as a dropped frame, not a half-decoded one.
+    test('tunnel:http-response no longer parses', () {
+      expect(
+        parseAbMessage({
+          'type': 'tunnel:http-response',
+          'requestId': 'req-1',
+          'status': 200,
+          'headers': <String, dynamic>{},
+          'body': '',
+          'bodyEncoding': 'utf8',
+        }),
+        isNull,
+      );
     });
 
     test('malformed ports:update returns null', () {

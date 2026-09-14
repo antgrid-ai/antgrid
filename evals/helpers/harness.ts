@@ -566,7 +566,7 @@ export async function handshakeWithoutPairing(
   app: RelayClient,
   agentDeviceId: string,
   agentEd25519Pub: string,
-  opts: { attempts?: number; perAttemptTimeoutMs?: number; gapMs?: number } = {},
+  opts: { attempts?: number; perAttemptTimeoutMs?: number; gapMs?: number; omitPullsTree?: boolean } = {},
 ): Promise<void> {
   // `setupTestEnv` calls this with the default before its own STREAM_ADVERT_*
   // retry loop (~20 lines below), and gate-harness-pairfree wraps the whole
@@ -582,7 +582,10 @@ export async function handshakeWithoutPairing(
   for (let i = 0; i < attempts; i++) {
     try {
       app.setPeerId(agentDeviceId);
-      await app.performE2EHandshake(agentDeviceId, perAttemptTimeoutMs, { agentEd25519Pub });
+      await app.performE2EHandshake(agentDeviceId, perAttemptTimeoutMs, {
+        agentEd25519Pub,
+        omitPullsTree: opts.omitPullsTree,
+      });
       return;
     } catch (err) {
       lastErr = err;

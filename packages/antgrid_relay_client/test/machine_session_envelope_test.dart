@@ -99,13 +99,17 @@ void main() {
       final reassembler = FragReassembler(
         timeoutMs: kTransferTimeoutMs,
         globalBudgetBytes: kGlobalReassemblyBudget,
-        onComplete: (json, _) => joined.add(json),
+        onComplete: (json, _, __, ___) => joined.add(json),
         onAbort: (_) {},
       );
       for (final f in relay.sent) {
         final plaintext = await _openFromPhone(keys, f.payload);
         expect(plaintext, isNotNull);
-        reassembler.accept(plaintext!);
+        reassembler.accept(
+          plaintext!,
+          frameId: frameIdOf(f.payload, f.kind),
+          epoch: 1,
+        );
       }
 
       expect(joined, hasLength(1));

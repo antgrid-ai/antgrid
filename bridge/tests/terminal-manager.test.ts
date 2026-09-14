@@ -1,8 +1,20 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { TerminalManager } from "../src/terminal-manager";
 import { TerminalSession } from "../src/terminal-session";
+import type { TerminalFrameSource } from "../src/terminal-frames/source";
 import { createConnState, type ConnState } from "../src/conn-state";
 import type { AbMessage } from "../src/protocol";
+
+/** Poll until [pred] holds, or give up and let the caller's assertion report
+ *  it. A fixed sleep sized to a real PTY's spawn-and-reap is a race a loaded
+ *  machine loses; this returns as soon as the thing happens and only waits out
+ *  the timeout when it genuinely never does. */
+async function waitFor(pred: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!pred() && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
 
 describe("TerminalManager", () => {
   let manager: TerminalManager;
@@ -10,10 +22,21 @@ describe("TerminalManager", () => {
   let connState: ConnState;
 
   beforeEach(() => {
-    messages = [];
+    // The sink closes over THIS array, never over the `messages` binding that
+    // the next beforeEach rebinds. `killAll` returns before the PTY is reaped —
+    // on Windows the tree kill is asynchronous — so a session outlives its test
+    // and keeps emitting; through the binding those frames land in whatever
+    // array the next test is asserting on, carrying a ConnState that test never
+    // paused, which is a suppression gate the frames never passed.
+    const own: AbMessage[] = [];
+    messages = own;
     connState = createConnState();
-    manager = new TerminalManager((msg) => messages.push(msg), undefined, connState);
+    manager = new TerminalManager((msg) => own.push(msg), undefined, connState);
   });
+
+  // Bounds the leak above rather than preventing it: each test's terminals stop
+  // with it instead of accumulating across the file.
+  afterEach(() => manager.killAll());
 
   test("spawn terminal emits terminal:started", async () => {
     const id = manager.spawn({ terminalId: "t1" });
@@ -31,26 +54,33 @@ describe("TerminalManager", () => {
     manager.killAll();
   });
 
-  test("attach snapshot opens with the attach preamble and carries the live seq", async () => {
+  test("same-id respawn assigns a new terminal run", () => {
     manager.spawn({ terminalId: "t1" });
-    await new Promise((r) => setTimeout(r, 800));
-
-    const seqBefore = manager.getScrollback("t1")!.seq;
-    const attach = await manager.getAttachSnapshot("t1");
-    expect(attach).not.toBeNull();
-    // The app applies this verbatim, so the sequence that lands its engine on
-    // the right buffer has to be the first thing in it.
-    expect(attach!.text.startsWith("\x1b[?1049l\x1b[r")).toBe(true);
-    // The cutoff describes the blob exactly. It is read AFTER the barrier, and
-    // anything that arrived during one is replayed into the body — so on an
-    // idle terminal there is nothing to replay and it cannot have moved.
-    expect(attach!.seq).toBe(seqBefore);
-
+    const firstRun = manager.runId("t1");
+    expect(firstRun).toBeDefined();
+    manager.spawn({ terminalId: "t1" });
+    expect(manager.runId("t1")).not.toBe(firstRun);
+    expect(manager.runId("nope")).toBeUndefined();
     manager.killAll();
   });
 
-  test("attach snapshot is null for an unknown terminal", async () => {
-    expect(await manager.getAttachSnapshot("nope")).toBeNull();
+  test("parsed bells are run-scoped and throttled independently of remote viewer suppression", async () => {
+    let source: TerminalFrameSource | undefined;
+    manager = new TerminalManager((msg) => messages.push(msg), {
+      onRunStarted: (_id, _run, screen) => { source = screen; },
+    }, connState);
+    manager.spawn({ terminalId: "bell" });
+    connState.appFocusPaused = true;
+    source!.feed("\x1b]2;title\x07");
+    await source!.settle();
+    expect(messages.filter((m) => m.type === "terminal:bell")).toHaveLength(0);
+    source!.feed("\x07".repeat(500));
+    await source!.settle();
+    const bells = messages.filter((m) => m.type === "terminal:bell");
+    expect(bells).toHaveLength(1);
+    expect(bells[0]).toMatchObject({ terminalId: "bell", runId: manager.runId("bell") });
+    source!.capture(performance.now());
+    expect(messages.filter((m) => m.type === "terminal:bell")).toHaveLength(1);
   });
 
   test("kill terminal emits terminal:exited", async () => {
@@ -61,7 +91,7 @@ describe("TerminalManager", () => {
     // made to wait on the reaping. Also the proof that the deferred handle
     // kill still lands — the PTY exits without anyone awaiting anything.
     expect(manager.kill("t1")).toBeUndefined();
-    await new Promise((r) => setTimeout(r, 500));
+    await waitFor(() => messages.some((m) => m.type === "terminal:exited"));
 
     const exited = messages.find((m) => m.type === "terminal:exited");
     expect(exited).toBeDefined();

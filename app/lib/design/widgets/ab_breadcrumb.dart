@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../ab_colors.dart';
 import '../ab_tokens.dart';
 
+const double _leadingSegmentMaxWidth = 140;
+
 /// Mono breadcrumb chip. All but the last segment render dimmed; the last
 /// segment ("leaf") renders in the brightest foreground tone, matching the
 /// Antgrid workspace head pattern.
@@ -19,7 +21,20 @@ class AbBreadcrumb extends StatelessWidget {
   final Widget? leafOverride;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      // Keep the active session/file readable when fixed ancestor segments
+      // would consume the row. The leaf still owns the rename affordance.
+      final visibleSegments =
+          segments.length > 1 &&
+              constraints.maxWidth < _leadingSegmentMaxWidth * segments.length
+          ? [segments.last]
+          : segments;
+      return _buildSegments(context, visibleSegments);
+    },
+  );
+
+  Widget _buildSegments(BuildContext context, List<String> segments) {
     final palette = context.antgrid;
     final children = <Widget>[];
     for (var i = 0; i < segments.length; i++) {
@@ -83,7 +98,9 @@ class AbBreadcrumb extends StatelessWidget {
         isLast
             ? Flexible(fit: FlexFit.loose, child: segment)
             : ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 140),
+                constraints: const BoxConstraints(
+                  maxWidth: _leadingSegmentMaxWidth,
+                ),
                 child: segment,
               ),
       );

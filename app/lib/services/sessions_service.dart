@@ -100,12 +100,21 @@ class SessionsState {
       Object.hash(projectId, loading, error, Object.hashAll(sessions));
 }
 
+typedef SessionListing = ({
+  List<SessionEntry> sessions,
+  bool isReply,
+  bool includeArchived,
+});
+
+typedef _ListRequest = ({bool includeArchived, int epoch});
+
 class SessionsService {
   final ProjectSession session;
   final CachedSessionsStore cache;
 
   StreamSubscription<Map<String, dynamic>>? _statusSub;
   final _stateController = StreamController<SessionsState>.broadcast();
+  final _listingsController = StreamController<SessionListing>.broadcast();
   SessionsState _state;
   bool _disposed = false;
 
@@ -116,6 +125,7 @@ class SessionsService {
   String? _focused;
 
   final Map<String, PendingReply<List<SessionEntry>>> _pendingList = {};
+  final Map<String, _ListRequest> _listRequests = {};
   final Map<String, PendingReply<SessionEntry?>> _pendingMutations = {};
   final Map<String, PendingReply<SessionEntry?>> _pendingRefusableMutations =
       {};
@@ -124,6 +134,7 @@ class SessionsService {
   final Map<String, PendingReply<SessionModeResult>> _pendingModeChanges = {};
 
   Stream<SessionsState> get stateStream => _stateController.stream;
+  Stream<SessionListing> get listings => _listingsController.stream;
   SessionsState get currentState => _state;
   String get projectId => session.projectId;
 
@@ -146,9 +157,8 @@ class SessionsService {
   }
 
   Future<void> _hydrateList() async {
-    await _send(
-      createAbMessage('session:list', {'requestId': _newRequestId()}),
-    );
+    final requestId = _newListRequest(false);
+    await _send(createAbMessage('session:list', {'requestId': requestId}));
   }
 
   void _writeThrough(List<SessionEntry> sessions) {
@@ -181,15 +191,37 @@ class SessionsService {
 
   void _handleListResult(Map<String, dynamic> j) {
     final requestId = j['requestId'] as String?;
+    final request = _listRequests[requestId];
+    if (request != null && request.epoch != session.establishmentEpoch) return;
     final sessions = _parseSessions(j['sessions']);
-    _setState(
-      _state.copyWith(sessions: sessions, loading: false, clearError: true),
-    );
-    _writeThrough(sessions);
-
-    if (requestId != null) {
+    final includeArchived =
+        request?.includeArchived == true || sessions.any((s) => s.archived);
+    if (request != null && !includeArchived) {
+      final compatible = _pendingList.keys.where((id) {
+        final pending = _listRequests[id];
+        return pending != null &&
+            !pending.includeArchived &&
+            pending.epoch == request.epoch;
+      }).toList();
+      for (final id in compatible) {
+        _pendingList.remove(id)?.complete(sessions);
+      }
+    } else if (requestId != null) {
       _pendingList.remove(requestId)?.complete(sessions);
     }
+    _setState(
+      _state.copyWith(
+        sessions: sessions,
+        loading: _pendingList.isNotEmpty,
+        clearError: true,
+      ),
+    );
+    _writeThrough(sessions);
+    _listingsController.add((
+      sessions: sessions,
+      isReply: true,
+      includeArchived: includeArchived,
+    ));
   }
 
   void _handleResult(Map<String, dynamic> j) {
@@ -254,6 +286,11 @@ class SessionsService {
 
   void _handleUpdated(Map<String, dynamic> j) {
     final sessions = _parseSessions(j['sessions']);
+    _listingsController.add((
+      sessions: sessions,
+      isReply: false,
+      includeArchived: sessions.any((s) => s.archived),
+    ));
     // Each running-session mutation fires `session:updated` twice on the agent
     // (sync `changed()` and async PTY-exit `noteExited`). The two frames are
     // structurally identical for non-`running` fields; skip the second so
@@ -277,12 +314,30 @@ class SessionsService {
 
   String _newRequestId() => const Uuid().v4();
 
+  String _newListRequest(bool includeArchived) {
+    final id = _newRequestId();
+    _listRequests[id] = (
+      includeArchived: includeArchived,
+      epoch: session.establishmentEpoch,
+    );
+    // Keep recently timed-out requests recognizable without retaining an
+    // unbounded request log over a long-lived project connection.
+    while (_listRequests.length > 256) {
+      final expired = _listRequests.keys.where(
+        (key) => !_pendingList.containsKey(key) && key != id,
+      );
+      if (expired.isEmpty) break;
+      _listRequests.remove(expired.first);
+    }
+    return id;
+  }
+
   PendingReply<T> _newPending<T>(
-    void Function() onTimeout, {
+    void Function() onAbandon, {
     Duration timeout = _kPendingReplyTimeout,
-  }) => PendingReply<T>(
+  }) => session.newPending<T>(
     timeout: timeout,
-    onTimeout: onTimeout,
+    onAbandon: onAbandon,
     timeoutError: () => TimeoutException('session reply timed out'),
   );
 
@@ -293,10 +348,13 @@ class SessionsService {
   // --- Public requests ---
 
   Future<List<SessionEntry>> requestList({bool includeArchived = false}) {
-    final requestId = _newRequestId();
-    final pending = _newPending<List<SessionEntry>>(
-      () => _pendingList.remove(requestId),
-    );
+    final requestId = _newListRequest(includeArchived);
+    final pending = _newPending<List<SessionEntry>>(() {
+      _pendingList.remove(requestId);
+      if (_pendingList.isEmpty) {
+        _setState(_state.copyWith(loading: false));
+      }
+    });
     _pendingList[requestId] = pending;
     _setState(_state.copyWith(loading: true, clearError: true));
     unawaited(
@@ -449,7 +507,7 @@ class SessionsService {
   /// [PendingReply] a second completion mode, so a disposal `StateError` from
   /// [_failPending] still propagates: that transport is genuinely gone.
   ///
-  /// [PendingReply.onTimeout] still de-registers the entry, and deliberately so
+  /// [PendingReply.onAbandon] still de-registers the entry, and deliberately so
   /// — a late `ok:false` is not lost by it. [_handleResult] writes the reason
   /// onto [SessionsState.error] BEFORE it looks the pending entry up, and
   /// `OperationalErrorToaster` toasts that for the focused project. What
@@ -482,7 +540,10 @@ class SessionsService {
       // StateError alongside the lapse: `dispose()` fails everything pending,
       // and a project switch mid-delete would otherwise surface as a generic
       // "couldn't delete" toast for a removal the bridge is still running.
-      test: (e) => e is TimeoutException || e is StateError,
+      // SessionDownException too: a reconnect landing inside the two-minute
+      // delete window is silence, same as a lapsed timer.
+      test: (e) =>
+          e is TimeoutException || e is StateError || e is SessionDownException,
     );
   }
 
@@ -534,32 +595,43 @@ class SessionsService {
     await _statusSub?.cancel();
     _statusSub = null;
     await _stateController.close();
+    await _listingsController.close();
+    _listRequests.clear();
   }
 
+  // Snapshot-then-clear-then-fail, in that order: `fail` runs each reply's
+  // `onAbandon`, which is exactly this map's own removal callback — iterating
+  // the live map while it fails would be a ConcurrentModificationError.
   void _failPending(Object error) {
-    for (final p in _pendingList.values) {
-      p.fail(error);
-    }
+    final list = _pendingList.values.toList();
     _pendingList.clear();
-    for (final p in _pendingMutations.values) {
+    for (final p in list) {
       p.fail(error);
     }
+    final mutations = _pendingMutations.values.toList();
     _pendingMutations.clear();
-    for (final p in _pendingRefusableMutations.values) {
+    for (final p in mutations) {
       p.fail(error);
     }
+    final refusable = _pendingRefusableMutations.values.toList();
     _pendingRefusableMutations.clear();
-    for (final p in _pendingCreates.values) {
+    for (final p in refusable) {
       p.fail(error);
     }
+    final creates = _pendingCreates.values.toList();
     _pendingCreates.clear();
-    for (final p in _pendingDeletes.values) {
+    for (final p in creates) {
       p.fail(error);
     }
+    final deletes = _pendingDeletes.values.toList();
     _pendingDeletes.clear();
-    for (final p in _pendingModeChanges.values) {
+    for (final p in deletes) {
       p.fail(error);
     }
+    final modeChanges = _pendingModeChanges.values.toList();
     _pendingModeChanges.clear();
+    for (final p in modeChanges) {
+      p.fail(error);
+    }
   }
 }

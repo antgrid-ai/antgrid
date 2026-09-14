@@ -510,6 +510,16 @@ describe("CodexDriver", () => {
     expect(intr?.params).toEqual({ threadId: "th1", turnId: "tn1" });
   });
 
+  it("surfaces a resume failure without creating a replacement thread", async () => {
+    const { ep, requests } = makeFakeEndpoint({ onRequest: (method) => {
+      if (method === "thread/resume") throw new Error("thread unavailable");
+      return {};
+    } });
+    const driver = new CodexDriver({ sessionId: "s1", endpoint: ep, sendMessage: () => {}, cwd: "/x" });
+    await expect(driver.start("saved-thread")).rejects.toThrow("Could not resume Codex thread saved-thread: thread unavailable");
+    expect(requests.map((r) => r.method)).toEqual(["initialize", "thread/resume"]);
+  });
+
   it("resumes an existing thread and replays its history", async () => {
     const sent: AbMessage[] = [];
     const { ep, requests } = makeFakeEndpoint({

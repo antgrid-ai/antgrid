@@ -10,6 +10,7 @@ import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 
@@ -26,6 +27,7 @@ void main() {
         RecentAgentsStore.open(),
         CachedSessionsStore.open(),
       ).wait;
+      final pendingForgetsStore = await PendingForgetsStore.open();
       addTearDown(recentAgentsStore.close);
       addTearDown(cachedSessionsStore.close);
 
@@ -54,6 +56,7 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           projectStoreProvider.overrideWithValue(projectStore),
+          pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
           recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
           cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),
           // accountAgentsProvider is a FutureProvider hitting the network; short-
@@ -81,6 +84,7 @@ void main() {
       RecentAgentsStore.open(),
       CachedSessionsStore.open(),
     ).wait;
+    final pendingForgetsStore = await PendingForgetsStore.open();
     addTearDown(recentAgentsStore.close);
     addTearDown(cachedSessionsStore.close);
 
@@ -102,6 +106,7 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         projectStoreProvider.overrideWithValue(projectStore),
+        pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
         recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
         cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),
         accountAgentsProvider.overrideWith((_) async => const []),
@@ -154,12 +159,14 @@ void main() {
       RecentAgentsStore.open(),
       CachedSessionsStore.open(),
     ).wait;
+    final pendingForgetsStore = await PendingForgetsStore.open();
     addTearDown(recentAgentsStore.close);
     addTearDown(cachedSessionsStore.close);
 
     final container = ProviderContainer(
       overrides: [
         projectStoreProvider.overrideWithValue(projectStore),
+        pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
         recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
         cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),
         accountAgentsProvider.overrideWith((_) async => const []),

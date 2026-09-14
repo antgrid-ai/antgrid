@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/session_entry.dart';
+import '../services/pending_reply.dart';
 import '../services/sessions_service.dart';
 import 'providers.dart';
 import 'sessions.dart';
@@ -252,6 +253,8 @@ Future<SessionSetupResult> runSessionSetupAction(
       ok: false,
       error: 'The machine didn\'t answer. Setup may still be running.',
     );
+  } on SessionDownException catch (e) {
+    return (ok: false, error: e.toString());
   } on StateError {
     // The project's services were torn down under the request (a host restart,
     // an LRU eviction). Nothing was necessarily lost on the bridge, so this

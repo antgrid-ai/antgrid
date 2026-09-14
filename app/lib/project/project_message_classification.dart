@@ -55,9 +55,18 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'terminal:started',
   'terminal:exited',
   'terminal:notification',
+  'terminal:bell',
   'terminal:size',
   'terminal:snapshot:request',
   'terminal:snapshot',
+  'terminal:subscribe',
+  'terminal:subscribed',
+  'terminal:frame',
+  'terminal:ack',
+  'terminal:unsubscribe',
+  'terminal:history:request',
+  'terminal:history:page',
+  'terminal:display:status',
   'agent:status',
   'tree:full',
   'tree:update',
@@ -121,10 +130,34 @@ const Set<String> kCheckoutVariableMessageTypes = <String>{
   'preview:url',
   'file:tree:snapshot:request',
   'file:tree:snapshot',
+  'file:tree:unchanged',
   'preview:snapshot:request',
   'preview:snapshot',
   'session:result',
   'control:result',
+};
+
+/// Authoritative app-side mirror of the bridge's `PREVIEW_CHANNEL_MESSAGE_TYPES`
+/// (`bridge/src/protocol.ts`), gated against it in
+/// `checkout-mirror-contract.test.ts`. Checked by [MessageRouter] before
+/// classification: the preview channel is also the browser tunnel's hot path
+/// (HTTP/WS bulk data at full bandwidth), so anything riding it that is not in
+/// this set is dropped on sight rather than paying for `classifyAbMessage`,
+/// `_retainIfDurable`, and — in debug — the `_isExpectedIgnore` parse. Every
+/// member here must also appear in `_heavyTypes` or `_statusTypes`, or it
+/// would clear this gate only to be silently dropped as [MessageTier.ignore]
+/// one line later.
+///
+/// Neither member is in [kCheckoutDurableReplayTypes], so nothing here is
+/// retained for replay: a frame that arrives before its checkout's heavy
+/// subscriber is attached is lost, and no later subscriber can recover it. A
+/// consumer must therefore be listening on `checkoutHeavyStream` BEFORE it asks
+/// the bridge to start sending — the bridge's only backstop is its ack timeout,
+/// which surfaces as a connection failure several seconds later rather than as
+/// the ordering bug it is.
+const Set<String> kPreviewChannelInboundTypes = <String>{
+  'terminal:frame',
+  'terminal:history:page',
 };
 
 String checkoutIdForEnvelope(Map<String, dynamic> envelope) {
@@ -169,6 +202,13 @@ const Set<String> _statusTypes = <String>{
   'terminal:started',
   'terminal:exited',
   'terminal:notification',
+  'terminal:bell',
+  // Frame-mode negotiation and its error surface sit beside the terminal
+  // lifecycle for the same reason: a subscription that was refused, timed out
+  // or ended must still reach the UI while the app is paused, or the viewer
+  // waits forever on frames that will never come.
+  'terminal:subscribed',
+  'terminal:display:status',
   'notification:push',
   'terminal:size',
   'git:branches',
@@ -205,17 +245,20 @@ const Set<String> _statusTypes = <String>{
 /// what makes "add an inbound type without classifying it" fail CI instead of
 /// silently dropping the frame.
 ///
-///   - `tunnel:http-response`, `tunnel:ws-data` and `tunnel:ws-close` all
-///     arrive on the `preview` channel and are consumed by PreviewService's
-///     direct transport subscription, bypassing the control classification
-///     path entirely — same as the WS tunnel's own `tunnel:ws-open`, which is
-///     app→bridge (outbound) only and so never reaches this parser at all.
+///   - `tunnel:http-start`/`http-chunk`/`http-end`, `tunnel:ws-data` and
+///     `tunnel:ws-close` all arrive on the `preview` channel and are consumed
+///     by PreviewService's direct transport subscription, bypassing the
+///     control classification path entirely — same as the WS tunnel's own
+///     `tunnel:ws-open` and `tunnel:http-cancel`, which are app→bridge
+///     (outbound) only and so never reach this parser at all.
 ///   - `client:focus-state` is app→agent (outbound); it parses only for the
 ///     agent / loopback side.
 ///   - the three `*:snapshot:request` types are snapshot REQUESTS serviced
 ///     outside the heavy/status reducers.
 const Set<String> kUnroutedInboundTypes = <String>{
-  'tunnel:http-response',
+  'tunnel:http-start',
+  'tunnel:http-chunk',
+  'tunnel:http-end',
   'tunnel:ws-data',
   'tunnel:ws-close',
   'client:focus-state',
@@ -227,9 +270,12 @@ const Set<String> kUnroutedInboundTypes = <String>{
 const Set<String> _heavyTypes = <String>{
   'terminal:output',
   'terminal:snapshot',
+  'terminal:frame',
+  'terminal:history:page',
   'tree:full',
   'tree:update',
   'file:tree:snapshot',
+  'file:tree:unchanged',
   'file:content',
   'file:resolve-path-result',
   'preview:url',

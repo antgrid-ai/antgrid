@@ -1,6 +1,6 @@
 import { describe, expect, test, it, mock } from "bun:test";
 import { MessageBus, type TransportSubscriber } from "../src/message-bus";
-import { createMessage } from "../src/protocol";
+import { createMessage, parseMessage, parseMessageFast, CHECKOUT_VARIABLE_MESSAGE_TYPES } from "../src/protocol";
 
 function makeSub(): TransportSubscriber & { sent: { msg: any; channel: string }[] } {
   const sent: any[] = [];
@@ -11,6 +11,24 @@ function makeSub(): TransportSubscriber & { sent: { msg: any; channel: string }[
 }
 
 describe("MessageBus", () => {
+  test("bell events reach both app wires without exposing or replaying raw output", () => {
+    const bus = new MessageBus();
+    const relay = makeSub();
+    const loopback = makeSub();
+    bus.subscribe({ ...relay, audience: "relay" });
+    bus.subscribe({ ...loopback, audience: "loopback" });
+    bus.publish(createMessage("terminal:output", { terminalId: "t", data: "\x07" }), "control");
+    const bell = createMessage("terminal:bell", {
+      terminalId: "t", runId: crypto.randomUUID(), checkoutId: "wt1",
+    });
+    bus.publish(bell, "control");
+    expect(relay.sent).toEqual([{ msg: bell, channel: "control" }]);
+    expect(loopback.sent).toEqual(relay.sent);
+    expect(bus.getSnapshot(["terminal:bell"])).toEqual([]);
+    expect(parseMessage(JSON.stringify(bell))).toEqual(bell);
+    expect(parseMessageFast(JSON.stringify(bell))).toEqual(bell);
+    expect(CHECKOUT_VARIABLE_MESSAGE_TYPES.has("terminal:bell")).toBe(true);
+  });
   test("publish fans out to all subscribers", () => {
     const bus = new MessageBus();
     const a = makeSub();
@@ -188,6 +206,41 @@ describe("MessageBus.getSnapshot", () => {
   test("returns empty array for an unknown type with no cached frame", () => {
     const bus = new MessageBus();
     expect(bus.getSnapshot(["tree:full"])).toEqual([]);
+  });
+
+  test("retain caches a frame for replay without delivering it", () => {
+    const bus = new MessageBus();
+    const delivered: string[] = [];
+    bus.subscribe({ deliver: (m) => delivered.push(m.type) });
+    const tree = createMessage("tree:full", {
+      projectId: "p1",
+      root: { name: "root", path: "/", type: "directory" as const, children: [] },
+    });
+
+    bus.retain(tree, "control");
+
+    // The pull answers with it; the wire never carried it. This is what makes
+    // the open-time tree free: every client asks for its own copy anyway.
+    expect(bus.getSnapshot(["tree:full"]).map((m) => m.type)).toEqual(["tree:full"]);
+    expect(delivered).toEqual([]);
+  });
+
+  test("a retained frame still counts as the cached one a republish must beat", () => {
+    const bus = new MessageBus();
+    const delivered: string[] = [];
+    bus.subscribe({ deliver: (m) => delivered.push(m.type) });
+    const tree = () => createMessage("tree:full", {
+      projectId: "p1",
+      root: { name: "root", path: "/", type: "directory" as const, children: [] },
+    });
+
+    bus.retain(tree(), "control");
+    // Byte-identical, so the ordinary dedup would swallow it — which is exactly
+    // the case a resync exists to defeat.
+    bus.publish(tree(), "control");
+    expect(delivered).toEqual([]);
+    bus.republish(tree(), "control");
+    expect(delivered).toEqual(["tree:full"]);
   });
 
   test("exclude drops a type from both the ['*'] and the named answer", () => {

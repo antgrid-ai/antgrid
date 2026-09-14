@@ -25,6 +25,14 @@ export interface ProjectCoreRemoteDeps {
   currentPeerPubkey(): string | null;
   /** E2E app capability, established only after authenticated app:ready. */
   currentPeerSupportsCheckoutRouting?(): boolean;
+  /** False only while an established app has NOT advertised `pullsTree`; the
+   *  re-sync's tree push exists for exactly that app. */
+  currentPeerPullsTree?(): boolean;
+  /** Whether the established app renders terminals from `terminal:frame`.
+   *  Absent reads FALSE — the opposite of `currentPeerPullsTree`'s spirit — so
+   *  an unwired supplier keeps the legacy `terminal:output` path selected
+   *  rather than switching an app into a mode it cannot render. */
+  currentPeerTerminalFramesV1?(): boolean;
   /** The bare machine deviceUuid this host registers under. The phone addresses
    *  a project as `<machineUuid>.<projectId>`, so a push sealed without it is a
    *  push the phone cannot open. Required, unlike currentPeerSupportsCheckoutRouting:
@@ -380,6 +388,7 @@ export class ProjectCore {
     const listener = new LocalListener({
       bus,
       token,
+      projectId: core.projectId,
       // `onHandshakeComplete` is called twice intentionally and is idempotent:
       // here per owner connection, and eagerly below to prime managers at startup
       // (the loopback socket + token is the trust boundary; there's no E2E
@@ -397,6 +406,8 @@ export class ProjectCore {
     });
     await listener.start();
     this.listener = listener;
+    core.setOwnerPullsTreeProvider(() => listener.ownerPullsTree);
+    core.setOwnerTerminalFramesV1Provider(() => listener.ownerSupportsTerminalFramesV1);
 
     // Connect info is published via the control-plane `project:open` response
     // (no per-project discovery file). Surface it for the host to hand out.
@@ -490,8 +501,23 @@ export class ProjectCore {
       // snapshots on reconnect. connState gates ALL bus subscribers at the source,
       // so don't suppress while a desktop owner shares it over loopback — that
       // would freeze the live local session.
-      onPeerOnline: () => { peerConnected = true; core.connState.peerOnline = true; },
+      onPeerOnline: () => {
+        // A tunneled body in flight across either edge is dead by construction —
+        // the relay client clears its queues at promotion and on peer-offline —
+        // but that clear only reaches a run parked on a send at that instant; a
+        // run between sends keeps streaming into a relay that will drop it or a
+        // session that will ignore it, competing for the preview window with the
+        // page reload the app is doing. The manager is the only thing that can
+        // stop it.
+        core.abortTunnelStreams();
+        peerConnected = true;
+        core.connState.peerOnline = true;
+      },
       onPeerOffline: () => {
+        // Before the hasOwner early return, and for the same reason as at
+        // peer-online: the phone has left whether or not a desktop owner is
+        // still here, and every body it was receiving is now unreachable.
+        core.abortTunnelStreams();
         // Unconditional, unlike the stream gate below: the loopback carve-out
         // keeps the DESKTOP's stream live, it doesn't make the phone reachable
         // in-band. Leaving this set would mute push on every promoted core.
@@ -512,6 +538,8 @@ export class ProjectCore {
     // control stays ungated.
     core.setPeerPubkeyProvider(() => remote.currentPeerPubkey());
     core.setPeerCheckoutRoutingProvider(() => remote.currentPeerSupportsCheckoutRouting?.() === true);
+    core.setPeerPullsTreeProvider(() => remote.currentPeerPullsTree?.() === true);
+    core.setPeerTerminalFramesV1Provider(() => remote.currentPeerTerminalFramesV1?.() === true);
 
     // Fallback push path: while the paired phone can't receive in-band (no live
     // peer on this stream OR the app is backgrounded), seal a notification to its
@@ -620,6 +648,8 @@ export class ProjectCore {
         try { core.setPlainHook(null); } catch { /* best-effort */ }
         try { core.setPeerPubkeyProvider(null); } catch { /* best-effort */ }
         try { core.setPeerCheckoutRoutingProvider(null); } catch { /* best-effort */ }
+        try { core.setPeerPullsTreeProvider(null); } catch { /* best-effort */ }
+        try { core.setPeerTerminalFramesV1Provider(null); } catch { /* best-effort */ }
       },
     };
   }
@@ -660,6 +690,8 @@ export class ProjectCore {
         try { core.setPlainHook(null); } catch {}
         try { core.setPeerPubkeyProvider(null); } catch {}
         try { core.setPeerCheckoutRoutingProvider(null); } catch {}
+        try { core.setPeerPullsTreeProvider(null); } catch {}
+        try { core.setPeerTerminalFramesV1Provider(null); } catch {}
       },
     };
   }
@@ -669,11 +701,15 @@ export class ProjectCore {
     try { this.promotion?.stop(); } catch {}
     if (this.deps.mode === "remote" && this.streamHandle) {
       // Publish over the bus so the disconnecting notice rides this core's stream.
+      // Best-effort: a notice still queued in the relay client when the socket
+      // closes is dropped, and the phone learns of the shutdown by liveness.
       try { this.bus?.publish(createMessage("agent:disconnecting", { reason }), "control"); } catch {}
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     try { this.core?.setPeerPubkeyProvider(null); } catch {}
     try { this.core?.setPeerCheckoutRoutingProvider(null); } catch {}
+    try { this.core?.setPeerPullsTreeProvider(null); } catch {}
+    try { this.core?.setPeerTerminalFramesV1Provider(null); } catch {}
     // Remove the primary stream's push dispatcher (additive bus subscriber) before
     // detaching — deliver() would otherwise hand a frame to a torn-down stream.
     try { this.relayPushUnsub?.(); } catch {}

@@ -14,6 +14,8 @@ import { CheckoutStore } from "../src/worktrees/checkout-store";
 import type { CheckoutRecord } from "../src/worktrees/checkout-types";
 import type { GitCommandResult, GitRunner } from "../src/worktrees/project-resolver";
 import { WorktreeManager } from "../src/worktrees/worktree-manager";
+import { snapshotDescendants, survivingProcesses, type ProcessIdentity } from "../src/win32-process";
+import type { Subprocess } from "bun";
 
 const BRANCH = "antgrid/session-abcdefgh";
 const HEAD = "0".repeat(40);
@@ -163,8 +165,8 @@ describe("WorktreeManager delete failures", () => {
       const record = await seed();
       const git = fakeGit(worktreePath, { removeExitCode: 1 });
       const holders = [
-        { pid: 18688, name: "bun.exe", cwd: join(worktreePath, "bridge") },
-        { pid: 4020, name: "dart.exe", cwd: worktreePath },
+        { pid: 18688, parentPid: 1, name: "bun.exe", cwd: join(worktreePath, "bridge") },
+        { pid: 4020, parentPid: 1, name: "dart.exe", cwd: worktreePath },
       ];
       const lines: string[] = [];
       __setRootForTest({ write: (message: string) => { lines.push(message); } }, "info");
@@ -189,7 +191,7 @@ describe("WorktreeManager delete failures", () => {
       const record = await seed();
       const git = fakeGit(worktreePath, { removeExitCode: 1 });
       const holders = Array.from({ length: 5 }, (_, index) => ({
-        pid: 100 + index, name: `bun-${index}.exe`, cwd: worktreePath,
+        pid: 100 + index, parentPid: 1, name: `bun-${index}.exe`, cwd: worktreePath,
       }));
       await expect(
         manager(git.run, { listHolders: () => holders })
@@ -245,13 +247,155 @@ describe("WorktreeManager delete failures", () => {
       const record = await seed();
       const git = fakeGit(worktreePath, { removeExitCode: 1 });
       const holders = [
-        { pid: 77, name: "sibling.exe", cwd: resolve(worktreePath, "..", "elsewhere") },
-        { pid: 78, name: "crossroot.exe", cwd: process.platform === "win32" ? "Z:\\work" : "/etc" },
+        { pid: 77, parentPid: 1, name: "sibling.exe", cwd: resolve(worktreePath, "..", "elsewhere") },
+        { pid: 78, parentPid: 1, name: "crossroot.exe", cwd: process.platform === "win32" ? "Z:\\work" : "/etc" },
       ];
       await expect(
         manager(git.run, { listHolders: () => holders })
           .remove({ checkoutId: record.id, force: true, deleteBranch: false }),
       ).rejects.toThrow(/Held by sibling\.exe \(pid 77\), crossroot\.exe \(pid 78\)\.$/);
+    });
+  });
+
+  describe("evicting what holds a directory that will not go away", () => {
+    // Naming the holder was the whole fix once, and it was not enough: an
+    // orphan holds the checkout until something kills it, and the user is
+    // routinely on a phone with no way to reach a pid on the dev machine. What
+    // matters most here is not that the kill happens but WHERE it is allowed
+    // to — this is the one path on which Antgrid terminates a process it did
+    // not start.
+
+    test("never touches a holder of a path outside the managed worktree root", async () => {
+      // A bare temp directory is exactly the shape the guard exists to refuse:
+      // recorded as ours, not under our root. `managed`/`kind` both say yes
+      // here — they are metadata a hand-edited store can lie about — so the
+      // path is the only thing standing between this and killing a process for
+      // sitting in an arbitrary directory on the user's machine.
+      const record = await seed();
+      const git = fakeGit(worktreePath, { removeExitCode: 1 });
+      let asked = 0;
+      await expect(
+        manager(git.run, {
+          listHolders: () => [{ pid: 4242, parentPid: 1, name: "bun.exe", cwd: worktreePath }],
+          terminateHolders: () => { asked++; return 1; },
+        }).remove({ checkoutId: record.id, force: true, deleteBranch: false }),
+      ).rejects.toMatchObject({ code: "WORKTREE_DELETE_HELD" });
+      expect(asked).toBe(0);
+    });
+
+
+    // The only place the eviction can be exercised end to end. POSIX unlinks a
+    // directory whatever is standing in it, so there is no failure to recover
+    // from and nothing to assert; on Windows a live process's current directory
+    // cannot be deleted, which IS the bug. So the holder below is a real
+    // process in a real managed checkout rather than a stub — a stubbed kill
+    // would prove only that the code calls the function it obviously calls.
+    describe.skipIf(process.platform !== "win32")("on a directory Windows really refuses", () => {
+      let managedPath: string;
+      let holder: Subprocess | null = null;
+      let entry: ProcessIdentity;
+
+      beforeEach(() => {
+        managedPath = join(abDir, "wt", "repo-root", "checkout-held");
+        mkdirSync(managedPath, { recursive: true });
+        writeFileSync(join(managedPath, "file.txt"), "x");
+        // `ping` rather than a shell: `cmd /c ...` leaves the real waiter as a
+        // CHILD holding the same inherited cwd, so killing the one the test
+        // named would free nothing and the assertion would be about the wrong
+        // process. One process, one cwd, one thing to kill.
+        holder = Bun.spawn(["ping", "-n", "60", "127.0.0.1"], {
+          cwd: managedPath, stdout: "ignore", stderr: "ignore",
+        });
+        // Built from the real process table, not from what the test believes it
+        // spawned: `terminateProcesses` re-verifies identity on all three
+        // fields, so a hand-written `parentPid` that is merely plausible would
+        // be refused and the test would fail for a reason of its own making.
+        entry = (snapshotDescendants(process.pid) ?? []).find((p) => p.pid === holder!.pid)!;
+      });
+
+      afterEach(async () => {
+        try { holder?.kill(); } catch { /* already terminated by the eviction */ }
+        // Awaited, then retried. A killed holder releases its current directory
+        // asynchronously — the same lag `removeWithRetries` exists for — and the
+        // outer hook removes `abDir` unconditionally, so a cleanup that gave up
+        // early would fail the NEXT test rather than this one.
+        try { await holder?.exited; } catch { /* never started */ }
+        holder = null;
+        for (let attempt = 0; attempt < 20; attempt++) {
+          try {
+            rmSync(join(abDir, "wt"), { recursive: true, force: true });
+            return;
+          } catch {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+        }
+      });
+
+      test("kills the holder, retries, and completes the delete", async () => {
+        expect(entry).toBeDefined();
+        const record = await seed({ path: managedPath });
+        const git = fakeGit(managedPath, { removeExitCode: 1 });
+        // The real `terminateProcesses` — only the enumeration is stubbed, and
+        // only because scanning every process on the machine is the slow part,
+        // not the part under test.
+        await manager(git.run, {
+          listHolders: () => [{ ...entry, cwd: managedPath }],
+        }).remove({ checkoutId: record.id, force: true, deleteBranch: false });
+        expect(existsSync(managedPath)).toBe(false);
+        expect(survivingProcesses([entry])).toEqual([]);
+        // The row is what the UI lists. A delete that freed the directory but
+        // left this behind is the undeletable session all over again.
+        expect(await store().get(record.id)).toBeUndefined();
+      });
+
+      test("still reports the holders when the eviction frees nothing", async () => {
+        const record = await seed({ path: managedPath });
+        const git = fakeGit(managedPath, { removeExitCode: 1 });
+        await expect(
+          manager(git.run, {
+            listHolders: () => [{ ...entry, cwd: managedPath }],
+            // What a process table that could not be read answers. It must not
+            // read as "nothing was holding it".
+            terminateHolders: () => null,
+          }).remove({ checkoutId: record.id, force: true, deleteBranch: false }),
+        ).rejects.toMatchObject({ code: "WORKTREE_DELETE_HELD" });
+        expect(existsSync(managedPath)).toBe(true);
+        expect(await store().get(record.id)).toMatchObject({ id: record.id });
+      });
+
+      test("retries when the holder exited instead of being terminated", async () => {
+        expect(entry).toBeDefined();
+        const record = await seed({ path: managedPath });
+        const git = fakeGit(managedPath, { removeExitCode: 1 });
+        // Zero terminated BY US, and the directory free anyway: the holder
+        // exited between the enumeration this report was built from and the
+        // eviction, which is ordinary for a process that was already on its
+        // way out. `terminateProcesses` documents zero and null as different
+        // answers for exactly this case — merged into one "nothing was
+        // released", the retry below never runs and the user keeps a session
+        // they cannot delete, named after a pid that is already gone.
+        await manager(git.run, {
+          listHolders: () => [{ ...entry, cwd: managedPath }],
+          terminateHolders: () => { holder?.kill(); return 0; },
+        }).remove({ checkoutId: record.id, force: true, deleteBranch: false });
+        expect(existsSync(managedPath)).toBe(false);
+        expect(await store().get(record.id)).toBeUndefined();
+      });
+
+      test("an eviction that throws stays the original failure", async () => {
+        // Every other seam here answers rather than throws, and this one reaches
+        // FFI — a refused `dlopen` on a hardened host is a throw. It must not
+        // turn a reported DELETE_HELD into an unhandled error from a recovery
+        // attempt the user never asked for.
+        const record = await seed({ path: managedPath });
+        const git = fakeGit(managedPath, { removeExitCode: 1 });
+        await expect(
+          manager(git.run, {
+            listHolders: () => [{ ...entry, cwd: managedPath }],
+            terminateHolders: () => { throw new Error("no process table"); },
+          }).remove({ checkoutId: record.id, force: true, deleteBranch: false }),
+        ).rejects.toMatchObject({ code: "WORKTREE_DELETE_HELD" });
+      });
     });
   });
 

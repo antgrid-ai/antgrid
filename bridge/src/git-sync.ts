@@ -53,6 +53,12 @@ export interface GitSyncState {
   behind: number;
   hasUpstream: boolean;
   hasRemote: boolean;
+  /** Whether this branch's `remote`/`remoteBranch` came from real tracking
+   *  config rather than the same-name-on-origin fallback. Bridge-internal: it
+   *  is what lets [fetchRemote]'s caller skip a pass that could only bail, and
+   *  `sendGitSyncState` enumerates the wire fields explicitly so it never
+   *  reaches the app. */
+  tracked: boolean;
 }
 
 export const EMPTY_SYNC_STATE: GitSyncState = {
@@ -63,6 +69,7 @@ export const EMPTY_SYNC_STATE: GitSyncState = {
   behind: 0,
   hasUpstream: false,
   hasRemote: false,
+  tracked: false,
 };
 
 // A transfer has no UI deadline the way `ls-remote` does — the user has pressed
@@ -175,18 +182,29 @@ export async function readSyncState(cwd: string): Promise<GitSyncState> {
   const target = await resolvePushTarget(cwd, branch);
   if (!target) return { ...EMPTY_SYNC_STATE, branch };
 
-  // `@{upstream}` resolves only for a branch with tracking config AND a present
-  // remote ref, which is precisely the condition for counts to mean anything.
-  // Its failure is the `hasUpstream: false` signal — never an error.
-  const counts = await runGitRemote(cwd, [
-    "rev-list", "--left-right", "--count", `${branch}@{upstream}...${branch}`,
-  ]);
   const base = {
     branch,
     remote: target.remote,
     remoteBranch: target.remoteBranch,
     hasRemote: true,
+    tracked: target.tracked,
   };
+
+  // `@{upstream}` resolves only for a branch with tracking config AND a present
+  // remote ref, which is precisely the condition for counts to mean anything.
+  // Without the config half it CANNOT resolve, so the rev-list below would
+  // spawn a git only to exit 128 — which is every `antgrid/*` isolated branch,
+  // on every poll tick, forever. The value returned here is the one that arm
+  // produced. Keyed on the config, never on `target.tracked`: see
+  // [resolvePushTarget].
+  if (!target.hasTrackingConfig) {
+    return { ...base, ahead: 0, behind: 0, hasUpstream: false };
+  }
+
+  // Its failure is the `hasUpstream: false` signal — never an error.
+  const counts = await runGitRemote(cwd, [
+    "rev-list", "--left-right", "--count", `${branch}@{upstream}...${branch}`,
+  ]);
   if (counts.exitCode !== 0) {
     return { ...base, ahead: 0, behind: 0, hasUpstream: false };
   }

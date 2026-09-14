@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../analytics/events.dart';
+import '../config/storage_scope.dart';
 import '../services/auth_service.dart';
 import '../services/devices_api.dart' show ProvisioningException;
 import '../util/ab_log.dart';
@@ -39,7 +40,9 @@ final postSignInProvisioningProvider = Provider<void>((ref) {
     }
     () async {
       try {
-        final prefs = SharedPreferencesAsync();
+        final prefs = SharedPreferencesAsync(
+          options: desktopSharedPreferencesOptions,
+        );
         final existing = await prefs.getString(kLocalHostUuidKey);
         final rec = await ref
             .read(deviceProvisioningProvider)

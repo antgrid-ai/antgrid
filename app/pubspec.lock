@@ -682,8 +682,8 @@ packages:
     dependency: "direct overridden"
     description:
       path: "pkgs/vte/ghostty_vte"
-      ref: "6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee"
-      resolved-ref: "6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee"
+      ref: "97c8ae5c1caa856f96f7bc3d772c3f3042c85ae8"
+      resolved-ref: "97c8ae5c1caa856f96f7bc3d772c3f3042c85ae8"
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.1.4+antgrid.1"
@@ -691,8 +691,8 @@ packages:
     dependency: "direct main"
     description:
       path: "pkgs/vte/ghostty_vte_flutter"
-      ref: "6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee"
-      resolved-ref: "6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee"
+      ref: "97c8ae5c1caa856f96f7bc3d772c3f3042c85ae8"
+      resolved-ref: "97c8ae5c1caa856f96f7bc3d772c3f3042c85ae8"
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.1.4+antgrid.1"
@@ -1204,8 +1204,8 @@ packages:
     dependency: "direct overridden"
     description:
       path: "pkgs/pty/portable_pty"
-      ref: "6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee"
-      resolved-ref: "6831ba09fe9a298ecd9e1d9bdb40de141b9bfbee"
+      ref: "97c8ae5c1caa856f96f7bc3d772c3f3042c85ae8"
+      resolved-ref: "97c8ae5c1caa856f96f7bc3d772c3f3042c85ae8"
       url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.0.6+antgrid.2"
@@ -1379,7 +1379,7 @@ packages:
     source: hosted
     version: "2.4.23"
   shared_preferences_foundation:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: shared_preferences_foundation
       sha256: "4e7eaffc2b17ba398759f1151415869a34771ba11ebbccd1b0145472a619a64f"
@@ -1387,7 +1387,7 @@ packages:
     source: hosted
     version: "2.5.6"
   shared_preferences_linux:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: shared_preferences_linux
       sha256: "580abfd40f415611503cae30adf626e6656dfb2f0cee8f465ece7b6defb40f2f"
@@ -1411,7 +1411,7 @@ packages:
     source: hosted
     version: "2.4.3"
   shared_preferences_windows:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: shared_preferences_windows
       sha256: "94ef0f72b2d71bc3e700e025db3710911bd51a71cefb65cc609dd0d9a982e3c1"

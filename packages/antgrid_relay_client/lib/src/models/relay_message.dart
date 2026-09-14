@@ -151,12 +151,19 @@ class ErrorMessage {
   /// Server clock, present on clock-skew AUTH_FAILED only.
   final String? serverTime;
 
+  /// Routed-frame drops only: the channel and payload length of the frame the
+  /// relay discarded, so the sender can un-charge its flow-control window.
+  final String? channel;
+  final int? bytes;
+
   const ErrorMessage({
     required this.code,
     required this.message,
     required this.retryable,
     this.ref,
     this.serverTime,
+    this.channel,
+    this.bytes,
   });
 
   static ErrorMessage? fromJson(Map<String, dynamic> json) {
@@ -168,12 +175,16 @@ class ErrorMessage {
     }
     final ref = json['ref'];
     final serverTime = json['serverTime'];
+    final channel = json['channel'];
+    final bytes = json['bytes'];
     return ErrorMessage(
       code: code,
       message: message,
       retryable: retryable,
       ref: ref is String ? ref : null,
       serverTime: serverTime is String ? serverTime : null,
+      channel: channel is String ? channel : null,
+      bytes: bytes is int && bytes >= 0 ? bytes : null,
     );
   }
 }

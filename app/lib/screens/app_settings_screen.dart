@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -15,7 +14,6 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_panel_header.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_tap_target.dart';
-import '../design/widgets/ab_text_field.dart';
 import '../models/pending_nav.dart';
 import '../models/settings_section.dart';
 import '../providers/agent_transport.dart';
@@ -28,7 +26,6 @@ import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
 import '../widgets/settings/help_about_section.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
-import 'design_gallery_screen.dart';
 import 'upgrade_screen.dart';
 
 class _UiScaleStep {
@@ -61,11 +58,9 @@ extension SettingsSectionUI on SettingsSection {
   /// addresses it cannot drift apart.
   String get title => switch (this) {
     SettingsSection.billing => 'BILLING',
-    SettingsSection.connection => 'CONNECTION',
     SettingsSection.appearance => 'APPEARANCE',
     SettingsSection.uiSize => 'UI SIZE',
     SettingsSection.accessibility => 'ACCESSIBILITY',
-    SettingsSection.design => 'DESIGN',
     SettingsSection.privacy => 'PRIVACY',
     SettingsSection.help => 'HELP',
     SettingsSection.account => 'ACCOUNT',
@@ -82,13 +77,9 @@ class AppSettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
-  late final TextEditingController _relayCtrl;
-
   @override
   void initState() {
     super.initState();
-    final initial = ref.read(appSettingsServiceProvider).defaultRelayUrl ?? '';
-    _relayCtrl = TextEditingController(text: initial);
     // A link naming a section writes it before this screen exists — the surface
     // it also names is what mounts us — so the first frame is the first chance
     // to honour it. Post-frame: the sections need to be laid out before one can
@@ -110,9 +101,9 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
     if (pending == null) return;
     ref.read(pendingSettingsSectionProvider.notifier).set(null);
     if (pending.target != ref.read(selectedTargetProvider)) return;
-    // Silently does nothing for a section this build omits — BILLING,
-    // CONNECTION and DESIGN are all conditional — which is the codec's
-    // degrade-rather-than-reject contract carried through to the destination.
+    // Silently does nothing for a section this build omits — BILLING and
+    // DESIGN are both conditional — which is the codec's degrade-rather-than-
+    // reject contract carried through to the destination.
     final ctx = settingsSectionKey(pending.value).currentContext;
     if (ctx == null) return;
     unawaited(
@@ -123,22 +114,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
         // on its first row reads as "here it is" where centring it does not.
         alignment: 0,
       ),
-    );
-  }
-
-  @override
-  void dispose() {
-    _relayCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _saveRelayUrl(AppSettingsService service, String value) async {
-    final error = await service.setDefaultRelayUrl(value);
-    if (!mounted) return;
-    showAbSnackBar(
-      context,
-      error ?? 'Saved default relay URL.',
-      clearPrevious: true,
     );
   }
 
@@ -178,7 +153,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
     final antgrid = context.antgrid;
     final settings = ref.watch(appSettingsServiceProvider);
     final service = ref.read(appSettingsServiceProvider.notifier);
-    final isNarrow = MediaQuery.sizeOf(context).width < 600;
 
     // Links that land while this screen is already up (and back/forward over
     // them) drain here; the initState post-frame callback covers the mount.
@@ -256,38 +230,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                     ),
                     const SizedBox(height: AbTokens.space12),
                   ],
-                  if (!isNarrow) ...[
-                    _Section(
-                      section: SettingsSection.connection,
-                      body: [
-                        const SizedBox(height: AbTokens.space8),
-                        Text(
-                          'Relay every connection from this device uses. Leave '
-                          'empty for the one this build ships with.',
-                          style: AbTokens.sansStyle(
-                            fontSize: AbTokens.fontXxs,
-                            color: antgrid.textMuted,
-                          ),
-                        ),
-                        const SizedBox(height: AbTokens.space8),
-                        AbTextField(
-                          controller: _relayCtrl,
-                          hintText: 'wss://relay.example.com',
-                          onSubmitted: (v) => _saveRelayUrl(service, v),
-                        ),
-                        const SizedBox(height: AbTokens.space8),
-                        Align(
-                          alignment: Alignment.centerRight,
-                          child: AbButton(
-                            label: 'SAVE URL',
-                            onTap: () =>
-                                _saveRelayUrl(service, _relayCtrl.text),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: AbTokens.space12),
-                  ],
                   _Section(
                     section: SettingsSection.appearance,
                     body: [
@@ -308,11 +250,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                             _PresetTile(
                               preset: preset,
                               selected: settings.preset == preset,
-                              caption:
-                                  settings.followSystemBrightness &&
-                                      preset == AbThemePreset.light
-                                  ? 'used when system is light'
-                                  : null,
                               onTap: () => preset == AbThemePreset.custom
                                   ? service.setCustomColors(
                                       bg:
@@ -382,11 +319,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                     alignment: Alignment.centerRight,
                     child: AbButton(
                       label: 'RESET TO DEFAULTS',
-                      onTap: () async {
-                        await service.reset();
-                        if (!mounted) return;
-                        _relayCtrl.text = '';
-                      },
+                      onTap: () => service.reset(),
                     ),
                   ),
                   const SizedBox(height: AbTokens.space12),
@@ -432,25 +365,6 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                       ),
                     ],
                   ),
-                  // Dev-only: the design gallery is a developer reference, not a
-                  // user-facing feature — keep it out of release builds.
-                  if (!kReleaseMode) ...[
-                    const SizedBox(height: AbTokens.space12),
-                    _Section(
-                      section: SettingsSection.design,
-                      body: [
-                        const SizedBox(height: AbTokens.space8),
-                        AbButton(
-                          label: 'Open design gallery',
-                          onTap: () => Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => const DesignGalleryScreen(),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
                   const SizedBox(height: AbTokens.space12),
                   _Section(
                     section: SettingsSection.privacy,
@@ -570,16 +484,11 @@ class _PresetTile extends StatelessWidget {
     required this.preset,
     required this.selected,
     required this.onTap,
-    this.caption,
   });
 
   final AbThemePreset preset;
   final bool selected;
   final VoidCallback onTap;
-
-  /// Optional role hint under the preset name (e.g. the light preset's
-  /// "used when system is light" while follow-system is on).
-  final String? caption;
 
   AbColors _peek(BuildContext context) {
     if (preset == AbThemePreset.custom) {
@@ -592,7 +501,7 @@ class _PresetTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final antgrid = context.antgrid;
     final p = _peek(context);
-    final name = preset.name.toUpperCase();
+    final name = preset.label;
     return InkWell(
       onTap: onTap,
       borderRadius: AbTokens.borderRadius8,
@@ -628,18 +537,6 @@ class _PresetTile extends StatelessWidget {
                 fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
               ),
             ),
-            if (caption != null) ...[
-              const SizedBox(height: AbTokens.space2),
-              Text(
-                caption!,
-                // Colored with the TILE's palette (not the ambient theme) so
-                // the hint stays legible on the light preview surface.
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXxs,
-                  color: p.textMuted,
-                ),
-              ),
-            ],
           ],
         ),
       ),

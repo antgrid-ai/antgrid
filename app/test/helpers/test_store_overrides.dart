@@ -25,6 +25,7 @@ import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/drawer_collapsed_store.dart';
 import 'package:antgrid/storage/drawer_order_store.dart';
 import 'package:antgrid/storage/first_run_store.dart';
+import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/storage/update_handoff_store.dart';
@@ -85,6 +86,7 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
     UpdateHandoffStore.open(),
     openAppSettingsPrefs(),
   ).wait;
+  final pendingForgetsStore = await PendingForgetsStore.open();
   // Deterministic, NOT eagerly created: ProjectStatusCache.testInstance only
   // stores the path; the dir is created lazily on first write() and the file is
   // statted only when clear()/read() run. Crucially this performs NO real I/O at
@@ -99,6 +101,7 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
   return TestStoreOverrides._(
     overrides: [
       projectStoreProvider.overrideWithValue(projectStore),
+      pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
       recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
       drawerOrderStoreProvider.overrideWithValue(drawerOrderStore),
       drawerCollapsedStoreProvider.overrideWithValue(drawerCollapsedStore),

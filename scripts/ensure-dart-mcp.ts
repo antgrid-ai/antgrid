@@ -19,10 +19,13 @@ const DART_ENTRY = {
  * also owned by `bridge/plugin/setup.ts`, which adds/removes its own `antgrid`
  * key, and it is gitignored, so a clone never carries one.
  *
- * Why register it at all: the MCP server keeps ONE warm analysis server, so
- * agents get near-instant `analyze_files` instead of spawning `flutter analyze`
- * per check — and two concurrent `flutter analyze` runs deadlock silently on
- * the Flutter startup lock (see the gotcha in CLAUDE.md).
+ * Why register it at all: a session's server stays warm for that session, so
+ * repeat `analyze_files` calls are near-instant instead of spawning
+ * `flutter analyze` per check — and two concurrent `flutter analyze` runs
+ * deadlock silently on the Flutter startup lock (see the gotcha in CLAUDE.md).
+ * The warmth is per session, NOT shared across agents, and only calls into an
+ * already-running server dodge that lock: `command: "dart"` resolves to
+ * `flutter/bin/dart.bat`, so STARTING one takes the lock like any other.
  */
 export function ensureDartMcp(projectDir: string): void {
   const path = resolve(projectDir, ".mcp.json");

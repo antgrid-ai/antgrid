@@ -64,46 +64,41 @@ function establish(sent: Array<string | Buffer>): { client: RelayClient; phoneTr
 }
 
 describe("RelayClient.sendTunnel", () => {
-  it("seals the tunnel message in the control-plane envelope and sends it on the preview channel", () => {
+  it("seals the tunnel message in the control-plane envelope and sends it on the preview channel", async () => {
     const sent: Array<string | Buffer> = [];
     const { client, phoneTransport } = establish(sent);
     const sentBefore = sent.length;
 
-    const msg = { type: "tunnel:http-response", requestId: "r1", status: 200, headers: {}, body: "ok", bodyEncoding: "utf8" };
-    client.sendTunnel(msg);
+    const msg = { type: "tunnel:http-start", requestId: "r1", status: 200, headers: {}, data: "b2s=", bodyEncoding: "base64", last: true };
+    expect(await client.sendTunnel(msg)).toBe("sent");
 
     expect(sent.length).toBe(sentBefore + 1);
     const envelopeJson = phoneTransport.open(sent[sent.length - 1] as Buffer);
     expect(JSON.parse(envelopeJson!)).toEqual({ m: msg });
   });
 
-  it("replies 413 (not the oversized body) when the response is too large to fragment", () => {
+  it("resolves too-large and writes nothing for a message the fragmenter refuses", async () => {
     const sent: Array<string | Buffer> = [];
-    const { client, phoneTransport } = establish(sent);
+    const { client } = establish(sent);
     const sentBefore = sent.length;
 
     // Body large enough that the JSON envelope exceeds MAX_TRANSFER_BYTES (32 MiB),
-    // so fragmentForSend rejects it. The phone must get a fast 413, not a hang.
+    // so fragmentForSend rejects it. The outcome is the answer now — the caller
+    // (TunnelManager) ends its stream on it rather than the send path
+    // synthesising a reply it cannot attribute to a checkout.
     const huge = "a".repeat(34 * 1024 * 1024);
-    client.sendTunnel({
-      type: "tunnel:http-response",
+    expect(await client.sendTunnel({
+      type: "tunnel:http-chunk",
       requestId: "r1",
-      status: 200,
-      headers: {},
-      body: huge,
-      bodyEncoding: "utf8",
-    });
+      seq: 1,
+      data: huge,
+      bodyEncoding: "base64",
+    })).toBe("too-large");
 
-    // Exactly one frame leaves — the small error response, never the oversized body.
-    expect(sent.length).toBe(sentBefore + 1);
-    const envelopeJson = phoneTransport.open(sent[sent.length - 1] as Buffer);
-    const envelope = JSON.parse(envelopeJson!);
-    expect(envelope.m.type).toBe("tunnel:http-response");
-    expect(envelope.m.requestId).toBe("r1");
-    expect(envelope.m.status).toBe(413);
+    expect(sent.length).toBe(sentBefore);
   });
 
-  it("drops the tunnel message when the E2E session is not established", () => {
+  it("drops the tunnel message when the E2E session is not established", async () => {
     const sent: unknown[] = [];
     const client = RelayClient.forTest({
       generateKeypair: () => {
@@ -113,7 +108,7 @@ describe("RelayClient.sendTunnel", () => {
       peerId: "phone-1",
     });
     // No handshake → no established session.
-    client.sendTunnel({ type: "tunnel:http-response", requestId: "r1" });
+    expect(await client.sendTunnel({ type: "tunnel:http-end", requestId: "r1", chunks: 0 })).toBe("dropped");
     expect(sent).toEqual([]);
   });
 });

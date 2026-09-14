@@ -35,6 +35,7 @@ import '../providers/session_mode.dart';
 import '../providers/sessions.dart';
 import '../providers/visible_surface.dart';
 import '../screens/terminal_screen.dart';
+import '../services/pending_reply.dart' show SessionDownException;
 import '../util/ab_log.dart';
 import '../util/device_id.dart';
 import '../util/detached.dart';
@@ -58,6 +59,8 @@ import 'session_rename_dialog.dart';
 import 'session_setup_banner.dart';
 import 'window_title_bar.dart';
 import 'workspace_menu_button.dart';
+import 'display_visibility.dart';
+import 'workspace_readiness_chip.dart';
 
 class AgentPanel extends ConsumerWidget {
   const AgentPanel({super.key});
@@ -103,100 +106,105 @@ class AgentPanel extends ConsumerWidget {
       ),
     );
 
-    return Column(
-      children: [
-        // Two headers, one layout: mobile needs a button for its slide-in
-        // drawer, desktop toggles that drawer from the window title bar
-        // instead. Both carry the same session context (breadcrumb, branch
-        // pill, agent mark, mode, handler) — the title bar yields the controls
-        // while either is up (see agentBarMountedProvider) and never renders
-        // the name at all.
-        if (MediaQuery.sizeOf(context).width < kCompactBreakpoint)
-          AbToolbar.custom(
-            children: [
-              // Via provider, not Scaffold.of: the mobile drawer is a PageView
-              // page, so there is no ScaffoldState holding it.
-              AbIconButton(
-                icon: AbIcons.menu,
-                tooltip: 'Projects',
-                onTap: ref.watch(openDrawerProvider),
-              ),
-              const SizedBox(width: AbTokens.space6),
-              const SessionAgentMark(),
-              const SizedBox(width: AbTokens.space6),
-              const ActiveSessionApprovalBadge(),
-              // space12, not space8: the work-status badge overhangs the mark
-              // by 2px (see AgentWorkStatusBadge's Positioned offset in
-              // SessionAgentMark) and needs the wider gap to actually clear
-              // the breadcrumb — same convention as _SessionMark's use of
-              // space12 in recent_session_row_widget.dart.
-              const SizedBox(width: AbTokens.space12),
-              // Branch pill folded into the overflow menu below: it lives
-              // inside the breadcrumb on desktop, but on a phone-width row it
-              // competes with the title for the one flexible slot.
-              const Expanded(child: TitleBarBreadcrumb(showBranchPill: false)),
-              const SizedBox(width: AbTokens.space6),
-              const _SessionOverflowButton(),
-            ],
-          )
-        else
-          const AgentBar(),
-        const SessionSetupBanner(),
-        Expanded(
-          child: isChat && activeId != null
-              // Keyed by session so switching sessions rebuilds the State —
-              // composer draft, expansion/dismiss sets, and scroll position
-              // must not leak from one session into another.
-              ? AgentTranscriptView(
-                  key: ValueKey(activeId),
-                  sessionId: activeId,
-                )
-              // Both overlays are terminal-only; neither may paint over the
-              // transcript, which owns its own inline resolution UI.
-              //
-              // The escalation card FLOATS and the terminal reserves only the
-              // collapsed strip beneath it: a height change on the terminal
-              // child sends a `terminal:resize` up the wire (see
-              // `_maybeSendResize` in terminal_view_wrapper.dart, whose row
-              // count comes off the incoming constraints), so reserving on a
-              // BLOCKING row costs one reflow when the question arrives and one
-              // when it goes — both at the moment the agent is stopped and
-              // drawing nothing — while reserving on expand/collapse would cost
-              // one per chevron tap. What the reserve buys is the terminal's
-              // last line, which is the line the user collapsed the card in
-              // order to read.
-              : Stack(
-                  children: [
-                    Padding(
-                      padding: EdgeInsets.only(
-                        bottom: hasBlockingEscalation
-                            ? handlerEscalationCollapsedHeight(context)
-                            : 0,
-                      ),
-                      child: const TerminalScreen(),
-                    ),
-                    // Both of the following are opaque, full-width and pinned
-                    // to the same bottom edge, so their order IS the stacking
-                    // contract and belongs here rather than in either of them.
-                    // The escalation sits UNDER the command panel because only
-                    // one of the two can be dismissed: a failed command's
-                    // output stands until the user closes it, so an escalation
-                    // painted over it puts the close and rerun buttons out of
-                    // reach for as long as the question stands — and reading
-                    // that failure is routinely what answering the question
-                    // needs. The command panel retires and gives the card back.
-                    // Keyed by session for the reason the transcript above is:
-                    // the collapse flag must not leak from one session into
-                    // another.
-                    HandlerEscalationOverlay(key: ValueKey(activeId)),
-                    const CommandOutputOverlay(),
-                  ],
+    return DisplayVisibility(
+      child: Column(
+        children: [
+          // Two headers, one layout: mobile needs a button for its slide-in
+          // drawer, desktop toggles that drawer from the window title bar
+          // instead. Both carry the same session context (breadcrumb, branch
+          // pill, agent mark, mode, handler) — the title bar yields the controls
+          // while either is up (see agentBarMountedProvider) and never renders
+          // the name at all.
+          if (MediaQuery.sizeOf(context).width < kCompactBreakpoint)
+            AbToolbar.custom(
+              children: [
+                // Via provider, not Scaffold.of: the mobile drawer is a PageView
+                // page, so there is no ScaffoldState holding it.
+                AbIconButton(
+                  icon: AbIcons.menu,
+                  tooltip: 'Projects',
+                  onTap: ref.watch(openDrawerProvider),
                 ),
-        ),
-        const HandlerAwayHint(),
-        const HandlerPaBar(),
-        const CommandTray(),
-      ],
+                const SizedBox(width: AbTokens.space6),
+                const SessionAgentMark(),
+                const SizedBox(width: AbTokens.space6),
+                const ActiveSessionApprovalBadge(),
+                // space12, not space8: the work-status badge overhangs the mark
+                // by 2px (see AgentWorkStatusBadge's Positioned offset in
+                // SessionAgentMark) and needs the wider gap to actually clear
+                // the breadcrumb — same convention as _SessionMark's use of
+                // space12 in recent_session_row_widget.dart.
+                const SizedBox(width: AbTokens.space12),
+                // Branch pill folded into the overflow menu below: it lives
+                // inside the breadcrumb on desktop, but on a phone-width row it
+                // competes with the title for the one flexible slot.
+                const Expanded(
+                  child: TitleBarBreadcrumb(showBranchPill: false),
+                ),
+                const WorkspaceReadinessChip(),
+                const SizedBox(width: AbTokens.space6),
+                const _SessionOverflowButton(),
+              ],
+            )
+          else
+            const AgentBar(),
+          const SessionSetupBanner(),
+          Expanded(
+            child: isChat && activeId != null
+                // Keyed by session so switching sessions rebuilds the State —
+                // composer draft, expansion/dismiss sets, and scroll position
+                // must not leak from one session into another.
+                ? AgentTranscriptView(
+                    key: ValueKey(activeId),
+                    sessionId: activeId,
+                  )
+                // Both overlays are terminal-only; neither may paint over the
+                // transcript, which owns its own inline resolution UI.
+                //
+                // The escalation card FLOATS and the terminal reserves only the
+                // collapsed strip beneath it: a height change on the terminal
+                // child sends a `terminal:resize` up the wire (see
+                // `_maybeSendResize` in terminal_view_wrapper.dart, whose row
+                // count comes off the incoming constraints), so reserving on a
+                // BLOCKING row costs one reflow when the question arrives and one
+                // when it goes — both at the moment the agent is stopped and
+                // drawing nothing — while reserving on expand/collapse would cost
+                // one per chevron tap. What the reserve buys is the terminal's
+                // last line, which is the line the user collapsed the card in
+                // order to read.
+                : Stack(
+                    children: [
+                      Padding(
+                        padding: EdgeInsets.only(
+                          bottom: hasBlockingEscalation
+                              ? handlerEscalationCollapsedHeight(context)
+                              : 0,
+                        ),
+                        child: const TerminalScreen(),
+                      ),
+                      // Both of the following are opaque, full-width and pinned
+                      // to the same bottom edge, so their order IS the stacking
+                      // contract and belongs here rather than in either of them.
+                      // The escalation sits UNDER the command panel because only
+                      // one of the two can be dismissed: a failed command's
+                      // output stands until the user closes it, so an escalation
+                      // painted over it puts the close and rerun buttons out of
+                      // reach for as long as the question stands — and reading
+                      // that failure is routinely what answering the question
+                      // needs. The command panel retires and gives the card back.
+                      // Keyed by session for the reason the transcript above is:
+                      // the collapse flag must not leak from one session into
+                      // another.
+                      HandlerEscalationOverlay(key: ValueKey(activeId)),
+                      const CommandOutputOverlay(),
+                    ],
+                  ),
+          ),
+          const HandlerAwayHint(),
+          const HandlerPaBar(),
+          const CommandTray(),
+        ],
+      ),
     );
   }
 }
@@ -415,6 +423,7 @@ class AgentBar extends ConsumerWidget {
         // mobile header above.
         const SizedBox(width: AbTokens.space12),
         const Expanded(child: TitleBarBreadcrumb()),
+        const WorkspaceReadinessChip(),
         const SizedBox(width: AbTokens.space6),
         const SessionModeControl(),
         const SizedBox(width: AbTokens.space8),
@@ -880,6 +889,8 @@ class _EditableSessionLeafState extends ConsumerState<EditableSessionLeaf> {
       await svc.rename(id, name);
     } on TimeoutException {
       report("the agent didn't answer. Check the connection and try again.");
+    } on SessionDownException catch (e) {
+      report(e.toString());
     }
   }
 

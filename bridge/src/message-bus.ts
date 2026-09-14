@@ -4,7 +4,13 @@ export type Channel = "control" | "preview";
 
 export interface TransportSubscriber {
   /** Bus calls this to deliver an outbound message to the wire. */
-  deliver(msg: AbMessage, channel: Channel): void;
+  deliver(msg: AbMessage, channel: Channel, signal?: AbortSignal): unknown;
+  /** Which wire this subscriber IS, for the audience-targeted publishes below.
+   *  Left undefined by the subscribers that are not a client at all — the
+   *  work-status fold and the push dispatcher — and those receive every emit
+   *  regardless of targeting, because targeting decides what a CLIENT sees, not
+   *  what the core gets to observe. */
+  readonly audience?: InboundSource;
 }
 
 /** Where an inbound frame entered the core. The allowlist gate keys off this:
@@ -90,7 +96,20 @@ export class MessageBus {
   }
 
   publish(msg: AbMessage, channel: Channel): void {
-    this.emit(msg, channel, false);
+    this.emit(msg, channel, {});
+  }
+
+  /** Cache for replay WITHOUT delivering to subscribers.
+   *
+   *  For a durable frame that every client pulls for itself: the cache still
+   *  has to hold it (`state.snapshot` is how a client that asks for it by name
+   *  gets one), but pushing it costs the wire a copy nobody reads. The one
+   *  frame this is for today is the open-time file tree, which is also the
+   *  largest the bridge ever produces — it went out before any app had a
+   *  stream bound to receive it, so it was discarded on arrival AND held half
+   *  the control channel's credit window while the bind waited behind it. */
+  retain(msg: AbMessage, channel: Channel): void {
+    this.emit(msg, channel, { deliver: false });
   }
 
   /** Publish, bypassing the payload-equality dedup below.
@@ -101,10 +120,51 @@ export class MessageBus {
    *  dedup is what silently swallowed them — a reconnecting app's `agent:status`
    *  is byte-identical to the cached one, so no subscriber ever saw it. */
   republish(msg: AbMessage, channel: Channel): void {
-    this.emit(msg, channel, true);
+    this.emit(msg, channel, { force: true });
   }
 
-  private emit(msg: AbMessage, channel: Channel, force: boolean): void {
+  /** Publish to ONE wire only, plus every audience-less subscriber.
+   *
+   *  For a reply that belongs to one client's own request rather than to the
+   *  project: a terminal frame answers the viewer that subscribed, and pushing
+   *  it at every other connected client costs them the bytes and hands them a
+   *  stream they never asked for. Never for a durable/replayed type — the cache
+   *  is keyed per type, not per audience, so a targeted frame would be replayed
+   *  to whoever reconnects next. */
+  publishOnly(msg: AbMessage, channel: Channel, only: InboundSource): void {
+    this.emit(msg, channel, { audience: { only } });
+  }
+
+  async deliverTo(msg: AbMessage, channel: Channel, only: InboundSource, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
+    const pending: Promise<unknown>[] = [];
+    for (const sub of this.subs) {
+      if (sub.audience !== undefined && sub.audience !== only) continue;
+      pending.push(Promise.resolve(sub.deliver(msg, channel, signal)));
+    }
+    await Promise.all(pending);
+  }
+
+  /** Publish to every wire EXCEPT the ones listed, plus every audience-less
+   *  subscriber.
+   *
+   *  For a stream one client has opted out of while the others have not — the
+   *  terminal-frame mode exclusivity gate, where a phone watching frames must
+   *  not silence the desktop's legacy output for the same terminal. Same
+   *  restriction as [publishOnly]: streaming types only. */
+  publishExcept(msg: AbMessage, channel: Channel, except: ReadonlySet<InboundSource>): void {
+    this.emit(msg, channel, { audience: { except } });
+  }
+
+  private emit(
+    msg: AbMessage,
+    channel: Channel,
+    { force = false, deliver = true, audience }: {
+      force?: boolean;
+      deliver?: boolean;
+      audience?: { only?: InboundSource; except?: ReadonlySet<InboundSource> };
+    },
+  ): void {
     const key = this.replayKey(msg);
     if (key !== null) {
       const prev = this.replayCache.get(key);
@@ -121,7 +181,15 @@ export class MessageBus {
     // a log. The one subscriber that must NOT abort the emit — the best-effort
     // push dispatcher — wraps its own deliver at the subscribe site (see
     // project-core.ts attachRelayStream).
+    if (!deliver) return;
     for (const s of this.subs) {
+      // PTY bytes remain observable internally; app displays are frame-only.
+      if (s.audience !== undefined &&
+          (msg.type === "terminal:output" || msg.type === "terminal:snapshot")) continue;
+      if (audience && s.audience !== undefined) {
+        if (audience.only !== undefined && s.audience !== audience.only) continue;
+        if (audience.except?.has(s.audience)) continue;
+      }
       s.deliver(msg, channel);
     }
   }

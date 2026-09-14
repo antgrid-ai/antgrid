@@ -94,7 +94,9 @@ final relayEpochProvider = FutureProvider<int>((ref) async {
   // SharedPreferencesAsync, not the legacy getInstance() — this repo's prefs
   // convention (see device_provisioning.dart) and the only API the in-memory
   // test platform backs.
-  final prefs = SharedPreferencesAsync();
+  final prefs = SharedPreferencesAsync(
+    options: desktopSharedPreferencesOptions,
+  );
   var stored = 0;
   try {
     stored = await prefs.getInt(key) ?? 0;

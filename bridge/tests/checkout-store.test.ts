@@ -1,8 +1,21 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { rename } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { CheckoutStore } from "../src/worktrees/checkout-store";
+import { CheckoutStore, RENAME_ATTEMPTS, renameReplacing } from "../src/worktrees/checkout-store";
+
+/** A rename that reports `codes` in order before deferring to the real one. */
+function flakyRename(codes: string[]) {
+  const attempts: string[] = [];
+  const fn = (async (from: string, to: string) => {
+    const code = codes[attempts.length];
+    attempts.push(code ?? "ok");
+    if (!code) return await rename(from, to);
+    throw Object.assign(new Error(`${code}: injected`), { code });
+  }) as typeof rename;
+  return { fn, attempts };
+}
 
 describe("CheckoutStore", () => {
   let dir: string;
@@ -120,6 +133,53 @@ describe("CheckoutStore", () => {
     const legacy = await store.get("legacy");
     expect(legacy?.branch).toBe("antgrid/legacy");
     expect(legacy?.setupState).toBeUndefined();
+  });
+
+  // The write half of the race read() documents from the read side: on Windows
+  // a rename onto a file somebody else has open fails, and this file has far
+  // more readers than writers. Every case here is about the rename alone, which
+  // is why the seam is injected rather than reproduced by racing real handles —
+  // a test that had to win a timing race to mean anything would be the flake it
+  // was written to remove.
+  describe("replacing the file while a reader holds it", () => {
+    test("waits out a busy destination instead of failing the write", async () => {
+      const from = join(dir, "source");
+      const to = join(dir, "target");
+      writeFileSync(from, "replacement");
+      writeFileSync(to, "original");
+      const { fn, attempts } = flakyRename(["EPERM", "EBUSY"]);
+      await renameReplacing(from, to, fn);
+      expect(attempts).toEqual(["EPERM", "EBUSY", "ok"]);
+      expect(readdirSync(dir)).not.toContain("source");
+    });
+
+    test("gives up bounded, and reports the error it actually hit", async () => {
+      const { fn, attempts } = flakyRename(Array(RENAME_ATTEMPTS + 5).fill("EPERM"));
+      await expect(renameReplacing("a", "b", fn)).rejects.toMatchObject({ code: "EPERM" });
+      expect(attempts.length).toBe(RENAME_ATTEMPTS);
+    });
+
+    test("a failure that waiting cannot fix is reported at once", async () => {
+      // Retrying an absent source only delays the same answer, and this store is
+      // in the path of a session action the user is waiting on.
+      const { fn, attempts } = flakyRename(["ENOENT", "ENOENT"]);
+      await expect(renameReplacing("a", "b", fn)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(attempts.length).toBe(1);
+    });
+
+    test("a write that cannot land leaves no temp file behind", async () => {
+      // A directory where the file belongs is a rename this can never win, which
+      // is the point: the store is left as it was, and so is its directory.
+      const home = join(dir, "agents", "project-a");
+      mkdirSync(join(home, "checkouts.json"), { recursive: true });
+      const store = new CheckoutStore(dir, "project-a");
+      await expect(store.put({
+        id: "checkout-a", projectId: "project-a", kind: "managed-worktree",
+        path: "C:/safe/worktree", branch: null, baseRef: null,
+        managed: true, sessionId: null, createdAt: 1,
+      })).rejects.toBeDefined();
+      expect(readdirSync(home).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+    });
   });
 
   test("read() separates an absent file from one it could not fully understand", async () => {

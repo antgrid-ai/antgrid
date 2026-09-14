@@ -33,7 +33,7 @@ import '../utils/platform_utils.dart';
 /// whether or not the file tree has arrived yet. [collapsedPaths] is how the
 /// user folds a folder back up once the list is long enough to need it; a
 /// folded folder then carries the rollup of what it hides.
-class FileTreeView extends StatelessWidget {
+class FileTreeView extends StatefulWidget {
   final FileNode? root;
   final Set<String> expandedPaths;
   final String? selectedFilePath;
@@ -76,13 +76,96 @@ class FileTreeView extends StatelessWidget {
   });
 
   @override
+  State<FileTreeView> createState() => _FileTreeViewState();
+}
+
+class _FileTreeViewState extends State<FileTreeView> {
+  final ScrollController _scrollController = ScrollController();
+
+  // Reused across builds rather than per-row: only ever attached to whatever
+  // is CURRENTLY at flat index 0 (to measure a row's height — every row in
+  // one tree shares it, see [_FileTreeRow]'s doc) and to the currently
+  // selected file's row (to jump straight to its element once built). A
+  // GlobalKey moving to a new widget each build is the normal way to track
+  // "whichever one is live right now" — Flutter reparents it, it doesn't
+  // duplicate.
+  final _measureKey = GlobalKey();
+  final _selectedRowKey = GlobalKey();
+  double? _rowExtent;
+  List<_TreeRow> _lastFlatList = const [];
+
+  @override
+  void didUpdateWidget(FileTreeView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A newly opened file (terminal link, search result, git "view file", …)
+    // should be scrolled into view, not just expanded-and-hoped-visible —
+    // that's the whole point of the ancestor-expansion `FileService` already
+    // does. A re-select of the SAME file (e.g. reopening from a dialog) isn't
+    // worth re-animating the scroll for.
+    if (widget.selectedFilePath != null &&
+        widget.selectedFilePath != oldWidget.selectedFilePath) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealSelected());
+    }
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _revealSelected() {
+    if (!mounted || !_scrollController.hasClients) return;
+    final builtCtx = _selectedRowKey.currentContext;
+    if (builtCtx != null) {
+      Scrollable.ensureVisible(
+        builtCtx,
+        alignment: 0.5,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+      return;
+    }
+    // Not already built, so it's outside the viewport (+ cache extent) —
+    // every row shares one height (see [_FileTreeRow]'s doc), so a row
+    // measured anywhere gives an exact, not approximate, offset for any
+    // index. Jump there directly, then let the now-built row correct for the
+    // viewport's own height on a second pass.
+    final extent = _rowExtent ?? _measureKey.currentContext?.size?.height;
+    if (extent == null) return;
+    _rowExtent = extent;
+    final index = _lastFlatList.indexWhere(
+      (entry) =>
+          !entry.truncationNotice && entry.node.path == widget.selectedFilePath,
+    );
+    if (index < 0) return;
+    final position = _scrollController.position;
+    final target = (index * extent - position.viewportDimension / 2).clamp(
+      0.0,
+      position.maxScrollExtent,
+    );
+    _scrollController.jumpTo(target);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _selectedRowKey.currentContext;
+      if (ctx != null && mounted) {
+        Scrollable.ensureVisible(
+          ctx,
+          alignment: 0.5,
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     // [changesOnly] answers from [gitFileEntries] alone, nesting included, so
     // it has nothing to bail out of: the two arrive independently
     // (`git:status` is a push — `file_service.dart`'s `_handleGitStatus` —
     // while `root` waits on a lazy per-checkout tree hydration), and the Git
     // tab must render the same list either way.
-    if (root == null && !changesOnly) {
+    if (widget.root == null && !widget.changesOnly) {
       return const AbEmptyState(
         icon: AbIcons.folder,
         title: 'No files available',
@@ -94,7 +177,7 @@ class FileTreeView extends StatelessWidget {
     // of its siblings for holding one somewhere below (see
     // [_flattenChangesOnly]).
     final dirsWithConflicts = <String>{};
-    for (final e in gitFileEntries) {
+    for (final e in widget.gitFileEntries) {
       entriesByPath.putIfAbsent(e.path, () => []).add(e);
       if (e.status != '!') continue;
       var dir = e.path;
@@ -108,14 +191,23 @@ class FileTreeView extends StatelessWidget {
       }
     }
 
-    final flatList = changesOnly
-        ? _flattenChangesOnly(entriesByPath, dirsWithConflicts, collapsedPaths)
-        : _flattenVisibleNodes(root!, expandedPaths, filterQuery);
+    final flatList = widget.changesOnly
+        ? _flattenChangesOnly(
+            entriesByPath,
+            dirsWithConflicts,
+            widget.collapsedPaths,
+          )
+        : _flattenVisibleNodes(
+            widget.root!,
+            widget.expandedPaths,
+            widget.filterQuery,
+          );
+    _lastFlatList = flatList;
 
     if (flatList.isEmpty) {
       return AbEmptyState(
-        icon: changesOnly ? AbIcons.check : AbIcons.search,
-        title: changesOnly ? 'No changed files' : 'No matching files',
+        icon: widget.changesOnly ? AbIcons.check : AbIcons.search,
+        title: widget.changesOnly ? 'No changed files' : 'No matching files',
       );
     }
 
@@ -127,59 +219,85 @@ class FileTreeView extends StatelessWidget {
         return false;
       },
       child: ListView.builder(
+        controller: _scrollController,
         itemCount: flatList.length,
         itemBuilder: (context, index) {
-          final (node, depth) = flatList[index];
+          final (:node, :depth, :truncationNotice) = flatList[index];
+          if (truncationNotice) {
+            return _TruncationRow(
+              key: ValueKey(('truncated', node.path)),
+              depth: depth,
+            );
+          }
           final isDirectory = node.type == FileNodeType.directory;
-          return _FileTreeRow(
+          Widget row = _FileTreeRow(
             // Typed, because one path can produce two rows: replacing a file
             // with a directory of the same name leaves a deletion and an
             // addition that share it, and a bare path key would be a duplicate.
             key: ValueKey((node.path, node.type)),
             node: node,
             depth: depth,
-            isExpanded: changesOnly
-                ? !collapsedPaths.contains(node.path)
-                : expandedPaths.contains(node.path),
-            isSelected: node.path == selectedFilePath,
+            isExpanded: widget.changesOnly
+                ? !widget.collapsedPaths.contains(node.path)
+                : widget.expandedPaths.contains(node.path),
+            isSelected: node.path == widget.selectedFilePath,
             changeEntries: entriesByPath[node.path] ?? const [],
             // A folded folder answers for what it hides, so it carries the
             // rollup its children can no longer show; an open one stays bare
             // (its rows are right there, and a second stat over them is noise).
-            rollupEntries: isDirectory && collapsedPaths.contains(node.path)
+            rollupEntries:
+                isDirectory && widget.collapsedPaths.contains(node.path)
                 ? _descendantEntries(node, entriesByPath)
                 : const [],
             onTap: isDirectory
-                ? () => onToggleExpanded(node.path)
-                : () => onFileSelected(node.path),
-            onStage: onStage,
-            onUnstage: onUnstage,
-            onDiscard: onDiscard,
-            onResolveConflict: onResolveConflict,
+                ? () => widget.onToggleExpanded(node.path)
+                : () => widget.onFileSelected(node.path),
+            onStage: widget.onStage,
+            onUnstage: widget.onUnstage,
+            onDiscard: widget.onDiscard,
+            onResolveConflict: widget.onResolveConflict,
           );
+          if (index == 0) row = KeyedSubtree(key: _measureKey, child: row);
+          if (!isDirectory && node.path == widget.selectedFilePath) {
+            row = KeyedSubtree(key: _selectedRowKey, child: row);
+          }
+          return row;
         },
       ),
     );
   }
 }
 
-/// Flatten the tree into a list of (node, depth) pairs for rendering.
+/// One rendered row. A [truncationNotice] row stands in for the entries the
+/// bridge did not send: it carries the directory that was CUT, at the depth
+/// that directory's children occupy.
+typedef _TreeRow = ({FileNode node, int depth, bool truncationNotice});
+
+/// Flatten the tree into a list of rows for rendering.
 /// When filterQuery is active, show ALL matching files regardless of
 /// directory expand state.
-List<(FileNode, int)> _flattenVisibleNodes(
+List<_TreeRow> _flattenVisibleNodes(
   FileNode root,
   Set<String> expandedPaths,
   String? filterQuery,
 ) {
-  final result = <(FileNode, int)>[];
+  final result = <_TreeRow>[];
   final query = filterQuery?.toLowerCase().trim();
 
   if (query != null && query.isNotEmpty) {
+    // A filter walks the whole tree, so it can only search what arrived; the
+    // notice rows below are anchored to a directory row the filter does not
+    // render, and there is nowhere honest to put them here.
     _flattenFiltered(root, 0, query, result);
   } else {
     // Root node itself is the project directory; show its children at depth 0
     for (final child in root.children) {
       _flattenNormal(child, 0, expandedPaths, result);
+    }
+    // The root has no row of its own to hang this off, and it is the directory
+    // the node budget cuts first on a wide repo.
+    if (root.truncated) {
+      result.add((node: root, depth: 0, truncationNotice: true));
     }
   }
 
@@ -190,14 +308,18 @@ void _flattenNormal(
   FileNode node,
   int depth,
   Set<String> expandedPaths,
-  List<(FileNode, int)> result,
+  List<_TreeRow> result,
 ) {
-  result.add((node, depth));
+  result.add((node: node, depth: depth, truncationNotice: false));
 
   if (node.type == FileNodeType.directory &&
       expandedPaths.contains(node.path)) {
     for (final child in node.children) {
       _flattenNormal(child, depth + 1, expandedPaths, result);
+    }
+    // After the children, where the missing ones would have been.
+    if (node.truncated) {
+      result.add((node: node, depth: depth + 1, truncationNotice: true));
     }
   }
 }
@@ -206,11 +328,11 @@ void _flattenFiltered(
   FileNode node,
   int depth,
   String query,
-  List<(FileNode, int)> result,
+  List<_TreeRow> result,
 ) {
   if (node.type == FileNodeType.file) {
     if (node.name.toLowerCase().contains(query)) {
-      result.add((node, 0));
+      result.add((node: node, depth: 0, truncationNotice: false));
     }
     return;
   }
@@ -244,12 +366,12 @@ void _flattenFiltered(
 ///
 /// [collapsedPaths] hides a folder's descendants without dropping the folder
 /// itself, which then carries the rollup of what it hides.
-List<(FileNode, int)> _flattenChangesOnly(
+List<_TreeRow> _flattenChangesOnly(
   Map<String, List<GitFileStatusEntry>> entriesByPath,
   Set<String> dirsWithConflicts,
   Set<String> collapsedPaths,
 ) {
-  final result = <(FileNode, int)>[];
+  final result = <_TreeRow>[];
 
   bool holdsConflict(FileNode node) => node.type == FileNodeType.directory
       ? dirsWithConflicts.contains(node.path)
@@ -264,7 +386,7 @@ List<(FileNode, int)> _flattenChangesOnly(
       ...node.children.where((c) => !holdsConflict(c)),
     ];
     for (final child in children) {
-      result.add((child, depth));
+      result.add((node: child, depth: depth, truncationNotice: false));
       if (child.type == FileNodeType.directory &&
           !collapsedPaths.contains(child.path)) {
         walk(child, depth + 1);
@@ -365,6 +487,47 @@ List<GitFileStatusEntry> _descendantEntries(
   return out;
 }
 
+/// Stands in for entries the bridge never sent. Its directory's listing stopped
+/// at the walk's node budget or its depth cap, so what is above this row is a
+/// prefix of that directory, not the whole of it — without a row saying so the
+/// explorer renders a partial repo that looks complete.
+///
+/// No count: the bridge reports only THAT it cut, and deriving a number from
+/// the entries it skipped would count the ignored ones it never intended to
+/// send.
+class _TruncationRow extends StatelessWidget {
+  final int depth;
+
+  const _TruncationRow({super.key, required this.depth});
+
+  @override
+  Widget build(BuildContext context) {
+    return AbListRow(
+      density: AbRowDensity.sm,
+      leading: Padding(
+        padding: EdgeInsets.only(left: depth * AbTokens.space16),
+        child: Text(
+          '\u22ef ',
+          style: TextStyle(
+            fontSize: AbTokens.fontXxs,
+            color: context.antgrid.textMuted,
+          ),
+        ),
+      ),
+      // Sans, not the mono every other row uses: this is a notice about the
+      // listing, not an entry in it.
+      title: Text(
+        'more items not shown',
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontXs,
+          color: context.antgrid.textMuted,
+        ),
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
+}
+
 /// One row of the tree.
 ///
 /// The tree's trailing rule is COLLAPSE AND FLOOR, NO CELL: the git actions
@@ -372,7 +535,11 @@ List<GitFileStatusEntry> _descendantEntries(
 /// anchored by [AbRowContentFloor] so mounting them shifts nothing. It takes
 /// no shared trailing cell, unlike the drawer's rows — its outermost element
 /// is a variable-width diff-stat badge inside a resizable pane, so there is no
-/// fixed panel edge for a column to align against.
+/// fixed panel edge for a column to align against. Every row in one
+/// [FileTreeView] therefore renders at the SAME height regardless of depth,
+/// name length, or decoration — [_FileTreeViewState._revealSelected] leans on
+/// that to jump straight to an off-screen row's exact offset from a single
+/// measured row, with no per-row measurement pass.
 class _FileTreeRow extends StatefulWidget {
   final FileNode node;
   final int depth;

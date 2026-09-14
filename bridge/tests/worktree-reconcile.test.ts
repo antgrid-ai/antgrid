@@ -124,7 +124,7 @@ describe("WorktreeManager reconciliation", () => {
         // The real enumeration reads this machine's entire process table:
         // right on a failure path, wrong in a test that would then assert on
         // whatever else happens to be running.
-        listHolders: () => [{ pid: 4242, name: "bun.exe", cwd: join(orphan.path, "bridge") }],
+        listHolders: () => [{ pid: 4242, parentPid: 1, name: "bun.exe", cwd: join(orphan.path, "bridge") }],
       }).reconcile(projectId, repo);
     } finally {
       __setRootForTest(process.stdout, "info");

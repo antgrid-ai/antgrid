@@ -1,10 +1,12 @@
 import 'dart:async';
 
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/models/ab_config.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/config_service.dart';
+import 'package:antgrid/services/pending_reply.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
@@ -105,6 +107,29 @@ void main() {
     await svc.dispose();
     await session.close();
   });
+
+  test(
+    'read() clears loading on a session-down fail without stamping the '
+    'timeout-specific error copy',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = ConfigService.fromSession(session);
+
+      final fut = svc.read();
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.loading, isTrue);
+
+      t.emitState(TransportState.disconnected);
+
+      await expectLater(fut, throwsA(isA<SessionDownException>()));
+      expect(svc.currentState.loading, isFalse);
+      expect(svc.currentState.error, isNull);
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
 
   test('save() throws when the reply never comes', () async {
     final t = FakeAgentTransport();

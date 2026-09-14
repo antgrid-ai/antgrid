@@ -162,6 +162,44 @@ void main() {
       expect(find.text('README.md'), findsNothing);
     });
 
+    testWidgets('selecting a file off the current viewport scrolls to reveal it', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 300);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final tree = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        children: [
+          for (var i = 0; i < 60; i++)
+            FileNode(
+              name: 'file$i.dart',
+              path: 'project/file$i.dart',
+              type: FileNodeType.file,
+              extension: 'dart',
+            ),
+        ],
+      );
+
+      // Nothing selected yet: the tree renders from the top, so a file far
+      // down the (unscrolled) list is not yet built.
+      await tester.pumpWidget(buildTestWidget(root: tree));
+      expect(find.text('file59.dart'), findsNothing);
+
+      // Selecting it (as opening it from an agent transcript link does)
+      // should scroll the tree down to reveal its row, not just open the
+      // file's content off in another pane.
+      await tester.pumpWidget(
+        buildTestWidget(root: tree, selectedFilePath: 'project/file59.dart'),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('file59.dart'), findsOneWidget);
+    });
+
     testWidgets('a filename wider than the panel does not overflow', (
       tester,
     ) async {
@@ -1237,6 +1275,79 @@ void main() {
           expect(acted, isFalse);
         },
       );
+    });
+  });
+
+  group('truncation notice', () {
+    const cutDirectory = FileNode(
+      name: 'project',
+      path: 'project',
+      type: FileNodeType.directory,
+      children: [
+        FileNode(
+          name: 'lib',
+          path: 'project/lib',
+          type: FileNodeType.directory,
+          truncated: true,
+          children: [
+            FileNode(
+              name: 'main.dart',
+              path: 'project/lib/main.dart',
+              type: FileNodeType.file,
+            ),
+          ],
+        ),
+      ],
+    );
+
+    testWidgets('an expanded cut directory carries a notice', (tester) async {
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: cutDirectory,
+          expandedPaths: const {'project/lib'},
+        ),
+      );
+
+      expect(find.text('more items not shown'), findsOneWidget);
+    });
+
+    testWidgets('a folded cut directory carries none', (tester) async {
+      await tester.pumpWidget(buildTestWidget(root: cutDirectory));
+
+      expect(find.text('more items not shown'), findsNothing);
+    });
+
+    // The root is the directory the node budget cuts first on a wide repo, and
+    // it is the one with no row of its own to hang the notice off.
+    testWidgets('a cut root carries a notice', (tester) async {
+      const root = FileNode(
+        name: 'project',
+        path: 'project',
+        type: FileNodeType.directory,
+        truncated: true,
+        children: [
+          FileNode(
+            name: 'README.md',
+            path: 'project/README.md',
+            type: FileNodeType.file,
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(buildTestWidget(root: root));
+
+      expect(find.text('more items not shown'), findsOneWidget);
+    });
+
+    testWidgets('a complete tree carries none', (tester) async {
+      await tester.pumpWidget(
+        buildTestWidget(
+          root: makeTree(),
+          expandedPaths: const {'project/lib'},
+        ),
+      );
+
+      expect(find.text('more items not shown'), findsNothing);
     });
   });
 }

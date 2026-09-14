@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/session_entry.dart';
+import '../project/project_session_registry.dart';
 import '../services/sessions_service.dart';
 import 'agent_transport.dart';
 import 'cached_sessions.dart';
@@ -223,6 +224,23 @@ final focusedCheckoutIdProvider = Provider<String>((ref) {
   return ref.watch(activeSessionOrCachedProvider)?.checkoutId ?? 'main';
 });
 
+/// Keep-alive binder: the focused project's focused checkout is the only one
+/// that carries the per-checkout pulls (tree, config, preview, terminal
+/// snapshots). Same shape and same reason as `agentFocusBinderProvider` —
+/// `watch`, not `listen` + `read`, so the scheduler batches the recompute
+/// instead of rebuilding a dirty dependency mid-frame.
+///
+/// A project switched away from keeps its last active set, so a backgrounded
+/// project still refreshes its one visible checkout on reconnect rather than
+/// every checkout it has.
+final checkoutActivationBinderProvider = Provider<void>((ref) {
+  final id = ref.watch(selectedRegistrationIdProvider);
+  if (id == null) return;
+  final session = ref.watch(projectSessionProvider(id)).value;
+  if (session == null) return;
+  session.setActiveCheckouts({ref.watch(focusedCheckoutIdProvider)});
+});
+
 /// Side-effect listener: keep `activeSessionIdProvider` valid as the session
 /// list churns. If the active session is deleted or archived, advance to the
 /// most-recently-used non-archived sibling. If the list is empty, clear the
@@ -256,5 +274,22 @@ void reconcileActiveSession(WidgetRef ref, List<SessionEntry> available) {
   } else {
     next = available.isEmpty ? null : available.first.id;
   }
-  if (next != current) ref.read(activeSessionIdProvider.notifier).set(next);
+  if (next == current) return;
+  ref.read(activeSessionIdProvider.notifier).set(next);
+  // Tell the bridge too. This advance re-points `focusedCheckoutIdProvider`,
+  // and with it every checkout-scoped surface, without any tap — so without
+  // this the bridge keeps naming the DELETED session as focused, resolves it
+  // to `main`, and treats the checkout now on screen as unattended. Anything
+  // keyed off focus (git poll cadence, work-status attribution) then answers
+  // for the wrong worktree until the user taps a row.
+  if (next == null) return;
+  // The two reads [focusedServiceOrNull] makes, inlined because that helper
+  // takes a ProviderContainer and this callback holds a WidgetRef. Same reason
+  // for going through them rather than the facade: this can run while the
+  // focused project's ProjectSession is still resolving, where reading the
+  // provider directly THROWS. A null here just means no ping — the next tap
+  // sends one.
+  final registrationId = ref.read(selectedRegistrationIdProvider);
+  if (registrationId == null) return;
+  ref.read(projectSessionProvider(registrationId)).value?.sessionsService.focus(next);
 }

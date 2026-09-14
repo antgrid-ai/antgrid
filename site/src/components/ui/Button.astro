@@ -1,6 +1,16 @@
 ---
-interface Props { href: string; variant?: "primary" | "outline"; class?: string }
-const { href, variant = "primary", class: cls = "" } = Astro.props;
+// `aria-current` is enumerated rather than swept in with a rest spread: this is
+// an anchor with a fixed visual contract, and a spread would let any caller
+// bolt attributes onto it that the design system has no answer for. It is here
+// because the nav's CTA is a link to a real page now, so the reader can be
+// standing on the page one of these points at.
+interface Props {
+  href: string;
+  variant?: "primary" | "outline";
+  class?: string;
+  "aria-current"?: "page";
+}
+const { href, variant = "primary", class: cls = "", "aria-current": current } = Astro.props;
 const base =
   "inline-flex items-center gap-2 rounded-md px-6 py-3 text-note font-medium transition-all duration-200 motion-reduce:transition-none";
 const styles =
@@ -8,4 +18,4 @@ const styles =
     ? "bg-signalbtn text-page shadow-[0_0_16px_rgba(210,84,42,0.25)] hover:bg-signal hover:shadow-[0_0_28px_rgba(210,84,42,0.45)] hover:-translate-y-px"
     : "border border-edge-emph text-ink2 hover:bg-panel hover:border-muted2";
 ---
-<a href={href} class={`${base} ${styles} ${cls}`}><slot /></a>
+<a href={href} aria-current={current} class={`${base} ${styles} ${cls}`}><slot /></a>

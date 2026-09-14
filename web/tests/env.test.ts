@@ -25,6 +25,9 @@ describe("loadEnv", () => {
     expect(env.PORT).toBe(8787);
     expect(env.CORS_ORIGINS).toEqual(["http://a", "https://b"]);
     expect(env.RELAY_INTERNAL_URL).toBeUndefined();
+    expect(env.SALESIQ_WIDGET_URL).toBe(
+      "https://salesiq.zohopublic.com/widget?wc=siq1b947f921d212e33194fb74467bb4e1d9243576c0c0fc99198af56f9bc127661",
+    );
   });
 
   test("rejects missing required", () => {

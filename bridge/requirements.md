@@ -309,8 +309,14 @@ Authoritative flow, field types and sealing rules: `docs/protocol/e2e-handshake.
 ### Tunnel Messages (separate protocol)
 | Type | Direction | Purpose |
 |------|-----------|---------|
-| `tunnel:http-request` | Relay → Agent | HTTP request forwarded through relay |
-| `tunnel:http-response` | Agent → Relay | HTTP response from localhost |
+| `tunnel:http-request` | App → Agent | HTTP request for a localhost port, forwarded through the relay |
+| `tunnel:http-start` | Agent → App | Response head plus body slice 0; `last` when that slice is the whole body |
+| `tunnel:http-chunk` | Agent → App | Body slice `seq` (1-based, dense) |
+| `tunnel:http-end` | Agent → App | Body is over: `chunks` emitted, `error` when it is incomplete |
+| `tunnel:http-cancel` | App → Agent | Stop streaming a response (tab gone, or the app saw a gap) |
+| `tunnel:ws-open` | App → Agent | Open an upstream WebSocket for the previewed page's own socket |
+| `tunnel:ws-data` | App → Agent, Agent → App | One WebSocket frame, in whichever direction it was sent |
+| `tunnel:ws-close` | App → Agent, Agent → App | Tear the tunnel down; carries `code`/`reason` when the closer had one |
 
 ---
 

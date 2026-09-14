@@ -100,6 +100,9 @@ void main() {
   test('the opening script routes', () {
     expect(kDemoScript, isNotEmpty);
     for (final beat in kDemoScript) {
+      // Terminal chunks feed the demo's authoritative in-memory screen and are
+      // converted to terminal:frame before they reach the app.
+      if (beat.frame['type'] == 'terminal:output') continue;
       expectRoutable(beat.frame);
     }
   });
@@ -108,7 +111,6 @@ void main() {
     for (final frame in <Map<String, Object?>>[
       ...kDemoDurableFrames,
       kDemoTerminalStarted,
-      kDemoTerminalSnapshot,
       kDemoGitBranches,
       kDemoPortsUpdate,
       kDemoPreviewUrl,
@@ -190,12 +192,14 @@ void main() {
       {'type': 'file:read', 'path': 'not/in/the/sample.ts'},
       {'type': 'file:tree:snapshot:request'},
       {'type': 'preview:snapshot:request'},
-      {'type': 'terminal:snapshot:request'},
+      {
+        'type': 'terminal:subscribe',
+        'terminalId': kDemoTerminalId,
+        'version': 2,
+        'requestId': 'q',
+      },
       {'type': 'terminal:start'},
-      {'type': 'terminal:input', 'terminalId': kDemoTerminalId, 'data': 'ls\r'},
-      {'type': 'terminal:input', 'terminalId': 'demo-terminal-2', 'data': 'ls'},
       {'type': 'terminal:start', 'terminalId': 'demo-terminal-2'},
-      {'type': 'terminal:snapshot:request', 'terminalId': 'demo-terminal-2'},
       {
         'type': 'agent:set-config',
         'sessionId': kDemoSessionCheckoutId,
@@ -243,6 +247,50 @@ void main() {
       }
     }
   });
+
+  // `_answerRpc`'s method table, driven through the correlated `request` path
+  // `TerminalService`, `SessionsService` and friends actually call — the verbs
+  // list above only reaches the message-typed replies, so a method added here
+  // with no case in the switch would answer every caller with the refusal and
+  // nothing above would notice.
+  test(
+    'every method in the RPC table answers ok, never the demo refusal',
+    () async {
+      final transport = DemoTransport(now: now);
+      addTearDown(transport.dispose);
+      await transport.connect();
+      transport.drainScript();
+      await Future<void>.delayed(Duration.zero);
+
+      Future<void> expectAnswered(
+        String method,
+        Map<String, dynamic>? params,
+        String resultKey,
+      ) async {
+        final reply = transport.request(method, params: params);
+        transport.drainScript();
+        Object? error;
+        Map<String, dynamic>? result;
+        try {
+          result = await reply;
+        } on RpcException catch (e) {
+          error = e;
+        }
+        expect(
+          error,
+          isNull,
+          reason: '"$method" fell through to the demo refusal ($error)',
+        );
+        expect(result, contains(resultKey));
+      }
+
+      await expectAnswered('state.snapshot', null, 'frames');
+      await expectAnswered('session.transcriptSnapshot', {
+        'sessionId': kDemoSessionCheckoutId,
+      }, 'frames');
+      await expectAnswered('sessions.list', null, 'sessions');
+    },
+  );
 
   // The parser-less set, checked against its real consumer instead.
   group('session status frames', () {

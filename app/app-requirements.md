@@ -73,9 +73,9 @@ The app connects outbound to the relay server. It never communicates directly wi
 - The app must list detected dev server ports reported by the agent.
 - The user must be able to open a preview of a running web app.
 - Preview traffic flows through the dedicated preview WebSocket channel via the relay.
-- The app runs a local HTTP proxy that the embedded browser points to. The proxy tunnels requests to the agent, which fetches from the local dev server and returns responses.
+- The app runs a local HTTP proxy that the embedded browser points to. The proxy tunnels requests to the agent, which fetches from the local dev server and returns responses, streamed as start/chunk/end frames so a large body is delivered as it arrives.
 - Each proxied request must carry a unique ID. Multiple concurrent requests must be supported (a single page load triggers 20-50+ requests).
-- HMR/hot-reload WebSocket connections from dev servers must be tunneled through the preview channel.
+- HMR/hot-reload WebSocket connections from dev servers must be tunneled through the preview channel, and an oversized frame in either direction closes the tunnel rather than leaving a hole in it.
 
 ### 5. Notifications
 

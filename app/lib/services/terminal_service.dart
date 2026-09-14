@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:uuid/uuid.dart';
 
 import '../analytics/events.dart';
 import '../models/terminal_models.dart';
@@ -10,6 +12,7 @@ import '../project/project_session.dart';
 import '../util/detached.dart';
 import '../utils/terminal_bell.dart';
 import 'reply_latch.dart';
+import 'terminal_screen_cache.dart';
 
 class TerminalService {
   final ProjectSession session;
@@ -19,44 +22,309 @@ class TerminalService {
   StreamSubscription<Map<String, dynamic>>? _statusSub;
   StreamSubscription<void>? _resumeSub;
   bool _disposed = false;
+  final Map<Object, String> _displayOwners = {};
+  final Set<String> _freshScreens = {};
+  final Set<String> _materialized = {};
+  final Map<String, TerminalFrameMessage> _visibleFrames = {};
+  final Map<String, Stopwatch> _screenWaits = {};
+  final Map<String, int> _lastViewed = {};
+  static final hiddenScreens = TerminalScreenCache();
+  static TerminalService? _prefetchOwner;
+  static final Set<TerminalService> _displayServices = {};
+  String? _prefetchId;
+  Timer? _prefetchTimer;
+  Timer? _prefetchDeadline;
+  final Set<String> _prefetchAttempted = {};
+  Set<String> _prefetchCandidates = {};
+  Object? _focusVisit;
+  bool _prefetchStopped = false;
 
-  final Map<String, int> _snapshotSeq = {};
+  bool _visible(String id) => _displayOwners.containsValue(id);
+
+  bool canSendInput(String id) =>
+      _visible(id) &&
+      _freshScreens.contains(id) &&
+      _frameAttachment.containsKey(id) &&
+      !_pendingExitCodes.containsKey(id) &&
+      _state.tabs[id]?.sessionState == TerminalSessionState.running;
+  bool hasDisplayInterest(Object owner, String id) =>
+      _displayOwners[owner] == id;
+
+  void suspendDisplay() {
+    _finishPrefetch();
+    for (final id in _resizeTimers.keys.toList()) {
+      _cancelQueuedResize(id);
+    }
+    _resizeTimers.clear();
+    _resizeBaseDrivers.clear();
+    for (final id in {..._frameAttachment.keys, ..._frameSubscribePending}) {
+      _unsubscribeFrame(id);
+      if (_pendingExitCodes.containsKey(id)) {
+        _completeTerminal(id, _pendingExitCodes.remove(id));
+      }
+      _resetFrameTracking(id);
+    }
+    _freshScreens.clear();
+    _publishHydration();
+  }
+
+  /// Each pane owns one lease; repeated builds and overlapping panes deduplicate.
+  void setDisplayInterest(Object owner, String? terminalId) {
+    if (_disposed || _displayOwners[owner] == terminalId) return;
+    final previous = _displayOwners.remove(owner);
+    if (terminalId != null) {
+      _displayOwners[owner] = terminalId;
+      _displayServices.add(this);
+      _lastViewed[terminalId] = DateTime.now().microsecondsSinceEpoch;
+    }
+    if (previous != null && !_visible(previous)) _retireDisplay(previous);
+    if (_displayOwners.isEmpty) _displayServices.remove(this);
+    if (terminalId != null) {
+      final speculative = _prefetchOwner;
+      if (identical(speculative, this) && _prefetchId == terminalId) {
+        _finishPrefetch(promote: true);
+        if (_frameAttachment.containsKey(terminalId)) {
+          _frameSubscribeDeadlines[terminalId] = Timer(
+            snapshotAttachTimeout,
+            () => _failFrameSubscribe(terminalId),
+          );
+        }
+      } else {
+        speculative?._finishPrefetch();
+      }
+      final tab = _state.tabs[terminalId];
+      if (tab != null) {
+        _materializeTab(tab);
+        final cached = hiddenScreens.take(this, terminalId);
+        if (cached != null) {
+          _visibleFrames[terminalId] = cached;
+          _state = _state.copyWith(
+            tabs: {
+              ..._state.tabs,
+              terminalId: tab.copyWith(cols: cached.cols, rows: cached.rows),
+            },
+          );
+          tab.history.applyBoundary(cached.history);
+          _paintFrame(tab, cached);
+        }
+        if (!_frameAttachment.containsKey(terminalId) &&
+            !_frameSubscribePending.contains(terminalId)) {
+          _attachTerminal(terminalId);
+        }
+      }
+    }
+    _publishHydration();
+    _schedulePrefetch();
+  }
+
+  void _retireDisplay(String id) {
+    _unsubscribeFrame(id);
+    if (_pendingExitCodes.containsKey(id)) {
+      _completeTerminal(id, _pendingExitCodes.remove(id));
+    }
+    _resetFrameTracking(id);
+    _freshScreens.remove(id);
+    final frame = _visibleFrames.remove(id);
+    if (frame != null) hiddenScreens.put(this, id, frame);
+    _cancelQueuedResize(id);
+    if (_materialized.remove(id)) {
+      final tab = _state.tabs[id];
+      if (tab != null) {
+        final replacement = TerminalTab(terminalId: id, name: tab.name);
+        final tabs = Map<String, TerminalTab>.from(_state.tabs);
+        tabs[id] = tab.copyWith(ghostty: replacement.ghostty);
+        replacement.history.dispose();
+        replacement.replaceEpoch.dispose();
+        tab.ghostty.dispose();
+        _framePaintedIds.remove(id);
+        _state = _state.copyWith(tabs: tabs);
+        _publishHydration();
+      }
+    }
+  }
+
+  /// Only the focused checkout's user-terminal list supplies candidates.
+  void setPrefetchFocus(Object? visit, Set<String> candidates) {
+    if (_disposed) return;
+    if (_focusVisit != visit) {
+      _finishPrefetch();
+      _focusVisit = visit;
+      _prefetchAttempted.clear();
+      _prefetchStopped = false;
+    }
+    _prefetchCandidates = candidates;
+    _schedulePrefetch();
+  }
+
+  bool get _visibleReady => _displayServices.every(
+    (service) =>
+        service._displayOwners.values.every(service._freshScreens.contains),
+  );
+
+  void _schedulePrefetch() {
+    if (_prefetchTimer != null) return;
+    if (_disposed ||
+        _focusVisit == null ||
+        _prefetchStopped ||
+        _prefetchOwner != null ||
+        !session.transport.isEstablished ||
+        !_visibleReady) {
+      return;
+    }
+    _prefetchTimer = Timer(prefetchSettleDelay, _startPrefetch);
+  }
+
+  void _startPrefetch() {
+    _prefetchTimer = null;
+    if (_disposed ||
+        _focusVisit == null ||
+        _prefetchStopped ||
+        _prefetchOwner != null ||
+        !_visibleReady ||
+        !session.transport.isEstablished) {
+      return;
+    }
+    final candidates =
+        _prefetchCandidates
+            .where(
+              (id) =>
+                  !_visible(id) &&
+                  !_prefetchAttempted.contains(id) &&
+                  !hiddenScreens.contains(this, id) &&
+                  _state.tabs.containsKey(id) &&
+                  !_missingTerminalIds.contains(id),
+            )
+            .toList()
+          ..sort((a, b) {
+            final recent = (_lastViewed[b] ?? 0).compareTo(_lastViewed[a] ?? 0);
+            return recent != 0 ? recent : a.compareTo(b);
+          });
+    if (candidates.isEmpty) return;
+    final id = candidates.first;
+    _prefetchAttempted.add(id);
+    _prefetchOwner = this;
+    _prefetchId = id;
+    perfRecorder.setTerminalDemandGauge('speculativeAttachments', 1);
+    perfRecorder.noteTerminalDemand('prefetchStarted');
+    _prefetchDeadline = Timer(prefetchTimeout, () {
+      _prefetchStopped = true;
+      perfRecorder.noteTerminalDemand('prefetchTimeout');
+      _finishPrefetch();
+    });
+    _attachTerminal(id);
+  }
+
+  void _finishPrefetch({bool promote = false}) {
+    _prefetchTimer?.cancel();
+    _prefetchTimer = null;
+    _prefetchDeadline?.cancel();
+    _prefetchDeadline = null;
+    final id = _prefetchId;
+    _prefetchId = null;
+    if (identical(_prefetchOwner, this)) _prefetchOwner = null;
+    if (_prefetchOwner == null) {
+      perfRecorder.setTerminalDemandGauge('speculativeAttachments', 0);
+    }
+    if (id != null && !promote) _retireDisplay(id);
+  }
+
   final Map<String, Timer> _resizeTimers = {};
   final Map<String, String?> _resizeBaseDrivers = {};
   final Map<String, Timer> _pendingTerminalTimers = {};
   final Set<String> _deletedTerminalIds = {};
   final Set<String> _pendingTerminalIds = {};
   final Set<String> _canceledPendingTerminalIds = {};
+  final Set<String> _missingTerminalIds = {};
 
-  /// Terminals whose Ghostty engine has had bytes written into it since the tab
-  /// was built. Drives the `history` flag on a snapshot request: the agent's
-  /// history blob ERASES before it paints, so asking for one against an engine
-  /// that already holds the user's scrollback destroys it, and asking for a
-  /// screen-only blob against an empty engine leaves a scrolling build log
-  /// showing its last few rows and nothing above them.
-  ///
-  /// Keyed to the ENGINE's life, not the terminal's: [_createTab] is the only
-  /// place a fresh controller is born, and an exit-then-respawn under the same
-  /// id keeps the same engine — with the dead run's output still on it, which is
-  /// history worth protecting. Deliberately not derived from the engine's own
-  /// line contents: a guest that cleared its screen presents as empty while
-  /// holding thousands of lines above.
-  final Set<String> _paintedTerminalIds = {};
+  // --- Frame mode (live `terminal:frame` display) ---
 
-  /// Terminals this client has asked for a history blob and not yet been
-  /// answered for.
+  /// terminalId -> the `requestId` of this client's most recently sent
+  /// `terminal:subscribe`. A `terminal:subscribed` or `terminal:display:status`
+  /// whose own `requestId` does not match is the answer to an attempt this
+  /// terminal has since superseded (a fresh reconnect, respawn or retry) and
+  /// must never resurrect it.
+  final Map<String, String> _frameSubscribeRequestId = {};
+  // A service-specific UUID prefix recognizes canceled requests without an
+  // unbounded tombstone set; the counter occupies the UUID's final 48 bits.
+  final String _subscribePrefix = const Uuid().v4().substring(0, 24);
+  int _subscribeSerial = 0;
+
+  /// terminalId -> true while a `terminal:subscribe` is outstanding for it.
+  /// Consumed by whichever answers first: `terminal:subscribed`, or a
+  /// `terminal:display:status` naming the same request.
+  final Set<String> _frameSubscribePending = {};
+
+  final Map<String, int> _frameSubscribeRequestedAtMs = {};
+
+  final Map<String, Timer> _frameSubscribeDeadlines = {};
+
+  /// terminalId -> the live attachment once `terminal:subscribed` has been
+  /// accepted for it. Absent means no live frame-mode attachment: subscribe
+  /// has never succeeded, is outstanding, or the attachment was retired
+  /// (ended, failed, unsubscribed, or dropped locally by a fresh attach
+  /// attempt that has not yet been answered).
   ///
-  /// A reply fans out to every client, so [_applySnapshot] refuses a history
-  /// blob against a painted engine. Without this claim that refusal would
-  /// also swallow OUR OWN answer whenever live output lands during the round
-  /// trip -- routine on a busy terminal -- leaving the cold attach with a
-  /// screen and no history, which is the whole loss the flag exists to fix.
+  /// Scoped to THIS connection: an attachment id is minted by one
+  /// `TerminalViewerConnection` and does not survive a reconnect, so every
+  /// re-attach drops it before asking again rather than trusting it to still
+  /// name anything on the other end.
+  final Map<String, ({String runId, String attachmentId})> _frameAttachment =
+      {};
+  final Map<String, String> _historyRunId = {};
+  final Map<String, ({String runId, String attachmentId})>
+  _endedHistoryAttachment = {};
+  final Map<String, int?> _pendingExitCodes = {};
+
+  /// terminalId -> the highest `terminal:frame` `sequence` this client has
+  /// processed (applied or dropped as stale) for its live attachment. Acks
+  /// are cumulative on this value, so it doubles as "what to ack next".
+  final Map<String, int> _frameHighestSequence = {};
+
+  /// Terminals whose live frame attachment has painted at least one frame.
+  /// reconnect or a resubscribe attempt (the engine's last frame is still
+  /// current-looking on screen right up until a fresh one replaces it), only
+  /// on a genuinely fresh engine ([_createTab]) or a deletion.
+  final Set<String> _framePaintedIds = {};
+
+  /// Terminals whose live frame attachment reported a failure other than
+  /// `ENDED` -- DISPLAY_FAILED, ACK_TIMEOUT, or any code this client does not
+  /// recognize (a newer agent's failure must surface, never be silently
+  /// ignored). `HISTORY_DISABLED` is deliberately absent: it scopes to the
+  /// archive, and badging a pane that is still painting for a scrollback
+  /// refusal hides a terminal that works -- it lands on the terminal's
+  /// [TerminalHistoryModel] instead. See [TerminalAttachStage.failed].
+  final Set<String> _frameFailedIds = {};
+
+  /// Terminals whose live frame attachment ended with `ENDED` -- the run
+  /// completed. Lifecycle, not failure; kept distinct from [_frameFailedIds]
+  /// so [TerminalAttachStage.ended] never renders as a failure. See
+  /// [TerminalAttachStage.ended].
+  final Set<String> _frameEndedIds = {};
+
+  /// terminalId -> the last `terminal:display:status.message` for it, shown
+  /// alongside [_frameFailedIds] / [_frameEndedIds].
+  final Map<String, String> _frameStatusMessage = {};
+
+  /// terminalId -> the bound on an outstanding `terminal:history:request`.
   ///
-  /// Consumed by the next snapshot that actually applies, whatever it is: an
-  /// older agent strips the request key and answers screen-only, and a claim
-  /// nothing retires would later admit ANOTHER device's erase.
-  final Set<String> _awaitingHistoryIds = {};
+  /// A history page is the one frame-mode reply with no other path back to the
+  /// user: nothing else restates it, and the model reads as loading until it
+  /// lands. An agent that drops the request (a checkout deleting under it, a
+  /// run rotated away, a wire that went quiet) would otherwise leave the pane
+  /// spinning for good.
+  final Map<String, Timer> _historyRequestDeadlines = {};
+
+  Timer? _checkoutAttachDeadline;
+  bool _sawAgentStatus = false;
+  bool _checkoutAttachFailed = false;
+  bool _hydrationPublishScheduled = false;
   bool _trackedUse = false;
+
+  /// True while `session.transport.isEstablished` reads false — the only
+  /// truthful synchronous read of "a send will actually leave". Synced by
+  /// [_syncInputPaused], never toggled directly, so every writer folds into
+  /// the same emission gate.
+  bool _inputPaused = false;
 
   String? _clientId;
   void setClientId(String id) => _clientId = id;
@@ -70,10 +338,32 @@ class TerminalService {
   /// Bounds optimistic terminal state when the one-shot start send is dropped.
   /// Injectable so tests do not wait for the production recovery window.
   final Duration terminalStartTimeout;
+
+  /// Bounds one terminal's screen pull. A request is not a promise of a reply —
+  /// an id the agent no longer knows, and a send dropped in a keyless window or
+  /// behind the machine's remote-access gate, are all answered with no frame at
+  /// all — so an unanswered pull over an empty engine has to end somewhere.
+  /// Injectable so tests drive a short window.
+  final Duration snapshotAttachTimeout;
+
+  /// Bounds the wait for the checkout's first `agent:status`, which is what
+  /// tells the app there are any terminals to attach to.
+  final Duration checkoutAttachTimeout;
+  final Duration prefetchSettleDelay;
+  final Duration prefetchTimeout;
   ReplyLatch? _branchesLatch;
   ReplyLatch? _checkoutLatch;
 
-  final _stateController = StreamController<TerminalState>.broadcast();
+  /// Every attach bound is armed on first subscription and dropped with the
+  /// last one: a bound exists to tell a surface that is waiting that its wait
+  /// ended badly, so a service nobody watches must not hold a live timer for
+  /// the length of the timeout — the test binding reports one outliving its
+  /// widget tree as a leak, and a service is built eagerly for every checkout
+  /// whether or not anything reads it.
+  late final _stateController = StreamController<TerminalState>.broadcast(
+    onListen: _resumeAttachBounds,
+    onCancel: _dropAttachBounds,
+  );
   final StreamController<TerminalNotificationMessage> _notificationController =
       StreamController<TerminalNotificationMessage>.broadcast();
   final StreamController<NotificationPushMessage> _pushController =
@@ -93,6 +383,10 @@ class TerminalService {
     this.checkoutId = 'main',
     this.gitActionTimeout = const Duration(seconds: 15),
     this.terminalStartTimeout = const Duration(seconds: 15),
+    this.snapshotAttachTimeout = const Duration(seconds: 15),
+    this.checkoutAttachTimeout = const Duration(seconds: 30),
+    this.prefetchSettleDelay = const Duration(milliseconds: 500),
+    this.prefetchTimeout = const Duration(seconds: 5),
   }) {
     // Heavy tier — terminal:output + terminal:snapshot (HEAVY tier messages).
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
@@ -101,31 +395,14 @@ class TerminalService {
     // git:branches, git:checkout-result. Routed through the focus-gated
     // router status stream so all dispatch goes through one path.
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+  }
 
-    // Tier-3 re-drive. This is the terminal's ONLY reconnect recovery: the
-    // agent drops terminal output while suppressed but keeps bumping the seq,
-    // so a tab that was already on screen when the stream went away renders
-    // whatever it held then, forever — nothing else re-pulls it (the discovery
-    // pulls only fire for a tab the app has never seen).
-    //
-    // A seq cutoff is only meaningful against the PTY generation it was taken
-    // from, and the agent's counter is per PTY: it is deleted on exit
-    // (`ConnState.clearTerminal`), so a same-id respawn starts again at 1. A
-    // disconnect is exactly the window in which a terminal can exit and respawn
-    // unwitnessed — neither `terminal:exited` nor `terminal:started` arrives —
-    // and nothing on the wire distinguishes the new run from the old, so a
-    // surviving cutoff sits above every seq the new PTY will ever emit and
-    // filters its entire output. The tab then renders blank behind a live
-    // process, with no user action that clears it. Dropped wholesale rather
-    // than reasoned about per tab: losing a still-valid cutoff costs a few
-    // duplicated lines on the next snapshot, keeping a stale one costs the
-    // pane.
-    session.hydrateCheckout(
-      checkoutId,
-      _snapshotHydratorKey,
-      _rehydrateTerminals,
-    );
-    _resumeSub = session.focusResumed.listen(
+  static const _frameHydratorKey = 'terminal:frames';
+
+  void activate() {
+    if (_disposed) return;
+    session.hydrateCheckout(checkoutId, _frameHydratorKey, _rehydrateTerminals);
+    _resumeSub ??= session.focusResumed.listen(
       (_) => detached(
         'TerminalService',
         're-attach snapshot pull on focus resume',
@@ -134,17 +411,82 @@ class TerminalService {
     );
   }
 
-  static const _snapshotHydratorKey = 'terminal:snapshots';
+  void deactivate() {
+    if (_disposed) return;
+    setPrefetchFocus(null, {});
+    for (final owner in _displayOwners.keys.toList()) {
+      setDisplayInterest(owner, null);
+    }
+    session.unhydrateCheckout(checkoutId, _frameHydratorKey);
+    unawaited(_resumeSub?.cancel());
+    _resumeSub = null;
+  }
+
+  /// Bounds the wait for the first `agent:status`, so a checkout that is never
+  /// answered stops claiming progress.
+  ///
+  /// Re-armed rather than merely cancelled wherever the attach is re-driven: a
+  /// fresh attempt clears the previous failure, and clearing it without a new
+  /// bound would leave the checkout attaching with nothing left to end it.
+  void _cancelCheckoutAttachDeadline() {
+    _checkoutAttachDeadline?.cancel();
+    _checkoutAttachDeadline = null;
+  }
+
+  void _dropAttachBounds() {
+    if (_displayOwners.isNotEmpty || _prefetchId != null) return;
+    _cancelCheckoutAttachDeadline();
+    for (final terminalId in _frameSubscribePending.toList()) {
+      _clearPendingSubscribe(terminalId);
+    }
+  }
+
+  void _resumeAttachBounds() {
+    _armCheckoutAttachDeadline();
+    if (_disposed) return;
+    for (final entry in _state.tabs.entries) {
+      // Only the tabs a pull could still reach, and only those left with
+      // neither a screen nor anything outstanding — a re-pull over a painted
+      // or in-flight tab is the churn `_stageFor`'s `refreshing` arm exists to
+      // keep off screen.
+      if (!_hasLivePty(entry.value)) continue;
+      if (_stageFor(entry.key) != TerminalAttachStage.cold) continue;
+      _attachTerminal(entry.key);
+    }
+  }
+
+  void _armCheckoutAttachDeadline() {
+    _cancelCheckoutAttachDeadline();
+    if (_disposed || _sawAgentStatus) return;
+    _checkoutAttachDeadline = Timer(checkoutAttachTimeout, () {
+      _checkoutAttachDeadline = null;
+      if (_disposed || _sawAgentStatus) return;
+      _checkoutAttachFailed = true;
+      _publishHydration();
+    });
+  }
 
   Future<void> _rehydrateTerminals() async {
     if (_disposed) return;
-    // Cleared first and unconditionally, because a request is not a promise of
-    // a reply: an id the agent no longer knows is answered with a log line and
-    // no frame, and a send in a keyless window vanishes. Only the tabs whose
-    // reply lands re-arm a cutoff (in _applySnapshot), so a clear made
-    // conditional on one would strand a cutoff above every seq a respawned PTY
-    // emits and leave the pane blank behind a live process.
-    _snapshotSeq.clear();
+    _finishPrefetch();
+    _freshScreens.clear();
+    // The re-establish edge, and the only one there is: nothing publishes a
+    // transport transition the pane could listen for — `sessionDownEvents`
+    // fires from retry exhaustion, not a live socket loss, and StreamTransport
+    // never emits `disconnected`. So the refusal latch is cleared by the same
+    // hydrator re-drive that reopens the pulls, which is exactly what a
+    // recovered send would have needed anyway.
+    _syncInputPaused();
+    // A checkout that was merely slow is not a broken one, and this path is a
+    // fresh attempt at the thing that timed out. The verdict is dropped and
+    // re-bounded together — a cleared failure with no deadline behind it would
+    // leave the checkout attaching with nothing left to end it. Skipped when
+    // neither is live, so a re-drive can never mint the first bound for a
+    // service nothing is listening to.
+    if (_checkoutAttachDeadline != null || _checkoutAttachFailed) {
+      _checkoutAttachFailed = false;
+      _armCheckoutAttachDeadline();
+    }
     // The geometry is invalidated on the same grounds as the cutoff above: a
     // reattach can hide a resize the agent never applied, and an
     // exit-and-respawn nothing on the wire reported (the seq reasoning in the
@@ -169,12 +511,10 @@ class TerminalService {
     }
     if (invalidated) _setState(_state.copyWith(tabs: rehydrated));
     for (final tab in rehydrated.values) {
-      // A pending tab is the app's own optimistic invention — the agent has
-      // never confirmed the id, so it would answer "snapshot requested for
-      // unknown terminal" and send nothing. Its own terminal:started carries
-      // the pull.
+      // The bridge has not admitted an optimistic start yet; its started
+      // event will attach the confirmed run.
       if (_pendingTerminalIds.contains(tab.terminalId)) continue;
-      _requestTerminalSnapshot(tab.terminalId);
+      _attachTerminal(tab.terminalId);
     }
   }
 
@@ -187,6 +527,7 @@ class TerminalService {
   /// drops.
   bool _hasLivePty(TerminalTab tab) =>
       tab.sessionState == TerminalSessionState.running &&
+      !_missingTerminalIds.contains(tab.terminalId) &&
       !_pendingTerminalIds.contains(tab.terminalId);
 
   /// Retires whatever the driver believes [terminalId]'s geometry is, so its
@@ -205,134 +546,512 @@ class TerminalService {
     _setState(_state.copyWith(tabs: tabs));
   }
 
+  void _cancelQueuedResize(String terminalId) {
+    final timer = _resizeTimers.remove(terminalId);
+    _resizeBaseDrivers.remove(terminalId);
+    if (timer == null) return;
+    timer.cancel();
+    _invalidateGeometry(terminalId);
+  }
+
   void _setState(TerminalState state) {
     if (_disposed) return;
-    // Focusing a terminal — by ANY path (list tap, pinned/pushed view, agent
-    // auto-focus) — marks it read. Centralized here so every activeTerminalId
-    // change clears the badge, not just the list-row tap.
-    final activeId = state.activeTerminalId;
-    if (activeId != null) {
-      final activeTab = state.tabs[activeId];
-      if (activeTab != null && activeTab.unread) {
-        final tabs = Map<String, TerminalTab>.from(state.tabs);
-        tabs[activeId] = activeTab.copyWith(unread: false);
-        state = state.copyWith(tabs: tabs);
+    for (final id in _displayOwners.values.toSet()) {
+      final tab = state.tabs[id];
+      if (tab != null && tab.unread) {
+        state = state.copyWith(
+          tabs: {...state.tabs, id: tab.copyWith(unread: false)},
+        );
       }
     }
+    // Recomputed on every emission rather than carried, because every mutation
+    // site funnels through here: a value carried on the state would be wiped by
+    // the field-by-field rebuild in _handleAgentStatus, and one carried on a tab
+    // by any of the copyWith sites.
+    state = state.copyWith(
+      hydration: _deriveHydration(state.tabs),
+      attach: _deriveAttach(state.tabs),
+      inputPaused: _inputPaused,
+    );
     _state = state;
     _stateController.add(state);
+  }
+
+  Map<String, TerminalHydration> _deriveHydration(
+    Map<String, TerminalTab> tabs,
+  ) {
+    return {
+      for (final entry in tabs.entries)
+        entry.key: TerminalHydration(
+          stage: _stageFor(entry.key),
+          requestedAtMs: _frameSubscribeRequestedAtMs[entry.key],
+          message: _frameStatusMessage[entry.key],
+        ),
+    };
+  }
+
+  // The paint decides how an outstanding pull reads. A re-pull over an engine
+  // that already holds current bytes is routine — every re-establishment and
+  // every focus resume issues one for every live tab — and must never present
+  // as a wait or escalate to a failure.
+  TerminalAttachStage _stageFor(String id) => _frameStageFor(id);
+
+  TerminalAttachStage _frameStageFor(String id) {
+    if (_missingTerminalIds.contains(id)) {
+      return TerminalAttachStage.unavailable;
+    }
+    if (_frameEndedIds.contains(id)) return TerminalAttachStage.ended;
+    if (_frameFailedIds.contains(id)) return TerminalAttachStage.failed;
+    final painted = _framePaintedIds.contains(id);
+    if (_frameSubscribePending.contains(id) ||
+        (_frameAttachment.containsKey(id) && !_freshScreens.contains(id))) {
+      return painted
+          ? TerminalAttachStage.refreshing
+          : TerminalAttachStage.awaitingScreen;
+    }
+    return painted ? TerminalAttachStage.painted : TerminalAttachStage.cold;
+  }
+
+  // Checkout-wide failure means ONLY "no agent:status ever arrived", i.e. there
+  // are no tabs to show. One terminal that cannot be snapshotted — a PTY that
+  // exited, an id the agent no longer knows — is surfaced on that terminal's own
+  // pane and leaves the checkout usable.
+  CheckoutAttachStatus _deriveAttach(Map<String, TerminalTab> tabs) {
+    if (_checkoutAttachFailed) return CheckoutAttachStatus.failed;
+    if (!_sawAgentStatus) return CheckoutAttachStatus.attaching;
+    for (final entry in tabs.entries) {
+      if (!_visible(entry.key)) continue;
+      // Only a wait that something will end may hold the checkout back. A
+      // terminal with no PTY behind it is snapshotted on purpose — a retained
+      // transcript is always already stopped — and the agent answers a screen
+      // it no longer has with no frame at all, so nothing arms a deadline for
+      // it and nothing would ever clear an "attaching" taken from it.
+      if (!_hasLivePty(entry.value)) continue;
+      final stage = _stageFor(entry.key);
+      if (stage == TerminalAttachStage.cold ||
+          stage == TerminalAttachStage.awaitingScreen) {
+        return CheckoutAttachStatus.attaching;
+      }
+    }
+    return CheckoutAttachStatus.ready;
+  }
+
+  /// The only truthful synchronous read of "a send will actually leave" —
+  /// `transport.currentState` stays `connected` across a relay session-down
+  /// window where a send silently drops (see `AgentTransport.isEstablished`).
+  /// Idempotent against its own no-op case so a poll tick that finds nothing
+  /// changed costs no emission.
+  void _syncInputPaused() {
+    if (_disposed) return;
+    final paused = !session.transport.isEstablished;
+    if (paused == _inputPaused) return;
+    _inputPaused = paused;
+    _publishHydration();
+  }
+
+  /// Re-emit the current state so a hydration-only transition reaches the UI.
+  ///
+  /// Coalesced to one emission per microtask. Neither TerminalState nor
+  /// TerminalTab defines `==` and `terminalStateProvider` is a StreamProvider,
+  /// so every emission notifies every listener in the workspace; a burst of
+  /// discovered terminals would otherwise produce one full rebuild each.
+  void _publishHydration() {
+    if (_disposed || _hydrationPublishScheduled) return;
+    _hydrationPublishScheduled = true;
+    scheduleMicrotask(() {
+      _hydrationPublishScheduled = false;
+      if (_disposed) return;
+      _setState(_state);
+    });
   }
 
   void _onHeavyJson(Map<String, dynamic> json) {
     if (_disposed) return;
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
-    if (parsed is TerminalSnapshotMessage) {
-      // Arming is _applySnapshot's job, not this one's: it bails on a tab that
-      // vanished between request and reply, and a cutoff armed for scrollback
-      // nothing rendered filters the live output of the tab that replaces it.
-      _applySnapshot(parsed);
+    if (parsed is TerminalFrameMessage) {
+      _handleTerminalFrame(parsed);
       return;
     }
-    if (parsed is TerminalOutputMessage) {
-      final seq = parsed.seq;
-      final cutoff = _snapshotSeq[parsed.terminalId];
-      if (seq != null && cutoff != null && seq <= cutoff) {
-        return; // stale — already in snapshot
-      }
-      _handleTerminalOutput(parsed);
+    if (parsed is TerminalHistoryPageMessage) {
+      _handleTerminalHistoryPage(parsed);
+      return;
     }
   }
 
-  /// Erase for the LEGACY payload only — an older agent's raw byte tail, up to
-  /// ten thousand characters of it, which is several screens.
-  ///
-  /// `CSI 3 J` is in it because a body taller than the screen SCROLLS: `2J`
-  /// clears the visible rows, and the tail then pushes each of them into the
-  /// buffer above as it draws past the bottom, so every attach stacks another
-  /// copy of the same output into the user's history with no way to clear it.
-  /// The re-attach now fires on every focus resume, so that is unbounded.
-  /// Erasing history the tail is about to reprint is the lesser loss, and it is
-  /// what this path did before the composed blob existed.
-  ///
-  /// A composed blob takes no erase at all — it is exactly one screen and
-  /// carries its own preamble, which deliberately stops at `2J` so the app's
-  /// own scrollback survives it.
-  static final Uint8List _legacyAttachErase = Uint8List.fromList(
-    utf8.encode('\x1b[3J\x1b[2J\x1b[H'),
-  );
-
-  void _applySnapshot(TerminalSnapshotMessage msg) {
+  /// Applies (or drops) one `terminal:frame` and acks it. Ack is delivery,
+  /// not proof of rendering (D5): sent whenever a frame is accepted as
+  /// belonging to the live attachment, whether or not its geometry let it
+  /// actually paint.
+  void _handleTerminalFrame(TerminalFrameMessage msg) {
+    if (!session.transport.isEstablished) {
+      suspendDisplay();
+      return;
+    }
     final tab = _state.tabs[msg.terminalId];
-    if (tab == null) return;
-    // A blob describes the instant its seq was read, and one terminal has
-    // several snapshot producers on a single re-establishment: the agent's
-    // resync push, this service's hydrator pull, a focus-resume pull, and any
-    // other client's request — replies are published on the project bus, so
-    // every attached client gets them. The frame that lands last is not the
-    // one that describes the latest instant, and applying an older one both
-    // repaints a screen the tab has moved past and lowers the cutoff BELOW
-    // frames already applied, which nothing refilters and nothing re-sends.
-    //
-    // Safe against a respawn's counter reset (the agent's seq is per PTY and
-    // starts again at 1) because every path into a new generation drops the
-    // cutoff first — terminal:started, the exit handler, and the re-drive.
-    // Equal seqs are still applied: a screen-only push and a `history` reply
-    // can describe the same instant, and only the second carries the history.
-    final held = _snapshotSeq[msg.terminalId];
-    if (held != null && msg.seq < held) return;
-    // Consumed here, not at the guards above: a frame that never applied
-    // leaves the claim standing for the answer that does.
-    final wasAwaited = _awaitingHistoryIds.remove(msg.terminalId);
-    // A history blob erases before it paints, and replies fan out to every
-    // client on the project -- so this one may be the answer to another
-    // device's cold attach. Only a client whose engine is empty asked for
-    // it; for a painted engine the erase would destroy the user's own
-    // scrollback, which is exactly what the warm preamble exists to avoid.
-    // Dropped rather than degraded: a painted engine has been taking live
-    // output all along, so it needs no repaint either.
-    if (msg.history &&
-        !wasAwaited &&
-        _paintedTerminalIds.contains(msg.terminalId)) {
+    if (tab == null || tab.mode != TerminalDisplayMode.frame) return;
+    final attachment = _frameAttachment[msg.terminalId];
+    // D5: never apply or ack a frame for a superseded attachment -- a
+    // resubscribe (reconnect, respawn, retry) can still have one of the old
+    // attachment's frames in flight, addressed by a runId/attachmentId this
+    // client no longer considers live.
+    if (attachment == null ||
+        attachment.runId != msg.runId ||
+        attachment.attachmentId != msg.attachmentId) {
+      perfRecorder.noteTerminalDemand(
+        'discardedFrameBytes',
+        utf8.encode(msg.ansi).length,
+      );
       return;
     }
-    _snapshotSeq[msg.terminalId] = msg.seq;
-    // Deliberately NOT `clear()`. That resets the engine, and a reset takes
-    // the guest's MODES with it — alt screen, bracketed paste, focus events,
-    // mouse tracking, synchronised output. A fullscreen TUI sets those once at
-    // startup and never sends them again, and they are far outside the byte
-    // tail this snapshot carries, so nothing here can put them back: the
-    // engine would sit on the primary screen with mouse off while the guest
-    // draws into an alt screen, until the agent itself is restarted.
-    //
-    // A composed blob is self-contained: it opens with its own preamble (alt
-    // screen exit, margin reset, screen erase, cursor home, SGR reset),
-    // repaints the visible screen, restores its own modes, and ends in a
-    // RELATIVE cursor placement. Anything prepended lands ahead of that
-    // preamble — the wrong-screen bug the preamble exists to fix — and anything
-    // appended lands after the cursor is placed, so the blob goes on verbatim.
-    if (!msg.composed) tab.ghostty.appendOutputBytes(_legacyAttachErase);
-    tab.ghostty.appendOutputBytes(utf8.encode(msg.scrollback));
-    _paintedTerminalIds.add(msg.terminalId);
+    final highest = _frameHighestSequence[msg.terminalId] ?? 0;
+    // Cumulative, and cheap to be defensive about: a sequence already
+    // processed (applied or dropped) needs neither a second apply nor a
+    // second ack -- "ack the highest and drop the superseded ones unparsed".
+    if (msg.sequence <= highest) return;
+    _frameHighestSequence[msg.terminalId] = msg.sequence;
+    if (_prefetchId == msg.terminalId && !_visible(msg.terminalId)) {
+      final elapsed = _screenWaits.remove(msg.terminalId)?.elapsedMilliseconds;
+      if (elapsed != null) {
+        perfRecorder.noteTerminalDemand('prefetchFirstFrameMs', elapsed);
+      }
+      perfRecorder.noteTerminalDemand(
+        'prefetchBytes',
+        utf8.encode(msg.ansi).length,
+      );
+      hiddenScreens.put(this, msg.terminalId, msg);
+      _ackFrame(
+        msg.terminalId,
+        runId: msg.runId,
+        attachmentId: msg.attachmentId,
+        sequence: msg.sequence,
+      );
+      _finishPrefetch();
+      _schedulePrefetch();
+      return;
+    }
+    if (!_visible(msg.terminalId)) return;
+    _visibleFrames[msg.terminalId] = msg;
+    final firstFresh = _freshScreens.add(msg.terminalId);
+    _frameSubscribeDeadlines.remove(msg.terminalId)?.cancel();
+    // Every frame restates the archive boundary, and it is true whether or not
+    // this screen's geometry lets it paint -- a deferred frame's rows scrolled
+    // off just the same.
+    tab.history.applyBoundary(msg.history);
+    if (msg.cols != tab.cols || msg.rows != tab.rows) {
+      final tabs = Map<String, TerminalTab>.from(_state.tabs);
+      tabs[msg.terminalId] = tab.copyWith(cols: msg.cols, rows: msg.rows);
+      _setState(_state.copyWith(tabs: tabs));
+    }
+    _paintFrame(tab, msg);
+    if (firstFresh) {
+      final elapsed = _screenWaits.remove(msg.terminalId)?.elapsedMilliseconds;
+      if (elapsed != null) {
+        perfRecorder.noteTerminalDemand('visibleFirstFrameMs', elapsed);
+      }
+      perfRecorder.noteTerminalDemand('visibleFirstFrames');
+      _publishHydration();
+      _schedulePrefetch();
+    }
+    _ackFrame(
+      msg.terminalId,
+      runId: msg.runId,
+      attachmentId: msg.attachmentId,
+      sequence: msg.sequence,
+    );
   }
 
-  void _requestTerminalSnapshot(String terminalId) {
-    final wantsHistory = !_paintedTerminalIds.contains(terminalId);
-    if (wantsHistory) {
-      _awaitingHistoryIds.add(terminalId);
-    } else {
-      _awaitingHistoryIds.remove(terminalId);
+  /// Writes one frame into [tab]'s engine and moves this terminal's frame-mode
+  /// hydration on.
+  void _paintFrame(TerminalTab tab, TerminalFrameMessage msg) {
+    // A frame is this mode's live output: it is the screen that answers what
+    // the user typed, so it closes the echo timer for the same reason the raw
+    // byte path does. Without this the perf harness reads zero echo latency in
+    // frame mode and leaves every sample pending forever.
+    perfRecorder.noteTerminalOutput(
+      projectId: session.projectId,
+      checkoutId: checkoutId,
+      terminalId: msg.terminalId,
+    );
+    tab.ghostty.resize(cols: msg.cols, rows: msg.rows);
+    tab.ghostty.appendOutputBytes(utf8.encode(msg.ansi));
+    // D10: every cell a live selection's row/col anchors pointed at was
+    // just replaced wholesale. See TerminalTab.replaceEpoch's doc comment.
+    tab.replaceEpoch.value++;
+    final firstPaint = _framePaintedIds.add(msg.terminalId);
+    final recovered = _frameFailedIds.remove(msg.terminalId);
+    if (recovered) _frameStatusMessage.remove(msg.terminalId);
+    // Gated, not unconditional: a live stream applies up to
+    // `TERMINAL_FRAME_INTERVAL_MS` frames a second, and _publishHydration
+    // re-emits the whole TerminalState — one full workspace rebuild per frame.
+    if (firstPaint || recovered) _publishHydration();
+  }
+
+  void _ackFrame(
+    String terminalId, {
+    required String runId,
+    required String attachmentId,
+    required int sequence,
+  }) {
+    detached(
+      'terminal',
+      'acknowledge consumed frame',
+      () => session.sendForCheckout(
+        checkoutId,
+        createAbMessage('terminal:ack', {
+          'terminalId': terminalId,
+          'runId': runId,
+          'attachmentId': attachmentId,
+          'sequence': sequence,
+        }),
+      ),
+    );
+  }
+
+  /// Reattaches the terminal with a fresh viewer attachment.
+  void _attachTerminal(String terminalId) {
+    if (_disposed) return;
+    if (!_visible(terminalId) && _prefetchId != terminalId) return;
+    if (_missingTerminalIds.contains(terminalId) ||
+        _pendingTerminalIds.contains(terminalId)) {
+      return;
     }
+    if (!_state.tabs.containsKey(terminalId)) return;
+    _unsubscribeFrame(terminalId);
+    _resetFrameTracking(terminalId);
+    _subscribeFrame(terminalId);
+  }
+
+  /// Drops everything this client believes about [terminalId]'s frame-mode
+  /// attachment, short of whether it has ever painted (see
+  /// [_framePaintedIds]'s own doc comment for why that survives this).
+  void _resetFrameTracking(String terminalId) {
+    _screenWaits.remove(terminalId);
+    _freshScreens.remove(terminalId);
+    _endedHistoryAttachment.remove(terminalId);
+    _pendingExitCodes.remove(terminalId);
+    _historyRequestDeadlines.remove(terminalId)?.cancel();
+    _state.tabs[terminalId]?.history.cancelRequest();
+    _frameAttachment.remove(terminalId);
+    _clearPendingSubscribe(terminalId);
+    _frameHighestSequence.remove(terminalId);
+    _frameFailedIds.remove(terminalId);
+    _frameEndedIds.remove(terminalId);
+    _frameStatusMessage.remove(terminalId);
+  }
+
+  /// Drops the archive [terminalId] was paging, the bound on its outstanding
+  /// request included.
+  ///
+  /// The archive is addressed by row ids scoped to one run and reachable only
+  /// through a live frame attachment, so every exit from frame mode -- a
+  /// respawn, a re-attach, a demotion -- leaves every loaded row and the
+  /// cursor derived from them naming ids the agent will not serve. Routed
+  /// through one call so that holds of the EXITS themselves, rather than of
+  /// the order two unrelated helpers happen to run in at one call site.
+  void _discardFrameArchive(String terminalId) {
+    hiddenScreens.take(this, terminalId);
+    _visibleFrames.remove(terminalId);
+    _historyRequestDeadlines.remove(terminalId)?.cancel();
+    _state.tabs[terminalId]?.history.reset();
+  }
+
+  /// Retires the bookkeeping for an outstanding `terminal:subscribe`, its
+  /// bound included.
+  void _clearPendingSubscribe(String terminalId) {
+    _frameSubscribeDeadlines.remove(terminalId)?.cancel();
+    _frameSubscribePending.remove(terminalId);
+    _frameSubscribeRequestId.remove(terminalId);
+    _frameSubscribeRequestedAtMs.remove(terminalId);
+  }
+
+  /// Sends `terminal:subscribe` for [terminalId] at the highest frame
+  /// protocol version this client can render, and bounds the wait.
+  void _subscribeFrame(String terminalId) {
+    if (_disposed || (!_visible(terminalId) && _prefetchId != terminalId)) {
+      return;
+    }
+    _screenWaits[terminalId] = Stopwatch()..start();
+    perfRecorder.noteTerminalDemand('subscribes');
+    final requestId =
+        '$_subscribePrefix${(++_subscribeSerial).toRadixString(16).padLeft(12, '0')}';
+    _clearPendingSubscribe(terminalId);
+    _frameSubscribeRequestId[terminalId] = requestId;
+    _frameSubscribePending.add(terminalId);
+    _frameSubscribeRequestedAtMs[terminalId] =
+        DateTime.now().millisecondsSinceEpoch;
+    _frameSubscribeDeadlines[terminalId] = Timer(snapshotAttachTimeout, () {
+      if (_disposed) return;
+      _frameSubscribeDeadlines.remove(terminalId);
+      _failFrameSubscribe(terminalId);
+    });
     session.sendForCheckout(
       checkoutId,
-      createAbMessage('terminal:snapshot:request', {
+      createAbMessage('terminal:subscribe', {
         'terminalId': terminalId,
-        // See [_paintedTerminalIds]. An agent that predates the key strips it
-        // (the request schema is a `z.object`) and answers with the legacy
-        // prelude-plus-byte-tail blob, which `_applySnapshot` puts its own
-        // erase ahead of.
-        'history': wantsHistory,
+        'version': kTerminalFrameProtocolVersion,
+        'requestId': requestId,
       }),
+    );
+    // The subscribe IS this terminal's attach from here on, so the stage it
+    // moves to has to reach the pane — without this a re-subscribe over an
+    // already-painted frame tab never republishes, and the UI keeps rendering
+    // the stage from before it (see [_frameSubscribeDeadlines]).
+    _publishHydration();
+  }
+
+  /// Bounds an unanswered subscribe without changing the display protocol.
+  void _failFrameSubscribe(String terminalId) {
+    _clearPendingSubscribe(terminalId);
+    _frameFailedIds.add(terminalId);
+    _frameStatusMessage[terminalId] =
+        'Terminal connection failed. Reconnect or upgrade the bridge.';
+    _publishHydration();
+  }
+
+  /// Best-effort `terminal:unsubscribe` for whatever live frame attachment
+  /// [terminalId] holds. Fire-and-forget like every other outbound verb here
+  /// -- the bridge's own ACK_TIMEOUT and run-exit paths already retire an
+  /// attachment nobody explicitly released, so a dropped send here costs
+  /// nothing but a slightly later bridge-side cleanup.
+  void _unsubscribeFrame(String terminalId) {
+    final attachment = _frameAttachment.remove(terminalId);
+    if (attachment == null) return;
+    perfRecorder.noteTerminalDemand('unsubscribes');
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('terminal:unsubscribe', {
+        'terminalId': terminalId,
+        'runId': attachment.runId,
+        'attachmentId': attachment.attachmentId,
+      }),
+    );
+  }
+
+  bool requestTerminalHistoryPage(String terminalId) {
+    if (_disposed) return false;
+    final tab = _state.tabs[terminalId];
+    if (tab == null || tab.mode != TerminalDisplayMode.frame) return false;
+    final attachment =
+        _frameAttachment[terminalId] ?? _endedHistoryAttachment[terminalId];
+    if (attachment == null) return false;
+    final model = tab.history;
+    if (!model.canLoadMore) return false;
+    final boundary = model.boundary;
+    final cursor = model.cursor;
+    if (boundary == null || cursor == null) return false;
+    final requestId = const Uuid().v4();
+    if (!model.markRequested(requestId)) return false;
+    // Armed BEFORE the send, never after: the model reads as outstanding from
+    // the line above, so a send that throws at the call would otherwise leave
+    // the pane waiting on a bound that was never armed.
+    _historyRequestDeadlines[terminalId]?.cancel();
+    _historyRequestDeadlines[terminalId] = Timer(snapshotAttachTimeout, () {
+      if (_disposed) return;
+      _historyRequestDeadlines.remove(terminalId);
+      // Addressed to the MODEL, not to the terminal: the live screen is
+      // unaffected by a page that never came, and demoting a painting
+      // terminal because its scrollback stalled would trade the thing that
+      // works for the thing that does not.
+      //
+      // Named, because this map is keyed by terminal while the model is the
+      // authority on which request is outstanding: the model can abandon the
+      // request behind this bound without the bound's knowledge (an epoch
+      // turnover discards the very rows its answer would be addressed by), and
+      // a timeout reported for a request the client itself gave up on is a
+      // banner nothing on screen explains.
+      _state.tabs[terminalId]?.history.noteRequestFailed(
+        "The agent didn't answer this scrollback request.",
+        requestId: requestId,
+      );
+    });
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('terminal:history:request', {
+        'terminalId': terminalId,
+        'runId': attachment.runId,
+        'attachmentId': attachment.attachmentId,
+        'requestId': requestId,
+        'epoch': boundary.epoch,
+        'beforeRowId': cursor,
+      }),
+    );
+    return true;
+  }
+
+  /// One answered `terminal:history:request`.
+  void _handleTerminalHistoryPage(TerminalHistoryPageMessage msg) {
+    final tab = _state.tabs[msg.terminalId];
+    if (tab == null || tab.mode != TerminalDisplayMode.frame) return;
+    final attachment =
+        _frameAttachment[msg.terminalId] ??
+        _endedHistoryAttachment[msg.terminalId];
+    // D5, applied to the archive: a page answering an attachment this client
+    // has since replaced describes a run it is no longer reading, and its row
+    // ids belong to that run's epoch counter, not this one's.
+    if (attachment == null ||
+        attachment.runId != msg.runId ||
+        attachment.attachmentId != msg.attachmentId) {
+      return;
+    }
+    // The model does its own correlation on requestId -- a late answer to a
+    // superseded request names this same attachment and must not be inserted.
+    // The bound is retired on its verdict and never ahead of it: this map is
+    // keyed by terminal alone, so retiring it for a loser would leave the
+    // request that IS outstanding with nothing left to end it, and the pane
+    // loading for good.
+    if (tab.history.applyPage(msg)) {
+      _historyRequestDeadlines.remove(msg.terminalId)?.cancel();
+      if (tab.history.hasPendingSeek) {
+        requestTerminalHistoryPage(msg.terminalId);
+      }
+    }
+  }
+
+  /// Re-drives ONE terminal's screen pull.
+  ///
+  /// Deliberately not `StreamTransport.refreshSnapshot()`, which re-drives every
+  /// hydrator on the stream — including a per-checkout `tree:full` for every
+  /// checkout — and would turn a user's tap into a multi-megabyte fan-out.
+  void retryAttach(String terminalId) {
+    if (_disposed || !_state.tabs.containsKey(terminalId)) return;
+    _attachTerminal(terminalId);
+  }
+
+  /// Re-drives the whole checkout's attach after its checkout-wide verdict
+  /// came back failed.
+  ///
+  /// Reached only from an explicit tap on a workspace whose terminals never
+  /// arrived, because it is the expensive lever: [retryAttach] re-asks for ONE
+  /// terminal's screen, and with no tabs at all it has no id to name. This
+  /// re-asks for the frame the tabs themselves are built from.
+  ///
+  /// The bound is re-armed only over a live subscription, the same rule
+  /// [_rehydrateTerminals] follows. A bound exists to tell a surface that is
+  /// waiting that its wait ended badly, so a service nobody watches must not
+  /// hold a live timer for the length of the timeout — and this is a public
+  /// method, so the mounted surface the tap usually comes from is not proof
+  /// that anything is reading.
+  Future<void> retryCheckoutAttach() async {
+    if (_disposed) return;
+    _checkoutAttachFailed = false;
+    if (_stateController.hasListener) _armCheckoutAttachDeadline();
+    _publishHydration();
+    final transport = session.transport;
+    if (transport is StreamTransport) {
+      await transport.refreshDurableState();
+      return;
+    }
+    // No relay stream to re-pull on: re-running the hydrator is the only
+    // re-drive this transport has, and registering under the live key runs it
+    // now rather than adding a second one. Deliberately the key [activate]
+    // registers, not a private one, so a checkout that is retried and then
+    // loses focus has its heavy hydrator taken away again by [deactivate]
+    // rather than kept alive behind the activation gate's back.
+    await session.hydrateCheckout(
+      checkoutId,
+      _frameHydratorKey,
+      _rehydrateTerminals,
     );
   }
 
@@ -361,11 +1080,170 @@ class TerminalService {
       _handleGitCheckoutResult(message);
     } else if (message is TerminalNotificationMessage) {
       _handleNotification(message);
+    } else if (message is TerminalBellMessage) {
+      if (_frameAttachment[message.terminalId]?.runId == message.runId &&
+          _state.tabs[message.terminalId]?.ghostty.isFocused == true) {
+        ringTerminalBell();
+      }
     } else if (message is NotificationPushMessage) {
       _pushController.add(message);
     } else if (message is TerminalSizeMessage) {
       _handleTerminalSize(message);
+    } else if (message is TerminalSubscribedMessage) {
+      _handleFrameSubscribed(message);
+    } else if (message is TerminalDisplayStatusMessage) {
+      _handleFrameDisplayStatus(message);
     }
+  }
+
+  /// Accepts a `terminal:subscribe` this client sent, promoting the terminal
+  /// to frame mode.
+  void _handleFrameSubscribed(TerminalSubscribedMessage msg) {
+    final terminalId = msg.terminalId;
+    // A late reply to a subscribe this terminal has since superseded (a
+    // fresh reconnect, respawn, or retry already sent another one) must
+    // never resurrect the attempt it answers.
+    if (_frameSubscribeRequestId[terminalId] != msg.requestId) {
+      if (!msg.requestId.startsWith(_subscribePrefix)) return;
+      final current = _frameAttachment[terminalId];
+      if (current?.runId == msg.runId &&
+          current?.attachmentId == msg.attachmentId) {
+        return;
+      }
+      session.sendForCheckout(
+        checkoutId,
+        createAbMessage('terminal:unsubscribe', {
+          'terminalId': terminalId,
+          'runId': msg.runId,
+          'attachmentId': msg.attachmentId,
+        }),
+      );
+      return;
+    }
+    _clearPendingSubscribe(terminalId);
+    final tab = _state.tabs[terminalId];
+    if (tab == null) return; // Tab gone since we asked; nothing to attach.
+    if (_historyRunId[terminalId] != msg.runId) {
+      _discardFrameArchive(terminalId);
+      _historyRunId[terminalId] = msg.runId;
+    }
+    _frameAttachment[terminalId] = (
+      runId: msg.runId,
+      attachmentId: msg.attachmentId,
+    );
+    _frameHighestSequence[terminalId] = 0;
+    if (_visible(terminalId)) {
+      _frameSubscribeDeadlines[terminalId] = Timer(snapshotAttachTimeout, () {
+        if (!_disposed && !_freshScreens.contains(terminalId)) {
+          _failFrameSubscribe(terminalId);
+        }
+      });
+    }
+    _frameFailedIds.remove(terminalId);
+    _frameEndedIds.remove(terminalId);
+    _frameStatusMessage.remove(terminalId);
+    final tabs = Map<String, TerminalTab>.from(_state.tabs);
+    tabs[terminalId] = tab.copyWith(mode: TerminalDisplayMode.frame);
+    _setState(_state.copyWith(tabs: tabs));
+  }
+
+  /// Handles a subscribe refusal or a live attachment's status.
+  void _handleFrameDisplayStatus(TerminalDisplayStatusMessage msg) {
+    final terminalId = msg.terminalId;
+    final tab = _state.tabs[terminalId];
+    if (tab == null) return;
+    final requestId = msg.requestId;
+    if (_prefetchId == terminalId &&
+        ((requestId != null &&
+                requestId == _frameSubscribeRequestId[terminalId]) ||
+            (msg.attachmentId != null &&
+                msg.attachmentId ==
+                    _frameAttachment[terminalId]?.attachmentId))) {
+      _prefetchStopped = true;
+      _finishPrefetch();
+      return;
+    }
+    // A notice naming a request this client still has outstanding is answering
+    // the SUBSCRIBE, and by construction carries no attachment to key on --
+    // Refusals carry only the terminal and requestId.
+    // Resolved FIRST and regardless of mode, or a tab already committed to
+    // frame mode drops the only word it will ever get that its re-subscribe
+    // was refused, and then waits out the bound instead.
+    if (requestId != null &&
+        _frameSubscribeRequestId[terminalId] == requestId) {
+      _clearPendingSubscribe(terminalId);
+      if (msg.code == 'UNKNOWN_TERMINAL') {
+        _handleMissingTerminal(terminalId, tab);
+        return;
+      }
+      _frameFailedIds.add(terminalId);
+      _frameStatusMessage[terminalId] = msg.message;
+      _publishHydration();
+      return;
+    }
+    // Request replies cannot act on an attachment accepted by a newer attempt.
+    if (requestId != null || msg.code == 'UNKNOWN_TERMINAL') return;
+    if (tab.mode != TerminalDisplayMode.frame) return;
+    final attachment = _frameAttachment[terminalId];
+    // Only the LIVE attachment's own notice may act on it -- a superseded
+    // attachment's late ENDED/failure racing a fresh resubscribe must never
+    // touch the one that replaced it. A notice carrying no attachmentId
+    // addresses the terminal itself and is taken at face value (D7: an
+    // unrecognized notice must surface, never be dropped).
+    if (attachment == null) return;
+    if (msg.attachmentId != null &&
+        msg.attachmentId != attachment.attachmentId) {
+      return;
+    }
+    if (msg.code == 'HISTORY_DISABLED') {
+      // Names exactly what it broke. The live display is unaffected, and
+      // badging the whole terminal failed for a scrollback problem would
+      // hide a pane that is still painting. No bridge emits this today; the
+      // code is in the wire enum, so the app answers it correctly rather than
+      // falling through to the generic failure below.
+      _historyRequestDeadlines.remove(terminalId)?.cancel();
+      // Closes paging as well as recording the sentence: the refusal is
+      // addressed at the RUN, so the next scroll tick asking again earns the
+      // same refusal and a bound that expires over this message.
+      tab.history.noteHistoryUnavailable(msg.message);
+      return;
+    }
+    _frameStatusMessage[terminalId] = msg.message;
+    if (msg.code == 'ENDED') {
+      // D7: lifecycle, not failure. The only notice that definitionally ends
+      // the attachment, so the only one that drops it here.
+      _endedHistoryAttachment[terminalId] = attachment;
+      _frameAttachment.remove(terminalId);
+      _frameEndedIds.add(terminalId);
+      final exitCode = _pendingExitCodes.remove(terminalId) ?? msg.exitCode;
+      _completeTerminal(terminalId, exitCode);
+    } else {
+      _frameFailedIds.add(terminalId);
+    }
+    _publishHydration();
+  }
+
+  void _handleMissingTerminal(String terminalId, TerminalTab tab) {
+    _missingTerminalIds.add(terminalId);
+    _resizeTimers.remove(terminalId)?.cancel();
+    _resizeBaseDrivers.remove(terminalId);
+    tab.ghostty.setSessionRunning(false);
+    final retained =
+        _framePaintedIds.contains(terminalId) ||
+        tab.history.rows.isNotEmpty ||
+        tab.history.boundary != null;
+    if (!retained && !_pendingTerminalIds.contains(terminalId)) {
+      _removeLocalTerminal(terminalId);
+      return;
+    }
+    _frameStatusMessage[terminalId] = 'Terminal no longer available';
+    final tabs = Map<String, TerminalTab>.from(_state.tabs);
+    tabs[terminalId] = tab.copyWith(
+      sessionState: _pendingTerminalIds.contains(terminalId)
+          ? TerminalSessionState.starting
+          : TerminalSessionState.exited,
+    );
+    _setState(_state.copyWith(tabs: tabs));
   }
 
   Future<void> _send(Map<String, dynamic> message) async {
@@ -374,21 +1252,12 @@ class TerminalService {
 
   // --- Message handlers ---
 
-  void _handleTerminalOutput(TerminalOutputMessage msg) {
-    final tab = _state.tabs[msg.terminalId];
-    if (tab == null) return;
-    // Only the live output path closes an echo timer. Snapshots are a
-    // reconnect artifact, not a response to anything the user typed.
-    perfRecorder.noteTerminalOutput(
-      projectId: session.projectId,
-      checkoutId: checkoutId,
-      terminalId: msg.terminalId,
-    );
-    tab.ghostty.appendOutputBytes(utf8.encode(msg.data));
-    _paintedTerminalIds.add(msg.terminalId);
-  }
-
   void _handleTerminalStarted(TerminalStartedMessage msg) {
+    if (_prefetchId == msg.terminalId) _finishPrefetch();
+    _missingTerminalIds.remove(msg.terminalId);
+    _pendingExitCodes.remove(msg.terminalId);
+    _discardFrameArchive(msg.terminalId);
+    _historyRunId.remove(msg.terminalId);
     if (_canceledPendingTerminalIds.contains(msg.terminalId)) {
       _settlePendingTerminal(msg.terminalId);
       requestStop(msg.terminalId);
@@ -418,6 +1287,7 @@ class TerminalService {
         clearExitCode: true,
         type: msg.terminalType,
         sizeEpoch: existing.sizeEpoch + 1,
+        mode: TerminalDisplayMode.frame,
       );
     } else {
       final tab = _createTab(
@@ -434,20 +1304,8 @@ class TerminalService {
 
     final activeId = _state.activeTerminalId ?? msg.terminalId;
     _setState(_state.copyWith(tabs: tabs, activeTerminalId: activeId));
-    // A start means a fresh PTY, and the agent's seq counter is per PTY —
-    // deleted on exit, so this one begins again at 1. Any cutoff still held for
-    // this id was taken from the previous generation and now sits above every
-    // seq the new one will ever emit, filtering its whole output: a blank pane
-    // behind a live process. Dropped BEFORE the pull, and unconditionally,
-    // because the reply is not guaranteed and losing a live cutoff costs a few
-    // duplicated lines where keeping a dead one costs the pane. The exit
-    // handler covers the ordinary case; this covers the start whose exit was
-    // never delivered, which is every window where outbound frames were dropped
-    // (a remote-access flip drops status frames too).
-    _snapshotSeq.remove(msg.terminalId);
-    // Newly-discovered terminal — fetch its scrollback so we can drop stale
-    // terminal:output frames via the per-terminal seq cutoff.
-    _requestTerminalSnapshot(msg.terminalId);
+    // A same-id respawn requires a fresh attachment even if its exit was lost.
+    _attachTerminal(msg.terminalId);
   }
 
   void _handleTerminalSize(TerminalSizeMessage msg) {
@@ -468,8 +1326,8 @@ class TerminalService {
     }
     final tabs = Map<String, TerminalTab>.from(_state.tabs);
     tabs[msg.terminalId] = tab.copyWith(
-      cols: msg.cols,
-      rows: msg.rows,
+      cols: _framePaintedIds.contains(msg.terminalId) ? null : msg.cols,
+      rows: _framePaintedIds.contains(msg.terminalId) ? null : msg.rows,
       driverClientId: msg.driverClientId,
       // The caller booked that size the moment `sendResize` queued it, so a
       // frame cancelled here would otherwise leave its gate shut against a
@@ -482,30 +1340,48 @@ class TerminalService {
   void _handleTerminalExited(TerminalExitedMessage msg) {
     _settlePendingTerminal(msg.terminalId);
     _canceledPendingTerminalIds.remove(msg.terminalId);
-    // The agent's seq counter is per PTY, not per terminal id: it is deleted on
-    // exit (`ConnState.clearTerminal`), so a same-id respawn restarts at 1.
-    // A cutoff kept from the previous run sits above every seq the next one
-    // emits, and would filter its entire output as already-snapshotted.
-    _snapshotSeq.remove(msg.terminalId);
     final tab = _state.tabs[msg.terminalId];
     if (tab == null) return;
 
+    if (_frameAttachment.containsKey(msg.terminalId) &&
+        !_frameEndedIds.contains(msg.terminalId)) {
+      tab.ghostty.setSessionRunning(false);
+      _pendingExitCodes[msg.terminalId] = msg.exitCode;
+      return;
+    }
+    _completeTerminal(msg.terminalId, msg.exitCode);
+  }
+
+  void _completeTerminal(String terminalId, int? exitCode) {
+    final tab = _state.tabs[terminalId];
+    if (tab == null) return;
     tab.ghostty.setSessionRunning(false);
     final tabs = Map<String, TerminalTab>.from(_state.tabs);
-    tabs[msg.terminalId] = tab.copyWith(
+    tabs[terminalId] = tab.copyWith(
       sessionState: TerminalSessionState.exited,
-      exitCode: msg.exitCode,
+      exitCode: exitCode,
     );
     _setState(_state.copyWith(tabs: tabs));
   }
 
   void _handleAgentStatus(AgentStatusMessage msg) {
+    _sawAgentStatus = true;
+    // A checkout that was merely slow is not a broken one. The deadline fired
+    // before the frame arrived; the frame arriving is the answer.
+    _checkoutAttachFailed = false;
+    _checkoutAttachDeadline?.cancel();
+    _checkoutAttachDeadline = null;
     // Services list is now mirrored into ProjectStatus by ProjectStatusNotifier;
     // consumers read it from projectStatusProvider.
     final newTabs = <String, TerminalTab>{};
     final discovered = <String>[];
 
     for (final info in msg.terminals) {
+      if (_missingTerminalIds.contains(info.terminalId)) {
+        final retained = _state.tabs[info.terminalId];
+        if (retained != null) newTabs[info.terminalId] = retained;
+        continue;
+      }
       if (_canceledPendingTerminalIds.contains(info.terminalId)) {
         if (info.running) {
           requestStop(info.terminalId);
@@ -541,16 +1417,32 @@ class TerminalService {
         final respawned =
             info.running &&
             existing.sessionState == TerminalSessionState.exited;
+        if (respawned) {
+          _discardFrameArchive(info.terminalId);
+          _historyRunId.remove(info.terminalId);
+          _resetFrameTracking(info.terminalId);
+        }
+        final awaitingFinal =
+            !info.running &&
+            _frameAttachment.containsKey(info.terminalId) &&
+            !_frameEndedIds.contains(info.terminalId);
         final updated = existing.copyWith(
           name: info.name,
-          sessionState: info.running
+          sessionState: awaitingFinal
+              ? existing.sessionState
+              : info.running
               ? TerminalSessionState.running
               : TerminalSessionState.exited,
           shell: info.shell,
-          cols: info.cols,
-          rows: info.rows,
+          cols: !respawned && _framePaintedIds.contains(info.terminalId)
+              ? null
+              : info.cols,
+          rows: !respawned && _framePaintedIds.contains(info.terminalId)
+              ? null
+              : info.rows,
           type: info.type,
           sizeEpoch: respawned ? existing.sizeEpoch + 1 : null,
+          mode: respawned ? TerminalDisplayMode.frame : null,
         );
         newTabs[info.terminalId] = info.driverClientId == null
             ? updated.copyWith(clearDriverClientId: true)
@@ -589,6 +1481,10 @@ class TerminalService {
       final pending = _state.tabs[terminalId];
       if (pending != null) newTabs.putIfAbsent(terminalId, () => pending);
     }
+    for (final terminalId in _missingTerminalIds) {
+      final retained = _state.tabs[terminalId];
+      if (retained != null) newTabs.putIfAbsent(terminalId, () => retained);
+    }
 
     var activeId = _state.activeTerminalId;
     if (activeId == null || !newTabs.containsKey(activeId)) {
@@ -622,13 +1518,10 @@ class TerminalService {
     // A tab can leave the status without ever exiting — a service dropped
     // from antgrid.yaml, a slot renamed. Its cutoff would otherwise outlive it
     // and filter the first bytes of whatever later claims the same id.
-    _snapshotSeq.removeWhere((id, _) => !newTabs.containsKey(id));
-    _paintedTerminalIds.removeWhere((id) => !newTabs.containsKey(id));
-    _awaitingHistoryIds.removeWhere((id) => !newTabs.containsKey(id));
     for (final terminalId in discovered) {
       // Only the tabs that survived the rebuild: one dropped along the way has
       // nowhere for the reply to land.
-      if (newTabs.containsKey(terminalId)) _requestTerminalSnapshot(terminalId);
+      if (newTabs.containsKey(terminalId)) _attachTerminal(terminalId);
     }
   }
 
@@ -643,12 +1536,9 @@ class TerminalService {
     String? driverClientId,
     TerminalSessionState? sessionState,
   }) {
-    // A fresh engine holds nothing, so the next snapshot request for this id is
-    // a COLD one. Cleared here rather than at every removal site because this is
-    // the single place a controller is built — a stale `true` would cost the
-    // user the history the new tab is about to be handed.
-    _paintedTerminalIds.remove(terminalId);
-    _awaitingHistoryIds.remove(terminalId);
+    _framePaintedIds.remove(terminalId);
+    _materialized.remove(terminalId);
+    _resetFrameTracking(terminalId);
     final tab = TerminalTab(
       terminalId: terminalId,
       name: name,
@@ -664,6 +1554,14 @@ class TerminalService {
       driverClientId: driverClientId,
     );
 
+    if (_visible(terminalId)) _materializeTab(tab);
+    return tab;
+  }
+
+  void _materializeTab(TerminalTab tab) {
+    final terminalId = tab.terminalId;
+    if (!_materialized.add(terminalId)) return;
+
     // Wire the Ghostty controller's user-input path back to the agent.
     //
     // The bridge fronts the PTY and answers the guest's capability queries
@@ -675,24 +1573,25 @@ class TerminalService {
     // matched against whichever query is pending by the time it lands.
     tab.ghostty.attachExternalTransport(
       writeBytes: (bytes) {
+        // sendInput's refusal is surfaced as pane chrome (inputPaused, the
+        // hydration strip), not through this return value: `false` here
+        // becomes KeyEventResult.ignored, so the keystroke would escape into
+        // the app's global shortcut layer, and the IME/soft-keyboard path
+        // discards the bool entirely — the platform this bug bites hardest.
         sendInput(terminalId, utf8.decode(bytes, allowMalformed: true));
         return true;
       },
       onResize: null,
       forwardGuestQueryReplies: false,
     );
-    // A bare BEL rings audibly like a native terminal — it is deliberately not a
-    // desktop notification (only OSC 9/777 raise those, via terminal:notification).
-    // Ring only the terminal the user is actually viewing: the focus coordinator
-    // keeps `isFocused` current (false for background projects, blurred agents,
-    // and while the app is backgrounded), so a background bell doesn't sound /
-    // buzz the device. `ringTerminalBell` throttles bursts.
     final ghostty = tab.ghostty;
     ghostty.onBellData = () {
       if (!ghostty.isFocused) return;
       ringTerminalBell();
     };
-    tab.ghostty.setSessionRunning(running);
+    tab.ghostty.setSessionRunning(
+      tab.sessionState == TerminalSessionState.running,
+    );
 
     // Agent terminals start "blurred" so a background/never-viewed agent can
     // still raise notifications (TUIs like opencode treat focus-unknown as
@@ -701,13 +1600,39 @@ class TerminalService {
     if (tab.isAgent) {
       tab.ghostty.setFocused(false);
     }
-
-    return tab;
   }
 
   // --- Outbound messages ---
 
-  void sendInput(String terminalId, String data) {
+  /// Sends a keystroke, reporting whether the frame actually left.
+  ///
+  /// False means the transport could not carry it and NOTHING was buffered.
+  /// A delayed keystroke replayed against a prompt that has moved on can
+  /// confirm something the user never saw, so a refusal is dropped, not
+  /// queued, and the pane says so instead. Callers that report success to the
+  /// user must honour this.
+  bool sendInput(String terminalId, String data) {
+    return _sendTerminalInput(terminalId, data, requireFreshDisplay: true);
+  }
+
+  bool _sendTerminalInput(
+    String terminalId,
+    String data, {
+    required bool requireFreshDisplay,
+  }) {
+    if (_disposed) return false;
+    if (_missingTerminalIds.contains(terminalId)) return false;
+    if (!session.transport.isEstablished) {
+      _syncInputPaused();
+      return false;
+    }
+    final tab = _state.tabs[terminalId];
+    if (tab == null ||
+        !_hasLivePty(tab) ||
+        _pendingExitCodes.containsKey(terminalId)) {
+      return false;
+    }
+    if (requireFreshDisplay && !canSendInput(terminalId)) return false;
     // terminal_used = the user actually typed into / drove a terminal. Fire on
     // input, not on terminal:started — the latter replays automatically on
     // every session re-warm, which has nothing to do with user engagement.
@@ -726,21 +1651,60 @@ class TerminalService {
         'data': data,
       }),
     );
+    return true;
   }
 
-  void sendToAgentTerminal(String text) {
+  /// Sends a confirmed handoff even when the agent pane is hidden. Unlike
+  /// pane keystrokes, this action does not depend on rendered input modes:
+  /// mobile capture and Git handoffs reveal the agent only after sending.
+  /// Refuses unavailable PTYs and disconnected transports without buffering.
+  bool sendToAgentTerminal(String text) {
     final agentTabs = _state.tabs.values.where(
       (tab) => tab.isAgent && tab.sessionState == TerminalSessionState.running,
     );
-    if (agentTabs.isEmpty) return;
-    sendInput(agentTabs.first.terminalId, text);
+    if (agentTabs.isEmpty) return false;
+    // Terminals submit on CR, not bare LF (see `_sanitizePaste` in
+    // terminal_view_wrapper.dart) — normalize embedded newlines and append a
+    // trailing CR. Unlike a clipboard paste, this is an explicit "Send"
+    // action the user already confirmed in a dialog, so it must land in the
+    // agent outright rather than sit in the prompt waiting on a manual Enter.
+    final normalized = text.replaceAll('\r\n', '\r').replaceAll('\n', '\r');
+    final data = normalized.endsWith('\r') ? normalized : '$normalized\r';
+    return _sendTerminalInput(
+      agentTabs.first.terminalId,
+      data,
+      requireFreshDisplay: false,
+    );
+  }
+
+  bool takeControl(String terminalId, int cols, int rows) {
+    if (_disposed ||
+        _clientId == null ||
+        !_visible(terminalId) ||
+        !session.transport.isEstablished ||
+        _state.tabs[terminalId]?.sessionState != TerminalSessionState.running) {
+      return false;
+    }
+    _resizeTimers.remove(terminalId)?.cancel();
+    _resizeBaseDrivers.remove(terminalId);
+    _send(
+      createAbMessage('terminal:resize', {
+        'terminalId': terminalId,
+        'cols': cols,
+        'rows': rows,
+        'clientId': _clientId,
+        'intent': TerminalResizeIntent.takeover.name,
+      }),
+    );
+    return true;
   }
 
   /// Queues a debounced `terminal:resize`, reporting whether it was QUEUED.
   ///
   /// False means nothing was queued and nothing ever will be for this call —
   /// the per-install client id has not resolved yet (see
-  /// `terminalStateProvider`, which pushes it in), or the service is gone. The
+  /// `terminalStateProvider`, which pushes it in), the transport is offline,
+  /// or the service is gone. The
   /// caller must not record the size as sent: the wrapper gates re-sends on the
   /// last size it believes the PTY has, so a drop booked as a send strands the
   /// PTY at the previous geometry until the panel happens to change size again.
@@ -756,17 +1720,18 @@ class TerminalService {
     String? baseDriverClientId,
   }) {
     final clientId = _clientId;
-    if (_disposed || clientId == null) return false;
+    if (!_visible(terminalId)) return false;
+    if (_disposed || clientId == null || !session.transport.isEstablished) {
+      return false;
+    }
     _resizeTimers[terminalId]?.cancel();
     _resizeBaseDrivers[terminalId] = baseDriverClientId;
     _resizeTimers[terminalId] = Timer(const Duration(milliseconds: 100), () {
       _resizeTimers.remove(terminalId);
       _resizeBaseDrivers.remove(terminalId);
       final currentDriver = _state.tabs[terminalId]?.driverClientId;
-      if (baseDriverClientId != null &&
-          currentDriver != null &&
-          currentDriver != baseDriverClientId &&
-          currentDriver != clientId) {
+      if (!session.transport.isEstablished ||
+          (currentDriver != null && currentDriver != clientId)) {
         // Discarded, not sent — and the caller booked this size when the queue
         // accepted it, so hand back the invalidation edge that reopens its gate.
         _invalidateGeometry(terminalId);
@@ -778,6 +1743,7 @@ class TerminalService {
           'cols': cols,
           'rows': rows,
           'clientId': clientId,
+          'intent': TerminalResizeIntent.resize.name,
           'baseDriverClientId': ?baseDriverClientId,
         }),
       );
@@ -793,6 +1759,23 @@ class TerminalService {
     String? cwd,
     Map<String, String>? env,
   }) {
+    final tab = _state.tabs[terminalId];
+    if (tab != null) {
+      // A reply to the previous run must not delete a start awaiting admission.
+      _clearPendingSubscribe(terminalId);
+      _pendingTerminalIds.add(terminalId);
+      _pendingTerminalTimers.remove(terminalId)?.cancel();
+      _pendingTerminalTimers[terminalId] = Timer(
+        terminalStartTimeout,
+        () => _expirePendingTerminal(terminalId),
+      );
+      final tabs = Map<String, TerminalTab>.from(_state.tabs);
+      tabs[terminalId] = tab.copyWith(
+        sessionState: TerminalSessionState.starting,
+        clearExitCode: true,
+      );
+      _setState(_state.copyWith(tabs: tabs));
+    }
     _send(
       createAbMessage('terminal:start', {
         'terminalId': terminalId,
@@ -810,13 +1793,6 @@ class TerminalService {
   void createAdHocTerminal(String terminalId, {required String name}) {
     _deletedTerminalIds.remove(terminalId);
     _canceledPendingTerminalIds.remove(terminalId);
-    _pendingTerminalIds.add(terminalId);
-    _pendingTerminalTimers.remove(terminalId)?.cancel();
-    _pendingTerminalTimers[terminalId] = Timer(
-      terminalStartTimeout,
-      () => _expirePendingTerminal(terminalId),
-    );
-
     final tabs = Map<String, TerminalTab>.from(_state.tabs);
     final existing = tabs[terminalId];
     tabs[terminalId] = existing == null
@@ -864,19 +1840,38 @@ class TerminalService {
   /// reports the session running again (via `terminal:started` or `running:
   /// true` in a status snapshot), at which point a fresh controller is built.
   void deleteTerminal(String terminalId) {
+    _discardFrameArchive(terminalId);
+    _historyRunId.remove(terminalId);
     requestStop(terminalId);
     _deletedTerminalIds.add(terminalId);
     if (_pendingTerminalIds.contains(terminalId)) {
       _canceledPendingTerminalIds.add(terminalId);
     }
     _settlePendingTerminal(terminalId);
+    _missingTerminalIds.remove(terminalId);
+    _removeLocalTerminal(terminalId);
+  }
+
+  void _removeLocalTerminal(String terminalId) {
+    _lastViewed.remove(terminalId);
+    if (_prefetchId == terminalId) _finishPrefetch();
+    hiddenScreens.take(this, terminalId);
+    _visibleFrames.remove(terminalId);
+    _materialized.remove(terminalId);
     final tab = _state.tabs[terminalId];
     if (tab == null) return;
     _resizeTimers.remove(terminalId)?.cancel();
     _resizeBaseDrivers.remove(terminalId);
-    _snapshotSeq.remove(terminalId);
-    _paintedTerminalIds.remove(terminalId);
-    _awaitingHistoryIds.remove(terminalId);
+    _unsubscribeFrame(terminalId);
+    _framePaintedIds.remove(terminalId);
+    _resetFrameTracking(terminalId);
+    // `replaceEpoch` and `history` are deliberately NOT disposed, while the
+    // engine below must be: neither notifier holds a native resource, and
+    // `addListener` on a disposed one THROWS where `removeListener` is
+    // allowed. Disposing them only here would make this the single path that
+    // can fault a widget remounting on a stale tab object — the service's own
+    // dispose and a same-id respawn both leave theirs alive, and both are
+    // garbage the moment the tab holding them leaves the state.
     tab.ghostty.dispose();
     final tabs = Map<String, TerminalTab>.from(_state.tabs)..remove(terminalId);
     final isActive = _state.activeTerminalId == terminalId;
@@ -998,7 +1993,7 @@ class TerminalService {
     // Mark the originating tab unread (badge) — unless it's the terminal the
     // user is already viewing — then surface to UI listeners.
     final tab = _state.tabs[msg.terminalId];
-    if (tab != null && msg.terminalId != _state.activeTerminalId) {
+    if (tab != null && !_visible(msg.terminalId)) {
       final tabs = Map<String, TerminalTab>.from(_state.tabs);
       tabs[msg.terminalId] = tab.copyWith(unread: true);
       _setState(_state.copyWith(tabs: tabs));
@@ -1008,11 +2003,24 @@ class TerminalService {
 
   Future<void> dispose() async {
     if (_disposed) return;
+    _finishPrefetch();
+    _displayServices.remove(this);
+    hiddenScreens.removeOwner(this);
     _disposed = true;
+    _displayOwners.clear();
+    for (final timer in [
+      ..._frameSubscribeDeadlines.values,
+      ..._historyRequestDeadlines.values,
+      ..._resizeTimers.values,
+      ..._pendingTerminalTimers.values,
+    ]) {
+      timer.cancel();
+    }
+    _cancelCheckoutAttachDeadline();
     // Same reason PreviewService deregisters its own: the registry is the
     // TRANSPORT's, which outlives this service, so a hydrator left behind
     // keeps pulling a dead checkout's snapshots on every reconnect forever.
-    session.unhydrateCheckout(checkoutId, _snapshotHydratorKey);
+    session.unhydrateCheckout(checkoutId, _frameHydratorKey);
     await _resumeSub?.cancel();
     _resumeSub = null;
     // Resolve any in-flight git action cleanly so its tier-2 timeout timer is
@@ -1025,18 +2033,37 @@ class TerminalService {
     _heavySub = null;
     await _statusSub?.cancel();
     _statusSub = null;
+    for (final id in _materialized) {
+      _state.tabs[id]?.ghostty.dispose();
+    }
+    _materialized.clear();
+    // Disown every live frame attachment on the way out — otherwise the
+    // bridge keeps ticking an ack budget against a viewer that has stopped
+    // listening, and only discovers that the hard way via ACK_TIMEOUT.
+    for (final id in _frameAttachment.keys.toList()) {
+      _unsubscribeFrame(id);
+    }
     for (final timer in _resizeTimers.values) {
       timer.cancel();
     }
     for (final timer in _pendingTerminalTimers.values) {
       timer.cancel();
     }
+    for (final timer in _frameSubscribeDeadlines.values) {
+      timer.cancel();
+    }
+    for (final timer in _historyRequestDeadlines.values) {
+      timer.cancel();
+    }
+    _historyRequestDeadlines.clear();
+    _checkoutAttachDeadline?.cancel();
+    _checkoutAttachDeadline = null;
     _resizeTimers.clear();
     _pendingTerminalTimers.clear();
     _resizeBaseDrivers.clear();
-    _snapshotSeq.clear();
     _deletedTerminalIds.clear();
     _pendingTerminalIds.clear();
+    _missingTerminalIds.clear();
     _canceledPendingTerminalIds.clear();
     await _stateController.close();
     await _notificationController.close();

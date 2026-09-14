@@ -134,6 +134,117 @@ void main() {
   // it and turning one real failure into a cascade of platform-dependent ones.
   tearDown(() => debugDefaultTargetPlatformOverride = null);
 
+  for (final physicalKeyboard in [true, false]) {
+    testWidgets(
+      'explicit takeover is immediate and bounded (keyboard: $physicalKeyboard)',
+      (tester) async {
+        debugHasPhysicalKeyboardOverride = physicalKeyboard;
+        addTearDown(() => debugHasPhysicalKeyboardOverride = null);
+        final h = await _makeService(addTearDown);
+        h.service.setClientId(_myClientId);
+        h.transport.emit('agent:status', {
+          'projectId': 'p',
+          'terminals': [
+            {
+              'terminalId': 'takeover',
+              'name': 'Terminal',
+              'running': true,
+              'cols': 200,
+              'rows': 40,
+              'driverClientId': _otherClientId,
+            },
+          ],
+        });
+        await tester.pump();
+        var tab = h.service.currentState.tabs['takeover']!;
+        Widget pane() => _wrap(
+          Center(
+            child: SizedBox(
+              width: 300,
+              height: 400,
+              child: TerminalViewWrapper(tab: tab, terminalService: h.service),
+            ),
+          ),
+        );
+        await tester.pumpWidget(pane());
+        await tester.pumpAndSettle();
+        h.transport.sent.clear();
+        final before = tester.getSize(find.byType(GhosttyTerminalView));
+        await tester.tap(find.text('Take control'));
+        await tester.pump();
+        final messages = h.transport.sent.where(
+          (m) => m['type'] == 'terminal:resize',
+        );
+        expect(messages, hasLength(1));
+        expect(messages.single['intent'], 'takeover');
+        expect(messages.single['cols'], lessThan(200));
+        expect(find.text('Taking control\u2026'), findsOneWidget);
+        expect(tester.getSize(find.byType(GhosttyTerminalView)), before);
+        await tester.tap(find.text('Taking control\u2026'));
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(messages, hasLength(1));
+        h.transport.emit('terminal:size', {
+          'terminalId': 'takeover',
+          'cols': messages.single['cols'],
+          'rows': messages.single['rows'],
+          'driverClientId': _myClientId,
+        });
+        await tester.pump();
+        tab = h.service.currentState.tabs['takeover']!;
+        await tester.pumpWidget(pane());
+        await tester.pump();
+        expect(find.text('Take control'), findsNothing);
+        expect(find.text('Taking control\u2026'), findsNothing);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+
+  testWidgets(
+    'takeover timeout restores retry and disconnect disables control',
+    (tester) async {
+      final h = await _makeService(addTearDown);
+      h.service.setClientId(_myClientId);
+      h.transport.emit('agent:status', {
+        'projectId': 'p',
+        'terminals': [
+          {
+            'terminalId': 'retry',
+            'name': 'Terminal',
+            'running': true,
+            'cols': 200,
+            'rows': 40,
+            'driverClientId': _otherClientId,
+          },
+        ],
+      });
+      await tester.pump();
+      final tab = h.service.currentState.tabs['retry']!;
+      Widget pane() =>
+          _wrap(TerminalViewWrapper(tab: tab, terminalService: h.service));
+      await tester.pumpWidget(pane());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Take control'));
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+      expect(find.text('Take control'), findsOneWidget);
+      expect(
+        find.text('Taking control timed out. Please try again.'),
+        findsOneWidget,
+      );
+      h.transport.setEstablished(false);
+      await tester.pumpWidget(pane());
+      h.transport.sent.clear();
+      await tester.tap(find.text('Take control'));
+      await tester.pump();
+      expect(
+        h.transport.sent.where((m) => m['type'] == 'terminal:resize'),
+        isEmpty,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   testWidgets(
     'non-driver grid larger than the viewport is scaled down, not scrolled',
     (tester) async {
@@ -299,54 +410,46 @@ void main() {
     },
   );
 
-  testWidgets(
-    'unclaimed + unfocused renders the driver fill path, not a fixed-width '
-    'letterbox (content tracks the panel)',
-    (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-      final h = await _makeService(addTearDown);
-      h.service.setClientId(_myClientId);
+  testWidgets('unclaimed + unfocused renders the authoritative frame grid', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    final h = await _makeService(addTearDown);
+    h.service.setClientId(_myClientId);
 
-      // Exactly the user-reported repro: a freshly-created session that never
-      // got keyboard focus (driverClientId == null). Before the fix this fell
-      // into the non-driver branch — a fixed-width SizedBox centered by an
-      // Align — so the panel grew (letterbox area) while the content stayed
-      // pinned at tab.cols. An unclaimed terminal must instead drive and fill
-      // the viewport without needing focus. (Assert on the widget tree, not
-      // engine cols: the headless engine does not run its grid layout without
-      // a focus context — see the letterbox tests above, which do the same.)
-      final tab = _tab(id: 't7', cols: 5, driverClientId: null);
+    // Exactly the user-reported repro: a freshly-created session that never
+    // got keyboard focus (driverClientId == null). Before the fix this fell
+    // into the non-driver branch — a fixed-width SizedBox centered by an
+    // Align — so the panel grew (letterbox area) while the content stayed
+    // pinned at tab.cols. An unclaimed terminal must instead drive and fill
+    // the viewport without needing focus. (Assert on the widget tree, not
+    // engine cols: the headless engine does not run its grid layout without
+    // a focus context — see the letterbox tests above, which do the same.)
+    final tab = _tab(id: 't7', cols: 5, driverClientId: null);
 
-      await tester.pumpWidget(
-        _wrap(
-          ExcludeFocus(
-            child: Center(
-              child: SizedBox(
-                width: 300,
-                height: 400,
-                child: TerminalViewWrapper(
-                  tab: tab,
-                  terminalService: h.service,
-                ),
-              ),
+    await tester.pumpWidget(
+      _wrap(
+        ExcludeFocus(
+          child: Center(
+            child: SizedBox(
+              width: 300,
+              height: 400,
+              child: TerminalViewWrapper(tab: tab, terminalService: h.service),
             ),
           ),
         ),
-      );
-      await tester.pumpAndSettle();
+      ),
+    );
+    await tester.pumpAndSettle();
 
-      // The driver fill path uses no scaler at all. That is the non-driver
-      // construct, and a driver whose content were scaled would be typing
-      // into a grid that does not match the size it renders at.
-      expect(find.byType(FittedBox), findsNothing);
-      expect(_wrappingScrollView, findsNothing);
+    expect(find.byType(FittedBox), findsOneWidget);
+    expect(_wrappingScrollView, findsNothing);
 
-      debugDefaultTargetPlatformOverride = null;
-    },
-  );
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets(
-    'driver: resizing the panel re-syncs the engine grid to the new width',
+    'driver resize requests new geometry without mutating the current frame',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       final h = await _makeService(addTearDown);
@@ -371,20 +474,26 @@ void main() {
       await tester.pumpAndSettle();
       await tester.pump(const Duration(milliseconds: 200));
       final colsAt300 = tab.ghostty.cols;
+      final requestedAt300 =
+          h.transport.sent
+                  .where((message) => message['type'] == 'terminal:resize')
+                  .last['cols']
+              as int;
 
       // Grow the panel and let the grid-freeze settle delay (150ms) elapse.
       await tester.pumpWidget(atWidth(600));
       await tester.pumpAndSettle();
       await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 150));
       final colsAt600 = tab.ghostty.cols;
 
-      expect(
-        colsAt600,
-        greaterThan(colsAt300),
-        reason:
-            'engine grid must widen with the panel; stuck at $colsAt300 means '
-            'the content never re-rendered to the new size',
-      );
+      expect(colsAt600, colsAt300);
+      final resizes = h.transport.sent
+          .where((message) => message['type'] == 'terminal:resize')
+          .toList();
+      expect(resizes, isNotEmpty);
+      expect(resizes.last['cols'] as int, greaterThan(requestedAt300));
 
       debugDefaultTargetPlatformOverride = null;
     },
@@ -420,7 +529,7 @@ void main() {
     },
   );
 
-  testWidgets('desktop pointer activation claims by sending terminal:resize', (
+  testWidgets('desktop pointer activation does not take size control', (
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
@@ -448,15 +557,14 @@ void main() {
     final resizes = h.transport.sent
         .where((m) => m['type'] == 'terminal:resize')
         .toList();
-    expect(resizes, isNotEmpty);
-    expect(resizes.last['clientId'], _myClientId);
-    expect(resizes.last['baseDriverClientId'], _otherClientId);
+    expect(resizes, isEmpty);
+    expect(find.text('Take control'), findsOneWidget);
 
     debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets(
-    'driver grid settles to a grown panel while the wrapper keeps rebuilding',
+    'driver keeps the authoritative frame grid while its wrapper rebuilds',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       final h = await _makeService(addTearDown);
@@ -496,10 +604,9 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(
-        tester.getSize(find.byType(GhosttyTerminalView)).width,
-        closeTo(300, _epsilon),
-      );
+      final authoritativeWidth = tester
+          .getSize(find.byType(GhosttyTerminalView))
+          .width;
 
       width.value = 600;
       for (var i = 0; i < 12; i++) {
@@ -509,6 +616,10 @@ void main() {
 
       expect(
         tester.getSize(find.byType(GhosttyTerminalView)).width,
+        closeTo(authoritativeWidth, _epsilon),
+      );
+      expect(
+        tester.getSize(find.byType(FittedBox)).width,
         closeTo(600, _epsilon),
       );
 

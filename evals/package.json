@@ -8,6 +8,7 @@
     "test:evals:isolation": "bun test tests/gate-worktree-isolation.test.ts",
     "test:evals:pairing": "bun test scenarios/pairing/",
     "test:evals:terminal": "bun test scenarios/terminal/",
+    "test:evals:terminal-frames": "bun test tests/gate-terminal-frames.test.ts",
     "test:evals:file-explorer": "bun test scenarios/file-explorer/",
     "test:evals:browser-preview": "bun test scenarios/browser-preview/",
     "test:evals:connection": "bun test scenarios/connection/",

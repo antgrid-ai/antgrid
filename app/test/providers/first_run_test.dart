@@ -13,6 +13,7 @@ import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/devices_api.dart';
 import 'package:antgrid/storage/first_run_store.dart';
+import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -101,10 +102,12 @@ void main() {
           ),
         );
       }
+      final pendingForgetsStore = await PendingForgetsStore.open();
       final container = ProviderContainer(
         overrides: [
           firstRunStoreProvider.overrideWithValue(firstRunStore),
           projectStoreProvider.overrideWithValue(projectStore),
+          pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
           signedInProvider.overrideWith((_) => signedIn),
           recentSessionsProvider.overrideWith((_) => recents),
           otherAccountMobileDevicesProvider.overrideWith((_) async => phones),

@@ -28,6 +28,11 @@ const EnvSchema = z
     RAZORPAY_KEY_SECRET: z.string().optional(),
     RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
     IPINFO_TOKEN: z.string().optional(),
+    SALESIQ_WIDGET_URL: z
+      .url()
+      .default(
+        "https://salesiq.zohopublic.com/widget?wc=siq1b947f921d212e33194fb74467bb4e1d9243576c0c0fc99198af56f9bc127661",
+      ),
     // Dev-only escape hatch: mounts POST /dev/billing/subscription so a
     // subscription can be set without a real payment/webhook. Hard-gated to
     // non-production in app.ts; the enum rejects typos so a bad value fails

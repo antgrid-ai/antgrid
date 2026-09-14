@@ -6,6 +6,7 @@ import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/projects.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/storage/pending_forgets_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 
 import '../helpers/prefs_test_mock.dart';
@@ -22,9 +23,11 @@ void main() {
     projectStore = await ProjectStore.open();
     cachedSessionsStore = await CachedSessionsStore.open();
     addTearDown(cachedSessionsStore.close);
+    final pendingForgetsStore = await PendingForgetsStore.open();
     final container = ProviderContainer(
       overrides: [
         projectStoreProvider.overrideWithValue(projectStore),
+        pendingForgetsStoreProvider.overrideWithValue(pendingForgetsStore),
         cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),
       ],
     );

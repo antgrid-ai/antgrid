@@ -82,6 +82,14 @@ Future<void> performHardSignOut(ProviderContainer ref) async {
   await ref.read(signOutServiceProvider).hardSignOut();
   ref.read(chatComposerDraftsProvider).clear();
   ref.invalidate(licenseTokenMinterProvider);
+  // Load-bearing on its own, and NOT covered by the minter invalidate below:
+  // this is a non-autoDispose FutureProvider, so invalidating a provider that
+  // merely watches it leaves the resolved record cached for the life of the
+  // process. hardSignOut has just deleted that controller row and its OAuth
+  // client server-side, so a surviving record mints `400 invalid_client`
+  // forever — never the 401 the recovery paths are gated on (see
+  // device_revocation.dart), and the controller row is never re-provisioned.
+  ref.invalidate(connectionDeviceRecordProvider);
   ref.invalidate(connectionTokenMinterProvider);
   ref.invalidate(currentUserProvider);
   ref.invalidate(hasStoredSessionProvider);

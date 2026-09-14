@@ -92,7 +92,18 @@ class MessageRouter {
   void dropCheckoutReplay(String checkoutId) => _durable.remove(checkoutId);
 
   void _onInbound(InboundMessage raw) {
-    if (raw.channel != 'control') return;
+    // The preview channel also carries the browser tunnel's hot path (HTTP/WS
+    // bulk data at full bandwidth) — accepting it wholesale here would run
+    // every one of those frames through `classifyAbMessage`,
+    // `_retainIfDurable` and the debug `_isExpectedIgnore` parse for nothing,
+    // since PreviewService reads that traffic off its own direct transport
+    // subscription. A Set lookup on the type keeps everything but the two
+    // terminal bulk payloads (`terminal:frame`, `terminal:history:page`) off
+    // this path entirely.
+    if (raw.channel != 'control' &&
+        !kPreviewChannelInboundTypes.contains(raw.json['type'])) {
+      return;
+    }
     final tier = classifyAbMessage(raw.json);
     _retainIfDurable(raw.json);
     switch (tier) {

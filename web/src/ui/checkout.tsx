@@ -1,4 +1,4 @@
-import { Layout } from "./layout.js";
+import { Layout, type LayoutUser } from "./layout.js";
 import { asset } from "./asset.js";
 import { formatUsd, TRIAL_DAYS } from "../billing/plans.js";
 import {
@@ -38,7 +38,7 @@ export type CheckoutOrder = {
 };
 
 export type CheckoutPageProps = {
-  user: { email?: string | null };
+  user: LayoutUser;
   plan: CheckoutPlan;
   detectedCountry: string | null;
   gateway: "paddle" | "razorpay";

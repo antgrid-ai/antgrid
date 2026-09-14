@@ -33,7 +33,9 @@ class LastAuthMethodStore {
   final SharedPreferencesAsync _prefs;
 
   LastAuthMethodStore({SharedPreferencesAsync? prefs})
-    : _prefs = prefs ?? SharedPreferencesAsync();
+    : _prefs =
+          prefs ??
+          SharedPreferencesAsync(options: desktopSharedPreferencesOptions);
 
   /// The method [email] last committed to on this device, or null when nothing
   /// is remembered. Never throws — a store that will not open is a miss, and a
